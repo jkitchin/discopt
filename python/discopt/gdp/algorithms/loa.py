@@ -17,16 +17,19 @@
   Without it one nested ``Model.solve`` could take the whole run (measured: 849
   s of a 3600 s budget on one flowsheet configuration). The default is LBB's and
   LD-SDA's node budget, a tenth of the run within [1 s, 30 s] (#1153). A
-  subproblem stopped by its cap is uncertified: its configuration is treated as
-  any other uncertified one (it never leaves the master as resolved without a
-  certificate).
+  subproblem stopped by its cap is uncertified; when its solve kept a valid
+  bound the configuration leaves the master with ``max(that bound, LB)`` in
+  ``excluded_floor`` (``LOA._exclude_bounded``), so the search moves on instead
+  of stopping when the master proposes it again.
 
 Bounds (§5.4): the master is a relaxation -- OA cuts go only on rows (and an
 objective) certified convex -- so its dual bound is a valid LB when the
 objective is linear or certified convex. A configuration excluded because it
 was certified *optimal* (not infeasible) leaves the master, so the LB is then
-``min(master bound, best excluded configuration bound)``. Unresolved
-configurations never leave the master: they block ``optimal``, not the bound.
+``min(master bound, best excluded configuration bound)``. The same holds for
+a configuration excluded uncertified with its valid bound. Unresolved
+configurations (no point, no bound) never leave the master: they block
+``optimal``, not the bound.
 """
 
 from __future__ import annotations
@@ -207,6 +210,28 @@ class LOA(GDPAlgorithm):
             self.excluded_floor = min(self.excluded_floor, bound_min)
         self.master.exclude(config)
 
+    def _exclude_bounded(self, config: tuple, sub_bound: Optional[float]) -> None:
+        """Exclude an uncertified configuration whose global solve kept a valid bound (#1984).
+
+        Left in the master, a configuration whose subproblem stopped at its cap
+        (``subproblem_time_limit``) short of a certificate is proposed again
+        whenever the master cannot see its cost -- a nonconvex row gets no OA
+        cut -- and the re-proposal stops the run on that configuration's
+        incumbent (measured: the book's flowsheet GDP, epigraph form, stopped at
+        iteration 2 on 2276.14 against the optimum 1945.96). Its bound
+        ``max(subproblem bound, LB)`` is a valid lower bound on its optimum --
+        the LB bounds every configuration -- so the configuration leaves the
+        master with that bound in ``excluded_floor``, and ``min(master bound,
+        excluded_floor)`` stays a valid LB. Only a finite bound excludes: an
+        infinite floor would read a later empty master as an infeasibility proof.
+        """
+        cands = [] if sub_bound is None else [self.obj_sign * float(sub_bound)]
+        if self.lb_valid and math.isfinite(self.lb):
+            cands.append(self.lb)
+        bound = max(cands, default=-math.inf)
+        if math.isfinite(bound):
+            self._exclude_certified(config, bound)
+
     def _offer_master_bound(self, bound: Optional[float]) -> None:
         if bound is None or not self.master.bound_valid:
             return
@@ -247,6 +272,8 @@ class LOA(GDPAlgorithm):
         if res.certified and mode == "global":
             bound = None if res.bound is None else self.obj_sign * float(res.bound)
             self._exclude_certified(config, bound)
+        elif mode == "global":
+            self._exclude_bounded(config, res.bound)
         return res
 
     def _seed_cuts(self) -> None:
@@ -410,6 +437,7 @@ class LOA(GDPAlgorithm):
             self.mark_solved(config)
         elif x is not None:
             self.mark_solved(config)  # a point but no certificate: as the NLP mode
+            self._exclude_bounded(config, res.bound)
         else:
             # The global solve proved nothing and found no point: fall back to the
             # NLP mode's step for this configuration, so global mode never does

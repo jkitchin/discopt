@@ -12428,3 +12428,210 @@ these hold for:
 rewrite of a ratio of two degree-1 forms, which is degree 0 and keeps the `s = 0`
 closure only where the denominator's leading form is bounded away from 0. It is
 the most likely route to such a class.
+
+## 97. #1990: ex1252a's integer-product objective — both levers measured, the bound loss found in the node LP (2026-10-26)
+
+**Problem.** ex1252a's objective is `Σ_k (c_k + 1800·x_{15+k})·x_k·x_{3+k}·x_{18+k}`,
+`x0..x5 ∈ {0..3}`, `x18..x20 ∈ {0,1}`. On `main` + #1988 a 120 s solve ended at
+bound 19,389 (optimum 128,894); SCIP's root is 25,019. The issue named two levers.
+
+**Lever 1, exact lift of the integer products — killed.** The lift already exists:
+#707's `integer.multilinear` (binary expansion + exact n-ary AND hull). Measured
+root LP bound of ex1252a (`MccormickLPRelaxer.solve_at_node`, scratch probe), plain
+and after FBBT + OBBT with the incumbent cutoff:
+
+| model | root LP | FBBT + OBBT(cutoff) |
+|---|---:|---:|
+| as parsed (24 cols) | 0 | 0 |
+| #707 lift (75 cols) | 0 | 0 |
+| #707 lift + #721 coupling RLT (90 cols) | 0 | 0 |
+
+The AND hull over fractional bits still relaxes every product to 0 at
+`x18 = x19 = x20 = 1/3`. Below the issue's kill criterion (10,000).
+
+**Lever 2, implied bounds into the product envelopes — entry measured.** Hand-built
+indicator-face McCormick rows for `w_k = x_k·x_{3+k}·x_{18+k}`, valid because
+`x_k, x_{3+k} <= 3·x_{18+k}` (face `y = 0` is the point 0) and `x_{3+k} >= x_{18+k}`
+(face `y = 1` has `x_{3+k} >= 1`): `w >= x_k`, `w >= 3x_k + 3x_{3+k} - 9y`,
+`w <= 3x_k`, `w <= x_k + 3x_{3+k} - 3y`. Root LP **2,986**, **6,165** after OBBT,
+against 0 without them. Also below 10,000 at the root.
+
+**What the probes found instead.** FBBT on the face `x18 = 1` returned `x3 in [0, 3]`.
+`x18 = 0.0025·x9·x3` at `x18 = 1` with `x9 <= 400` implies `x3 >= 1`, which OBBT
+finds and FBBT did not: the backward `Mul` rule divided by a factor only when that
+factor's interval excluded 0. Per configuration node (`x18..x20` fixed or free,
+FBBT box, node LP), every node bounded at **0**; with `x3 >= 1` added, the
+fully-fixed configurations bound at 6–9k. That is lever 2 at the node level, and it
+is general: a product that excludes 0 bounds each factor even when the other one
+touches or straddles 0.
+
+**`DISCOPT_FBBT_EXTENDED_MUL`** (`presolve/fbbt.rs`, `extended_mul_preimage`): for
+`z = a·b` with `z` excluding 0 and `b` containing 0, `a ∈ z / (b \ {0})`, a ray
+per side of 0 that `b` reaches (two rays for a straddling `b`, intersected with
+`a`'s box before the hull), rounded outward. It declines when `z` contains 0, when
+`b` is the point 0 (the infeasibility verdict is left to the forward pass) and when
+the hull is the whole box. FBBT on the face `x18 = 1` then gives `x3 >= 1`,
+`x9 >= 133.3`, `x12 <= 238.9`, the same values OBBT finds, and the configuration
+nodes bound at 13.6k–87.3k.
+
+**The tighter box made the tree worse.** ex1252a at 300 nodes: bound **73,740
+OFF → 23,694 ON**, twice. A node-level trace of the B&B tree showed why: on the same
+branching box, `x2 ∈ [2,3], x3 = 3, x19 = 1`, OFF bounded at 44,047 and ON at
+14,522. ON's LP box was strictly inside OFF's in every coordinate. Logging each
+`solve_at_node` call showed that ON's weak nodes are exactly the ones where the
+first node LP gave no certified verdict and the #671 row filter dropped ~140 rows
+before re-solving. OFF hits the same filter on a different node (19,889 vs ON's
+73,448). Transplanting the relaxer's attributes one at a time onto a fresh relaxer
+narrows it to one: `_rlt_applicable`. The level-1-RLT LP of that box does not
+certify, while the same box without RLT certifies 47,742. Which nodes fail is
+effectively chaotic, so any change to the boxes reshuffles where the filter strikes.
+This is the ex1252 plan's layer L5 (`docs/dev/ex1252-certification-plan.md` §1),
+and a candidate explanation for #1616's looser bounds under a tighter box (see below).
+
+**`DISCOPT_RLT_STRIP_RETRY`** (`mccormick_lp.py`): when the RLT-augmented node LP
+gives no certified verdict, re-solve the node without the RLT rows before the #671
+filter. The re-solve takes the cold path with no inherited pool, because the pool is
+stated over the RLT layout. Its verdict is kept when it certifies (an optimum, or a
+Farkas proof of emptiness). RLT rows only tighten a relaxation that is valid
+without them, the C-42 argument for pool rows. Counted in
+`rlt_strip/{retries,certified}` and `mccormick_lp.RLT_STRIP_TOTALS`.
+
+**ex1252a, three arms, equal load:**
+
+| | 300 nodes | 600 s (≈283 nodes) | row-filter invocations / rows dropped (600 s) |
+|---|---:|---:|---|
+| neither flag | 73,740 | 56,665 | 37 / 5,254 |
+| strip retry | 90,370 | 87,589 | 4 / 310 (34 retries, 32 certified) |
+| strip retry + extended FBBT | 98,067 | 92,254 | 8 / 522 (39 retries, 36 certified) |
+
+The 120 s target is out of reach in this container: the root's heuristics alone
+take about 60 s (feasibility pump 31 s, integer local search 29 s), and a tree node
+costs 1.3–2 s, mostly square and convex separation (75 s and 62 s of 125 nodes).
+
+**Section 5 panels** (`discopt_benchmarks/scripts/issue1990_panel.py`; 30 s,
+interleaved, own subprocess per solve, every incumbent `verify_point`-ed). The
+population is MINLPLib ≤ 200 vars/cons with a proven status (384 instances), plus
+the 40 in-repo corpus instances outside it. Each screen keeps only the instances
+the flag can act on.
+
+* Extended FBBT. The screen digests the FBBT box on the root box, both end faces
+  of every integer variable and both halves of every continuous variable, OFF vs
+  ON. It changes **42** instances. A/B on all of them: cert-clean (252 checks,
+  0 problems), no certificate gained or lost. `kall_congruentcircles_c41`
+  195 → 143 nodes; one bound looser at the limit, nous1 1.5618 → 1.5531 (opt
+  1.5671); every other uncertified bound is equal. Total wall
+  219.4 → 214.6 s on the 31, 91.0 → 91.8 s on the 6 added at ≤ 200, and
+  121.7 → 121.8 s on the corpus 5.
+* Extended FBBT on #1616's population. The retired rule fired on 29 instances; the
+  20 tractable here (gancns, nvs01, st_e02/e08/e16, waternd1/2,
+  transswitch0009p/r and 0014p/r, waterund01/08/11/14/17/18/22/25/36) are best
+  known primals, not all proven. Two runs: strip retry in both arms, and strip
+  retry off. Both runs: cert-clean (120 checks each, 0 problems), no certificate
+  lost (#1616 lost gancns and waternd1). Every waterund bound is equal or tighter,
+  including **waterund22 246.44 → 246.86 and waterund25 289.03 → 289.80**, the two
+  #1616 recorded as looser. waternd2 1.0240e6 → 1.0438e6; total wall 512.0 →
+  504.9 s. The strip retry never fires on these, so the RLT mechanism is **not**
+  what loosened #1616's bounds. On the current base those losses do not reproduce.
+* Strip retry. The screen is one ON solve, kept when the retry ran. It fires on
+  **4** of 424 at 30 s: haverly 7, mathopt3 1, nvs16 9, ex8_5_4 1. ex1252a never
+  reaches its tree in 30 s here and fires at longer limits. A/B on those plus
+  ex1252a: cert-clean (30 checks, 0 problems), nothing gained or lost; haverly
+  57 → 69 nodes, nvs16 229 → 197. A solve where the retry never runs executes the
+  OFF path, so the other 419 are unchanged by construction.
+
+**Shipped: both graduated default ON**, `=0` each restores the legacy path
+(`DISCOPT_FBBT_EXTENDED_MUL=0` is byte-for-byte the division-only rule). They ship
+together: extended FBBT alone loses on ex1252a (73,740 → 23,694 at 300 nodes) for
+the reason above, and the strip retry removes that loss. The strip retry's own
+measured gain is confined to ex1252a, the one instance where it fires inside a
+30 s panel and changes a bound. It graduates as a guard of the C-42 class, which
+removes a fallback that costs certified bound, rather than as a broad speedup.
+That is a judgement call, and the owner may reverse it.
+
+**Interim status (2026-10-26, superseded below).** Not certified at that point:
+ex1252a's 600 s bound was 92,254 against 128,894, limited by throughput (root
+heuristics about 60 s, about 2 s a node on the Python tree).
+
+### 97.1 The native kernel certifies ex1252a (2026-10-27)
+
+**Profile of the Python tree** (merged base, 100 nodes, cProfile): 11,102 LP solves
+took 107 s, about 10 ms each; the square and convex separators took 43 s and 37 s
+over 74 node solves, and OBBT probes another 33 s. The incremental fast path
+declines (`column-count mismatch`): the cold build has 81 columns on the probe box
+and 66 on validation boxes touching zero, because 15 opaque lifted columns appear
+only on boxes excluding zero. So every node cold-builds, and a fixed incremental
+structure cannot cover it.
+
+**Why the kernel never ran.** `build_spatial_kernel_spec` declines a relaxation
+with trilinear or multilinear terms, and the factorable lift leaves three
+4-factor products `aux_k * x_k * x_{3+k} * x_{18+k}`.
+
+**Entry experiment** (the objective written by hand as bilinear chains
+`w = x0*x3`, `v = w*x18`, `u = x15*v`, default solve, 120 s): the kernel runs
+**85,741 nodes and its bound reaches 128,893.741, the optimum**; it does not
+certify only because its incumbent stays at 139,191. The relaxation and the
+search are fine; the primal side is not.
+
+**`DISCOPT_KERNEL_MULTILINEAR_SPLIT`** (`_relax/multilinear_split.py`, call site in
+`solver.py`): for the kernel attempt only, each product of three or more distinct
+scalar variables becomes a chain of bilinear auxiliaries (binary, then integer,
+then continuous factors, canonical within each group so prefixes are shared; aux
+bounds are interval products; a factor at the `1e20` sentinel declines the pass).
+Exact reformulation; points are verified on the split model and on the problem
+posed; the result reports the caller's columns. Probe `tree/multilinear_split_cols`.
+
+**`DISCOPT_NATIVE_NLP_PRIMAL`** (#1522's in-tree local NLP, default OFF, panel
+owed) supplies the primal side: with both flags a default solve certifies ex1252a
+at **128,893.741 in 33 s, 2,048 kernel nodes** (SCIP: about 1,900). Its first
+panel failed, though: over 424 instances at 30 s it fired on 60, gained none and
+**lost nous1 and genpooling_lee1**, wall +2 %. Per-call logs showed why. Each call
+rounds the integer columns of the node's LP point and fixes them; at a fractional
+point that rounding is a guess the NLP rarely repairs, at 1-3 s a call
+(genpooling_lee1: 10 calls, 10 s of 30, none productive). On ex1252a the 8 calls
+at fractional points failed and the one at a point integral on every integer
+column found the optimum in 0.06 s.
+
+**`DISCOPT_HOOK_INTEGRAL_POINTS`** (Rust `spatial_tree.rs`, default ON under the
+hook; `=0` is the #1522 schedule): on a model with integer columns each
+power-of-two call is held until the next node whose LP point is integral on every
+integer column with an integer assignment not yet tried (SCIP's sub-NLP rule).
+Continuous models keep the #1522 schedule, and accepted kernel incumbents are
+still polished. At 30 s: ex1252a 33 -> 18.1 s, nous1 uncertified -> 27.5 s,
+genpooling_lee1 uncertified (no incumbent) -> 21.7 s (OFF: 22.2 s and 26.6 s).
+
+**Panels** (`issue1990_panel.py`, interleaved, own subprocess per solve,
+`verify_point` on every incumbent):
+
+* Split, screened over the 424 (one ON solve each, kept when
+  `tree/multilinear_split_cols > 0`): fires on **4**, ex1252, ex1252a, st_e03,
+  st_e38. A/B at 120 s with the hook ON in both arms: cert-clean (24 checks,
+  0 problems); **certified +ex1252 (41.1 s) +ex1252a (18.3 s)**, none lost;
+  st_e03 8.6 -> 0.7 s; st_e38 unchanged; total wall 249.6 -> 59.3 s. With the
+  hook OFF in both arms: cert-clean, both ex1252 bounds reach the optimum
+  (21,308 / 23,694 -> 128,893.74) but neither certifies, and the kernel's ex1252
+  incumbent (151,116) is worse than the Python tree's (134,264): the split needs
+  the hook.
+* Hook with the integral-point schedule, OFF vs ON over the 424 at 30 s: fires on
+  52; cert-clean (2,544 checks; the report's 4 "problems" are meanvar and
+  st_e17, corpus-only instances with no reference value, certified identically in
+  both arms); certified 0 gained, 2 listed as lost. tln6 is noise: the hook is
+  called 0 times in the ON arm, and in 4 reruns per arm OFF certifies 1, ON 0,
+  and at 60 s neither does, with equal bounds. nous1 is a real cost: ON
+  certifies in 3/3 reruns at 30 s and at 60 s, but in ~28 s against ~21 s
+  (15,160 vs 11,685 nodes), so the panel's 2-worker load pushed it past 30 s.
+  genpooling_lee1 26.1 -> 21.5 s, cvxnonsep_psig30 28.5 -> 26.1 s, tln4/tln5
+  slightly faster; both-certify wall 1160.2 -> 1152.5 s; total wall 3344.6 ->
+  3361.6 s. (The #1522 schedule's panel had lost nous1 and genpooling_lee1 for
+  real, wall +2 %.)
+
+**Shipped: `DISCOPT_KERNEL_MULTILINEAR_SPLIT` and `DISCOPT_NATIVE_NLP_PRIMAL`
+graduated default ON together**, `DISCOPT_HOOK_INTEGRAL_POINTS` default ON under
+the hook; `=0` restores each legacy path. They ship together because the split
+without the hook only raises the bound, and the hook's own gain at 30 s is a
+wash (genpooling_lee1 faster, nous1 slower) while the pair certifies ex1252 and
+ex1252a. nous1's 21 -> 28 s is the recorded trade-off.
+
+**#1990 status: done.** A default `Model.solve()` of ex1252a certifies
+128,893.741 in **19.3 s** (2,048 kernel nodes; issue: bound 19,389 at 120 s), and
+ex1252 in 41 s. Pinned by `test_1990_multilinear_split.py::
+test_ex1252a_certifies_by_default` (slow, correctness).
