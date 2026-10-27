@@ -13,7 +13,11 @@ Each solve runs in its own subprocess with a hard timeout of
 ``time_limit + 30`` s. Both solvers get ``gap = 1e-4``; SCIP runs single
 threaded (its default). Results are appended to ``<out>/results_tl<T>.jsonl``
 as they finish, so a rerun resumes. The verdict table checks every claimed
-optimum and every dual bound against the MINLPLib oracle.
+optimum and every dual bound against the MINLPLib oracle, and (#2006) every
+discopt incumbent, at any status: it is ``verify_point``-ed on a fresh parse, its
+reported objective must be its own, and it must not beat the proven optimum. A
+results file from before #2006 has no verification fields and fails ``analyze``;
+rerun it rather than resume it.
 
 Usage::
 
@@ -65,6 +69,11 @@ def _solve_one(solver: str, nl: str, tl: float) -> None:
             bound=r.bound,
             nodes=getattr(r, "node_count", None),
         )
+        out["wall"] = time.perf_counter() - t0
+        if r.x is not None and r.objective is not None:
+            out.update(_verify_incumbent(nl, r.x))
+        print("RESULT " + json.dumps(out), flush=True)
+        return
     else:
         import pyscipopt
 
@@ -84,6 +93,29 @@ def _solve_one(solver: str, nl: str, tl: float) -> None:
         )
     out["wall"] = time.perf_counter() - t0
     print("RESULT " + json.dumps(out), flush=True)
+
+
+def _verify_incumbent(nl: str, x: dict) -> dict:
+    """Check discopt's incumbent on a freshly parsed copy of the instance (#2006).
+
+    A fresh parse, because a solve may rewrite its model in place. Returns
+    ``verified`` (the point passes ``verify_point``) and ``verified_obj`` (its
+    true objective), or ``verify_error`` when the point cannot be laid out over
+    the declared variables -- a failure ``verdict`` reports, never a pass.
+    """
+    import discopt.modeling as dm
+    import numpy as np
+    from discopt.validation.feasibility import verify_point
+
+    fresh = dm.from_nl(nl)
+    try:
+        flat = np.concatenate(
+            [np.ravel(np.asarray(x[v.name], dtype=np.float64)) for v in fresh._variables]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"verify_error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    vr = verify_point(fresh, flat, with_objective=True)
+    return {"verified": bool(vr.ok), "verified_obj": vr.objective, "verify_reason": vr.reason}
 
 
 def _fetch(url: str, dest: Path) -> Path:
@@ -192,10 +224,34 @@ def _close(a, b) -> bool:
     return a is not None and abs(a - b) <= GAP * max(1.0, abs(b)) + 1e-6
 
 
-def verdict(res: dict, opt: float | None) -> str:
+def _beats(obj: float, opt: float, sense: str) -> bool:
+    """``obj`` is strictly better than the proven optimum, beyond tolerance."""
+    tol = GAP * max(1.0, abs(opt)) + 1e-6
+    return obj < opt - tol if sense == "min" else obj > opt + tol
+
+
+def verdict(res: dict, opt: float | None, sense: str = "min") -> str:
+    """Classify one solve against the MINLPLib oracle.
+
+    Every ``WRONG*`` verdict is a soundness failure, at any status (#2006): a
+    claimed optimum away from the oracle, a claim on a proven-infeasible
+    instance, an incumbent strictly better than the proven optimum (it must be
+    infeasible), an incumbent that fails ``verify_point``, or a reported
+    objective that is not the point's own. Only discopt's rows carry the
+    verification fields; SCIP's are judged on status and objective alone.
+    """
     st, obj = res["status"].lower(), res.get("objective")
     if st in ("crash", "hard_timeout"):
         return st.upper()
+    if "verify_error" in res:
+        return "WRONG_UNVERIFIABLE"
+    if res.get("verified") is False:
+        return "WRONG_INFEASIBLE_POINT"
+    vobj = res.get("verified_obj")
+    if obj is not None and vobj is not None and not _close(obj, vobj):
+        return "WRONG_OBJECTIVE"
+    if opt is not None and obj is not None and _beats(obj, opt, sense):
+        return "WRONG_BEATS_OPT"
     if opt is None:  # proven infeasible
         return "OK" if st == "infeasible" else ("WRONG" if obj is not None else "FAIL")
     if st in ("optimal", "gaplimit"):  # SCIP stops on limits/gap with "gaplimit"
@@ -216,7 +272,7 @@ def analyze(
     for ln in results.open():
         j = json.loads(ln)
         res[(j["name"], j["solver"])] = j
-    rows, bound_checks, violations = [], 0, []
+    rows, bound_checks, verify_checks, violations, unverified = [], 0, 0, [], []
     for p in panel:
         d, s = res.get((p["name"], "discopt")), res.get((p["name"], "scip"))
         if d is None or s is None:
@@ -228,7 +284,13 @@ def analyze(
             tol = GAP * max(1.0, abs(opt)) + 1e-6
             if (b > opt + tol) if p["sense"] == "min" else (b < opt - tol):
                 violations.append((p["name"], b, opt))
-        rows.append(dict(p, vd=verdict(d, opt), vs=verdict(s, opt), d=d, s=s))
+        if "verified" in d or "verify_error" in d:
+            verify_checks += 1
+        elif d.get("objective") is not None:
+            unverified.append(p["name"])
+        rows.append(
+            dict(p, vd=verdict(d, opt, p["sense"]), vs=verdict(s, opt, p["sense"]), d=d, s=s)
+        )
     print(f"\ncompared {len(rows)} instances")
     for who in ("vd", "vs"):
         counts: dict[str, int] = {}
@@ -236,8 +298,17 @@ def analyze(
             counts[r[who]] = counts.get(r[who], 0) + 1
         print(f"  {'discopt' if who == 'vd' else 'scip':8s} {counts}")
     print(f"discopt dual-bound checks: {bound_checks}, oracle violations: {violations}")
-    wrong = [r["name"] for r in rows if r["vd"].startswith("WRONG")]
+    print(f"discopt incumbents verified: {verify_checks}")
+    wrong = [(r["name"], r["vd"]) for r in rows if r["vd"].startswith("WRONG")]
     print(f"discopt WRONG verdicts: {wrong}")
+    for r in rows:
+        if r["vd"].startswith("WRONG"):
+            d = r["d"]
+            print(
+                f"  {r['name']:26s} {r['vd']:22s} status={d['status']} obj={d.get('objective')} "
+                f"verified_obj={d.get('verified_obj')} opt={r['opt']} "
+                f"{d.get('verify_reason') or d.get('verify_error') or ''}"
+            )
     wins = [
         r for r in rows if r["vs"] == "OK" and r["vd"] != "OK" and r["s"]["wall"] <= max_scip_time
     ]
@@ -273,6 +344,10 @@ def analyze(
         print(f"wrote {len(wins) + len(slow)} candidates to {candidates}")
     if bound_checks == 0:
         print("ERROR: no bound was checked -- the probe measured nothing")
+        return 1
+    if unverified:
+        # a resumed pre-#2006 results file, or an objective returned without a point
+        print(f"ERROR: discopt incumbents with no verification: {unverified}")
         return 1
     return 1 if violations or wrong else 0
 
