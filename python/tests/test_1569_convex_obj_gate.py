@@ -130,7 +130,10 @@ def test_1569_array_variable_gate_engages_without_warning(lb, ub, caplog):
     assert _gate_warnings(caplog) == []
 
 
-def test_1569_issue_repro_solve(caplog):
+def test_1569_issue_repro_solve(caplog, monkeypatch):
+    # #2015: the full-support claim lets the native kernel take this model; the
+    # gate under test is the Python tree's, so pin it.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     caplog.set_level(logging.DEBUG, logger="discopt.solver")
     seen: list[bool] = []
     orig = solver._objective_is_convex_quadratic
