@@ -12,6 +12,17 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **The Claude Code bundle installs with knowhow v0.3
+  (`uvx knowhow add jkitchin/discopt --all`).**
+  - New Agent Skill `discopt` (`python/discopt/skills/skills/discopt/SKILL.md`):
+    building a model, solving it and reading a `SolveResult`. Because it follows
+    the Agent Skills spec, it also works outside Claude Code.
+  - Root `commands/`, `agents/` and `skills/` symlinks point into the package
+    data, so knowhow and `npx skills` find the 8 commands, 17 agents and the
+    skill at the repository root. `knowhow validate --strict` is clean.
+  - `discopt install-skills` now also installs skills, to `.claude/skills/<name>/`.
+    `discopt.skills` gains `skills_dir()` and `iter_skills()`.
+
 - **`dm.external` and the spectral norm `dm.norm(X, 2)` run without JAX, and the
   spectral norm certifies (#1903).**
   - The default tape evaluator now supports numpy-evaluated "holes"

@@ -459,9 +459,15 @@ discopt install-skills --dev            # symlink, for `pip install -e`
 discopt install-skills --force          # overwrite
 ```
 
-`ls python/discopt/skills/commands/` (8) and `skills/agents/` (17) for the current set;
-`skills/__init__.py` exposes `commands_dir()`, `agents_dir()`, `iter_commands()`,
-`iter_agents()` for programmatic discovery.
+`ls python/discopt/skills/commands/` (8), `skills/agents/` (17) and `skills/skills/` (the
+`discopt` Agent Skill) for the current set; `skills/__init__.py` exposes `commands_dir()`,
+`agents_dir()`, `skills_dir()` and the matching `iter_*()` for programmatic discovery.
+
+The repo-root `commands/`, `agents/` and `skills/` are **symlinks** into that directory, so
+[knowhow](https://github.com/jkitchin/knowhow) v0.3 (`uvx knowhow add jkitchin/discopt
+--all`) finds the bundle at the root. Do not replace them with copies;
+`test_cli_install_skills.py::TestKnowhowLayout` fails on that. A new skill needs a
+`name` equal to its directory and must not share a name with a command.
 
 **The gotcha:** editing a command or agent means editing the file under
 `python/discopt/skills/`. Editing a copy under `.claude/` changes only that one machine's

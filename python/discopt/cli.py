@@ -273,14 +273,14 @@ def _cmd_gams_verify(args):
 
 
 def _cmd_install_skills(args):
-    """Install packaged Claude Code skills/agents into the user's .claude/ tree.
+    """Install packaged Claude Code commands, agents and skills into a .claude/ tree.
 
     Defaults to ``~/.claude/`` (user scope). Use ``--project-scope`` to
     target the current directory's ``./.claude/`` instead. Copies files by
     default; ``--dev`` symlinks them instead so edits to package data show
     up live (useful with ``pip install -e``).
     """
-    from discopt.skills import iter_agents, iter_commands
+    from discopt.skills import iter_agents, iter_commands, iter_skills
 
     if args.project_scope:
         base = Path.cwd() / ".claude"
@@ -289,8 +289,10 @@ def _cmd_install_skills(args):
 
     dest_commands = base / "commands"
     dest_agents = base / "agents"
+    dest_skills = base / "skills"
     dest_commands.mkdir(parents=True, exist_ok=True)
     dest_agents.mkdir(parents=True, exist_ok=True)
+    dest_skills.mkdir(parents=True, exist_ok=True)
 
     def _install_one(src, dest_dir, verb_counts):
         dest = dest_dir / src.name
@@ -313,6 +315,11 @@ def _cmd_install_skills(args):
             dest.symlink_to(src_path)
             print(f"  link  {src.name}")
             verb_counts["link"] += 1
+        elif src_path.is_dir():
+            # A skill is a directory (SKILL.md plus any resources it references).
+            shutil.copytree(src_path, dest)
+            print(f"  copy  {src.name}/")
+            verb_counts["copy"] += 1
         else:
             shutil.copy2(src_path, dest)
             print(f"  copy  {src.name}")
@@ -328,7 +335,15 @@ def _cmd_install_skills(args):
         _install_one(src, dest_agents, verb_counts)
         n_agents += 1
 
-    print(f"\nInstalled {n_commands} command(s) and {n_agents} agent(s) into {base}")
+    n_skills = 0
+    for src in iter_skills():
+        _install_one(src, dest_skills, verb_counts)
+        n_skills += 1
+
+    print(
+        f"\nInstalled {n_commands} command(s), {n_agents} agent(s) and "
+        f"{n_skills} skill(s) into {base}"
+    )
     if verb_counts["skip"]:
         print(f"  {verb_counts['skip']} already existed; pass --force to overwrite.")
 
@@ -788,7 +803,7 @@ def main():
 
     p_skills = subparsers.add_parser(
         "install-skills",
-        help="Install packaged Claude Code slash commands and agents into ~/.claude/",
+        help="Install packaged Claude Code slash commands, agents and skills into ~/.claude/",
     )
     p_skills.add_argument(
         "--project-scope",

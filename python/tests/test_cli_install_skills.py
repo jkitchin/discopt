@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,83 @@ class TestSkillsPackage:
     def test_every_agent_is_markdown(self):
         for p in skills.iter_agents():
             assert p.name.endswith(".md")
+
+    def test_iter_skills_yields_the_overview_skill(self):
+        names = [p.name for p in skills.iter_skills()]
+        assert names == sorted(names)
+        assert "discopt" in names
+        for p in skills.iter_skills():
+            assert (p / "SKILL.md").is_file()
+
+
+# ──────────────────────────────────────────────────────────
+# Agent Skills / knowhow layout (https://github.com/jkitchin/knowhow)
+# ──────────────────────────────────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Agent Skills spec name rule, as enforced by ``knowhow validate``.
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def _frontmatter(path: Path) -> dict[str, str]:
+    text = path.read_text()
+    assert text.startswith("---\n"), f"{path} has no YAML frontmatter"
+    block = text[4 : text.index("\n---", 4)]
+    out = {}
+    for line in block.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and not line.startswith(" "):
+            out[key.strip()] = value.strip()
+    return out
+
+
+class TestKnowhowLayout:
+    """``knowhow add jkitchin/discopt`` discovers ``commands/``, ``agents/`` and
+    ``skills/`` at the repository root only; the root entries are symlinks to the
+    package data so there is one source of truth."""
+
+    @pytest.mark.parametrize(
+        "name,target",
+        [
+            ("commands", skills.commands_dir),
+            ("agents", skills.agents_dir),
+            ("skills", skills.skills_dir),
+        ],
+    )
+    def test_root_link_resolves_to_package_data(self, name, target):
+        link = _REPO_ROOT / name
+        if not link.exists():
+            pytest.skip("not running from a source checkout")
+        assert link.is_symlink(), f"{link} must be a symlink, not a copy"
+        assert link.resolve() == Path(str(target())).resolve()
+
+    def test_skill_frontmatter_meets_agent_skills_spec(self):
+        checked = 0
+        for d in skills.iter_skills():
+            fm = _frontmatter(d / "SKILL.md")
+            assert fm.get("name") == d.name, "skill name must equal its directory"
+            assert _SKILL_NAME_RE.match(d.name)
+            assert len(d.name) <= 64
+            desc = fm.get("description", "")
+            assert 0 < len(desc) <= 1024
+            assert re.search(r"\b(use|when|trigger)", desc, re.I), "say when to use it"
+            checked += 1
+        assert checked >= 1
+
+    def test_no_skill_name_collides_with_a_command(self):
+        # A skill and a command of the same name shadow each other in Claude Code.
+        commands = {Path(p.name).stem for p in skills.iter_commands()}
+        assert not commands & {p.name for p in skills.iter_skills()}
+
+    def test_agents_have_string_name_and_description(self):
+        # knowhow only lists a subagent whose frontmatter has both as strings.
+        checked = 0
+        for p in skills.iter_agents():
+            fm = _frontmatter(Path(str(p)))
+            assert fm.get("name"), p.name
+            assert fm.get("description"), p.name
+            checked += 1
+        assert checked >= 1
 
 
 # ──────────────────────────────────────────────────────────
@@ -94,6 +172,35 @@ class TestInstallSkills:
         pkg_agents = {p.name for p in skills.iter_agents()}
         got_agents = {p.name for p in dest_agents.iterdir()}
         assert got_agents == pkg_agents
+
+    def test_skills_installed_as_directories(self, tmp_path):
+        _run_install(tmp_path)
+        dest = tmp_path / ".claude" / "skills"
+        for src in skills.iter_skills():
+            got = dest / src.name / "SKILL.md"
+            assert got.is_file()
+            assert not (dest / src.name).is_symlink()
+            assert _hash(got) == _hash(Path(str(src)) / "SKILL.md")
+
+    def test_dev_mode_links_skill_directories(self, tmp_path):
+        _run_install(tmp_path, dev=True)
+        for src in skills.iter_skills():
+            link = tmp_path / ".claude" / "skills" / src.name
+            assert link.is_symlink()
+            assert link.resolve() == Path(str(src)).resolve()
+
+    def test_force_replaces_skill_directory(self, tmp_path):
+        stale = tmp_path / ".claude" / "skills" / "discopt"
+        stale.mkdir(parents=True)
+        (stale / "SKILL.md").write_text("stale")
+        (stale / "leftover.txt").write_text("x")
+
+        _run_install(tmp_path, force=False)
+        assert (stale / "SKILL.md").read_text() == "stale"
+
+        _run_install(tmp_path, force=True)
+        assert (stale / "SKILL.md").read_text() != "stale"
+        assert not (stale / "leftover.txt").exists()
 
     def test_copy_mode_byte_identical(self, tmp_path):
         _run_install(tmp_path)
