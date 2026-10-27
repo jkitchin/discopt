@@ -13012,3 +13012,51 @@ to 51 live default-OFF solver-math gates.
 every arm), slay07m (every arm ends at 61,757.14) and portfol_classical050_1 (every arm
 ends at -0.097774). These are the eight neither-certify rows above, along with
 clay0205m/0305m and tls4.
+
+
+### 103.3 The HiGHS master's in-tree check-in reported the current tree's bound, not the master's (2026-10-27)
+
+**Mechanism (code + measurement).** `milp_highs.solve_milp_with_lazy_cuts` rebuilds
+the HiGHS tree after every lazy cut. Its restart check-in and its final result carry
+the running max of the trees' dual bounds. The in-tree (`kCallbackMipInterrupt`)
+check-in passed the *current* tree's `mip_dual_bound`, which restarts at the rebuilt
+tree's root. Two independent investigations found it from opposite ends:
+
+* slay07m: a check-in read 62,121 right after a tree had finished at 64,215, so the
+  #1066 guard saw "relative gap 0.0406 vs 0.0423" at ~15 s and abandoned a master
+  whose bound had climbed 62,025 -> 64,215 (opt 64,748.8). Abandoning withdraws the
+  route's bound, and the fallback ends at the root LP bound 61,757.14 (section 103's
+  "every arm stops at 61,757.14").
+* p_ball_10b_5p_2d_m: the guard's history alternated gap 1.0 / 0.2 and it fired on
+  "relative gap 1 vs 1".
+
+**Fix (unflagged).** The in-tree check-in reports `max(running bound, current tree
+bound)`, the quantity the function already publishes. Rows are only ever added to
+the master, so a finished tree's dual bound stays a valid lower bound on every later
+tree. The early exit that reads the same snapshot is still confirmed by the #1634
+presolve-free cross-solve. Pinned by
+`test_2013_master_checkin_running_bound.py`, which fails before the fix.
+
+**Panel** (the 102 routed instances, 30 s, interleaved, every incumbent verified;
+A/B through a temporary local switch that was removed before commit): 612 checks,
+0 problems; certified 94 -> **96** (p_ball_10b_5p_2d_m 21.2 s, slay07m 20.6 s), none
+lost; total wall 502.7 -> 482.4 s; both-certify nodes 124,036 -> 123,905. The guard's
+verdict changed on 8 instances. Among those that stay uncertified, no final bound is
+lower: clay0305m 1320 -> 2145, tls4 1.879 -> 1.900, the rest equal.
+
+**Still open on #2013**, each with a measured mechanism from the same investigation:
+* p_ball_10b_5p_4d_m / 20b_5p_2d_m: the master has no row confining a point to its
+  chosen ball (every tree's bound 0.0). Support-point tangent cuts lift the trees to
+  55.9 -> 62.5 (opt 71.37), but the #1066 25%-per-window rule hands over a bound that
+  rises 2-3 units per restart. With the guard off, 20b certifies in 43.9 s; on 4d the
+  #1634 cross-solve, starting from a root bound of 0, exhausts the budget and
+  withdraws a correct claim.
+* slay08m-10m: HiGHS re-runs RINS/RENS sub-MIPs on every rebuilt tree (2.92 s of a
+  3.49 s solve on one slay07m tree); disabling them halves slay04m-07m's wall but
+  leaves 08m-10m uncertified.
+* portfol_classical050_1: -0.097774 is the continuous relaxation optimum. z decouples
+  from w (sum z = 1 << K = 10), so the master sits on a flat 19-dimensional face and
+  every tree ends in 1 node. A diagonal-perspective (Frangioni-Gentile) strengthening
+  of the dense risk row moves the relaxation to -0.096990 and makes sum z = 10 bind
+  (entry experiment only; the existing perspective detector handles separable
+  objective squares only).
