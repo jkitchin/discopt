@@ -39,11 +39,16 @@ OPT = -856648.8186999999  # minlplib.solu
 def test_documented_gap_applies_only_without_an_absolute_request(monkeypatch):
     monkeypatch.setenv(GAP, "1")
     assert SV._kernel_documented_gap_applies(None)
-    # #1243: a named absolute tolerance keeps the strict ``min`` mapping.
-    assert not SV._kernel_documented_gap_applies(1e-9)
-    assert not SV._kernel_documented_gap_applies(0.0)
+    # #2000: a named absolute tolerance no looser than the default tightens the
+    # documented criterion (``a OR rel``), so it is honoured as that criterion...
+    assert SV._kernel_documented_gap_applies(1e-9)
+    assert SV._kernel_documented_gap_applies(0.0)
+    assert SV._kernel_documented_gap_applies(SV._DEFAULT_ABS_GAP_TOL)
+    # ...while a looser one keeps #1243's strict ``min`` mapping.
+    assert not SV._kernel_documented_gap_applies(1e-3)
     monkeypatch.setenv(GAP, "0")
     assert not SV._kernel_documented_gap_applies(None)
+    assert not SV._kernel_documented_gap_applies(1e-9)
 
 
 @pytest.mark.slow

@@ -33,7 +33,9 @@ def _feasible(termination):
         ("iteration_limit", link.SOLVESTAT_ITERATION),
         ("interrupted", link.SOLVESTAT_USER_INTERRUPT),
         (None, link.SOLVESTAT_NORMAL),
-        ("gap", link.SOLVESTAT_NORMAL),
+        # #2000: a feasible result that stopped on the gap test lost the certificate
+        # it stopped on (the published pair does not close the gap).
+        ("gap", link.SOLVESTAT_TERMINATED),
         ("exhausted", link.SOLVESTAT_NORMAL),
     ],
 )

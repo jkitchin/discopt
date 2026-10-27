@@ -149,14 +149,15 @@ class TestGamsImportTransport:
 
     def test_variable_count(self):
         m = parse_gams(TRANSPORT_GMS)
-        # x(2,3)=6 scalars + z=1 scalar = 2 Variable objects
-        assert len(m._variables) == 2
+        # x(2,3)=6 scalars; the free objective variable z is substituted
+        # out of its defining equation (#2002) -> 1 Variable object
+        assert len(m._variables) == 1
 
     def test_variable_shapes(self):
         m = parse_gams(TRANSPORT_GMS)
         var_map = {v.name: v for v in m._variables}
         assert var_map["x"].shape == (2, 3)
-        assert var_map["z"].shape == ()
+        assert "z" not in var_map
 
     def test_constraint_count(self):
         m = parse_gams(TRANSPORT_GMS)
@@ -225,7 +226,9 @@ class TestGamsImportNLP:
     def test_rosenbrock(self):
         m = parse_gams(NLP_ROSENBROCK_GMS)
         assert m._objective is not None
-        assert len(m._variables) == 3  # x1, x2, obj
+        # `obj` is a free objective variable defined only by `z =e= expr`:
+        # substituted out, as `model_from_gmo` does (#2002).
+        assert [v.name for v in m._variables] == ["x1", "x2"]
 
 
 # MINLPLib standard form: a free ``objvar`` that is minimized but is *embedded*

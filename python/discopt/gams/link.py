@@ -75,7 +75,8 @@ def is_available() -> bool:
 
 #: ``SolveResult.termination`` values that name an interruption, and the GAMS
 #: solve status each maps to (#1888). ``gap`` / ``exhausted`` / ``presolve`` / ``None``
-#: are normal completions and are absent on purpose.
+#: are normal completions and are absent on purpose -- except ``gap`` on a result
+#: that is only ``feasible``, which ``status_to_gams`` reports as terminated (#2000).
 _TERMINATION_SOLVESTAT: dict[str | None, int] = {
     "time_limit": SOLVESTAT_RESOURCE,
     "node_limit": SOLVESTAT_RESOURCE,
@@ -123,6 +124,13 @@ def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
         # uncertified one now gets, which would hide the certificate.
         return MODELSTAT_OPTIMAL, SOLVESTAT_NORMAL
     if status == "feasible":
+        if termination == "gap":
+            # The search stopped on its convergence test, and the certificate it
+            # stopped on was then withdrawn -- the published (incumbent, bound) pair
+            # does not close the gap (the #1537 E repair moved the point, #2000).
+            # That is not a normal completion: GAMS's OBJVAL/OBJEST miss optcr with
+            # budget left, so say the solver terminated.
+            return feasible_stat, SOLVESTAT_TERMINATED
         return feasible_stat, _TERMINATION_SOLVESTAT.get(termination, SOLVESTAT_NORMAL)
     if status == "infeasible":
         if has_discrete:

@@ -58,7 +58,8 @@ def test_type_statement_keeps_domain():
 
 def test_split_declaration_matches_single_declaration():
     split, once = parse_gams(SPLIT), parse_gams(ONCE)
-    assert _ncols(split) == _ncols(once) == 7
+    # 6 shipments; the free objective variable `z` is substituted out (#2002)
+    assert _ncols(split) == _ncols(once) == 6
     rs, ro = split.solve(), once.solve()
     assert rs.status == ro.status == "optimal"
     assert rs.objective == pytest.approx(153.675, abs=1e-6)
