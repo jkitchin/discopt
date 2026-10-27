@@ -13102,3 +13102,21 @@ The 4d / 30 s row loses its (trivial) bound. With the flag on, the route keeps m
 gap progress until the #1066 guard abandons it at 26.8 s. Abandoning withdraws the
 route's unconfirmed bound (#1634, #1658 B2), and the fallback's remaining ~3 s produce
 none. The section 5 panel over the 102 routed instances decides the flag.
+
+**Panel** (the 102 routed instances, 30 s, interleaved, every incumbent verified).
+The first run was invalid: with the flag on, the probe passed a 47-entry
+master-space point (model columns plus the objective epigraph) to a 46-column
+evaluator, so on every model with a nonlinear objective the route raised and fell
+back (batch 0.7 -> 14.2 s, batchdes, ex4, ravempb). The fix slices the model
+columns and is pinned by
+`test_support_probe_takes_the_model_columns_of_a_master_point`. A rerun after that
+fix (no ON-arm route raised): 612 checks, 0 problems; certified 96 -> 96; both-certify
+wall 296.6 -> 286.1 s; total wall 477.5 -> 467.1 s. Nearly all of the gain is
+p_ball_10b_5p_2d_m (17.1 -> 9.8 s), which already certifies OFF. p_ball_10b_5p_4d_m
+again loses its bound (6.7e-7 -> none).
+
+**Verdict.** Not graduated: section 5 forbids the lost bound, and the gain at 30 s is
+one instance. The flag's measured value is at 60 s (p_ball_20b_5p_2d_m feasible ->
+optimal 37.3 s), and it is blocked downstream of the cuts. The #1066 guard abandons a
+route whose bound is still rising, and abandoning withdraws an unconfirmed bound
+(#1634) with too little budget left for the fallback to produce one.
