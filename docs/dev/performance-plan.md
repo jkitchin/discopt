@@ -13060,3 +13060,45 @@ lower: clay0305m 1320 -> 2145, tls4 1.879 -> 1.900, the rest equal.
   of the dense risk row moves the relaxation to -0.096990 and makes sum z = 10 bind
   (entry experiment only; the existing perspective detector handles separable
   objective squares only).
+
+
+### 103.4 p_ball: the master had no row confining a point to its chosen ball (2026-10-27)
+
+**Mechanism (measured by the p_ball investigation).** p_ball assigns points to unit
+balls through big-M rows `||x_p - c_b||^2 + M y_pb <= M + 1`. Linearised only at the
+relaxation point (plus the points the lazy NLPs visit), the master has no row bounding
+`x_p` once `y_pb = 1`. Every integer master point stacks the points on top of each
+other at objective 0. On p_ball_10b_5p_4d_m (30 s), every one of 11 trees ends with
+dual bound 0.0. SCIP gets the same information from either propagation or
+separation; switching both off takes it from 1,551 to 12,108 nodes.
+
+**Change (flag `DISCOPT_OA_SUPPORT_CUTS`, default OFF).** Before the first tree, for
+each convex `<=` row allowed by `oa_cut_mask` with at most 16 nonlinear columns:
+1. Split columns into linear and nonlinear by two Jacobian evaluations.
+2. Set the linear columns to their tightest bounds (`y = 1` for a big-M row).
+3. Minimise the row over its nonlinear columns.
+4. Bisect from that centre to the boundary along each axis, and take the tangent at
+   each boundary point through the ordinary `_add_oa_cuts`.
+
+For a ball this gives its axis-aligned supporting planes, so fixing `y` in the master
+yields the ball's box. Each row is a tangent of a certified-convex function at a finite
+point, so no feasible point is cut off. The wall budget is 2% of the limit, floored at
+0.25 s, and the probe measured 0.07-0.17 s. Pinned by
+`test_2013_pball_support_cuts.py`.
+
+**Entry experiment** (this branch, after section 103.3; every certified point
+verified):
+
+| instance | limit | OFF | ON |
+|---|---|---|---|
+| p_ball_10b_5p_2d_m | 30 s | optimal 21.2 s, 3,637 nodes | optimal 12.9 s, 1,902 nodes |
+| | 60 s | optimal 19.0 s | optimal 11.0 s |
+| p_ball_10b_5p_4d_m | 30 s | feasible, bound 6.7e-7 | feasible (incumbent 71.372 = opt), **no bound** |
+| | 60 s | feasible, bound 6.7e-7 | feasible, bound 24.0 |
+| p_ball_20b_5p_2d_m | 30 s | feasible, bound 3.2e-7 | feasible (incumbent 2.4372 = opt), bound 3.2e-7 |
+| | 60 s | feasible | optimal 37.3 s, 16,444 nodes |
+
+The 4d / 30 s row loses its (trivial) bound. With the flag on, the route keeps making
+gap progress until the #1066 guard abandons it at 26.8 s. Abandoning withdraws the
+route's unconfirmed bound (#1634, #1658 B2), and the fallback's remaining ~3 s produce
+none. The section 5 panel over the 102 routed instances decides the flag.
