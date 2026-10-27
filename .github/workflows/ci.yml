@@ -331,6 +331,7 @@ jobs:
           # See python/tests/_time_budget.py.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             discopt_benchmarks/tests/test_1134_cert_baseline_shrink_guard.py \
+            discopt_benchmarks/tests/test_2006_scip_wins_verdict.py \
             -q --tb=short --timeout=120 \
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \
@@ -848,6 +849,7 @@ jobs:
           # skips python-fast.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             discopt_benchmarks/tests/test_1134_cert_baseline_shrink_guard.py \
+            discopt_benchmarks/tests/test_2006_scip_wins_verdict.py \
             -q --tb=short --timeout=120 \
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \
