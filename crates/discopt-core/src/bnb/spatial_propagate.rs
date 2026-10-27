@@ -61,7 +61,9 @@ fn cap_hi(hi: &mut [f64], j: usize, cap: f64) -> bool {
         return false;
     }
     let guarded = cap + EPS * rel(cap);
-    if guarded < hi[j] - EPS * rel(hi[j]) {
+    // An infinite `hi[j]` (a free column, #2011) is tightened by any finite cap;
+    // the relative test below would compare against `inf - inf = NaN`.
+    if hi[j] == f64::INFINITY || guarded < hi[j] - EPS * rel(hi[j]) {
         hi[j] = guarded;
         true
     } else {
@@ -76,7 +78,7 @@ fn raise_lo(lo: &mut [f64], j: usize, cap: f64) -> bool {
         return false;
     }
     let guarded = cap - EPS * rel(cap);
-    if guarded > lo[j] + EPS * rel(lo[j]) {
+    if lo[j] == f64::NEG_INFINITY || guarded > lo[j] + EPS * rel(lo[j]) {
         lo[j] = guarded;
         true
     } else {
@@ -95,18 +97,48 @@ fn tighten_le(
     // Minimum activity, rounded DOWN (#1537 D): a lower bound on the exact minimum
     // activity, so neither the infeasibility test nor a residual built from it can
     // exceed what exact arithmetic gives.
+    //
+    // A term whose bound is infinite (a free column, #2011) is left out of `tot` and
+    // counted. With exactly one such term, `tot` is a lower bound on the min activity
+    // of all the OTHERS, so that one column is bounded by `rhs - tot` (the standard
+    // single-infinite-contributor deduction); with two or more nothing follows. This
+    // is what gives a free linear column the finite bound the node LP's safe bound
+    // needs. Every all-finite row takes the unchanged path below.
     let mut tot = 0.0f64;
+    let mut n_inf = 0usize;
+    let mut inf_k = 0usize;
     for (k, &c) in coeffs.iter().enumerate() {
+        if c == 0.0 {
+            continue;
+        }
         let j = cols[k];
         let m = if c > 0.0 {
             mul_down(c, lo[j])
         } else {
             mul_down(c, hi[j])
         };
-        tot = add_down(tot, m);
+        if m.is_finite() {
+            tot = add_down(tot, m);
+        } else {
+            n_inf += 1;
+            inf_k = k;
+        }
     }
     if !tot.is_finite() {
-        return Some(false); // an unbounded term: no deduction possible, not a proof
+        return Some(false); // overflow: no deduction possible, not a proof
+    }
+    if n_inf > 0 {
+        let c = coeffs[inf_k];
+        if n_inf > 1 || c.abs() < 1e-12 {
+            return Some(false); // an unbounded activity: no deduction, not a proof
+        }
+        let j = cols[inf_k];
+        let resid = sub_up(rhs, tot);
+        return Some(if c > 0.0 {
+            cap_hi(hi, j, div_up(resid, c))
+        } else {
+            raise_lo(lo, j, div_down(resid, c))
+        });
     }
     if tot > rhs + INFEAS_TOL * rel(rhs) {
         return None;
@@ -385,6 +417,45 @@ pub fn propagate_spec_fixpoint(
     cutoff: Option<f64>,
     max_rounds: usize,
 ) -> bool {
+    // #2011: the LP layer's infinity is the `1e20` sentinel, which interval
+    // arithmetic would read as a finite bound -- a product `a * 1e20` with `|a| < 1`
+    // is an ordinary number and its sum cancels smaller terms (CLAUDE.md, Key
+    // Constraints). Propagate over real infinities and hand the sentinel back.
+    let mut had_sentinel = false;
+    for j in 0..lo.len().min(hi.len()) {
+        if lo[j] <= -SENTINEL {
+            lo[j] = f64::NEG_INFINITY;
+            had_sentinel = true;
+        }
+        if hi[j] >= SENTINEL {
+            hi[j] = f64::INFINITY;
+            had_sentinel = true;
+        }
+    }
+    let live = propagate_fixpoint_rounds(spec, lo, hi, cutoff, max_rounds);
+    if had_sentinel {
+        for j in 0..lo.len().min(hi.len()) {
+            if lo[j] == f64::NEG_INFINITY {
+                lo[j] = -SENTINEL;
+            }
+            if hi[j] == f64::INFINITY {
+                hi[j] = SENTINEL;
+            }
+        }
+    }
+    live
+}
+
+/// The LP layer's infinite bound (`1e20`, never `f64::INFINITY`).
+const SENTINEL: f64 = 1e20;
+
+fn propagate_fixpoint_rounds(
+    spec: &SpatialKernelSpec,
+    lo: &mut [f64],
+    hi: &mut [f64],
+    cutoff: Option<f64>,
+    max_rounds: usize,
+) -> bool {
     // Objective-cutoff row support, built once. Every nonzero term is kept (#1955):
     // dropping a tiny `c_j` without accounting for `c_j·x_j` can make the row prove a
     // non-empty node empty when `|x_j|` is large. `tighten_le` already counts tiny
@@ -522,6 +593,71 @@ mod tests {
             blf_terms: vec![],
             obbt_candidates: vec![],
         }
+    }
+
+    /// #2011: a free column carries the `1e20` sentinel. A row in which it is the
+    /// only unbounded term bounds it; a row with two unbounded terms deduces
+    /// nothing; and a bound never derived stays the sentinel, not a number.
+    #[test]
+    fn free_column_sentinel_single_infinite_contributor_2011() {
+        // y - x <= 0 and x - y <= 1, x in [0, 2], y free  =>  y in [-1, 2].
+        let mut spec = empty_spec(2);
+        spec.fixed_rows = vec![
+            FixedRow {
+                cols: vec![0, 1],
+                coeffs: vec![-1.0, 1.0],
+                rhs: 0.0,
+            },
+            FixedRow {
+                cols: vec![0, 1],
+                coeffs: vec![1.0, -1.0],
+                rhs: 1.0,
+            },
+        ];
+        let mut lo = vec![0.0, -1e20];
+        let mut hi = vec![2.0, 1e20];
+        assert!(propagate_spec_fixpoint(&spec, &mut lo, &mut hi, None, 10));
+        assert!((2.0..2.0 + 1e-6).contains(&hi[1]), "y hi {}", hi[1]);
+        assert!((-1.0 - 1e-6..=-1.0).contains(&lo[1]), "y lo {}", lo[1]);
+        assert!(
+            lo[0] <= 0.0 && hi[0] >= 2.0,
+            "x cut: [{}, {}]",
+            lo[0],
+            hi[0]
+        );
+
+        // y + z <= 0 with both free: nothing follows, and the sentinel comes back.
+        let mut spec = empty_spec(2);
+        spec.fixed_rows = vec![FixedRow {
+            cols: vec![0, 1],
+            coeffs: vec![1.0, 1.0],
+            rhs: 0.0,
+        }];
+        let mut lo = vec![-1e20, -1e20];
+        let mut hi = vec![1e20, 1e20];
+        assert!(propagate_spec_fixpoint(&spec, &mut lo, &mut hi, None, 10));
+        assert_eq!((lo, hi), (vec![-1e20, -1e20], vec![1e20, 1e20]));
+    }
+
+    /// #2011, the CLAUDE.md sentinel hazard: `0.5 * -1e20` is an ordinary number,
+    /// and a row summed with it absorbs the small terms. Read as a finite bound, the
+    /// row `x + 0.5*y <= 1` with `x >= 0.001` gave `y <= ~16,386` (the 0.001 lost to
+    /// cancellation, the residual rounded outward by an ulp of 5e19). Over a real
+    /// infinity the residual is exact: `y <= 1.998`, and x is never cut.
+    #[test]
+    fn sentinel_is_not_read_as_a_finite_bound_2011() {
+        let mut spec = empty_spec(2);
+        spec.fixed_rows = vec![FixedRow {
+            cols: vec![0, 1],
+            coeffs: vec![1.0, 0.5],
+            rhs: 1.0,
+        }];
+        let mut lo = vec![0.001, -1e20];
+        let mut hi = vec![3.0, 1e20];
+        assert!(propagate_spec_fixpoint(&spec, &mut lo, &mut hi, None, 10));
+        assert_eq!((lo[0], hi[0]), (0.001, 3.0), "x was cut");
+        assert!(hi[1] >= 1.998 && hi[1] < 1.998 + 1e-6, "y hi {}", hi[1]);
+        assert_eq!(lo[1], -1e20);
     }
 
     #[test]

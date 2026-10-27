@@ -69,6 +69,47 @@ def _vector_vars_enabled() -> bool:
     return _env_flag("DISCOPT_NATIVE_KERNEL_VECTOR_VARS", default=True)
 
 
+def _free_linear_enabled() -> bool:
+    """#2011: ``DISCOPT_KERNEL_FREE_LINEAR`` -- let the native kernel take a model
+    whose relaxation has a free ORIGINAL column that enters only linearly.
+
+    The guard below declines a spec whenever any column has an infinite bound,
+    because an unbounded FACTOR makes a McCormick envelope degenerate (#764,
+    tanksize). A column that is no lifted term's factor has no envelope, so that
+    reason does not apply to it, yet one such column sent the whole solve to the
+    Python tree. Under the flag such a column is admitted with the LP layer's
+    ``1e20`` sentinel as its bound; any lifted column, or any original column
+    that is a factor of a lifted term, with an infinite bound still declines.
+    The kernel's FBBT reads the sentinel as a real infinity and bounds a free
+    column through the single-infinite-contributor row deduction
+    (``spatial_propagate.rs``); the node LP and the Neumaier-Shcherbina bound
+    already treat ``>= 1e20`` as open; OBBT never probes such a column.
+
+    **Graduated (default ON, 2026-10-27); ``=0`` restores the decline.** Census
+    (``discopt_benchmarks/scripts/issue2011_free_linear_census.py``, 410 MINLPLib
+    instances <= 200 vars/cons with a proven status plus the in-repo corpus, spec
+    built at the solver's presolved box with the flag OFF and ON): the flag
+    changes the engine on 10 (util, sporttournament14, st_e42, ex14_1_2/5/6,
+    pointpack04, autocorr_bern20-15/25-19/25-25); 39 keep declining for a free
+    FACTOR (elf, haverly, the ex14_* family, ...); OFF and ON agree on every other
+    spec, none of which carries an infinite or ``>= 1e20`` bound. Section 5 panel
+    on the 10 (``issue1913_pseudocost_panel.py --flag DISCOPT_KERNEL_FREE_LINEAR``,
+    60 s, interleaved): cert-clean, 60 checks, 0 problems; certified +util (61.4 s
+    at the limit -> 5.5 s), none lost; where both certify nodes 19 -> 7, wall
+    10.7 -> 2.9 s; total wall 334.2 -> 249.0 s; on the 4 neither certifies the
+    bound is tighter ON on all 4 (sporttournament14 106 -> 100, autocorr_bern25-19
+    -508,536 -> -132,223). Recorded trade-off: on those 4 the time-limit incumbent
+    is slightly worse ON (sporttournament14 96 -> 94). performance-plan section 99.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_KERNEL_FREE_LINEAR", default=True)
+
+
+#: The Rust LP layer's infinite bound. ``f64::INFINITY`` is never passed there.
+_LP_INF = 1e20
+
+
 def build_spatial_kernel_spec(
     model, bounds: Optional[tuple] = None, deadline: Optional[float] = None
 ) -> Optional[dict]:
@@ -173,8 +214,15 @@ def build_spatial_kernel_spec(
     # feeding the native kernel presolved bounds is the follow-up. #764.)
     if not getattr(rel_real.model, "_objective_bound_valid", False):
         return None
-    if np.isinf(np.asarray(rel_real.model._bounds, dtype=np.float64)).any():
-        return None
+    # #2011: an infinite bound on a LIFTED column, or with the flag off on any
+    # column, declines. Under the flag a free ORIGINAL column passes here and is
+    # checked below to be no lifted term's factor.
+    _real_inf = np.isinf(np.asarray(rel_real.model._bounds, dtype=np.float64)).any(axis=1)
+    free_cols: list[int] = []
+    if _real_inf.any():
+        if not _free_linear_enabled() or _real_inf[n_orig:].any():
+            return None
+        free_cols = [int(k) for k in np.flatnonzero(_real_inf[:n_orig])]
 
     # Decline lifted families the Rust kernel does not implement yet.
     if rel.trilinear_map or rel.multilinear_map or rel.ratio_map or rel.composite_multivar_specs:
@@ -360,6 +408,18 @@ def build_spatial_kernel_spec(
     br = np.asarray(rel_real.model._b_ub, dtype=np.float64).ravel()
     if Ar.shape != A.shape or br.shape[0] != b.shape[0]:
         return None
+    if free_cols:
+        # #2011: only purely linear free columns. A free factor of any lifted term
+        # (or an infinite coefficient the real-box build derived from its bound)
+        # declines, as before.
+        factors = set(int(i) for i in ti) | set(int(j) for j in tj if int(j) >= 0)
+        factors |= set(blf_a_cols) | set(blf_b_cols)
+        if any(k in factors or k in claimed_aux for k in free_cols):
+            return None
+        if not (np.isfinite(Ar.data).all() and np.isfinite(br).all()):
+            return None
+        if any(int(r) in env_rows for k in free_cols for r in rows_with_col(k)):
+            return None
     rp_indptr, rp_indices, rp_data = Ar.indptr, Ar.indices, Ar.data
     # #1944: bound-factor RLT rows carry the box they were built at. The probe
     # build's copies are valid only in the probe box, so they are never used; the
@@ -436,6 +496,19 @@ def build_spatial_kernel_spec(
     obbt_candidates = [
         k for k in range(n_orig) if np.isfinite(global_lo[k]) and np.isfinite(global_hi[k])
     ]
+    # #2011: an admitted free column carries the LP layer's sentinel, never ``inf``.
+    # Under the flag, any other non-finite original bound was not checked above, so
+    # it declines (the flag-off path is unchanged).
+    if free_cols or _free_linear_enabled():
+        _admitted = set(free_cols)
+        for k in np.flatnonzero(~(np.isfinite(global_lo) & np.isfinite(global_hi))):
+            if int(k) not in _admitted:
+                return None
+    for k in free_cols:
+        if not np.isfinite(global_lo[k]):
+            global_lo[k] = -_LP_INF
+        if not np.isfinite(global_hi[k]):
+            global_hi[k] = _LP_INF
 
     if c.shape[0] != ncol:
         return None

@@ -12673,3 +12673,60 @@ on all 23 instances the lift settles inside its first slice; they differ only on
 instances that run timed slices, which are wall-clock dependent: three repeats per
 arm on dense_n15_s1 give 1,048-1,228 nodes (base) vs 1,052-1,094 (fix), conge15
 1,178-1,774 vs 1,428-1,636, all certified.
+
+## 99. #2011: the native kernel takes a free column that enters only linearly (graduated 2026-10-27)
+
+**Mechanism.** `build_spatial_kernel_spec` declined any spec with an infinite column
+bound, a guard written for an unbounded FACTOR (a degenerate McCormick envelope,
+#764). One free `.nl` column that appears in no lifted term (util,
+sporttournament14) therefore sent the whole solve to the Python tree. (A column
+declared through the modeling API with no bounds gets the finite default box
+`+-9.999e19` and never reached the guard.)
+
+**Change.** Under `DISCOPT_KERNEL_FREE_LINEAR` a free ORIGINAL column passes when it
+is no lifted term's factor, touches no envelope row, and the real-box build has no
+infinite coefficient; it reaches the kernel as the LP layer's `1e20` sentinel,
+never `inf`, and is no OBBT candidate. Any infinite bound on a lifted column or a
+factor still declines (elf). In Rust, `propagate_spec_fixpoint` now reads the
+sentinel as a real infinity for the duration of the fixpoint (CLAUDE.md, Key
+Constraints) and applies the single-infinite-contributor row deduction, which is
+what gives a free column the finite bound the node LP's safe bound needs. Pinned:
+`spatial_propagate.rs::sentinel_is_not_read_as_a_finite_bound_2011` (fails before:
+the row `x + 0.5 y <= 1`, `x >= 0.001`, gave `y <= ~16,386` through cancellation
+against `0.5 * -1e20`; now `y <= 1.998`), `::free_column_sentinel_single_infinite_
+contributor_2011`, and `test_2011_kernel_free_linear_column.py` (spec, decline on a
+free factor, kernel vs Python-tree objective, 12 seeded random boxes never bound
+above the closed-form optimum).
+
+**Census** (`discopt_benchmarks/scripts/issue2011_free_linear_census.py`, 410
+MINLPLib instances <= 200 vars/cons with a proven status + the in-repo corpus;
+the spec is built at the box the solver passes, OFF and ON): admitted 10 (util,
+sporttournament14, st_e42, ex14_1_2, ex14_1_5, ex14_1_6, pointpack04,
+autocorr_bern20-15, autocorr_bern25-19, autocorr_bern25-25); free factor 39
+(contvar, demo7, elf, ex14_1_1/3/4/7/8/9, ex14_2_1..9, ex4_1_5, ex7_3_1, ex7_3_3,
+ex9_1_1/2/5/8, gear4, haverly, heatexch_gen1/2, hybriddynamic_fixedcc/varcc,
+korcns, launch, least, mathopt3, maxmineig2, prolog, tricp, wallfix); no spec 180;
+same 181, with 0 OFF/ON disagreements. None of the 121 flag-OFF specs carries an
+infinite or `>= 1e20` bound, so the Rust change runs the identical arithmetic on
+every one of them (bound-neutral by construction off the admitted set).
+
+**Section 5 panel** on the 10 (`issue1913_pseudocost_panel.py --flag
+DISCOPT_KERNEL_FREE_LINEAR`, 60 s, OFF/ON interleaved, every incumbent
+`verify_point`-ed on a fresh parse, every bound against `minlplib.solu`):
+
+| instance | OFF | ON |
+|---|---|---|
+| util (opt 999.5788) | feasible, bound 999.5539, 291 nodes, 61.4 s | **optimal** 999.57875, 211 nodes, **5.5 s** |
+| ex14_1_2 / 1_5 / 1_6 | optimal, 5 / 3 / 3 nodes, 5.7 / 0.9 / 4.3 s | optimal, 1 / 1 / 1 nodes, 1.6 / 0.9 / 1.6 s |
+| pointpack04 | optimal, 7 nodes, 2.1 s | optimal, 3 nodes, 1.1 s |
+| st_e42 | optimal, 1 node, 0.8 s | optimal, 1 node, 1.2 s |
+| sporttournament14 (max, opt 96) | feasible 96, bound 106 | time limit, 94, bound **100** |
+| autocorr_bern20-15 / 25-19 / 25-25 | bounds -198,352 / -508,536 / -375,232 | bounds **-49,344 / -132,223 / -105,008** |
+
+Cert-clean (60 checks, 0 problems), certified +util, none lost; where both certify
+nodes 19 -> 7, wall 10.7 -> 2.9 s; total wall 334.2 -> 249.0 s; the four that
+neither arm certifies end with a tighter bound ON. Recorded trade-off: their
+time-limit incumbents are slightly worse ON (sporttournament14 96 -> 94,
+autocorr_bern20-15 -5,960 -> -5,808). **Graduated default ON; `=0` restores the
+decline.** elf and the other 38 free-factor instances stay out of scope until
+something bounds those factors; SCIP leaves elf's 27 unbounded too.
