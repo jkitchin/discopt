@@ -100,6 +100,8 @@ def _convex_gdp():
 @pytest.mark.parametrize("build", [_spatial_gdp, _convex_gdp])
 def test_the_deferred_call_runs_with_the_rest_of_the_grant(build, monkeypatch):
     """Both routes: the root call is short, a later iteration spends the rest."""
+    # #2015: the native kernel now takes this model; the test is about the Python tree.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     calls: list[tuple[float, float]] = []
     real = PH.one_hot_config_subnlp
 
@@ -126,6 +128,8 @@ def test_the_deferred_call_runs_with_the_rest_of_the_grant(build, monkeypatch):
 
 @pytest.mark.parametrize("build", [_spatial_gdp, _convex_gdp])
 def test_opt_out_is_one_full_grant(build, monkeypatch):
+    # #2015: the native kernel now takes this model; the test is about the Python tree.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     calls: list[float] = []
     real = PH.one_hot_config_subnlp
 

@@ -58,6 +58,9 @@ def _path(name):
 
 def _solve(name, monkeypatch, gate, time_limit=60.0):
     monkeypatch.setenv("DISCOPT_IPX_CHEAP_FIRST", "1" if gate else "0")
+    # The node counts above were measured before #2015's full-support claim let the
+    # native kernel take prob03's un-lifted model; pin the engines they belong to.
+    monkeypatch.setenv("DISCOPT_KERNEL_BLF_FULL_SUPPORT", "0")
     return from_nl(_path(name)).solve(time_limit=time_limit)
 
 

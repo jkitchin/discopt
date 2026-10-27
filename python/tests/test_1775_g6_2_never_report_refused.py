@@ -94,6 +94,8 @@ def _refuse_at_exit(monkeypatch):
 )
 def test_a_refused_incumbent_is_withdrawn(build, stat, monkeypatch):
     """The repair is switched off, so nothing can verify the refused point."""
+    # #2015: the native kernel now takes this model; the test is about the Python tree.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ok = build().solve(time_limit=30)

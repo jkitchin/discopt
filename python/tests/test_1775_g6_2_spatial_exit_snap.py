@@ -100,6 +100,8 @@ def _spatial_gdp():
 @pytest.mark.parametrize("fails", [False, True])
 def test_the_exit_asks_for_the_repair_floor_when_the_integral_point_fails(fails, monkeypatch):
     """Wiring: the polish budget is chosen from the INTEGRAL point's verdict."""
+    # #2015: the native kernel now takes this model; the test is about the Python tree.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     seen: list[bool] = []
     real_floor = SV._exit_polish_floor
 
