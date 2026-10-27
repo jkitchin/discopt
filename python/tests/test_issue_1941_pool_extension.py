@@ -89,6 +89,8 @@ def _rosenbrock():
 
 @pytest.mark.parametrize("on", ["0", "1"])
 def test_switch_fires_and_keeps_the_bound_sound(monkeypatch, on):
+    # #2015: the native kernel now takes this model; the test is about the Python tree.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     monkeypatch.setenv("DISCOPT_INCREMENTAL_POOL_EXTEND", on)
     # A short time limit, not ``max_nodes``: a node cap sends this model to the
     # native kernel, which has no McCormick pool. The switch fires at the first

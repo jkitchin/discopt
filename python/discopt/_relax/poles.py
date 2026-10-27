@@ -202,6 +202,67 @@ class _LinearRows:
             ends.append(sgn * float(res.fun) + const if res.status == 0 else -sgn * np.inf)
         return ends[0], ends[1]
 
+    def safe_range(self, terms: dict[int, float], const: float) -> tuple[float, float]:
+        """``(lo, hi)`` enclosing ``terms . x + const`` over the rows and the box,
+        PROVED by weak duality rather than read off the LP (#2012).
+
+        For ``min c.x`` over ``A_ub x <= b_ub``, ``A_eq x == b_eq``, ``l <= x <= u``,
+        every ``y_ub <= 0`` and ``y_eq`` give ``c.x >= y_ub.b_ub + y_eq.b_eq +
+        sum_j min(r_j l_j, r_j u_j)`` with ``r = c - A_ubᵀ y_ub - A_eqᵀ y_eq``, at
+        every feasible ``x``. The duals come from HiGHS; any ``y`` is valid, so a
+        solver tolerance can only make the bound weaker, never wrong. A reduced cost
+        that meets an infinite bound gives ``-inf`` (no claim); the result is widened
+        outward by a margin scaled to the magnitude of the summed terms.
+        """
+        from scipy.optimize import linprog
+
+        c = np.zeros(self.n)
+        for i, a in terms.items():
+            c[i] += a
+        big = 1e20
+        lb = np.where(self.lb <= -big, -np.inf, self.lb)
+        ub = np.where(self.ub >= big, np.inf, self.ub)
+        bounds = [
+            (None if not np.isfinite(lo) else lo, None if not np.isfinite(hi) else hi)
+            for lo, hi in zip(lb, ub)
+        ]
+        ends = []
+        for sgn in (1.0, -1.0):
+            cs = sgn * c
+            res = linprog(
+                cs,
+                A_ub=self.A_ub,
+                b_ub=self.b_ub if self.A_ub is not None else None,
+                A_eq=self.A_eq,
+                b_eq=self.b_eq if self.A_eq is not None else None,
+                bounds=bounds,
+                method="highs",
+            )
+            val = -np.inf
+            if res.status == 0:
+                r = cs.copy()
+                terms_mag = 0.0
+                tot = 0.0
+                if self.A_ub is not None:
+                    y = np.minimum(np.asarray(res.ineqlin.marginals, dtype=np.float64), 0.0)
+                    r -= self.A_ub.T @ y
+                    t = float(y @ self.b_ub)
+                    tot += t
+                    terms_mag += float(np.abs(y) @ np.abs(self.b_ub))
+                if self.A_eq is not None:
+                    y = np.asarray(res.eqlin.marginals, dtype=np.float64)
+                    r -= self.A_eq.T @ y
+                    tot += float(y @ self.b_eq)
+                    terms_mag += float(np.abs(y) @ np.abs(self.b_eq))
+                with np.errstate(invalid="ignore"):
+                    box = np.where(r > 0.0, r * lb, np.where(r < 0.0, r * ub, 0.0))
+                if np.all(np.isfinite(box)):
+                    tot += float(box.sum())
+                    terms_mag += float(np.abs(box).sum())
+                    val = tot - 1e-9 * (1.0 + terms_mag)
+            ends.append(sgn * val + const if np.isfinite(val) else -sgn * np.inf)
+        return float(ends[0]), float(ends[1])
+
 
 def _implied_range(den: Expression, model: Model, rows: list) -> Optional[tuple[float, float]]:
     """LP range of an affine ``den`` (see :class:`_LinearRows`), else ``None``."""

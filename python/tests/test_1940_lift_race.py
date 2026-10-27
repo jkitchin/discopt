@@ -196,6 +196,49 @@ def test_every_arm_receives_the_callers_options_verbatim(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_the_default_node_budget_is_not_charged_per_slice(monkeypatch):
+    """#2010: the default ``max_nodes`` is not a cap the caller chose -- the MILP
+    engine reads it as uncapped (#1874). Charged per slice, a lift slice that spent
+    most of it handed the continuation ``default - spent``, which the engine then
+    honoured as a caller's cap; tln4 stopped uncertified at 2.9 s of 120 s. Every
+    arm must see the default itself, and a spent default must not end the race."""
+    default = S._DEFAULT_MAX_NODES
+    _, stub = _race(
+        monkeypatch,
+        {
+            "lift": [_fake(10.0, 9.0, False, nodes=default - 100), _fake(10.0, 10.0, True)],
+            "unlifted": [_fake(10.0, 5.0, False, nodes=500)],
+        },
+        max_nodes=default,
+    )
+    assert [arm for arm, _ in stub.calls] == ["lift", "unlifted", "lift"]
+    assert [kw["max_nodes"] for _, kw in stub.calls] == [default, default, default]
+
+
+@pytest.mark.smoke
+def test_a_callers_node_cap_is_one_budget_over_the_slices(monkeypatch):
+    """#2010 leaves an explicit ``max_nodes`` as one budget for the whole call."""
+    _, stub = _race(
+        monkeypatch,
+        {
+            "lift": [_fake(10.0, 9.0, False, nodes=300), _fake(10.0, 10.0, True)],
+            "unlifted": [_fake(10.0, 5.0, False, nodes=200)],
+        },
+        max_nodes=1000,
+    )
+    assert [kw["max_nodes"] for _, kw in stub.calls] == [1000, 700, 500]
+    _, stub = _race(
+        monkeypatch,
+        {
+            "lift": [_fake(10.0, 9.0, False, nodes=800)],
+            "unlifted": [_fake(10.0, 5.0, False, nodes=200)],
+        },
+        max_nodes=1000,
+    )
+    assert len(stub.calls) == 2, "a spent caller cap must end the race"
+
+
+@pytest.mark.smoke
 def test_only_the_continuation_may_take_the_incumbent_extension(monkeypatch):
     """``Model.solve`` grants the primary an extension past its limit while it
     holds an incumbent (#917). A slice that inherited it ran 15.5 s on a 5 s

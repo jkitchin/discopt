@@ -12635,3 +12635,330 @@ ex1252a. nous1's 21 -> 28 s is the recorded trade-off.
 128,893.741 in **19.3 s** (2,048 kernel nodes; issue: bound 19,389 at 120 s), and
 ex1252 in 41 s. Pinned by `test_1990_multilinear_split.py::
 test_ex1252a_certifies_by_default` (slow, correctness).
+
+## 98. #2010: the #1940 lift race charged the DEFAULT node budget per slice (2026-10-27)
+
+**Mechanism (code).** `_ipx_lift_race` passed `max_nodes - spent` to the un-lifted
+slice and to the continuation, and returned early once `spent >= max_nodes`. With
+the 100k default that number is no longer `_DEFAULT_MAX_NODES`, so
+`_solve_milp_simplex` read it as a caller's cap (`_callers_node_cap`) and the #1874
+full-budget rule stopped applying. A lift slice that spent the default in a few
+seconds left the next arm 1 node and ended the race with the clock untouched.
+
+**Fix.** The default passes through to every arm unchanged; an explicit
+`max_nodes` keeps today's one-budget accounting. Pinned by
+`test_1940_lift_race.py::test_the_default_node_budget_is_not_charged_per_slice`
+(fails before) and `::test_a_callers_node_cap_is_one_budget_over_the_slices`.
+
+**Measured (Linux container, 4 cores, load < 1.5).** On this machine the lift
+slice stall-exits at ~23k nodes (~9k nodes/s; the issue's Mac exceeds 100k inside
+the slice), so the cap never binds at the shipped 5 s slice: tln2/4/5/6 at 120 s,
+2 reps, certify in both arms with the same status and objective. To reach the
+issue's regime the slice was scaled (the #1959 CI-speed proxy, the other way):
+`_IPX_RACE_SLICE_S = 30`, 120 s limit, base vs fix interleaved, 2 reps, arm-level
+spy recording the `max_nodes` each arm received
+(`scripts/issue2010_race_budget_probe.py`):
+
+| instance | base | fix |
+|---|---|---|
+| tln4 | **feasible**, bound 7.7, 218,645 / 216,107 nodes, 30.8 / 30.9 s; un-lifted slice given **1 node** | **optimal** 8.3, 31.3 / 31.4 s (un-lifted slice: 100,000 budget, certifies in 880 nodes) |
+| tln5 | **node_limit**, 12.5 / bound 9.66, 30.0 s (the issue's stage-2 signature) | **optimal** 10.3, 33.4 / 33.4 s |
+
+Certified 0/4 -> 4/4; base leaves ~89 s of a 120 s budget unused.
+
+**Bound-neutral on the #1940 panel** (43 instances, race ON, base vs fix, 30 s, one
+subprocess per solve): certified 42 = 42, total wall 147.5 -> 146.4 s, 0 incumbent
+violations, no slice's node cap reached in either arm. Node counts are identical
+on all 23 instances the lift settles inside its first slice; they differ only on
+instances that run timed slices, which are wall-clock dependent: three repeats per
+arm on dense_n15_s1 give 1,048-1,228 nodes (base) vs 1,052-1,094 (fix), conge15
+1,178-1,774 vs 1,428-1,636, all certified.
+
+## 99. #2011: the native kernel takes a free column that enters only linearly (graduated 2026-10-27)
+
+**Mechanism.** `build_spatial_kernel_spec` declined any spec with an infinite column
+bound, a guard written for an unbounded FACTOR (a degenerate McCormick envelope,
+#764). One free `.nl` column that appears in no lifted term (util,
+sporttournament14) therefore sent the whole solve to the Python tree. (A column
+declared through the modeling API with no bounds gets the finite default box
+`+-9.999e19` and never reached the guard.)
+
+**Change.** Under `DISCOPT_KERNEL_FREE_LINEAR` a free ORIGINAL column passes when it
+is no lifted term's factor, touches no envelope row, and the real-box build has no
+infinite coefficient; it reaches the kernel as the LP layer's `1e20` sentinel,
+never `inf`, and is no OBBT candidate. Any infinite bound on a lifted column or a
+factor still declines (elf). In Rust, `propagate_spec_fixpoint` now reads the
+sentinel as a real infinity for the duration of the fixpoint (CLAUDE.md, Key
+Constraints) and applies the single-infinite-contributor row deduction, which is
+what gives a free column the finite bound the node LP's safe bound needs. Pinned:
+`spatial_propagate.rs::sentinel_is_not_read_as_a_finite_bound_2011` (fails before:
+the row `x + 0.5 y <= 1`, `x >= 0.001`, gave `y <= ~16,386` through cancellation
+against `0.5 * -1e20`; now `y <= 1.998`), `::free_column_sentinel_single_infinite_
+contributor_2011`, and `test_2011_kernel_free_linear_column.py` (spec, decline on a
+free factor, kernel vs Python-tree objective, 12 seeded random boxes never bound
+above the closed-form optimum).
+
+**Census** (`discopt_benchmarks/scripts/issue2011_free_linear_census.py`, 410
+MINLPLib instances <= 200 vars/cons with a proven status + the in-repo corpus;
+the spec is built at the box the solver passes, OFF and ON): admitted 10 (util,
+sporttournament14, st_e42, ex14_1_2, ex14_1_5, ex14_1_6, pointpack04,
+autocorr_bern20-15, autocorr_bern25-19, autocorr_bern25-25); free factor 39
+(contvar, demo7, elf, ex14_1_1/3/4/7/8/9, ex14_2_1..9, ex4_1_5, ex7_3_1, ex7_3_3,
+ex9_1_1/2/5/8, gear4, haverly, heatexch_gen1/2, hybriddynamic_fixedcc/varcc,
+korcns, launch, least, mathopt3, maxmineig2, prolog, tricp, wallfix); no spec 180;
+same 181, with 0 OFF/ON disagreements. None of the 121 flag-OFF specs carries an
+infinite or `>= 1e20` bound, so the Rust change runs the identical arithmetic on
+every one of them (bound-neutral by construction off the admitted set).
+
+**Section 5 panel** on the 10 (`issue1913_pseudocost_panel.py --flag
+DISCOPT_KERNEL_FREE_LINEAR`, 60 s, OFF/ON interleaved, every incumbent
+`verify_point`-ed on a fresh parse, every bound against `minlplib.solu`):
+
+| instance | OFF | ON |
+|---|---|---|
+| util (opt 999.5788) | feasible, bound 999.5539, 291 nodes, 61.4 s | **optimal** 999.57875, 211 nodes, **5.5 s** |
+| ex14_1_2 / 1_5 / 1_6 | optimal, 5 / 3 / 3 nodes, 5.7 / 0.9 / 4.3 s | optimal, 1 / 1 / 1 nodes, 1.6 / 0.9 / 1.6 s |
+| pointpack04 | optimal, 7 nodes, 2.1 s | optimal, 3 nodes, 1.1 s |
+| st_e42 | optimal, 1 node, 0.8 s | optimal, 1 node, 1.2 s |
+| sporttournament14 (max, opt 96) | feasible 96, bound 106 | time limit, 94, bound **100** |
+| autocorr_bern20-15 / 25-19 / 25-25 | bounds -198,352 / -508,536 / -375,232 | bounds **-49,344 / -132,223 / -105,008** |
+
+Cert-clean (60 checks, 0 problems), certified +util, none lost; where both certify
+nodes 19 -> 7, wall 10.7 -> 2.9 s; total wall 334.2 -> 249.0 s; the four that
+neither arm certifies end with a tighter bound ON. Recorded trade-off: their
+time-limit incumbents are slightly worse ON (sporttournament14 96 -> 94,
+autocorr_bern20-15 -5,960 -> -5,808). **Graduated default ON; `=0` restores the
+decline.** elf and the other 38 free-factor instances stay out of scope until
+something bounds those factors; SCIP leaves elf's 27 unbounded too.
+
+## 100. #2014: the parked zero-half separator on sporttournament14 -- entry experiment kills it (2026-10-27)
+
+**Hypothesis (#2014).** The native {0,½}-CG separator (PR #427, parked) was inert on
+graphpart because that root vertex is ⅓-valued; sporttournament14's root vertex is
+½-valued and SCIP's root moves 97.75 -> 109 without zero-half, so the parked code
+should close >= 3 of discopt's 120 -> 96 gap.
+
+**Measured** (`discopt_benchmarks/scripts/issue2014_zerohalf_exact_entry.py`, the
+relaxation at the box the solver hands the kernel producer, simplex vertex):
+
+* root LP 120.0, and every integer column sits at exactly ½ -- the geometry the
+  parked note asked for;
+* the parked separator, ported onto main (its 4 soundness/property tests pass),
+  returns **0 cuts**, with or without the binary-product aux columns marked
+  integral;
+* EXACT separation (Caprara-Fischetti as a MILP over all 673 rows plus the bound
+  inequalities: integer columns' combined coefficients even, continuous columns'
+  zero, combined rhs odd, minimum total slack) on the plain rows: minimum total
+  slack **exactly 1.0**, i.e. no violated {0,½} cut exists. Counting the aux of a
+  product of two binaries as integral (sound: it equals that product at every
+  integer point): 10 violated cuts, one per round, root **120 -> 119**, then the
+  minimum slack returns to 1.0. The kernel's build options give the same rows and
+  the same numbers.
+
+**Verdict: killed** by the issue's criterion (improvement < 3 points). Because the
+separation was exact, no better heuristic recovers more from these rows. SCIP's
+11.25 points come from zero-half over SCIP's own presolved formulation, not from
+rows discopt's relaxation has; the separator stays unmerged (no dead flag on
+main). sporttournament14's root bound stays 120 at default settings (100 at 60 s
+after branching on the kernel, section 99), above the issue's <= 110 target; the
+reason is this measurement.
+
+## 101. #2012: an affine denominator bounded by its linear rows (graduated 2026-10-27)
+
+**Mechanism.** minlphi stopped at the root, `feasible` with no bound, 1 node: the
+tree fathomed the root as `bound_unresolved` because the objective's quotients
+(`x8 / (x0 - x26)`, ...) divide by affine forms whose box interval holds 0, so
+`t**-1` had no enclosure and the objective no bound. The linear rows keep those
+forms away from 0 (`x0 - x26 >= 10`); the pole diagnostic computed exactly that
+range but used it only for its message.
+
+**Entry experiment** (minlphi, 60 s, monkeypatched): (a) `0 * unbounded = 0` in
+`_interval_mul` alone -- unchanged (no bound, 1 node); (b) the LP-implied range
+intersected into an affine node's interval -- **optimal, bound 582.202 <=
+582.236, 3 nodes, 1.4 s**. (b) is the mechanism; (a) was not built.
+
+**Change.** `_Builder.denominator_bounds`: the base of a negative power, when it is
+an affine sum whose box interval holds 0, is intersected with the range the
+model's linear rows imply over THIS build's box (every feasible point of the box
+satisfies those rows). The range is proved by weak duality on HiGHS's duals
+(`poles._LinearRows.safe_range`: any `y_ub <= 0`, `y_eq` gives a valid bound, so a
+solver tolerance can only loosen it; an open reduced cost against an infinite
+bound gives no claim) and cached per (node, box) in the model's analysis cache.
+`DISCOPT_IMPLIED_DENOMINATOR`. Pinned by `test_2012_implied_denominator.py`:
+`x / (a - b)` with `a - b >= 1` certifies `2 sqrt(0.1)` (no bound with the flag
+off); with `a - b >= -1` the refusal still fires (the pole is feasible); and
+`safe_range` encloses the LP range on 40 seeded random LPs.
+
+**Census** (`issue2012_implied_denominator_census.py`, 410 MINLPLib instances <=
+200 vars/cons + the in-repo corpus; root build at the declared box, flag ON): a
+qualifying denominator exists in **3** instances (4stufen, beuster, minlphi); the
+rows narrow it in 2 (beuster: `x14 - x22 ... x17 - x25` from `(-inf, inf)` to
+`[0.01, inf)`; minlphi: 12). A node box is a sub-box of the declared box, so the
+flag cannot act anywhere else.
+
+**Panel** (`issue2012_implied_denominator_panel.py`, 60 s, 2 reps, arms
+interleaved; bounds against `minlplib.solu` `=opt=`/`=best=`; every incumbent
+`verify_point`-ed with its own objective): 16 checks, 0 failures.
+
+| instance | OFF | ON |
+|---|---|---|
+| minlphi (opt 582.236) | feasible, **no bound**, 1 node (2/2) | **optimal**, bound 582.202, 3 nodes, 1.2 / 1.1 s (2/2) |
+| 4stufen (open) | bound 19,713.04 | identical |
+| beuster (open) | bound 6,365.20 | 6,352.06 |
+
+beuster at 180 s: 10,144.414 OFF vs 10,144.419 ON with the same 31 nodes, so the
+60 s difference is a search-path transient. On a quiet machine the ON run ends
+7-21 s past the 180 s limit (3 runs; OFF 1.7 s), inside a node-NLP batch that
+straddles the deadline (`faulthandler` at 184 s: `_solve_nlp_batch_by_deadline`);
+the LP ranges themselves cost 0.28 s over 49 calls. Recorded as the trade-off.
+**Graduated default ON; `=0` opts out.**
+
+## 102. #2015: the three kernel declines on chakra, ex8_1_7 and rbrock (2026-10-27)
+
+Each decline was traced at the box the solver hands `build_spatial_kernel_spec`
+(the decline line found by tracing the producer's returns).
+
+**rbrock -- fixed (`DISCOPT_KERNEL_DECLINE_EXACT`, graduated).** Not a producer
+defect: the #1656 pricing callback declines when `c'x` at a McCormick-tight point
+and the posed objective disagree past `1e-4 (1 + |v|)`. The acceptance test lets
+each lifted term `mccormick_tol = 1e-6` (absolute) plus envelope slack, and the
+objective coefficient 100 on `(x1 - x0**2)**2` multiplies it: beside the optimum
+`c'x = -3.2e-4` against a true 6.4e-5 (measured), so an exact lift was declined
+after ~1,800 nodes. Entry experiment: pricing such points honestly instead, the
+kernel certifies rbrock in 1.6 s (2,863 nodes). Fix without moving any tolerance:
+a disagreement is first re-checked on the spec's own node over a tight box around
+the point (widths 1e-8..1e-5 relative; a point box is infeasible because the tight
+point satisfies a reform column `x2 = x0**2` only to `mccormick_tol`), whose bound
+is the lift's objective there; the kernel declines only if that disagrees too.
+prob10 (spec without its `sin`, `c'x = 2.345` vs 3.446) still declines. Panel over
+the 130 proven instances whose spec the kernel builds (30 s, interleaved, fired
+stat `tree/decline_exact_kept`): 780 checks; fires on 1 (rbrock: 20 s uncertified,
+bound -45 -> **optimal in 3.1 s**); certified lost none. The panel's only 2
+"problems" are pooling_bental5tp crashing in `repair_point` (`LinAlgError: SVD did
+not converge`) in BOTH arms -- reproduced on main 477701c4, unrelated, reported in
+the PR.
+
+**ex8_1_7 -- first decline fixed (`DISCOPT_KERNEL_BLF_FULL_SUPPORT`, graduated),
+second recorded as deliberate.** (1) #861: the model constraint `x0*x3 == 2` lifts
+to `w <= 2`, `-w <= -2`, rows inside the product's support, so the product
+"claimed 6 rows" and the spec declined. On the probe box every McCormick row of
+`w = A*B` has a nonzero coefficient on every factor column, so under the flag only
+full-support rows are claimed and the rest stay fixed rows (still validated
+box-independent). Census (410 MINLPLib + corpus): the kernel newly takes 11
+instances, 0 disagreements elsewhere; panel on the 11 (30 s): 66 checks, 0
+problems, certified 11 = 11, **wall 35.5 -> 17.8 s**, nodes 381 -> 299 (st_e05 3.5
+-> 0.4 s, nvs21 3.2 -> 0.5 s, ex9_2_3 8.1 -> 2.7 s). (2) ex8_1_7 then declines
+because `x2**3` sits on a sign-straddling root box (`x2 in [-2.88, 2.24]`), where
+the Python build emits the 2-facet S-shaped hull and the kernel's
+`monomial_rows` deliberately emits vacuous rows (`mccormick_patch.rs`); the
+producer is meant to decline that term. **Deliberate decline**: the kernel has no
+two-piece odd-power hull.
+
+**chakra -- recorded as deliberate.** The decline line is the probe/real row-count
+check, tripped by `x0` and `x20` being fixed (`[15, 15]`, `[46.16, 46.16]`): their
+terms emit 4 rows on the probe box and 0 on the real box. But those terms are
+`x_k ** 0.75`, a fractional-power family no kernel term map registers, so even
+with the shapes matched their box-dependent rows fail the fixed-row validation:
+**the kernel does not implement fractional powers**; that, not the fixed columns,
+is why chakra stays on the Python tree. Root gap (Python tree -184.32 vs SCIP
+-179.14): Kelley tangent separation at the root LP point for the 39 univariate
+atoms, 10 rounds / 164 cuts, moves the bound at the solver's pre-OBBT root box from
+-198.1983 to -198.1979 -- tangent density is **not** the mechanism; root OBBT closes
+-198.2 -> -184.3, and the residual 5.2 points stay unattributed (SCIP: no single
+component moves its root bound, it is the base relaxation). Recorded, open.
+
+## 103. #2013: the convex-MINLP route's HiGHS master never separated at a fractional point (2026-10-27)
+
+**Mechanism (code + measurement).** Since #1658 the routed `lp_nlp_bb` master is
+always HiGHS, and `milp_highs.solve_milp_with_lazy_cuts` refuses `node_callback`:
+HiGHS has no fractional-node hook, so the ECP rows `DISCOPT_OA_NODE_CUTS`
+(#1141) gives the in-house master never reached it. OA rows arrived only at
+integer incumbents. Entry experiment on smallinvDAXr2b200-220 (30 s): HiGHS
+master 21,769 nodes, uncertified; the in-house master with its node hook optimal
+in 9.8 s / 1,565 nodes; route OFF optimal in 19.5 s / 731 nodes.
+
+**Change (flag `DISCOPT_HIGHS_MASTER_LP_CUTS`, default OFF).** Before each HiGHS
+tree, up to 10 rounds: solve the master's LP relaxation (`solve_relaxation`),
+call the same separator at that fractional point, add its rows (globally valid
+supporting hyperplanes of certified-convex functions). Pinned by
+`test_2013_highs_master_lp_cuts.py` (the rounds separate at a fractional point,
+the optimum is unchanged, `node_callback` without rounds is still refused).
+
+**Panel** (`issue2013_route_census.py`: 102 of 384 proven MINLPLib instances
+<= 200 vars/cons take the route; `issue1913_pseudocost_panel.py --flag
+DISCOPT_HIGHS_MASTER_LP_CUTS`, 30 s, interleaved, every incumbent verified):
+612 checks, 0 problems; where both certify nodes 243,050 -> 60,804, wall
+359.3 -> 199.4 s (smallinvDAXr3b200-220 21.5 -> 3.4 s, r4b200-220 25.1 -> 3.1
+s, r1b050-055 17.7 -> 3.8 s); total wall 890.6 -> 603.8 s; certified +6
+(smallinvDAXr1b100/150/200, r2b150/200, r5b200), **lost 3**: smallinvDAXr3b150-165
+and r4b150-165 (OFF 21-24 s at ~1,400 nodes/s; ON ~390 nodes/s, 30 s) and
+cvxnonsep_pcon30 (OFF 26.9 s). Variants on those: separating only before the
+first tree keeps the b150 pair (20.7 / 20.1 s) but gives back most of the gain
+(r2b200-220 21.6 s) and still loses pcon30; a cut cap of 100 changes nothing.
+**Not graduated** (section 5: no certification regression); kept as a documented
+opt-in with a flag-audit row.
+
+**The other instances (measured, open).**
+* p_ball_10b/20b: the bound stays at ~7e-7 under the HiGHS master with or without
+  LP cuts and under the in-house master with node cuts (472 nodes); route OFF
+  processes 0 nodes in 30 s. SCIP's root is 0 too and it wins in the tree; not
+  attributed to a lever here.
+* slay07m: the HiGHS master spends ~15 s in 8 restarts (25 lazy cuts, 173 nodes,
+  a full tree per incumbent cut because HiGHS cannot take rows mid-tree), the
+  #1066 progress guard abandons it with no bound, and the spatial fallback ends at
+  61,757.14. Every arm (HiGHS, in-house master, route OFF) stops at that same bound
+  in 30 s here, so the binding limit is shared, not the route's.
+* portfol_classical050_1: every arm ends at -0.097774 (opt -0.094760).
+* sssd12-05: certifies in both arms (12.9 / 15.3 s; nodes 7,912 -> 2,921).
+
+#2013 stays open: the smallinvDAX mechanism is identified and fixed behind a flag
+that cannot yet graduate, and p_ball, slay07m and portfol are measured but not
+fixed.
+
+
+### 103.1 The two smallinvDAX "losses" were the #1634 cross-solve's; it is fixed (2026-10-27)
+
+**Retraction.** Section 103 attributed the smallinvDAXr3b150-165 / r4b150-165 losses
+to a per-restart cost of the LP rounds at "~390 nodes/s". That rate divided 11.8k
+nodes by the 30 s limit; the master had run only 8.5 s, at ~1,400 nodes/s, the same
+as OFF. The LP rounds cost 0.04 s on r3b150 (124 rounds, 87 rows); they were not
+where the time went. Measured by an instrumented re-run (every `Highs.run` timed as
+LP or tree phase):
+
+* r3b150-165 ON: after 15 restarts the driver's early exit fired at check-in bound
+  88.09689 (gap 9.1e-5 to the NLP incumbent 88.10493). `_cross_check_lazy_master`
+  then re-solved the master presolve-free at the master's `mip_rel_gap = 1e-4`, and
+  that tree stopped on ITS gap against a weaker incumbent of its own with dual bound
+  88.09371, which "lowered" the claim; the early exit was withdrawn, the route fell
+  back with 20.8 s left, and the fallback did not certify. r4b150-165: the same
+  (claim 88.09654, cross-solve 88.09556).
+* cvxnonsep_pcon30: the master is stuck in BOTH arms (every tree 1 node, bound flat
+  at -36.15628, lazy rows alternating 0/2). OFF certifies only because the #1066
+  progress guard hands over to the fallback at 20.5 s (a nested `lp_nlp_bb` from
+  the RENS incumbent then certifies in 3.1 s); ON's extra integer points keep the
+  guard's gap test satisfied while the bound stays flat, so it never fires.
+
+**Fix (unflagged).** A bound claim is confirmed when a presolve-free tree's dual
+bound reaches it, so the cross-solve now runs at `mip_rel_gap = mip_abs_gap = 0` and
+is interrupted the moment its dual bound reaches the claim (rounding slack 1e-9
+relative); optimality below the claim (a refutation) and the time limit lower or
+withdraw it as before, and the published bound is still `min(primary, cross)`. It
+accepts no bound that a valid presolve-free dual bound has not reached. Pinned by
+`test_1634_oa_master_presolve.py::test_lazy_cross_check_is_driven_to_the_claim_not_
+to_its_own_gap` (a 60-variable MIP with a real integrality gap and a master at
+`mip_rel_gap = 0.5`: the old cross-solve would have lowered the true optimum to the
+root bound).
+
+**Panel** (the same 102 routed instances, 30 s, interleaved, quiet machine;
+compared with section 103's run, which had the old cross-solve):
+
+| arm | certified | wall | |
+|---|---|---|---|
+| flag OFF (the default route), old -> new cross-solve | 82 -> **89** | 890.6 -> 772.6 s | gained smallinvDAXr1b100/150/200, r2b150/200, r5b150/200; lost none |
+| flag ON, old -> new cross-solve | 85 -> 88 | 603.8 -> 512.5 s | gained r3b150, r4b150, r5b150; lost none |
+| new cross-solve, OFF -> ON | 89 -> 88 | 772.6 -> 512.5 s | lost cvxnonsep_pcon30; both-certify nodes 462,275 -> 123,731, wall 503.3 -> 240.8 s |
+
+612 checks per panel, 0 problems. The cross-solve fix ships on the default path:
++7 certificates on the route, none lost. `DISCOPT_HIGHS_MASTER_LP_CUTS` stays a
+documented opt-in because of the single pcon30 loss, which belongs to the #1066
+guard's timing (recorded in its docstring and the flag audit).

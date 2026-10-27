@@ -137,10 +137,12 @@ def test_corpus_instances_now_admitted(name):
     assert inc.ok, f"{name} still declines: {inc.decline_reason}"
 
 
-def test_native_producer_declines_rather_than_dropping_a_model_row():
+def test_native_producer_declines_rather_than_dropping_a_model_row(monkeypatch):
     """``spatial_producer`` must not claim a lifted model row as a BlfTerm
-    envelope — claiming it drops the constraint from every node LP. It now
-    declines (returns None) so the caller keeps the trusted Python path."""
+    envelope — claiming it drops the constraint from every node LP. Under the
+    #861 claim it declines (returns None) so the caller keeps the trusted Python
+    path; under #2015's full-support claim (default ON) it keeps the row as a
+    FIXED row of the spec instead, which every node LP then carries."""
     from discopt._relax.spatial_producer import build_spatial_kernel_spec
     from discopt._relax.uniform_relax import build_uniform_relaxation
 
@@ -177,4 +179,15 @@ def test_native_producer_declines_rather_than_dropping_a_model_row():
         if len(rows) > 4:
             over_claiming += 1
     assert over_claiming > 0, "fixture no longer exercises the over-claiming shape"
+    monkeypatch.setenv("DISCOPT_KERNEL_BLF_FULL_SUPPORT", "0")
     assert build_spatial_kernel_spec(m) is None
+
+    monkeypatch.delenv("DISCOPT_KERNEL_BLF_FULL_SUPPORT", raising=False)
+    spec = build_spatial_kernel_spec(m)
+    assert spec is not None
+    blf_w = {int(w) for w in spec["blf_w"]}
+    ptr, cols = spec["fixed_row_ptr"], spec["fixed_cols"]
+    kept = [
+        r for r in range(len(ptr) - 1) if set(int(c) for c in cols[ptr[r] : ptr[r + 1]]) <= blf_w
+    ]
+    assert kept, "the lifted model row was dropped from the spec's fixed rows"

@@ -1553,7 +1553,86 @@ def _native_kernel_noise_repair(model, x_flat, source, bound_val, gap_tolerance,
     return rep.x, float(obj)
 
 
-def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
+def _kernel_decline_exact_enabled() -> bool:
+    """#2015: ``DISCOPT_KERNEL_DECLINE_EXACT`` -- confirm a #1656 disagreement on the
+    LIFT'S EXACT VALUE before declining the kernel.
+
+    The pricing callback declines when ``c'x`` at a McCormick-tight point and the
+    posed objective disagree by more than #789's tolerance, reading that as "the
+    lift is not this problem" (prob10: 2.345 vs 3.446, its spec has no row for the
+    ``sin``). But the acceptance test allows each lifted term ``mccormick_tol``
+    (1e-6, absolute) plus envelope slack, and an objective coefficient multiplies
+    that: on rbrock (``100 (x1 - x0**2)**2 + (1 - x0)**2``) a point beside the
+    optimum has ``c'x = -3.2e-4`` against a true 6.4e-5, past ``1e-4 (1 + |v|)``,
+    though the lift is exact. Under the flag a disagreement is first re-checked by
+    solving the spec's own root node over the POINT box (originals fixed at the
+    point's values): every envelope the kernel regenerates then collapses to its
+    term's value, so the node's bound is the lift's objective AT that point. If it
+    agrees with the posed objective (#789's tolerance) the lift is this problem and
+    the point is priced at its true value; otherwise the kernel declines as before.
+    No tolerance changes, and a lift that misses a term (prob10) still declines.
+    Read at call time.
+
+    **Graduated (default ON, 2026-10-27); ``=0`` restores #1656's decline.** Panel
+    (``issue1913_pseudocost_panel.py --flag DISCOPT_KERNEL_DECLINE_EXACT --fired-stat
+    tree/decline_exact_kept``) over every proven MINLPLib instance <= 200 vars/cons
+    whose spec the kernel builds (130; the #2011 census), 30 s, interleaved: 780
+    checks, cert-clean (the only 2 "problems" are pooling_bental5tp crashing in
+    ``repair_point`` with ``LinAlgError`` in BOTH arms, reproduced on main
+    477701c4); the check fires on 1 instance, rbrock, which is certified on the
+    kernel (20 s uncertified, bound -45 -> optimal in 3.1 s, 91 disagreements kept);
+    certified lost: none; on the other 129 the code path is the same. prob10
+    still declines. performance-plan section 102.
+    """
+    return os.environ.get("DISCOPT_KERNEL_DECLINE_EXACT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: #2015: how often the pricing callback re-checked a disagreement on the exact lift
+#: (``checked``) and how often the lift agreed so the kernel did not decline
+#: (``kept``) -- the probe counter CLAUDE.md section 6 asks for.
+KERNEL_DECLINE_EXACT_STATS: "collections.Counter[str]" = collections.Counter()
+
+
+def _kernel_lift_agrees_at(spec: dict, x_orig, declared: float, sign: float, off: float) -> bool:
+    """Whether the lift's exact objective at ``x_orig`` matches ``declared`` (#2015).
+
+    One kernel node over ``spec`` with every original column boxed tightly around
+    ``x_orig``: the node bound is then a rigorous lower bound on the lift's
+    objective over that box, within ``|grad| * width`` of its value at the point,
+    because every envelope the kernel regenerates collapses as the box shrinks. The
+    box is not a point because the tight point satisfies the lift only to
+    ``mccormick_tol`` (a reform column ``x2 = x0**2`` pinned at both values is
+    infeasible); widths step up from ``1e-8`` relative until the node is decided.
+    Anything but a decided node with a finite bound is "does not agree" -- the
+    caller keeps #1656's decline.
+    """
+    from discopt import _rust
+
+    glo = np.asarray(spec["global_lo"], dtype=np.float64)
+    ghi = np.asarray(spec["global_hi"], dtype=np.float64)
+    n = len(x_orig)
+    xo = np.clip(np.asarray(x_orig, dtype=np.float64), glo[:n], ghi[:n])
+    for rel_width in (1e-8, 1e-7, 1e-6, 1e-5):
+        d = rel_width * (1.0 + np.abs(xo))
+        lo, hi = glo.copy(), ghi.copy()
+        lo[:n] = np.maximum(glo[:n], xo - d)
+        hi[:n] = np.minimum(ghi[:n], xo + d)
+        res = _rust.solve_spatial_tree_py(**{**spec, "global_lo": lo, "global_hi": hi}, max_nodes=1)
+        bound = res.get("bound")
+        if bound is None or not math.isfinite(float(bound)):
+            continue
+        lift_value = sign * (float(bound) + off)
+        return abs(lift_value - declared) <= 1e-4 * (1.0 + abs(declared))
+    return False
+
+
+def _native_kernel_incumbent_value(model, source, sign, off, n_orig, spec=None):
     """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
 
     Returns ``price(x, lp_obj)`` for a McCormick-tight LP point ``x`` whose lifted
@@ -1636,9 +1715,15 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
         if not math.isfinite(internal):
             return None
         lp_published = sign * (float(lp_obj) + off)
-        if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
-            return "decline"
         x_orig = np.asarray(x, dtype=np.float64)[:n_orig]
+        if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
+            if spec is None or not _kernel_decline_exact_enabled():
+                return "decline"
+            KERNEL_DECLINE_EXACT_STATS["checked"] += 1
+            if not _kernel_lift_agrees_at(spec, x_orig, declared, sign, off):
+                return "decline"
+            KERNEL_DECLINE_EXACT_STATS["kept"] += 1
+            price.kept += 1  # type: ignore[attr-defined]
         ok, _ = _native_kernel_verify_point(model, x_orig)
         if not ok:
             # Reject only the #1938 class, where the snap moved an integer column.
@@ -1662,6 +1747,7 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
         return internal_rep
 
     price.repaired = repaired  # type: ignore[attr-defined]
+    price.kept = 0  # type: ignore[attr-defined]
     return price
 
 
@@ -2573,7 +2659,7 @@ def _try_native_spatial_kernel(
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
-    _pricer = _native_kernel_incumbent_value(model, source, sign, off, n_orig)
+    _pricer = _native_kernel_incumbent_value(model, source, sign, off, n_orig, spec=spec)
     solve_kwargs["incumbent_value"] = _pricer
     if _tuning().native_nlp_primal:
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
@@ -2953,6 +3039,8 @@ def _try_native_spatial_kernel(
     _native_stats["tree/incumbent_value_raised"] = float(
         int(res.get("n_incumbent_value_raised") or 0)
     )
+    # #2015: disagreements the exact-lift check kept rather than declined.
+    _native_stats["tree/decline_exact_kept"] = float(int(getattr(_pricer, "kept", 0)))
     # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
     _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
     _native_stats["tree/spatial_score_picks"] = float(int(res.get("n_spatial_score_picks") or 0))
@@ -11379,8 +11467,9 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
     arm re-enters ``solve_model`` with exactly the caller's options -- nothing has
     to be forwarded by name, so nothing can be dropped -- and differs from the
     legacy solve only in ``_IPX_RACE_ARM`` and in its budgets: its ``time_limit``,
-    its ``max_nodes`` (ONE budget for the call, so each slice's nodes are charged
-    against what the next may use), and, for the two slices, a zero
+    its ``max_nodes`` (when the caller named one, ONE budget for the call, so each
+    slice's nodes are charged against what the next may use; the default is passed
+    to every arm unchanged, #2010), and, for the two slices, a zero
     ``incumbent_time_extension``. Each arm is therefore the very path that was
     measured.
     """
@@ -11416,11 +11505,22 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         result.wall_time = time.perf_counter() - solve_t0
         return result
 
+    # #2010: ``max_nodes`` is ONE budget only when the CALLER named it. The default
+    # is not a cap the caller chose -- the MILP engine reads it as "uncapped" (#1874,
+    # ``_callers_node_cap``) -- so it is passed through to every arm unchanged.
+    # Charging it per slice turned it into a cap: a lift slice that spent ~100k
+    # nodes in 3 s handed the continuation ``100_000 - spent``, which the engine
+    # then honoured as a caller's cap (tln4: stopped at 2.9 s, 117 s unused).
+    callers_node_cap = max_nodes != _DEFAULT_MAX_NODES
+
+    def _left(spent: int) -> int:
+        return max_nodes - spent if callers_node_cap else max_nodes
+
     lifted = _run("lift", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes)
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
-    unlifted = _run("unlifted", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes - spent)
+    unlifted = _run("unlifted", min(_IPX_RACE_SLICE_S, _remaining()), _left(spent))
     merged = _merge_route_and_fallback(lifted, unlifted, is_maximize)
     gaps = (_ipx_relative_gap(lifted), _ipx_relative_gap(unlifted))
     if _result_certifies(unlifted):
@@ -11438,9 +11538,9 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         arm,
         rest,
     )
-    if rest <= 0.0 or spent >= max_nodes:
+    if rest <= 0.0 or (callers_node_cap and spent >= max_nodes):
         return _done(merged)
-    final = _run(arm, rest, max_nodes - spent, final=True)
+    final = _run(arm, rest, _left(spent), final=True)
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 

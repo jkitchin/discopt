@@ -227,9 +227,12 @@ def test_a_callback_that_raises_is_logged_and_the_solve_continues():
     assert r.objective == pytest.approx(TRUE_OPT, abs=1e-4)
 
 
-def test_a_callback_returning_nothing_leaves_the_solve_byte_identical():
+def test_a_callback_returning_nothing_leaves_the_solve_byte_identical(monkeypatch):
     """A cut callback that never cuts must not perturb the search — otherwise its
     presence alone would be a confound in any measurement using it."""
+    # #2015: the native kernel now takes the callback-free baseline, while a cut
+    # callback keeps a solve on the Python tree; compare like with like.
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     m, _x, _y = _hyperbola_model()
     baseline = m.solve(time_limit=60)
 

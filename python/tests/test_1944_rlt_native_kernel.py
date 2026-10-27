@@ -257,6 +257,9 @@ def test_lineq_rows_reach_the_kernel(monkeypatch):
         return rel
 
     monkeypatch.setattr(ur, "build_uniform_relaxation", untagged)
+    # The pre-#1944 behaviour is the #861 claim's decline; #2015's full-support claim
+    # (default ON) leaves such rows to the fixed rows instead, so pin the claim.
+    monkeypatch.setenv("DISCOPT_KERNEL_BLF_FULL_SUPPORT", "0")
     assert build_spatial_kernel_spec(_pinned_component_model(), bounds=bounds) is None
 
 

@@ -51,7 +51,7 @@ import logging
 import math
 import os
 import time
-from typing import Callable, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 
@@ -882,6 +882,8 @@ class _ModelAnalysisCache:
         "bounds_by_box",
         "hessian_certs",
         "hessian_abstain",
+        "linear_rows",
+        "implied_by_box",
     )
 
     def __init__(self, model: Model, dag: CanonicalDAG):
@@ -906,6 +908,10 @@ class _ModelAnalysisCache:
         self.hessian_certs: dict[int, list[tuple[np.ndarray, np.ndarray, str]]] = {}
         # id(cnode) -> [(lo_support, hi_support)] abstained boxes (capped).
         self.hessian_abstain: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+        # #2012: the model's linear rows (``poles._LinearRows``, built on first need)
+        # and (id(cnode), lb.tobytes(), ub.tobytes()) -> proved implied range.
+        self.linear_rows: Any = None
+        self.implied_by_box: dict[tuple, tuple[float, float]] = {}
 
 
 def _get_analysis_cache(
@@ -1671,6 +1677,58 @@ class _Builder:
         self._bounds[id(node)] = result
         return result
 
+    def denominator_bounds(self, node: CNode) -> tuple[float, float]:
+        """:meth:`bounds` of a negative power's BASE, narrowed by the linear rows.
+
+        #2012: when the box interval of an affine base holds 0 and
+        ``DISCOPT_IMPLIED_DENOMINATOR`` is on, it is intersected with the range the
+        model's linear rows imply over THIS build's box. Every feasible point of the
+        box satisfies those rows, so the narrowed interval still contains the base's
+        value at every feasible point, which is all the envelope rows built on it
+        need. The narrowed value replaces the build's own cached enclosure, so every
+        consumer in this build sees the same interval.
+        """
+        lo, hi = self.bounds(node)
+        if not (lo <= 0.0 <= hi) or node.kind != "sum" or not is_affine(node):
+            return lo, hi
+        if not _implied_denominator_enabled():
+            return lo, hi
+        from discopt._relax.poles import _LP_RANGE_MAX_SIZE, _LinearRows
+
+        n = self.n_orig
+        if max(n, len(self.model._constraints)) > _LP_RANGE_MAX_SIZE:
+            return lo, hi
+        key = (id(node), self._flat_lb.tobytes(), self._flat_ub.tobytes())
+        rng = self._analysis.implied_by_box.get(key)
+        if rng is None:
+            from discopt._relax.problem_classifier import (
+                _extract_linear_coefficients_sparse,
+                _NotLinearError,
+            )
+
+            rows = self._analysis.linear_rows
+            if rows is None:
+                rows = _LinearRows(self.model)
+                self._analysis.linear_rows = rows
+            if rows.n != n:
+                return lo, hi
+            try:
+                terms, const = _extract_linear_coefficients_sparse(self._expr(node), self.model, n)
+            except _NotLinearError:
+                return lo, hi
+            rows.lb, rows.ub = self._flat_lb, self._flat_ub
+            rng = rows.safe_range(terms, const)
+            if len(self._analysis.implied_by_box) >= _BOUNDS_CACHE_CAP:
+                self._analysis.implied_by_box.clear()
+            self._analysis.implied_by_box[key] = rng
+        nlo, nhi = max(lo, rng[0]), min(hi, rng[1])
+        if nlo > nhi:
+            # The rows admit no point of this box (a proof of infeasibility we do
+            # not act on here): keep the box interval, which is always valid.
+            return lo, hi
+        self._bounds[id(node)] = (nlo, nhi)
+        return nlo, nhi
+
     # -- the recursive representation walk (bottom-up) ---------------------- #
     def rep(self, node: CNode) -> LinForm:
         cached = self._rep.get(id(node))
@@ -2127,6 +2185,43 @@ def _pole_envelope_enabled() -> bool:
     ``=0`` opts out.
     Read at call time."""
     return os.environ.get("DISCOPT_POLE_ENVELOPE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _implied_denominator_enabled() -> bool:
+    """#2012: ``DISCOPT_IMPLIED_DENOMINATOR`` -- bound an affine denominator by the
+    range the model's linear rows imply over the build box, not by its box interval
+    alone (:meth:`_Builder.denominator_bounds`).
+
+    ``t**e`` (``e < 0``) on a base whose box interval holds 0 has no finite
+    enclosure, so the relaxation has no objective bound at all and the tree stops
+    at the root with ``bound_unresolved``. When the base is an affine form whose
+    sign the linear rows fix (minlphi: ``x0 - x26 >= 10`` while the box gives
+    ``[-69, inf)``), the pole is not in the feasible set. The range is proved by
+    weak duality on HiGHS's duals (``poles._LinearRows.safe_range``), so a solver
+    tolerance can only loosen it. Read at call time.
+
+    **Graduated (default ON, 2026-10-27); ``=0`` opts out.** Census
+    (``discopt_benchmarks/scripts/issue2012_implied_denominator_census.py``, 410
+    MINLPLib instances <= 200 vars/cons + the in-repo corpus, root build at the
+    declared box): a qualifying denominator exists only in 4stufen, beuster and
+    minlphi -- a node box is a sub-box of the declared box, so nowhere else can the
+    flag act. Panel on the 3 (``issue2012_implied_denominator_panel.py``, 60 s,
+    2 reps, interleaved, bounds against ``minlplib.solu``, incumbents
+    ``verify_point``-ed): 16 checks, 0 failures; minlphi feasible / no bound /
+    1 node -> **optimal in 3 nodes, 1.2 s** (2/2); 4stufen identical; beuster's
+    60 s bound 6,365.20 -> 6,352.06 (a search-path transient: at 180 s 10,144.414
+    -> 10,144.419 with the same 31 nodes). Recorded trade-off: at 180 s beuster's
+    ON run ends 7-21 s past the limit (OFF 1.7 s) inside a node-NLP batch that
+    straddles the deadline; the LP ranges themselves cost 0.28 s (49 calls).
+    performance-plan section 101.
+    """
+    return os.environ.get("DISCOPT_IMPLIED_DENOMINATOR", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -3107,7 +3202,7 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     p = float(node.payload)
     base = node.children[0]
     lt = ctx.rep(base)
-    lo, hi = ctx.bounds(base)
+    lo, hi = ctx.denominator_bounds(base) if p < 0.0 else ctx.bounds(base)
     # Exact finite-domain trig-square selector table (#640 Bucket 1): a
     # ``sin/cos(int-affine)**2`` over a small integer domain relaxes EXACTLY via
     # one-hot selectors, superseding the loose ``(trig-envelope)**2`` double-lift.
@@ -3219,7 +3314,7 @@ def _factor_value(
     is the modeling Expression for that factor (validation tracking only).
     """
     lb_base = ctx.rep(base)
-    bb = ctx.bounds(base)
+    bb = ctx.denominator_bounds(base) if e < 0.0 else ctx.bounds(base)
     base_expr = ctx._expr(base) if ctx.track_aux_exprs else None
     if e == 1.0:
         return lb_base, bb, base_expr
