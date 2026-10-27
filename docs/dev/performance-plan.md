@@ -12268,7 +12268,69 @@ measured gain is confined to ex1252a, the one instance where it fires inside a
 removes a fallback that costs certified bound, rather than as a broad speedup.
 That is a judgement call, and the owner may reverse it.
 
-**#1990 status.** Not certified: ex1252a's 600 s bound is 92,254 against 128,894.
-Both levers are measured and recorded (the issue's second Done branch). What
-remains is throughput (root heuristics about 60 s, about 2 s a node) and the
-relaxation of fractional configurations (the root is still 0).
+**Interim status (2026-10-26, superseded below).** Not certified at that point:
+ex1252a's 600 s bound was 92,254 against 128,894, limited by throughput (root
+heuristics about 60 s, about 2 s a node on the Python tree).
+
+### 95.1 The native kernel certifies ex1252a (2026-10-27)
+
+**Profile of the Python tree** (merged base, 100 nodes, cProfile): 11,102 LP solves
+took 107 s, about 10 ms each; the square and convex separators took 43 s and 37 s
+over 74 node solves, and OBBT probes another 33 s. The incremental fast path
+declines (`column-count mismatch`): the cold build has 81 columns on the probe box
+and 66 on validation boxes touching zero, because 15 opaque lifted columns appear
+only on boxes excluding zero. So every node cold-builds, and a fixed incremental
+structure cannot cover it.
+
+**Why the kernel never ran.** `build_spatial_kernel_spec` declines a relaxation
+with trilinear or multilinear terms, and the factorable lift leaves three
+4-factor products `aux_k * x_k * x_{3+k} * x_{18+k}`.
+
+**Entry experiment** (the objective written by hand as bilinear chains
+`w = x0*x3`, `v = w*x18`, `u = x15*v`, default solve, 120 s): the kernel runs
+**85,741 nodes and its bound reaches 128,893.741, the optimum**; it does not
+certify only because its incumbent stays at 139,191. The relaxation and the
+search are fine; the primal side is not.
+
+**`DISCOPT_KERNEL_MULTILINEAR_SPLIT`** (`_relax/multilinear_split.py`, call site in
+`solver.py`): for the kernel attempt only, each product of three or more distinct
+scalar variables becomes a chain of bilinear auxiliaries (binary, then integer,
+then continuous factors, canonical within each group so prefixes are shared; aux
+bounds are interval products; a factor at the `1e20` sentinel declines the pass).
+Exact reformulation; points are verified on the split model and on the problem
+posed; the result reports the caller's columns. Probe `tree/multilinear_split_cols`.
+
+**`DISCOPT_NATIVE_NLP_PRIMAL`** (#1522's in-tree local NLP, default OFF, panel
+owed) supplies the primal side: with both flags a default solve certifies ex1252a
+at **128,893.741 in 33 s, 2,048 kernel nodes** (SCIP: about 1,900). Its first
+panel failed, though: over 424 instances at 30 s it fired on 60, gained none and
+**lost nous1 and genpooling_lee1**, wall +2 %. Per-call logs showed why. Each call
+rounds the integer columns of the node's LP point and fixes them; at a fractional
+point that rounding is a guess the NLP rarely repairs, at 1-3 s a call
+(genpooling_lee1: 10 calls, 10 s of 30, none productive). On ex1252a the 8 calls
+at fractional points failed and the one at a point integral on every integer
+column found the optimum in 0.06 s.
+
+**`DISCOPT_HOOK_INTEGRAL_POINTS`** (Rust `spatial_tree.rs`, default ON under the
+hook; `=0` is the #1522 schedule): on a model with integer columns each
+power-of-two call is held until the next node whose LP point is integral on every
+integer column with an integer assignment not yet tried (SCIP's sub-NLP rule).
+Continuous models keep the #1522 schedule, and accepted kernel incumbents are
+still polished. At 30 s: ex1252a 33 -> 18.1 s, nous1 uncertified -> 27.5 s,
+genpooling_lee1 uncertified (no incumbent) -> 21.7 s (OFF: 22.2 s and 26.6 s).
+
+**Panels** (`issue1990_panel.py`, interleaved, own subprocess per solve,
+`verify_point` on every incumbent):
+
+* Split, screened over the 424 (one ON solve each, kept when
+  `tree/multilinear_split_cols > 0`): fires on **4**, ex1252, ex1252a, st_e03,
+  st_e38. A/B at 120 s with the hook ON in both arms: cert-clean (24 checks,
+  0 problems); **certified +ex1252 (41.1 s) +ex1252a (18.3 s)**, none lost;
+  st_e03 8.6 -> 0.7 s; st_e38 unchanged; total wall 249.6 -> 59.3 s. With the
+  hook OFF in both arms: cert-clean, both ex1252 bounds reach the optimum
+  (21,308 / 23,694 -> 128,893.74) but neither certifies, and the kernel's ex1252
+  incumbent (151,116) is worse than the Python tree's (134,264): the split needs
+  the hook.
+* Hook with the integral-point schedule: TODO-NLP-PANEL
+
+**#1990 status.** TODO-STATUS
