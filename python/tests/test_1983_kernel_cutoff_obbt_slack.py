@@ -165,6 +165,19 @@ def test_slack_only_where_the_exact_cutoff_root_is_undecided(monkeypatch):
 
 
 # ── the regression ──────────────────────────────────────────────────────────
+#
+# #2005: which arm pq_pooling's root takes is platform-dependent. On Linux CI the
+# exact-cutoff root LP ends undecided (and so does the kernel with the slack off);
+# on a macOS dev machine the same box fathoms by propagation and certifies with no
+# slack. The real-path tests below therefore assert only what holds on either arm
+# (sound certificate; the slack never adopted without a failed exact probe), and
+# the two mechanisms are pinned by constructing the undecided state directly.
+
+
+def _assert_pq_certified(r):
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(PQ_OPTIMUM, rel=1e-8)
+    assert r.bound >= r.objective - 1e-6  # maximize: bound is an upper bound
 
 
 @pytest.mark.slow
@@ -174,31 +187,105 @@ def test_pq_pooling_certifies_at_the_root_again(monkeypatch):
     monkeypatch.delenv("DISCOPT_KERNEL_CUTOFF_OBBT", raising=False)
     S.KERNEL_CUTOFF_OBBT_STATS.clear()
     r = _quiet_solve(pq_pooling(), max_nodes=2000, time_limit=120)
-    assert S.KERNEL_CUTOFF_OBBT_STATS["fired"] >= 1, "cutoff OBBT never ran: probe is blind"
-    assert S.KERNEL_CUTOFF_OBBT_STATS["root_undecided"] == 1  # the exact box failed
-    assert S.KERNEL_CUTOFF_OBBT_STATS["slack_adopted"] == 1
-    assert r.status == "optimal" and r.gap_certified
-    assert r.objective == pytest.approx(PQ_OPTIMUM, rel=1e-8)
-    assert r.bound >= r.objective - 1e-6  # maximize: bound is an upper bound
-    assert r.solver_stats["root/status"] == "bounded"
+    st = S.KERNEL_CUTOFF_OBBT_STATS
+    assert st["fired"] >= 1, "cutoff OBBT never ran: probe is blind"
+    assert st["adopted"] >= 1
+    # The rescue runs only after a failed exact-cutoff probe, and resolves once.
+    assert st["root_undecided"] <= 1
+    assert st["slack_adopted"] + st["kept_root_box"] == st["root_undecided"]
+    _assert_pq_certified(r)
+    if r.solver_stats["root/status"] == "undecided":
+        # Only reachable when the exact box was kept with an undecided root (the
+        # probe ran out of time): the #933 fallback carries the certificate.
+        assert st["slack_adopted"] == 0
+        assert r.bound_source == "root_relaxation"
+    else:
+        # Whichever box was adopted (exact where decided, the slack one where
+        # not), its root decides and certifies the seed (#1983's regression).
+        assert r.node_count <= 5
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_undecided_exact_cutoff_root_takes_the_slack_box(monkeypatch):
+    """The exact-cutoff root probe is made to fail, as it does on Linux CI: the
+    OBBT is redone with the cutoff lifted by the kernel's acceptance gap, that box
+    is adopted, and the solve certifies at the root."""
+    monkeypatch.delenv("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", raising=False)
+    monkeypatch.delenv("DISCOPT_KERNEL_CUTOFF_OBBT", raising=False)
+    real_probe, real_box = S._kernel_root_undecided, S._kernel_cutoff_obbt_box
+    probes, cutoffs = [], []
+
+    def probe(spec, deadline):
+        probes.append(1)
+        return True if len(probes) == 1 else real_probe(spec, deadline)
+
+    def box(model, lb, ub, cutoff, deadline):
+        cutoffs.append(float(cutoff))
+        return real_box(model, lb, ub, cutoff, deadline)
+
+    monkeypatch.setattr(S, "_kernel_root_undecided", probe)
+    monkeypatch.setattr(S, "_kernel_cutoff_obbt_box", box)
+    S.KERNEL_CUTOFF_OBBT_STATS.clear()
+    r = _quiet_solve(pq_pooling(), max_nodes=2000, time_limit=120)
+    st = S.KERNEL_CUTOFF_OBBT_STATS
+    assert len(probes) == 2, probes  # the exact box, then the slack box
+    assert len(cutoffs) == 2, cutoffs
+    # Internal (minimised) units: the exact cutoff is the seed, -PQ_OPTIMUM.
+    assert cutoffs[0] == pytest.approx(-PQ_OPTIMUM, rel=1e-8)
+    slack = S._kernel_cutoff_slack(cutoffs[0], 0.0, S._DEFAULT_REL_GAP_TOL, None)
+    assert slack == pytest.approx(1e-4 * PQ_OPTIMUM)
+    assert cutoffs[1] - cutoffs[0] == pytest.approx(slack)
+    assert st["root_undecided"] == 1
+    assert st["slack_adopted"] == 1 and st["kept_root_box"] == 0
+    assert st["adopted"] == 1
+    _assert_pq_certified(r)
     assert r.node_count <= 5
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
-def test_fallback_bound_that_closes_the_gap_certifies(monkeypatch, caplog):
-    """With the slack off the kernel stays undecided; its #933 fallback bound meets
-    the incumbent, which is a proof, and the log names the real exit."""
+def test_slack_off_certifies_on_either_root_arm(monkeypatch):
+    """With the slack off, the real solve is sound whichever arm the platform's root
+    LP takes; a bound-less root is closed by the #933 fallback."""
     monkeypatch.setenv("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "0")
+    r = _quiet_solve(pq_pooling(), max_nodes=200, time_limit=120)
+    _assert_pq_certified(r)
+    if r.solver_stats["root/status"] == "undecided":
+        assert r.bound_source == "root_relaxation"
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_fallback_bound_that_closes_the_gap_certifies(monkeypatch, caplog):
+    """A bound-less ``node_limit`` kernel exit (what pq_pooling's kernel returns on
+    Linux with the slack off) is constructed on every platform: the #933 fallback
+    bound meets the incumbent, which is a proof, and the log names the real exit."""
+    import discopt._rust as R
+
+    monkeypatch.setenv("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "0")
+    real_tree = R.solve_spatial_tree_py
+    injected = []
+
+    def tree(**kw):
+        res = real_tree(**kw)
+        res["status"] = "node_limit"
+        res["bound"] = float("-inf")
+        res["root_bound"] = float("-inf")
+        res["root_status"] = "undecided"
+        injected.append(1)
+        return res
+
+    monkeypatch.setattr(R, "solve_spatial_tree_py", tree)
     with caplog.at_level(logging.INFO, logger="discopt.solver"):
         r = _quiet_solve(pq_pooling(), max_nodes=200, time_limit=120)
+    assert injected, "the kernel was never called: injection is blind"
     assert r.solver_stats["root/status"] == "undecided"
     assert r.bound_source == "root_relaxation"
-    assert r.status == "optimal" and r.gap_certified
-    assert r.objective == pytest.approx(PQ_OPTIMUM, rel=1e-8)
-    assert r.bound >= r.objective - 1e-6
+    _assert_pq_certified(r)
     msgs = [rec.getMessage() for rec in caplog.records]
     assert any("bound-less at node_limit" in s for s in msgs), msgs
+    assert any("node_limit -> optimal" in s for s in msgs), msgs
     assert not any("bound-less at time_limit" in s for s in msgs)
 
 
