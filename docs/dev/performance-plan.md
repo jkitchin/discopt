@@ -12331,6 +12331,27 @@ genpooling_lee1 uncertified (no incumbent) -> 21.7 s (OFF: 22.2 s and 26.6 s).
   (21,308 / 23,694 -> 128,893.74) but neither certifies, and the kernel's ex1252
   incumbent (151,116) is worse than the Python tree's (134,264): the split needs
   the hook.
-* Hook with the integral-point schedule: TODO-NLP-PANEL
+* Hook with the integral-point schedule, OFF vs ON over the 424 at 30 s: fires on
+  52; cert-clean (2,544 checks; the report's 4 "problems" are meanvar and
+  st_e17, corpus-only instances with no reference value, certified identically in
+  both arms); certified 0 gained, 2 listed as lost. tln6 is noise: the hook is
+  called 0 times in the ON arm, and in 4 reruns per arm OFF certifies 1, ON 0,
+  and at 60 s neither does, with equal bounds. nous1 is a real cost: ON
+  certifies in 3/3 reruns at 30 s and at 60 s, but in ~28 s against ~21 s
+  (15,160 vs 11,685 nodes), so the panel's 2-worker load pushed it past 30 s.
+  genpooling_lee1 26.1 -> 21.5 s, cvxnonsep_psig30 28.5 -> 26.1 s, tln4/tln5
+  slightly faster; both-certify wall 1160.2 -> 1152.5 s; total wall 3344.6 ->
+  3361.6 s. (The #1522 schedule's panel had lost nous1 and genpooling_lee1 for
+  real, wall +2 %.)
 
-**#1990 status.** TODO-STATUS
+**Shipped: `DISCOPT_KERNEL_MULTILINEAR_SPLIT` and `DISCOPT_NATIVE_NLP_PRIMAL`
+graduated default ON together**, `DISCOPT_HOOK_INTEGRAL_POINTS` default ON under
+the hook; `=0` restores each legacy path. They ship together because the split
+without the hook only raises the bound, and the hook's own gain at 30 s is a
+wash (genpooling_lee1 faster, nous1 slower) while the pair certifies ex1252 and
+ex1252a. nous1's 21 -> 28 s is the recorded trade-off.
+
+**#1990 status: done.** A default `Model.solve()` of ex1252a certifies
+128,893.741 in **19.3 s** (2,048 kernel nodes; issue: bound 19,389 at 120 s), and
+ex1252 in 41 s. Pinned by `test_1990_multilinear_split.py::
+test_ex1252a_certifies_by_default` (slow, correctness).

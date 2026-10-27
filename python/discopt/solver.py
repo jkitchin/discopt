@@ -2171,16 +2171,19 @@ def _native_exit_primal_polish(model, x_flat, obj_val, bound_val, n_orig, deadli
 
 def _kernel_multilinear_split_enabled() -> bool:
     """Hand the native kernel a model's bilinear-chain split (#1990,
-    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT``; default **off**).
+    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT``; **default ON**, ``=0`` opts out).
 
     The kernel's spec builder declines a relaxation with trilinear or multilinear
     terms, so such a model ran on the Python tree. ON, every product of three or
     more distinct scalar variables is rewritten as a chain of bilinear auxiliaries
     (``_relax/multilinear_split.py``) for the kernel attempt only. Exact
     reformulation; the relaxation becomes the recursive bilinear McCormick
-    envelope. Bound-changing route switch (CLAUDE.md §5), default off until its
-    panel; audit row in ``docs/dev/flag-retirement-audit.md``."""
-    return _env_flag("DISCOPT_KERNEL_MULTILINEAR_SPLIT", default=False)
+    envelope. Bound-changing route switch (CLAUDE.md §5), graduated with
+    ``DISCOPT_NATIVE_NLP_PRIMAL`` (``docs/dev/performance-plan.md`` §95.1): over 424
+    instances it fires on 4; at 120 s it certifies ex1252 and ex1252a (the Python
+    tree ends at bounds 21,308 / 23,694 of 128,894), st_e03 8.6 -> 0.7 s, st_e38
+    unchanged, cert-clean."""
+    return _env_flag("DISCOPT_KERNEL_MULTILINEAR_SPLIT", default=True)
 
 
 def _try_native_spatial_kernel(

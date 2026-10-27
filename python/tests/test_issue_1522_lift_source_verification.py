@@ -102,9 +102,12 @@ def test_node_limit_incumbent_passes_check_feasibility(monkeypatch, max_nodes):
     that exit deterministically; everything downstream of it is the default path.
     The legacy spatial branching rule is pinned too: since #1970 the scored rule
     closes this tree inside the node limit, so the exit under test never happens.
+    So is the in-tree primal step: since #1990 it is on by default and certifies
+    this tree (``test_primal_step_certifies_the_unseeded_kernel``).
     """
     monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
     monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "0")
+    monkeypatch.setenv(FLAG, "0")
     m = _prob09()
     r = m.solve(deterministic=True, max_nodes=max_nodes)
     assert r.status == "node_limit"

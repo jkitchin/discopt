@@ -85,6 +85,15 @@ def test_split_admits_the_kernel_spec():
     assert build_spatial_kernel_spec(sm, bounds=(slb, sub)) is not None
 
 
+def test_flag_defaults_on(monkeypatch):
+    from discopt.solver import _kernel_multilinear_split_enabled
+
+    monkeypatch.delenv(_FLAG, raising=False)
+    assert _kernel_multilinear_split_enabled() is True
+    monkeypatch.setenv(_FLAG, "0")
+    assert _kernel_multilinear_split_enabled() is False
+
+
 def test_no_product_no_split():
     m = dm.Model("bil")
     x = m.continuous("x", lb=0, ub=1)
@@ -119,3 +128,24 @@ def test_solve_matches_and_routes(monkeypatch, flag):
         assert split == 5.0
     else:
         assert split is None
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_ex1252a_certifies_by_default(monkeypatch):
+    """#1990's Done criterion: ex1252a certifies at 120 s on the default path.
+
+    Before: the Python tree, bound 19,389 (incumbent 131,124) at 120 s. After: the
+    kernel on the split, with the integral-point primal step, about 20 s here.
+    """
+    import os
+
+    for flag in (_FLAG, "DISCOPT_NATIVE_NLP_PRIMAL", "DISCOPT_HOOK_INTEGRAL_POINTS"):
+        monkeypatch.delenv(flag, raising=False)
+    path = os.path.join(os.path.dirname(__file__), "data", "minlplib", "ex1252a.nl")
+    r = dm.from_nl(path).solve(time_limit=120)
+    opt = 128893.741
+    assert r.status == "optimal", (r.status, r.objective, r.bound)
+    assert r.objective == pytest.approx(opt, rel=1e-4)
+    assert r.bound <= opt * (1 + 1e-6)
+    assert r.algorithm_route.startswith("native-spatial")

@@ -1418,7 +1418,7 @@ class SolverTuning:
     """
 
     native_nlp_primal: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NATIVE_NLP_PRIMAL", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_NATIVE_NLP_PRIMAL", default=True)
     )
     """Run a local NLP inside the native spatial kernel's tree (#1522,
     ``DISCOPT_NATIVE_NLP_PRIMAL``).
@@ -1436,7 +1436,17 @@ class SolverTuning:
     when it accepts a new incumbent and at nodes 1, 2, 4, 8, ...; the hook runs one
     KKT re-solve of the lift from the node's LP point and returns the point only if
     it verifies on the lift AND on the pre-reform model. Primal only: the reported
-    bound is still the min of the closed regions' rigorous bounds.
+    bound is still the min of the closed regions' rigorous bounds. On a model with
+    integer columns a scheduled call waits for an LP point integral on every
+    integer column with an untried assignment (#1990, Rust
+    ``DISCOPT_HOOK_INTEGRAL_POINTS``).
+
+    **Default ON since #1990** (``=0`` opts out), graduated together with
+    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT`` (``docs/dev/performance-plan.md`` §95.1).
+    Panel, 424 instances at 30 s: fired on 52, cert-clean, both-certify wall 1160.2
+    -> 1152.5 s (genpooling_lee1 26.1 -> 21.5 s); nous1 is the measured cost, still
+    certified in 3/3 reruns but 21 -> 28 s. With the split it certifies ex1252 and
+    ex1252a, which neither flag does alone.
     """
 
     # --- determinism (#1116) --------------------------------------------------

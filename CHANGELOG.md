@@ -207,6 +207,19 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **ex1252a and ex1252 certify: products of three or more variables reach the
+  native kernel, and its primal step runs at integral LP points (#1990).**
+  - Such products are split into exact bilinear chains for the kernel
+    (`DISCOPT_KERNEL_MULTILINEAR_SPLIT`, default on). The kernel's spec builder
+    used to decline them, so these models ran on the much slower Python tree.
+  - The kernel's in-tree local NLP (`DISCOPT_NATIVE_NLP_PRIMAL`, #1522) is now on
+    by default. On a model with integer columns it waits for an LP point
+    integral on every integer column with an untried assignment
+    (`DISCOPT_HOOK_INTEGRAL_POINTS`).
+  - ex1252a: bound 19,389 at 120 s before, certified 128,893.741 in 19 s now.
+    ex1252 certifies in 41 s, and st_e03 takes 0.7 s instead of 8.6 s. nous1
+    slows from about 21 s to 28 s (`docs/dev/performance-plan.md` §95.1).
+
 - **A failed RLT node LP no longer costs the node its bound, and FBBT bounds a
   factor of a product whose other factor touches zero (#1990).**
   - A node whose level-1-RLT LP gave no certified verdict went to the #671 row
