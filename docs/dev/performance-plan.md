@@ -12914,3 +12914,51 @@ opt-in with a flag-audit row.
 #2013 stays open: the smallinvDAX mechanism is identified and fixed behind a flag
 that cannot yet graduate, and p_ball, slay07m and portfol are measured but not
 fixed.
+
+
+### 103.1 The two smallinvDAX "losses" were the #1634 cross-solve's; it is fixed (2026-10-27)
+
+**Retraction.** Section 103 attributed the smallinvDAXr3b150-165 / r4b150-165 losses
+to a per-restart cost of the LP rounds at "~390 nodes/s". That rate divided 11.8k
+nodes by the 30 s limit; the master had run only 8.5 s, at ~1,400 nodes/s, the same
+as OFF. The LP rounds cost 0.04 s on r3b150 (124 rounds, 87 rows); they were not
+where the time went. Measured by an instrumented re-run (every `Highs.run` timed as
+LP or tree phase):
+
+* r3b150-165 ON: after 15 restarts the driver's early exit fired at check-in bound
+  88.09689 (gap 9.1e-5 to the NLP incumbent 88.10493). `_cross_check_lazy_master`
+  then re-solved the master presolve-free at the master's `mip_rel_gap = 1e-4`, and
+  that tree stopped on ITS gap against a weaker incumbent of its own with dual bound
+  88.09371, which "lowered" the claim; the early exit was withdrawn, the route fell
+  back with 20.8 s left, and the fallback did not certify. r4b150-165: the same
+  (claim 88.09654, cross-solve 88.09556).
+* cvxnonsep_pcon30: the master is stuck in BOTH arms (every tree 1 node, bound flat
+  at -36.15628, lazy rows alternating 0/2). OFF certifies only because the #1066
+  progress guard hands over to the fallback at 20.5 s (a nested `lp_nlp_bb` from
+  the RENS incumbent then certifies in 3.1 s); ON's extra integer points keep the
+  guard's gap test satisfied while the bound stays flat, so it never fires.
+
+**Fix (unflagged).** A bound claim is confirmed when a presolve-free tree's dual
+bound reaches it, so the cross-solve now runs at `mip_rel_gap = mip_abs_gap = 0` and
+is interrupted the moment its dual bound reaches the claim (rounding slack 1e-9
+relative); optimality below the claim (a refutation) and the time limit lower or
+withdraw it as before, and the published bound is still `min(primary, cross)`. It
+accepts no bound that a valid presolve-free dual bound has not reached. Pinned by
+`test_1634_oa_master_presolve.py::test_lazy_cross_check_is_driven_to_the_claim_not_
+to_its_own_gap` (a 60-variable MIP with a real integrality gap and a master at
+`mip_rel_gap = 0.5`: the old cross-solve would have lowered the true optimum to the
+root bound).
+
+**Panel** (the same 102 routed instances, 30 s, interleaved, quiet machine;
+compared with section 103's run, which had the old cross-solve):
+
+| arm | certified | wall | |
+|---|---|---|---|
+| flag OFF (the default route), old -> new cross-solve | 82 -> **89** | 890.6 -> 772.6 s | gained smallinvDAXr1b100/150/200, r2b150/200, r5b150/200; lost none |
+| flag ON, old -> new cross-solve | 85 -> 88 | 603.8 -> 512.5 s | gained r3b150, r4b150, r5b150; lost none |
+| new cross-solve, OFF -> ON | 89 -> 88 | 772.6 -> 512.5 s | lost cvxnonsep_pcon30; both-certify nodes 462,275 -> 123,731, wall 503.3 -> 240.8 s |
+
+612 checks per panel, 0 problems. The cross-solve fix ships on the default path:
++7 certificates on the route, none lost. `DISCOPT_HIGHS_MASTER_LP_CUTS` stays a
+documented opt-in because of the single pcon30 loss, which belongs to the #1066
+guard's timing (recorded in its docstring and the flag audit).

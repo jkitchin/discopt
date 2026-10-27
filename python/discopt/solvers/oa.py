@@ -5678,21 +5678,22 @@ def _highs_master_lp_cuts_enabled() -> bool:
     ``DISCOPT_OA_NODE_CUT_CAP``. Bound-changing (tighter master LP), so gated per
     CLAUDE.md section 5. Read at call time.
 
-    **Kept default OFF as a documented opt-in (2026-10-27).** Section 5 panel over
-    the 102 proven MINLPLib instances the router sends to the route
+    **Kept default OFF as a documented opt-in (2026-10-27).** Panel over the 102
+    proven MINLPLib instances the router sends to the route
     (``issue2013_route_census.py``; ``issue1913_pseudocost_panel.py --flag
-    DISCOPT_HIGHS_MASTER_LP_CUTS``, 30 s, interleaved): cert-clean (612 checks, 0
-    problems) and broadly faster -- where both certify nodes 243,050 -> 60,804 and
-    wall 359.3 -> 199.4 s, total wall 890.6 -> 603.8 s, +6 certificates (the
-    smallinvDAX family: r2b200-220 30 s uncertified -> 2.9 s) -- but it LOSES 3:
-    smallinvDAXr3b150-165 and r4b150-165 (OFF certifies at 21-24 s with ~1,400
-    nodes/s; ON reaches 30 s at ~390 nodes/s) and cvxnonsep_pcon30 (OFF 26.9 s;
-    ON uncertified). Separating only before the first tree keeps the b150 pair
-    (20.7 / 20.1 s) but gives back most of the gain (r2b200 21.6 s) and still loses
-    cvxnonsep_pcon30; lowering the cut cap to 100 changes nothing (not binding).
-    Section 5 forbids a certification regression, so it is not the default. What
-    would change that: the per-restart cost on the b150 pair and the pcon30 loss
-    explained and removed, then the same panel rerun. performance-plan section 103.
+    DISCOPT_HIGHS_MASTER_LP_CUTS``, 30 s, interleaved), run after the #1634
+    cross-solve fix (``milp_highs._cross_check_lazy_master``): 612 checks, 0
+    problems; where both certify nodes 462,275 -> 123,731 and wall 503.3 -> 240.8 s
+    (smallinvDAXr2b200-220 3.4 s); total wall 772.6 -> 512.5 s; certified gained
+    none, **lost 1: cvxnonsep_pcon30**. Its master is stuck in both arms (every
+    tree 1 node, dual bound flat at -36.15628); OFF certifies only because the
+    #1066 progress guard hands the solve to the fallback at ~20.5 s, and ON's
+    extra integer points keep the guard's gap-progress test satisfied, so it never
+    fires. Section 5 forbids the loss, so the flag is not the default. What would
+    change that: a #1066 guard that judges BOUND progress, not only the gap that
+    incumbents move, then the same panel rerun. (The first panel's two other losses,
+    smallinvDAXr3b150-165 and r4b150-165, were the cross-solve's, not this flag's.)
+    performance-plan section 103.
     """
     return os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUTS", "0").strip().lower() not in (
         "0",
