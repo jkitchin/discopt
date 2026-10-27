@@ -9,12 +9,13 @@
   nonconvex row inside a disjunct is relaxed and then big-M'd onto that
   disjunct's indicator by the lowering, which is the master of the spec. LOA's
   OA cuts are kept: they go only on certified-convex rows and are valid there.
-* **Subproblems are global.** A configuration is excluded from the master only
-  on a certificate (optimal or infeasible); anything less is unresolved and
+* **Subproblems are global.** A configuration is excluded from the master on a
+  certificate (optimal or infeasible), or uncertified with its valid bound
+  (LOA's ``_exclude_bounded``); a configuration with neither is unresolved and
   blocks ``optimal`` (the RIC no-good rule).
 
 Bound (§5.4): every master row is a valid relaxation and every no-good removes a
-configuration that is either certified infeasible or whose certified bound is
+configuration that is either certified infeasible or whose valid bound is
 kept in ``excluded_floor``, so ``min(master bound, excluded_floor)`` is a valid
 LB with no convexity certificate. Pyomo's GLOA builds its convex-side cut from
 the concave subgradient (spec §3.1); discopt's relaxation layer emits each side
