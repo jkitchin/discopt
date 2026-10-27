@@ -6447,10 +6447,20 @@ def solve_lp_nlp_bb(
     if _oa_support_cuts_enabled():
         support_report = _SupportPointReport()
         cuts_before_support = len(oa_A_rows)
-        support_base = (
-            cut_provenance.records[-1].supporting_point
+        # A cut record's point lives in the MASTER's column space, which appends
+        # auxiliary columns (the objective epigraph, perspective blocks) after the
+        # model's own; the evaluator takes only the model's. Measured: on batch (a
+        # nonlinear objective) the unsliced 47-entry point made the evaluator raise
+        # "expected length 46, got 47" and the whole route fell back (0.7 -> 14.2 s).
+        last_point = (
+            getattr(cut_provenance.records[-1], "supporting_point", None)
             if cut_provenance.records
-            and getattr(cut_provenance.records[-1], "supporting_point", None) is not None
+            else None
+        )
+        n_model = int(evaluator.n_variables)
+        support_base = (
+            np.asarray(last_point, dtype=np.float64)[:n_model]
+            if last_point is not None and len(last_point) >= n_model
             else _default_nlp_start(decomp.lb, decomp.ub)
         )
         support_points = _support_points_for_rows(

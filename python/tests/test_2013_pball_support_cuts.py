@@ -135,3 +135,27 @@ def test_support_cuts_keep_the_optimum_and_are_reported(monkeypatch, dim):
     assert on_rep["boundary_points"] == _expected_points(dim)
     assert on.mip_nlp_trace["summary"]["cut_source_counts"]["support"] == _expected_points(dim)
     assert "support" not in off.mip_nlp_trace["summary"]["cut_source_counts"]
+
+
+@pytest.mark.smoke
+def test_support_probe_takes_the_model_columns_of_a_master_point(monkeypatch):
+    """A cut record's point is in the master's column space, which appends the
+    objective epigraph after the model's columns. The probe must hand the evaluator
+    the model's columns only: on batch the unsliced point raised "expected length 46,
+    got 47" and the route fell back. A convex nonlinear objective gives the master
+    that extra column here."""
+
+    def model():
+        m = _two_point_ball_model(2)
+        xs = [v for v in m._variables if v.name.startswith("x")]
+        m.minimize(sum((x - 3.0) ** 2 for x in xs))
+        return m
+
+    monkeypatch.delenv("DISCOPT_OA_SUPPORT_CUTS", raising=False)
+    off = solve_lp_nlp_bb(model(), time_limit=60.0, milp_solver="highs")
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "1")
+    on = solve_lp_nlp_bb(model(), time_limit=60.0, milp_solver="highs")
+    assert off.status == "optimal" and on.status == "optimal", (off.status, on.status)
+    assert on.objective == pytest.approx(off.objective, abs=1e-4)
+    report = on.mip_nlp_trace["summary"]["support_cuts"]
+    assert report is not None and report["boundary_points"] > 0, report
