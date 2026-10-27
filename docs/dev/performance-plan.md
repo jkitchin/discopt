@@ -12962,3 +12962,53 @@ compared with section 103's run, which had the old cross-solve):
 +7 certificates on the route, none lost. `DISCOPT_HIGHS_MASTER_LP_CUTS` stays a
 documented opt-in because of the single pcon30 loss, which belongs to the #1066
 guard's timing (recorded in its docstring and the flag audit).
+
+
+### 103.2 The #1066 guard judges bound progress; `DISCOPT_HIGHS_MASTER_LP_CUTS` graduates (2026-10-27)
+
+**Mechanism (measured).** Traced every #1066 guard call on cvxnonsep_pcon30 (30 s).
+In both LP-cut arms the `lp_nlp_bb` master's dual bound sits at -36.156283 (it moves
+< 1e-7) for the whole route; only incumbents move the gap. OFF: the incumbents stall
+at a relative gap of 0.0059, the gap test fires at ~19-20 s, and the fallback certifies.
+ON: the incumbents arrive later and more slowly (gap 0.275 -> 0.011 by 25 s), so each
+trailing window still shows the 25% shrink, the guard never fires, and the solve ends
+`feasible`. A gap that only incumbents close cannot certify unless the stuck bound
+already is the optimum, so the gap was the wrong quantity to judge.
+
+**Change.** `DISCOPT_CONVEX_ROUTE_BOUND_STALL`: where the trend test would let the
+route continue, the guard also requires the dual bound to have moved by more than
+`_CONVEX_ROUTE_BOUND_STALL_FRACTION` (1e-3) of the current absolute gap across the
+trailing window. The rule can only hand over earlier, never later. It acts only under
+the #1066 trend policy (the `lp_nlp_bb` route; the #1143 decision point consults no
+trend). Entry experiment on pcon30, 30 s: rule OFF -> ON, LP cuts off: optimal 25.4
+-> 20.9 s; LP cuts on: feasible -> **optimal 24.2 s** (fired at the checkpoint).
+
+**Panels** (the 102 routed instances re-derived by `issue2013_route_census.py`, 30 s,
+interleaved, 2 workers, every incumbent verified on a fresh model; the panel script
+now records each guard verdict that fired):
+
+| panel | arms | checks / problems | certified | both-certify nodes | both-certify wall | total wall |
+|---|---|---|---|---|---|---|
+| A | stall rule OFF -> ON (LP cuts off) | 612 / 0 | 94 -> 94 | 464,179 -> 462,918 | 497.3 -> 493.7 s | 740.3 -> 736.2 s |
+| B | LP cuts OFF -> ON (stall rule on) | 612 / 0 | 94 -> 94 | 463,000 -> **124,032** | 494.1 -> **246.1 s** | 735.2 -> **488.5 s** |
+
+In A the rule fired on exactly one instance, pcon30 (25.0 -> 20.7 s). Every other
+instance's guard verdict came from the unchanged gap test. Two uncertified rows ended
+with a different bound: clay0305m (2145 -> 1320) and tls4 (1.897 -> 1.888). In both,
+both arms handed over at the same instant through the old gap rule. Reruns of
+clay0305m return 1320 / 1320 OFF and 2227 / 1320 ON, so that difference is the
+time-limited fallback's variance. In B the only lower final bound is clay0205m
+(neither certifies, 1320 -> 990). There ON finds the optimal incumbent 8092.5, where
+OFF finds none, and so hands over ~3 s later (18 s vs 15 s). In 3 of 3 reruns ON ends
+at 1320, the same as OFF, so the 990 is the fallback's timing tail.
+
+**Verdict.** Both flags graduate to default ON (`=0` opt-outs kept). B is cert-clean and
+net-positive: no certificate lost, wall halved where both certify. A on its own is
+close to neutral. The stall rule ships because it is what removes the one certificate
+B would otherwise lose (section 103), not for a gain of its own. The flag audit drops
+to 51 live default-OFF solver-math gates.
+
+**Still open on #2013 (unchanged by this section):** p_ball_10b/20b (bound ~7e-7 in
+every arm), slay07m (every arm ends at 61,757.14) and portfol_classical050_1 (every arm
+ends at -0.097774). These are the eight neither-certify rows above, along with
+clay0205m/0305m and tls4.

@@ -551,8 +551,16 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
 
 
 @pytest.mark.smoke
-def test_the_early_exit_stays_out_of_the_way_when_the_separator_finishes_first():
-    """Not every model needs it, and on those it must change nothing."""
+def test_the_early_exit_stays_out_of_the_way_when_the_separator_finishes_first(monkeypatch):
+    """Not every model needs it, and on those it must change nothing.
+
+    Pinned to the bare HiGHS master: since #2013 the master also separates at its
+    LP relaxation by default (``DISCOPT_HIGHS_MASTER_LP_CUTS``), which tightens
+    this toy enough that its tree bound reaches the claim mid-tree and the early
+    exit fires -- correctly (optimal 9.0, certified, in both arms). The premise
+    here is a model the separator finishes first, which is the bare master.
+    """
+    monkeypatch.setenv("DISCOPT_HIGHS_MASTER_LP_CUTS", "0")
     res = _toy_convex_minlp().solve(time_limit=30, mip_nlp_method="lp_nlp_bb", milp_solver="highs")
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
     assert stats["dual_bound_observations"] > 0

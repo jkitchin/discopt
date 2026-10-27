@@ -10354,8 +10354,20 @@ def _convex_route_bound_stall_enabled() -> bool:
     LP cuts on, incumbents arrive slowly enough to keep passing the 25% gap test,
     the guard never fires and the solve ends ``feasible``; with them off the gap
     test fires at ~20.5 s and the fallback certifies. Read per call.
+
+    **Default ON since #2013;** ``DISCOPT_CONVEX_ROUTE_BOUND_STALL=0`` restores the
+    gap-only verdict. Panel over the 102 proven MINLPLib instances the router
+    sends to the route (``issue1913_pseudocost_panel.py --flag
+    DISCOPT_CONVEX_ROUTE_BOUND_STALL``, 30 s, interleaved, LP cuts off): 612
+    checks, 0 problems, certified 94 -> 94. The rule fired on exactly one
+    instance, cvxnonsep_pcon30 (25.0 -> 20.7 s, both optimal); every other
+    instance's guard verdict was unchanged. On its own it is close to neutral.
+    What it buys is the graduation of ``DISCOPT_HIGHS_MASTER_LP_CUTS``, whose
+    only lost certificate was this failure: with both on, the routed set's total
+    wall drops 735.2 -> 488.5 s and no certificate is lost. performance-plan
+    section 103.2.
     """
-    return os.environ.get("DISCOPT_CONVEX_ROUTE_BOUND_STALL", "0") != "0"
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_BOUND_STALL", "1") != "0"
 
 
 class _RouteProgressGuard:

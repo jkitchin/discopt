@@ -5678,24 +5678,24 @@ def _highs_master_lp_cuts_enabled() -> bool:
     ``DISCOPT_OA_NODE_CUT_CAP``. Bound-changing (tighter master LP), so gated per
     CLAUDE.md section 5. Read at call time.
 
-    **Kept default OFF as a documented opt-in (2026-10-27).** Panel over the 102
+    **Default ON since #2013 (graduated 2026-10-27);** ``=0`` restores the bare
+    HiGHS master, which is kept intact. History: the first panel over the 102
     proven MINLPLib instances the router sends to the route
     (``issue2013_route_census.py``; ``issue1913_pseudocost_panel.py --flag
-    DISCOPT_HIGHS_MASTER_LP_CUTS``, 30 s, interleaved), run after the #1634
-    cross-solve fix (``milp_highs._cross_check_lazy_master``): 612 checks, 0
-    problems; where both certify nodes 462,275 -> 123,731 and wall 503.3 -> 240.8 s
-    (smallinvDAXr2b200-220 3.4 s); total wall 772.6 -> 512.5 s; certified gained
-    none, **lost 1: cvxnonsep_pcon30**. Its master is stuck in both arms (every
-    tree 1 node, dual bound flat at -36.15628); OFF certifies only because the
-    #1066 progress guard hands the solve to the fallback at ~20.5 s, and ON's
-    extra integer points keep the guard's gap-progress test satisfied, so it never
-    fires. Section 5 forbids the loss, so the flag is not the default. What would
-    change that: a #1066 guard that judges BOUND progress, not only the gap that
-    incumbents move, then the same panel rerun. (The first panel's two other losses,
-    smallinvDAXr3b150-165 and r4b150-165, were the cross-solve's, not this flag's.)
-    performance-plan section 103.
+    DISCOPT_HIGHS_MASTER_LP_CUTS``, 30 s, interleaved) lost one certificate,
+    cvxnonsep_pcon30: its master's dual bound is flat at -36.15628 in both arms,
+    and ON's extra incumbents kept the #1066 guard's gap-progress test satisfied,
+    so the guard never handed over. The #1066 guard now also judges BOUND progress
+    (``solver._convex_route_bound_stall_enabled``), and the same panel with that
+    rule on in both arms passes both section 5 bars: 612 checks, 0 problems,
+    certified 94 -> 94 (none lost, pcon30 certifies in both), where both certify
+    nodes 463,000 -> 124,032 and wall 494.1 -> 246.1 s, total wall 735.2 ->
+    488.5 s. The one row whose final bound moved down, clay0205m (neither arm
+    certifies; 1320 -> 990), is the fallback's timing tail: ON finds the optimal
+    incumbent 8092.5 where OFF finds none, hands over ~3 s later, and in 3 of 3
+    reruns ends at the same 1320 as OFF. performance-plan section 103.2.
     """
-    return os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUTS", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUTS", "1").strip().lower() not in (
         "0",
         "",
         "false",
