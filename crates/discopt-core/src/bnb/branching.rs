@@ -486,6 +486,182 @@ pub fn select_spatial_branch_variable(
     })
 }
 
+/// A nonlinear term of ORIGINAL columns the Python spatial tree scores branching
+/// candidates on (#1978): a bilinear product `x_i * x_j` (`i == j` is a square) or
+/// a power `x_i ^ p`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScoreTerm {
+    /// `x_i * x_j`.
+    Bilinear(usize, usize),
+    /// `x_i ^ p`.
+    Power(usize, f64),
+}
+
+/// Fraction of the way the split point is pulled from the node point to the box
+/// midpoint (SCIP's `branching/midpull`). `1.0` = the midpoint, the legacy rule's
+/// split: #1970's native `0.75` cost `test_sign_envelope` two certificates here,
+/// because a discontinuity at a box midpoint (`sign(x) == 0` on `[-2, 2]`) then
+/// never lands on a child boundary; on #1975's prolog piece the native score
+/// certifies without midpull too (57 nodes).
+const SCORE_MIDPULL: f64 = 1.0;
+
+/// Gap between a term and its McCormick / secant envelope at `x` over the box,
+/// computed from the point and the box alone (the tree sees only original
+/// columns). `None` for a term with an infinite or crossed side.
+fn score_term_gap(t: &ScoreTerm, x: &[f64], lb: &[f64], ub: &[f64]) -> Option<f64> {
+    let clamp = |i: usize| x[i].max(lb[i]).min(ub[i]);
+    let finite = |i: usize| lb[i].is_finite() && ub[i].is_finite() && lb[i] <= ub[i];
+    match *t {
+        ScoreTerm::Bilinear(i, j) => {
+            if !(finite(i) && finite(j)) {
+                return None;
+            }
+            let (xi, xj) = (clamp(i), clamp(j));
+            if i == j {
+                // Secant gap of x^2: (x - l)(u - x).
+                return Some((xi - lb[i]) * (ub[i] - xi));
+            }
+            let (dli, dui, dlj, duj) = (xi - lb[i], ub[i] - xi, xj - lb[j], ub[j] - xj);
+            let under = (dli * dlj).min(dui * duj);
+            let over = (dli * duj).min(dui * dlj);
+            Some(under + over)
+        }
+        ScoreTerm::Power(i, p) => {
+            if !finite(i) || !p.is_finite() {
+                return None;
+            }
+            let integral = (p - p.round()).abs() < 1e-12;
+            if !integral && lb[i] < 0.0 {
+                return None;
+            }
+            let (l, u, xi) = (lb[i], ub[i], clamp(i));
+            if u - l <= 0.0 {
+                return Some(0.0);
+            }
+            let (fl, fu, fx) = (l.powf(p), u.powf(p), xi.powf(p));
+            if !(fl.is_finite() && fu.is_finite() && fx.is_finite()) {
+                return None;
+            }
+            let secant = fl + (fu - fl) / (u - l) * (xi - l);
+            Some((secant - fx).abs())
+        }
+    }
+}
+
+/// #1978: choose the continuous column to bisect by its share of the envelope gap
+/// of the nonlinear terms it appears in at the node point `x` -- #1970's native
+/// rule (after SCIP's nonlinear-handler rule, Bestuzheva et al. 2023), ported to
+/// the Python spatial tree, which sees only original columns and so measures each
+/// term's gap from the point and the box (see [`score_term_gap`]).
+///
+/// The legacy rule ([`select_spatial_branch_variable`]) bisects the widest column
+/// relative to its root range across EVERY continuous column, including ones that
+/// appear only linearly and whose split shrinks no envelope. On #1975's rescaled
+/// prolog piece that never isolates the narrow factors `u0, u1 in [0, ~5]` against
+/// their wide partners `x2..x5 in [0, ~7000]`, and the bound stalls at 0.
+///
+/// Candidates are the continuous, non-deprioritized columns of terms with a
+/// positive gap whose width relative to `ref` is at least [`SPATIAL_MIN_WIDTH`].
+/// Each term's gap is split evenly over its candidate operands; the largest total
+/// wins (ties: wider relative width, then lower index). The split point is
+/// pulled [`SCORE_MIDPULL`] of the way from the point to the midpoint (all the way:
+/// the midpoint). `None` when
+/// no term has a gap on a candidate -- the caller then falls back to the legacy
+/// rule, so the search stays complete. Branching order only: both children still
+/// cover the parent box.
+#[allow(clippy::too_many_arguments)]
+pub fn select_spatial_score_variable(
+    node_lb: &[f64],
+    node_ub: &[f64],
+    ref_lb: &[f64],
+    ref_ub: &[f64],
+    x: &[f64],
+    integer_vars: &[VarBranchInfo],
+    deprioritized: &[bool],
+    terms: &[ScoreTerm],
+) -> Option<(BranchDecision, f64)> {
+    let n = node_lb.len();
+    if x.len() < n {
+        return None;
+    }
+    let mut is_int = vec![false; n];
+    for var in integer_vars {
+        for i in 0..var.size {
+            if var.offset + i < n {
+                is_int[var.offset + i] = true;
+            }
+        }
+    }
+    let rel_width = |i: usize| -> Option<f64> {
+        let w = node_ub[i] - node_lb[i];
+        let g = ref_ub[i] - ref_lb[i];
+        if g < 1e-15 {
+            return None;
+        }
+        let r = w / g;
+        (r.is_finite() && r >= SPATIAL_MIN_WIDTH).then_some(r)
+    };
+    let eligible = |i: usize| -> bool {
+        i < n
+            && !is_int[i]
+            && !(i < deprioritized.len() && deprioritized[i])
+            && rel_width(i).is_some()
+    };
+    let mut viol = vec![0.0f64; n];
+    for t in terms {
+        let ops: [Option<usize>; 2] = match *t {
+            ScoreTerm::Bilinear(i, j) if i != j => [Some(i), Some(j)],
+            ScoreTerm::Bilinear(i, _) | ScoreTerm::Power(i, _) => [Some(i), None],
+        };
+        if ops.iter().flatten().any(|&i| i >= n) {
+            continue;
+        }
+        let gap = match score_term_gap(t, x, node_lb, node_ub) {
+            Some(g) if g > 0.0 && g.is_finite() => g,
+            _ => continue,
+        };
+        let cands: Vec<usize> = ops
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&i| eligible(i))
+            .collect();
+        let share = gap / cands.len().max(1) as f64;
+        for i in cands {
+            viol[i] += share;
+        }
+    }
+    let mut best: Option<(usize, f64, f64)> = None; // (idx, viol, rel width)
+    for (i, &v) in viol.iter().enumerate() {
+        if v <= 0.0 {
+            continue;
+        }
+        let r = rel_width(i).unwrap_or(0.0);
+        let better = match best {
+            None => true,
+            Some((_, bv, br)) => v > bv || (v == bv && r > br),
+        };
+        if better {
+            best = Some((i, v, r));
+        }
+    }
+    let (idx, _, r) = best?;
+    let (l, u) = (node_lb[idx], node_ub[idx]);
+    let mid = 0.5 * (l + u);
+    let xc = x[idx].max(l).min(u);
+    let mut bp = SCORE_MIDPULL * mid + (1.0 - SCORE_MIDPULL) * xc;
+    if !(bp > l && bp < u) {
+        bp = mid;
+    }
+    Some((
+        BranchDecision {
+            var_index: idx,
+            branch_point: bp,
+        },
+        r,
+    ))
+}
+
 /// Select an *integer* variable for spatial (domain-partition) branching.
 ///
 /// Fallback used by nonconvex spatial B&B when no continuous variable is
@@ -1142,5 +1318,137 @@ mod tests {
         assert_eq!((i, int), (0, true));
         assert_eq!(bp, bp.floor());
         assert!(bp >= 0.5);
+    }
+}
+
+#[cfg(test)]
+mod tests_1978 {
+    //! #1978: the Python tree's spatial score rule (`select_spatial_score_variable`).
+    use super::*;
+
+    fn pick(
+        lb: &[f64],
+        ub: &[f64],
+        x: &[f64],
+        terms: &[ScoreTerm],
+        ints: &[VarBranchInfo],
+    ) -> Option<(BranchDecision, f64)> {
+        select_spatial_score_variable(lb, ub, lb, ub, x, ints, &[], terms)
+    }
+
+    /// The #1978 shape: a narrow factor `u in [0, 5]` against a wide partner
+    /// `x in [0, 7000]`, plus a wide column that only appears linearly. The legacy
+    /// longest-edge rule ties every column at relative width 1 and takes the
+    /// lowest index (the linear one); the score rule takes a term operand, and of
+    /// those the narrow factor shared by two terms.
+    #[test]
+    fn score_rule_prefers_the_shared_narrow_factor_over_linear_columns() {
+        // cols: 0 = linear-only, 1 = u, 2 = x_a, 3 = x_b
+        let lb = [0.0, 0.0, 0.0, 0.0];
+        let ub = [9000.0, 5.0, 7000.0, 7000.0];
+        let x = [100.0, 2.3, 3000.0, 2500.0];
+        let terms = [ScoreTerm::Bilinear(1, 2), ScoreTerm::Bilinear(1, 3)];
+        let legacy = select_spatial_branch_variable(&lb, &ub, &lb, &ub, &[], &[], false);
+        assert_eq!(
+            legacy.unwrap().0.var_index,
+            0,
+            "control: legacy splits the linear column"
+        );
+        let (d, _) = pick(&lb, &ub, &x, &terms, &[]).expect("a term has a gap");
+        assert_eq!(d.var_index, 1, "the score rule splits u: {d:?}");
+        // The split point is the midpoint (SCORE_MIDPULL = 1), strictly inside.
+        let want = 2.5;
+        assert!((d.branch_point - want).abs() < 1e-12, "{}", d.branch_point);
+        assert!(d.branch_point > lb[1] && d.branch_point < ub[1]);
+    }
+
+    /// No gap (the point sits on a box corner of every term), integer operands, and
+    /// deprioritized operands all leave nothing to score: `None`, so the caller's
+    /// legacy fallback keeps the search complete.
+    #[test]
+    fn score_rule_declines_when_nothing_scores() {
+        let lb = [0.0, 0.0];
+        let ub = [4.0, 4.0];
+        let terms = [ScoreTerm::Bilinear(0, 1)];
+        assert!(
+            pick(&lb, &ub, &[0.0, 4.0], &terms, &[]).is_none(),
+            "corner: no gap"
+        );
+        let ints = [VarBranchInfo {
+            offset: 0,
+            size: 2,
+            is_integer: true,
+        }];
+        assert!(
+            pick(&lb, &ub, &[1.0, 2.0], &terms, &ints).is_none(),
+            "integers are not candidates"
+        );
+        let dep = select_spatial_score_variable(
+            &lb,
+            &ub,
+            &lb,
+            &ub,
+            &[1.0, 2.0],
+            &[],
+            &[true, true],
+            &terms,
+        );
+        assert!(dep.is_none(), "deprioritized operands are not candidates");
+        // An unbounded side has no envelope gap to measure.
+        let inf_ub = [4.0, f64::INFINITY];
+        assert!(pick(&lb, &inf_ub, &[1.0, 2.0], &terms, &[]).is_none());
+    }
+
+    /// The bilinear gap is the McCormick under- plus over-estimation at the point;
+    /// a square and a power use their secant gap.
+    #[test]
+    fn score_term_gaps_are_the_envelope_gaps() {
+        let (lb, ub) = ([0.0, 0.0], [2.0, 4.0]);
+        // x0 = 1, x1 = 1: under = min(1*1, 1*3) = 1, over = min(1*3, 1*1) = 1.
+        let g = score_term_gap(&ScoreTerm::Bilinear(0, 1), &[1.0, 1.0], &lb, &ub).unwrap();
+        assert!((g - 2.0).abs() < 1e-15, "{g}");
+        let sq = score_term_gap(&ScoreTerm::Bilinear(0, 0), &[0.5, 0.0], &lb, &ub).unwrap();
+        assert!((sq - 0.75).abs() < 1e-15, "(x-l)(u-x) = 0.5*1.5: {sq}");
+        let p3 = score_term_gap(&ScoreTerm::Power(1, 3.0), &[0.0, 2.0], &lb, &ub).unwrap();
+        // secant of x^3 on [0, 4] at 2 is 32, x^3 = 8.
+        assert!((p3 - 24.0).abs() < 1e-12, "{p3}");
+        // A non-integer power on a box reaching below 0 has no real envelope.
+        assert!(
+            score_term_gap(&ScoreTerm::Power(0, 0.5), &[1.0, 0.0], &[-1.0, 0.0], &ub).is_none()
+        );
+    }
+
+    /// Branching order only: the two children of a score pick cover the parent box.
+    #[test]
+    fn score_pick_children_cover_the_parent() {
+        let lb = [0.0, 0.0, 0.0];
+        let ub = [1.0, 5.0, 7000.0];
+        let x = [0.5, 1.0, 6999.0];
+        let terms = [ScoreTerm::Bilinear(1, 2), ScoreTerm::Power(0, 2.0)];
+        let (d, _) = pick(&lb, &ub, &x, &terms, &[]).unwrap();
+        let i = d.var_index;
+        assert!(lb[i] < d.branch_point && d.branch_point < ub[i]);
+        // [lb, bp] U [bp, ub] = [lb, ub]: create_children_spatial splits at bp.
+        let parent = Node {
+            id: NodeId(0),
+            parent: None,
+            depth: 0,
+            lb: lb.to_vec(),
+            ub: ub.to_vec(),
+            local_lower_bound: 0.0,
+            best_estimate: 0.0,
+            status: NodeStatus::Pending,
+            parent_solution: None,
+            basis: None,
+        };
+        let mut next = 1usize;
+        let (l, r) = create_children_spatial(&parent, &d, || {
+            next += 1;
+            NodeId(next)
+        });
+        assert_eq!(
+            (l.lb[i], l.ub[i], r.lb[i], r.ub[i]),
+            (lb[i], d.branch_point, d.branch_point, ub[i])
+        );
     }
 }

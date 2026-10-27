@@ -11937,7 +11937,219 @@ nodes; ON optimal in 11,921 nodes, 23 s.
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
 section 5 panel, on the merged base too, and graduated (Done item 2).
 
-## 90. #1990: ex1252a's integer-product objective — both levers measured, the bound loss found in the node LP (2026-10-26)
+## 91. #1978: the spatial stall on a bounded bilinear piece -- native fixed by #1970, Python tree fixed here (graduated 2026-10-26)
+
+**Probe.** #1975's rescaled prolog outer piece: 21 bounded columns, products `u_k * x_j`
+of narrow factors `u0, u1 in [0, ~5]` against wide partners `x2..x5 in [0, ~7000]`,
+margin about 1e-5 relative. §90 measured discopt stalled at bound `-1e-12` after 1.17M
+nodes, against SCIP's 10,243.
+
+**Native kernel: already fixed by #1970** (default ON since this morning). `DISCOPT_KERNEL_SPATIAL_BRANCHING`:
+
+| `=1` (default) | `=0` (legacy) |
+|---|---|
+| optimal, bound 0.03486, 3,579 nodes, 3.4 s | bound `-1.2e-12` after 100,000 nodes |
+
+Native variants (`kwargs` overridden), all certify: score + pseudocost + midpull 3,579
+nodes; score + midpull 71; score + pseudocost 481; **score alone 57**. The violation
+share is what carries it.
+
+**Python tree: the same stall, and it is the main spatial engine on this class.** A
+5 s route census of the 287 panel instances: **154 run the Python spatial tree, 7 the
+native kernel** (the rest are convex, MILP or other routes). The Python tree's
+`select_spatial_branch_variable` bisects the widest column relative to its root range
+across every continuous column, linear-only ones included.
+
+*Port, three attempts.*
+1. **Envelope spread at `result_sols`:** `result_sols` is usually the node NLP point.
+   Fired 1,101 times, bound unchanged.
+2. **Envelope spread at the node LP point** (a new per-node score-point channel):
+   unchanged. The branch counts showed why: it split `u18`/`u19` most, which the model
+   uses only linearly.
+3. **The model's own terms.** The engine's `bilinear_map` also holds the products RLT
+   lifts (#1944); scoring those gaps was the defect. Scoring the model's own terms
+   (`NonlinearTerms`), it splits only `u0`/`u1`.
+
+| Python tree | result |
+|---|---|
+| legacy | bound ~0 after 2,463 nodes / 120 s |
+| score rule | bound 0.034931 in 75 nodes (tree exhausted); `optimal` at `abs_gap_tolerance=1e-3` in 71 nodes |
+
+The residual gap at tight tolerances is not branching. The root fixpoint and OBBT ran
+with a cutoff of 0.0349313, an incumbent below the native kernel's certified 0.0349502
+that was later withdrawn (the reported incumbent is 0.0349575). The bound then stays at
+that cutoff, honestly uncertified. The incumbent was most likely tolerance-feasible, the
+same ill-conditioning as §90.
+
+**Section 5 panel** (`flag_onoff_corpus_panel.py --flag DISCOPT_PY_TREE_SPATIAL_SCORE`,
+287 instances, 20 s, interleaved; data in `docs/dev/data/1978-1982-panels/`):
+- **Cert-clean:** 460 incumbent checks, 0 false bounds. The certification flips
+  (`slay06m` +, `smallinvDAXr3b100-110` -) are on instances where the rule never fired;
+  `smallinv` has an identical node count, 25,473, in both arms.
+- **Fires on 31 instances.** Where both certify: nodes 218 -> 168, wall 73.1 -> 66.0 s.
+- **Uncertified bound moves, replicated 3x:**
+  - tighter 3/3: `chenery` (-1194.6 -> -1184.1..-1188.8), `pointpack06..14` (max;
+    0.83 -> 0.49..0.69);
+  - looser 3/3: `knp3-12` (max; 5.46 -> 7.72; dual best 2.28), `hybriddynamic_varcc`
+    (-0.6%);
+  - `nvs05` overlaps.
+
+`knp3-12` packs 12 points on a sphere. Its gaps are spread over many symmetric squared
+distances, where round-robin bisection suits the symmetry and a violation score
+concentrates.
+
+**Split point.** The panel above used #1970's midpull of 0.75. Smoke then failed two
+`test_sign_envelope` certificates under it: a discontinuity at a box midpoint
+(`sign(x) == 0` on `[-2, 2]`) never lands on a child boundary. The shipped rule splits
+at the **midpoint**, which is the legacy split; the native score certifies without
+midpull too (57 nodes).
+
+**Re-run on the midpoint variant** (`panel1978_midpoint.jsonl`):
+- **Cert-clean:** 460 checks, 0 false bounds. All four certification flips (+3 / -1)
+  are on instances where the rule never fired.
+- **Fires on 30.** Where both certify: nodes 215 -> 191, wall 66.6 -> 64.2 s.
+- **Bounds:** tighter on `chenery`, `hybriddynamic_varcc` and `pointpack06..14`
+  (0.82 -> 0.50 on `pointpack06`); looser on `knp3-12` (5.46 -> 7.86).
+
+**Graduated** default ON; `=0` restores the longest-edge rule.
+
+**#1978 is closed:** the stall is gone on both engines.
+
+## 92. #1979-#1982: bounds through function domains, poles and fractional powers (graduated 2026-10-26)
+
+**Probes.** #1975's census (§90) found 7 instances where SCIP's presolve closes a
+negative-cost recession ray that discopt's root LP keeps (`chakra`, `wallfix`,
+`ex8_5_2..6`), plus `ex8_5_1` and 3 with rays only on lifted columns (`hhfair`,
+`launch`, `like`). Each fix below is general and was built against the probe, then
+measured on the whole panel.
+
+| issue | probe | mechanism (flag) | result |
+|---|---|---|---|
+| #1979 | `ex8_5_1..6` | affine domain rows of `log`/`sqrt`/fractional powers to the LP and OBBT, structural FBBT domain pass (`FBBT_SIGN_DOMAIN`); tangent half of a 1-D envelope at a closed-edge pole, one-sided negative power (`POLE_ENVELOPE`); Cauchy root bound of the cubic EOS (`POLY_ROOT_BOUND`); `x log x` atom on `[0, hi]` (`ENTROPY_ATOM`) | `None` -> finite on all six, every bound below MINLPLib's best |
+| #1980 | `chakra` | verified monotone inversion of `x^p`, non-integer `p > 0`, in FBBT (`FBBT_SIGN_DOMAIN`) | `None` -> -183.88 (opt -179.13) |
+| #1981 | `launch` | a power of a positive base enclosed `>= 0` (`POLE_ENVELOPE`): `x**-0.1959` on `[5, inf)` dipped to `-5e-324` | certifies 2257.79756 (= MINLPLib opt) in 5 nodes |
+| #1981 | `hhfair` | product-equality rule takes a straddling factor's sign from an LP over the linear rows (`FBBT_SIGN_DOMAIN`) | `None` -> -109.68 (best -87.159) |
+| #1981 | `like` | none: a Gaussian-mixture likelihood with `sigma >= 0` is unbounded below (-ln 10 per decade of `sigma`) | "no bound" is correct |
+| #1982 | `wallfix` | non-integer power domain shipped; the one-sided product division **declined** | root LP still unbounded |
+
+**#1982's product rule is the retired `DISCOPT_FBBT_ONE_SIDED_DIV`.** `x * y == 1`,
+`y >= 0` => `x >= 0` is the #1616 rule, retired on 2026-10-05 after its 29-instance
+panel lost two certificates at +11 % wall (audit row). The first bundle panel carried
+it again; its only measured gain was `wallfix`'s bound. It was removed, and the bundle
+re-measured without it. A narrower variant (tighten only an infinite side) was
+measured against the audit row's 29 instances and retired too (§93).
+
+**Section 5 panel** (`flag_onoff_corpus_panel.py` with all four flags, in-repo corpus
++ the 227-instance class = 287 instances, 20 s, interleaved; the 38 differing instances
+replicated 3x; `docs/dev/data/1978-1982-panels/panel_bundle.jsonl`, `rep_bundle_*.jsonl`,
+`aggregate_bundle.py`):
+- **Cert-clean:** 463 incumbent checks, 0 bounds past a reference, 0 errors.
+- **Reproducible gains (4/4 runs):** a bound where OFF has none on `chakra`,
+  `ex8_5_1..6`, `hhfair` (8); `launch` certified (OFF 0/4); `prob07` 87,193 -> 134,073.
+- **Reproducible loss:** `chenery` -1184.6 -> -1189.6 (0.4 %). Root bound identical
+  in both arms (-1211.4994); node-limited at 50 the trees diverge (71 vs 57 nodes), so
+  it is the search path, not a weaker relaxation.
+- **Noise, not the bundle:** `ex14_1_2` certifies at 25-28 s in both arms at 60 s
+  (identical bound, 3 nodes), so the 20 s limit splits it (OFF 1/4, ON 2/4); `slay06m`
+  certifies 3/4 in both arms; the `autocorr_bern*`, `sssd*`, `smallinv*` differences
+  flip both ways across replicates.
+
+Graduated: all four default ON, `=0` opts out.
+
+## 93. #1982 item 1: the narrowed one-sided product rule -- retired as measured (2026-10-26)
+
+**Hypothesis.** The retired #1616 rule (`DISCOPT_FBBT_ONE_SIDED_DIV`, audit row) lost
+gancns/waternd1 certificates by tightening *finite* sides. Restrict it to replacing an
+*infinite* side of a scalar variable: `a * b = w`, `w` excluding 0 by more than `FEAS_TOL`,
+`b` touching 0 from one side, so `a` gets its sign. `wallfix` (`objvar * x2 = 1`,
+`x2 >= 0`, objvar free; root LP unbounded) would keep its root bound, and the 29 would not
+be hurt. **Kill criterion:** it fires nowhere but `wallfix`, or it fails §5 on the 29.
+
+**Entry experiment.** OFF vs ON root `fbbt_box` over all 1,609 MINLPLib `.nl` files at
+120 s: 1,568 compared, 41 timeouts. It fires on **wallfix only**, and on none of the
+29-instance #1616 set. The waterund22/25 loosening therefore cannot arise under this rule;
+the narrowing sidesteps it rather than explains it.
+
+**§5 panel** (109 instances, 30 s, interleaved, a subprocess per arm, 174 feasibility
+checks):
+
+- **Cert-clean.** 0 problems, certified 59 -> 59.
+- **Gain.** One bound where none: `wallfix`, 0.0 against opt 1.0000047, uncertified in
+  both arms.
+- **Noise elsewhere.** Every other moved number is timing. A trace build counted 0 fires
+  in full solves of the 7 instances that moved, against 5 on `wallfix`.
+- **Wall.** 1749.4 -> 1724.4 s (paired sd 2.1 s/instance).
+
+**Verdict: kill criterion met. Not shipped.** It is sound and costs nothing, but its whole
+benefit is one named instance's uncertified root bound (CLAUDE.md §2). Rule and tests are
+kept as `docs/dev/data/1978-1982-panels/free_sign_1982_retired.patch`.
+
+**Reopen** when another corpus shows the free-sign product firing as a class, not as an
+isolated instance.
+
+## 94. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
+
+**Symptom.** `gdp.simplex` of `either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])`
+(minimise `x + y`; 10 continuous columns) ended `time_limit` at 30 s after ~59k
+nodes with bound 4.9721, where the source model certifies 5.0 at the root. The
+issue's candidate causes (weight branching, envelope refinement on the weight
+products) were measured first and are **not** the cause:
+
+* The Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`) certifies in 3 nodes; the
+  kernel never does. A box of +-0.01 around the optimum still took the kernel 14k
+  nodes, so the stall is not in x/y.
+* 4.9721 is not a tree bound at all: the kernel exits *bound-less* and the number
+  is #933's root-relaxation fallback. Every second node LP was undecided (2,257 of
+  4,437 in a 4 s run; 38 of the first 40 `numerical`).
+* Bisecting the kernel's options on the captured spec: `initial_incumbent` alone
+  turns the root from `bounded 4.99999995` to `undecided`, and
+  `run_propagation=false` certifies at node 1. The node FBBT applies the cutoff
+  `x + y <= 5 + 1.5e-8` against `x >= 4, y >= 1`, leaving x/y with widths
+  2.0e-8/1.7e-8 and two weights ~5e-9. The McCormick LP over that box ends
+  `Numerical` (its objective at bail 4.99999999999993); the undecided arm branches
+  a weight column and every child inherits the sliver.
+
+This is #1983's class, a cutoff at the LP optimum collapsing the box, reached by a
+different door: #1983 fixed the Python-side cutoff-OBBT box, and its root probe
+runs without the incumbent, so it reports the box decided.
+
+(An aside measured on the way: rewriting each clause `sum_j l_j p_j <= 0` as
+`p_k + sum_{j != k} l_j (p_j - p_k)` under `sum_j l_j = 1` makes two of the four
+clauses linear and certifies in 7 nodes. It sidesteps the sliver on this instance
+only; not pursued.)
+
+**Fix: `DISCOPT_KERNEL_UNDECIDED_RETRY`** (`SpatialTreeConfig::undecided_unpropagated_retry`).
+An undecided node LP over a propagation-tightened box is re-solved over the box
+the node was pushed with. That box contains the region (propagation removes only
+points infeasible or no better than the incumbent), so its bound, Farkas proof and
+McCormick-tight points hold for the region; the node is solved exactly as
+`run_propagation=false` would solve it. Captured spec: 22,190 nodes / 11,133
+undecided / bound-less at 10 s -> optimal at node 1. Fixed boxes with the
+incumbent at the box optimum: 12 of 16 roots undecided OFF, all 16 decided ON,
+every ON bound <= the closed-form box optimum and >= OFF.
+
+**Section 5 panels** (30 s, interleaved, every incumbent `verify_point`-ed):
+
+* `issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_UNDECIDED_RETRY=1
+  --fired-stat tree/prop_retries`, 271 instances, fires on 4: cert-clean, 1,626
+  checks, 0 problems; certified +nous1; tighter 30 s bounds on the other three
+  (ex5_2_5 -8030.0 -> -8024.4, tln6 15.2187 -> 15.2225, wastewater15m1 2269.6 ->
+  2283.8). Re-run interleaved on an idle machine, 2 reps: nous1 OFF time limit
+  (30.8/30.7 s), ON optimal (24.0/24.3 s, 20 retries). The listed loss
+  `pointpack04` routes to the Python tree (probe absent in both arms); both arms
+  certify in 29 nodes / 3.5-4.0 s on re-run -- its ON row ran while a test suite
+  loaded the machine.
+* `issue1995_gdp_panel.py`, 54 cases (every serialize bound-neutral case plus
+  jobshop, ex1_linan_2023, small_batch under `gdp_method="simplex"`): cert-clean,
+  424 checks, 0 problems; fires on #1995's case only (time limit -> optimal);
+  the other 53 node-identical (171 -> 171); total wall 61.5 -> 34.9 s.
+
+Graduated default ON; `=0` restores the legacy undecided arm. Note: since #1993
+the `issue1944_rlt_panel.py` subprocess called `_solve_one` without its new
+`stat` argument, so it would have crashed every row; fixed here (it now forwards
+`--fired-stat`).
+
+## 95. #1990: ex1252a's integer-product objective — both levers measured, the bound loss found in the node LP (2026-10-26)
 
 **Problem.** ex1252a's objective is `Σ_k (c_k + 1800·x_{15+k})·x_k·x_{3+k}·x_{18+k}`,
 `x0..x5 ∈ {0..3}`, `x18..x20 ∈ {0,1}`. On `main` + #1988 a 120 s solve ended at

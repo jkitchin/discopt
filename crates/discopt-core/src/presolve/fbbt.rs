@@ -238,7 +238,7 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
 }
 
 /// Is the #1990 extended product preimage on? `DISCOPT_FBBT_EXTENDED_MUL`,
-/// **default ON** since its CLAUDE.md §5 panel (`docs/dev/performance-plan.md` §90);
+/// **default ON** since its CLAUDE.md §5 panel (`docs/dev/performance-plan.md` §95);
 /// `=0` restores the division-only rule byte-for-byte.
 fn extended_mul_enabled() -> bool {
     use std::sync::OnceLock;
@@ -306,6 +306,58 @@ fn extended_mul_preimage(t: &Interval, other: &Interval, cur: &Interval) -> Opti
         return None;
     }
     Some(h)
+}
+
+/// #1980: an upper bound on every `x >= 0` with `x^p <= y` (`p > 0` non-integer),
+/// VERIFIED: the candidate root is stepped up until the forward power's own lower
+/// enclosure (`lib_down(r^p)`, the bound [`interval_pow`] uses) reaches `y`, so the
+/// true `r^p >= y` and monotonicity gives `x <= r`. `None` if it cannot be shown.
+fn frac_root_up(y: f64, p: f64) -> Option<f64> {
+    if y == f64::INFINITY {
+        return Some(f64::INFINITY);
+    }
+    if !y.is_finite() || y < 0.0 || p.is_nan() || p <= 0.0 {
+        return None;
+    }
+    if y == 0.0 {
+        return Some(0.0);
+    }
+    let mut r = lib_up(y.powf(1.0 / p));
+    for _ in 0..64 {
+        if !r.is_finite() {
+            return None;
+        }
+        if lib_down(r.powf(p)) >= y {
+            return Some(r);
+        }
+        r = lib_up(r);
+    }
+    None
+}
+
+/// #1980: a lower bound on every `x >= 0` with `x^p >= y` (`p > 0` non-integer),
+/// verified the same way from the other side (`lib_up(r^p) <= y`).
+fn frac_root_down(y: f64, p: f64) -> Option<f64> {
+    if p.is_nan() || p <= 0.0 || y.is_nan() {
+        return None;
+    }
+    if y <= 0.0 {
+        return Some(0.0);
+    }
+    if !y.is_finite() {
+        return None;
+    }
+    let mut r = lib_down(y.powf(1.0 / p));
+    for _ in 0..64 {
+        if r <= 0.0 {
+            return Some(0.0);
+        }
+        if lib_up(r.powf(p)) <= y {
+            return Some(r);
+        }
+        r = lib_down(r);
+    }
+    None
 }
 
 /// `[a,b]^n` for integer exponent.
@@ -1266,6 +1318,50 @@ fn increasing_preimage(
     Interval::new(lo, hi)
 }
 
+/// #1982: presolve FBBT's sign/domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`).
+/// **Default ON since 2026-10-26** -- graduated as one bundle with #1979's function
+/// domains, #1980's fractional-power inversion and #1981's LP-implied sign: section 5
+/// panel over 287 instances, cert-clean (463 checks, 0 false bounds), a bound where
+/// none on 8 instances and `launch` certified, 4/4 runs (performance-plan section 92).
+/// `=0` opts out.
+///
+/// The one-sided `Mul` division (a factor touching zero still fixing the other's
+/// sign) is deliberately NOT here: it is the retired `DISCOPT_FBBT_ONE_SIDED_DIV`
+/// (#1616 -- lost certificates on gancns/waternd1 over its 29 firing instances), and
+/// its only measured gain in #1982 was `wallfix`'s root bound.
+///
+/// * `Pow` with a constant non-integer exponent: the base is `>= 0`, the domain the
+///   forward [`interval_pow`] already assumes (it clamps the base).
+///
+/// Read once per [`backward_propagate`] walk; ON only ever adds tightenings.
+pub fn fbbt_sign_domain_enabled() -> bool {
+    match std::env::var("DISCOPT_FBBT_SIGN_DOMAIN") {
+        Err(_) => true,
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no" | ""
+        ),
+    }
+}
+
+thread_local! {
+    /// [`fbbt_sign_domain_enabled`] for the walk in progress, set by
+    /// [`backward_propagate`] so the recursion need not thread it through.
+    static SIGN_DOMAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only override of the environment flag: unit tests run on parallel
+    /// threads of one process, so they must not toggle a process-wide variable.
+    #[cfg(test)]
+    static SIGN_DOMAIN_FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn sign_domain_for_walk() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SIGN_DOMAIN_FORCE.with(|c| c.get()) {
+        return on;
+    }
+    fbbt_sign_domain_enabled()
+}
+
 /// Backward-propagate an output bound through the expression DAG to
 /// tighten variable bounds.
 ///
@@ -1279,6 +1375,7 @@ pub fn backward_propagate(
     node_bounds: &[Interval],
     var_bounds: &mut [Interval],
 ) {
+    let prev = SIGN_DOMAIN.with(|c| c.replace(sign_domain_for_walk()));
     // The `Sum` inversion needs each reduction's fold count (#1364). Compute the
     // table ONCE per walk here rather than inside the recursion, and only when the
     // arena actually contains a reduction -- most constraint bodies do not.
@@ -1288,6 +1385,97 @@ pub fn backward_propagate(
         Vec::new()
     };
     backward_propagate_with(arena, id, output_bound, node_bounds, var_bounds, &counts);
+    SIGN_DOMAIN.with(|c| c.set(prev));
+}
+
+/// Children of an expression node (the operands its value is computed from).
+fn expr_children(node: &ExprNode) -> Vec<ExprId> {
+    match node {
+        ExprNode::BinaryOp { left, right, .. } | ExprNode::MatMul { left, right } => {
+            vec![*left, *right]
+        }
+        ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => vec![*operand],
+        ExprNode::Index { base, .. } => vec![*base],
+        ExprNode::FunctionCall { args, .. } => args.clone(),
+        ExprNode::SumOver { terms } => terms.clone(),
+        ExprNode::Constant(_)
+        | ExprNode::ConstantArray(..)
+        | ExprNode::Variable { .. }
+        | ExprNode::Parameter { .. } => Vec::new(),
+    }
+}
+
+/// The argument domain a node imposes, `(argument, interval)`: `log` / `log2` /
+/// `log10` / `sqrt` need a nonnegative argument, `log1p` one `>= -1`, and a power
+/// with a constant non-integer exponent a nonnegative base (#1982 / #1979).
+fn node_domain(arena: &ExprArena, node: &ExprNode) -> Option<(ExprId, Interval)> {
+    match node {
+        ExprNode::FunctionCall { func, args } if !args.is_empty() => match func {
+            MathFunc::Log | MathFunc::Log2 | MathFunc::Log10 | MathFunc::Sqrt => {
+                Some((args[0], Interval::new(0.0, f64::INFINITY)))
+            }
+            MathFunc::Log1p => Some((args[0], Interval::new(-1.0, f64::INFINITY))),
+            _ => None,
+        },
+        ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left,
+            right,
+        } => {
+            let p = arena.try_constant_value_pub(*right)?;
+            (p.is_finite() && (p - p.round()).abs() >= 1e-12)
+                .then(|| (*left, Interval::new(0.0, f64::INFINITY)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether any node reachable from `root` imposes an argument domain.
+pub fn has_function_domain(arena: &ExprArena, root: ExprId) -> bool {
+    let mut stack = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.0) {
+            continue;
+        }
+        let node = arena.get(id);
+        if node_domain(arena, node).is_some() {
+            return true;
+        }
+        stack.extend(expr_children(node));
+    }
+    false
+}
+
+/// #1979: impose the argument domain of every `log` / `sqrt` / non-integer power
+/// reachable from `root`, whatever its parent's interval. A model is evaluable --
+/// and a point optimal -- only where its functions are defined, which is the
+/// semantics the forward rules already assume (`interval_pow` clamps the base, the
+/// backward `log` maps `(-inf, hi]` to `[0, e^hi]`). Structural, because the
+/// ordinary backward walk only reaches a node whose ancestors can be inverted: in
+/// `x * log(x)` with `x` free the product is never divided, so `log`'s domain was
+/// never applied -- `ex8_5_*`'s objective left every column free and its root LP
+/// unbounded. Each domain goes through [`backward_propagate`]'s rules (directed
+/// rounding, array references), so it tightens exactly what those rules allow.
+/// `node_bounds` must be the forward pass of `root` over `var_bounds`.
+pub fn impose_function_domains(
+    arena: &ExprArena,
+    root: ExprId,
+    node_bounds: &[Interval],
+    var_bounds: &mut [Interval],
+) {
+    let mut stack = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.0) {
+            continue;
+        }
+        let node = arena.get(id);
+        if let Some((arg, dom)) = node_domain(arena, node) {
+            backward_propagate(arena, arg, dom, node_bounds, var_bounds);
+        }
+        stack.extend(expr_children(node));
+    }
 }
 
 fn backward_propagate_with(
@@ -1444,6 +1632,35 @@ fn backward_propagate_with(
                     // If exponent is constant integer, we can invert.
                     if let Some(exp_val) = arena.try_constant_value_pub(*right) {
                         let exp_int = exp_val.round() as i64;
+                        // #1982: a non-integer power is real-valued only on a
+                        // nonnegative base -- the domain `interval_pow` assumes.
+                        // The same integrality test as the forward pass.
+                        if (exp_val - exp_int as f64).abs() >= 1e-12
+                            && exp_val.is_finite()
+                            && SIGN_DOMAIN.with(|c| c.get())
+                        {
+                            // #1980: and for p > 0 the monotone inverse, rounded
+                            // outward and verified (`frac_root_*`): `x^0.75 <= U`
+                            // gives `x <= U^(4/3)`, which is what pins chakra's
+                            // capital chain from its fixed first production.
+                            let mut base = Interval::new(0.0, f64::INFINITY);
+                            if exp_val > 0.0 {
+                                if let (Some(lo), Some(hi)) = (
+                                    frac_root_down(tightened.lo.max(0.0), exp_val),
+                                    frac_root_up(tightened.hi, exp_val),
+                                ) {
+                                    base = Interval::new(lo, hi);
+                                }
+                            }
+                            backward_propagate_with(
+                                arena,
+                                *left,
+                                base,
+                                node_bounds,
+                                var_bounds,
+                                reduce_counts,
+                            );
+                        }
                         if (exp_val - exp_int as f64).abs() < 1e-12 && exp_int > 0 {
                             // Roots are VERIFIED outward (#1504): `powf(1/n)`
                             // rounds to nearest, so the lower root could land
@@ -2197,6 +2414,18 @@ pub fn fbbt_with_cutoff_until(
     // Determine the objective cutoff constraint (if any).
     // One buffer for the whole call, not one per constraint per sweep.
     let mut scratch = FwdScratch::new();
+    // #1979: the bodies (and objective) holding a function with a domain.
+    let domain_roots: Vec<ExprId> = if sign_domain_for_walk() {
+        model
+            .constraints
+            .iter()
+            .map(|c| c.body)
+            .chain(std::iter::once(model.objective))
+            .filter(|&r| has_function_domain(&model.arena, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
         let output_bound = match model.objective_sense {
@@ -2271,6 +2500,13 @@ pub fn fbbt_with_cutoff_until(
             );
         }
 
+        // #1979: function domains of every body and the objective (flag-gated;
+        // `domain_roots` is empty when the flag is off).
+        for &root in &domain_roots {
+            let nb = forward_propagate_into(&model.arena, root, &var_bounds, &mut scratch);
+            impose_function_domains(&model.arena, root, nb, &mut var_bounds);
+        }
+
         // Snap derived bounds to integrality (indicator-aware propagation).
         // Done before the convergence check so a freshly-fixed binary is fed
         // back into the next forward sweep within this same call.
@@ -2313,6 +2549,18 @@ pub fn fbbt_until(
     let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
     // One buffer for the whole call, not one per constraint per sweep.
     let mut scratch = FwdScratch::new();
+    // #1979: the bodies (and objective) holding a function with a domain.
+    let domain_roots: Vec<ExprId> = if sign_domain_for_walk() {
+        model
+            .constraints
+            .iter()
+            .map(|c| c.body)
+            .chain(std::iter::once(model.objective))
+            .filter(|&r| has_function_domain(&model.arena, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     for _ in 0..max_iter {
         if let Some(dl) = deadline {
@@ -2361,6 +2609,13 @@ pub fn fbbt_until(
                 node_bounds,
                 &mut var_bounds,
             );
+        }
+
+        // #1979: function domains of every body and the objective (flag-gated;
+        // `domain_roots` is empty when the flag is off).
+        for &root in &domain_roots {
+            let nb = forward_propagate_into(&model.arena, root, &var_bounds, &mut scratch);
+            impose_function_domains(&model.arena, root, nb, &mut var_bounds);
         }
 
         // Snap derived bounds to integrality (indicator-aware propagation).
@@ -5548,6 +5803,272 @@ mod tests_1990 {
         assert!(
             tightened >= 50 && executed >= 1000,
             "{tightened} tightenings, {executed} checks"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_1982 {
+    //! #1982: presolve FBBT's sign / domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`).
+    use super::*;
+    use crate::expr::{ConstraintRepr, VarInfo};
+
+    /// FBBT of one constraint `body == rhs` over `x0, x1` with the given boxes, the
+    /// flag forced `on` for this thread only.
+    fn fbbt_1982(
+        build: impl Fn(&mut ExprArena, ExprId, ExprId) -> ExprId,
+        rhs: f64,
+        x0: (f64, f64),
+        x1: (f64, f64),
+        on: bool,
+    ) -> Vec<Interval> {
+        let mut arena = ExprArena::new();
+        let v0 = arena.add(ExprNode::Variable {
+            name: "x0".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let v1 = arena.add(ExprNode::Variable {
+            name: "x1".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let body = build(&mut arena, v0, v1);
+        let var = |name: &str, offset: usize, b: (f64, f64)| VarInfo {
+            name: name.into(),
+            var_type: VarType::Continuous,
+            offset,
+            size: 1,
+            shape: vec![],
+            lb: vec![b.0],
+            ub: vec![b.1],
+        };
+        let model = ModelRepr {
+            arena,
+            objective: v0,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Eq,
+                rhs,
+                name: None,
+            }],
+            variables: vec![var("x0", 0, x0), var("x1", 1, x1)],
+            n_vars: 2,
+        };
+        SIGN_DOMAIN_FORCE.with(|c| c.set(Some(on)));
+        let out = fbbt(&model, 20, 1e-9);
+        SIGN_DOMAIN_FORCE.with(|c| c.set(None));
+        out
+    }
+
+    fn mul(a: &mut ExprArena, x: ExprId, y: ExprId) -> ExprId {
+        a.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: y,
+        })
+    }
+
+    fn pow_minus(p: f64) -> impl Fn(&mut ExprArena, ExprId, ExprId) -> ExprId {
+        // x1 - x0**p  (== 0)
+        move |a: &mut ExprArena, x0: ExprId, x1: ExprId| {
+            let c = a.add(ExprNode::Constant(p));
+            let pw = a.add(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: x0,
+                right: c,
+            });
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Sub,
+                left: x1,
+                right: pw,
+            })
+        }
+    }
+
+    const FREE: (f64, f64) = (-9.999e19, 9.999e19);
+
+    /// `wallfix`'s row: `x0 * x1 == 1`, `x1 >= 0`, `x0` free. Dividing by a factor
+    /// that merely touches zero is the retired `DISCOPT_FBBT_ONE_SIDED_DIV` (#1616),
+    /// so the sign/domain rules must leave every such product box exactly as OFF
+    /// does -- including when the product excludes 0 or the partner straddles it.
+    #[test]
+    fn fbbt_1982_does_not_revive_the_one_sided_product_division() {
+        let cases = [
+            (1.0, (0.0, 9.999e19)),
+            (1.0, (0.0, 4.0)),
+            (-2.0, (-4.0, 0.0)),
+            (0.0, (0.0, 4.0)),
+            (1.0, (-1.0, 4.0)),
+        ];
+        for (rhs, partner) in cases {
+            let off = fbbt_1982(mul, rhs, FREE, partner, false);
+            let on = fbbt_1982(mul, rhs, FREE, partner, true);
+            assert_eq!(
+                (off[0].lo, off[0].hi),
+                (on[0].lo, on[0].hi),
+                "rhs {rhs} {partner:?}"
+            );
+        }
+        assert_eq!(cases.len(), 5);
+    }
+
+    /// `x1 == x0 ** 0.75`: a non-integer power is real-valued only on `x0 >= 0`.
+    /// Integer exponents are untouched (`x0 ** 3` keeps its negative branch).
+    #[test]
+    fn fbbt_1982_non_integer_power_domain() {
+        let off = fbbt_1982(pow_minus(0.75), 0.0, (-5.0, 5.0), (0.0, 10.0), false);
+        assert_eq!(off[0].lo, -5.0, "control: OFF keeps x0 >= -5: {:?}", off[0]);
+        let on = fbbt_1982(pow_minus(0.75), 0.0, (-5.0, 5.0), (0.0, 10.0), true);
+        assert_eq!(on[0].lo, 0.0, "ON: x0 ** 0.75 needs x0 >= 0: {:?}", on[0]);
+        let neg_p = fbbt_1982(pow_minus(-0.5), 0.0, (-5.0, 5.0), (0.0, 10.0), true);
+        assert_eq!(neg_p[0].lo, 0.0, "x0 ** -0.5 needs x0 >= 0: {:?}", neg_p[0]);
+        let cube = fbbt_1982(pow_minus(3.0), 0.0, (-5.0, 5.0), (-200.0, 200.0), true);
+        assert_eq!(
+            cube[0].lo, -5.0,
+            "an odd integer power keeps x0 < 0: {:?}",
+            cube[0]
+        );
+    }
+
+    /// #1979: `x0 * log(x0)` -- the product's other factor `x0` is free, so the
+    /// ordinary backward walk never divides and never reaches `log`; the
+    /// structural domain pass still imposes `x0 >= 0`, in a constraint body AND
+    /// when the term lives only in the objective.
+    #[test]
+    fn fbbt_1979_function_domain_reaches_a_log_inside_a_product() {
+        let xlogx = |a: &mut ExprArena, x0: ExprId, x1: ExprId| {
+            let lg = a.add(ExprNode::FunctionCall {
+                func: MathFunc::Log,
+                args: vec![x0],
+            });
+            let p = a.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: x0,
+                right: lg,
+            });
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Sub,
+                left: p,
+                right: x1,
+            })
+        };
+        let off = fbbt_1982(xlogx, 0.0, FREE, FREE, false);
+        assert_eq!(
+            off[0].lo, -9.999e19,
+            "control: OFF leaves x0 free: {:?}",
+            off[0]
+        );
+        let on = fbbt_1982(xlogx, 0.0, FREE, FREE, true);
+        assert_eq!(on[0].lo, 0.0, "ON: log needs x0 >= 0: {:?}", on[0]);
+
+        // The same term in the objective only, no constraint touching x0.
+        let mut arena = ExprArena::new();
+        let v0 = arena.add(ExprNode::Variable {
+            name: "x0".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let lg = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Log,
+            args: vec![v0],
+        });
+        let obj = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: v0,
+            right: lg,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x0".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![FREE.0],
+                ub: vec![FREE.1],
+            }],
+            n_vars: 1,
+        };
+        SIGN_DOMAIN_FORCE.with(|c| c.set(Some(true)));
+        let b = fbbt(&model, 20, 1e-9);
+        SIGN_DOMAIN_FORCE.with(|c| c.set(None));
+        assert_eq!(
+            b[0].lo, 0.0,
+            "objective-only log still needs x0 >= 0: {:?}",
+            b[0]
+        );
+    }
+
+    /// #1980: the verified fractional roots are on the right side of the true root
+    /// (checked against the forward enclosure) and within a few ulps of it.
+    #[test]
+    fn fbbt_1980_fractional_roots_are_verified_and_tight() {
+        let mut checked = 0usize;
+        for &p in &[0.75, 0.1, 0.5, 1.5, 2.5, 1.0 / 3.0] {
+            for &y in &[1e-12, 0.3, 1.0, 4.275, 1e6, 1e15] {
+                let up = frac_root_up(y, p).expect("upper root");
+                let dn = frac_root_down(y, p).expect("lower root");
+                let exact = y.powf(1.0 / p);
+                assert!(dn <= exact && exact <= up, "p={p} y={y}: {dn} {exact} {up}");
+                assert!(lib_down(up.powf(p)) >= y, "upper root not verified");
+                assert!(lib_up(dn.powf(p)) <= y, "lower root not verified");
+                assert!(
+                    (up - dn) <= 1e-12 * exact.max(1e-300) + 1e-300,
+                    "loose: {dn} {up}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(frac_root_up(f64::INFINITY, 0.75), Some(f64::INFINITY));
+        assert_eq!(frac_root_down(0.0, 0.75), Some(0.0));
+        assert_eq!(checked, 36);
+    }
+
+    /// chakra's first production row: `0.5609 * x0^0.75 == 4.275`, `x0 in [1, inf)`.
+    /// OFF the non-integer power is never inverted and `x0` stays open; ON it is
+    /// pinned to `(4.275 / 0.5609)^(4/3)`.
+    #[test]
+    fn fbbt_1980_fractional_power_is_inverted() {
+        let build = |a: &mut ExprArena, x0: ExprId, _x1: ExprId| {
+            let p = a.add(ExprNode::Constant(0.75));
+            let pw = a.add(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: x0,
+                right: p,
+            });
+            let c = a.add(ExprNode::Constant(0.560877056310648));
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: c,
+                right: pw,
+            })
+        };
+        let off = fbbt_1982(build, 4.275, (1.0, 9.999e19), (0.0, 1.0), false);
+        assert_eq!(
+            off[0].hi, 9.999e19,
+            "control: OFF leaves x0 open: {:?}",
+            off[0]
+        );
+        let on = fbbt_1982(build, 4.275, (1.0, 9.999e19), (0.0, 1.0), true);
+        let exact = (4.275f64 / 0.560877056310648).powf(4.0 / 3.0);
+        assert!(
+            on[0].lo <= exact && exact <= on[0].hi,
+            "{:?} vs {exact}",
+            on[0]
+        );
+        assert!(
+            on[0].hi - on[0].lo < 1e-9 * exact,
+            "not pinned: {:?}",
+            on[0]
         );
     }
 }

@@ -1187,9 +1187,11 @@ class _Parser:
 
     def _parse_variable_decl(self):
         var_type = "free"
+        explicit_type = False
         kw = self._cur_kw()
         if kw in self._VARTYPE_KW:
             var_type = kw
+            explicit_type = True
             self._advance()
         # optional 'variable'/'variables' keyword
         if self._cur_kw() in self._VAR_KW:
@@ -1200,10 +1202,48 @@ class _Parser:
             if self._match_sym("("):
                 domain = self._parse_domain()
             desc = self._parse_decl_text()
-            self.variables[name] = GamsVariable(name, var_type, domain, desc)
+            existing = self.variables.get(name)
+            if existing is None:
+                self.variables[name] = GamsVariable(name, var_type, domain, desc)
+            else:
+                self._redeclare_variable(existing, var_type, explicit_type, domain, desc)
             if self._match_sym(","):
                 self._advance()
         self._skip_semi()
+
+    def _redeclare_variable(
+        self,
+        gv: GamsVariable,
+        var_type: str,
+        explicit_type: bool,
+        domain: list[str],
+        desc: str,
+    ) -> None:
+        """Apply a repeated declaration of ``gv`` (#1986).
+
+        GAMS lets a type statement repeat only a variable's name
+        (``Variables x(i,j); Positive Variable x;`` -- GAMS's own
+        ``trnsport.gms``). That sets the type and keeps the domain. Replacing
+        the symbol dropped ``(i,j)`` and read the model as a scalar ``x``,
+        which solved ``infeasible``. A repeated declaration whose domain or
+        type conflicts with the first is refused rather than guessed at.
+        """
+        if domain and domain != gv.domain:
+            raise GamsParseError(
+                f"variable {gv.name!r} is redeclared with domain ({', '.join(domain)}) "
+                f"but was declared with domain ({', '.join(gv.domain)}); GAMS rejects "
+                "a domain change on redeclaration"
+            )
+        if explicit_type and var_type != gv.var_type:
+            if gv.var_type != "free":
+                raise GamsParseError(
+                    f"variable {gv.name!r} is redeclared as {var_type} but was "
+                    f"declared {gv.var_type}; a conflicting type redeclaration is "
+                    "not supported"
+                )
+            gv.var_type = var_type
+        if desc and not gv.description:
+            gv.description = desc
 
     # ── Equations declaration ──
 

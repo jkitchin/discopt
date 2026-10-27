@@ -39,7 +39,10 @@ def test_kernel_certifies_the_integral_optimum(monkeypatch, eps, big_m, c):
 
     def trace(**kwargs):
         res = tree(**kwargs)
-        kernel.append(res)
+        # #1983's root probe is a one-node call with no hooks; only the search
+        # itself prices incumbents through ``incumbent_value``.
+        if "incumbent_value" in kwargs:
+            kernel.append(res)
         return res
 
     monkeypatch.setattr(native, "solve_spatial_tree_py", trace)

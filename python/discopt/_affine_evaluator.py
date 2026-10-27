@@ -41,7 +41,7 @@ def _csr_rows(A: Any, n_cols: int) -> Any:
 
 
 def affine_constraint_rows(
-    model: Model, n_orig: int
+    model: Model, n_orig: int, memo: Optional[dict] = None
 ) -> Optional[tuple[Any, np.ndarray, list[tuple[int, int, Any]]]]:
     """``(J, g(0), row_map)`` of an all-affine constraint set, or ``None`` (#1720).
 
@@ -63,6 +63,10 @@ def affine_constraint_rows(
     """
     from discopt._relax.affine_array import NotAffineError, affine_of
 
+    # One memo for every row (#1987): the bodies share their variable and element
+    # nodes, which a per-row walk rebuilt as a sparse matrix once per row.
+    if memo is None:
+        memo = {}
     blocks = []
     row_map: list[tuple[int, int, Any]] = []
     start = 0
@@ -70,7 +74,7 @@ def affine_constraint_rows(
         for con in model._constraints:
             if not isinstance(con, Constraint):
                 continue
-            aff = affine_of(con.body, model._flat_var_offset, n_orig)
+            aff = affine_of(con.body, model._flat_var_offset, n_orig, memo=memo)
             M = aff.M if aff.M is not None else sp.csr_matrix((aff.size, n_orig))
             blocks.append((M, aff.b))
             row_map.append((start, start + aff.size, con))
@@ -159,11 +163,12 @@ class AffineEvaluator:
         if _expression_degree(obj) > 1:
             return None
         n = int(sum(int(v.size) for v in model._variables))
-        rows = affine_constraint_rows(model, n)
+        memo: dict = {}
+        rows = affine_constraint_rows(model, n, memo)
         if rows is None:
             return None
         try:
-            aff = affine_of(obj, model._flat_var_offset, n)
+            aff = affine_of(obj, model._flat_var_offset, n, memo=memo)
         except NotAffineError:
             return None
         if aff.size != 1:
@@ -225,12 +230,39 @@ class AffineEvaluator:
         return np.asarray(self._J.toarray(), dtype=np.float64)
 
 
+#: ``cached_by_fingerprint`` treats ``None`` as a miss; a declined build is cached as this.
+_DECLINED = object()
+
+
+def _affine_evaluator(model: Model) -> Optional[AffineEvaluator]:
+    """:meth:`AffineEvaluator.try_build`, memoized per model structure (#1987).
+
+    Three post-solve consumers (objective reconciliation, incumbent repair, the
+    certificate backstop) each built it afresh: measured on a 488-column,
+    572-row facility-location MILP, the builds were ~1.4 s of a 2.2 s solve.
+    Keyed on :func:`~discopt._evaluator_cache.evaluator_fingerprint` (the objects
+    the rows and objective are built from, pinned so an id cannot be recycled,
+    #1329). That fingerprint leaves out ``Parameter.value``, which ``affine_of``
+    would bake in; it cannot go stale here because ``try_build`` declines any
+    model with a parameter in a row (``_expression_degree`` is ``inf`` for one).
+    Variable bounds are read live from the model.
+    """
+    from discopt._evaluator_cache import cached_by_fingerprint
+
+    def _build(m: Model) -> Any:
+        ev = AffineEvaluator.try_build(m)
+        return _DECLINED if ev is None else ev
+
+    built = cached_by_fingerprint(model, "_affine_evaluator_cache", _build)
+    return None if built is _DECLINED else built
+
+
 def post_solve_evaluator(model: Model) -> Any:
     """:class:`AffineEvaluator` for an all-affine model, else ``make_evaluator``.
 
     For the post-solve consumers that read only rows and the objective (#1743).
     """
-    ev = AffineEvaluator.try_build(model)
+    ev = _affine_evaluator(model)
     if ev is not None:
         return ev
     from discopt._tape_nlp_evaluator import make_evaluator

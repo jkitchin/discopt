@@ -297,7 +297,7 @@ def test_a09_infeasible_lp_is_not_unbounded_on_pounce():
     assert r.status in ("infeasible", "error"), (r.status, r.error)
 
 
-# --- B-05c: a declined dual-divergence retry's counts are labelled ---------------
+# --- B-05c: a gh#884 retry's counts are labelled (from the document since #1985) ---
 
 
 def _toll():
@@ -321,41 +321,35 @@ def _toll():
     return m, start
 
 
-def test_b05c_declined_retry_counts_are_labelled():
+def test_b05c_retry_counts_are_labelled():
     m, start = _toll()
     r = m.solve(solver="pounce", initial_solution=start)
     stats = r.solve_report["statistics"]
-    # The measured case: POUNCE's gh#884 guard fired and declined its retry. Whether
-    # the guard fires depends on POUNCE's floating-point path (it does on macOS, not
-    # on CI's Linux runner); the labelling itself is pinned deterministically by
-    # test_b05c_declined_retry_is_labelled below.
-    if stats.get("dual_divergence_signature") is not True or (
-        stats.get("dual_divergence_retry_promoted") is not False
-    ):
-        # Measured on CI's Linux runner: the guard fires but the retry is promoted,
-        # which is not the declined case this label is for.
-        pytest.skip("POUNCE did not decline its gh#884 retry on this platform")
-    assert stats["dual_divergence_retry_promoted"] is False
-    assert stats["counts_attempt"] == "declined_retry"
-    assert stats["solution_attempt"] == "base"
+    # Whether POUNCE's gh#884 guard fires depends on its floating-point path; the
+    # labelling itself is pinned deterministically by the tests below.
+    if stats.get("dual_divergence_signature") is not True:
+        pytest.skip("POUNCE's gh#884 guard did not fire on this platform")
+    assert stats["counts_attempt"] == "retry"
+    assert stats["solution_attempt"] in ("retry", "base")
+    assert stats["total_counts_complete"] is False
     assert "iteration_count" in stats["counts_attempt_keys"]
     assert "iterations" in stats["counts_attempt_keys"]
 
 
-def test_b05c_label_only_on_declined_retry():
-    from discopt.solvers._pounce_report import label_declined_retry
+def test_b05c_label_only_when_a_retry_ran():
+    from discopt.solvers._pounce_report import label_retry_attempts
 
-    for sig, promoted in ((False, False), (True, True), (None, None)):
+    for sig, promoted in ((False, False), (True, None), (None, None)):
         rep: dict = {"statistics": {"iteration_count": 3}}
         if sig is not None:
             rep["statistics"]["dual_divergence_signature"] = sig
             rep["statistics"]["dual_divergence_retry_promoted"] = promoted
-        label_declined_retry(rep)
+        label_retry_attempts(rep)
         assert "counts_attempt" not in rep["statistics"]
 
 
-def test_b05c_declined_retry_is_labelled():
-    from discopt.solvers._pounce_report import label_declined_retry
+def test_b05c_retry_without_trajectory_is_undetermined():
+    from discopt.solvers._pounce_report import label_retry_attempts
 
     rep: dict = {
         "statistics": {
@@ -364,9 +358,9 @@ def test_b05c_declined_retry_is_labelled():
             "dual_divergence_retry_promoted": False,
         }
     }
-    label_declined_retry(rep)
+    label_retry_attempts(rep)
     stats = rep["statistics"]
-    assert stats["counts_attempt"] == "declined_retry"
-    assert stats["solution_attempt"] == "base"
+    assert stats["counts_attempt"] == "retry"
+    assert stats["solution_attempt"] == "undetermined"
     assert "iteration_count" in stats["counts_attempt_keys"]
     assert "iterations" in stats["counts_attempt_keys"]

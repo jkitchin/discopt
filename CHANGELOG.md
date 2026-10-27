@@ -218,7 +218,7 @@ The release procedure that produces these entries is documented in
     (`DISCOPT_FBBT_EXTENDED_MUL`, default on). On ex1252a, `x18 = 0.0025*x9*x3`
     at `x18 = 1` now gives `x3 >= 1`.
   - ex1252a's bound at 600 s rose from 56,665 to 92,254 (optimum 128,894). The
-    panels are cert-clean (`docs/dev/performance-plan.md` §90). `=0` restores
+    panels are cert-clean (`docs/dev/performance-plan.md` §95). `=0` restores
     either legacy path.
 
 - **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/

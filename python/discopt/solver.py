@@ -1198,7 +1198,7 @@ def _native_spatial_kernel_enabled() -> bool:
     )
 
 
-def _native_kernel_feature_safe(
+def _native_kernel_bypass_reasons(
     *,
     mccormick_bounds,
     initial_point,
@@ -1208,62 +1208,63 @@ def _native_kernel_feature_safe(
     kwargs,
     search_levers=(),
     cut_callback=None,
-) -> bool:
-    """Whether the native spatial kernel may take over this solve (#789).
+) -> list[str]:
+    """The requests that keep this solve off the native kernel, by option name (#789).
 
     The kernel runs the ENTIRE spatial B&B inside ``discopt-core`` and so does
     not exercise the Python-engine machinery layered on the interpreter loop:
     node/incumbent/iteration callbacks, lazy-constraint injection, the solution
     pool, warm-start incumbents, non-default McCormick bound modes, and any
     per-solve ``tuning`` whose stats/behaviour a caller inspects. Those are real
-    contracts (encoded by the smoke suite), so when a solve REQUESTS one, we
-    decline here and route it to the trusted Python engine, taking the native
-    path only when the solve is feature-safe. This is the #789 "route
-    unsupported models to the Python engine" resolution — no test is weakened,
-    and the fast native path is still taken for the plain certified-optimal
-    solves it was graduated on (tanksize et al.).
+    contracts (encoded by the smoke suite), so when a solve REQUESTS one it is
+    routed to the trusted Python engine, and the native path is taken only when
+    this list is empty. Declining is always sound: it only ever *widens* which
+    solves use the already-trusted default path.
 
-    Declining is always sound: it only ever *widens* which solves use the
-    already-trusted default path.
+    One list for the routing decision and the #1678 warning, so a request that
+    moves a solve off the kernel can no longer do so silently: an explicit
+    ``tuning`` (e.g. ``SolverTuning(root_fixpoint=False)``) did (#1983).
     """
-    if incumbent_callback is not None or node_callback is not None:
-        return False
+    reasons: list[str] = []
+    if incumbent_callback is not None:
+        reasons.append("incumbent_callback")
+    if node_callback is not None:
+        reasons.append("node_callback")
     # The kernel has no cut hook either: a ``cut_callback`` reaching it was simply
     # never called (0 calls, silently) on every scalar model on the spatial path --
     # the #1535 defect, which survived on this route because its regression test's
     # model used an array variable and so never reached the kernel until
     # ``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``.
     if cut_callback is not None:
-        return False
+        reasons.append("cut_callback")
     if kwargs.get("iteration_callback") is not None:
-        return False
+        reasons.append("iteration_callback")
     if lazy_constraints:
-        return False
+        reasons.append("lazy_constraints")
     if initial_point is not None:
-        return False
+        reasons.append("initial_point")
     # A non-default McCormick bound mode changes the relaxation the caller asked
     # for; the kernel always builds its own McCormick relaxation, so honour the
     # request by routing to the Python engine (e.g. ``mccormick_bounds="none"``).
     if mccormick_bounds is not None and str(mccormick_bounds) != "auto":
-        return False
+        reasons.append("mccormick_bounds")
     # Solution-pool collection is a Python-engine feature the kernel does not fill.
     if kwargs.get("solution_pool") is not None or kwargs.get("solution_pool_capacity"):
-        return False
+        reasons.append("solution_pool")
     # An explicit per-solve tuning object may enable/disable levers whose
     # solver_stats a caller inspects (e.g. cut-inherit pool stats); the kernel
     # emits none of those, so route explicit-tuning solves to the Python engine.
     # #1615 D-03: ``_scoped_tuning`` pops ``tuning`` out of ``kwargs`` before the
     # solve body runs, so the ``kwargs`` test alone was dead; read the scope flag.
     if kwargs.get("tuning") is not None or _EXPLICIT_TUNING.get():
-        return False
+        reasons.append("tuning")
     # #1615 D-01/D-02/D-08/D-13: search levers the kernel does not read. The kernel
     # runs its own fixed best-first search over its own McCormick relaxation with
     # its own root presolve, so a caller who sets any of these away from its
     # default would otherwise get the kernel's search with the option silently
     # ignored. Route to the Python engine, which honours them.
-    if search_levers:
-        return False
-    return True
+    reasons.extend(search_levers)
+    return reasons
 
 
 def _native_kernel_ignored_levers(
@@ -2285,20 +2286,45 @@ def _try_native_spatial_kernel(
     # existed. Same call, same budget, and the spec is rebuilt on the result.
     if initial_incumbent is not None and _kernel_cutoff_obbt_enabled() and n_vars <= 200:
         _t_phase = time.perf_counter()
-        _cut_box = _kernel_cutoff_obbt_box(
-            model,
-            np.asarray(lb, dtype=np.float64)[:n_vars],
-            np.asarray(ub, dtype=np.float64)[:n_vars],
-            float(initial_incumbent) + off,
-            outer_deadline,
-        )
-        if _cut_box is not None:
-            _spec_cut = build_spatial_kernel_spec(model, bounds=_cut_box, deadline=outer_deadline)
-            if _spec_cut is not None:
-                for _k in [k for k in _spec_cut if k.startswith("meta_")]:
-                    _spec_cut.pop(_k)
-                spec = _spec_cut
-                KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
+        _lb0 = np.asarray(lb, dtype=np.float64)[:n_vars]
+        _ub0 = np.asarray(ub, dtype=np.float64)[:n_vars]
+
+        def _cutoff_spec(_slack: float) -> Optional[dict]:
+            _box = _kernel_cutoff_obbt_box(
+                model, _lb0, _ub0, float(initial_incumbent) + off + _slack, outer_deadline
+            )
+            if _box is None:
+                return None
+            _s = build_spatial_kernel_spec(model, bounds=_box, deadline=outer_deadline)
+            if _s is not None:
+                for _k in [k for k in _s if k.startswith("meta_")]:
+                    _s.pop(_k)
+            return _s
+
+        _spec_cut = _cutoff_spec(0.0)
+        # #1983: the exact cutoff can collapse the box to round-off slivers when the
+        # seed is already optimal, leaving the root LP undecided (see
+        # `_kernel_cutoff_slack`). Only then is the cutoff lifted by the kernel's
+        # acceptance gap; if that root is undecided too, the untightened box is kept.
+        if (
+            _spec_cut is not None
+            and _kernel_cutoff_slack_enabled()
+            and _kernel_root_undecided(_spec_cut, outer_deadline)
+        ):
+            KERNEL_CUTOFF_OBBT_STATS["root_undecided"] += 1
+            _spec_cut = _cutoff_spec(
+                _kernel_cutoff_slack(
+                    float(initial_incumbent), off, gap_tolerance, abs_gap_tolerance
+                )
+            )
+            if _spec_cut is not None and _kernel_root_undecided(_spec_cut, outer_deadline):
+                _spec_cut = None
+            KERNEL_CUTOFF_OBBT_STATS[
+                "slack_adopted" if _spec_cut is not None else "kept_root_box"
+            ] += 1
+        if _spec_cut is not None:
+            spec = _spec_cut
+            KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
         _native_jax_s += time.perf_counter() - _t_phase
 
     remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
@@ -2448,6 +2474,10 @@ def _try_native_spatial_kernel(
     # #1962: the integral-point probe (default ON; ``=0`` opts out; see the helper).
     if _kernel_int_probe_enabled():
         solve_kwargs["int_fix_probe"] = True
+    # #1995: re-solve an undecided node LP over its pre-propagation box (default ON;
+    # ``=0`` opts out; see the helper).
+    if _kernel_undecided_retry_enabled():
+        solve_kwargs["undecided_unpropagated_retry"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -2683,8 +2713,9 @@ def _try_native_spatial_kernel(
         )
         if _fb_bound is not None:
             logger.info(
-                "native spatial kernel bound-less at time_limit — reporting the "
+                "native spatial kernel bound-less at %s — reporting the "
                 "root-relaxation fallback bound %.6g (#933)",
+                native_status,
                 _fb_bound,
             )
             bound_val = _fb_bound
@@ -2703,6 +2734,33 @@ def _try_native_spatial_kernel(
         _native_jax_s += time.perf_counter() - _t_phase
         if _polished is not None:
             x_flat, obj_val = _polished
+
+    # #1983: the #933 fallback bound is rigorous; when it meets the incumbent within
+    # the solve's tolerance the incumbent is proved global, and the honest status is
+    # ``optimal`` -- the same re-certification the Python tree applies to the same
+    # fallback (``_recertify_gap_closed`` with the on-correct-side guard). Without it
+    # the pq pooling model of #1983 reported ``node_limit`` with ``gap = 0.0``.
+    if (
+        _native_bound_source == "root_relaxation"
+        and native_status in ("time_limit", "node_limit")
+        and obj_val is not None
+        and math.isfinite(obj_val)
+        and math.isfinite(bound_val)
+    ):
+        from discopt.modeling.core import ObjectiveSense as _ObjSenseRC
+
+        _rc_max = model._objective is not None and model._objective.sense == _ObjSenseRC.MAXIMIZE
+        _rc_side = bound_val >= obj_val - 1e-9 if _rc_max else bound_val <= obj_val + 1e-9
+        _rc_abs = _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+        if _rc_side and _recertify_gap_closed(obj_val, bound_val, _rc_max, gap_tolerance, _rc_abs):
+            logger.info(
+                "native spatial kernel: the root-relaxation fallback bound %.10g closes "
+                "the gap to the incumbent %.10g; %s -> optimal (#1983)",
+                bound_val,
+                obj_val,
+                native_status,
+            )
+            native_status = "optimal"
 
     x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start
@@ -2800,6 +2858,10 @@ def _try_native_spatial_kernel(
     _native_stats["tree/int_probe_improvements"] = float(
         int(res.get("n_int_probe_improvements") or 0)
     )
+    # #1995: pre-propagation re-solves of undecided node LPs
+    # (``DISCOPT_KERNEL_UNDECIDED_RETRY``) and how many decided; 0 when off.
+    _native_stats["tree/prop_retries"] = float(int(res.get("n_prop_retries") or 0))
+    _native_stats["tree/prop_retry_decided"] = float(int(res.get("n_prop_retry_decided") or 0))
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -7834,8 +7896,95 @@ def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
     return abs_gap_tolerance is None and _kernel_documented_gap_enabled()
 
 
+def _kernel_cutoff_slack_enabled() -> bool:
+    """``DISCOPT_KERNEL_CUTOFF_OBBT_SLACK`` (#1983, default ON; ``=0`` opts out).
+
+    The #1983 rescue: when #1871's exact-cutoff box leaves the kernel's root LP
+    undecided, redo the OBBT with the cutoff lifted by :func:`_kernel_cutoff_slack`
+    (and keep the untightened box if that root is undecided too). Wherever the
+    exact-cutoff root is decided the spec is unchanged, so the flag is
+    bound-neutral there. Kept as a documented opt-out so the rescue can be A/B'd;
+    ``=0`` is #1871 as it shipped.
+
+    Why not lift the cutoff always: measured on the in-repo corpus (73
+    instances, 30 s, interleaved), an always-on slack was cert-clean (64 oracle
+    checks, 0 problems; 56 certified in both arms) but loosened ``nous1``'s bound
+    at a fixed node count, 1.414 -> 1.298 at 3,000 nodes and 1.559 -> 1.443 at
+    10,000 (optimum ~1.567), so it is applied only where the exact box fails.
+    The same panel on this form: cert-clean (64 oracle checks, 0 problems), 56
+    certified in both arms, no objective drift; the root probe fired on none of
+    the 73 instances, and the remaining node-count differences are all on routes
+    the flag does not touch or on wall-clock-limited exits (nous1: same bound).
+    """
+    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_cutoff_slack(
+    incumbent: float, off: float, gap_tolerance: float, abs_gap_tolerance: Optional[float]
+) -> float:
+    """How far above the incumbent #1871's OBBT cutoff sits (#1983), internal units.
+
+    The cutoff was the incumbent's value exactly. When the seed is already optimal
+    (#1871's pooling, ``st_ph*`` and ``st_m*`` families), ``{relaxation, objective
+    <= incumbent}`` is about one point, and OBBT shrank the box to it: on the
+    #1983 pq pooling model 39 bounds moved, 30 columns ended with widths 1e-17 to
+    1e-6, HiGHS called the root LP over that box infeasible, the kernel's simplex
+    ended ``Numerical``, and every node below inherited the same slivers --
+    100,000 nodes, uncertified, where the untightened box certifies at node 1.
+
+    The kernel only has to prove ``bound >= incumbent - g``, ``g`` its own
+    acceptance gap. So the cutoff is lifted to ``incumbent + g``: the region kept
+    is a superset of #1871's (sound for any slack >= 0), and it never collapses
+    below the precision the certificate is decided at. ``g`` is the kernel's
+    test at this incumbent: ``min(gap_tol, max(abs_gap_tol, rel_gap_tol *
+    |published value|))``, mirroring the kwargs built for the kernel below (a
+    denominator of ``|incumbent|`` alone makes ``g`` no larger than the kernel's
+    own, ``max(|ub|, |lb|)``). Measured on the #1983 model (2000-node cap):
+    slack 0, 1e-9, 1e-7, 1e-6 all end undecided at the node cap; 1e-5 certifies
+    in 3 nodes; ``g`` = 0.0402 certifies in 1 node with min width 2.4e-5.
+    Applied only when the exact cutoff's root is undecided
+    (:func:`_kernel_cutoff_slack_enabled`).
+    """
+    abs_t = _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+    kernel_abs = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
+    if float(gap_tolerance) > _DEFAULT_REL_GAP_TOL or _kernel_documented_gap_applies(
+        abs_gap_tolerance
+    ):
+        kernel_abs = math.inf
+    rel = float(gap_tolerance) * max(abs(float(incumbent) + float(off)), 1e-10)
+    slack = min(kernel_abs, max(abs_t, rel))
+    return slack if math.isfinite(slack) and slack > 0.0 else 0.0
+
+
+def _kernel_root_undecided(spec: dict, outer_deadline: Optional[float]) -> bool:
+    """Whether the kernel's root node LP over ``spec`` ends undecided (#1983).
+
+    One node, no hooks: a probe of the root LP's verdict only, which decides
+    nothing a certificate rests on (the solve that follows runs on whichever box
+    is chosen, and every box offered is valid). Its work is bounded
+    deterministically -- one node, the simplex's own iteration cap -- so it gets
+    the solve's whole remaining time (role 1, as the kernel's own call), never a
+    carved wall slice that would make the chosen box depend on machine speed
+    (#912, #1187). Out of time counts as decided: #1871's box is kept.
+    """
+    from discopt import _rust
+
+    remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
+    if remaining is not None and remaining <= 0.0:
+        return False
+    res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=remaining)
+    return bool(res.get("root_status") == "undecided")
+
+
 #: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe
-#: counter, CLAUDE.md section 6).
+#: counter, CLAUDE.md section 6). #1983 adds ``root_undecided`` (the exact-cutoff
+#: root probe failed), ``slack_adopted`` and ``kept_root_box``.
 KERNEL_CUTOFF_OBBT_STATS: "collections.Counter[str]" = collections.Counter()
 
 
@@ -7943,22 +8092,64 @@ def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance
     )
 
 
-def _warn_native_kernel_bypassed(options: list[str]) -> None:
+def _native_kernel_covers(model, lb, ub, n_vars: int) -> Optional[bool]:
+    """Whether the native kernel's producer accepts ``model`` on ``[lb, ub]`` (#1983).
+
+    ``False`` when :func:`build_spatial_kernel_spec` declines it (out of the
+    kernel's term families -- an ``exp`` rate law, for one), ``True`` when it
+    builds, ``None`` when unknown. Only asked when an option already keeps the
+    solve off the kernel, to decide whether saying so is true; it decides no
+    route. Above ``_BYPASS_COVERAGE_MAX_VARS`` columns (the size gate #1871's
+    cutoff OBBT uses) it does not build and answers ``None``: the spec is two
+    relaxation builds, which outlasted a whole solve on a dense QP. Within the
+    gate the build polls only the solve's own role-1 deadline (no carved wall
+    slice, #912/#1187); running out of it is ``None`` too.
+    """
+    from discopt._relax.spatial_producer import build_spatial_kernel_spec
+
+    if n_vars > _BYPASS_COVERAGE_MAX_VARS:
+        return None
+    deadline = _role1_deadline()
+    spec = build_spatial_kernel_spec(
+        model,
+        bounds=(
+            np.asarray(lb, dtype=np.float64)[:n_vars],
+            np.asarray(ub, dtype=np.float64)[:n_vars],
+        ),
+        deadline=deadline,
+    )
+    if spec is not None:
+        return True
+    return None if deadline is not None and time.perf_counter() >= deadline else False
+
+
+#: The largest model (columns) whose kernel coverage the #1678 warning checks;
+#: #1871's cutoff-OBBT gate.
+_BYPASS_COVERAGE_MAX_VARS = 200
+
+
+def _warn_native_kernel_bypassed(options: list[str], covers=None) -> None:
     """Say so when a search option moves a spatial solve off the native kernel (#1678).
 
     The native Rust kernel (default ON) runs its own fixed best-first search and calls
-    no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
+    no node callback, so ``_native_kernel_bypass_reasons`` routes a solve that sets
     ``strategy``, ``rlt``, ``presolve=False``,
-    ``in_tree_presolve_stride``, ``obbt_at_root=False``, ``node_callback`` or
-    ``cut_callback`` to the Python tree, which honours them. That is sound -- the
+    ``in_tree_presolve_stride``, ``obbt_at_root=False``, a callback,
+    ``initial_point``, ``lazy_constraints``, ``mccormick_bounds``, a solution pool
+    or an explicit ``tuning`` to the Python tree, which honours them. That is sound -- the
     Python tree is the trusted path -- but it changes the engine, its node counts,
     its gap-tolerance semantics (the kernel stops absolutely at
     ``gap_tolerance <= 1e-4``; the Python tree uses absolute-OR-relative) and
     usually its wall time, and the caller was told nothing.
     Silent when the kernel is opted out (``DISCOPT_NATIVE_SPATIAL_KERNEL=0``), since
-    then nothing moved.
+    then nothing moved -- and (#1983) when ``covers()`` says the kernel's producer
+    declines the model anyway: a CSTR model with an Arrhenius ``exp`` was warned
+    about though it never reaches the kernel. ``covers`` returns ``True``,
+    ``False`` or ``None`` (unknown: warn).
     """
     if not options or not _native_spatial_kernel_enabled():
+        return
+    if covers is not None and covers() is False:
         return
     import warnings
 
@@ -11296,6 +11487,49 @@ def _kernel_int_probe_enabled() -> bool:
     )
 
 
+def _kernel_undecided_retry_enabled() -> bool:
+    """#1995: ``DISCOPT_KERNEL_UNDECIDED_RETRY`` for the native spatial kernel
+    (``SpatialTreeConfig::undecided_unpropagated_retry``).
+
+    **Graduated (default ON, 2026-10-26, #1995); ``=0`` opts out** and restores
+    the tree before it (an undecided node is branched over its propagated box).
+
+    When a node LP decides nothing over a box that the node's FBBT propagation
+    tightened, the kernel re-solves the node over the box it was pushed with and
+    uses that verdict. The case it exists for: an incumbent at the relaxation
+    optimum makes the objective cutoff collapse the box to a sliver (#1995, the
+    ``gdp.simplex`` lowering of a two-disjunct ``either_or``: ``x + y <= 5 + 1.5e-8``
+    against ``x >= 4, y >= 1`` leaves widths ~2e-8). The McCormick LP over that box
+    ends ``Numerical``, the undecided arm branches a weight column, and every child
+    inherits the same sliver, so the search never fathoms (22,190 nodes, 11,133
+    undecided, bound-less at 10 s on the captured spec; with the retry, optimal at
+    node 1). The pre-propagation box contains the node's region, so its bound,
+    emptiness proof and tight points hold for the region. Bound-changing only at a
+    node whose first LP is undecided; everywhere else the tree is unchanged.
+    Probe: ``tree/prop_retries`` / ``tree/prop_retry_decided``.
+
+    Section 5 panels (30 s, interleaved, every incumbent ``verify_point``-ed):
+    ``issue1944_rlt_panel.py --with-corpus`` (271 instances, fires on 4):
+    cert-clean, 1,626 checks, 0 problems; certified +nous1 (OFF time limit at
+    30.7 s twice, ON optimal at 24.0/24.3 s, 20 retries), tighter 30 s bounds on
+    the other three it fires on (ex5_2_5, tln6, wastewater15m1). The listed loss
+    ``pointpack04`` routes to the Python tree, where the flag is never read; it
+    certifies in 29 nodes / ~3.6 s in both arms on re-run (the panel row ran
+    under load). ``issue1995_gdp_panel.py`` (every serialize bound-neutral case
+    plus the native GDPlib models under ``gdp_method="simplex"``, 54 cases):
+    cert-clean, 424 checks, 0 problems; fires on #1995's case only, certified
+    there, the other 53 node-identical. ``performance-plan.md`` section 94.
+    Read at call time.
+    """
+    return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
 def _kernel_spatial_branching_kwargs() -> dict:
     """#1970: ``DISCOPT_KERNEL_SPATIAL_BRANCHING`` for the native spatial kernel.
 
@@ -11335,6 +11569,60 @@ def _kernel_spatial_branching_kwargs() -> dict:
     if raw in ("0", "false", "no", "off", ""):
         return {}
     return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
+
+
+def _py_tree_spatial_score_enabled() -> bool:
+    """#1978: ``DISCOPT_PY_TREE_SPATIAL_SCORE`` for the Python spatial tree.
+
+    ON, the tree picks the continuous column to bisect by its share of the envelope
+    gap of the nonlinear terms it appears in at the node point (#1970's native rule,
+    ported; ``select_spatial_score_variable``), split at the midpoint (#1970's native
+    midpull of 0.75 cost two ``test_sign_envelope`` certificates: a discontinuity at a
+    box midpoint never lands on a child boundary), and falls back to the legacy
+    longest-edge rule when no term has a gap on a candidate. Branching order only:
+    both children still cover the parent box, so no bound moves. Probe:
+    ``tree/py_spatial_score_picks``.
+
+    **Graduated (default ON, 2026-10-26, #1978); ``=0`` restores the legacy rule.**
+
+    Entry experiment (#1975's rescaled prolog outer piece, Python tree): legacy bound
+    ~0 after 2,463 nodes / 120 s; ON bound 0.034931 in 75 nodes, splitting only the
+    two narrow factors (certified at ``abs_gap_tolerance=1e-3`` in 71 nodes). A first
+    version scored the engine's ``bilinear_map``, which also holds RLT-lifted
+    products (#1944), and steered branching onto linear-only columns; it now scores
+    the model's own terms (``NonlinearTerms``).
+
+    Section 5 panel (``flag_onoff_corpus_panel.py --flag
+    DISCOPT_PY_TREE_SPATIAL_SCORE``, 287 instances -- in-repo corpus + every
+    MINLPLib instance <= 200 vars/cons with an unbounded continuous variable after
+    FBBT -- 20 s, interleaved), shipped midpoint variant: fires on 30; cert-clean (460
+    incumbent checks, 0 false bounds; all four certification flips, +3 / -1, are on
+    instances where the rule never fired). Where it fires: nodes where both certify
+    215 -> 191, wall 66.6 -> 64.2 s; uncertified bounds tighter on ``chenery``,
+    ``hybriddynamic_varcc`` and ``pointpack06..14`` (0.82 -> 0.50 on ``pointpack06``),
+    looser on ``knp3-12`` (5.46 -> 7.86, a symmetric sphere packing where round-robin
+    bisection suits the symmetry). The earlier midpull-0.75 run measured the same
+    directions, replicated 3x. Read at call time.
+    """
+    raw = os.environ.get("DISCOPT_PY_TREE_SPATIAL_SCORE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
+
+
+def _register_spatial_score_terms(tree, relaxer) -> bool:
+    """Hand the relaxer's lifted bilinear pairs and monomials to ``tree`` (#1978).
+
+    ``True`` once registered; ``False`` while the relaxer has not finished a
+    complete build yet (the caller retries next iteration) or there is none.
+    """
+    terms = getattr(relaxer, "_score_terms", None) if relaxer is not None else None
+    if terms is None:
+        return False
+    pairs, monos = terms
+    bil = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    pcols = np.asarray([i for i, _ in monos], dtype=np.int64)
+    pexps = np.asarray([float(p) for _, p in monos], dtype=np.float64)
+    tree.set_spatial_score_terms(bil, pcols, pexps)
+    return True
 
 
 def _native_warm_start_mode() -> int:
@@ -12346,7 +12634,7 @@ def _scoped_tuning(fn: _F) -> _F:
         _explicit = kwargs.pop("tuning", None)
         token = _enter_tuning_scope(_explicit)
         # #1615 D-03: the pop above hides ``tuning`` from ``fn``'s ``kwargs``, so
-        # ``_native_kernel_feature_safe`` could never see it. Record "an explicit
+        # ``_native_kernel_bypass_reasons`` could never see it. Record "an explicit
         # tuning was requested" (inherited by nested solves) where it can.
         explicit_token = _EXPLICIT_TUNING.set(_explicit is not None or _EXPLICIT_TUNING.get())
         try:
@@ -13026,6 +13314,9 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
         # configuration certified by discopt). Pyomo selects this through the
         # choice of NLP solver; there is no key of its own to reuse.
         "subproblem",
+        # discopt's own (#1984): each global subproblem's wall budget, in
+        # seconds. Default a tenth of the run within [1 s, 30 s] (#1153).
+        "subproblem_time_limit",
         # discopt's own (#1775 G4.2): enumerate's ceiling on the configuration
         # count, above which it refuses rather than truncate.
         "max_configurations",
@@ -13040,11 +13331,13 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
 
 #: The ``gdp_options`` keys each implemented native method reads.
 _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
-    "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"}),
+    "loa": frozenset(
+        {"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem", "subproblem_time_limit"}
+    ),
     # GLOA's subproblems are always global, so it reads no "subproblem" key.
-    "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem_time_limit"}),
     # RIC's subproblems are always global, as GLOA's (#1775 G4.2).
-    "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem_time_limit"}),
     # Enumerate solves every configuration: no iteration limit, no master.
     "enumerate": frozenset({"max_configurations"}),
     # LBB (#1775 G4.4): a node budget, and Pyomo's ``check_sat`` toggles the logic
@@ -13059,6 +13352,7 @@ _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
             "disjunction_list",
             "direction_norm",
             "subproblem",
+            "subproblem_time_limit",
             "check_sat",
         }
     ),
@@ -13149,6 +13443,16 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             raise ValueError(
                 f"gdp_options['direction_norm'] must be one of {DIRECTION_NORMS}, got "
                 f"{gdp_options['direction_norm']!r}"
+            )
+    if "subproblem_time_limit" in gdp_options:
+        cap = gdp_options["subproblem_time_limit"]
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, (int, float, np.integer, np.floating))
+            or not cap > 0
+        ):
+            raise ValueError(
+                f"gdp_options['subproblem_time_limit'] must be a number of seconds > 0, got {cap!r}"
             )
     if "check_sat" in gdp_options and not isinstance(gdp_options["check_sat"], bool):
         got = gdp_options["check_sat"]
@@ -15552,6 +15856,7 @@ def solve_model(
             "logical_constraint_list",
             "disjunction_list",
             "direction_norm",
+            "subproblem_time_limit",
         ):
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
@@ -17929,12 +18234,7 @@ def solve_model(
         in_tree_presolve_stride=in_tree_presolve_stride,
         kwargs=kwargs,
     )
-    _warn_native_kernel_bypassed(
-        _native_search_levers
-        + (["node_callback"] if node_callback is not None else [])
-        + (["cut_callback"] if cut_callback is not None else [])
-    )
-    if not _native_budget_spent and _native_kernel_feature_safe(
+    _native_bypass = _native_kernel_bypass_reasons(
         mccormick_bounds=mccormick_bounds,
         initial_point=initial_point,
         lazy_constraints=lazy_constraints,
@@ -17943,7 +18243,13 @@ def solve_model(
         kwargs=kwargs,
         search_levers=_native_search_levers,
         cut_callback=cut_callback,
-    ):
+    )
+
+    def _bypass_coverage() -> Optional[bool]:
+        return _native_kernel_covers(model, lb, ub, n_vars)
+
+    _warn_native_kernel_bypassed(_native_bypass, covers=_bypass_coverage)
+    if not _native_budget_spent and not _native_bypass:
         _native_result = _try_native_spatial_kernel(
             model,
             lb,
@@ -18369,6 +18675,7 @@ def solve_model(
     # The LP relaxer was requested but discarded for a continuous model (#120/#1112).
     _lp_downgraded = False
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
+    _spatial_score_registered = False  # #1978: score terms handed to the tree
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
@@ -20274,6 +20581,9 @@ def solve_model(
         # is large enough to amortize it (_POUNCE_BATCH_MIN_VARS); smaller nodes
         # stay on the serial path.
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
+        # #1978: each node's relaxation LP point, for the tree's spatial score.
+        _score_pts: dict[int, np.ndarray] = {}
+        _score_on = _py_tree_spatial_score_enabled()
         if _use_pounce_batch and n_batch > 1:
             result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
                 _active_evaluator,
@@ -20480,6 +20790,9 @@ def solve_model(
                         np.asarray(batch_ub[i]),
                         time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                         abort_deadline=_node_abort_deadline,
+                        # #1989: the grant is restarted after the cold build, so cap
+                        # the node's LPs at the solve's own (live) end as well.
+                        solve_deadline=t_start + time_limit,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -20495,6 +20808,8 @@ def solve_model(
                             and not _lazy_probing
                         ),
                     )
+                    if _score_on and mc_res is not None and mc_res.x is not None:
+                        _score_pts[i] = np.asarray(mc_res.x, dtype=np.float64)
                     if mc_res.status == "infeasible":
                         # Rigorous fathom: the McCormick LP is a valid outer
                         # relaxation, so an empty relaxed feasible set proves the
@@ -20832,7 +21147,22 @@ def solve_model(
                             _exp_build is not None and _serial_remaining < _exp_build
                         )
                     else:
-                        _round_blocked = False
+                        # #1989: with the round budget off this path still had no
+                        # past-deadline skip, so every serial node after the
+                        # deadline ran a full cold build + solve + retry cascade
+                        # (the batch path above skips such nodes unconditionally).
+                        # Skip it the same way, non-root only (#928 rule 1). The
+                        # live limit, not ``_deadline``, so the #917 incumbent
+                        # extension keeps its rounds. A node whose NLP also failed
+                        # is kept OPEN on its parent bound rather than left on the
+                        # failure sentinel, which would fathom it with no proof.
+                        _round_blocked = (
+                            iteration >= 1 and time.perf_counter() >= t_start + time_limit
+                        )
+                        if _round_blocked:
+                            _yield_keeps_node_open(
+                                True, result_lbs[i] >= _SENTINEL_THRESHOLD, result_lbs, i
+                            )
                 else:
                     _round_blocked = True
                 if _mc_lp_relaxer is not None and not _reduced_done_serial and not _round_blocked:
@@ -20846,6 +21176,9 @@ def solve_model(
                         node_ub,
                         time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                         abort_deadline=_node_abort_deadline,
+                        # #1989: the grant is restarted after the cold build, so cap
+                        # the node's LPs at the solve's own (live) end as well.
+                        solve_deadline=t_start + time_limit,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_serial_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -20861,6 +21194,8 @@ def solve_model(
                             and not _lazy_probing
                         ),
                     )
+                    if _score_on and mc_lp_res is not None and mc_lp_res.x is not None:
+                        _score_pts[i] = np.asarray(mc_lp_res.x, dtype=np.float64)
                     if mc_lp_res is not None and mc_lp_res.status == "infeasible":
                         # The McCormick LP is a valid OUTER relaxation of this
                         # node's subtree: if the (larger) relaxed feasible set is
@@ -21193,6 +21528,10 @@ def solve_model(
             sb_hint_vars = []
             rel_thresh = tree.reliability_threshold()
             for i in range(n_batch):
+                # #1989: a branching hint only orders the search, and once the
+                # budget is spent there is no further search to order.
+                if time.perf_counter() >= t_start + time_limit:
+                    break
                 if result_lbs[i] >= _SENTINEL_THRESHOLD:
                     continue  # skip infeasible nodes
                 node_id = int(batch_ids[i])
@@ -21234,6 +21573,9 @@ def solve_model(
         # --- Optional cut generation (OA + RLT + lift-and-project) ---
         if cutting_planes and _generate_cuts is not None and _cut_pool is not None:
             for i in range(n_batch):
+                # #1989: cuts feed later node solves; past the budget there are none.
+                if time.perf_counter() >= t_start + time_limit:
+                    break
                 if result_lbs[i] < _SENTINEL_THRESHOLD:  # skip infeasible nodes
                     node_lb_i = np.array(batch_lb[i])
                     node_ub_i = np.array(batch_ub[i])
@@ -22506,6 +22848,16 @@ def solve_model(
                 result_feas,
                 node_infeasible_mask,
                 _exclusion_mask,
+            )
+        if not _spatial_score_registered and _score_on:
+            _spatial_score_registered = _register_spatial_score_terms(
+                tree, _mc_lp_relaxer if _mc_mode == "lp" else None
+            )
+        if _spatial_score_registered and _score_pts:
+            _sp_idx = sorted(_score_pts)
+            tree.set_spatial_score_points(
+                np.asarray([int(batch_ids[k]) for k in _sp_idx], dtype=np.int64),
+                np.ascontiguousarray(np.stack([_score_pts[k] for k in _sp_idx])),
             )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
@@ -23781,6 +24133,8 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    if _spatial_score_registered:
+        _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:
@@ -25566,6 +25920,8 @@ def _pounce_midpath_continuation(
     """
     import pounce
 
+    from discopt.solvers._pounce_report import record_attempts
+
     x = np.asarray(first.x, dtype=np.float64)
     scaled = _pounce_row_equilibration(evaluator, x, options)
     if scaled is None or first.multipliers is None:
@@ -25578,7 +25934,11 @@ def _pounce_midpath_continuation(
         mu=float((first.kkt or {})["barrier_parameter"]),
     )
     second = solve_nlp_pounce(scaled, x, options=opts, warm_start=warm, **solve_kwargs)
+    # #1985: whichever call's answer is published, its report carries both calls'
+    # counts and their total -- the continuation's work is not hidden.
+    reports = [first.solve_report, second.solve_report]
     if second.raw_status not in (0, _IPOPT_SOLVED_TO_ACCEPTABLE) or second.x is None:
+        first.solve_report = record_attempts(reports, 0)
         logger.info(
             "solver='pounce': the mid-path continuation returned code %s; keeping the "
             "first point (#1768).",
@@ -25604,7 +25964,9 @@ def _pounce_midpath_continuation(
                 f2,
                 f1,
             )
+            first.solve_report = record_attempts(reports, 0)
             return first, False
+    second.solve_report = record_attempts(reports, 1)
     second.multipliers = scaled.unscale_multipliers(second.multipliers)
     second.iterations += first.iterations
     second.wall_time += first.wall_time
