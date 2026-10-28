@@ -951,15 +951,19 @@ class TestMINLP:
         assert r.node_count >= 1, "MINLP should use branch-and-bound"
 
     def test_default_convex_route_reports_its_work(self) -> None:
-        """#1269: the default solve is OA; ``node_count=0`` is correct there.
+        """#1269: the default solve is a MIP-NLP route; ``node_count=0`` is correct there.
 
-        ``node_count`` counts B&B nodes, and OA runs no tree. Its work is
-        reported as master MILP solves and NLP subproblems, which must be
-        nonzero. Otherwise a 0 would be the reporting defect #1059 fixed.
+        ``node_count`` counts discopt B&B nodes, and the MIP-NLP routes run no
+        discopt tree. Their work is reported as master MILP solves and NLP
+        subproblems, which must be nonzero. Otherwise a 0 would be the reporting
+        defect #1059 fixed. The route was OA when this was written; since #1658 a
+        certified-convex MINLP goes to LP/NLP-BB, which reports the same way.
         """
         r = _build_simple_minlp().solve()
         assert r.status == "optimal"
-        assert r.algorithm_route is not None and "mip-nlp/oa" in r.algorithm_route
+        assert r.algorithm_route is not None and r.algorithm_route.startswith(
+            ("mip-nlp/oa", "mip-nlp/lp_nlp_bb")
+        ), r.algorithm_route
         assert r.node_count == 0
         assert r.mip_count >= 1
         assert r.subnlp_calls >= 1

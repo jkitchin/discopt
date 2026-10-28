@@ -195,8 +195,14 @@ def test_pounce_batch_end_to_end_wide_bilinear(monkeypatch):
     The model has 4 variables, below the default ``_POUNCE_BATCH_MIN_VARS`` size
     gate, so the threshold is lowered here to drive the integration; the gate's
     own behavior is covered by ``test_pounce_size_gate_keeps_small_serial``.
+
+    The batch path lives in the Python tree. By default this model goes to the
+    native Rust spatial kernel, which solves it (27 nodes, -12.8) without ever
+    calling ``_solve_batch_pounce``, so the kernel is pinned off with its
+    documented opt-out to reach the unit under test.
     """
     monkeypatch.setattr(S, "_POUNCE_BATCH_MIN_VARS", 0)
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
 
     sizes: list[int] = []
     orig = S._solve_batch_pounce

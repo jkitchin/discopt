@@ -152,12 +152,18 @@ class TestBatchIPMRootMultistart:
 class TestBatchIPMUsesVmapPath:
     """Verify IPM uses the vmap batch path for multi-node B&B."""
 
-    def test_batch_ipm_uses_vmap_path(self) -> None:
+    def test_batch_ipm_uses_vmap_path(self, monkeypatch) -> None:
         """Solve a MINLP needing >1 B&B node with batch_size=4 and IPM.
 
         Uses a 4-binary knapsack problem that requires branching to find the
         optimal integer solution.
+
+        The knapsack is a pure MILP, which the LP/MILP routing
+        (``docs/dev/lp-milp-highs-routing-plan.md``) sends to HiGHS with
+        ``node_count=0``. ``DISCOPT_LP_MILP_BACKEND=rust`` -- the documented
+        opt-out -- keeps it on discopt's own tree, the path this test asserts.
         """
+        monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
         m = dm.Model("branch_knapsack")
         x1 = m.binary("x1")
         x2 = m.binary("x2")
