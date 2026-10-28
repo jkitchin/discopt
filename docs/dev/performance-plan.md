@@ -13082,8 +13082,9 @@ each convex `<=` row allowed by `oa_cut_mask` with at most 16 nonlinear columns:
 
 For a ball this gives its axis-aligned supporting planes, so fixing `y` in the master
 yields the ball's box. Each row is a tangent of a certified-convex function at a finite
-point, so no feasible point is cut off. The wall budget is 2% of the limit, floored at
-0.25 s, and the probe measured 0.07-0.17 s. Pinned by
+point, so no feasible point is cut off. The probe is bounded by a deterministic count of
+50,000 evaluations (#912), with the caller's deadline as a backstop. Measured use:
+6,417-13,845 evaluations, 0.08-0.24 s. Pinned by
 `test_2013_pball_support_cuts.py`.
 
 **Entry experiment** (this branch, after section 103.3; every certified point

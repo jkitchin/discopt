@@ -24,7 +24,10 @@ import pytest
 
 highspy = pytest.importorskip("highspy", reason="the HiGHS master is a core dependency")
 
+from discopt._work_budget import WorkBudget  # noqa: E402
 from discopt.solvers.oa import (  # noqa: E402
+    _OA_SUPPORT_MAX_EVALUATIONS,
+    _SUPPORT_EVAL,
     _decompose_model,
     _support_points_for_rows,
     _SupportPointReport,
@@ -89,7 +92,7 @@ def test_support_points_are_the_axis_extremes_of_the_tight_slice():
         decomp.constraint_senses,
         decomp.oa_cut_mask,
         np.full(decomp.n_vars, 5.0),
-        budget_s=10.0,
+        work=WorkBudget({_SUPPORT_EVAL: _OA_SUPPORT_MAX_EVALUATIONS}),
         report=report,
     )
     ball_rows = [k for k, s in enumerate(decomp.constraint_senses) if decomp.oa_cut_mask[k]]

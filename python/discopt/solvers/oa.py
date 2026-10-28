@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import numpy as np
 
+from discopt._work_budget import WorkBudget
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import (
@@ -5754,18 +5755,15 @@ def _oa_support_cuts_enabled() -> bool:
 _OA_SUPPORT_MAX_NONLINEAR_VARS = 16
 
 
-#: Ceiling on the support-point probe's wall budget, in seconds (#1153).
-_OA_SUPPORT_BUDGET_CAP_S = 1.0
+#: Evaluations (constraint values or Jacobians) the support-point probe may spend
+#: (#912: a deterministic work count, not a wall budget, so the master's rows do
+#: not depend on machine speed). Measured use: 6,417 / 12,652 / 13,845 on
+#: p_ball_10b_5p_2d_m / 10b_5p_4d_m / 20b_5p_2d_m (0.08-0.24 s), so this is ~3.6x
+#: the largest. A numeric knob, not a gate.
+_OA_SUPPORT_MAX_EVALUATIONS = 50_000
 
-
-def _oa_support_cut_budget_s(time_limit: float) -> float:
-    """Wall budget for ``_support_points_for_rows`` (``DISCOPT_OA_SUPPORT_BUDGET``
-    as a fraction of the time limit, default 0.02, floored at 0.25 s and capped at
-    :data:`_OA_SUPPORT_BUDGET_CAP_S`). A numeric knob read only under
-    ``DISCOPT_OA_SUPPORT_CUTS``. The cap keeps the probe from growing with the
-    caller's budget (#1153): measured cost 0.07-0.17 s on the p_ball instances."""
-    fraction = float(os.environ.get("DISCOPT_OA_SUPPORT_BUDGET", "0.02"))
-    return min(max(0.25, fraction * float(time_limit)), _OA_SUPPORT_BUDGET_CAP_S)
+#: The :class:`~discopt._work_budget.WorkBudget` kind the probe charges.
+_SUPPORT_EVAL = "support_point_evaluation"
 
 
 @dataclass
@@ -5780,6 +5778,7 @@ class _SupportPointReport:
     rows_infeasible_slice: int = 0
     boundary_points: int = 0
     budget_exhausted: bool = False
+    evaluations: int = 0
     wall_s: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
@@ -5794,7 +5793,7 @@ def _support_points_for_rows(
     cut_mask: Optional[list[bool]],
     x_base: np.ndarray,
     *,
-    budget_s: float,
+    work: WorkBudget,
     max_nonlinear_vars: int = _OA_SUPPORT_MAX_NONLINEAR_VARS,
     report: Optional[_SupportPointReport] = None,
 ) -> list[tuple[int, np.ndarray]]:
@@ -5823,7 +5822,8 @@ def _support_points_for_rows(
     above affects soundness, only strength; a point where ``g`` is not finite is
     left to :func:`_add_oa_cuts`, which refuses a non-finite linearisation (#1491).
     Rows with more than ``max_nonlinear_vars`` nonlinear columns are skipped, and
-    the whole probe stops once ``budget_s`` of wall is spent.
+    the whole probe stops once ``work`` is exhausted: its evaluation count
+    (deterministic, #912) or the caller's deadline as a backstop.
     """
     from scipy.optimize import minimize
 
@@ -5844,15 +5844,17 @@ def _support_points_for_rows(
     p2 = lo_box + rng.random(n) * (hi_box - lo_box)
     jac1 = np.asarray(evaluator.evaluate_jacobian(p1), dtype=np.float64)
     jac2 = np.asarray(evaluator.evaluate_jacobian(p2), dtype=np.float64)
+    work.charge(_SUPPORT_EVAL, 2)
     nonlinear = ~np.isclose(jac1, jac2, rtol=1e-9, atol=1e-12)
     linear = (~nonlinear) & (jac1 != 0.0)
     x_base = np.asarray(x_base, dtype=np.float64)
 
     def value_at(z: np.ndarray, k: int) -> float:
+        work.charge(_SUPPORT_EVAL)
         return float(evaluator.evaluate_constraints(z)[k])
 
     for k in range(m):
-        if time.perf_counter() - t0 > budget_s:
+        if work.exhausted():
             rep.budget_exhausted = True
             break
         if cut_mask is not None and not cut_mask[k]:
@@ -5884,6 +5886,7 @@ def _support_points_for_rows(
         def grad_of(xs: np.ndarray, *, _z=z, _k=k, _cols=cols) -> np.ndarray:
             zz = _z.copy()
             zz[_cols] = xs
+            work.charge(_SUPPORT_EVAL)
             gr = np.asarray(evaluator.evaluate_jacobian(zz), dtype=np.float64)[_k, _cols]
             return np.where(np.isfinite(gr), gr, 0.0)
 
@@ -5928,6 +5931,7 @@ def _support_points_for_rows(
                 zz[cols] = centre + t * step
                 out.append((k, zz))
                 rep.boundary_points += 1
+    rep.evaluations = int(work.used.get(_SUPPORT_EVAL, 0))
     rep.wall_s = time.perf_counter() - t0
     return out
 
@@ -6476,7 +6480,10 @@ def solve_lp_nlp_bb(
             decomp.constraint_senses,
             decomp.oa_cut_mask,
             np.asarray(support_base, dtype=np.float64),
-            budget_s=_oa_support_cut_budget_s(time_limit),
+            work=WorkBudget(
+                {_SUPPORT_EVAL: _OA_SUPPORT_MAX_EVALUATIONS},
+                deadline=t_start + float(time_limit),
+            ),
             report=support_report,
         )
         for row_index, point in support_points:
