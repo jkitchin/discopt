@@ -392,9 +392,17 @@ The release procedure that produces these entries is documented in
   `_pounce_report.py` documents is now below the pin and kept only for reading
   old reports. The 0.13-only settings that `convex_ipm_pounce.py` refuses on older
   releases are therefore always available. CI already installs POUNCE from git
-  `main`, so the CI lanes do not change. The Pyodide wheel in
-  `crates/discopt-wasm/web/wheels/` is still 0.12.0; it is built in the POUNCE
-  repository and is updated separately.
+  `main`, so the CI lanes do not change. The browser page's Pyodide wheel in
+  `crates/discopt-wasm/web/wheels/` is now pounce-solver 0.14.0 as well (taken
+  from the POUNCE v0.14.0 tag), alongside a rebuilt discopt 0.10.0 wheel (#2037).
+
+- **The manuscript no longer describes retired relaxation features (#2037).**
+  `manuscript/discopt.org` drops the ICNN section and the sampled-αBB claims,
+  and describes piecewise relaxation as the relaxation behind AMP. It says that
+  an ordinary solve imports no JAX. Table 4 now reports the gap reductions
+  measured by the rewritten numpy notebook
+  `manuscript/piecewise_gap_reduction.ipynb`: 97.9% (exp), 97.0% (log) and
+  98.4% (x²). The bilinear row is removed.
 
 - **The convex-MINLP route's HiGHS master no longer runs RINS/RENS sub-MIPs
   (`DISCOPT_HIGHS_MASTER_NO_SUBMIP`, default ON; `=0` restores them) (#2021).**
@@ -710,6 +718,17 @@ The release procedure that produces these entries is documented in
 ### Fixed
 
 #### False results (earlier answers on these models may have been wrong)
+
+- **A MIQP on a platform without threads or HiGHS could stop at `feasible` with a
+  wrong incumbent (#2037).** Without OS threads, MIQP node QPs take the serial
+  POUNCE path, which computed its node lower bound with no multipliers. Without
+  `highspy` that bound fell to the box-only bound, which was too weak to prune.
+  Under Pyodide, which has neither, the browser page's cardinality-portfolio
+  example stopped at `feasible` 0.04244 after 13 nodes against a true optimum
+  of 0.036667. The serial path now passes the equality multipliers POUNCE
+  returns to the Lagrangian bound, as the threaded path already did. That bound
+  is valid for any multipliers. The example now certifies 0.036667. Covered by
+  `test_wasm32_platform_paths.py`, which simulates the platform on desktop.
 
 - **False certificates and bounds on nonlinear models.** Each of these fixes removes a certified wrong answer.
   - The convex NLP certificate wrongly certified `-log(x)` on the default box: -18.97 certified against a true -46.05 (#1475).
@@ -1052,6 +1071,13 @@ The release procedure that produces these entries is documented in
   NLP path as the backends that do work on an opaque body. This affected plain
   `dm.custom` too, not just the new `dm.external`, and the fix is keyed on
   `CustomCall` so it covers both.
+
+- **Every MILP failed in the browser with `OverflowError` (#2037).** The
+  "uncapped" node limit `1 << 62` is passed to the Rust engine as a `usize`,
+  which is 32-bit on wasm32. It is now `min(1 << 62, sys.maxsize)`, which is
+  unchanged on 64-bit platforms. The Pyodide examples harness now also takes its
+  `DISCOPT_*` environment lines from `worker.js` instead of a copy, so it runs
+  under the same settings as the page.
 
 - **A threadless platform no longer kills the solve with a Rust panic (#1476).** Rayon
   builds its global thread pool lazily and *panics* when that build fails, and

@@ -35193,9 +35193,18 @@ def _pounce_qp_relaxation_nodes(
                 clean[i] = True
                 obj_vals[i] = float(res.objective)
                 x_vals[i] = x_full
-                # No structured multipliers on this path: the LP tangent bound.
+                # The rows are ``A_eq`` alone, so ``dual_values`` (the HiGHS
+                # shadow-price sign, ``-mult_g``) is ``-y`` in the bound's
+                # ``grad f + A'y - z_lb + z_ub = 0`` convention. Any ``y`` gives a
+                # valid Lagrangian bound on an equality system; the IPM's makes it
+                # tight. Without it the bound needs the HiGHS tangent LP, and where
+                # HiGHS is absent (Pyodide, which also has no threads for the
+                # batched path) it fell to the box-only bound, too weak to prune.
+                y_eq = None
+                if res.dual_values is not None and len(res.dual_values) == A_eq.shape[0]:
+                    y_eq = -np.asarray(res.dual_values, dtype=np.float64)
                 lb_vals[i] = _convex_qp_node_lower_bound(
-                    Q, c, obj_const, None, None, A_eq, b_eq, lb_full, ub_full, x_full
+                    Q, c, obj_const, None, None, A_eq, b_eq, lb_full, ub_full, x_full, y=y_eq
                 )
         elif res.status == SolveStatus.INFEASIBLE:
             # #1537: verified on the slack form this path solved (slacks >= 0).
@@ -37604,7 +37613,9 @@ _MILP_ENGINE_FRONTIER_BYTES = 2 << 30
 
 #: The node cap handed to the engine when the clock, the gap and the frontier
 #: budget govern (#1874). Not ``usize::MAX``: the driver compares against it only.
-_MILP_ENGINE_UNCAPPED_NODES = 1 << 62
+#: Capped at ``sys.maxsize`` because the engine takes a ``usize``, which is 32-bit
+#: on wasm32 (Pyodide): ``1 << 62`` raised ``OverflowError`` there on every MILP.
+_MILP_ENGINE_UNCAPPED_NODES = min(1 << 62, sys.maxsize)
 
 
 def _milp_engine_full_budget_enabled() -> bool:
