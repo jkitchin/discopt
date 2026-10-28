@@ -5776,6 +5776,14 @@ def _oa_support_cuts_enabled() -> bool:
     point and the master stays a relaxation. Which points are chosen only decides
     how *tight* the rows are: see :func:`_support_points_for_rows`.
 
+    That argument is only as good as the convexity certificate. Under a false one
+    (the #1673 B4 model with the pre-fix Gershgorin gate) the tangents of the
+    concave ``-x2**2`` drove the master to ``optimal`` 9620.58 against an optimum
+    of 21.555 -- where the ordinary OA rows alone had left the run uncertified. So
+    the probe checks every tangent against the row's own sampled values, and a
+    tangent above one of them withdraws the master's bound and infeasibility proof
+    (``oa/convexity_refuted``, #2021).
+
     Bound-changing (a tighter master), so gated per CLAUDE.md section 5. Read at
     call time.
 
@@ -5825,12 +5833,41 @@ class _SupportPointReport:
     #: on those linear columns.
     rows_infeasible_slice: int = 0
     boundary_points: int = 0
+    #: Rows whose own sampled values a tangent of theirs overestimates: proof that
+    #: the row is NOT convex on the box, so its convexity certificate is false
+    #: (:func:`_tangent_refutes_convexity`). Their support points are dropped.
+    rows_refuted: list[int] = dataclasses.field(default_factory=list)
     budget_exhausted: bool = False
     evaluations: int = 0
     wall_s: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
         return dict(dataclasses.asdict(self))
+
+
+#: Relative slack before a tangent's overestimate of a sampled value counts as a
+#: refutation of convexity. Roundoff on a genuinely convex row is ~1e-12 relative;
+#: a refutation costs the route its certificate, never soundness, so the margin
+#: errs wide. A numeric knob, not a gate.
+_SUPPORT_REFUTE_RTOL = 1e-6
+
+
+def _tangent_refutes_convexity(
+    g_p: float, grad_p: np.ndarray, p: np.ndarray, qs: np.ndarray, g_qs: np.ndarray
+) -> bool:
+    """Whether the tangent of ``g`` at ``p`` overestimates ``g`` at any sampled ``q``.
+
+    A convex ``g`` satisfies ``g(q) >= g(p) + grad(p) . (q - p)`` for every ``q``, so
+    one sample above that line by more than roundoff proves ``g`` nonconvex -- and
+    every OA row of it suspect, not only this tangent (#2021, the #1673 B4 model).
+    """
+    if qs.size == 0 or not (np.isfinite(g_p) and np.all(np.isfinite(grad_p))):
+        return False
+    lin = (qs - p) @ grad_p
+    excess = (g_p + lin) - g_qs
+    scale = np.maximum.reduce([np.ones_like(g_qs), np.abs(g_qs), np.abs(lin)])
+    scale = np.maximum(scale, abs(g_p))
+    return bool(np.any(excess > _SUPPORT_REFUTE_RTOL * scale))
 
 
 def _support_points_for_rows(
@@ -5865,6 +5902,12 @@ def _support_points_for_rows(
        edge if ``g`` never crosses). The tangent at such a point supports the slice
        in that coordinate direction; together the ``2 |S|`` tangents bound the slice
        in every coordinate, which is what the master's propagation can use.
+
+    5. Every tangent is checked against all the values of ``g`` the row's probe
+       evaluated (:func:`_tangent_refutes_convexity`). A tangent above one of them
+       proves the row nonconvex: the row's points are dropped and its index is
+       recorded in ``report.rows_refuted``, for the caller to withdraw any claim
+       that rests on the row's convexity certificate.
 
     Any finite point gives a valid tangent of a convex row, so none of the choices
     above affects soundness, only strength; a point where ``g`` is not finite is
@@ -5901,6 +5944,19 @@ def _support_points_for_rows(
         work.charge(_SUPPORT_EVAL)
         return float(evaluator.evaluate_constraints(z)[k])
 
+    def refuted(k: int, cols: np.ndarray, points: list[np.ndarray]) -> bool:
+        if not samples:
+            return False
+        qs = np.array([q for q, _ in samples])
+        g_qs = np.array([v for _, v in samples])
+        for zz in points:
+            work.charge(_SUPPORT_EVAL, 2)
+            g_p = float(evaluator.evaluate_constraints(zz)[k])
+            grad_p = np.asarray(evaluator.evaluate_jacobian(zz), dtype=np.float64)[k, cols]
+            if _tangent_refutes_convexity(g_p, grad_p, zz[cols], qs, g_qs):
+                return True
+        return False
+
     for k in range(m):
         if work.exhausted():
             rep.budget_exhausted = True
@@ -5916,6 +5972,9 @@ def _support_points_for_rows(
             rep.rows_skipped_dense += 1
             continue
         rep.rows_probed += 1
+        #: Every finite value of row ``k`` the probe evaluates, in its ``cols``
+        #: subspace -- the evidence step 5 checks the tangents against.
+        samples: list[tuple[np.ndarray, float]] = []
         z = x_base.copy()
         for j in np.flatnonzero(linear[k]):
             if jac1[k, j] > 0.0 and np.isfinite(ub[j]):
@@ -5929,6 +5988,8 @@ def _support_points_for_rows(
             zz = _z.copy()
             zz[_cols] = xs
             v = value_at(zz, _k)
+            if np.isfinite(v):
+                samples.append((np.array(xs, dtype=np.float64), v))
             return v if np.isfinite(v) else 1e30
 
         def grad_of(xs: np.ndarray, *, _z=z, _k=k, _cols=cols) -> np.ndarray:
@@ -5950,11 +6011,15 @@ def _support_points_for_rows(
         centre = np.clip(np.asarray(res.x, dtype=np.float64), lo, hi)
         g_centre = g_of(centre)
         if g_centre > 0.0:
-            rep.rows_infeasible_slice += 1
             zz = z.copy()
             zz[cols] = centre
+            if refuted(k, cols, [zz]):
+                rep.rows_refuted.append(k)
+                continue
+            rep.rows_infeasible_slice += 1
             out.append((k, zz))
             continue
+        row_points: list[np.ndarray] = []
         for i in range(cols.size):
             for sign in (1.0, -1.0):
                 t_max = (hi[i] - centre[i]) if sign > 0 else (centre[i] - lo[i])
@@ -5977,8 +6042,12 @@ def _support_points_for_rows(
                     t = a
                 zz = z.copy()
                 zz[cols] = centre + t * step
-                out.append((k, zz))
-                rep.boundary_points += 1
+                row_points.append(zz)
+        if refuted(k, cols, row_points):
+            rep.rows_refuted.append(k)
+            continue
+        out.extend((k, zz) for zz in row_points)
+        rep.boundary_points += len(row_points)
     rep.evaluations = int(work.used.get(_SUPPORT_EVAL, 0))
     rep.wall_s = time.perf_counter() - t0
     return out
@@ -6555,6 +6624,20 @@ def solve_lp_nlp_bb(
                 constraint_source="support",
             )
         support_rows_added = len(oa_A_rows) - cuts_before_support
+        if support_report.rows_refuted:
+            # #2021: a row certified convex has a tangent above its own sampled
+            # values, so the certificate is false and every OA row of it -- not
+            # only the dropped support rows -- may cut off feasible points. The
+            # master is no longer a relaxation: no bound, gap or infeasibility
+            # proof rests on it (the #1673 B4 model certified 9620.58 against an
+            # optimum of 21.555 before this).
+            logger.warning(
+                "LP/NLP BB: rows %s were certified convex but a tangent overestimates "
+                "their sampled values; the master bound is withdrawn",
+                support_report.rows_refuted,
+            )
+            master_bound_valid = False
+            master_feasible_set_valid = False
         logger.info(
             "LP/NLP BB: %d support rows from %d boundary points on %d rows in %.2fs "
             "(DISCOPT_OA_SUPPORT_CUTS)",
@@ -7205,6 +7288,8 @@ def solve_lp_nlp_bb(
     if support_rows_added:
         # #2021: the support rows the master started with (``--fired-stat``).
         route_stats["oa/support_cuts"] = float(support_rows_added)
+    if support_report is not None and support_report.rows_refuted:
+        route_stats["oa/convexity_refuted"] = float(len(support_report.rows_refuted))
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(

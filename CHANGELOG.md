@@ -393,7 +393,13 @@ The release procedure that produces these entries is documented in
   fallback (`DISCOPT_OA_SUPPORT_CUTS`, `DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE`,
   both default ON; `=0` opts out) (#2013, #2021).**
   - Each new row is a tangent of a certified-convex function, so the master stays
-    a relaxation.
+    a relaxation. That holds only if the certificate is true, so the probe checks
+    each tangent against the row's own sampled values. A tangent above one of them
+    proves the row nonconvex; the route then withdraws its bound and infeasibility
+    proof (`oa/convexity_refuted`). Without this check, a deliberately false
+    certificate (the #1673 B4 model) certified 9620.58 against an optimum of
+    21.555. On the 102 routed instances it never fired, and every instance's
+    support rows were unchanged.
   - Panel (102 routed instances, 60 s): 612 checks, 0 problems. Certified 99 → 100
     (p_ball_10b_5p_4d_m gained), none lost. Total wall 377.6 → 313.0 s.
     performance-plan §103.8.

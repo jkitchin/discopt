@@ -13347,3 +13347,40 @@ instance that section 103.6 rejected, and the cuts are neutral where else they
 fire. Both flags **graduate** default ON. `DISCOPT_OA_SUPPORT_CUTS=0` and
 `DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE=0` restore the old paths. The audit marker
 goes 53 -> 51.
+
+### 103.9 #2021 section 1, CI: the support cuts certified a false bound under a false convexity certificate (2026-10-28)
+
+CI on #2026 failed `test_1673_b4_false_convexity_infeasible.py`. That test feeds
+LP/NLP-BB a deliberately false convexity certificate for
+`x0**-3.5 - x2**2 <= 0` (true optimum 21.555). With highspy 1.15.1, the version
+CI uses, `main` and #2026 both pass with `DISCOPT_OA_SUPPORT_CUTS=0` and both fail
+with `=1`. The tangents of the concave `-x2**2` drove the master to `optimal`
+9620.58 with a matching bound. With only the ordinary OA rows the run stayed
+uncertified and fell back. (With highspy 1.12.0 the same tests fail on `main`
+without the flag: that version alone mishandles this master.)
+
+Fix: `_support_points_for_rows` keeps every value of the row it evaluates. Each
+tangent is checked against those values (`_tangent_refutes_convexity`, relative
+slack 1e-6). One tangent above a sample proves the row nonconvex. The row's
+support points are dropped, and `solve_lp_nlp_bb` withdraws `master_bound_valid`
+and `master_feasible_set_valid`, reported as `oa/convexity_refuted`. The check
+reuses the probe's evaluations, plus 2 per tangent point.
+
+Bound-neutral on true certificates: an A/B against the unfixed head (0a9b488e)
+over the 102 routed instances, 60 s, interleaved, fresh process per solve, code
+marker asserted, incumbents verified:
+
+- 0 refutations; `oa/support_cuts` identical on all 32 instances where it fires.
+- Certified 100 → 100 (none lost, none gained); total wall 271.8 → 271.1 s.
+- 0 problems over 493 checks (each objective and bound checked against `.solu`).
+- The one node difference among the instances both arms certify, `clay0305m`
+  (22812 → 22909), is run-to-run noise: two reruns of the unfixed code gave 22964
+  and 22965.
+- `tls4` was missing from the batch run and was rerun on its own: no refutation,
+  4 support rows in each arm, uncertified in each arm with bound ≤ 8.3.
+
+`test_1658::test_lp_nlp_bb_never_certifies_an_unverified_incumbent` exceeded the
+fast-lane budget. That was not a slowdown: with the support cuts the solve
+certifies (8.7 s locally, against a 0.5 s uncertified exit without them), and it
+reached its 30 s limit on CI. Its limit is now 8 s; it checks both exits.
+

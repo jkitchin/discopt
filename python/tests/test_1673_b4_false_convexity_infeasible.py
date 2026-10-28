@@ -112,3 +112,40 @@ def test_the_default_route_falls_back_on_a_misclassified_model(monkeypatch):
     assert "fell back" in r.algorithm_route, r.algorithm_route
     assert r.status == "optimal", (r.status, r.objective, r.bound)
     assert r.objective == pytest.approx(_OPT, abs=1e-4)
+
+
+def test_the_support_probe_refutes_the_false_certificate(monkeypatch):
+    """#2021: ``DISCOPT_OA_SUPPORT_CUTS`` seeded the misclassified master with
+    tangents of ``-x2**2`` until it "converged": ``optimal`` 9620.58 with a bound
+    to match, against an optimum of 21.555. The probe's own samples prove the row
+    nonconvex (a tangent above them), and the route then withdraws its bound."""
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "1")
+    m = _build()
+    _misclassify(monkeypatch, m)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(
+            solver="mip-nlp", mip_nlp_method="lp_nlp_bb", milp_solver="highs", time_limit=30
+        )
+    # Probe fired (CLAUDE.md section 6): the refutation, not some other exit.
+    assert (r.solver_stats or {}).get("oa/convexity_refuted", 0) >= 1, r.solver_stats
+    assert r.mip_nlp_trace["summary"]["support_cuts"]["rows_refuted"] == [0]
+    assert r.mip_nlp_trace["master_bound_valid"] is False
+    assert r.status != "optimal", (r.status, r.objective, r.bound)
+    assert not r.gap_certified
+
+
+def test_a_tangent_above_a_sample_refutes_convexity():
+    from discopt.solvers.oa import _tangent_refutes_convexity
+
+    qs = np.linspace(-3.0, 3.0, 13).reshape(-1, 1)
+    p = np.array([1.0])
+    # Convex x^2: its tangent at 1 is below every sample.
+    assert not _tangent_refutes_convexity(1.0, np.array([2.0]), p, qs, qs[:, 0] ** 2)
+    # Concave -x^2: its tangent at 1 is above every other sample.
+    assert _tangent_refutes_convexity(-1.0, np.array([-2.0]), p, qs, -(qs[:, 0] ** 2))
+    # Roundoff on a convex row is not a refutation.
+    g = qs[:, 0] ** 2 * (1.0 - 1e-12)
+    assert not _tangent_refutes_convexity(1.0, np.array([2.0]), p, qs, g)
+    # A non-finite tangent proves nothing.
+    assert not _tangent_refutes_convexity(np.nan, np.array([2.0]), p, qs, -(qs[:, 0] ** 2))
