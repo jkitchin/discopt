@@ -550,6 +550,40 @@ def test_every_rebuilding_pass_carries_atan2_and_piecewise_guards():
     assert fired == 6
 
 
+def _guarded_nonsmooth_model():
+    """A piecewise guard plus an ``abs`` atom in a monotone position, which the
+    nonsmooth epigraph lift (#1501) rewrites. Optimum 2 at x = 2, u = 0, z = 1."""
+    m = dm.Model("ns")
+    x = m.continuous("x", lb=0, ub=4)
+    u = m.continuous("u", lb=-3, ub=3)
+    z = m.integer("z", lb=0, ub=3)
+    y = m.piecewise(x, [0, 1, 2, 4], [0, 3, 1, 5], name="y")
+    m.subject_to(dm.abs(u - 1) <= x)
+    m.subject_to(x + z >= 2.5)
+    m.minimize(y + u**2 + z)
+    return m
+
+
+def test_nonsmooth_epigraph_carries_the_guards():
+    """``lift_nonsmooth_atoms`` rebuilt the model without ``carry_validation_guards``,
+    so ``Transformation.apply`` refused it, and ``solve(solver="mip-nlp")`` -- which
+    lifts every such model -- raised on any guarded model with an abs/max/min atom."""
+    m = _guarded_nonsmooth_model()
+    _assert_guards_carried(m, dt.get("nonsmooth.epigraph").apply(m), "nonsmooth.epigraph")
+    out = dt.create_using("nonsmooth.epigraph", _guarded_nonsmooth_model())
+    _widen_x(out)
+    from discopt.modeling._piecewise import PiecewiseDomainError
+
+    with pytest.raises(PiecewiseDomainError):
+        out.validate()
+
+
+def test_mip_nlp_solves_a_guarded_nonsmooth_model():
+    r = _guarded_nonsmooth_model().solve(solver="mip-nlp", time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(2.0, abs=1e-5)
+
+
 def test_a_pass_that_drops_a_guard_is_refused(monkeypatch):
     def rebuild_without_guards(model):
         out = dm.Model(model.name)
