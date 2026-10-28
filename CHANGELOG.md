@@ -388,6 +388,18 @@ The release procedure that produces these entries is documented in
   - The routed `SolveResult.solver_stats` now carries `oa/highs_no_submip` when
     the switch applied.
 
+- **The convex-MINLP route's master starts with supporting hyperplanes at each
+  convex row's extremes, and the #1066 guard keeps 20% of the budget for the
+  fallback (`DISCOPT_OA_SUPPORT_CUTS`, `DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE`,
+  both default ON; `=0` opts out) (#2013, #2021).**
+  - Each new row is a tangent of a certified-convex function, so the master stays
+    a relaxation.
+  - Panel (102 routed instances, 60 s): 612 checks, 0 problems. Certified 99 → 100
+    (p_ball_10b_5p_4d_m gained), none lost. Total wall 377.6 → 313.0 s.
+    performance-plan §103.8.
+  - The routed `SolveResult.solver_stats` carries `oa/support_cuts`, the number of
+    support rows the master received.
+
 - **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
   no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
   imports no `jax` module. Without the extra, every JAX-only feature raises

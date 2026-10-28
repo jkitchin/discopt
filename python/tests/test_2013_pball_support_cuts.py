@@ -123,7 +123,7 @@ def test_support_points_are_the_axis_extremes_of_the_tight_slice():
 def test_support_cuts_keep_the_optimum_and_are_reported(monkeypatch, dim):
     """Mechanism 1, end to end: the flag changes the master's rows, not the answer,
     and the trace says what it did (OFF: ``None``, not zero)."""
-    monkeypatch.delenv("DISCOPT_OA_SUPPORT_CUTS", raising=False)
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "0")
     off = solve_lp_nlp_bb(_two_point_ball_model(dim), time_limit=60.0, milp_solver="highs")
     monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "1")
     on = solve_lp_nlp_bb(_two_point_ball_model(dim), time_limit=60.0, milp_solver="highs")
@@ -154,7 +154,7 @@ def test_support_probe_takes_the_model_columns_of_a_master_point(monkeypatch):
         m.minimize(sum((x - 3.0) ** 2 for x in xs))
         return m
 
-    monkeypatch.delenv("DISCOPT_OA_SUPPORT_CUTS", raising=False)
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "0")
     off = solve_lp_nlp_bb(model(), time_limit=60.0, milp_solver="highs")
     monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "1")
     on = solve_lp_nlp_bb(model(), time_limit=60.0, milp_solver="highs")
@@ -162,3 +162,34 @@ def test_support_probe_takes_the_model_columns_of_a_master_point(monkeypatch):
     assert on.objective == pytest.approx(off.objective, abs=1e-4)
     report = on.mip_nlp_trace["summary"]["support_cuts"]
     assert report is not None and report["boundary_points"] > 0, report
+
+
+@pytest.mark.smoke
+def test_support_cuts_are_counted_in_solver_stats(monkeypatch):
+    """#2021: the panel's ``--fired-stat oa/support_cuts`` reads how many support
+    rows the master received (CLAUDE.md section 6); absent when the flag is off."""
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "0")
+    off = solve_lp_nlp_bb(_two_point_ball_model(2), time_limit=60.0, milp_solver="highs")
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "1")
+    on = solve_lp_nlp_bb(_two_point_ball_model(2), time_limit=60.0, milp_solver="highs")
+    assert "oa/support_cuts" not in (off.solver_stats or {})
+    added = on.mip_nlp_trace["summary"]["cut_source_counts"]["support"]
+    assert added == _expected_points(2)
+    assert (on.solver_stats or {}).get("oa/support_cuts") == float(added)
+
+
+@pytest.mark.smoke
+def test_the_pair_is_on_by_default(monkeypatch):
+    """#2021: graduated with ``DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE`` on the 60 s
+    panel (performance-plan section 103.8); ``=0`` opts each out."""
+    from discopt.solver import _convex_route_fallback_reserve_enabled
+    from discopt.solvers.oa import _oa_support_cuts_enabled
+
+    monkeypatch.delenv("DISCOPT_OA_SUPPORT_CUTS", raising=False)
+    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE", raising=False)
+    assert _oa_support_cuts_enabled()
+    assert _convex_route_fallback_reserve_enabled()
+    monkeypatch.setenv("DISCOPT_OA_SUPPORT_CUTS", "0")
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE", "0")
+    assert not _oa_support_cuts_enabled()
+    assert not _convex_route_fallback_reserve_enabled()

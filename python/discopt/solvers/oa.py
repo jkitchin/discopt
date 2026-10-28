@@ -5777,20 +5777,19 @@ def _oa_support_cuts_enabled() -> bool:
     how *tight* the rows are: see :func:`_support_points_for_rows`.
 
     Bound-changing (a tighter master), so gated per CLAUDE.md section 5. Read at
-    call time. ``DISCOPT_OA_SUPPORT_CUTS=1`` opts in.
+    call time.
 
-    **Kept as a documented opt-in (2026-10-28), not the default.** Panels over the
-    102 routed MINLPLib instances were cert-clean at 30 s and 60 s (612 checks each,
-    0 problems, none gained or lost), but the gain is confined to the class it was
-    built for: p_ball_10b_5p_2d_m 25.2 -> 13.0 s (30 s) and 23.9 -> 13.3 s (60 s),
-    total wall 738.9 -> 729.3 s at 60 s. Section 2 rejects a default whose benefit
-    is one instance. What would change that: the p_ball remainder in #2021 -- the
-    #1066 guard handing over a bound that climbs 2-3 units per restart, and the #1634
-    cross-solve re-proving a claim from a root bound of 0 -- after which
-    p_ball_10b_5p_4d_m / 20b_5p_2d_m certify, then the same panel rerun.
-    performance-plan section 103.6.
+    **Graduated (2026-10-28, #2021): default ON; ``=0`` opts out.** It was first kept
+    as an opt-in because its panels' gain was confined to p_ball_10b_5p_2d_m. With
+    the #2021 sub-MIP switch (``DISCOPT_HIGHS_MASTER_NO_SUBMIP``) and paired with
+    ``DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE``, the 60 s panel over the 102 routed
+    MINLPLib instances (612 checks, 0 problems) certified 99 -> 100
+    (p_ball_10b_5p_4d_m gained, none lost), total wall 377.6 -> 313.0 s. The gain is
+    all three p_ball instances (10b_2d 7.3 -> 3.2 s, 20b_2d 40.6 -> 13.9 s, 4d
+    uncertified -> 29.2 s); the other 30 instances it fires on are neutral
+    (56.1 -> 53.3 s). performance-plan section 103.8.
     """
-    return os.environ.get("DISCOPT_OA_SUPPORT_CUTS", "0").strip().lower() in (
+    return os.environ.get("DISCOPT_OA_SUPPORT_CUTS", "1").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -6503,6 +6502,7 @@ def solve_lp_nlp_bb(
     # strategy's point) is what the probe starts from for columns it does not
     # move. Reported in the trace whether or not it ran (CLAUDE.md section 6).
     support_report: Optional[_SupportPointReport] = None
+    support_rows_added = 0
     if _oa_support_cuts_enabled():
         support_report = _SupportPointReport()
         cuts_before_support = len(oa_A_rows)
@@ -6554,10 +6554,11 @@ def solve_lp_nlp_bb(
                 cut_provenance=cut_provenance,
                 constraint_source="support",
             )
+        support_rows_added = len(oa_A_rows) - cuts_before_support
         logger.info(
             "LP/NLP BB: %d support rows from %d boundary points on %d rows in %.2fs "
             "(DISCOPT_OA_SUPPORT_CUTS)",
-            len(oa_A_rows) - cuts_before_support,
+            support_rows_added,
             support_report.boundary_points,
             support_report.rows_probed,
             support_report.wall_s,
@@ -7201,6 +7202,9 @@ def solve_lp_nlp_bb(
         route_stats["oa/unverified_incumbent"] = 1.0
     if highs_no_submip:
         route_stats["oa/highs_no_submip"] = 1.0
+    if support_rows_added:
+        # #2021: the support rows the master started with (``--fired-stat``).
+        route_stats["oa/support_cuts"] = float(support_rows_added)
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(

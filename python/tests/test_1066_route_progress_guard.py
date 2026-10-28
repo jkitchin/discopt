@@ -48,11 +48,17 @@ pytest.importorskip("highspy", reason="the OA master needs a MILP backend")
 #: whole module rather than letting these assertions read whichever policy happens
 #: to be the default -- a test of the legacy path must select the legacy path.
 DECISION_POINT_ENV = "DISCOPT_CONVEX_ROUTE_DECISION_POINT"
+#: #2021 graduated the #2013 fallback reserve to default-on. It is a separate rule
+#: (a hand-over at 80% of the budget) with its own class, ``TestFallbackReserve``,
+#: which sets it explicitly; the trend and bound-stall tests replay traces to the
+#: wall and pin it off so they judge their own rule.
+RESERVE_ENV = "DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE"
 
 
 @pytest.fixture(autouse=True)
 def _pin_the_1066_policy(monkeypatch):
     monkeypatch.setenv(DECISION_POINT_ENV, "0")
+    monkeypatch.setenv(RESERVE_ENV, "0")
 
 
 def _load(name: str) -> Model:
