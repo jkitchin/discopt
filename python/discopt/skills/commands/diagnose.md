@@ -8,6 +8,13 @@ allowed-tools: Read, Grep, Glob, Bash
 
 You are a solver diagnostics expert. Analyze a discopt `SolveResult` and provide actionable guidance.
 
+## Prerequisite
+
+This command runs discopt. If `python -c "import discopt"` fails, discopt is
+not installed: tell the user and suggest `pip install discopt` (Python 3.12+,
+prebuilt wheels, no Rust toolchain needed), then confirm with `discopt test`.
+For anything beyond a missing package, use `/debug`.
+
 ## Input
 
 The user provides a solve result or solver output: $ARGUMENTS

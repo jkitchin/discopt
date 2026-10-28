@@ -24,21 +24,46 @@ Before debugging anything model-specific, confirm the installation is sane.
 These are cheap and rule out a huge class of problems:
 
 ```bash
-discopt about          # versions: discopt, Rust ext, JAX backend, optional deps
-discopt test           # smoke test: import, Rust extension, JAX, build+solve
+python -c "import discopt; print(discopt.__version__, discopt.__file__)"
+discopt about          # versions: discopt, Rust ext, Python, optional deps
+discopt test           # smoke test: import, Rust extension, build+solve
 ```
 
-Read the output carefully:
-- **`Rust ext: not available`** → the compiled extension didn't build/install.
-  Rebuild with `cd discopt_benchmarks && pip install -e ".[dev]"` (or `maturin
-  develop` in the crate). Most "import discopt fails" / segfault reports are this.
-- **JAX backend unexpected** (e.g. GPU when you wanted CPU, or vice versa) →
-  set `JAX_PLATFORMS=cpu` (or `cuda`) before importing. discopt needs 64-bit
-  floats; `JAX_ENABLE_X64=1` is auto-set but verify it if you see precision loss.
-- **Optional dep `not installed`** (cyipopt, highspy, onnx, litellm, pycutest) →
-  install the matching extra: `pip install "discopt[nn]"`, `[llm]`, `[ipopt]`, etc.
-  (Design of experiments is no longer an extra — it is a separate package:
-  `pip install discopt-doe`.)
+First decide which kind of install this is, because the fixes differ. If
+`discopt.__file__` is under `site-packages`, it is a **PyPI install** (most
+users). If it points into a git checkout (`.../python/discopt/`), it is a
+**source/developer install**.
+
+**PyPI install:**
+- **`ModuleNotFoundError: No module named 'discopt'`** → not installed in *this*
+  interpreter. `pip install discopt` (or `uv pip install discopt`). If the user
+  says it is installed, compare `which python` / `sys.executable` with where pip
+  installed it; a notebook kernel or IDE using a different environment is the
+  usual cause.
+- **pip says "no matching distribution"** → Python is older than 3.12. Use a
+  newer interpreter (`uv venv --python 3.12`), do not try a source build.
+- **pip starts compiling Rust / fails in `maturin`** → no prebuilt wheel for this
+  platform (wheels exist for macOS x86_64/arm64, Linux x86_64/aarch64, Windows
+  x86_64). Building from source needs a Rust toolchain (`rustup`); say so rather
+  than silently installing one.
+- **`Rust ext: not available`** on a PyPI install → a broken or partial install.
+  `pip install --force-reinstall discopt`.
+
+**Source/developer install:**
+- **`Rust ext: not available`**, or `AttributeError: ... has no attribute ...` on
+  a Rust object → the compiled extension is missing or stale. From the **repo
+  root**, run `maturin develop --release` (re-run after any change under
+  `crates/`). Running maturin inside `crates/discopt-python/` installs a separate
+  package and leaves the in-tree `_rust` extension stale.
+
+**Either:**
+- **Optional dep `not installed`** (jax, cyipopt, onnx, litellm, pycutest) →
+  only matters if the user needs that feature; a missing extra raises an
+  `ImportError` naming it. Install the matching extra: `pip install
+  "discopt[jax]"`, `[nn]`, `[ipopt]`, `[llm]`, `[pyomo]`, etc. (Design of
+  experiments is a separate package: `pip install discopt-doe`.)
+- **JAX backend unexpected** (GPU vs CPU) → set `JAX_PLATFORMS=cpu` (or `cuda`)
+  before importing. JAX is optional and not on the default solve path.
 
 ## Step 1 — Reproduce minimally
 
@@ -56,7 +81,8 @@ Get a deterministic, smallest-possible reproduction:
 
 ### A. Import / install / segfault
 - Run `discopt about` / `discopt test` (Step 0).
-- `ImportError: discopt._rust` → extension not built (see Step 0).
+- `ImportError: discopt._rust` → extension missing: reinstall the wheel (PyPI
+  install) or rebuild it (source install); see Step 0.
 - Segfault on solve → almost always a numpy dtype/shape passed into the Rust
   zero-copy boundary. Check arrays are contiguous `float64`/`int64`; print
   shapes. Re-run with `--no-daemon` so the crash is in-process and traceable.

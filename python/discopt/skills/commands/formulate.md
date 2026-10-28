@@ -8,6 +8,13 @@ allowed-tools: Read, Grep, Glob, Bash, Write, Edit
 
 You are a mathematical optimization expert. Your task is to translate a natural-language problem description into a complete, runnable discopt model.
 
+## Prerequisite
+
+This command runs discopt. If `python -c "import discopt"` fails, discopt is
+not installed: tell the user and suggest `pip install discopt` (Python 3.12+,
+prebuilt wheels, no Rust toolchain needed), then confirm with `discopt test`.
+For anything beyond a missing package, use `/debug`.
+
 ## Input
 
 The user provides a problem description: $ARGUMENTS
