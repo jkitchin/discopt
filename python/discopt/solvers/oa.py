@@ -1450,6 +1450,15 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         from discopt._relax.perspective import perspective_objective_terms
 
         evaluator._perspective_oa_terms = perspective_objective_terms(model)
+    # #2021 §3: the diagonal-perspective split of a coupled quadratic ``<=`` row,
+    # carried the same way for the same reason (a model property the cut sites
+    # cannot see). Keyed by EVALUATOR row, which is what a cut's id names.
+    if _perspective_row_cut_enabled():
+        from discopt._relax.perspective import perspective_row_terms
+
+        evaluator._perspective_row_terms = _PerspectiveRowState(
+            perspective_row_terms(model, evaluator.constraint_row_map())
+        )
     oa_convexity = classify_oa_cut_convexity(model)
     n_vars = evaluator.n_variables
     n_cons = evaluator.n_constraints
@@ -3140,6 +3149,61 @@ def _perspective_oa_terms_enabled() -> bool:
     return perspective_oa_cut_enabled()
 
 
+def _perspective_row_cut_enabled() -> bool:
+    """Thin re-export, as :func:`_perspective_oa_terms_enabled`."""
+    from discopt._relax.perspective import perspective_row_cut_enabled
+
+    return perspective_row_cut_enabled()
+
+
+class _PerspectiveRowState:
+    """#2021 §3: the split rows of one solve and their CLAUDE.md §6 counters.
+
+    ``applied`` counts cuts that were replaced by their split form;
+    ``id_mismatch`` counts cuts left alone because the library's own tangent at
+    the support point did not match the detected row's -- the row id did not
+    name the row the detector read, so the split is refused for that cut.
+    """
+
+    __slots__ = ("by_row", "applied", "id_mismatch")
+
+    def __init__(self, terms):
+        self.by_row = {t.row: t for t in terms}
+        self.applied = 0
+        self.id_mismatch = 0
+
+
+def _apply_perspective_row_cut(evaluator, constraint_id, coeffs, rhs, support, n_vars):
+    """Replace a ``<=`` row's OA tangent with its #2021 split form, or return it.
+
+    Applies only when the flag attached a state, ``constraint_id`` is a split
+    row, and the library's tangent ``coeffs`` at ``support`` equals the
+    detector's own tangent of that row at ``support`` (a runtime check that the
+    row id and the extracted algebra agree). Anything else returns the cut
+    unchanged.
+    """
+    state = getattr(evaluator, "_perspective_row_terms", None)
+    if state is None or constraint_id is None or support is None:
+        return coeffs, rhs
+    term = state.by_row.get(int(constraint_id))
+    if term is None:
+        return coeffs, rhs
+    coeffs = np.asarray(coeffs, dtype=np.float64)
+    if coeffs.shape != (n_vars,):
+        return coeffs, rhs
+    support = np.asarray(support, dtype=np.float64)[:n_vars]
+    mine = term.plain_tangent(support, n_vars)
+    scale = max(1.0, float(np.abs(mine).max()))
+    if not np.allclose(coeffs, mine, rtol=0.0, atol=1e-7 * scale):
+        state.id_mismatch += 1
+        return coeffs, rhs
+    new, new_rhs, shifted = term.cut(support, n_vars)
+    if not shifted:
+        return coeffs, rhs
+    state.applied += 1
+    return new, new_rhs
+
+
 def _strengthen_objective_cut_perspective(coeffs, rhs, x_star, n_vars, terms):
     """Perspective-strengthen an OA objective epigraph row in place-safe form.
 
@@ -3486,11 +3550,14 @@ def _add_oa_cuts(
             )
 
             if sense == "<=":
+                coeffs, row_rhs = _apply_perspective_row_cut(
+                    evaluator, constraint_id, coeffs, cut.rhs, support, n_vars
+                )
                 _append_master_cut(
                     oa_A_rows,
                     oa_b_rows,
                     coeffs,
-                    cut.rhs,
+                    row_rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
                     source=constraint_source,
@@ -3685,13 +3752,16 @@ def _add_ecp_cuts(
             )
 
             if sense == "<=":
-                if reject_if_incumbent_excluded(coeffs, cut.rhs, global_valid):
+                coeffs, row_rhs = _apply_perspective_row_cut(
+                    evaluator, constraint_id, coeffs, cut.rhs, x_master, n_vars
+                )
+                if reject_if_incumbent_excluded(coeffs, row_rhs, global_valid):
                     continue
                 _append_master_cut(
                     oa_A_rows,
                     oa_b_rows,
                     coeffs,
-                    cut.rhs,
+                    row_rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
                     source="ecp",
@@ -7290,6 +7360,10 @@ def solve_lp_nlp_bb(
         route_stats["oa/support_cuts"] = float(support_rows_added)
     if support_report is not None and support_report.rows_refuted:
         route_stats["oa/convexity_refuted"] = float(len(support_report.rows_refuted))
+    row_state = getattr(decomp.evaluator, "_perspective_row_terms", None)
+    if row_state is not None and row_state.applied:
+        # #2021 §3: OA row cuts replaced by their diagonal-perspective split.
+        route_stats["oa/perspective_row_cuts"] = float(row_state.applied)
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(

@@ -416,6 +416,23 @@ The release procedure that produces these entries is documented in
   - The routed `SolveResult.solver_stats` carries `oa/support_cuts`, the number of
     support rows the master received.
 
+- **The convex-MINLP route strengthens the OA cut of a dense convex quadratic row
+  over semicontinuous variables with a diagonal-perspective split
+  (`DISCOPT_PERSPECTIVE_ROW_CUT`, default ON; `=0` restores the plain tangent)
+  (#2021).**
+  - The row has the form `x'Qx <= ...`, where `x = F w + f0` holds by linear
+    equalities, `0 <= w_i <= U z_i` and `z_i` is binary. `D = t diag(M)` is split
+    off `M = 0.5 F'QF`, keeping `M - D` PSD (Cholesky-certified). The tangent then
+    gains the perspective term of each `d_i w_i^2`.
+  - The new row is valid for every feasible point, and stronger than the plain
+    tangent wherever `z_i < 1`. The portfolio risk row is the witness.
+  - Panel (102 routed instances, 30 s): 612 checks, 0 problems, certified 98 → 98.
+    The cut fires only on portfol_classical050_1, which gets its optimal incumbent.
+  - Portfolio class run (7 instances outside the index, 2 reps): 0 soundness
+    problems. portfol_robust050_34 certifies in 14 s (uncertified at 30 s OFF), and
+    portfol_robust100_09 finds its optimum (no incumbent OFF). performance-plan §103.10.
+  - The routed `SolveResult.solver_stats` carries `oa/perspective_row_cuts`.
+
 - **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
   no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
   imports no `jax` module. Without the extra, every JAX-only feature raises

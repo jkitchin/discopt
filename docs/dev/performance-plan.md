@@ -13384,3 +13384,110 @@ fast-lane budget. That was not a slowdown: with the support cuts the solve
 certifies (8.7 s locally, against a 0.5 s uncertified exit without them), and it
 reached its 30 s limit on CI. Its limit is now 8 s; it checks both exits.
 
+### 103.10 #2021 section 3: a diagonal-perspective split of the coupled risk row; `DISCOPT_PERSPECTIVE_ROW_CUT` graduates (2026-10-28)
+
+**Structure.** A convex row `0.5 x_S'Q_SS x_S + c'x + k <= 0` whose quadratic
+columns are each defined by one linear `==` row, `x_S = F w + f0`, has quadratic part
+`w'Mw` with `M = 0.5 F'Q_SS F`. On the `w_i` that are semicontinuous (`lb >= 0`, a
+row `w_i <= U_i z_i`, `z_i` binary) take `D = t diag(M)`, with `t` bisected for
+`M - D` PSD, multiplied by 0.999, and confirmed by a Cholesky of
+`M - D - 1e-9 max(1, max|diag M|) I`. The OA tangent at `x^ = F w^ + f0` then gains
+`-d_i w^_i^2` on `z_i` and on the right-hand side wherever `w^_i > 0`. That row is the
+tangent of the PSD remainder plus the perspective cut of each `d_i w_i^2`. It is
+valid at `z_i = 1` (the shift cancels) and at `z_i = 0` (`w_i = 0`), and it is
+strictly stronger than the plain tangent whenever `z_i < 1`. Validity needs only
+`M - D` PSD and the exact substitution, and the detector declines anything else:
+an ambiguous or missing defining row, `|a_j| < 1e-6` times the row scale, `lb < 0`,
+no indicator, an asymmetric `Q_SS`, or more than 500 columns. The portfolio risk
+row `x'Sigma x <= sigma2` with `x_i = w_i` is the witness; the separable
+`DISCOPT_PERSPECTIVE_DISAGG` path cannot touch it because `Sigma` is dense.
+
+**Entry experiment** (`issue2021_perspective_row_probe.py`). No library edit: the
+probe wraps `oa._append_master_cut` and replaces the risk-row cut. 30 s, 2 reps,
+interleaved, load 3.5. EXECUTED 6, every ON solve applied the cut, and 0 id
+mismatches.
+
+| instance | `t` | OFF | ON |
+|---|---|---|---|
+| portfol_robust050_34 | 0.0774 | feasible -0.05524, 30.1 s (x2) | **certified -0.0720755, 13.9 / 14.1 s** |
+| portfol_classical050_1 | 0.1257 | feasible -0.08975, bound -0.09777 (x2) | feasible **-0.09476 (the optimum)**, same bound (x2) |
+| portfol_classical200_2 | 0.0047 | no incumbent; bound -0.13154 in rep 1 only (at 40.3 s) | no incumbent, no bound (x2) |
+
+Not killed: one certificate, one optimal incumbent.
+
+**Deviation from the plan: `_RootLP` is not wired.** The cut is wired into
+`_add_oa_cuts` and `_add_ecp_cuts` of the `lp_nlp_bb` master. It is not wired into
+`_RootLP`, which serves the NLP-BB route. No routed panel instance reaches that
+route, so the panel could not have measured it there. Wiring it without a
+measurement would be the unmeasured change section 4 forbids. Cut ids are evaluator
+flat rows (`evaluator.constraint_row_map()`), and a runtime guard refuses to replace
+a cut when the detector's plain tangent at the support point does not match the
+cut it was handed (atol `1e-7` times the row scale). The guard counted 0 mismatches
+in every run below.
+
+**Panel** (`issue1913_pseudocost_panel.py`, the 102 routed instances, 30 s,
+2 workers, interleaved, each subprocess asserting the
+`discopt._relax.perspective:def perspective_row_terms` marker, load 2.6 at start):
+
+| checks | problems | certified OFF -> ON | total wall | both-certify wall |
+|---|---|---|---|---|
+| 612 | 0 | 98 -> 98 (none gained, none lost) | 247.7 -> 247.7 s | 127.3 -> 127.3 s, 173,001 nodes both arms |
+
+The cut fires on one instance (`--fired-stat oa/perspective_row_cuts`):
+portfol_classical050_1, 299 cuts. The other two portfol instances in the index
+(buyin, card) have no qualifying row. That instance again finds the optimum ON
+(-0.09476) against -0.08975 OFF, at the same bound. The routed panel holds one
+member of the class the cut targets, so it shows only that the cut is inert
+elsewhere.
+
+**Supplementary class run.** The index the panel builds from excludes the other
+portfol instances, because their `gap` in `instancedata.csv` is not 0. They were
+run directly through the library flag: 7 instances, 30 s, 2 reps, OFF/ON interleaved
+with a fresh subprocess per arm. Every incumbent passed `verify_point` on a freshly
+read model, every bound stayed at or below its `minlplib.solu` best value, and every
+incumbent stayed at or above its best dual. EXECUTED 28, 0 soundness problems,
+0 id mismatches. The run's own scratch script is `s3_supp.py`, a library-flag
+variant of `s3_lib_check.py`, and is not committed.
+
+| instance | applied | OFF (x2) | ON (x2) |
+|---|---|---|---|
+| portfol_robust050_34 | 276 | feasible -0.05524, 30.1 s | **certified -0.0720755, 14.0 / 14.1 s** |
+| portfol_robust100_09 | 250 | no incumbent, bound -0.107954 | **incumbent -0.1050046 (the optimum)**, bound -0.107954 / -0.1079545 |
+| portfol_classical200_2 | 23 | no incumbent, no bound | no incumbent, bound -0.13148 / -0.13165 (best dual -0.11619) |
+| portfol_shortfall050_68, _100_04, _200_05, portfol_robust200_03 | 0 | identical | identical (no qualifying row) |
+
+Summed over the 28 solves: certified 0 -> 2, incumbents 8 -> 10, bounds 8 -> 10,
+wall 454.7 -> 441.7 s.
+
+**Two qualifications.**
+
+- **robust100_09's rep-2 ON bound is 7e-7 looser than OFF.** Its rep-1 bound is
+  identical to OFF. Both are valid (the optimum is -0.10500). The same instrument
+  measures run-to-run bound variation of 2.9e-6 on portfol_shortfall100_04, where
+  the cut never fires: -1.1346660 vs -1.1346689 across OFF reps. The 7e-7 is
+  within that noise.
+- **classical200_2 is mixed, not a win.** Over the entry run and this one, a bound
+  at the limit appears in 2/4 ON and 1/4 OFF solves. The arm that gets one overruns
+  the 30 s limit to about 40 s in either arm: 40.3 s OFF in the entry run,
+  40.9 / 41.0 s ON here. That overrun is a property of the late phase that produces
+  the bound, not of the flag.
+
+**Overlap disclosure.** One 3-instance detector timing probe ran during solves 26-27
+of the supplementary run. Those two solves were on shortfall100_04 and
+shortfall200_05, where the cut does not fire. The probe measured the detector at
+0.07 s on classical200_2. Another project's pytest was also running on the machine,
+which I did not start; load was about 2.
+
+**Verdict.** The flag graduates. Cert-clean: 612 + 28 checks, 0 problems, no bound
+past its reference, no certificate lost, every incumbent verified. Net-positive on
+the class it targets, on more than one instance: a certificate on robust050_34
+(4/4 reps), the optimal incumbent on robust100_09 (2/2 vs 0/2), and the optimal
+incumbent on classical050_1 (3/3 vs 0/3). It is inert across the other 101 routed
+instances. It graduates default ON; `DISCOPT_PERSPECTIVE_ROW_CUT=0` restores the
+plain tangent. It is introduced and graduated in the same PR, so the audit marker
+is unchanged at 51. classical050_1 still does not certify at 30 s: the bound
+-0.09777 does not move in either arm, so the remaining gap there is the master's
+bound, not the incumbent. At 120 s with the flag ON (one run, 548 cuts applied,
+0 id mismatches, load 2.6) it is still uncertified. The bound reaches -0.097687
+against the optimum -0.094760, a gap of about 3%. The issue's portfol item stays
+open on that bound.
