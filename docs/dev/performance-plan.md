@@ -13265,3 +13265,122 @@ certified, below the optimum, 393 nodes in 0.28 s. With the flag off it reaches
 48.989795 in 333 nodes and 0.49 s (2 reps each, identical). The test reads the tree
 that runs past the gap tolerance, so it now pins `DISCOPT_HIGHS_MASTER_NO_SUBMIP=0`
 as well, and its docstring records the flag-on reading. No tolerance was loosened.
+
+
+### 103.8 #2021 section 1: neither p_ball remainder reproduces; the support cuts and the reserve graduate (2026-10-28)
+
+The plan named two causes for p_ball_10b_5p_4d_m and p_ball_20b_5p_2d_m staying
+uncertified under the pair: (b) the #1634 cross-solve re-proving the master's claim
+from a root bound of 0, and (a) the #1066 guard handing over a bound that climbs
+2-3 units per restart. Both were measured first, with no library edit
+(`issue2021_pball_probe.py`). The tree was the section 2 branch, with
+`DISCOPT_HIGHS_MASTER_NO_SUBMIP` default ON. The machine was quiet, with one worker.
+
+**The premise of (b) does not reproduce.** 4d at 120 s with the guard off
+(`DISCOPT_CONVEX_ROUTE_GUARD=0`) certifies in 29.1 s over 15 restarts. Its
+cross-solve takes 2.8 s and 1,869 nodes and finishes optimal. With
+`DISCOPT_HIGHS_MASTER_NO_SUBMIP=0` it certifies in 48.1 s over 21 restarts, and the
+cross-solve takes 3.3 s. The issue's "final bound 33.9, cross-solve re-proves from
+0" was not seen on 5702696c. Commit 36f4339c is a candidate cause, since it bounds
+the support probe by an evaluation count and not a clock. That is an inference and
+was not bisected.
+
+`cross` mode reloads the captured final master. It then runs the cross-solve cold
+and seeded with the accepted incumbent (`setSolution` right after `passModel`),
+3 interleaved reps:
+
+| instance | cold | warm |
+|---|---|---|
+| 4d | 3.12 s, 1,842 nodes | 3.34 s, 2,035 nodes |
+| 20b | 1.62 s, 1,596 nodes | 0.97 s, 841 nodes |
+
+All runs finished optimal. The warm start is slower on one instance and faster on
+the other, and at most 0.65 s either way, so **(b) ships nothing**.
+
+**(a) is killed by its own criterion.** 60 s, pair on, guard on, 2 reps per
+arm, interleaved by flag:
+
+| instance | `NO_SUBMIP=0` | `NO_SUBMIP=1` (default) |
+|---|---|---|
+| 4d | certified 48.0 / 47.8 s, 21 restarts | certified 28.8 / 28.8 s, 15 restarts |
+| 20b | certified 9.6 / 9.6 s | certified 13.8 / 13.9 s |
+
+The guard never handed over in these runs. The `replay` mode then replayed the
+proposed rule offline on the recorded guard calls, with the solve's own limit and
+reserve. The rule keeps the route only if the trailing-window bound rate projects
+the bound onto the incumbent before `limit - reserve`. On 4d with `NO_SUBMIP=0` it
+hands over at 30.3 s, but the measured route certifies at 48.0 s under the 25% gap
+rule that is already in place. The other traces certify before the checkpoint, so
+the rule is never consulted (EXECUTED 0). A rule that hands over a route 18 s before
+it certifies is the kill criterion, so `DISCOPT_CONVEX_ROUTE_BOUND_TREND` was
+**not built**.
+
+**Retraction of section 103.6.** Section 103.6 said p_ball_20b_5p_2d_m "does not
+certify by the reserve's 48 s hand-over under panel load". On the section 2 tree it
+certifies in 13.8 s at one worker and in 13.9 s in the panel below. Panel G's 4d
+bound of 6.7e-7 is likewise gone: 4d certifies. The remainder 103.6 named was
+mostly the sub-MIP cost that section 103.7 removed.
+
+**Panel G rerun** (`issue1913_pseudocost_panel.py`, the 102 routed instances,
+60 s, 2 workers, both flags toggled together, interleaved, every incumbent
+verified, each subprocess asserting the `oa/support_cuts` stat marker). Results:
+
+- 612 checks, 0 problems, no verify failures.
+- Certified 99 -> 100: p_ball_10b_5p_4d_m gained (60.1 s uncertified -> 29.2 s), none lost.
+- Both-certify wall 197.3 -> 163.5 s over 99 instances; total wall 377.6 -> 313.0 s.
+- The support rows reached the master on 33 instances (`--fired-stat oa/support_cuts`).
+- All three p_ball instances gain: 10b_2d 7.3 -> 3.2 s, 20b_2d 40.6 -> 13.9 s.
+- The other 30 instances where the cuts fire are neutral (56.1 -> 53.3 s summed).
+  Over all 97 non-p_ball instances that certify in both arms, the wall is 149.3 -> 146.4 s.
+- The guard fired on two instances in both arms, each time by the 25% trend rule
+  and never by the reserve. portfol_classical050_1 hit it at 30.9 / 30.7 s, with the
+  same bound. tls4 hit it at 35.2 / 42.5 s, with its bound 2.335 -> 2.140 (optimum
+  8.3, uncertified in both): the same guard-allocation tail as section 103.7.
+
+Load was 3.4-4.1 (two workers plus system daemons). The p_ball wall times match
+the quiet one-worker runs above, within 0.4 s (4d and 20b).
+
+**Verdict.** Both bars pass. The panel is cert-clean: 0 problems, none lost, and
+every bound at or below its reference. It is net-positive: one certificate gained
+and total wall down 17%. The benefit is now the whole p_ball class, not the one
+instance that section 103.6 rejected, and the cuts are neutral where else they
+fire. Both flags **graduate** default ON. `DISCOPT_OA_SUPPORT_CUTS=0` and
+`DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE=0` restore the old paths. The audit marker
+goes 53 -> 51.
+
+### 103.9 #2021 section 1, CI: the support cuts certified a false bound under a false convexity certificate (2026-10-28)
+
+CI on #2026 failed `test_1673_b4_false_convexity_infeasible.py`. That test feeds
+LP/NLP-BB a deliberately false convexity certificate for
+`x0**-3.5 - x2**2 <= 0` (true optimum 21.555). With highspy 1.15.1, the version
+CI uses, `main` and #2026 both pass with `DISCOPT_OA_SUPPORT_CUTS=0` and both fail
+with `=1`. The tangents of the concave `-x2**2` drove the master to `optimal`
+9620.58 with a matching bound. With only the ordinary OA rows the run stayed
+uncertified and fell back. (With highspy 1.12.0 the same tests fail on `main`
+without the flag: that version alone mishandles this master.)
+
+Fix: `_support_points_for_rows` keeps every value of the row it evaluates. Each
+tangent is checked against those values (`_tangent_refutes_convexity`, relative
+slack 1e-6). One tangent above a sample proves the row nonconvex. The row's
+support points are dropped, and `solve_lp_nlp_bb` withdraws `master_bound_valid`
+and `master_feasible_set_valid`, reported as `oa/convexity_refuted`. The check
+reuses the probe's evaluations, plus 2 per tangent point.
+
+Bound-neutral on true certificates: an A/B against the unfixed head (0a9b488e)
+over the 102 routed instances, 60 s, interleaved, fresh process per solve, code
+marker asserted, incumbents verified:
+
+- 0 refutations; `oa/support_cuts` identical on all 32 instances where it fires.
+- Certified 100 → 100 (none lost, none gained); total wall 271.8 → 271.1 s.
+- 0 problems over 493 checks (each objective and bound checked against `.solu`).
+- The one node difference among the instances both arms certify, `clay0305m`
+  (22812 → 22909), is run-to-run noise: two reruns of the unfixed code gave 22964
+  and 22965.
+- `tls4` was missing from the batch run and was rerun on its own: no refutation,
+  4 support rows in each arm, uncertified in each arm with bound ≤ 8.3.
+
+`test_1658::test_lp_nlp_bb_never_certifies_an_unverified_incumbent` exceeded the
+fast-lane budget. That was not a slowdown: with the support cuts the solve
+certifies (8.7 s locally, against a 0.5 s uncertified exit without them), and it
+reached its 30 s limit on CI. Its limit is now 8 s; it checks both exits.
+
