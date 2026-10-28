@@ -13121,3 +13121,37 @@ one instance. The flag's measured value is at 60 s (p_ball_20b_5p_2d_m feasible 
 optimal 37.3 s), and it is blocked downstream of the cuts. The #1066 guard abandons a
 route whose bound is still rising, and abandoning withdraws an unconfirmed bound
 (#1634) with too little budget left for the fallback to produce one.
+
+
+### 103.5 A fallback reserve for routes that earn their budget to the wall (2026-10-28)
+
+**Mechanism (measured).** The p_ball_10b_5p_4d_m bound loss in section 103.4 came
+from the guard's timing, not from the support cuts. A simulated route that keeps
+earning its budget (`earning_guard` probe: the trend test always passes) runs to the
+wall in both arms. There the #1634 cross-solve has no time, so the route's bound is
+withdrawn, and with less than the 1 s floor left no fallback runs: **no dual bound**.
+Forced late handovers lose it as well. With 4.3 s or less left, the fallback produced
+no bound in 6/6 runs (it spends ~1.3 s on setup before NLP-BB starts); with 5.3 s it
+produced its root bound. portfol_classical050_1's fallback bounds with 2.4 s. The
+support cuts only made the late case more likely.
+
+**Change (flag `DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE`, default OFF).** Under the
+#1066 trend policy, from the checkpoint on, the guard hands over once 20% of the
+limit remains unless the route has converged. The earning route then hands over at
+24.6 s and keeps its bound. Pinned by `TestFallbackReserve`.
+
+**Panels** (102 routed instances, 30 s, interleaved, every incumbent verified):
+
+| panel | arms | checks / problems | certified | both-certify wall | total wall |
+|---|---|---|---|---|---|
+| E | reserve OFF -> ON | 612 / 0 | 95 -> 95 | 350.0 -> 349.8 s | 562.4 -> 562.0 s |
+| F | support cuts OFF -> ON (reserve on) | 612 / 0 | 96 -> 96 | 351.7 -> 335.5 s | 533.3 -> 517.3 s |
+
+Panel E ran while ~75 s of local tests also ran, so its absolute walls are high; the
+arms are interleaved per instance. The reserve fired once (a nested 2 s route inside
+a fallback, with no effect). In F, p_ball_10b_5p_4d_m keeps its bound in both arms,
+and no ON-arm route raised. The gains are p_ball_10b_5p_2d_m 25.2 -> 13.0 s and
+clay0204m 8.9 -> 5.5 s; clay0303hfsg is slower (4.4 -> 7.4 s). Both bars are met at
+30 s but the gain is concentrated, and the support cuts' clearest win
+(p_ball_20b_5p_2d_m, optimal in 37.3 s) is beyond a 30 s limit. The decision is taken
+on a 60 s panel of the pair.

@@ -130,7 +130,8 @@ def run(
         for arm in ("1", "0") if idx % 2 else ("0", "1"):
             if (p["name"], arm) in done:
                 continue
-            env = dict(os.environ, **{flag: arm})
+            # ``--flag A,B`` toggles several flags together (#2013).
+            env = dict(os.environ, **dict.fromkeys(flag.split(","), arm))
             t0 = time.perf_counter()
             try:
                 proc = subprocess.run(
