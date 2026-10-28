@@ -32,7 +32,6 @@ always lies in it, and the monotone context never needs ``t`` outside it).
 
 from __future__ import annotations
 
-import copy
 from typing import Optional
 
 import numpy as np
@@ -49,6 +48,8 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
     _known_shape,
+    carry_builder_objective,
+    rewritten_objective,
 )
 
 __all__ = ["lift_nonsmooth_atoms", "complete_lifted_point"]
@@ -211,14 +212,13 @@ def lift_nonsmooth_atoms(model: Model) -> Model:
         e = 1 if obj.sense == ObjectiveSense.MINIMIZE else -1
         expr = lifter.rewrite(obj.expression, e)
         if expr is not obj.expression:
-            new_obj = copy.copy(obj)
-            new_obj.expression = expr
-            new_model._objective = new_obj
+            new_model._objective = rewritten_objective(obj, expr)
 
     if not lifter.aux:
         return model
     new_model._constraints = rebuilt + lifter.rows
     carry_complementarities(model, new_model, pass_name="nonsmooth epigraph lifting")
+    carry_builder_objective(model, new_model)  # fast-API objective; after the last aux column
     new_model._nsl_source_model = model  # type: ignore[attr-defined]
     new_model._nsl_n_orig_flat = sum(v.size for v in model._variables)  # type: ignore[attr-defined]
     new_model._nsl_aux = list(lifter.aux)  # type: ignore[attr-defined]

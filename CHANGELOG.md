@@ -1183,6 +1183,8 @@ The release procedure that produces these entries is documented in
 
 #### Other fixes
 
+- **A fast-API objective with nonlinear rows no longer fails to solve.** `add_linear_objective` / `add_quadratic_objective` keep the objective in the Rust builder. The factorable reformulation, entropy canonicalization, multilinear split, nonsmooth epigraph lift and integer-product expansion rebuilt the model without it, so `solve()` raised "objective is a builder placeholder but the model retains no builder objective block". Found by the `modeling_guide` notebook. Each pass now re-issues the builder objective, as the GDP lowering already did (#1798). A pass that rewrites the objective now yields an ordinary objective, so the rewrite is no longer discarded.
+
 - **Solve options that were ignored are now honoured, or a warning is raised.** This covers tuning and kernel levers, `mu_init`, `gdp_method`, the native kernel's relative `gap_tolerance`, `gdp_method="hull"` on `add_disjunction`, and `strategy` and `node_callback` (#1645, #1663, #1689). A gap tolerance below 1e-8 is obeyed (#1583).
 
 - **Routing fixes.** `Parameter*(x+y)` and zero-Q quadratics now route to HiGHS as LPs. `algorithm_route` is named for every route. Decomposition masters use HiGHS (#1646, #1663).

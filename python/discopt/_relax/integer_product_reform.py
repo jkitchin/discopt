@@ -50,7 +50,9 @@ from discopt.modeling.core import (
     Model,
     Variable,
     VarType,
+    carry_builder_objective,
     carry_validation_guards,
+    rewritten_objective,
 )
 from discopt.mpec import carry_complementarities
 from discopt.solver_tuning import _env_flag
@@ -1101,11 +1103,7 @@ def expand_integer_products(
             obj = new_model._objective
             new_expr = _rewrite(distribute_products(obj.expression), new_model, exp)
             if new_expr is not obj.expression:
-                import copy
-
-                new_obj = copy.copy(obj)
-                new_obj.expression = new_expr
-                new_model._objective = new_obj
+                new_model._objective = rewritten_objective(obj, new_expr)
 
         # Blowup guard. ``distribute_products`` can expand a handful of product
         # terms into a combinatorial number of monomials (nvs17: 7 vars -> 2751),
@@ -1131,6 +1129,7 @@ def expand_integer_products(
         # it; an unresolvable one raises (ComplementarityProvenanceError).
         carry_complementarities(model, new_model, pass_name="integer-product expansion")
         carry_validation_guards(model, new_model)  # #1498
+        carry_builder_objective(model, new_model)  # fast-API objective; after the last aux column
         return new_model
     except (IntegerProductNotApplicable, _Abandoned):
         return model

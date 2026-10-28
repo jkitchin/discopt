@@ -5957,8 +5957,14 @@ def carry_builder_objective(src: "Model", dst: "Model") -> None:
 
     The fast-API *rows* are carried separately, as ordinary constraints, with
     ``src._builder_linear_constraints()``.
+
+    Also a no-op when ``dst._objective`` is not ``src``'s placeholder: the pass
+    rewrote the objective, and the rewrite (an ordinary :class:`Objective` -- see
+    :func:`rewritten_objective`) is what ``dst`` minimizes.
     """
     if src._objective is None or not getattr(src._objective, "_is_placeholder", False):
+        return
+    if dst._objective is not src._objective:
         return
     lin_blk = src._builder_linear_objective
     quad_blk = src._builder_quadratic_objective
@@ -5973,6 +5979,19 @@ def carry_builder_objective(src: "Model", dst: "Model") -> None:
             "objective is a builder placeholder but the model retains no builder "
             "objective block to carry into the rebuilt model"
         )
+
+
+def rewritten_objective(obj: "Objective", expression: Expression) -> "Objective":
+    """A copy of ``obj`` minimizing ``expression``, for a pass that rewrote it.
+
+    The copy is an ordinary objective even when ``obj`` is a fast-API placeholder:
+    ``_objective_expression()`` of a placeholder reads the builder block, which
+    would discard the rewrite (and a rebuilt model holds no block to read).
+    """
+    out = _copy.copy(obj)
+    out.expression = expression
+    out._is_placeholder = False
+    return out
 
 
 def missing_validation_guards(src: "Model", dst: "Model") -> list[str]:

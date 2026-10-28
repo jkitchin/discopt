@@ -45,7 +45,9 @@ from discopt.modeling.core import (
     Model,
     Variable,
     VarType,
+    carry_builder_objective,
     carry_validation_guards,
+    rewritten_objective,
 )
 from discopt.mpec import carry_complementarities
 
@@ -228,15 +230,14 @@ def split_multilinear_products(
         if expr is None:
             return None
         if expr is not model._objective.expression:
-            obj = copy.copy(model._objective)
-            obj.expression = expr
-            new_model._objective = obj
+            new_model._objective = rewritten_objective(model._objective, expr)
     if sp.n_products == 0:
         return None
     new_model._constraints = rebuilt + sp.aux_constraints
     new_model._mls_aux_spec = tuple(sp.aux_spec)  # type: ignore[attr-defined]
     carry_complementarities(model, new_model, pass_name="multilinear split")
     carry_validation_guards(model, new_model)
+    carry_builder_objective(model, new_model)  # fast-API objective; after the last aux column
     return (
         new_model,
         np.concatenate([lb, np.asarray(sp.aux_lb, dtype=np.float64)]),

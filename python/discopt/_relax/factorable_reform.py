@@ -67,6 +67,7 @@ from discopt.modeling.core import (
     _IndicatorConstraint,
     _logical_node_count,
     _LogicalConstraint,
+    carry_builder_objective,
     carry_validation_guards,
 )
 from discopt.mpec import carry_complementarities
@@ -2514,6 +2515,7 @@ def _canonicalize_entropy_walk(
     # silent drop.
     carry_complementarities(model, new_model, pass_name="entropy canonicalization")
     carry_validation_guards(model, new_model)  # #1498
+    carry_builder_objective(model, new_model)  # fast-API objective; no new columns here
     return new_model
 
 
@@ -2603,6 +2605,7 @@ def _factorable_reformulate_inner(
     # the shared Variable objects, so the relation set forwards intact.
     carry_complementarities(model, new_model, pass_name="factorable reformulation")
     carry_validation_guards(model, new_model)  # #1498
+    carry_builder_objective(model, new_model)  # fast-API objective; after the last aux column
     return new_model
 
 
