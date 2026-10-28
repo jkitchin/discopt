@@ -5,35 +5,39 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 > **These tables record each task as it was completed, not the architecture as it
 > stands.** Several were later superseded, and the rows are deliberately left
 > as-written rather than back-edited. Where they disagree with the tree, the tree
-> wins. The ones that mislead most often, as of v0.9.0:
+> wins. The ones that mislead most often, as of v0.10.0:
 >
-> - **JAX is not the default evaluator, but it is still a core dependency and can
->   still load on the default path.** T8's "JIT-compiled grad/Hessian/Jacobian via
->   JAX" is now the POUNCE Rust AD tape (`_tape_nlp_evaluator.py`);
->   `DISCOPT_NLP_EVAL=jax` is the opt-out. T4's DAG compiler and T19's batch
->   relaxation evaluator are numpy — the `_relax` directory was named `_jax` before
->   the removal, so its name is not a guide either. `_relax/mccormick.py` is the
->   exception that proves the rule: that one file *is* `jax.numpy`, and a default
->   solve never imports it (measured — `discopt._relax.mccormick` absent from
->   `sys.modules` after an `optimal` solve that loaded 50 other `_relax` modules).
->
->   What an earlier version of this note got wrong is the *unconditional* claim
->   that "a default solve imports zero `jax` modules". An ordinary nonlinear solve
->   imports zero **unless** the model contains an expression with no POUNCE tape
->   opcode, in which case `build_evaluator` deliberately falls back to the legacy
->   JAX evaluator and loads it — and that fallback is on the default path. Measured
->   2026-09-22 on a plain `Model.solve()` of `dm.norm(X, 2)` with a 3×3 `X` and no
->   user `import jax`, `sys.modules` goes from **0 to 218** `jax` entries; the same
->   measurement on a tape-supported model (`x*y + x**2 - y`) stays at **0**.
->   `jax`/`jaxlib` are in `[project] dependencies`, not an extra, and `estimate.py`
->   uses `jax.jacobian` for exact sensitivity Jacobians.
+> - **JAX is optional, and it is not the default evaluator.** Since #1873 it is
+>   the `discopt[jax]` extra; `jax`/`jaxlib` are not in `[project] dependencies`.
+>   T8's "JIT-compiled grad/Hessian/Jacobian via JAX" is now the POUNCE Rust AD
+>   tape (`_tape_nlp_evaluator.py`); `DISCOPT_NLP_EVAL=jax` is the opt-out. T4's
+>   DAG compiler and T19's batch relaxation evaluator are numpy. The `_relax`
+>   directory was named `_jax` before the removal, so its name is not a guide.
+>   An ordinary nonlinear solve imports zero `jax` modules, *unless* the model
+>   holds an expression with no POUNCE tape opcode. `build_evaluator` then falls
+>   back to the legacy JAX evaluator, and that fallback is on the default path.
+>   Measured on a `dm.external` block nested inside another one's argument:
+>   `sys.modules` goes from 0 to 222 `jax` entries. (The v0.9.0 example,
+>   `dm.norm(X, 2)` of a matrix, no longer loads JAX: since #1903 the spectral
+>   norm and `dm.external` are numpy-evaluated holes in the tape.) Without the
+>   extra, a JAX-only path raises `MissingJaxError`.
+> - **The McCormick-NLP relaxation route was retired in #1873** — T6's relaxation
+>   compiler, the JAX `mccormick`/`envelopes`/`alphabb` primitives, and the
+>   piecewise/learned (ICNN)/Taylor envelope modes behind `partitions=`. T5's
+>   function count and Phase 3's rows describe that route. Relaxations are now
+>   the numpy factorable engine and the LP-form McCormick relaxation
+>   (`mccormick_lp`); piecewise relaxation survives as the relaxation inside AMP,
+>   and `partitions=` is refused with an error pointing at the measurement
+>   (`docs/dev/nlp-mccormick-route-retirement.md`).
 > - **The pure-JAX IPM (T17) has been retired**, so T9a's "replaced by T17" no
 >   longer describes anything live. `nlp_solver="ipm"` survives only as a
 >   back-compat alias. The NLP backends are `pounce` and `cyipopt`.
-> - **HiGHS is not the per-node LP engine** (T7). The default is the in-house
->   Rust primal/dual simplex; highspy is used only on the OA/GDP paths.
-> - **T5's count is stale**: `_relax/mccormick.py` now defines 28 relaxation
->   functions, not 19.
+> - **HiGHS is not the per-node LP engine** (T7). The MINLP default is the
+>   in-house Rust primal/dual simplex. HiGHS *is* a core dependency again
+>   (`highspy>=1.11,!=1.12.0`): pure LP/MILP models are routed to it with
+>   discopt-verified certificates (`milp_backend="native"` or
+>   `DISCOPT_LP_MILP_BACKEND=rust` opts out), and the convex-MINLP route uses a
+>   HiGHS master. Phase 8's "eliminate HiGHS" goal is superseded; see its header.
 
 ## Phase 1: Working Solver (complete)
 
@@ -44,8 +48,8 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 | T2 Expression IR         | Done        | Rust expression graph + PyO3 bindings              |
 | T3 .nl parser            | Done        | AMPL .nl file parser in Rust                       |
 | T4 JAX DAG compiler      | Done        | Expression-to-JAX compilation                      |
-| T5 McCormick relaxations | Done        | 19 convex/concave relaxation functions             |
-| T6 Relaxation compiler   | Done        | jit+vmap compatible relaxation compilation         |
+| T5 McCormick relaxations | Superseded  | 19 JAX relaxation functions; retired in #1873 for the numpy factorable engine |
+| T6 Relaxation compiler   | Retired     | jit+vmap relaxation compilation; McCormick-NLP route retired in #1873 |
 | T7 HiGHS LP wrapper      | Done        | LP solver with warm-start support                  |
 | T8 NLP evaluator         | Done        | JIT-compiled grad/Hessian/Jacobian via JAX         |
 | T9 cyipopt NLP wrapper   | Done        | Ipopt interface for continuous relaxations         |
@@ -69,17 +73,17 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 | T20 Multi-start heuristics           | Done   | Multi-start NLP solving + feasibility pump                 |
 | T23 Differentiable solving (Level 3) | Done   | Implicit differentiation at active set via KKT             |
 | T25 Benchmark runner                 | Done   | Performance metrics, batch scaling, JSON export            |
-| T17 GPU-batched IPM                  | Done   | Pure-JAX IPM solver with augmented KKT, vmap batch solving |
-| T24 GPU IPM in solver loop           | Done   | Batch IPM in B&B loop, ipm default backend                 |
+| T17 GPU-batched IPM                  | Retired | Pure-JAX IPM solver with augmented KKT, vmap batch solving; replaced by POUNCE |
+| T24 GPU IPM in solver loop           | Retired | Batch IPM in B&B loop; node waves now run on POUNCE (`solve_qp_batch`) |
 
 ## Phase 3: Competitive Performance (complete)
 
 | Task                    | Status | Description                                             |
 |-------------------------|--------|---------------------------------------------------------|
-| Piecewise McCormick     | Done   | k-partition domain splitting, O(1/k^2) convergence      |
-| alphaBB underestimators | Done   | Hessian-based convexification (Adjiman/Floudas 1998)    |
-| Cutting planes (RLT/OA) | Done   | Bilinear RLT cuts, gradient OA, separation oracles      |
-| Solver integration      | Done   | partitions, cutting_planes parameters                   |
+| Piecewise McCormick     | Superseded | k-partition splitting; the `partitions=` route was retired in #1873. Piecewise relaxation lives on as the adaptive refinement inside AMP |
+| alphaBB underestimators | Superseded | The sampled-Hessian αBB was unsound (C-17) and retired; αBB is now an interval-Hessian underestimator checked by `test_alphabb_bound_soundness.py` |
+| Cutting planes (RLT/OA) | Done   | Bilinear RLT cuts, gradient OA, separation oracles (numpy separator) |
+| Solver integration      | Done   | `cutting_planes` parameter; `partitions` is refused (#1873) |
 |                         |        |                                                         |
 
 ## Phase 4: Polish + Release (complete)
@@ -88,7 +92,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | POUNCE integration                | Done        | Pure-Rust Ipopt port via Python bindings (`nlp_solver="pounce"`); default single-solve backend, replaced the old ripopt crate |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | Done        | 66 notebooks, Jupyter Book site builds with zero warnings |
+| Documentation + example notebooks | Done        | 70 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 | Tiered Python test suite          | Done        | Fast PR-tier + full + integration markers (#69)           |
 | Examiner / KKT validator          | Done        | `Model.solve(validate=True)`, dual recovery (#55, #83)    |
@@ -115,7 +119,7 @@ New problem types to make discopt competitive across the full optimization lands
 
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
-| QP-specific solver                | Done    | HiGHS QP wrapper + JAX IPM QP path; convex QP fast path                      |
+| QP-specific solver                | Done    | HiGHS QP wrapper + POUNCE QP IPM; convex QP fast path (the JAX IPM QP path was retired) |
 | Benders decomposition             | Done    | Classical (linear recourse, complete-dual cuts) **and Generalized** (convex-NLP recourse, Lagrangian-dual cuts) Benders via `solve(decomposition="benders")`; nonlinear models auto-dispatch to GBD. Cuts stay sound under inexact interior-point subproblem solves; nonconvex GBD withholds the bound. GBD certifies recourse infeasibility with a feasibility-phase NLP before excluding any first-stage point (never mistakes a transient solver failure for infeasibility). **Multicut** (per-block η + cuts, parallel per-block recourse via `BendersConfig.backend`) and opt-in **in-out stabilization** + cut management |
 | Lagrangian relaxation             | Done    | Coupling-constraint dual via `solve(decomposition="lagrangian")`; **subgradient**, a real **level-bundle** method (`method="bundle"`, QP level projection + reliable dual stopping test) and the plain **Kelley** cutting plane (`method="kelley"`), primal recovery. The relaxed subproblem is **block-separable** and runs per block through the parallel comm layer (`backend="threads"`); equality couplings dualize with a single free multiplier |
 | Lagrangian B&B node-bound hook    | Done    | `solve(lagrangian_bound=True)` combines per-node Lagrangian dual bounds with the MILP B&B node LP bound |
@@ -125,7 +129,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46). The convex **kernel** graduated to default-ON in v0.9.0 (#1346) after its §5 panel; `DISCOPT_CONVEX_KERNEL=0` remains the opt-out |
 | Structural presolve pipeline      | Done    | 22 structural passes wired into the root presolve pipeline (#53)             |
 | Convexification roadmap M1-M11    | Done    | M2/M3 arithmetics, M4/M5/M9/M10 root passes, M6 eigenvalue bound (#51)       |
-| Deadline-aware JAX IPM            | Done    | Wall-clock `time_limit` honored inside JAX-compiled `while_loop`s (#80)      |
+| Deadline-aware JAX IPM            | Retired | Wall-clock `time_limit` inside JAX `while_loop`s (#80); retired with the JAX IPM |
 
 ## Phase 7: Modeling API and Infrastructure
 
@@ -146,12 +150,24 @@ New problem types to make discopt competitive across the full optimization lands
 | Optimization-as-a-block           | Done    | `dm.argmin` (inner NLP as a block of an outer model) and `dm.argmin_kkt` (the lowered arm of the same trade) (#1216) |
 | NumPy-shaped modeling surface     | Done    | Vector `min`/`max` (#1238) and the #1233/#1234/#1235 gap-closing batch, so array expressions behave the way the NumPy they resemble does (v0.9.0) |
 | FAIR provenance                   | Done    | A `.dopt` document records its schema id and provenance, and result files carry a validation report (#1266) |
+| Generalized disjunctive programming | Done  | Indicators, nested blocks, OR semantics and disjunctive state; new lowerings and reformulations; native GDPopt-style `loa`, `gloa`, `lbb`, `ric`, `enumerate` and `ldsda`; `discopt.pyomo.gdp.from_pyomo_gdp` converts a Pyomo GDP model (v0.10.0) |
+| Model serialization               | Done    | `Model` pickles; schema version policy with `discopt upgrade-model`; schemas 1.5–1.7 cover logical, GDP and indexed state; the reader is fuzz-hardened (v0.10.0) |
+| Transformation registry           | Done    | `discopt.transformations` (`apply_to`, `create_using`, `check`) and `Model.clone()`, so a reformulation is verified without a whole-solve A/B (#1486) |
+| Declared piecewise-linear functions | Done  | `Model.piecewise` / `dm.piecewise` and `dm.nonlinear_to_pwl` (v0.10.0) |
+| External functions                | Done    | `dm.external` with caller-supplied derivatives, evaluated in numpy on the default path (#1478, #1903) |
+| Solver selection                  | Done    | `solver="scip"` (whole model to SCIP), `solver="pounce"` (one POUNCE IPM solve), `milp_backend="highs"\|"native"` (v0.10.0) |
+| Model introspection               | Done    | `Model.convexity()` → `ConvexityReport`, `Model.to_latex()`, `SolveResult.termination` and `.solve_report` (v0.10.0) |
+| Optional JAX                      | Done    | JAX moved to the `discopt[jax]` extra; CI runs the smoke lane with JAX uninstalled (#1873) |
 
 ## Phase 8: POUNCE-Only Solver Stack
 
-Eliminate HiGHS as a runtime dependency so discopt ships as a complete pip-installable
-solver on a single in-house engine (POUNCE), with end-to-end differentiability and a
-batch-first (CPU multicore; GPU opportunistic) architecture. Detailed plan, phase exit
+The original goal was to eliminate HiGHS as a runtime dependency so discopt ships as a
+complete pip-installable solver on a single in-house engine (POUNCE), with end-to-end
+differentiability and a batch-first (CPU multicore; GPU opportunistic) architecture.
+**Superseded in part (v0.10.0):** `highspy` is a core dependency again, because pure
+LP/MILP models are routed to HiGHS with discopt-verified certificates (#1229, #1538) and
+the convex-MINLP route uses a HiGHS master. The in-house engine remains the MINLP node
+engine and the `milp_backend="native"` opt-out. The rows below record the work as done. Detailed plan, phase exit
 gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
 
 | Task                                   | Status      | Description                                                              |
@@ -166,7 +182,7 @@ gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounc
 Detailed status, increment-level history, and the remaining open items for each
 task live in [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
 
-## Where the work is now (post-v0.9.0)
+## Where the work is now (post-v0.10.0)
 
 Phases 1–4 are closed. Of 5–8, most rows are `Done`; what remains, and is the
 place to start, is:
@@ -182,7 +198,8 @@ place to start, is:
   from Python, and the additional methods. Dantzig–Wolfe / branch-and-price is
   deferred *by design*, not stalled — see its row.
 - **Phase 5 conic coverage** — SOCP, SDP and the general conic families are the
-  only rows still `Planned`. Nothing else in Phase 5 is open.
+  only rows still `Planned`. Nothing else in Phase 5 is open. (v0.10.0 recognizes
+  squared-form second-order cones as convex, #1936, but there is no conic solver.)
 
 Two standing disciplines are not roadmap rows but gate work in these areas:
 `docs/dev/flag-retirement-audit.md` (every default-OFF gate over solver math is
