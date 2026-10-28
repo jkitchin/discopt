@@ -27,6 +27,7 @@ from discopt.modeling.core import Model, from_nl
 from discopt.solver import (
     _CONVEX_ROUTE_BOUND_STALL_FRACTION,
     _CONVEX_ROUTE_BUDGET_FRACTION,
+    _CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION,
     _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT,
     _convex_route_progress_guard_enabled,
     _route_progress_guard_options,
@@ -345,6 +346,35 @@ class TestBoundStall:
         assert guard.decision_point
         assert _replay_bounds(guard, PCON30_LP_CUTS) == pytest.approx(5.0, abs=1.4)
         assert "decision point" in guard.reason
+
+
+@pytest.mark.unit
+class TestFallbackReserve:
+    """#2013: a route that keeps earning its budget must still leave the fallback
+    time to produce a bound. Measured on p_ball_10b_5p_4d_m (30 s,
+    ``DISCOPT_OA_SUPPORT_CUTS=1``): a route that ran to the wall had its bound
+    withdrawn by the #1634 cross-solve's empty budget and returned NO dual bound;
+    with the reserve it hands over at 24.6 s and the fallback bounds it."""
+
+    RESERVE_ENV = "DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE"
+
+    def test_an_earning_route_is_handed_over_at_the_reserve(self, monkeypatch):
+        monkeypatch.setenv(self.RESERVE_ENV, "1")
+        guard = _RouteProgressGuard(30.0)
+        reserve_at = 30.0 * (1.0 - _CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION)
+        fired = _replay(guard, _geometric(window_ratio=0.5, limit=30.0, step_s=0.5))
+        assert fired == pytest.approx(reserve_at, abs=0.5)
+        assert "reserve" in guard.reason
+
+    def test_without_it_an_earning_route_runs_to_the_wall(self, monkeypatch):
+        monkeypatch.setenv(self.RESERVE_ENV, "0")
+        guard = _RouteProgressGuard(30.0)
+        assert _replay(guard, _geometric(window_ratio=0.5, limit=30.0, step_s=0.5)) is None
+
+    def test_a_converged_route_is_not_handed_over(self, monkeypatch):
+        monkeypatch.setenv(self.RESERVE_ENV, "1")
+        guard = _RouteProgressGuard(30.0)
+        assert _replay(guard, [(t * 1.0, 0.0) for t in range(1, 30)]) is None
 
 
 @pytest.mark.unit

@@ -10370,6 +10370,33 @@ def _convex_route_bound_stall_enabled() -> bool:
     return os.environ.get("DISCOPT_CONVEX_ROUTE_BOUND_STALL", "1") != "0"
 
 
+#: #2013: the share of the caller's limit the #1066 trend policy keeps for the
+#: fallback under ``DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE``. Measured: on
+#: p_ball_10b_5p_4d_m (30 s) a fallback handed 4.3 s or less produced no dual
+#: bound in 6/6 runs and one handed 5.3 s produced its root bound, so 0.2 (6 s)
+#: clears it; portfol_classical050_1 bounds with 2.4 s.
+_CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION = 0.2
+
+
+def _convex_route_fallback_reserve_enabled() -> bool:
+    """Does the #1066 trend policy keep a reserve for the fallback (#2013)?
+
+    A route that keeps earning its budget can run to the wall. There the #1634
+    presolve-free cross-solve has no time, so the route's bound is withdrawn, and
+    with less than :data:`_CONVEX_ROUTE_FALLBACK_FLOOR_S` left no fallback runs: the
+    solve returns with **no dual bound at all**. A guard that hands over late
+    (after a stalled window) does the same thing more slowly: the fallback gets a
+    few seconds and produces none. Both were measured on p_ball_10b_5p_4d_m at
+    30 s: route to the wall (panel row, ``DISCOPT_OA_SUPPORT_CUTS=1``), and forced
+    handovers at 25-29 s in both support-cut arms. With this on, from the checkpoint
+    on, the guard hands over once the remaining budget falls to
+    :data:`_CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION` of the limit, unless the route
+    has converged. It can only hand over earlier, and only under the #1066 trend
+    policy. Default OFF pending the section 5 panel. Read per call.
+    """
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE", "0") != "0"
+
+
 class _RouteProgressGuard:
     """Stop the #1059 auto-route once it stops making progress -- not on a clock.
 
@@ -10495,6 +10522,11 @@ class _RouteProgressGuard:
         #: ``(elapsed, dual_bound, primal_bound)`` alongside ``history`` (#2013).
         self.bound_history: list[tuple[float, float, float]] = []
         self.bound_stall = _convex_route_bound_stall_enabled()
+        self.fallback_reserve = (
+            limit * _CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION
+            if _convex_route_fallback_reserve_enabled()
+            else None
+        )
         self.fired_at: Optional[float] = None
         self.reason: Optional[str] = None
         self.call_count = 0
@@ -10558,6 +10590,11 @@ class _RouteProgressGuard:
         if latest_gap <= 0.0:
             # Converged; the loop's own termination test owns this.
             return False, None
+        if self.fallback_reserve is not None and self.time_limit - now <= self.fallback_reserve:
+            return True, (
+                f"{self.time_limit - now:.1f}s left of {self.time_limit:.1f}s -- the "
+                f"fallback's {self.fallback_reserve:.1f}s reserve (#2013)"
+            )
         cutoff = now - self.window
         earlier = [gap for when, gap in self.history[:-1] if when >= cutoff]
         if not earlier:
