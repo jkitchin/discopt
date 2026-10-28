@@ -888,6 +888,7 @@ def _cross_check_lazy_master(
     bound: Optional[float],
     time_left: Optional[float],
     objective: Optional[float] = None,
+    extra_options: Optional[dict[str, object]] = None,
 ) -> tuple[SolveStatus, Optional[float], dict]:
     """#1634 for the lazy-cut master: re-solve its FINAL model with presolve off.
 
@@ -915,6 +916,12 @@ def _cross_check_lazy_master(
     about HiGHS's stopping rule, not about the bound. ``diag["reached_claim"]``
     says whether the interrupt fired; ``cross_bound`` is still the dual bound
     HiGHS reports after the run, and ``min`` with the primary's still applies.
+
+    ``extra_options`` are the master's caller-supplied HiGHS options
+    (``solve_milp_with_lazy_cuts(highs_options=...)``), applied here too so the
+    cross-solve searches like the master it checks (#2021). They are applied before
+    this function's own options, which therefore win on a clash: presolve stays off
+    and the gap stays at the claim.
     """
     infeasible = status == SolveStatus.INFEASIBLE
     diag: dict[str, object] = {"ran": False, "primary_status": status.value}
@@ -932,6 +939,7 @@ def _cross_check_lazy_master(
     if st != highspy.HighsStatus.kOk:
         raise RuntimeError(f"HiGHS would not report mip_rel_gap (status {st})")
     opts: list[tuple[str, object]] = [
+        *(extra_options or {}).items(),
         ("output_flag", False),
         ("presolve", "off"),
         ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),
@@ -1034,6 +1042,7 @@ def solve_milp_with_lazy_cuts(
     mip_start: Optional[np.ndarray] = None,
     node_lp_rounds: int = 0,
     node_hook_cut_cap: int = 500,
+    highs_options: Optional[dict[str, object]] = None,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
 
@@ -1108,6 +1117,11 @@ def solve_milp_with_lazy_cuts(
 
     The hook can only ever give budget *back*: ``time_limit`` is still enforced
     through the HiGHS option on every run, so nothing here can overrun it.
+
+    ``highs_options`` (#2021) are extra HiGHS options for the master and for the
+    #1634 cross-solve; a rejected option raises ``RuntimeError`` like the built-in
+    ones. Pass only options that do not change what a dual bound means (heuristic
+    switches, say): the cross-solve's own presolve/gap settings override them.
     """
     highspy = _require_highspy()
     t0 = time.time()
@@ -1163,6 +1177,10 @@ def solve_milp_with_lazy_cuts(
         ("output_flag", False),
         ("mip_rel_gap", float(gap_tolerance)),
         ("presolve_rule_off", int(MILP_PRESOLVE_RULE_OFF)),  # #1634
+        # #2021: caller options (e.g. the sub-MIP switch of
+        # ``oa._HIGHS_MASTER_NO_SUBMIP_OPTIONS``); the same object ``h`` is reused
+        # by every restart, so they hold for every rebuilt tree.
+        *(highs_options or {}).items(),
     ]:
         if h.setOptionValue(key, val) != highspy.HighsStatus.kOk:
             raise RuntimeError(f"HiGHS rejected option {key}={val!r}")
@@ -1487,7 +1505,7 @@ def solve_milp_with_lazy_cuts(
         # withdrawn rather than published.
         time_left = 0.0
     status, bound, cross_diag = _cross_check_lazy_master(
-        h, highspy, status, bound, time_left, objective=obj_out
+        h, highspy, status, bound, time_left, objective=obj_out, extra_options=highs_options
     )
 
     return MILPResult(

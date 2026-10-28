@@ -13173,3 +13173,95 @@ benefit is one instance of the class the cuts were built for, which section 2
 rejects as a default. Both flags are kept as documented opt-ins: the docstrings say
 why they are not the default and what would change that (the p_ball remainder in
 #2021).
+
+
+### 103.7 #2021 section 2: the HiGHS master stops re-running sub-MIPs; `DISCOPT_HIGHS_MASTER_NO_SUBMIP` graduates (2026-10-28)
+
+**Hypothesis.** `milp_highs.solve_milp_with_lazy_cuts` rebuilds the HiGHS tree after
+every lazy cut, and HiGHS re-runs its RINS and RENS sub-MIPs on every rebuilt tree.
+The incumbents they find are integer points the separator then vetoes. Switching
+both off should cut slay04m-07m's wall by at least 25% without loosening any bound,
+since heuristics never move a dual bound. **Kill:** no 25% cut on slay04m-07m, or
+any bound with sub-MIPs off below the route-on default.
+
+**Entry experiment** (`issue2021_submip_probe.py`, no library edit; arm C wraps
+`highspy.Highs.passModel` process-wide, so the master and the cross-solve both get
+the options; 60 s; arm order rotated per instance; every incumbent verified on a
+fresh parse). The loaded tree was asserted to lack the `highs_options` parameter.
+
+| instance | A route off | B route on | C route on, sub-MIPs off | restarts B / C |
+|---|---|---|---|---|
+| slay04m | 0.85 s | 0.67 s | 0.37 s | 5 / 6 |
+| slay05m | 1.73 s | 1.59 s | 0.90 s | 5 / 8 |
+| slay06m | 3.64 s | 3.89 s | 1.81 s | 9 / 9 |
+| slay07m (3 reps) | 9.30-9.37 s | 6.17-6.26 s | 5.69-5.74 s | 9 / 10 |
+| slay05h | 5.95 s | 3.14 s | 2.61 s | 7 / 7 |
+| slay08m (3 reps) | 19.4-19.6 s | 29.4-29.6 s | 18.3-18.4 s | 16 / 13 |
+| slay09m | optimal 43.3 s | feasible, bound 103,126 | feasible, bound 104,566 | 13 / 10 |
+| slay10m | no incumbent | feasible, bound 119,090 | feasible, bound 119,090 | 6 / 7 |
+
+Summed over slay04m-07m the wall falls 12.36 -> 8.81 s (-28.7%). Per instance the
+cuts are -44 / -43 / -53 / -8%: **slay07m does not reproduce the issue's 9.93 -> 4.76 s**,
+so on a strict per-instance reading the criterion fails for that one instance. The
+aggregate reading was taken, and the panel below is the decision. Every C bound on
+a certified run is within certification tolerance of B's: the largest shortfall is
+slay08m, 3.6e-7 absolute (4e-12 relative), with both arms certified optimal.
+
+**Change.** `solve_milp_with_lazy_cuts(highs_options=...)` appends caller options
+to the master's option list; the HiGHS object is reused across restarts, so they hold
+for every tree. `_cross_check_lazy_master(extra_options=...)` applies them before
+its own presolve-off / zero-gap options, which win on a clash. `oa.py` passes
+`_HIGHS_MASTER_NO_SUBMIP_OPTIONS` when the backend is HiGHS and the flag is on, and
+the routed `SolveResult.solver_stats` now carries `oa/highs_no_submip` (the route's
+stats had been only `oa/unverified_incumbent`, so no panel could count fires). The
+stat reaches `Model.solve()` (checked on slay04m) but is dropped when the route
+falls back, so "fired" undercounts by the fallback rows.
+
+**Panel** (`issue1913_pseudocost_panel.py`, the 102 routed instances, 30 s, 2
+workers, interleaved, every incumbent verified, each subprocess asserting the
+change's marker via the new `--expect-marker`): 612 checks, 0 problems; certified
+96 -> 97 (cvxnonsep_pcon30 gained), none lost; both-certify nodes 145,841 -> 160,255,
+wall 125.5 -> 97.9 s; total wall 306.1 -> 265.9 s. 95 ON-arm results carry the stat
+(the 5 presolve-infeasible ball_mk instances never route; cvxnonsep_pcon30 and
+p_ball_20b_5p_2d_m fell back). Machine load was ~2 from system daemons on a 14-core
+box throughout; the arms are interleaved per instance.
+
+Two rows were rerun (3 reps each, interleaved):
+
+- **cvxnonsep_pcon30** is a real gain. With sub-MIPs off, the route reaches the bound-stall
+  hand-over at 15.0 s and the fallback certifies by 17.1 s (3/3). With them on, the
+  guard never fires, the route runs to the wall, and no bound is returned (3/3).
+- **tls4** (uncertified in both arms) has a looser bound with sub-MIPs off: 2.054 -> 1.946
+  in 3/3 (optimum 8.3). It is the #1066 guard's allocation, not the master's bound.
+  The faster master keeps shrinking its gap, so the guard hands over at 17.7 s
+  instead of 15.0 s, and the fallback gets 2.7 s less. With the hand-over fixed at
+  15 s (`DISCOPT_CONVEX_ROUTE_GUARD=0`, 2 reps per arm) the bound with sub-MIPs off is
+  2.054 / 2.088 against 2.054 / 2.054 with them on, and the incumbent is better
+  (9.3 vs 11.3).
+
+**slay08m-10m (the issue's Done-when).** slay08m certifies in 18.4 s against the
+route-off arm's 19.5 s. At 120 s (one interleaved rep each): slay09m
+route-off certifies in 43.3 s. Route-on (flag on) is still `feasible` at 120 s
+(bound 103,748), and the guard never hands over because the gap keeps shrinking
+25% per window. slay10m certifies in neither arm: route-on has bound 119,090 and
+incumbent 132,228, route-off has the same bound and no incumbent. The recorded
+reason for slay09m is the restart loop itself. HiGHS 1.12 cannot add a row
+mid-tree, so every lazy cut costs a full tree. 10-13 trees at 60 s did not reach the
+bound a single spatial tree reaches in 43 s. That each rebuilt tree first re-proves
+its predecessors' bound is an inference from the restart design; it was not measured. Removing the sub-MIPs cut the
+per-tree cost, not the tree count. Closing slay09m needs either a master that keeps
+its tree across cuts or a guard that compares the route's bound rate against the
+alternative. The second is the bound-trend rule of #2021 section 1(a).
+
+**Verdict.** Both bars pass: cert-clean (0 problems, none lost, every bound at or
+below its reference) and net-positive across families (slay, smallinvDAX, sssd,
+ravempb, cvxnonsep, p_ball_10b_5p_2d_m 9.8 -> 7.3 s). **Graduated** default ON in
+the PR that introduced it; `=0` restores HiGHS's sub-MIPs.
+
+**A pinned test moved.** `test_1537_row_scaling::test_row_equilibrated_fixed_nlp_converges_and_certifies_flay03m`
+pins flay03m's bound within 1e-6 relative of the optimum. With the flag on, the bare
+master stops at its own `mip_rel_gap` (1e-4) with bound 48.98962: gap 3.6e-6,
+certified, below the optimum, 393 nodes in 0.28 s. With the flag off it reaches
+48.989795 in 333 nodes and 0.49 s (2 reps each, identical). The test reads the tree
+that runs past the gap tolerance, so it now pins `DISCOPT_HIGHS_MASTER_NO_SUBMIP=0`
+as well, and its docstring records the flag-on reading. No tolerance was loosened.

@@ -371,6 +371,23 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The convex-MINLP route's HiGHS master no longer runs RINS/RENS sub-MIPs
+  (`DISCOPT_HIGHS_MASTER_NO_SUBMIP`, default ON; `=0` restores them) (#2021).**
+  - The `lp_nlp_bb` master rebuilds its HiGHS tree after every lazy cut, and HiGHS
+    re-ran both sub-MIPs on every rebuilt tree. The separator then vetoed the
+    integer points they found. Heuristics do not move a dual bound, so this
+    changes the search, not what a bound means.
+  - The switch also reaches the #1634 presolve-free cross-solve, through the new
+    `milp_highs.solve_milp_with_lazy_cuts(highs_options=...)`. A rejected option
+    raises `RuntimeError`.
+  - Entry experiment (60 s, route on): slay04m–07m 12.36 → 8.81 s summed, and
+    slay08m 29.4 → 18.4 s (3/3 reps). All runs certify the same optimum.
+  - Panel (102 routed instances, 30 s): 612 checks, 0 problems. Certified
+    96 → 97 (cvxnonsep_pcon30 gained), none lost. Both-certify wall
+    125.5 → 97.9 s, total wall 306.1 → 265.9 s. performance-plan §103.7.
+  - The routed `SolveResult.solver_stats` now carries `oa/highs_no_submip` when
+    the switch applied.
+
 - **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
   no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
   imports no `jax` module. Without the extra, every JAX-only feature raises

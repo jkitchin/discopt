@@ -258,8 +258,10 @@ def test_lp_nlp_bb_early_exit_cannot_restore_an_unconfirmed_bound(monkeypatch):
     real = MH._cross_check_lazy_master
     fired = []
 
-    def lowered(h, highspy, status, bound, time_left, objective=None):
-        status, bound, diag = real(h, highspy, status, bound, time_left, objective=objective)
+    def lowered(h, highspy, status, bound, time_left, objective=None, extra_options=None):
+        status, bound, diag = real(
+            h, highspy, status, bound, time_left, objective=objective, extra_options=extra_options
+        )
         if bound is not None:
             fired.append(bound)
             bound -= 1.0
@@ -288,8 +290,10 @@ def test_lp_nlp_bb_early_exit_confirmed_by_a_bound_a_hair_lower(monkeypatch):
     real = MH._cross_check_lazy_master
     fired = []
 
-    def nudged(h, highspy, status, bound, time_left, objective=None):
-        status, bound, diag = real(h, highspy, status, bound, time_left, objective=objective)
+    def nudged(h, highspy, status, bound, time_left, objective=None, extra_options=None):
+        status, bound, diag = real(
+            h, highspy, status, bound, time_left, objective=objective, extra_options=extra_options
+        )
         if bound is not None:
             bound -= 1e-9
             fired.append(bound)

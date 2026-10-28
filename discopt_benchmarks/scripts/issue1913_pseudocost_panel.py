@@ -33,6 +33,7 @@ prints the verdict and exits non-zero when nothing was compared or a check faile
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import os
@@ -58,6 +59,12 @@ def _solve_one(nl: str, tl: float, stat: str) -> None:
     from discopt.validation.feasibility import verify_point
 
     assert discopt.__file__.startswith(str(REPO)), discopt.__file__
+    # #2021 (CLAUDE.md section 8): ``--expect-marker module:text`` -- the version under
+    # test, not merely *a* checkout, must be the one imported.
+    for marker in filter(None, os.environ.get("PANEL_EXPECT_MARKER", "").split("|")):
+        mod_name, _, text = marker.partition(":")
+        mod = importlib.import_module(mod_name)
+        assert text in Path(mod.__file__).read_text(), f"marker {text!r} absent from {mod_name}"
     # #2013: record every #1066 route-guard verdict that fired, so a panel over a
     # guard rule shows where it acted (section 6).
     import discopt.solver as _solver_mod
@@ -274,7 +281,15 @@ def main() -> None:
     ap.add_argument("--flag", default=FLAG)
     ap.add_argument("--fired-stat", default="tree/pseudocost_picks")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument(
+        "--expect-marker",
+        action="append",
+        default=[],
+        help="module:text every solve subprocess asserts is in that module's source",
+    )
     a = ap.parse_args()
+    if a.expect_marker:
+        os.environ["PANEL_EXPECT_MARKER"] = "|".join(a.expect_marker)
     if a.report:
         sys.exit(report(a.out / f"pc_tl{int(a.time_limit)}.jsonl"))
     names = None
