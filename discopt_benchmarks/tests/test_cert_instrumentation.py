@@ -214,6 +214,10 @@ def test_reduction_separation_timers_present_and_bounded():
     # recorded on every certified solve the check applies to) and 0/1 flags.
     # ``recentre/`` (#1537 C, ``DISCOPT_RECENTRE``) holds COUNTS and 0/1 flags:
     # ``variables_moved`` and ``mapped_point_refused``, present only when the pass ran.
+    # ``tree/`` (#1978) is COUNTS: ``py_spatial_score_picks``, the node selections
+    # the Python-tree spatial score decided, present only when it is registered.
+    # ``rlt_strip/`` (#1990) is COUNTS: the RLT strip-and-retry's ``retries`` and
+    # ``certified``, emitted (zeros included) whenever the retry is enabled.
     _NON_TIMER_FAMILIES = (
         "cuts/",
         "pool/",
@@ -221,6 +225,8 @@ def test_reduction_separation_timers_present_and_bounded():
         "bound_provenance/",
         "certificate/",
         "recentre/",
+        "tree/",
+        "rlt_strip/",
     )
     _KNOWN = _TIMER_FAMILIES + _NON_TIMER_FAMILIES
     # ``gap_criterion`` (#1243) is the one documented non-numeric entry: which arm
