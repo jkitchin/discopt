@@ -4,7 +4,7 @@ The module covers the ML predictor families discopt can put *inside* a model —
 feedforward networks, decision trees and tree ensembles, and any object meeting
 the :class:`Surrogate` protocol (a Gaussian-process mean, a kernel expansion, a
 soft tree, a fixed-structure symbolic formula). Networks are the best-known
-case, not the only one; ``discopt.nn`` is a deprecated alias for this package.
+case, not the only one. (Named ``discopt.nn`` before 0.9.0; that alias was removed in 0.10.0.)
 
 It spans two regimes of one hybrid-model story:
 

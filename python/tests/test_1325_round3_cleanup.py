@@ -1,61 +1,14 @@
-"""#1325: three loud-or-cosmetic defects from the round-3 adversarial sweep.
+"""#1325: loud-or-cosmetic defects from the round-3 adversarial sweep.
 
-Nothing here was silently wrong; each was a message that misnamed its own cause,
-a guard that failed open on a reload, or a comment a later measurement falsified.
+Nothing here was silently wrong; each was a message that misnamed its own cause
+or a comment a later measurement falsified. (The third, the ``discopt.nn`` alias
+finder that stacked on reload, went with the shim in 0.10.0.)
 """
-
-import importlib
-import sys
 
 import pytest
 from discopt.modeling.gams_parser import GamsParseError, parse_gams
 
-# ── 1. discopt.nn installs exactly one alias finder ──────────────────────
-
-
-@pytest.mark.smoke
-def test_reloading_discopt_nn_does_not_stack_alias_finders():
-    """#1314's guard used ``isinstance(f, _AliasFinder)``. Re-executing the
-    module builds a NEW ``_AliasFinder`` class, so the finder already on
-    ``sys.meta_path`` is not an instance of it: a reload took the count 1 -> 2,
-    and a ``sys.modules`` purge plus re-import took it to 3."""
-    import discopt.nn as nn
-
-    def _count():
-        return sum(1 for f in sys.meta_path if getattr(f, "_discopt_nn_alias_finder", False))
-
-    assert _count() == 1
-
-    with pytest.warns(DeprecationWarning):
-        importlib.reload(nn)
-    assert _count() == 1
-
-    for name in [n for n in list(sys.modules) if n == "discopt.nn" or n.startswith("discopt.nn.")]:
-        del sys.modules[name]
-    with pytest.warns(DeprecationWarning):
-        import discopt.nn as nn2  # noqa: F401
-    assert _count() == 1
-
-    # And aliasing still resolves to the same object as discopt.ml.
-    import discopt.ml.network as ml_network
-    import discopt.nn.network as nn_network
-
-    assert nn_network is ml_network
-
-
-@pytest.mark.smoke
-def test_discopt_nn_imports_importlib_util_itself():
-    """``find_spec`` is ``importlib.util.find_spec``; ``import importlib`` does
-    not bring the submodule in. It worked only because something else in the
-    process had imported it, and the finder's broad ``except`` would have turned
-    "the submodule is missing" into "the alias does not exist"."""
-    import discopt.nn as nn
-
-    src = open(nn.__file__).read()
-    assert "import importlib.util" in src
-
-
-# ── 2. GAMS min/max arity ────────────────────────────────────────────────
+# ── 1. GAMS min/max arity ────────────────────────────────────────────────
 
 
 _ONE_ARG_ENDOGENOUS = """
@@ -107,7 +60,7 @@ def test_two_and_three_argument_min_max_still_parse(fn):
         assert any(v.name == "x1" for v in m._variables)
 
 
-# ── 3. GAMS smin/smax in an equation body ────────────────────────────────
+# ── 2. GAMS smin/smax in an equation body ────────────────────────────────
 
 
 @pytest.mark.smoke
@@ -148,7 +101,7 @@ def test_sum_over_an_index_set_still_works():
     assert m.solve().objective == pytest.approx(3.0, abs=1e-5)
 
 
-# ── 4. the comment #1309 falsified ───────────────────────────────────────
+# ── 3. the comment #1309 falsified ───────────────────────────────────────
 
 
 @pytest.mark.smoke

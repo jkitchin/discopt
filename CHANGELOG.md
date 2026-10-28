@@ -668,6 +668,11 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **The `discopt.nn` deprecation alias is gone.** It has warned since 0.9.0
+  (#1219) that it would be removed in 0.10. `import discopt.nn` now raises
+  `ModuleNotFoundError`; import `discopt.ml` instead. The `nn` install extra
+  (`pip install discopt[nn]`) is unchanged.
+
 - **`DISCOPT_TRIVIAL_PRIMAL` is retired (#827, performance-plan §103.11).** It
   seeded the root `initial_point` with a trivially feasible point. It was default OFF.
   On a MINLPLib panel (1516 instances screened, 321 with a feasible trivial point,
