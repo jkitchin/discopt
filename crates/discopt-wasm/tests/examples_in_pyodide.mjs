@@ -1,7 +1,7 @@
 // End-to-end test of the emscripten wheels under real Pyodide.
 //
 // This is the same Pyodide build, the same two wheels, the same install order
-// and the same environment variable the page's worker uses -- fetched over HTTP
+// and the same environment variables the page's worker sets -- fetched over HTTP
 // from the same local server, so the wheels are exercised exactly as a visitor
 // would get them. What it does not cover is the DOM: CodeMirror, the worker
 // plumbing and the theme are still unverified by this.
@@ -76,12 +76,15 @@ try {
   process.exit(1);
 }
 
-// Exactly what worker.js does, in the same order.
-await pyodide.runPythonAsync(`
-import os
-
-os.environ["DISCOPT_LP_MILP_BACKEND"] = "rust"
-`);
+// Exactly what worker.js does, in the same order. The environment lines are read
+// out of worker.js rather than copied here: a copy drifted once (the worker gained
+// DISCOPT_CONVEX_MINLP_ROUTE=0 and this harness did not), and the MINLP example then
+// failed here on a route the page never takes.
+const worker = readFileSync(join(WEB, 'worker.js'), 'utf8');
+const envLines = worker.match(/^os\.environ\["DISCOPT_[A-Z_]+"\] = "[^"]*"$/gm) || [];
+if (envLines.length < 2) fail(`found ${envLines.length} os.environ lines in worker.js, expected >= 2`);
+console.log('worker env: ' + envLines.join('; '));
+await pyodide.runPythonAsync('import os\n' + envLines.join('\n') + '\n');
 
 // The worker's leak guard, verbatim in effect.
 await pyodide.runPythonAsync(`
