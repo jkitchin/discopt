@@ -622,8 +622,13 @@ def solve_model(
 
 def _problem_bound(res, minimize: bool) -> float | None:
     prob = res.problem
-    # Pyomo stores the dual bound in the field opposite the incumbent's.
-    field_name = "upper_bound" if minimize else "lower_bound"
+    # Pyomo's convention, which the discopt bridge follows since #1560: for a
+    # minimize the incumbent is ``upper_bound`` and the dual bound ``lower_bound``;
+    # a maximize swaps them. Reading ``upper_bound`` here (the pre-#1560 layout)
+    # took the incumbent for the bound, so a merely suboptimal incumbent, or the
+    # ``+inf`` left when there is none, was reported as a crossed bound -- and a
+    # really crossed bound went unseen.
+    field_name = "lower_bound" if minimize else "upper_bound"
     try:
         val = getattr(prob[0] if hasattr(prob, "__getitem__") else prob, field_name, None)
     except Exception:

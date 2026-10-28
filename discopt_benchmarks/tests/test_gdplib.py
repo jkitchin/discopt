@@ -442,6 +442,28 @@ def test_assess_flags_bound_crossing_min():
     assert run.bound_crosses is True
 
 
+@pytest.mark.parametrize("minimize", [True, False])
+def test_problem_bound_reads_the_bridge_dual_bound_field(minimize):
+    """The dual bound is read from the field the discopt Pyomo bridge writes it to.
+
+    Since #1560 the bridge follows Pyomo's convention (incumbent in ``upper_bound``
+    for a minimize). The runner read the opposite field, took the incumbent for the
+    bound, and flagged batch_processing/bigm and syngas/bigm as crossed bounds.
+    """
+    from types import SimpleNamespace
+
+    pyo = pytest.importorskip("pyomo.environ")
+    from discopt.pyomo.solver import DiscoptSolver
+
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 1))
+    m.obj = pyo.Objective(expr=m.x, sense=pyo.minimize if minimize else pyo.maximize)
+    _, incumbent_field, bound_field = DiscoptSolver._objective_sense(m)
+    incumbent, bound = (10.0, 7.0) if minimize else (10.0, 13.0)
+    prob = SimpleNamespace(**{incumbent_field: incumbent, bound_field: bound})
+    assert gr._problem_bound(SimpleNamespace(problem=[prob]), minimize) == bound
+
+
 def test_sweep_with_no_oracle_acquired_is_vacuous():
     """§6: zero executed comparisons must not read as a clean sweep."""
     runs = [_make_run(SolveStatus.TIME_LIMIT, None, oracle=None)]
