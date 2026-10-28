@@ -37,7 +37,11 @@ dependencies = [
     # Pure LP/MILP is routed to HiGHS (issue #1229, docs/dev/lp-milp-highs-routing-plan.md).
     # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
     # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
-    "highspy>=1.10",
+    # >=1.11: the lp_nlp_bb HiGHS master needs Highs.clearCallbacks, an ndarray
+    # mip_solution in its callback and the mip_heuristic_run_rins/_rens options,
+    # none of which 1.10.0 has. !=1.12.0: it alone returns kSolveError on
+    # test_1654's MILP. Measured 2026-10-28 (test_2021_highs_floor.py).
+    "highspy>=1.11,!=1.12.0",
 ]
 
 [project.urls]
@@ -65,7 +69,7 @@ ipopt = ["cyipopt>=1.4"]
 # extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
 # It also serves the opt-in MIP-NLP MILP master (`milp_solver="highs"`, issue
 # #1060). #356's removal of HiGHS from the per-node MINLP LP path still stands.
-highs = ["highspy>=1.10"]
+highs = ["highspy>=1.11,!=1.12.0"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.

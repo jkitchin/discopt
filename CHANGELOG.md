@@ -371,6 +371,19 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The `highspy` requirement is now `>=1.11,!=1.12.0` (was `>=1.10`)**, for both
+  the core dependency and the `highs` extra.
+  - 1.10.0 cannot run the `lp_nlp_bb` HiGHS master. It rejects the
+    `mip_heuristic_run_rins`/`_rens` options that #2025 sets, and it lacks
+    `Highs.clearCallbacks` and an ndarray `mip_solution` in the callback. The
+    default convex route caught the error and fell back, so only an explicit
+    `mip_nlp_method="lp_nlp_bb", milp_solver="highs"` solve crashed.
+  - 1.12.0 alone returns `kSolveError` on an ordinary MILP
+    (`test_1654_lazy_cut_master_repair.py`).
+  - The CI floor lane now pins 1.11.0 and runs the new
+    `test_2021_highs_floor.py`, which fails on 1.10.0. Measured 2026-10-28
+    across 1.10.0 to 1.15.1.
+
 - **The `pounce-solver` floor is now 0.14 (was 0.12)**, for both the core
   dependency and the `pounce` extra. Every release from 0.13.0 carries
   jkitchin/pounce#980, so the 0.12.0 solve-report behavior that

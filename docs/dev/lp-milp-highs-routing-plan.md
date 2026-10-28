@@ -437,7 +437,9 @@ thing being distrusted. On the HiGHS route:
 - `pyproject.toml`: move `highspy` from `[project.optional-dependencies].highs` to
   core. **Floor `highspy>=1.10`** (was `>=1.9`; falsified, §12: 1.9.0 has no
   `getDualRay`/`getPrimalRay`, which the §3.1.8–9 certificates need). The sdist-less
-  1.8.x line stays excluded. Keep the `highs` extra as an empty
+  1.8.x line stays excluded. (Since raised to `>=1.11,!=1.12.0`: 1.10.0 cannot run
+  the `lp_nlp_bb` HiGHS master and 1.12.0 returns `kSolveError`; see CHANGELOG,
+  measured 2026-10-28.) Keep the `highs` extra as an empty
   alias for one release (as `pounce` is).
 - `release.yml`: after each wheel builds (ubuntu x86_64/aarch64 `manylinux: auto`,
   macos-14 x86_64/aarch64, windows x64, py3.12 abi3), install it in a fresh venv and
