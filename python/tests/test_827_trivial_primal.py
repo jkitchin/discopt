@@ -69,7 +69,12 @@ def _solve(inst: str, flag: str, tl: float):
         # both arms are stable: OFF None / ON 0.0 on 3 of 3 repeats. Every assertion
         # below is unchanged -- this removes a timing dependence, it does not relax
         # the test.
-        return dm.from_nl(str(BENCH / f"{inst}.nl")).solve(time_limit=tl, deterministic=True)
+        # ``nlp_bb=False``: a convex instance is otherwise auto-routed to NLP-BB,
+        # which never enters the spatial loop where the seed lives, so neither arm
+        # would measure it (ball_mk2_30 measured 2026-10-27 on 05b07263).
+        return dm.from_nl(str(BENCH / f"{inst}.nl")).solve(
+            time_limit=tl, deterministic=True, nlp_bb=False
+        )
     finally:
         for k, v in prev.items():
             if v is None:
@@ -85,7 +90,16 @@ def _solve(inst: str, flag: str, tl: float):
     reason="ball_mk2_30.nl (benchmark corpus) absent",
 )
 def test_827_trivial_seed_finds_ball_mk2_incumbent():
-    """flag OFF finds NO incumbent; flag ON finds the origin (the optimum, obj 0)."""
+    """flag ON finds the origin (the optimum, obj 0) through the spatial loop.
+
+    The OFF arm used to find NO incumbent, which is what made this the #827
+    showcase. It no longer holds: measured 2026-10-27 on 05b07263, the spatial
+    tree finds the origin at its first node with the flag OFF too (``optimal``,
+    obj 0.0, bound 0.0, 1 node), so this instance no longer shows the seed's
+    gain -- recorded in the ``DISCOPT_TRIVIAL_PRIMAL`` row of
+    ``docs/dev/flag-retirement-audit.md``. The OFF arm is still checked for a
+    sound answer: no incumbent, or the true optimum.
+    """
     off = _solve("ball_mk2_30", "0", 8.0)
     on = _solve("ball_mk2_30", "1", 8.0)
     # #1422: assert the probe fired. A solve that never opened a node measures
@@ -95,8 +109,8 @@ def test_827_trivial_seed_finds_ball_mk2_incumbent():
         f"the search never ran (OFF {off.node_count} nodes, ON {on.node_count}); "
         "this asserts nothing about the #827 seed -- see the module docstring"
     )
-    assert off.objective is None, (
-        f"baseline unexpectedly found an incumbent ({off.objective}); repro drifted"
+    assert off.objective is None or abs(off.objective) < 1e-4, (
+        f"OFF arm returned a wrong incumbent {off.objective}; the optimum is 0.0"
     )
     assert on.objective is not None and abs(on.objective) < 1e-4, (
         f"#827: trivial seed failed to find the ball_mk2 optimum 0.0 (got {on.objective})"
