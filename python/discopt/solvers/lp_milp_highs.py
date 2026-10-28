@@ -128,7 +128,7 @@ def require_highspy():
         import highspy
     except ImportError as err:
         raise HighsUnavailable(
-            "the LP/MILP HiGHS route needs highspy>=1.10: pip install 'highspy>=1.10'"
+            "the LP/MILP HiGHS route needs highspy: pip install 'highspy>=1.11,!=1.12.0'"
         ) from err
     return highspy
 

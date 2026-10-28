@@ -674,7 +674,8 @@ jobs:
 
   python-highspy-versions:
     # highspy is a core dependency (#1229, docs/dev/lp-milp-highs-routing-plan.md §5)
-    # with the floor `highspy>=1.10` (1.9.0 has no getDualRay/getPrimalRay). Every
+    # with the floor `highspy>=1.11` (1.9.0 has no getDualRay/getPrimalRay; 1.10.0
+    # breaks the lp_nlp_bb HiGHS master, which test_2021_highs_floor.py runs). Every
     # other lane installs the latest highspy, so nothing else would notice a route that
     # quietly needs a newer API. This lane runs the route's own tests against the floor
     # and the latest release, plus the cross-backend soundness files on the
@@ -687,7 +688,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        highspy: ["==1.10.0", ""]
+        highspy: ["==1.11.0", ""]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -717,7 +718,8 @@ jobs:
           source .venv/bin/activate
           pytest -q --tb=short --timeout=300 -p no:cacheprovider \
             python/tests/test_lp_milp_highs_route.py \
-            python/tests/test_issue_1229_free_column_sentinel.py
+            python/tests/test_issue_1229_free_column_sentinel.py \
+            python/tests/test_2021_highs_floor.py
       - name: Cross-backend soundness files on the Rust opt-out route
         run: |
           source .venv/bin/activate
