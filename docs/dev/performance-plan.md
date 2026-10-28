@@ -13491,3 +13491,61 @@ bound, not the incumbent. At 120 s with the flag ON (one run, 548 cuts applied,
 0 id mismatches, load 2.6) it is still uncertified. The bound reaches -0.097687
 against the optimum -0.094760, a gap of about 3%. The issue's portfol item stays
 open on that bound.
+
+### 103.11 #827: `DISCOPT_TRIVIAL_PRIMAL` is retired -- it rescues incumbents and costs certificates (2026-10-28)
+
+**What it was.** When no warm start was given, `solve_model` tried four trivial
+points (origin projected into the box, box center, all lower bounds, all upper
+bounds), checked each against the true constraints, and passed the best feasible one
+as `initial_point`. Default OFF. The #1422 panel (66 vendored instances) measured
+nothing, because no in-repo instance was both trivially feasible and without a
+default-path incumbent. The audit row named the panel that would decide it: the
+MINLPLib instances in that intersection.
+
+**That panel.** Default configuration, 10 s limit, highspy 1.15.1 and pounce 0.14.0,
+`discopt.__file__` and the flag's presence asserted per subprocess. Every incumbent
+was re-checked with `verify_point` on a fresh parse; 0 failed, and 0 `optimal`
+claims disagree with `minlplib.solu`. Data and scripts are in
+`docs/dev/data/827-trivial-primal/`.
+
+- **Screen** (no solve): 1516 instances with at most 5000 variables, 6064 candidate
+  checks, 0 errors. A candidate passes the constraint check on 321. (The screen does
+  not check integrality, so `ball_mk3_*`, which `.solu` lists as infeasible, pass on
+  the non-integer box center. The solver correctly reports them infeasible on both
+  arms.)
+- **Gain.** On 49 of the 321, OFF returns no incumbent at 10 s. ON returns a
+  verified one on 20 of those (`t1000` reaches `optimal`). At 60 s, OFF finds an
+  incumbent on 12 of the 17 rescued instances it could be rerun on. ON is better
+  by a wide margin on `hadamard_7` (32 vs 0, the optimum is 32), `sporttournament48`
+  (1132 vs 0) and `sonet23v6` (7.10e6 vs 8.72e6). `torsion50` and `torsion75` stay
+  without an incumbent OFF. ON finds 0.0 there, against optima near -0.418.
+- **Cost.** ON was run at 10 s on the 272 instances where OFF already had an
+  incumbent. The 11 regressions were rerun interleaved, OFF/ON alternated, 3
+  repeats each. Every repeat agreed:
+
+  | instance | OFF | ON |
+  |---|---|---|
+  | `nvs17` | optimal, 1 s, 75 nodes | feasible at 10 s, 7287 nodes |
+  | `nvs19` / `nvs23` | optimal, 3 s / 6 s | feasible at 10 s, slightly worse incumbent |
+  | `nvs24` | optimal -1033.2, 8 s | feasible -792.0 / -791.4 |
+  | `sfacloc2_2_95` | optimal 19.58, 4 s | feasible 28.69 |
+  | `ex4_1_5`, `pointpack06`, `rbrock`, `st_rv9` | optimal, 1-3 s | feasible at 10 s, same incumbent |
+  | `nvs18` | optimal, 1 s | optimal, 9 s |
+  | `sonet20v6` | time limit, incumbent 3.42e6 | time limit, no incumbent |
+
+  Both arms run the same route (spatial B&B; `nvs17` checked). The seeded root
+  point sends the search down a much larger tree. The mechanism is not
+  root-caused here.
+
+**Verdict: Retired (§5).** It is cert-clean: no false claim and no unverified
+incumbent. It is not net-positive: 9 certificates lost and 0 gained at 10 s. The
+incumbent rescues are real, but a seed that changes the root search this much
+cannot be the default. The flag, the seed block, the #1422 panel script and its flag tests are
+deleted. `python/tests/test_827_trivial_primal.py` now checks the two
+showcase instances on the default path. Both certify without the seed:
+`ball_mk2_30` with `nlp_bb=False`, and `chimera_k64ising-01` at 30 s.
+
+**What would reopen it.** The 20-instance gain set above is a primal gap. A
+heuristic that offers a trivial point as an incumbent *candidate*, without making it
+the root's `initial_point`, should be judged against both lists: the gain set and
+the 9 lost certificates.

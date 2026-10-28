@@ -668,6 +668,15 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **`DISCOPT_TRIVIAL_PRIMAL` is retired (#827, performance-plan §103.11).** It
+  seeded the root `initial_point` with a trivially feasible point. It was default OFF.
+  On a MINLPLib panel (1516 instances screened, 321 with a feasible trivial point,
+  10 s limit), it gave an incumbent on 20 instances that had none, but cost 9
+  certificates (`nvs17` went from 75 to 7287 nodes) and gained 0. Every repeat of
+  an interleaved 3x rerun agreed. The flag, the seed block and
+  `discopt_benchmarks/scripts/issue1422_trivial_primal_graduation_panel.py` are
+  deleted. The panel data is in `docs/dev/data/827-trivial-primal/`.
+
 - **The McCormick-"nlp" relaxation route and its options (#1873).**
   `mccormick_bounds="nlp"`, `partitions`, `relaxation_arithmetic` and
   `use_learned_relaxations` now raise `ValueError`, and the CLI's `--partitions` is gone.
