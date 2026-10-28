@@ -14,6 +14,12 @@ with one deliberate difference recorded under "What you do not get" below.
 
 How it works, and why it is built this way
 ------------------------------------------
+On the default path a block never reaches the code described here: since
+#1903 the POUNCE tape lowers it as a numpy-evaluated *hole*
+(:mod:`discopt._tape_holes`) that calls ``fn``/``jac``/``hess`` directly and
+imports no JAX. What follows is the legacy JAX evaluator, which still handles a
+block nested inside another block's argument.
+
 The callables are reached through :func:`jax.pure_callback`, which is the only
 way to put non-traceable code inside the traced DAG. A bare ``pure_callback`` is
 not differentiable at all (*"Pure callbacks do not support JVP"*), so the

@@ -13,7 +13,7 @@ The release procedure that produces these entries is documented in
 ### Added
 
 - **The Claude Code bundle installs with knowhow v0.3
-  (`uvx knowhow add jkitchin/discopt --all`).**
+  (`uvx knowhow add jkitchin/discopt --all`) (#2016).**
   - New Agent Skill `discopt` (`python/discopt/skills/skills/discopt/SKILL.md`):
     building a model, solving it and reading a `SolveResult`. Because it follows
     the Agent Skills spec, it also works outside Claude Code.
@@ -85,7 +85,7 @@ The release procedure that produces these entries is documented in
   without (54.5 s before #1712). Results are unchanged on a 26-instance OFF/ON
   panel (`docs/dev/performance-plan.md` §78.2).
 
-- **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
+- **On/off (semicontinuous) units in `LinearTreeFormulation` (#1707).** The new
   `active=` argument takes `True` (a `{prefix}_active` binary is created) or an
   existing binary expression such as `on[t]`. When the unit is off, the inputs
   and outputs are forced to zero and no leaf is selected; when it is on, the
@@ -95,7 +95,7 @@ The release procedure that produces these entries is documented in
   cost on the binary.
 
 - **Linear model decision trees in `discopt.ml`: `LinearTreeDefinition` and
-  `LinearTreeFormulation`.** Trees with oblique (hyperplane) splits and affine
+  `LinearTreeFormulation` (#1703).** Trees with oblique (hyperplane) splits and affine
   leaves are read from the solver-neutral v1 `hyperplane_tree` spec written by
   jax-ldt and `difftree.export.to_spec`, with no dependency on either package,
   and embedded as a MILP with either the hull (disaggregated, no big-M) or the
@@ -188,7 +188,7 @@ The release procedure that produces these entries is documented in
   the tool for producing a MILP on purpose, not as a faster default. Gallery
   example `example_valve_point_dispatch` (Walters & Sheble 1993).
 
-- **`dm.external`: external functions with caller-supplied derivatives** — the
+- **`dm.external`: external functions with caller-supplied derivatives (#1478).** — the
   grey-box node, discopt's analogue of Pyomo's `ExternalGreyBoxModel`. Wrap a
   compiled simulator, a subprocess or a legacy kernel by supplying `fn`, `jac`
   and (for the NLP path) `hess`; discopt consumes them instead of trying to
@@ -216,7 +216,849 @@ The release procedure that produces these entries is documented in
   block is refused up front with a message naming both fixes rather than failing
   deep inside POUNCE.
 
+- **discopt runs in the browser (#1474, #1476).** `crates/discopt-wasm/web/` is a single static
+  page — CodeMirror editor, console, Run button, and a dropdown with one model
+  per problem class — that installs discopt and `pounce-solver` as emscripten
+  wheels into Pyodide 0.28.3 and solves entirely client-side. It is published
+  with the documentation at `/wasm/`, linked from the landing page and from the
+  new `docs/browser.md`. Both wheels are committed rather than built in CI,
+  because building one needs ~1 GB of toolchain; `build-wheel.sh --check` and a
+  load-time check in `worker.js` guard against a version-stale wheel.
+  `crates/discopt-wasm/tests/examples_in_pyodide.mjs` solves all six examples in
+  a real Pyodide interpreter as part of the docs workflow, which is the only
+  check that catches browser-only failures.
+
+- **A named transformation registry, `discopt.transformations`, plus `Model.clone()` (#1486).**
+  `apply_to` changes a model in place, `create_using` works on a `Model.clone()`, and `check` returns a model diff without solving.
+  `copy.deepcopy(Model)` used to raise on `from_nl`, solved and fast-API models. It now copies them (`Model.__deepcopy__`).
+  Bound-neutral: the solver's call sites now go through `Transformation.apply`. A 115-case panel shows no change.
+
+- **`Model.to_latex()` produces publication typography (#1517).**
+  Coefficients are now exact by default and rounding is opt-in through `precision=`. The old 6-significant-figure rounding changed 82 of 11,294 corpus rows.
+  New `standalone=True` gives a compilable document.
+  Fixed: MathJax failed with "internal buffer size exceeded" on models larger than about 5 KB (e.g. casctanks), and a builtin `sum()` of about 3000 terms raised `RecursionError`.
+
+- **`Model.solve(milp_backend="highs"|"native")` selects the engine for pure LP/MILP (#1538).**
+  `"native"` runs discopt's own LP/MILP branch and bound. It accepts `milp_cuts=False` and `branching_rule=` (`pseudocost`, `most_fractional`, `least_fractional`, `strong`).
+  Fixed: `node_callback` and `cut_callback` were silently ignored on pure-MILP routes (0 calls measured). Now a `node_callback` keeps the solve on the MILP tree and a `cut_callback` sends it to spatial B&B. A MILP with callbacks therefore runs on a discopt engine, which is slower, rather than on HiGHS.
+  Two combinations are refused: `"highs"` with any callback, and `nlp_bb=True` together with an explicit `milp_backend`.
+
+- **`solver="pounce"` runs a single POUNCE interior-point solve (#1539).**
+  LPs and QPs proved PSD report `optimal`. Every other model reports `local_*` with no bound. `pounce_options` is an alias of `ipopt_options`.
+  Refused: integer variables, GDP/SOS constraints, lazy constraints or callbacks, and any `nlp_solver` other than `"pounce"`.
+
+- **`Model` can be pickled, and serialized documents are checked when they load (#1748).**
+  `pickle` used to raise on solved, `from_nl` and fast-API models. For `from_nl`, the source's SHA-256 digest is checked.
+  **False certificate fixed:** an out-of-range `active_value` in a loaded document dropped its row, and the relaxed optimum was then certified.
+  Also fixed: copies lost decomposition marks; registered atoms lost their envelope (31 vs 5 nodes); deep expressions raised `RecursionError` (now verified at 50,000 levels); 18 attributes set after `__init__` were silently dropped. Schema 1.3 -> 1.4.
+
+- **A schema version policy and `discopt upgrade-model` (#1776, #1783).**
+  Unknown keys are refused, including nested and repeated keys. A newer minor version loads with `SchemaVersionWarning`. Keys starting with `x-` are annotations.
+  Pickles carry a format stamp: a different layout raises `TypeError`, and a different version warns with `ProvenanceSkewWarning`.
+  New CLI: `discopt upgrade-model <in> [<out>] [--check] [--import MODULE]`. Also fixed: a real objective stored in the placeholder slot was lost without warning.
+
+- **Serialization now covers logical, GDP and indexed-model state, schemas 1.5-1.7 (#1785, #1801, #1803).**
+  1.5 saves `Model.logical` constraints, which used to be refused, and complementarity-lowering rows, which used to be dropped.
+  1.6 saves `None`/`Ellipsis` indices (`DAEBuilder.add_control`, `TrainableNetwork`) and a disjunction used as a disjunct member.
+  1.7 saves Disjunct-block state: nested blocks, OR blocks and local variables.
+
+- **The serialization reader is hardened by fuzzing and a builder sweep (#1788, #1797, #1805).**
+  Fuzzing with hypothesis found these, now fixed: a negative CSR column index wrapped onto another variable; an `indptr` overrun caused a Rust panic; `{}` was read as an empty list; the nested atom `sq(sq(x))` lost its outer tag.
+  A `Model.disjunction` nested inside `either_or` crashed dumps, pickle, deepcopy, `clone` and `create_using`. This was found by the 56-case builder sweep.
+  Types are now checked at decode time. A disjunct indicator mapped to a continuous column used to load, and the solve then ran on a different model with no warning. `transform_current_disjunctive_state` also no longer leaves `start` stale.
+
+- **Faster and leaner model serialization (#1804, #1807, #1820).**
+  Unpickling a 200k-node model takes 147 ms instead of 327 ms.
+  Writes are streamed and reads are lazy, with the format unchanged. Peak memory falls 34-55 % at about 5-8 % more time; for example, `dumps` on acopf_caseactivsg70k_qcqp goes from 3.35 to 1.83 GB.
+
+- **GDP modeling: indicators, nested blocks, OR semantics and disjunctive state (#1782, #1789, #1791, #1795).**
+  `either_or` returns its disjunction. `d.indicators` are `BooleanVar`s created on first use. `gdp_tree` exposes the structure. `DeclaredLogic` now requires the selected disjunct to hold, and `simplex` refuses indicators that have been read.
+  Added `Disjunct.add_disjunction`, `Disjunct.subject_to(m.disjunction(...))` and local variables through `Disjunct.variable`. Rows added after lowering used to be lost without warning; they now raise.
+  Added `gdp.state.reduced_subproblem`, `fix_disjuncts` and `transform_current_disjunctive_state`, which returns a reversible token.
+  OR (at-least-one) semantics work under big-M, `auto`, `simplex` and `binary_multiplication`; `hull` and `mbigm` refuse them.
+
+- **`discopt.pyomo.gdp.from_pyomo_gdp` converts a Pyomo GDP model to native discopt (#1800).**
+  `check_evaluation_parity` compares how the two models evaluate.
+
+- **New GDP lowerings and reformulations (#1821, #1838, #1851, #1853, #1857, #1860).**
+  `hull` now lowers nested disjunctions. An explicit `gdp_method="hull"` on nested blocks used to fall back to big-M; the bounds are now as tight or tighter. A bug that dropped the content of hulled blocks with no rows is fixed.
+  New `gdp_method="binary_multiplication"`, `gdp.cuttingplane`, `gdp.partition_disjuncts` / `between_steps` (P-split), `gdp.basic_step.apply_basic_step` and `gdp.bilinear`.
+  A user-supplied `big_m=` on `either_or`/`disjunction` is validated by LP. If the value cannot be certified the certificate is withheld, and an M that is provably too small is refused.
+
+- **Default-OFF GDP relaxation options (#1824, #1837, #1884).**
+  `DISCOPT_MBIGM_CONDITIONED`, `DISCOPT_GDP_BOUND_PRETRANSFORM` (with `gdp.bound_pretransform`) and `DISCOPT_HULL_CONIC_QUADRATIC`. All three are default OFF.
+
+- **Native GDPopt-style algorithms: `loa`, `gloa`, `lbb`, `ric`, `enumerate` and `ldsda` (#1861, #1864, #1865, #1872, #1880, #1887, #1890, #1897, #1900).**
+  These are selected with `gdp_options`. They share building blocks for masters and subproblems and initialization strategies. `enumerate` takes `max_configurations` and propagates logic: syngas goes from 8,388,608 to 1,440 configurations.
+  `loa` defaults to `subproblem="global"`. On the gdp_parity panel it solves 12 instances instead of 8, with 0 incorrect.
+  Default-path changes: one-hot searches skip pinned binaries (33.7 s -> 0.68 s), and `integer_local_search` uses the node box. On the MILP path, an `ITERATION_LIMIT` result with no incumbent used to return a zero vector as its point; it now returns `x=None`.
+  Fixed: the converter's constant folding crashed on an empty `lor()`.
+
+- **A proof of infeasibility from `lp_nlp_bb` now has `gap_certified=True` (#1882).**
+
+- **New `SolveResult.termination` field says why a solve stopped, and every gap is computed by one formula (#1590).**
+  Its values are listed in `discopt.status.TERMINATION_REASONS`: `gap`, `exhausted`, `node_limit`, `time_limit`, `iteration_limit` and `interrupted`.
+  Reported gaps now all use `|obj - bound| / max(|obj|, |bound|, 1e-10)`, so some values differ slightly from earlier releases.
+  An invalid POUNCE option now raises `PounceOptionError` naming the bad key, instead of failing opaquely on an indefinite QP.
+
+- **New `Model.convexity()` reports what discopt can prove about a model's convexity, returning a `ConvexityReport` (#1663, #1684).**
+  It uses the same PSD predicate as the solver. An early version overclaimed, and #1684 corrected that before release.
+
+- **New `Model.solve(highs_options={...})` passes options straight to HiGHS (#1648).**
+  Also new: `discopt.export.nl_column_order`, which gives the `.nl` column order. OA progress is now logged at INFO level.
+
+- **Badly scaled models now trigger a warning before the solve (#1483, #1693).**
+  It fires when the coefficient range exceeds 1e9. The data is available from `PyModelRepr.scaling_diagnostics()`. The check is default-ON, and `DISCOPT_SCALING_DIAGNOSTICS=0` turns it off.
+  The check has an expansion budget, so it no longer hangs before the solve on large models (#1693).
+
+- **Sensitivity results now carry the objective's derivative (#1641).**
+  `SensitivityResult.dobjective_dp` and `predict_objective` are new. The old prediction was a constant.
+
+- **QP warm starts now carry the dual iterate (#1684).**
+  `Model.solve(warm_start=<previous result>)` on the qp-ipm route seeds POUNCE with the full primal-dual iterate, which is exposed as `SolveResult.pounce_qp_iterate`.
+
+- **New `nonsmooth.epigraph` transformation, applied by default on the mip-nlp route (#1501, via #1511).**
+
+- **Squared-form second-order cones are recognised as convex (#1936).**
+  A row `sum w_i a_i**2 + c <= k t**2` with `t >= 0` provable on the box is
+  rewritten exactly to `sqrt(sum w_i a_i**2 + c) <= sqrt(k) t` before the
+  convex-MINLP router, so it takes the convex route instead of spatial B&B.
+  `Model.convexity()` reports the rewrite as `"squared_soc"`; row duals are mapped
+  back to the row as written (withheld with a warning at the apex `t = 0`).
+  Same PR: `min s s.t. sqrt(x0**2 + x1**2) <= s` used to end `feasible` with no
+  gap (a NaN at `x = 0`) and now returns `optimal 0`.
+
+- **The convexity detector classifies `c ** f` and sign-proven `g ** n` (#1878).**
+  `2 ** x` (constant base `c > 0`) and integer powers `n >= 2` of a non-affine
+  base with a proven sign now get a DCP verdict instead of UNKNOWN. MINLPLib
+  `cvxnonsep_pcon20/30/40` go from an open gap at 120 s to optimal in 4.6 / 37.9 /
+  71.8 s. Default ON; `DISCOPT_POWER_COMPOSITION=0` restores the old classifier.
+
+- **`solver="pounce"`: `qp_*` options and per-attempt statistics (#1992, #1985).**
+  `qp_presolve`, `qp_reg`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` are
+  forwarded to POUNCE's QP solver (an older pounce that lacks one gets a refusal
+  naming the version). Reports carry `statistics["attempts"]` and
+  `total_iteration_count`; `iteration_count` stays the published call's own.
+
+- **GDP-LOA/GLOA/RIC cap each global subproblem and log every iteration (#1997;
+  #1984).** One subproblem could use the whole budget (849 s of 3600 s
+  in the reported case). The default cap is a tenth of the run, within [1 s, 30 s];
+  `gdp_options["subproblem_time_limit"]` sets it. A capped, uncertified subproblem
+  leaves the master with its valid bound instead of being re-proposed; on the
+  reported flowsheet the run used to stop at 2276.14 against an optimum of
+  1945.96. LOA logs one INFO line per iteration to `discopt.solvers.gdpopt_loa`.
+
+- **New `termination="unresolved"` for a search that removed a subtree without proof (#1896).**
+  `discopt.status.TERMINATION_UNRESOLVED`. It is reported when a tree drains after a
+  #467 pin, a non-rigorous sentinel fathom or an open #598 floor. `"exhausted"` now means
+  only a complete search (#1585). Before this, such runs reported `"exhausted"` with an open
+  gap (e.g. `haverly`: 69 nodes, bound −475 against the optimum −400).
+
+- **Documentation: new notebooks, merged duplicate pages and install guidance for the
+  skill bundle (#1602, #1737, #1488, #1477, #2019).**
+  - `docs/notebooks/relu_embedding_scaling.ipynb`: ReLU embedding scaling against
+    OMLT 1.2.2 + HiGHS, depth vs width at a fixed neuron budget, and best practices drawn
+    from those measurements (#1602).
+  - `docs/notebooks/external_greybox_pipeline.ipynb`: a pipeline-sizing model with a
+    Colebrook friction-factor grey box through `dm.external`, compared with its symbolic
+    twin (`optimal`, `gap_certified=True`) (#1737).
+  - The Pyomo-solver and parameter-estimation topics each had two pages; each is now one
+    notebook (`pyomo_solver.ipynb`, `tutorial_estimation.ipynb`) with nothing dropped (#1488).
+  - The README gains a "Related projects" section (#1477).
+  - The `discopt` Agent Skill and five commands now tell a new user how to install the
+    package (PyPI wheels, Python 3.12+, extras); `/debug` separates PyPI from source-install
+    remedies (#2019).
+
+### Changed
+
+- **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
+  no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
+  imports no `jax` module. Without the extra, every JAX-only feature raises
+  `MissingJaxError`, an `ImportError` naming the feature and the extra. That covers
+  `dm.custom`, a model whose expression has no tape opcode (the error names the construct),
+  `discopt.estimate`, `discopt.sensitivity`, the differentiable and parametric layers, and
+  `discopt.ml.train`. The `dev` extra includes JAX. `discopt.mo` sweeps, the GDP simplex
+  lowering's residuals and the nonsmooth lift's warm start used JAX on ordinary models;
+  they now evaluate on the tape. Inventory: `docs/dev/jax-optional-inventory.md`.
+
+- **In-tree FBBT now tightens through array-valued rows by default** (#1568).
+  `DISCOPT_IN_TREE_ARRAY_ROWS` is graduated to default-ON. Each array-valued
+  constraint row (every `discopt.ml` layer and any vectorised `A @ x` or
+  elementwise row) is now one scalar FBBT row per element at each node, so
+  branching on network inputs narrows the activations. Before this change those
+  rows were read through a hull proxy that was never tightened. Graduation panel:
+  58 array instances plus the 66 in-repo `.nl` files, 30 s each, 0 violations over
+  282 checks. Certificates went +5 / −0 (`discopt.ml` full_space 10x1 s0/s1,
+  reduced_space 10x1 s1, reduced_space 25x1 s0/s1), the final bound was tighter on 28 of the
+  29 instances neither arm certified, and total wall fell from 1350 s to 1244 s.
+  In-tree FBBT cost went from 1.8% to 3.2% of wall. Scalar-layout models are
+  unchanged. `DISCOPT_IN_TREE_ARRAY_ROWS=0` restores the previous behaviour.
+
+- **`import discopt` no longer pulls the `_multiprocessing` C extension (#1472).**
+  `discopt.modeling` re-exports `solve_batch`, so `discopt.batch` is imported by
+  every `import discopt`, and it imported `multiprocessing` at module level —
+  a capability only `solve_batch(workers>1)` uses, and one `workers=1` returns
+  before reaching. The import now lives in the two functions that build a pool.
+  No API change: `solve_batch` is exported and behaves exactly as before.
+  This makes the package importable on CPython builds that ship no
+  `_multiprocessing` (Pyodide/WebAssembly), where the eager import previously
+  made *all* of discopt unimportable. Regression tests reproduce that
+  environment with a `sys.meta_path` blocker and solve an LP, a MILP and an
+  MINLP with the multiprocessing names unimportable.
+
+- **`DISCOPT_MATMUL_INTERVAL_ENCLOSURE` is now on by default (#1863).** Set `=0` to opt out. On the panel 4 certificates were gained and 0 lost. Closes #1842.
+
+- **`DISCOPT_GDP_CONFIG_DEFER` is now on by default (#1909, #1912).** Set `=0`/`false`/`no`/`off` to opt out; it is off under deterministic mode. SGM on 15 GDP pairs fell from 23.65 s to 13.55 s.
+
+- **The sub-NLP heuristic skips integer assignments that integer-only linear rows rule out (#1907).** This affects only the primal side. It refused 1593 sub-NLPs across 29 instances.
+
+- **Five safeguards that were behind flags are now on by default. Each one passed the soundness-and-benefit panel (#1515, #1518, #1664, #1665, #1691, #1696).**
+  - `DISCOPT_CLOSED_EDGE_ENVELOPES`: envelopes at closed domain edges (#1515, extended to entropy and sqrt in #1583).
+  - `DISCOPT_IN_TREE_ARRAY_FBBT`: node-level FBBT for array models (#1518).
+  - `DISCOPT_MILP_COEF_TIGHTEN`: big-M coefficient tightening. 22/48 certified before, 48/48 after (#1664).
+  - `DISCOPT_PERSPECTIVE_OA`: perspective OA cuts (#1665).
+  - `DISCOPT_MILP_IMPLIED_BOUNDS`: implied bounds on open-box facility models. 39 certified before, 63 after (#1691).
+  - `DISCOPT_CONVEX_LIFT_VERTEX_ENCLOSURE`: on the hull root, the bound went from -1898 to -502.99 and nodes from 148 to 54 (#1696).
+  Setting a flag to `=0` restores the old behaviour.
+
+- **Convex MINLPs now default to LP/NLP branch-and-bound instead of OA (#1673).** `DISCOPT_CONVEX_ROUTE_METHOD=oa` restores the old route.
+
+- **The OA master asks for the HiGHS presolve-free cross-check only when its bound could close the gap (#1669).**
+  On the perspective test case, wall time fell from 24.2 s to 14.5 s. A big-M case that was uncertified at 60 s now certifies in 15.7 s. `DISCOPT_OA_MASTER_CONFIRM_ON_DEMAND=0` turns this off.
+
+- **Rank-deficient Gram QPs are accepted as convex when the rounding error is provably small (#1690).**
+  The new flag `DISCOPT_CONVEX_CHARGE` is default-ON, and `=0` restores the strict refusal. The charge is reported in `solver_stats["convexity/charge"]`. On the panel, 3 of 6 triggered instances now certify, where none did before.
+
+- **The POUNCE qp-ipm solver now equilibrates columns, which cuts iterations on badly scaled QPs (#1692).** The default is ON, and `DISCOPT_POUNCE_QP_COLSCALE=0` turns it off.
+
+- **The default `split_eps` changed from 1e-6 to 1e-5 (#1648).**
+
+- **Sparse models take a sparse HiGHS path, so memory use drops sharply (#1685).**
+  On the test model, peak RSS fell from 5117 MB to 228 MB. `solve_lagrangian` also got faster: 9.98 s before, 1.29 s after.
+  `constraint_duals[name]` on a constraint block now returns an array.
+
+- **`gradient()` and `sensitivity()` no longer use JAX (#1663).** One test case went from 10.2 s to 0.75 s.
+
+- **`solve(strategy=...)` is validated, and an ignored strategy warns (#1725;
+  #1722).** A value other than `best_first` / `depth_first` / `best_estimate`
+  raises `ValueError`; it used to return `optimal` on routes that build no tree.
+  A non-default strategy that no route consumed now raises a `UserWarning` naming
+  the route.
+
+- **An unknown `gdp_method` raises `ValueError` (#1773).** It used to solve
+  silently as big-M (including the reserved `"gloa"` and typos), and was ignored
+  on models without disjunctions; both cases now raise.
+
+- **`add_quadratic_objective` reads the whole `Q` (#1818).** The objective
+  is `0.5·x'Qx` as documented: a non-symmetric `Q` is stored as `0.5·(Q + Qᵀ)`.
+  It used to read only `triu(Q)`, so an upper-triangular `Q` doubled its cross
+  terms and a lower-triangular one lost them. A caller passing `triu(Q)` to mean
+  "the symmetric matrix with this upper triangle" now gets `0.5·x'(triu Q)x`.
+
+- **`time_limit` now covers work done before the solve clock started (#1932).**
+  `Model.solve` hands the solver `time_limit` minus its own pre-work (reported by
+  `last_solve_prework_seconds()`). Once the budget is spent, mandatory phases
+  return `time_limit` with no point and no bound; `DISCOPT_PRESOLVE_DEADLINE=0`
+  opts out.
+
+- **`SolveResult.x` no longer lists factorable-lift auxiliaries (#1727).**
+  `_fr_aux_*` columns the solve created are dropped from `res.x`; a variable you
+  declared with such a name is kept.
+
+- **`SolveResult.value()` refuses a variable that was substituted out (#1827).**
+  After `AffineDecisionRule(y, ...).apply()` and a new `m.continuous("y")`,
+  `value(old_y)` used to return the new `y`'s value; it now raises `KeyError`.
+  Reformulation passes also register the names they create, so a transformed model
+  no longer accepts a duplicate auxiliary name that `serialize.loads` then refuses
+  (#1823; #1799).
+
+- **GAMS link: `optca=0` is read at floating-point resolution, and status codes
+  follow GAMS's definitions (#1893; #1888, #1889).** `optca=0` becomes
+  `abs_gap=1e-9` (it had been silently a 1e-6 absolute tolerance). A certified
+  optimum reports model status 1 for every problem class; an uncertified discrete
+  point is 8 and a proven discrete infeasibility 10. A `feasible` result reports
+  its termination reason (time/node limit 3, iteration limit 2, interrupt 8), and
+  one whose certificate was withdrawn after the search reports solve status 4.
+
+- **The native spatial kernel branches, warm-starts and cuts like a modern spatial B&B
+  (#1904, #1943, #1949, #1942, #1969, #1974).** All of the following are default ON; each
+  `=0` restores the previous rule.
+  - Pseudocost + reliability integer branching instead of the lowest-index fractional
+    column (`DISCOPT_KERNEL_PSEUDOCOST`, #1943). nvs17 over 11 root boxes: 17,229 to
+    ≥ 100,000 nodes before, 9,741–13,147 after.
+  - Scored spatial branching after SCIP's nonlinear handler: violation share + spatial
+    pseudocost, split point pulled 3/4 toward the midpoint
+    (`DISCOPT_KERNEL_SPATIAL_BRANCHING`, #1974). nous1 now certifies 1.56707 (was bound 1.24
+    at 120 s).
+  - Child node LPs warm-start from the parent basis, with a bound-flip repair of a
+    dual-infeasible start (`DISCOPT_NATIVE_WARM_START=2`, introduced default-off in #1942,
+    graduated in #1949). Graduation panel, 270 instances at 30 s: gained `tanksize` and
+    `nous2`, lost none; total wall 1671.9 → 1597.1 s.
+  - Per-node outer-approximation cuts for proven-convex quadratic forms
+    (`DISCOPT_KERNEL_CONVEX_CUTS`) and an integral-point primal probe
+    (`DISCOPT_KERNEL_INT_PROBE`) (#1969). nvs23 and nvs24 now certify at 120 s (optimal
+    −1125.2 in 14.7 s; −1033.2 in 17 s).
+  - The stop/prune test uses the documented gap criterion, cutoff OBBT runs on the root
+    box once a verified seed exists, and the seed falls back to integer local search
+    (`DISCOPT_KERNEL_DOCUMENTED_GAP`, `DISCOPT_KERNEL_CUTOFF_OBBT`, `DISCOPT_KERNEL_SEED_ILS`,
+    #1904). st_m2 certifies in 1 node / 8.6 s; nous1 finds its optimum 1.56707 (no incumbent
+    before).
+
+- **More models reach the native spatial kernel (#1957, #2017).**
+  - Models with array (`shape=`) variables, which all ran on the Python spatial tree before
+    (`DISCOPT_NATIVE_KERNEL_VECTOR_VARS`, default ON). An array model and its scalar twin
+    give byte-identical kernel specs (#1957).
+  - A free original column that appears only linearly (`DISCOPT_KERNEL_FREE_LINEAR`;
+    `util` 61.4 s uncertified → 5.5 s optimal), a lift/model disagreement re-checked exactly
+    before declining (`DISCOPT_KERNEL_DECLINE_EXACT`; `rbrock` 20 s uncertified → optimal in
+    3.1 s), and products that claim only the envelope rows using all their columns
+    (`DISCOPT_KERNEL_BLF_FULL_SUPPORT`; 11 instances move onto the kernel, wall 35.5 →
+    17.8 s). All default ON with `=0` opt-outs (#2017).
+
+- **The integer-bilinear lift is raced against the un-lifted model instead of always being
+  adopted (#1948, #1960, #1957, #2017).** `DISCOPT_IPX_RACE` (default ON, `=0` restores the
+  legacy rule) runs the lifted model for 5 s, then the un-lifted one for 5 s, then continues
+  the arm with the smaller gap. It is skipped under `deterministic=True`, with time limits
+  under 15 s, with callbacks, warm starts or lazy constraints, and with cheap-first. Panel
+  (43 instances, 30 s): certified 37 → 39, total wall 330.0 → 261.0 s; `conge15` slowed 6.3 →
+  13.1 s.
+  - The lift slice ends when the native MILP engine stalls (`DISCOPT_IPX_RACE_STALL_EXIT`,
+    default ON) (#1960).
+  - `DISCOPT_INTEGER_PRODUCT_INDEXED` is now default ON: `x[0]*x[1]` on an array variable is
+    seen by the integer-product pass, so an array model takes its scalar twin's path (#1957).
+  - The default `max_nodes` is no longer charged per slice, which could leave the next arm
+    1 node; tln4 and tln5 now certify (#2017).
+
+- **Unbounded variables are branched and bounded, so unbounded-box models can certify
+  (#1896, #1901, #1977).** All default ON with `=0` opt-outs.
+  - An unbounded dimension is split at a finite point instead of the node being fathomed
+    (`DISCOPT_UNBOUNDED_BRANCH`, #1896).
+  - A rigorous lower bound for polynomial objectives over unbounded boxes
+    (`DISCOPT_SEPARABLE_POLY_BOUND`), a verified-HiGHS bound for a node LP that every
+    in-house certificate declined because of free columns (`DISCOPT_FREE_COLUMN_LP_CERT`),
+    and a high-accuracy re-solve of a best point just outside the gap
+    (`DISCOPT_ENDGAME_POLISH`) (#1901). haverly, ex7_3_1, ex4_1_5 and prolog all certify at
+    defaults (POUNCE 0.13.0).
+  - The verified-HiGHS bound is extended to any optimal continuous node LP every in-house
+    certificate declined (`DISCOPT_DECLINED_LP_CERT`, #1977). `ex14_1_7`: time limit at
+    bound −341.28 → optimal in 3 nodes, 1.7 s.
+
+- **Presolve proves integer quadratic rows infeasible and hands the convex route its
+  fixings (#1881, #1891).** All default ON with `=0` opt-outs.
+  - `SeparableQuadraticUpperBoundRule` takes an integer column's minimum over its integer
+    points (`DISCOPT_INTEGER_SEPARABLE_QUAD`, #1881). `ball_mk3_10/20/30`: time limit →
+    infeasible in 0.1–0.2 s.
+  - New `IntegerBlockQuadraticRule` bounds small positive-definite integer blocks by their
+    integer minimum; it only proves infeasibility (`DISCOPT_INTEGER_BLOCK_QUAD`, #1891).
+    `ball_mk4_05/10/15` are proven infeasible in 0.1 s.
+  - The convex MIP-NLP route solves a clone with presolve's fixings applied
+    (`DISCOPT_ROUTE_TIGHTENED_BOX`, #1891). `ball_mk2_10` 10.32 → 0.20 s.
+
+- **The native MILP engine spends the caller's budget and uses far less memory (#1892).**
+  Retired B&B nodes now release their box, parent solution and basis (tln4 full search:
+  1,844 MB → 410 MB peak, identical node count). With `DISCOPT_MILP_ENGINE_FULL_BUDGET`
+  (default ON), runs are no longer capped at 100k nodes each; the clock, gap and a 2 GiB
+  frontier budget govern. An explicit `max_nodes` is now one total over both engine runs,
+  as its docstring says (it was per run). tln4 at 120 s: 8.7 → optimal 8.3.
+
+- **Other solver speedups (#1697, #1745, #1988, #1993, #2017).**
+  - The sparse interval Hessian is vectorised: a node whose gradient is dense over n
+    variables no longer costs O(n²) Python interval operations. On a 600-variable model,
+    12.85 → 1.15 s (#1697).
+  - The binary-multilinear MILP linearization reads a scalar `@` (`c @ x`, `x @ Q @ x`)
+    instead of aborting on it. Subset-sum n=30: feasible at 31.0 s on spatial B&B → optimal
+    834 in 0.4 s on HiGHS (#1745).
+  - The LP layer's drive-out of basic artificials no longer raises the phase-1 objective
+    (`DISCOPT_DRIVE_OUT_MONOTONE`, default ON). Panel: certified 63 → 66; `ex1252a` bound
+    0 → 18987 (#1988).
+  - The incremental McCormick fast path extends itself with the root cut pool's product
+    and even-power columns (`DISCOPT_INCREMENTAL_POOL_EXTEND`, default ON) (#1993).
+  - An affine denominator whose range contains 0 is narrowed by the range the linear rows
+    imply (`DISCOPT_IMPLIED_DENOMINATOR`, default ON; `minlphi`: no bound → optimal in
+    1.2 s). The #1634 presolve-free cross-solve is driven to the claimed bound instead of
+    its own gap: certified 82 → 89 on 102 routed instances. `DISCOPT_HIGHS_MASTER_LP_CUTS`
+    is a default-OFF opt-in (#2017).
+
+- **A proved-convex continuous model starts fixed columns at their value (#1715, #1718).**
+  A column pinned by a single-variable affine `==` row starts at its implied value instead
+  of the box midpoint; the box itself is unchanged. On the #1711 chain NLP (N = 10,000):
+  101 → 47 POUNCE iterations, about 24 s → 11 s.
+
+- **Opt-in RLT and affine-product distribution for the native kernel (#1946).**
+  `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS` (default OFF) writes a product of two affine forms as
+  bilinear pairs that share columns with other products. `DISCOPT_RLT_INEQ` adds
+  inequality × bound-factor rows, and `DISCOPT_RLT_LINEQ` rows are now admitted by the
+  kernel. #1946 shipped the RLT gates default OFF; on current main both are default ON
+  after #1944's graduation panel.
+
+### Removed
+
+- **The McCormick-"nlp" relaxation route and its options (#1873).**
+  `mccormick_bounds="nlp"`, `partitions`, `relaxation_arithmetic` and
+  `use_learned_relaxations` now raise `ValueError`, and the CLI's `--partitions` is gone.
+  The route fired only for convex models with an explicit option (and `nlp_bb=False`).
+  On the in-repo corpus its bound left bound, node count and status identical in 36 of 36
+  measured instance/variant pairs. On two instances it turned a certified 2–6 s solve into
+  a 27× time-limit overrun and a 13.6 GB out-of-memory kill. 24 modules went with it:
+  `relaxation_compiler`, `mccormick_nlp`, the JAX `mccormick`/`envelopes`/`alphabb`
+  primitives, piecewise/OA/Taylor/Chebyshev/ellipsoidal arithmetics, the ICNN learned
+  relaxations, and the symbolic domain packs and registry. For a bilinear model whose gap
+  stalls, use `solver="amp"`. The `gnn`/`learned` extras are now aliases of `jax`. Record:
+  `docs/dev/nlp-mccormick-route-retirement.md`.
+
+- **Two default-OFF flags were retired along with the code behind them: `DISCOPT_EXTENDED_DIVISION` and `DISCOPT_POLE_BRANCHING` (#1518).**
+  Both were added in #1515 and failed the graduation panel.
+
+- **The SymPy structure-cut presolve (#1971; #1965).** On the in-repo corpus none
+  of the 59 instances under its size gate received a cut, and on 7 gas-network
+  variants it changed no result while taking 1.6–4.8× longer. `structure_cuts=True`
+  now raises `ValueError`; `recognize_and_inject(model)` before `solve` remains as
+  an explicit opt-in. On a default install (no `[sympy]` extra) the pass had been a
+  silent no-op.
+
 ### Fixed
+
+#### False results (earlier answers on these models may have been wrong)
+
+- **False certificates and bounds on nonlinear models.** Each of these fixes removes a certified wrong answer.
+  - The convex NLP certificate wrongly certified `-log(x)` on the default box: -18.97 certified against a true -46.05 (#1475).
+  - asin, acos and acosh were wrong at the edges of their domains. Piecewise-linear models on HiGHS returned false bounds on 60 of 180 panel cases, and now return none. `t**-2` was declared infeasible when it was not (#1492, #1509, #1493, via #1511).
+  - A warm basis is now refused at an infinite bound. One case returned Optimal -0.5 against a true -2.07 (#1510, via #1515).
+  - With shifted coordinates, MIQP-BB certified 0 against a true -6 (#1547).
+  - Clipping of the start window and the node pre-screen produced false "infeasible" certificates. Bound forgiveness produced super-optimal ones. The exact univariate floor certified a shifted cubic at -1.0887 against -4, and affine folding declared st_e36 infeasible (#1550, #1566).
+  - The lift cache merged distinct expressions such as `dm.sum([x,1])` and `dm.sum([y,1])`, which certified 1.8095 against a true 4.0 (#1558).
+  - NLP-BB certified a point whose integral rounding fails verification: -8 against -7. A new backstop in `Model.solve` catches this and records it in `certificate/incumbent_unverified`, and `verify_point` gained `evaluator=` (#1564).
+  - FBBT on an array `dm.prod` cut off the optimum. The product is now relaxed properly (#1584).
+  - The OBBT auxiliary cascade certified 7.59956 against a true 6.05822 (#1587).
+  - The simplex returned false optima, and LP bounds used the raw objective: 150 false bounds on the adversarial panel before the fix. The convex kernel bound sat above the optimum: 86.9096 against 86.5451 (#1597).
+  - The convex fast path certified a bound above the optimum, 0.01005 against 0.01. Its bound is now rigorous, including rounding in the slope, or it is withheld (#1605).
+  - When the gap-tolerance exit in `lp_spatial_bb` fired, it published the incumbent as the bound. The Gurobi route now publishes `ObjBound` (#1631).
+  - The spatial solver certified a point 5.9e-5 outside a constraint row. A new exit gate catches this (#1659, via #1664).
+  - Curvature of a quadratic now needs a PSD proof, which removes 24 false convexity proofs (#1660, via #1665).
+  - The native kernel and the Python tree reported "exhausted" with a bound of 562.5 above an incumbent of 400 (#1656, via #1669).
+  - A Gershgorin estimate declared a convex MINLP infeasible when it was not (#1673).
+
+- **False optima on MILPs routed to HiGHS.** HiGHS presolve rule 13 returned wrong optima on 205 of 10,000 panel instances, and on none after the fix. Every certified MILP is now cross-checked with a presolve-free solve, which costs an indicative 45-75% more wall time. The same guard now covers the OA and GDP masters, which had certified wrongly on 35 of 1,200 (#1638, #1639).
+
+- **False results from the native MILP cuts and the decomposition methods.**
+  - A clique-cut indexing bug returned an "optimal" 1.895 against a true 4.275. Cover cuts dropped tiny coefficients, giving 2.0 against 2.999995. Rejected cuts are counted in `cuts/rejected_by_incumbent` (#1607).
+  - The LOA bound for maximization was on the wrong side. Benders reported optimal with the gap still open. The Lagrangian bundle bound was 0.0 where it should be 331.58. `decomposition="lagrangian"` is no longer silently swapped for B&B. The `discopt.ro` budget counterpart dropped equality rows and returned an optimum of 0.0 (#1642).
+  - `1e-13*y >= 5` was declared infeasible (#1643).
+
+- **Wrong answers from model handling and input readers.**
+  - Solving used to modify the caller's model. Re-solving with p=10 returned the old answer of 8 as optimal (#1610, via #1637).
+  - MPS and LP names containing spaces were read as a different model, giving 8 instead of 24 (#1644).
+  - `from_gams` misread labels, text and tables. The transport model's 1280 was read as 0.0 and reported as optimal (#1666, via #1672).
+  - A binary pinned with `Variable.fix` was exported as free in MPS, LP and GAMS (#1481).
+  - The Fisher information matrix in parameter estimation used the partial derivative instead of the total one. That gave zero standard errors whenever a response depends on constrained states. Active-inequality, non-square and singular systems now raise `ValueError` (#1480).
+
+- **False certificate and wrong point fixed: GDP lowering dropped fast-API rows and the objective (#1802).**
+  In one repro, a point was reported feasible at 10.0 when the optimum is 1. A nonconvex fast-API QP was certified at a local point (-8.5604; the true optimum is -9.8024). Closes #1798. Adds the gdp_parity panel.
+
+- **Correctness and API fixes from the #1610-#1651 batch (#1653).**
+  **Wrong results fixed:** budget rows from the `discopt.ro` affine rule pinned the policy, so every Gamma returned 13.65 (now 11.775 / 12.75); a linear model with lazy constraints lost its certificate (bound 354.7 vs 410.3); a GBD convexity rule now gives optimal 745.439.
+  The HiGHS certificate is re-solved at tolerance 1e-8. X-30d is now optimal at 41, and 117 of 119 random MILPs are certified instead of 105.
+  Under `DISCOPT_COEF_TIGHTEN` (default OFF), coefficient tightening now covers array variables and implied fixings. The sensitivity KKT gates no longer depend on row scaling. `DISCOPT_PERSPECTIVE_COMPOSITE` is a new opt-in (default OFF).
+  Added: `dm.xor` / `a ^ b` and the aliases `dm.at_least` / `dm.at_most`; duals for vector rows; `SolveResult.last_iterate` / `last_iterate_violation`; `termination="presolve"`; `bound_elements` in `compute_iis`. A HiGHS recession ray on the POUNCE LP route now reports `unbounded` instead of `error`.
+
+- **The LP simplex could report `Optimal` for an infeasible LP (#1942). Correctness fix.**
+  The final feasibility audit ran in equilibrated units with a 1e-6 floor, so a badly
+  scaled column could pass a point that was ~0.1 out of bounds in original units. On a
+  `pooling_adhya1stp` node LP it returned `Optimal` (−538.904) with a basic column 0.0179
+  below its lower bound. Every scaled entry point now re-audits an `Optimal` point against
+  the original LP, re-solves unscaled if the audit fails, and otherwise reports `Numerical`.
+  Refusals were common (e.g. `st_e31`: 55 of 3,559 node LPs). Points from such LPs could
+  reach the incumbent repair (#1537 E).
+
+- **A solution at the default ±9.999e19 "no bound" box is no longer certified
+  (#1701; #1678).** **False certificate:** `min x - z**2 s.t. z*x <= 3` with `x`
+  free was reported `optimal` at −9.999e19 with `gap_certified=True`; it is
+  unbounded. LP and MILP models that run off along a default side now report
+  `unbounded`. NLP/MINLP/nonconvex-QP results at the default corner are `feasible`
+  with `bound=None` and a warning naming the variables. Bounds you declared
+  (e.g. `ub=1e17`) are treated as before.
+
+- **An unbounded convex MIQP is no longer reported `infeasible` (#1700; #1699).**
+  **False infeasible:** it now reports `unknown`.
+
+- **HiGHS MILP route: wrong certified optima from the slack-column form (#1740;
+  #1733).** **False certificate:** an epsilon-constraint facility-location MILP
+  certified 433.40 warm (403.40 cold) against a true optimum of 363.3962. Each
+  row's logical column is now folded into the row bounds before HiGHS sees it
+  (HiGHS >= 1.12.0; `DISCOPT_MILP_ROW_FORM=0` opts out), and a HiGHS-only
+  `infeasible` is cross-checked against the other form. On 600 issue-family solves
+  the old form gave 3 false certificates and the new one 0.
+
+- **HiGHS MILP route: more reliable bounds, incumbents and masters (#1765,
+  #1930; #1750, #1759, #1920).**
+  - The published incumbent is the snapped, re-verified point with its objective
+    recomputed (binaries were off by up to 8.3e-8, e.g. 136.99999884 for 137),
+    which broke `epsilon_constraint`'s ε bounds.
+  - The bound is now monotone in the time limit (it was −15.30 at 600 s against
+    −4.38 at 180 s on a `relu_bigm` network); the presolve-free cross-check runs
+    concurrently (`DISCOPT_MILP_CONCURRENT_CROSS`, default ON), and a
+    fix-and-propagate start finds a first incumbent (`DISCOPT_MILP_FIXPROP_SEED`,
+    default ON). A seeded `kOptimal` with no dual bound is re-solved cold instead of
+    "certifying" with `bound=None`.
+  - OA masters no longer loop on HiGHS "Solve error" from a 2^44 row scale
+    (`DISCOPT_HIGHS_DROP_NEGLIGIBLE`, default ON); an errored master is re-solved
+    with presolve off and makes no bound claim.
+
+- **Robust counterparts: several non-robust "optimal" points and false verdicts
+  (#1832; #1726, #1831, #1833–#1836, #1841, #1847, #1848).**
+  **False certificates:** a box counterpart of `p @ x` certified a point that
+  violates the row; a mixed-sign constant vector `c * p` was robustified with one
+  sign (`x = 6` where the robust truth is 4); a certain `Parameter` multiplying an
+  uncertain one was frozen, so a second pass robustified nothing (7 vs 5.5); the
+  polyhedral path gave unknown constant nodes a zero coefficient. Rows not affine
+  in the parameter are refused where the formulation needs affinity, an uncertain
+  parameter inside `if_else`, a disjunct or a complementarity is refused, and a
+  row the counterpart can only bound conservatively withholds the certificate
+  (`optimal`→`feasible`, `infeasible`→`unknown`). Box RO no longer reports
+  `infeasible` for cancelling terms such as `exp(p) - exp(p)`.
+
+- **GDP: rows whose function is undefined on part of the box gave false optima
+  (#1787, #1999; #1779, #1917).** **False certificate:** e.g. `sqrt(x) >= 2` in an
+  inactive disjunct with `x ∈ [−1, 10]` returned `optimal 4.0` under
+  big-M/mbigm/simplex (true −1); an independent probe found 32 false `optimal` in
+  90 checks. Such rows are now lowered by argument disaggregation where possible
+  (GDPlib `stranded_gas` lowers in 2.2 s instead of raising) and otherwise refused
+  loudly; `gdp_method="auto"` routes `either_or` cases to hull. A few models that
+  solved before (an enclosure that cannot show the row is defined) now refuse under
+  big-M/mbigm/simplex.
+
+- **GDP and indicator rows: a raw `Constraint` rhs was silently dropped (#1859;
+  #1858).** **False certificate:** `Constraint(x, "<=", 2.0)` in a disjunct
+  was solved as `x <= 0`. Rows with a non-zero rhs are now refused at
+  `either_or` / `if_then` / `disjunction` / `Disjunct.subject_to` and by
+  `Model.validate`. `if_else` on a raw `Constraint(body, ">=", 0)` condition
+  returned the wrong branch and is fixed.
+
+- **GDP: further false bounds and optima (#1796, #1828, #1862; #1825,
+  #1843, #1845, #1846, #1852, #1856).**
+  - GDP-LOA dropped the objective constant: `min x - 10` reported bound 0.0 above
+    its incumbent with `gap_certified=True`. OBBT's incumbent cutoff had the same
+    defect and could cut off the optimum (`x <= 1` where the optimum is `x = 3`).
+  - An array-valued constant in a linear row (`x >= np.array([5., 1.])`) was summed
+    into one row: `mbigm`, `loa` and `solver="amp"` certified 9.0 / 1.0 / 6.0
+    against truths of 5 / 10 / 5. Such rows are now declined.
+  - `(a@v)*(b@v)` was treated as a square (certified 2.5, truth 4);
+    `sum(B*(A@X))` with 2-D `X` certified 3.8 (truth 7.6); `if_else(y >= 1, p[0], 0)`
+    under hull certified 10.001 (truth 11).
+  - Reducing or transforming a GDP model dropped a `Constraint` shared with another
+    construct and lost fast-API rows (`optimal 1.0` where the answers are 5 and 6).
+  - An infeasible nonlinear `either_or` returned `unknown` (now `infeasible`), and
+    an `infeasible` result no longer carries a `bound`.
+
+- **`if_then` accepts `1 - z` and refuses non-binary indicators (#1702;
+  #1677, #1844).** `if_then(1 - z, ...)` ("if z == 0") used to raise `TypeError`
+  inside `solve()`. An integer or continuous indicator is refused; big-M and
+  binary multiplication gave different optima on it.
+
+- **A false convexity proof for negatively weighted matmuls (#1736; #1728).**
+  **False certificate risk:** `[-1, -1] @ (x**2)` (concave) was classified convex.
+  The same PR proves quadratic forms `u @ Q @ u` convex when `Q` is provably PSD
+  (60 s `feasible` → 0.3 s `optimal` on the issue model).
+
+- **`skip_convex_check=True` solved the factorable lift, not your model (#1738;
+  #1721).** **Wrong answer:** Rosenbrock returned f = 1 at (0, 0); it now returns
+  (1, 1). `initial_solution` on this path no longer crashes.
+
+- **Exact coefficients in the fast-API builder, `.nl` reader and presolve (#1816;
+  #1813, #1817).** Coefficients below 1e-15 were dropped and values within 1e-15 of
+  ±1 snapped to ±1. The redundancy pass compared rows within an absolute 1e-9 and
+  let an equality drop an inequality it violates (`x + y == 5` with
+  `2x + 2y <= 6`); comparisons are now exact.
+
+- **Native spatial kernel: no incumbent from a point that fails verification
+  (#1939; #1938).** **False certificate:** a binary at `1e-6` on a big-M row let
+  the kernel adopt −1.00994 below the true optimum −1.005 and exit `optimal`.
+
+- **An `incumbent_callback` veto withdraws the certificate (#1964, #1966).**
+  **False certificate:** a veto fathoms the whole node; the reproducer claimed
+  `optimal` −4.033 while the pruned box held an accepted point at −8.47. It now
+  reports `feasible` with a valid bound. Same PR: the root-LP certificate on
+  MINLPLib `prolog` is retracted; its LP is exactly unbounded in floating point
+  (#1966).
+
+- **Numerical-soundness batch (#1967; #1952–#1958).** Native LP and MILP routes
+  now require a rigorous Neumaier–Shcherbina bound before reporting `optimal`
+  (`DISCOPT_MILP_NS_NODE_BOUND=0` opts out of the per-node bound in the Rust MILP
+  driver). Lazy rows reach the node LP (the reproducers certify −2.9 / −2.5,
+  previously −2.0 / −0.117), FBBT in the convex kernel uses directed rounding, and
+  integer lattice bounds use an exact gcd.
+
+- **The in-house MILP driver audits every `Optimal` node LP against the original,
+  unscaled data (#1947; #1945).** 314 of 18,930 node LPs on the AMP route had
+  passed only on the scaled system. No published result was wrong (later gates
+  caught them), but nvs05 under AMP now reaches 5.4709 where it stalled at 7.7542.
+
+- **GAMS link: wrong certified values for several GAMS functions and variable
+  types (#1898).** **Wrong answers:** `entropy` had its sign flipped, `errorf` was
+  Gauss's erf instead of the normal CDF, `centropy` and the `sl*`/`sq*` smoothed
+  forms were mis-translated, semicontinuous/semi-integer variables were relaxed to
+  continuous (2.25 instead of 0.25), fixed binary bounds were dropped, and an
+  integer `+INF` bound was clamped to 1e9 (the `.gms` reader defaulted integers to
+  `ub=1e6`). SOS1/SOS2 variables and `=X=`/`=C=`/`=B=` rows are refused with a
+  reason (status 6); `=N=` rows are skipped instead of crashing. Equation levels
+  are written back, and `nodlim` is forwarded (`0` means no limit).
+
+- **`from_gams` objective variable and repeated declarations (#1986,
+  #2002).** **False certificate:** a bounded objective variable `z` in
+  `obj.. z =e= expr` was eliminated, certifying 0.0 where the answer is 2.0; it is
+  now removed only when free, unbounded and used nowhere else. `Variables x(i,j);
+  Positive Variable x;` replaced `x` with a scalar (GAMS's `trnsport.gms` became
+  infeasible); it now gives 7 columns and optimal 153.675.
+
+- **A certified fallback is no longer discarded for a route's uncertified answer
+  (#1919; #1913).** The merge treated "certified" as a fixed 1e-6 gap, below the
+  default 1e-4 tolerance. MINLPLib `smallinvDAXr2b200-220` and `r5b200-220` go
+  from `feasible` to `optimal` 156.6042679.
+
+- **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/
+  softplus/atanh limits or across a tan pole (#1908).** These gave wrong `optimal`
+  values and false `infeasible` verdicts.
+  - The backward inverses clamped the output to `limit ∓ 1e-12` before inverting.
+    So `tanh(x) >= 0.5` imposed `x <= 14.16`, `atan(x) <= 2` imposed `x <= ~1e12`,
+    and `softplus(x) >= 0` imposed `x >= -27.6`. Now an output that reaches the
+    range limit leaves that side unbounded. Interior endpoints are inverted from a
+    guess and accepted only once the forward image's own outward-rounded bounds
+    verify them.
+  - The forward atanh image no longer clamps its argument away from ±1.
+  - The tan branch test now requires the box to lie strictly between enclosures of
+    both poles, in the Rust FBBT and in the Python interval `tan`. The double
+    `pi/2` sits below the real pole but rounded onto branch 1, so `[pi/2, 2]` was
+    given the inverted image `[1.6e16, -2.19]`.
+
+#### Time limits, hangs and crashes
+
+- **Hangs and crashes.**
+  - HiGHS presolve's sparsify step looped forever on a unit-commitment model, which now solves in 17 s (#1667, via #1672).
+  - johnall at T=10 was killed at 280 s, and now finishes in 16.5 s (#1456, via #1687).
+  - Presolve on shared DAGs, such as neural-network embeddings, ran past `time_limit` (#1565, via #1581).
+  - Wide sums raised `RecursionError`, and so did `.nl` o54 sums at n=2000 (#1544, via #1549; #1644).
+  - AMP crashed on sin/cos, so mathopt3 now certifies. `c @ x` and `sum(c*x)` no longer raise errors in AMP (#1506, #1502, via #1511).
+  - Vector variables of zero length or with `ub=inf` crashed (#1643).
+
+- **Out-of-memory kills and hangs on large models (#1651, #1713, #1718, #1747, #1899).**
+  - The LP route no longer densifies `A`, and the post-solve screen on DAE models uses the
+    tape's CSR Jacobian. Chain LP n=2000: 542.1 → 21.5 MB peak. Batch-reactor DAE nfe=1600:
+    10511 → 10.9 MB. `dm.external` gained a per-callable 8-point memo (#1651).
+  - The convex-NLP certificate works in CSR above the dense-Jacobian cap. A 100k-link chain
+    NLP was OS-killed at ~32 GB; it now certifies at 1.32 GB peak RSS (#1713).
+  - POUNCE QP/LP callbacks declared every Jacobian entry and all of `tril(Q)` as nonzero.
+    COPS `torsion` 30×30 was OOM-killed at 15 GB; it now takes 5.4 s / 0.27 GB (#1718).
+  - An all-affine model's rows and objective are read after HiGHS without building an
+    evaluator. The 1000×1000 per-element transport LP was killed at 1200 s; it now solves
+    in 64.8 s at 2.40 GB with 0 `jax` modules loaded (#1747).
+  - The convexity classifier no longer builds dense model-width matrices. GDPlib biofuel
+    at `time_limit=6`: 47 s / 7.6 GB → 25 s / 0.7 GB; the 25 s is still an overrun (#1899).
+
+- **Solves ran past `time_limit` (#1698, #1718, #1915).**
+  - `has_factorable_work` walked a DAG as a tree before the time limit was first read: a
+    `time_limit=5` model took 40.36 s, now 8.70 s (#1698).
+  - B&B tree-node and recovery structured solves ran with no time limit; one ran 12.8 s
+    past a 100 s budget. They now get the remaining time (#1718).
+  - `solve_milp` started its clock after model construction, granting the tree the full
+    budget on top of it. The clock now starts at entry (#1915).
+
+- **A recovered B&B node point that violated a row could crash the solve (#1718).** A
+  short-budget callback recovery stopping at Ipopt's "acceptable" level was taken as
+  `OPTIMAL`; its point violated a row by 5.57–29.2 and the MILP-BB exit gate refused it with
+  a `RuntimeError`. Such points must now pass that gate's test, or the gap is decertified.
+
+- **A default solve of `pooling_bental5tp` crashed with `LinAlgError: SVD did not converge`
+  (#2017).** `repair_point` now falls back to LAPACK `gelsy` on that error only; it certifies
+  −3500 in 14.3 s.
+
+- **GDP solves respect `time_limit` (#1910, #1911).** The deterministic GDP-configuration wave now stops at the limit (hda: 526 s -> 100.2 s), and the GDP-lowered model keeps the solve's deadline (biofuel hull: 485 s -> 142 s).
+
+- **Solves return close to `time_limit` on large models (#1746, #1763, #1931,
+  #1991; #1757, #1758, #1924–#1929, #1989).** Long relaxation builds,
+  root fallbacks, root FBBT, dual refits, slack reconstruction, the PSD test on
+  large Hessians, node LP recovery retries and node-NLP/QP waves now honour the
+  deadline; a build cut off by the deadline is discarded whole, never used
+  truncated. QPLIB_3361/3709 had run 103–119 s on a 60 s limit; on a sweep of 41
+  slow MINLPLib instances at `time_limit=60`, those finishing within 63 s went
+  from 6 to 28 and those killed at 135 s from 6 to 1. Opt-outs:
+  `DISCOPT_ROOT_BUILD_ABORT=0`, `DISCOPT_NODE_BUILD_ABORT=0`,
+  `DISCOPT_PRESOLVE_DEADLINE=0`, `DISCOPT_NODE_RETRY_PAST_DEADLINE=1`.
+
+- **Entropy canonicalization honours its deadline (#1958).** `hadamard_9`
+  at `time_limit=60` finishes in 91.8 s (was 610–660 s).
+
+- **The exit integer-box polish runs on `time_limit` exits (#1875, #1876;
+  #1870).** It enumerated 0 cells on clock-limited runs. nvs19 / nvs23 / nvs24 now
+  reach their optima (−1098.4 / −1125.2 / −1033.2), and clock exits finish within
+  the limit instead of 0.4–0.6 s past it. `DISCOPT_INTEGER_BOX_POLISH=0` opts out.
+
+- **Large vectorized LPs no longer run out of memory (#1732; #1720).** A
+  1000×1000 transport LP written with `dm.sum(C * x)` was OOM-killed; it now
+  solves in 14.6 s at 1.13 GB peak. A dense Jacobian over 2 GiB raises
+  `LPExtractionTooLargeError` instead.
+
+- **`RecursionError` on deep or long expressions (#1764; #1808,
+  #1814, #1923).** Fixed for `model_fingerprint` / `check()` /
+  `diff_models`, `copy.deepcopy` and `pickle` of a lone expression, rows of
+  2,500+ terms in fast-API, disjunct and indicator bodies, `Model.complementarity`
+  on a deep operand, and Goldstein–Price / `ex8_1_3`.
+
+- **`Model.solve()` crashed on a numpy coefficient array times a squared vector
+  expression (#1717).** `TypeError: only 0-dimensional arrays can be converted to
+  Python scalars` on, e.g., COPS `bearing`.
+
+- **`Model.sensitivity` at a degenerate LP vertex (#1762; #1749).** It raised
+  `LinAlgError: Singular matrix` (a regression from 0.9.0). A unique derivative is
+  now returned; a kink or non-unique derivative raises `DegenerateSensitivityError`
+  (a `LinAlgError` subclass).
+
+- **`clone()` and pickle of a big-M-lowered fast-API model (#1854)** no
+  longer raise `AttributeError`.
+
+- **GDP block disjunctions: row-less blocks, double placement and cycles (#1793;
+  #1790).** A block disjunction whose disjuncts hold only nested disjunctions can
+  be solved; a block already placed, or a nesting cycle, is refused when built
+  (it used to raise `RecursionError` when lowered). `serialize` refuses a model
+  with local variables.
+
+- **Big-M encloses non-integer powers on a nonnegative base and `dm.sum` / `@`
+  bodies (#1770; #1767, #1855).** `(x + y)**1.5` and `a + b*V**0.6`
+  disjuncts used to be refused.
+
+- **`.nl` SOS suffixes are read (#1921, #1922).** `from_nl` declares
+  `sos1`/`sos2` sets from the `.nl` suffixes; they used to be ignored. `camcns` and
+  `korcns` (negative powers on a zero lower bound) now return `optimal 0.0`.
+
+- **Exporters: `to_gams()` and `to_lp()` keep lines under reader limits, and the
+  GAMS reader takes deep nesting (#1741; #1739).** Large models produced `.gms`
+  files GAMS refuses (80,000-character limit) and `.lp` rows of 100,000+
+  characters (CPLEX reads 560); lines are wrapped at 255 characters. The `.gms`
+  reader no longer raises `RecursionError` at ~170 parenthesis levels.
+
+- **Blocking JAX with `sys.modules["jax"] = None` no longer crashes every solve.**
+  Two checks tested `"jax" in sys.modules`, which is true for a blocked entry:
+  `import discopt` warned that JAX ran in float32, and `Model.solve()` raised
+  `ModuleNotFoundError: No module named 'jax.numpy'`.
+
+- **OA stops at a fixed point instead of repeating it (#1710).** When an OA
+  iteration added no cuts, the next master was the same problem, so OA re-solved
+  the same fixed-integer NLP from the same warm start until the 50-iteration
+  no-progress exit fired: on #1708's model, 51 identical fixed-NLP solves and 51
+  master solves for one answer. OA now digests the loop state at each master
+  solve (every master input except its wall budget, plus the bounds, incumbent
+  and candidate queue) and stops with the same `"stalling"` reason as soon as
+  it repeats the previous iteration's state. A converged fixed-NLP solve is
+  also reused for a bit-identical later request (32-entry LRU). On the #1708
+  model: 1 fixed-NLP solve, 2 masters, same objective and bound.
+
+- **`solver="amp"` now refuses an opaque body instead of failing internally.** AMP
+  certifies by linearizing a partitioned relaxation, and an opaque `dm.custom` /
+  `dm.external` body has no algebraic form to linearize. It produced no false
+  bound, but it reached that state via `AMP: MILP build/solve failed at iteration
+  1: too many indices for array: array is 0-dimensional` followed by
+  `status="error"` with `objective=None` — nothing naming the cause. It now raises
+  up front, naming `solver="direct"`, `solver="surrogate"` and the default local
+  NLP path as the backends that do work on an opaque body. This affected plain
+  `dm.custom` too, not just the new `dm.external`, and the fix is keyed on
+  `CustomCall` so it covers both.
+
+- **A threadless platform no longer kills the solve with a Rust panic (#1476).** Rayon
+  builds its global thread pool lazily and *panics* when that build fails, and
+  the panic reaches Python as `pyo3_runtime.PanicException`, which derives from
+  `BaseException` deliberately — so the `except Exception` serial fallbacks at
+  both POUNCE wave sites in `solver.py` never fired for it, and the solve died
+  instead of degrading. Measured under Pyodide, which has no pthreads: a MIQP
+  aborted with `ThreadPoolBuildError { kind: IOError(Os { code: 6, kind:
+  WouldBlock }) }`. Every parallel entry point now asks whether OS threads exist
+  before entering it — `discopt_core::parallel::threads_available` for
+  discopt-core's batch simplex and MILP node loops,
+  `solver._os_threads_available` for the POUNCE NLP and QP waves — and takes the
+  serial path that was already there when they do not. The catches were *not*
+  widened to `BaseException`: a panic from inside a wave is a real bug and stays
+  loud. A capability probe rather than a `sys.platform` test, so the next
+  threadless environment is covered too. Verified by solving the same MIQP both
+  ways: identical certified optimum, and the wave is entered 3 times with
+  threads and 0 times without.
+
+#### Certification and incumbents
+
+- **Certificates that used to be lost are now recovered.**
+  - Array quadratic forms `x @ Q @ x` had no LP relaxation (#1599).
+  - The convex-quadratic objective gate abstained on array models (#1580).
+  - The HiGHS root pair is certified through the NS gap (#1636), and a tight-tolerance cross bound recovers more certificates (#1649).
+  - Certificates were withheld spuriously (#1508, via #1511, and #1655, via #1664).
+  - An integral incumbent is repolished, recorded in `incumbent/repolished` (#1608), and the cross-solve's better verified incumbent is adopted (#1694).
+  - Infeasible convex QCPs are now certified infeasible instead of ending in an error (#1507, via #1511).
+
+- **Incumbents that fail the exit feasibility gate are repaired or withdrawn (#1916, #1918).**
+  Exit polishing has a repair budget. Before, mod_hens reported a point that violated row 431 by 4.55e-5.
+  If the gate refuses an incumbent and no repair is verified, the incumbent is withdrawn. The status becomes `node_limit`/`time_limit`/`unknown`, and the stat `certificate/incumbent_withdrawn` records it.
+
+- **Row-bounded convex QPs certify, and `initial_solution` seeds the root NLP
+  (#1735; #1714).** COPS `torsion` 50×50: uncertified −0.4178480 → certified
+  −0.4180857. COPS `pinene` reaches 19.8722 from its published start (the
+  multistart had reached 27,101 in 120 s).
+
+- **Convex QPs with an IPM point just outside an active inequality certify (#1777;
+  #1774).**
+
+- **Large sparse convex QPs certify (#1811; #1809).** The 2,000-variable cap on the
+  exact convexity proof no longer refuses sparse `Q`; 25 of 56 eligible QPLIB
+  instances flip to certified (all convex in the manifest).
+
+- **Native kernel: fewer stalls on slivered boxes (#1996; #1983,
+  #1995).** A cutoff at the LP optimum collapsed node boxes to ~1e-8 slivers where
+  the node LP decides nothing. Cutoff OBBT is redone with the kernel's own gap
+  when the root is undecided (`DISCOPT_KERNEL_CUTOFF_OBBT_SLACK=0` opts out), and an
+  undecided node LP is re-solved over its pre-propagation box
+  (`DISCOPT_KERNEL_UNDECIDED_RETRY`, default ON). `nous1` certifies in 24 s (was
+  the 30 s limit).
+
+- **Dual bounds through function domains, poles and fractional powers (#1994;
+  #1978–#1982).** MINLPLib `ex8_5_1..6`, `chakra` and `hhfair` get a bound where
+  they had none, `launch` certifies, and the Python spatial tree uses a
+  violation-share branching score. Default ON: `DISCOPT_PY_TREE_SPATIAL_SCORE`,
+  `DISCOPT_FBBT_SIGN_DOMAIN`, `DISCOPT_POLE_ENVELOPE`, `DISCOPT_POLY_ROOT_BOUND`,
+  `DISCOPT_ENTROPY_ATOM` (`=0` opts out).
+
+- **Repaired incumbents in the native kernel and `repair_point` (#2004; #2000,
+  #2001).** GDPlib `cstr` nt=5 hull and big-M go from decertified `feasible` to
+  `optimal` in about 6 s. An explicit `abs_gap_tolerance` ≤ 1e-6 now uses the
+  documented "absolute OR relative" criterion in the kernel.
+
+- **Integer-product reformulation recognises array-variable entries (#1937;
+  #1934).** It never ran on `x[i]`-indexed models. Shipped default-OFF here
+  (`DISCOPT_INTEGER_PRODUCT_INDEXED`) and graduated to default ON afterwards.
+
+- **Integer-product lift race: a no-incumbent tie continues the tighter bound
+  (#1961; #1944).** MINLPLib `tln6` certifies 15.3 in about 57 s (was the 120 s
+  limit).
+
+- **Native-MILP re-entry keeps a better incumbent on a node-limit exit (#1879;
+  #1874).** `tln4` at 120 s reports 8.7 instead of 8.9.
+
+- **Sub-NLP incumbents are accepted on verification, not NLP status (#1772;
+  #1760).** A GDP whose sub-NLP ends `Error_In_Step_Computation` at a
+  feasible point now gets its incumbent (2791.67 at 8 s, previously none);
+  `DISCOPT_SUBNLP_VERIFY_ANY_STATUS=0` restores the status gate. The GDP
+  disjunct-configuration constructor now runs before the generic root heuristics
+  (`DISCOPT_GDP_CONFIG_FIRST`, default ON).
+
+- **`solver="pounce"` no longer reports an under-converged NLP as `local_optimal`
+  (#1771, #1778; #1768).** Rows are scaled up to unit gradient, and a
+  `Solve_Succeeded` that stopped one barrier update early is continued. On a
+  100k-link COPS chain the result moves from −30268.753087 to −30268.937325;
+  where the continuation cannot finish, the status is `local_limit`.
+  `DISCOPT_POUNCE_ROW_EQUILIBRATE=0` opts out.
+
+- **Matmul interval enclosures (#1850; #1842).** `evaluate_interval` on
+  `(k,) @ (k,n)` raised `IndexError`; general 1-D/2-D matmuls now get finite sound
+  enclosures (`DISCOPT_MATMUL_INTERVAL_ENCLOSURE`, shipped default-OFF here and
+  graduated to default ON afterwards).
+
+- **`deterministic=True` is reproducible on the GDP local-branching path (#2008;
+  #1917).** Its sub-MIP slices read the wall clock; GDPlib `positioning` under
+  hull explored 147 or 199 nodes depending on load. It is now bit-identical.
 
 - **ex1252a and ex1252 certify: products of three or more variables reach the
   native kernel, and its primal step runs at integral LP points (#1990).**
@@ -245,20 +1087,70 @@ The release procedure that produces these entries is documented in
     panels are cert-clean (`docs/dev/performance-plan.md` §97). `=0` restores
     either legacy path.
 
-- **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/
-  softplus/atanh limits or across a tan pole (#1908).** These gave wrong `optimal`
-  values and false `infeasible` verdicts.
-  - The backward inverses clamped the output to `limit ∓ 1e-12` before inverting.
-    So `tanh(x) >= 0.5` imposed `x <= 14.16`, `atan(x) <= 2` imposed `x <= ~1e12`,
-    and `softplus(x) >= 0` imposed `x >= -27.6`. Now an output that reaches the
-    range limit leaves that side unbounded. Interior endpoints are inverted from a
-    guess and accepted only once the forward image's own outward-rounded bounds
-    verify them.
-  - The forward atanh image no longer clamps its argument away from ±1.
-  - The tan branch test now requires the box to lie strictly between enclosures of
-    both poles, in the Rust FBBT and in the Python interval `tan`. The double
-    `pi/2` sits below the real pole but rounded onto branch 1, so `[pi/2, 2]` was
-    given the inverted image `[1.6e16, -2.19]`.
+- **A node LP with no rows certifies from a rigorous bound.** The relaxation of
+  `min asin(x)` is a cost over a box; with no rows it skipped the warm simplex
+  and certified on trust (`trusted_vertex`). Its exact box optimum, rounded
+  down, is now its safe bound (`docs/dev/performance-plan.md` §78.1).
+
+#### Other fixes
+
+- **Solve options that were ignored are now honoured, or a warning is raised.** This covers tuning and kernel levers, `mu_init`, `gdp_method`, the native kernel's relative `gap_tolerance`, `gdp_method="hull"` on `add_disjunction`, and `strategy` and `node_callback` (#1645, #1663, #1689). A gap tolerance below 1e-8 is obeyed (#1583).
+
+- **Routing fixes.** `Parameter*(x+y)` and zero-Q quadratics now route to HiGHS as LPs. `algorithm_route` is named for every route. Decomposition masters use HiGHS (#1646, #1663).
+
+- **Convexity is recognized in more forms:** sparse exact PSD matrices, 0.5 powers, `xlogx`, perspectives and `centropy` in Rust (#1647, #1665).
+
+- **Clearer refusals and messages.**
+  - `minimize(None)`, string, NaN or inf, and list objectives are refused, and `x + None` raises (#1635).
+  - Every `error` status now carries a reason (#1511).
+  - A numerical failure becomes INFEASIBLE only with a proof, and POUNCE code 1 maps to `local_limit` (#1641).
+  - `hull` names the unbounded variable it refuses (#1643).
+
+- **Pyomo interface fixes.** `solve()` rejects unknown keyword arguments with `TypeError` and accepts a `time_limit` alias. The incumbent and the bound are written to the correct Pyomo fields, and the bound only when it is valid (#1563).
+
+- **More modeling and interface fixes.**
+  - `if_then` accepts `1 - z` and `~b` (#1681), and `BooleanVar` (#1643).
+  - `initial_solution` is no longer rejected because of auxiliary columns (#1675).
+  - `model_to_repr` accepts `np.newaxis` and `...`, and `y[:1]` indexes correctly (#1518).
+  - Vector `dm.norm` now gets a bound (#1515).
+  - Exact fingerprints, `diff_models` and `check()` (#1497), validation guards carried through rebuild passes (#1498), and `to_gams` Parameters (#1503), all via #1511.
+  - GAMS `Semicont`/`Semiint` are read exactly, SOS raises an error, and indexed parameter bounds are applied (#1644).
+  - The LOA incumbent is repaired (#1689).
+  - `DAEBuilder.integral` raises `RuntimeError` on misuse (#1648).
+  - `to_latex()` renders special functions as math (#1471).
+
+- **Errors are no longer silently swallowed (#1520, via #1523; #1514, via #1518).** Narrowing the catch-all handlers exposed and fixed an unsound linear FBBT fallback, unconverged McCormick-NLP bounds, a wrong cutoff under maximization, a stale declared-box cache, and L3 sensitivities dropped on vector constraints.
+
+- **A `cut_callback` was silently ignored on the native spatial kernel (#1957).** On a scalar
+  model on the spatial path, the callback was called 0 times with no warning. The kernel now
+  declines a model with a `cut_callback`, and the bypass warning names it.
+
+- **A time-limited point on the default box is now always named (#1915).** When the solve
+  hit its limit with the incumbent at the corner of the default box (`x = -9.98e19`),
+  `_withhold_default_box_certificate` returned early and the user saw only "the relaxation
+  could not bound this objective".
+
+- **`Model` deepcopy is back to its pre-#1764 cost (#1826).** Each node was re-walked; on
+  the 66-model corpus `copy.deepcopy` went 557.0 → 433.2 ms (base before #1764: 437.1 ms).
+
+- **GAMS link forwards `reslim`, `optcr`, `optca` and `threads`, and exports the
+  dual bound as `objest` (#1706; #1704, #1705).** `reslim` was ignored (nvs17 with
+  `reslim=5` ran past 60 s). Registration sets `dictType: 5` so variable names
+  reach discopt, and the per-variable `gmoDict failed` lines and the `runpy`
+  warning are gone (#1973; #1972).
+
+- **HiGHS route: `presolve=False` reaches HiGHS; native LP reports `lp/iters`;
+  array `fbbt_box` tightens per element (#1761; #1751, #1752, #1754).**
+
+- **Clearer local-solve reporting and warnings (#1723, #1753,
+  #1755).** `compute_iis` no longer blames you for its own probe bounds; the
+  convexity-unknown local NLP names its route; RO and bilevel multipliers are not
+  listed in the large-bounds warning. Ellipsoidal RO accepts `dm.sum(p * x)`
+  (#1756).
+
+- **Faster dual recovery and LP bounds on HiGHS LPs (#1729, #1730).**
+  Dense 1000×200 LP dual matching 45.6 s → 2.0 s, now counted in `wall_time`;
+  covering LPs without `ub` go from `feasible`/no bound to `optimal`.
 
 - **`DISCOPT_SCALE_FREE_BRANCHING` is default OFF again (`=1` opts in).** It made
   the native spatial kernel lose MINLPLib `tanksize` (certified in 63 s with it
@@ -267,21 +1159,12 @@ The release procedure that produces these entries is documented in
   on, no instance gained. Its original graduation panel ran at 20 s, which could
   not see the loss. `test_tanksize_driver_seeded_certifies` passes again.
 
-- **Blocking JAX with `sys.modules["jax"] = None` no longer crashes every solve.**
-  Two checks tested `"jax" in sys.modules`, which is true for a blocked entry:
-  `import discopt` warned that JAX ran in float32, and `Model.solve()` raised
-  `ModuleNotFoundError: No module named 'jax.numpy'`.
-
 - **Hand-written `dm.sum(C * x)` is read by three passes that used to refuse it.**
   The interval Hessian abstained on it. The sparse linear/quadratic extractors
   declined it, which sent a scalar-form sum of squares to `pounce:nlp` instead
   of `pounce:qp-ipm`. The binary-multilinear reformulation aborted with
   "non-scalar constant". All three now read the sum as its coefficients
   (`affine_array_sum`).
-- **A node LP with no rows certifies from a rigorous bound.** The relaxation of
-  `min asin(x)` is a cost over a box; with no rows it skipped the warm simplex
-  and certified on trust (`trusted_vertex`). Its exact box optimum, rounded
-  down, is now its safe bound (`docs/dev/performance-plan.md` §78.1).
 
 - **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
   LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
@@ -328,17 +1211,6 @@ The release procedure that produces these entries is documented in
   `DISCOPT_SUM_CANONICAL=1` (above) it takes 3.9 s, against 2.5 s for its
   vectorized form.
 
-- **OA stops at a fixed point instead of repeating it (#1710).** When an OA
-  iteration added no cuts, the next master was the same problem, so OA re-solved
-  the same fixed-integer NLP from the same warm start until the 50-iteration
-  no-progress exit fired: on #1708's model, 51 identical fixed-NLP solves and 51
-  master solves for one answer. OA now digests the loop state at each master
-  solve (every master input except its wall budget, plus the bounds, incumbent
-  and candidate queue) and stops with the same `"stalling"` reason as soon as
-  it repeats the previous iteration's state. A converged fixed-NLP solve is
-  also reused for a bit-identical later request (32-entry LRU). On the #1708
-  model: 1 fixed-NLP solve, 2 masters, same objective and bound.
-
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769
   times at only 85/71/69 distinct inputs: outer approximation re-solves the same
@@ -361,27 +1233,20 @@ The release procedure that produces these entries is documented in
   32 -> 67, 0 certificates or incumbents lost, 220 oracle bound checks with 0
   violations; on the 48 routed, kernel-eligible `syn`/`rsyn` rows incumbents
   18 -> 48 and certified 17 -> 28.
+
 - **Row-scaled MILP certificates: regression fixtures; row pre-pass retired** (`test`, contributes to #1537).
   - Scaling a model's rows by powers of ten (10^[-6,6]) makes the #1296 tiny-entry guard withdraw the certificate on m3/flay03m. That is sound (a lost certificate, never a false bound) and is now pinned by regression tests, so a future row-scale-invariant fix flips them visibly.
   - A pow2 row pre-pass in `scaling::equilibrate` that restored these certificates was tried and retired under §5: it lost clay0303hfsg's certificate at 20 s, with 15x the Numerical LP verdicts of the legacy factors, and a legacy-factor retry at every `Scaling` entry point did not reach the failing (unscaled, warm) solves. Measurements in `docs/dev/flag-retirement-audit.md`. No solver code changes.
+
 - **`to_nl` writes the nonlinear rows first, as the `.nl` format requires** (`fix`, #1562).
   - **The bug.** The header's `nlc` names rows `C0 .. C{nlc-1}` as nonlinear, but both writers emitted rows in declaration order. A linear row declared before a nonlinear one therefore produced a file whose header named the wrong rows, and pyscipopt's reader segfaulted on it. Both writers now write `[nonlinear | linear]`, stable within each group, as Pyomo does.
   - **Header.** Line 2 now carries the true `neqns` count; it was always written as `0`.
   - **New `discopt.export.nl_row_order(model)`.** **Behaviour change:** `.nl` row `i` is no longer model row `i`. Use this function to map a reader's per-row output (`.sol` duals, constraint activities) back to the model. The map comes from the writer `to_nl` actually used.
   - **Parameters.** The Python writer now folds a scalar Parameter (or an element of one) as a constant, as the Rust writer always did. A row such as `p*x + y >= 1` is therefore linear in both writers, and the two stay byte-identical.
-- **Source residual reports now evaluate active indicator constraints** (`fix`, #1529). A Boolean-active implication reports its wrapped-row violation, an inactive implication reports zero, and fractional selectors remain a separate integrality failure; GDP/MPEC reports no longer become unmeasurable merely because their source model contains explicit one-way indicator rows. Non-binary indicator selectors are refused because the separate binary-integrality check does not cover them.
-- **Exact MPEC warm starts now lift generated operand auxiliaries** (`fix`, #1528). `solve_mpec(..., method="sos1"|"gdp", initial_solution=...)` evaluates every generated continuous operand auxiliary at the source point before handing the model to the exact solve, instead of midpoint-filling those columns and silently discarding a source-feasible incumbent. Failed lifts retain caller values and successful auxiliary lifts, and clamping/rounding warnings are emitted only once.
 
-- **`solver="amp"` now refuses an opaque body instead of failing internally.** AMP
-  certifies by linearizing a partitioned relaxation, and an opaque `dm.custom` /
-  `dm.external` body has no algebraic form to linearize. It produced no false
-  bound, but it reached that state via `AMP: MILP build/solve failed at iteration
-  1: too many indices for array: array is 0-dimensional` followed by
-  `status="error"` with `objective=None` — nothing naming the cause. It now raises
-  up front, naming `solver="direct"`, `solver="surrogate"` and the default local
-  NLP path as the backends that do work on an opaque body. This affected plain
-  `dm.custom` too, not just the new `dm.external`, and the fix is keyed on
-  `CustomCall` so it covers both.
+- **Source residual reports now evaluate active indicator constraints** (`fix`, #1529). A Boolean-active implication reports its wrapped-row violation, an inactive implication reports zero, and fractional selectors remain a separate integrality failure; GDP/MPEC reports no longer become unmeasurable merely because their source model contains explicit one-way indicator rows. Non-binary indicator selectors are refused because the separate binary-integrality check does not cover them.
+
+- **Exact MPEC warm starts now lift generated operand auxiliaries** (`fix`, #1528). `solve_mpec(..., method="sos1"|"gdp", initial_solution=...)` evaluates every generated continuous operand auxiliary at the source point before handing the model to the exact solve, instead of midpoint-filling those columns and silently discarding a source-feasible incumbent. Failed lifts retain caller values and successful auxiliary lifts, and clamping/rounding warnings are emitted only once.
 
 - **An external callable's error now reaches the caller.** POUNCE catches an
   exception raised inside a Hessian callback, logs it as `ERROR pounce::py:
@@ -392,95 +1257,13 @@ The release procedure that produces these entries is documented in
   the callable, the role and both shapes. On the `solver="direct"` path the error
   did propagate but JAX's `INTERNAL: CpuCallback error calling callback` took the
   first line; ours leads now.
+
 - **A `None` return from an external callable is rejected instead of becoming
   NaN.** `np.asarray(None, dtype=float)` does not raise — it returns
   `array(nan)`, with exactly the shape a scalar block declares. A missing
   `return` statement therefore passed validation and fed NaN to the solver as a
   value. `None` is now rejected explicitly, before the (otherwise deliberate)
   lenient coercion that accepts lists and integer arrays.
-
-- **discopt runs in the browser.** `crates/discopt-wasm/web/` is a single static
-  page — CodeMirror editor, console, Run button, and a dropdown with one model
-  per problem class — that installs discopt and `pounce-solver` as emscripten
-  wheels into Pyodide 0.28.3 and solves entirely client-side. It is published
-  with the documentation at `/wasm/`, linked from the landing page and from the
-  new `docs/browser.md`. Both wheels are committed rather than built in CI,
-  because building one needs ~1 GB of toolchain; `build-wheel.sh --check` and a
-  load-time check in `worker.js` guard against a version-stale wheel.
-  `crates/discopt-wasm/tests/examples_in_pyodide.mjs` solves all six examples in
-  a real Pyodide interpreter as part of the docs workflow, which is the only
-  check that catches browser-only failures.
-
-### Changed
-
-- **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
-  no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
-  imports no `jax` module. Without the extra, every JAX-only feature raises
-  `MissingJaxError`, an `ImportError` naming the feature and the extra. That covers
-  `dm.custom`, a model whose expression has no tape opcode (the error names the construct),
-  `discopt.estimate`, `discopt.sensitivity`, the differentiable and parametric layers, and
-  `discopt.ml.train`. The `dev` extra includes JAX. `discopt.mo` sweeps, the GDP simplex
-  lowering's residuals and the nonsmooth lift's warm start used JAX on ordinary models;
-  they now evaluate on the tape. Inventory: `docs/dev/jax-optional-inventory.md`.
-- **In-tree FBBT now tightens through array-valued rows by default** (#1568).
-  `DISCOPT_IN_TREE_ARRAY_ROWS` is graduated to default-ON. Each array-valued
-  constraint row (every `discopt.ml` layer and any vectorised `A @ x` or
-  elementwise row) is now one scalar FBBT row per element at each node, so
-  branching on network inputs narrows the activations. Before this change those
-  rows were read through a hull proxy that was never tightened. Graduation panel:
-  58 array instances plus the 66 in-repo `.nl` files, 30 s each, 0 violations over
-  282 checks. Certificates went +5 / −0 (`discopt.ml` full_space 10x1 s0/s1,
-  reduced_space 10x1 s1, reduced_space 25x1 s0/s1), the final bound was tighter on 28 of the
-  29 instances neither arm certified, and total wall fell from 1350 s to 1244 s.
-  In-tree FBBT cost went from 1.8% to 3.2% of wall. Scalar-layout models are
-  unchanged. `DISCOPT_IN_TREE_ARRAY_ROWS=0` restores the previous behaviour.
-- **`import discopt` no longer pulls the `_multiprocessing` C extension.**
-  `discopt.modeling` re-exports `solve_batch`, so `discopt.batch` is imported by
-  every `import discopt`, and it imported `multiprocessing` at module level —
-  a capability only `solve_batch(workers>1)` uses, and one `workers=1` returns
-  before reaching. The import now lives in the two functions that build a pool.
-  No API change: `solve_batch` is exported and behaves exactly as before.
-  This makes the package importable on CPython builds that ship no
-  `_multiprocessing` (Pyodide/WebAssembly), where the eager import previously
-  made *all* of discopt unimportable. Regression tests reproduce that
-  environment with a `sys.meta_path` blocker and solve an LP, a MILP and an
-  MINLP with the multiprocessing names unimportable.
-
-### Removed
-
-- **The McCormick-"nlp" relaxation route and its options (#1873).**
-  `mccormick_bounds="nlp"`, `partitions`, `relaxation_arithmetic` and
-  `use_learned_relaxations` now raise `ValueError`, and the CLI's `--partitions` is gone.
-  The route fired only for convex models with an explicit option (and `nlp_bb=False`).
-  On the in-repo corpus its bound left bound, node count and status identical in 36 of 36
-  measured instance/variant pairs. On two instances it turned a certified 2–6 s solve into
-  a 27× time-limit overrun and a 13.6 GB out-of-memory kill. 24 modules went with it:
-  `relaxation_compiler`, `mccormick_nlp`, the JAX `mccormick`/`envelopes`/`alphabb`
-  primitives, piecewise/OA/Taylor/Chebyshev/ellipsoidal arithmetics, the ICNN learned
-  relaxations, and the symbolic domain packs and registry. For a bilinear model whose gap
-  stalls, use `solver="amp"`. The `gnn`/`learned` extras are now aliases of `jax`. Record:
-  `docs/dev/nlp-mccormick-route-retirement.md`.
-
-### Fixed
-
-- **A threadless platform no longer kills the solve with a Rust panic.** Rayon
-  builds its global thread pool lazily and *panics* when that build fails, and
-  the panic reaches Python as `pyo3_runtime.PanicException`, which derives from
-  `BaseException` deliberately — so the `except Exception` serial fallbacks at
-  both POUNCE wave sites in `solver.py` never fired for it, and the solve died
-  instead of degrading. Measured under Pyodide, which has no pthreads: a MIQP
-  aborted with `ThreadPoolBuildError { kind: IOError(Os { code: 6, kind:
-  WouldBlock }) }`. Every parallel entry point now asks whether OS threads exist
-  before entering it — `discopt_core::parallel::threads_available` for
-  discopt-core's batch simplex and MILP node loops,
-  `solver._os_threads_available` for the POUNCE NLP and QP waves — and takes the
-  serial path that was already there when they do not. The catches were *not*
-  widened to `BaseException`: a panic from inside a wave is a real bug and stays
-  loud. A capability probe rather than a `sys.platform` test, so the next
-  threadless environment is covered too. Verified by solving the same MIQP both
-  ways: identical certified optimum, and the wave is entered 3 times with
-  threads and 0 times without.
-
 
 - **OA's feasibility evaluators now forward `timing_bucket` (issue #74 again).**
   `nlp_ipopt`'s `_charge_evaluator` reads `evaluator.timing_bucket` to decide
@@ -493,6 +1276,7 @@ The release procedure that produces these entries is documented in
   over-report that layer by exactly the restoration cost. `solver.py`'s
   cut-augmented proxy has forwarded the attribute since #74; these two were
   written later and did not.
+
 - **The docs site no longer shows `global\_opt` with a visible backslash.**
   In a LaTeX document `\text{global\_opt}` is exactly right; MathJax 3
   implements none of TeX's text-mode escapes and prints the backslash. Measured
@@ -505,6 +1289,7 @@ The release procedure that produces these entries is documented in
   engines over a 15-string corpus — the three affected notebook equations use a
   math wrapper, and a test greps every authored page so the habit cannot come
   back.
+
 - **The docs assistant renders its answers instead of showing their source.**
   The model writes markdown and cites with bracketed numbers, but the panel
   printed the whole reply as one pre-wrapped string: a literal `\[ \min_x … \]`
@@ -515,12 +1300,15 @@ The release procedure that produces these entries is documented in
   invariant is unchanged: model output is still written only with
   `textContent`, never as HTML, so it cannot inject markup or a
   `javascript:` link.
+
 - **Passage previews no longer show raw TeX.** They are cut at 260 characters,
   often mid-expression, so they drop display equations and unwrap inline ones
   to their symbols (`\in` → ∈) rather than being handed to MathJax.
+
 - **The status line no longer overlaps the question box.** The panel is a flex
   column, so a two-line message was shrunk to its `min-height` and drawn across
   the textarea below it.
+
 - **Math the model writes badly no longer paints a MathJax error box into the
   answer.** A 1B local model opened `\begin{split}` and closed it with
   `\end{aligned}`; MathJax replaced the expression with its red-on-yellow
@@ -541,6 +1329,7 @@ The release procedure that produces these entries is documented in
   now builds the index and runs both assistant guards (`ask_retrieval.mjs`,
   `ask_e2e.py`) before uploading, and the browser guard asserts the index is
   fetched *and* served 200 — the exact shape of the bug.
+
 - **The Ask panel makes room for the page instead of covering it** (#1467). The
   open panel pads the body by its own width so the book reflows beside it, its
   left edge drags (and takes the arrow keys) to trade width between the two, and
