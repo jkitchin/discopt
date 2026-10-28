@@ -670,6 +670,11 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **The `discopt.nn` deprecation alias is gone.** It has warned since 0.9.0
+  (#1219) that it would be removed in 0.10. `import discopt.nn` now raises
+  `ModuleNotFoundError`; import `discopt.ml` instead. The `nn` install extra
+  (`pip install discopt[nn]`) is unchanged.
+
 - **`DISCOPT_TRIVIAL_PRIMAL` is retired (#827, performance-plan §103.11).** It
   seeded the root `initial_point` with a trivially feasible point. It was default OFF.
   On a MINLPLib panel (1516 instances screened, 321 with a feasible trivial point,
@@ -1179,6 +1184,8 @@ The release procedure that produces these entries is documented in
   down, is now its safe bound (`docs/dev/performance-plan.md` §78.1).
 
 #### Other fixes
+
+- **A fast-API objective with nonlinear rows no longer fails to solve.** `add_linear_objective` / `add_quadratic_objective` keep the objective in the Rust builder. The factorable reformulation, entropy canonicalization, multilinear split, nonsmooth epigraph lift and integer-product expansion rebuilt the model without it, so `solve()` raised "objective is a builder placeholder but the model retains no builder objective block". Found by the `modeling_guide` notebook. Each pass now re-issues the builder objective, as the GDP lowering already did (#1798). A pass that rewrites the objective now yields an ordinary objective, so the rewrite is no longer discarded.
 
 - **Solve options that were ignored are now honoured, or a warning is raised.** This covers tuning and kernel levers, `mu_init`, `gdp_method`, the native kernel's relative `gap_tolerance`, `gdp_method="hull"` on `add_disjunction`, and `strategy` and `node_callback` (#1645, #1663, #1689). A gap tolerance below 1e-8 is obeyed (#1583).
 

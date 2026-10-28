@@ -395,9 +395,9 @@ mypy python/discopt/
     (`__call__(x)->expression`, `parameters`, `n_parameters`, `l2_penalty`,
     `initial_values`), so a GP mean, a soft tree or a fixed-structure symbolic formula
     plugs in with no framework change.
-  - Named `discopt.nn` until #1219; `discopt.nn` remains a deprecation shim forwarding by
-    object identity. `presolve.py`'s `NNPresolvePass` is informational v0 — it does not
-    tighten anything.
+  - Named `discopt.nn` until #1219; the `discopt.nn` deprecation shim was removed in
+    0.10.0. `presolve.py`'s `NNPresolvePass` is informational v0 — it does not tighten
+    anything.
 - **`python/discopt/dae/`** — DAE/ODE discretization for dynamic optimization (no solver/DAG-compiler changes). `collocation.py` (`DAEBuilder` + `ContinuousSet`) transcribes ODEs/index-1 DAEs/2nd-order ODEs via orthogonal collocation on finite elements (Radau/Legendre); `finite_difference.py` (`FDBuilder`) and `mol.py` (`MOLBuilder`, method of lines for PDEs) are alternatives; `polynomials.py` holds the collocation matrices/roots. `fit.py` adds multi-experiment fitting glue (`Trajectory`, `fit_trajectories`, `TrajectoryFit`): one collocation block per trajectory on a shared model wired to one RHS, so a trainable surrogate's weights are shared and trained jointly.
 - **`python/discopt/solver.py`** — Solver orchestrator: end-to-end `Model.solve()` via B&B.
 - **`python/discopt/transformations.py`** — named registry over the existing reformulation functions (`gdp.*`, `integer.*`, `binary.multilinear`, `mpec.*`): `apply_to` (in place), `create_using` (on a `Model.clone()`), and `check` (copy + `diff_models`, no solve) — the unit for verifying a reformulation without a whole-solve flag A/B. Every solver call site of those functions (AMP's GDP lowering included) dispatches through `Transformation.apply`, which is the bare function call; the solver still decides when each pass runs and whether to adopt it. Register a new reformulation here so it can be checked in isolation.
