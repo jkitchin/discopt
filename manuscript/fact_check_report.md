@@ -80,6 +80,7 @@ something, not that it was measured.
 ### S5. ICNN "approximately 10% gap reduction" — test threshold is only 5%
 - `test_learned_relaxations.py` asserts `reduction >= 0.05` (5%), not 10%
 - **Fix**: Say "5–10%" or match the test threshold
+- **Resolved (v0.10.0)**: the ICNN/learned-relaxation route was retired in #1873 (it never took effect: no trained models shipped). The claim, the ICNN section and every other ICNN mention were removed from the manuscript; the Results section now reports the retirement measurement instead.
 
 ---
 
@@ -177,4 +178,4 @@ The following major claims were verified against source code:
 - OBBT: incumbent cutoff, warm-start ✓
 - FBBT: Rust implementation with cutoff ✓
 - All specialized envelopes: power_int, exp_tight, log_tight, sin_tight, cos_tight, signomial_multi ✓
-- ICNN: softplus weights, LearnedRelaxationRegistry ✓
+- ICNN: softplus weights, LearnedRelaxationRegistry ✓ (retired in #1873; removed from the manuscript in v0.10.0)
