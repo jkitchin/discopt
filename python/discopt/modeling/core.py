@@ -4859,7 +4859,7 @@ class SolveResult:
         on two rows -- the entry (a ``"restoration"`` row) and the return to the
         main phase -- so count calls with ``statistics["restoration_calls"]`` or
         the ``"main"`` -> ``"restoration"`` transitions, not the ``"R"`` rows.
-        On pounce-solver 0.12.0 rows carry no ``phase``, only the
+        On pounce-solver 0.12.0 (below discopt's pin) rows carry no ``phase``, only the
         main-phase rows are present -- restoration shows up as the ``"R"`` row and
         the ``restoration_*`` counts -- and ``inf_pr`` is POUNCE's internal primal
         infeasibility on its slack-reformulated, scaled problem rather than the

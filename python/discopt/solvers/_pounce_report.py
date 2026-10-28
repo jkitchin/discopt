@@ -3,13 +3,13 @@
 POUNCE writes its ``pounce.solve-report/v1`` document -- the same JSON as
 ``pounce --json-output <path> --json-detail full`` -- only to a path handed to
 ``Problem.solve(report_path=..., report_detail=...)``. There is no in-memory
-variant in the pinned release (0.12.0), so this module routes the report through a
+variant (still none in 0.14.0), so this module routes the report through a
 private temporary directory, parses it, and removes the file before returning.
 
-What the report holds (measured, not assumed). Two POUNCE versions are in range
-of discopt's pin (``pounce-solver>=0.12``) and their trajectories differ; the
-behavior with jkitchin/pounce#980 (the fix for pounce#979, on POUNCE ``main``
-672320d; not in 0.12.0) is described first:
+What the report holds (measured, not assumed). The behavior with
+jkitchin/pounce#980 (the fix for pounce#979, POUNCE 672320d; in every release
+from 0.13.0, so in all of discopt's pin ``pounce-solver>=0.14``) is described
+first:
 
 * ``statistics`` -- ``iteration_count``, the ``final_*`` residuals, evaluation
   counts, ``total_wallclock_time_secs``, ``restoration_calls`` /
@@ -35,7 +35,8 @@ behavior with jkitchin/pounce#980 (the fix for pounce#979, on POUNCE ``main``
 stops before its first iteration gets ``[]`` rather than a missing key, so a
 consumer can iterate it without a key check.
 
-On pounce-solver **0.12.0** (no pounce#980) the report differs in two places:
+On pounce-solver **0.12.0** (no pounce#980; below the pin since 0.14, kept for
+reading old reports) the report differs in two places:
 
 1. Rows carry no ``phase`` and no ``inf_pr_internal``, and the inner
    restoration-phase rows are **not** in ``iterations``; the restoration phase
