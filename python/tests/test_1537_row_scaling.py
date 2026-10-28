@@ -270,9 +270,16 @@ def test_row_equilibrated_fixed_nlp_converges_and_certifies_flay03m(monkeypatch)
     tree enough for the driver's early exit to fire at a claim inside the 1e-4
     certificate tolerance: certified, bound 48.98724 (gap 5.2e-5), confirmed by the
     presolve-free cross-solve. The 1e-6 pin below measures the bare master's tree
-    running to its own end, so that is the path it reads."""
+    running to its own end, so that is the path it reads.
+
+    Also pinned to the master with its RINS/RENS sub-MIPs on. Since #2021 they are
+    off by default (``DISCOPT_HIGHS_MASTER_NO_SUBMIP``); without their incumbents
+    HiGHS stops at its own ``mip_rel_gap`` with bound 48.98962 (gap 3.6e-6, 393
+    nodes, 0.28 s vs 333 nodes, 0.49 s), certified and below the optimum, but outside
+    this 1e-6 pin, which reads the tree that runs past that gap."""
     monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
     monkeypatch.setenv("DISCOPT_HIGHS_MASTER_LP_CUTS", "0")
+    monkeypatch.setenv("DISCOPT_HIGHS_MASTER_NO_SUBMIP", "0")
     monkeypatch.setenv("DISCOPT_OA_NLP_ROW_EQUILIBRATE", "1")
     seen = _fixed_nlp_statuses(monkeypatch)
     res = _per_row_scaled("flay03m.nl", 6.0).solve(time_limit=30)

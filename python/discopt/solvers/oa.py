@@ -5712,6 +5712,45 @@ def _highs_master_lp_cut_rounds() -> int:
     return max(1, int(os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUT_ROUNDS", "10")))
 
 
+#: #2021: the HiGHS options ``DISCOPT_HIGHS_MASTER_NO_SUBMIP`` passes to the
+#: ``lp_nlp_bb`` master and its #1634 cross-solve.
+_HIGHS_MASTER_NO_SUBMIP_OPTIONS: dict[str, object] = {
+    "mip_heuristic_run_rins": False,
+    "mip_heuristic_run_rens": False,
+}
+
+
+def _highs_master_no_submip() -> bool:
+    """#2021: ``DISCOPT_HIGHS_MASTER_NO_SUBMIP`` -- switch off HiGHS's RINS and
+    RENS sub-MIPs in the HiGHS ``lp_nlp_bb`` master (and its #1634 cross-solve).
+
+    **Mechanism.** ``milp_highs.solve_milp_with_lazy_cuts`` rebuilds the HiGHS
+    tree after every lazy cut, and HiGHS re-runs both sub-MIPs on every rebuilt
+    tree; the incumbents they find are integer points the separator then vetoes
+    with a cut. Heuristics never move a MIP's dual bound, so this changes the
+    search, not what any bound means. Entry experiment (60 s, route on, interleaved,
+    performance-plan section 103.7): slay04m-07m 12.36 -> 8.81 s summed
+    (-44/-43/-53/-8 %), slay08m 29.4 -> 18.4 s (3/3 reps), every run certified with
+    the same optimum.
+
+    **Graduated (default ON, #2021).** Panel over the 102 routed instances at 30 s,
+    interleaved, every incumbent verified: 612 checks, 0 problems, certified
+    96 -> 97 (cvxnonsep_pcon30 gained, 3/3 reruns), none lost; both-certify wall
+    125.5 -> 97.9 s, total wall 306.1 -> 265.9 s. The one looser bound (tls4,
+    uncertified, 2.054 -> 1.946 in 3/3) is the #1066 guard's: the faster master
+    earns the route 2.7 s more, the fallback gets that much less; with the
+    hand-over fixed (``DISCOPT_CONVEX_ROUTE_GUARD=0``) the ON bound is >= OFF.
+    ``=0`` restores HiGHS's sub-MIPs.
+    """
+    return os.environ.get("DISCOPT_HIGHS_MASTER_NO_SUBMIP", "1").strip().lower() not in (
+        "0",
+        "",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _oa_support_cuts_enabled() -> bool:
     """#2013 (p_ball): ``DISCOPT_OA_SUPPORT_CUTS`` -- seed the ``lp_nlp_bb`` master
     with supporting hyperplanes of every convex row at the extremes of each of its
@@ -6895,6 +6934,9 @@ def solve_lp_nlp_bb(
         lazy_kwargs["node_callback"] = node_callback
         lazy_kwargs["node_lp_rounds"] = _highs_master_lp_cut_rounds()
         lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
+    highs_no_submip = lazy_backend == "highs" and _highs_master_no_submip()
+    if highs_no_submip:
+        lazy_kwargs["highs_options"] = dict(_HIGHS_MASTER_NO_SUBMIP_OPTIONS)
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
     elif lazy_backend == "simplex":
@@ -7152,6 +7194,14 @@ def solve_lp_nlp_bb(
         "inverted_master_bound": _trace_value(inverted_master_bound),
     }
 
+    # Numeric markers a caller (the panel's ``--fired-stat``) can count; ``None``
+    # when nothing fired, as before.
+    route_stats: dict[str, float | str] = {}
+    if unverified_incumbent:
+        route_stats["oa/unverified_incumbent"] = 1.0
+    if highs_no_submip:
+        route_stats["oa/highs_no_submip"] = 1.0
+
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(
             status=status,
@@ -7165,7 +7215,7 @@ def solve_lp_nlp_bb(
             subnlp_calls=nlp_subproblem_count,
             gap_certified=gap_is_certified,
             mip_nlp_trace=single_tree_trace,
-            solver_stats=({"oa/unverified_incumbent": 1.0} if unverified_incumbent else None),
+            solver_stats=route_stats or None,
         )
 
     return SolveResult(
@@ -7180,6 +7230,7 @@ def solve_lp_nlp_bb(
         subnlp_calls=nlp_subproblem_count,
         gap_certified=gap_is_certified,
         mip_nlp_trace=single_tree_trace,
+        solver_stats=route_stats or None,
     )
 
 
