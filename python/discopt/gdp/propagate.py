@@ -15,7 +15,7 @@ and both can be decided on a *partial* assignment:
 Both checks are exact refutations -- they only ever reject an assignment none of
 whose completions satisfies the row -- so pruning by them removes infeasible
 configurations and nothing else. Pyomo's ``check_sat`` asks z3 the same question;
-this needs no dependency. Leaves that are not indicators (free ``BooleanVar``s,
+this needs no dependency. Leaves that are not indicators (a free ``BooleanVar``,
 an implication's own selector) stay unknown, which only weakens the check.
 """
 
