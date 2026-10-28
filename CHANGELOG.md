@@ -10,6 +10,8 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
 ### Added
 
 - **The Claude Code bundle installs with knowhow v0.3
@@ -6198,6 +6200,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.10.0]: https://github.com/jkitchin/discopt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jkitchin/discopt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jkitchin/discopt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jkitchin/discopt/compare/v0.6.0...v0.7.0

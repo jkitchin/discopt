@@ -270,7 +270,7 @@ def test_upgrade_model_import_failure_is_a_usage_error(tmp_path):
 def test_upgrade_model_takes_a_1_4_disjunction_to_current_unchanged(tmp_path):
     """1.4 -> 1.5 only adds ``indicators``, written once read, and 1.6 only new
     index kinds and nested members; a 1.4 document has none of them, so its
-    upgrade differs from it in the schema string alone (#1782)."""
+    upgrade differs from it in the schema string and writer stamp alone (#1782)."""
     src = FIXTURES / "v1.4" / "mip_indicator_sos_disjunction.json"
     out = tmp_path / "x.json"
     proc = _cli(src, out)
@@ -283,4 +283,7 @@ def test_upgrade_model_takes_a_1_4_disjunction_to_current_unchanged(tmp_path):
     for doc in (new, old):
         doc.pop("schema")
         doc.pop("provenance", None)
+        # The writer stamp is the running version, not the payload: the fixture was
+        # written by 0.9.1.dev0, so comparing it failed on the 0.10.0 bump.
+        doc.pop("discopt", None)
     assert new == old
