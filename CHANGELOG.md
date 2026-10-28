@@ -371,6 +371,16 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The `pounce-solver` floor is now 0.14 (was 0.12)**, for both the core
+  dependency and the `pounce` extra. Every release from 0.13.0 carries
+  jkitchin/pounce#980, so the 0.12.0 solve-report behavior that
+  `_pounce_report.py` documents is now below the pin and kept only for reading
+  old reports. The 0.13-only settings that `convex_ipm_pounce.py` refuses on older
+  releases are therefore always available. CI already installs POUNCE from git
+  `main`, so the CI lanes do not change. The Pyodide wheel in
+  `crates/discopt-wasm/web/wheels/` is still 0.12.0; it is built in the POUNCE
+  repository and is updated separately.
+
 - **The convex-MINLP route's HiGHS master no longer runs RINS/RENS sub-MIPs
   (`DISCOPT_HIGHS_MASTER_NO_SUBMIP`, default ON; `=0` restores them) (#2021).**
   - The `lp_nlp_bb` master rebuilds its HiGHS tree after every lazy cut, and HiGHS
