@@ -67,6 +67,9 @@ __all__ = [
     "perspective_objective_terms",
     "perspective_oa_cut_enabled",
     "perspective_disaggregation_enabled",
+    "perspective_row_cut_enabled",
+    "perspective_row_terms",
+    "PerspectiveRowTerm",
 ]
 
 #: Coefficients below this are treated as structurally zero when reading the
@@ -380,3 +383,281 @@ def perspective_disaggregation_enabled() -> bool:
     without reloading.
     """
     return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "1").strip() not in ("", "0")
+
+
+# ── #2021 §3: diagonal-perspective split of a coupled quadratic ROW ───────────
+
+
+def perspective_row_cut_enabled() -> bool:
+    """Is the #2021 diagonal-perspective strengthening of OA row cuts switched on?
+
+    Default ON (graduated with #2021, performance-plan section 103.10).
+    Bound-changing under CLAUDE.md §5 regime 2: it replaces the OA tangent of a
+    qualifying ``<=`` row with a valid row that is never weaker, and strictly
+    stronger wherever an indicator is below 1. ``DISCOPT_PERSPECTIVE_ROW_CUT=0``
+    restores the plain tangent. Read per call, not cached at import, so a test can
+    flip it.
+    """
+    return os.environ.get("DISCOPT_PERSPECTIVE_ROW_CUT", "1").strip() not in ("", "0")
+
+
+#: A row whose quadratic block or whose defining-variable block is wider than
+#: this is declined: the split costs dense ``O(k**3)`` eigen-decompositions, and
+#: declining only ever forgoes a strengthening.
+_ROW_SPLIT_MAX_COLS = 500
+
+
+class PerspectiveRowTerm:
+    """One ``<=`` row ``0.5 x_S' Q_SS x_S + c'x + k <= 0`` and its certified split.
+
+    ``x_S = F w + f0`` holds at every feasible point (each ``x_j``, ``j in S``,
+    is defined by one linear ``==`` row of the model). ``d`` is the diagonal
+    split off ``M = 0.5 F' Q_SS F`` with ``M - diag(d)`` certified PSD; ``z[i]``
+    is the binary indicator of ``w_i`` (``-1`` where ``d[i] == 0``).
+    """
+
+    __slots__ = ("row", "S", "QSS", "c_idx", "c_val", "k", "F", "f0", "W", "d", "z", "t")
+
+    def __init__(self, row, S, QSS, c_idx, c_val, k, F, f0, W, d, z, t):
+        self.row = int(row)
+        self.S = S
+        self.QSS = QSS
+        self.c_idx = c_idx
+        self.c_val = c_val
+        self.k = float(k)
+        self.F = F
+        self.f0 = f0
+        self.W = W
+        self.d = d
+        self.z = z
+        self.t = float(t)
+
+    def plain_tangent(self, x, n_vars: int) -> np.ndarray:
+        """The row's ordinary OA tangent coefficients at ``x`` (no split)."""
+        coeffs = np.zeros(n_vars, dtype=np.float64)
+        np.add.at(coeffs, self.c_idx, self.c_val)
+        coeffs[self.S] += self.QSS @ np.asarray(x, dtype=np.float64)[self.S]
+        return coeffs
+
+    def cut(self, x, n_vars: int) -> tuple[np.ndarray, float, int]:
+        """``(coeffs, rhs, n_shifted)``: the split cut referenced at ``x``.
+
+        The reference is projected through ``F`` first (``w = x[W]``,
+        ``x^ = F w + f0``) and the tangent is taken at ``x^``, never at
+        ``x[S]``: the validity argument is the tangent of the PSD remainder at
+        ``w`` plus each ``d_i w_i**2``'s perspective cut, and that tangent is the
+        row's tangent at ``x^`` only.
+        """
+        wbar = np.asarray(x, dtype=np.float64)[self.W]
+        xhat = self.F @ wbar + self.f0
+        coeffs = np.zeros(n_vars, dtype=np.float64)
+        np.add.at(coeffs, self.c_idx, self.c_val)
+        coeffs[self.S] += self.QSS @ xhat
+        rhs = -self.k + 0.5 * float(xhat @ self.QSS @ xhat)
+        shifted = 0
+        for di, wi, zi in zip(self.d, wbar, self.z):
+            if di > 0.0 and zi >= 0 and wi > 0.0:
+                sh = float(di * wi * wi)
+                coeffs[zi] -= sh
+                rhs -= sh
+                shifted += 1
+        return coeffs, rhs, shifted
+
+
+def _flat_lower_bounds(model: Model, n: int) -> np.ndarray:
+    lb = np.empty(n, dtype=np.float64)
+    for v in model._variables:
+        base = _compute_var_offset(v, model)
+        lb[base : base + v.size] = np.ravel(
+            np.broadcast_to(np.asarray(v.lb, dtype=np.float64), v.shape)
+        )
+    return lb
+
+
+def _certified_split(M: np.ndarray, diag: np.ndarray):
+    """Largest ``t`` (to bisection precision, then ``x 0.999``) with
+    ``M - t*diag(diag)`` PSD past a margin, plus a Cholesky certificate.
+
+    Returns ``(t, d)`` or ``None``. ``None`` whenever ``M`` itself does not clear
+    the margin or the certificate fails: the split is refused, never
+    approximated.
+    """
+    scale = max(1.0, float(np.abs(np.diag(M)).max()))
+    margin = 1e-9 * scale
+    eye = np.eye(M.shape[0])
+    if np.linalg.eigvalsh(M)[0] < margin:
+        return None
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if np.linalg.eigvalsh(M - np.diag(mid * diag))[0] >= margin:
+            lo = mid
+        else:
+            hi = mid
+    t = lo * 0.999
+    if t <= 0.0:
+        return None
+    d = t * diag
+    try:
+        np.linalg.cholesky(M - np.diag(d) - margin * eye)
+    except np.linalg.LinAlgError:
+        # The certificate is the only thing licensing the split; without it the
+        # row keeps its ordinary tangent.
+        return None
+    return t, d
+
+
+def perspective_row_terms(model: Model, row_map) -> list[PerspectiveRowTerm]:
+    """Every scalar ``<=`` quadratic row the diagonal-perspective split applies to.
+
+    ``row_map`` is the evaluator's ``constraint_row_map()``: ``(start, stop,
+    Constraint)`` per source constraint, which is what ties a model constraint to
+    the evaluator row an OA cut names. Only one-row (scalar) constraints are
+    read, and the returned :attr:`PerspectiveRowTerm.row` is the evaluator row.
+
+    **The algebra.** For a row ``g(x) = 0.5 x_S' Q_SS x_S + c'x + k <= 0`` whose
+    quadratic columns are each defined by a linear ``==`` row, ``x_S = F w + f0``
+    at every feasible point, so on the feasible set ``g`` is a quadratic in ``w``
+    with Hessian ``2M``, ``M = 0.5 F' Q_SS F``. Write
+    ``g = [g - sum_i d_i w_i**2] + sum_i d_i w_i**2``. With ``M - diag(d)`` PSD
+    the bracket is convex in ``w`` and lies above its tangent at ``w^``; each
+    ``d_i w_i**2`` with ``w_i`` semicontinuous (``lb >= 0``, ``w_i <= U z_i``,
+    ``z_i`` binary) lies above its Frangioni-Gentile perspective cut
+    ``2 d_i w^_i w_i - d_i w^_i**2 z_i``. Summing, every feasible point satisfies
+    the row's tangent at ``x^ = F w^ + f0`` plus ``d_i w^_i**2 (1 - z_i)``, i.e.
+    the tangent with ``coeffs[z_i] -= d_i w^_i**2`` and ``rhs -= d_i w^_i**2``.
+    Validity needs only ``M - diag(d)`` PSD and the exact substitution -- not
+    ``Q_SS`` PSD and not the row's convexity in ``x``.
+
+    Every gate is a soundness condition and a doubt declines the row:
+
+    * the row is scalar, ``<=``, and quadratic (degree ``<= 2``);
+    * each ``j in S`` is the only quadratic column of exactly one scalar linear
+      ``==`` row that defines it (a defining coefficient not tiny relative to the
+      row), and the defined columns ``W`` exclude ``S``;
+    * a split coordinate has ``lb >= 0`` and an indicator from
+      :func:`_semicontinuity_rows` that is not itself a ``W`` column it shifts;
+    * ``M`` clears a PSD margin, and ``M - diag(d) - margin*I`` passes Cholesky.
+    """
+    from .problem_classifier import (
+        _EXTRACTION_DECLINES,
+        _extract_linear_coefficients_sparse,
+        _extract_quadratic_terms,
+    )
+
+    n = sum(v.size for v in model._variables)
+    if n == 0:
+        return []
+    scalar = [(start, con) for start, stop, con in row_map if stop - start == 1]
+    semi = _semicontinuity_rows(model)
+    if not semi:
+        return []
+    lb = _flat_lower_bounds(model, n)
+
+    eq_rows: list[tuple[dict[int, float], float]] = []
+    for _start, con in scalar:
+        if con.sense != "==":
+            continue
+        try:
+            terms, const = _extract_linear_coefficients_sparse(con.body, model, n)
+        except _EXTRACTION_DECLINES:
+            continue
+        eq_rows.append((terms, const))
+    if not eq_rows:
+        return []
+
+    out: list[PerspectiveRowTerm] = []
+    for start, con in scalar:
+        if con.sense != "<=":
+            continue
+        try:
+            qterms, c, k = _extract_quadratic_terms(con.body, model, n)
+        except _EXTRACTION_DECLINES:
+            continue
+        nz = {(i, j): v for (i, j), v in qterms.items() if v != 0.0}
+        if not nz:
+            continue
+        S = np.array(sorted({i for i, _ in nz} | {j for _, j in nz}), dtype=np.int64)
+        if S.size < 2 or S.size > _ROW_SPLIT_MAX_COLS:
+            continue
+        pos = {int(j): a for a, j in enumerate(S)}
+        QSS = np.zeros((S.size, S.size))
+        for (i, j), v in nz.items():
+            QSS[pos[i], pos[j]] = v
+        if not np.allclose(QSS, QSS.T, rtol=0.0, atol=1e-12 * max(1.0, np.abs(QSS).max())):
+            continue  # not a symmetric Hessian; the gradient Q x would be wrong
+        defs: dict[int, tuple[dict[int, float], float]] = {}
+        ambiguous: set[int] = set()
+        for terms, const in eq_rows:
+            hit = [j for j in terms if j in pos and terms[j] != 0.0]
+            if len(hit) != 1:
+                continue
+            j = hit[0]
+            if j in defs:
+                ambiguous.add(j)
+            defs[j] = (terms, const)
+        if ambiguous or len(defs) != S.size:
+            continue
+        wcols = sorted(
+            {i for j in defs for i, v in defs[j][0].items() if i not in pos and v != 0.0}
+        )
+        if not wcols or len(wcols) > _ROW_SPLIT_MAX_COLS:
+            continue
+        widx = {i: t for t, i in enumerate(wcols)}
+        F = np.zeros((S.size, len(wcols)))
+        f0 = np.zeros(S.size)
+        ok = True
+        for a, j in enumerate(S):
+            terms, const = defs[int(j)]
+            aj = terms[int(j)]
+            rscale = max(abs(v) for v in terms.values())
+            if abs(aj) < 1e-6 * rscale:
+                ok = False  # an ill-conditioned definition; F would amplify rounding
+                break
+            for i, v in terms.items():
+                if i != j and v != 0.0:
+                    F[a, widx[i]] = -v / aj
+            f0[a] = -const / aj
+        if not ok:
+            continue
+        zcols = np.full(len(wcols), -1, dtype=np.int64)
+        for t_i, i in enumerate(wcols):
+            sc = semi.get(i)
+            if sc is None or lb[i] < 0.0:
+                continue
+            ind_var, ind_elem, _u = sc
+            zc = _compute_var_offset(ind_var, model) + ind_elem
+            if zc == i:
+                continue
+            zcols[t_i] = zc
+        if not (zcols >= 0).any():
+            continue
+        M = 0.5 * F.T @ QSS @ F
+        M = 0.5 * (M + M.T)
+        diag = np.where(zcols >= 0, np.diag(M), 0.0)
+        if not (diag > 0.0).any():
+            continue
+        split = _certified_split(M, diag)
+        if split is None:
+            continue
+        t, d = split
+        zcols = np.where(d > 0.0, zcols, -1)
+        c = np.asarray(c, dtype=np.float64)
+        c_idx = np.flatnonzero(c)
+        out.append(
+            PerspectiveRowTerm(
+                start,
+                S,
+                QSS,
+                c_idx,
+                c[c_idx].copy(),
+                float(k),
+                F,
+                f0,
+                np.asarray(wcols, dtype=np.int64),
+                d,
+                zcols,
+                t,
+            )
+        )
+    return out
