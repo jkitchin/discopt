@@ -1244,7 +1244,21 @@ def solve_milp_with_lazy_cuts(
                 return
             last_poll[0] = now
             raw_lb = float(data_out.mip_dual_bound)
-            stop[0] = _consult("interrupt", raw_lb if np.isfinite(raw_lb) else None, now - t0)
+            # #2013: report the master's RUNNING bound, as the restart arm and the
+            # final result do, not the current tree's own. Rows are only ever added
+            # to the master, so a finished tree's dual bound stays a valid lower
+            # bound for every later tree, while a rebuilt tree's own bound starts
+            # over at its root. Measured: the #1066 guard read that sawtooth as no
+            # progress and abandoned converging routes -- slay07m (gap read
+            # 0.0406 vs 0.0423 at 15 s) and p_ball_10b_5p_2d_m ("relative gap 1 vs
+            # 1"). Panel over the 102 routed instances, 30 s: certified 94 -> 96
+            # (those two, 20.6 / 21.2 s), none lost, 612 checks, 0 problems
+            # (performance-plan section 103.3). The early exit that reads the same
+            # snapshot is still held to the #1634 presolve-free cross-solve.
+            lb_now = raw_lb if np.isfinite(raw_lb) else None
+            if bound is not None:
+                lb_now = bound if lb_now is None else max(bound, lb_now)
+            stop[0] = _consult("interrupt", lb_now, now - t0)
             data_in.user_interrupt = stop[0]
             return
 

@@ -12962,3 +12962,214 @@ compared with section 103's run, which had the old cross-solve):
 +7 certificates on the route, none lost. `DISCOPT_HIGHS_MASTER_LP_CUTS` stays a
 documented opt-in because of the single pcon30 loss, which belongs to the #1066
 guard's timing (recorded in its docstring and the flag audit).
+
+
+### 103.2 The #1066 guard judges bound progress; `DISCOPT_HIGHS_MASTER_LP_CUTS` graduates (2026-10-27)
+
+**Mechanism (measured).** Traced every #1066 guard call on cvxnonsep_pcon30 (30 s).
+In both LP-cut arms the `lp_nlp_bb` master's dual bound sits at -36.156283 (it moves
+< 1e-7) for the whole route; only incumbents move the gap. OFF: the incumbents stall
+at a relative gap of 0.0059, the gap test fires at ~19-20 s, and the fallback certifies.
+ON: the incumbents arrive later and more slowly (gap 0.275 -> 0.011 by 25 s), so each
+trailing window still shows the 25% shrink, the guard never fires, and the solve ends
+`feasible`. A gap that only incumbents close cannot certify unless the stuck bound
+already is the optimum, so the gap was the wrong quantity to judge.
+
+**Change.** `DISCOPT_CONVEX_ROUTE_BOUND_STALL`: where the trend test would let the
+route continue, the guard also requires the dual bound to have moved by more than
+`_CONVEX_ROUTE_BOUND_STALL_FRACTION` (1e-3) of the current absolute gap across the
+trailing window. The rule can only hand over earlier, never later. It acts only under
+the #1066 trend policy (the `lp_nlp_bb` route; the #1143 decision point consults no
+trend). Entry experiment on pcon30, 30 s: rule OFF -> ON, LP cuts off: optimal 25.4
+-> 20.9 s; LP cuts on: feasible -> **optimal 24.2 s** (fired at the checkpoint).
+
+**Panels** (the 102 routed instances re-derived by `issue2013_route_census.py`, 30 s,
+interleaved, 2 workers, every incumbent verified on a fresh model; the panel script
+now records each guard verdict that fired):
+
+| panel | arms | checks / problems | certified | both-certify nodes | both-certify wall | total wall |
+|---|---|---|---|---|---|---|
+| A | stall rule OFF -> ON (LP cuts off) | 612 / 0 | 94 -> 94 | 464,179 -> 462,918 | 497.3 -> 493.7 s | 740.3 -> 736.2 s |
+| B | LP cuts OFF -> ON (stall rule on) | 612 / 0 | 94 -> 94 | 463,000 -> **124,032** | 494.1 -> **246.1 s** | 735.2 -> **488.5 s** |
+
+In A the rule fired on exactly one instance, pcon30 (25.0 -> 20.7 s). Every other
+instance's guard verdict came from the unchanged gap test. Two uncertified rows ended
+with a different bound: clay0305m (2145 -> 1320) and tls4 (1.897 -> 1.888). In both,
+both arms handed over at the same instant through the old gap rule. Reruns of
+clay0305m return 1320 / 1320 OFF and 2227 / 1320 ON, so that difference is the
+time-limited fallback's variance. In B the only lower final bound is clay0205m
+(neither certifies, 1320 -> 990). There ON finds the optimal incumbent 8092.5, where
+OFF finds none, and so hands over ~3 s later (18 s vs 15 s). In 3 of 3 reruns ON ends
+at 1320, the same as OFF, so the 990 is the fallback's timing tail.
+
+**Verdict.** Both flags graduate to default ON (`=0` opt-outs kept). B is cert-clean and
+net-positive: no certificate lost, wall halved where both certify. A on its own is
+close to neutral. The stall rule ships because it is what removes the one certificate
+B would otherwise lose (section 103), not for a gain of its own. The flag audit drops
+to 51 live default-OFF solver-math gates.
+
+**Still open on #2013 (unchanged by this section):** p_ball_10b/20b (bound ~7e-7 in
+every arm), slay07m (every arm ends at 61,757.14) and portfol_classical050_1 (every arm
+ends at -0.097774). These are the eight neither-certify rows above, along with
+clay0205m/0305m and tls4.
+
+
+### 103.3 The HiGHS master's in-tree check-in reported the current tree's bound, not the master's (2026-10-27)
+
+**Mechanism (code + measurement).** `milp_highs.solve_milp_with_lazy_cuts` rebuilds
+the HiGHS tree after every lazy cut. Its restart check-in and its final result carry
+the running max of the trees' dual bounds. The in-tree (`kCallbackMipInterrupt`)
+check-in passed the *current* tree's `mip_dual_bound`, which restarts at the rebuilt
+tree's root. Two independent investigations found it from opposite ends:
+
+* slay07m: a check-in read 62,121 right after a tree had finished at 64,215, so the
+  #1066 guard saw "relative gap 0.0406 vs 0.0423" at ~15 s and abandoned a master
+  whose bound had climbed 62,025 -> 64,215 (opt 64,748.8). Abandoning withdraws the
+  route's bound, and the fallback ends at the root LP bound 61,757.14 (section 103's
+  "every arm stops at 61,757.14").
+* p_ball_10b_5p_2d_m: the guard's history alternated gap 1.0 / 0.2 and it fired on
+  "relative gap 1 vs 1".
+
+**Fix (unflagged).** The in-tree check-in reports `max(running bound, current tree
+bound)`, the quantity the function already publishes. Rows are only ever added to
+the master, so a finished tree's dual bound stays a valid lower bound on every later
+tree. The early exit that reads the same snapshot is still confirmed by the #1634
+presolve-free cross-solve. Pinned by
+`test_2013_master_checkin_running_bound.py`, which fails before the fix.
+
+**Panel** (the 102 routed instances, 30 s, interleaved, every incumbent verified;
+A/B through a temporary local switch that was removed before commit): 612 checks,
+0 problems; certified 94 -> **96** (p_ball_10b_5p_2d_m 21.2 s, slay07m 20.6 s), none
+lost; total wall 502.7 -> 482.4 s; both-certify nodes 124,036 -> 123,905. The guard's
+verdict changed on 8 instances. Among those that stay uncertified, no final bound is
+lower: clay0305m 1320 -> 2145, tls4 1.879 -> 1.900, the rest equal.
+
+**Still open on #2013**, each with a measured mechanism from the same investigation:
+* p_ball_10b_5p_4d_m / 20b_5p_2d_m: the master has no row confining a point to its
+  chosen ball (every tree's bound 0.0). Support-point tangent cuts lift the trees to
+  55.9 -> 62.5 (opt 71.37), but the #1066 25%-per-window rule hands over a bound that
+  rises 2-3 units per restart. With the guard off, 20b certifies in 43.9 s; on 4d the
+  #1634 cross-solve, starting from a root bound of 0, exhausts the budget and
+  withdraws a correct claim.
+* slay08m-10m: HiGHS re-runs RINS/RENS sub-MIPs on every rebuilt tree (2.92 s of a
+  3.49 s solve on one slay07m tree); disabling them halves slay04m-07m's wall but
+  leaves 08m-10m uncertified.
+* portfol_classical050_1: -0.097774 is the continuous relaxation optimum. z decouples
+  from w (sum z = 1 << K = 10), so the master sits on a flat 19-dimensional face and
+  every tree ends in 1 node. A diagonal-perspective (Frangioni-Gentile) strengthening
+  of the dense risk row moves the relaxation to -0.096990 and makes sum z = 10 bind
+  (entry experiment only; the existing perspective detector handles separable
+  objective squares only).
+
+
+### 103.4 p_ball: the master had no row confining a point to its chosen ball (2026-10-27)
+
+**Mechanism (measured by the p_ball investigation).** p_ball assigns points to unit
+balls through big-M rows `||x_p - c_b||^2 + M y_pb <= M + 1`. Linearised only at the
+relaxation point (plus the points the lazy NLPs visit), the master has no row bounding
+`x_p` once `y_pb = 1`. Every integer master point stacks the points on top of each
+other at objective 0. On p_ball_10b_5p_4d_m (30 s), every one of 11 trees ends with
+dual bound 0.0. SCIP gets the same information from either propagation or
+separation; switching both off takes it from 1,551 to 12,108 nodes.
+
+**Change (flag `DISCOPT_OA_SUPPORT_CUTS`, default OFF).** Before the first tree, for
+each convex `<=` row allowed by `oa_cut_mask` with at most 16 nonlinear columns:
+1. Split columns into linear and nonlinear by two Jacobian evaluations.
+2. Set the linear columns to their tightest bounds (`y = 1` for a big-M row).
+3. Minimise the row over its nonlinear columns.
+4. Bisect from that centre to the boundary along each axis, and take the tangent at
+   each boundary point through the ordinary `_add_oa_cuts`.
+
+For a ball this gives its axis-aligned supporting planes, so fixing `y` in the master
+yields the ball's box. Each row is a tangent of a certified-convex function at a finite
+point, so no feasible point is cut off. The probe is bounded by a deterministic count of
+50,000 evaluations (#912), with the caller's deadline as a backstop. Measured use:
+6,417-13,845 evaluations, 0.08-0.24 s. Pinned by
+`test_2013_pball_support_cuts.py`.
+
+**Entry experiment** (this branch, after section 103.3; every certified point
+verified):
+
+| instance | limit | OFF | ON |
+|---|---|---|---|
+| p_ball_10b_5p_2d_m | 30 s | optimal 21.2 s, 3,637 nodes | optimal 12.9 s, 1,902 nodes |
+| | 60 s | optimal 19.0 s | optimal 11.0 s |
+| p_ball_10b_5p_4d_m | 30 s | feasible, bound 6.7e-7 | feasible (incumbent 71.372 = opt), **no bound** |
+| | 60 s | feasible, bound 6.7e-7 | feasible, bound 24.0 |
+| p_ball_20b_5p_2d_m | 30 s | feasible, bound 3.2e-7 | feasible (incumbent 2.4372 = opt), bound 3.2e-7 |
+| | 60 s | feasible | optimal 37.3 s, 16,444 nodes |
+
+The 4d / 30 s row loses its (trivial) bound. With the flag on, the route keeps making
+gap progress until the #1066 guard abandons it at 26.8 s. Abandoning withdraws the
+route's unconfirmed bound (#1634, #1658 B2), and the fallback's remaining ~3 s produce
+none. The section 5 panel over the 102 routed instances decides the flag.
+
+**Panel** (the 102 routed instances, 30 s, interleaved, every incumbent verified).
+The first run was invalid: with the flag on, the probe passed a 47-entry
+master-space point (model columns plus the objective epigraph) to a 46-column
+evaluator, so on every model with a nonlinear objective the route raised and fell
+back (batch 0.7 -> 14.2 s, batchdes, ex4, ravempb). The fix slices the model
+columns and is pinned by
+`test_support_probe_takes_the_model_columns_of_a_master_point`. A rerun after that
+fix (no ON-arm route raised): 612 checks, 0 problems; certified 96 -> 96; both-certify
+wall 296.6 -> 286.1 s; total wall 477.5 -> 467.1 s. Nearly all of the gain is
+p_ball_10b_5p_2d_m (17.1 -> 9.8 s), which already certifies OFF. p_ball_10b_5p_4d_m
+again loses its bound (6.7e-7 -> none).
+
+**Verdict.** Not graduated: section 5 forbids the lost bound, and the gain at 30 s is
+one instance. The flag's measured value is at 60 s (p_ball_20b_5p_2d_m feasible ->
+optimal 37.3 s), and it is blocked downstream of the cuts. The #1066 guard abandons a
+route whose bound is still rising, and abandoning withdraws an unconfirmed bound
+(#1634) with too little budget left for the fallback to produce one.
+
+
+### 103.5 A fallback reserve for routes that earn their budget to the wall (2026-10-28)
+
+**Mechanism (measured).** The p_ball_10b_5p_4d_m bound loss in section 103.4 came
+from the guard's timing, not from the support cuts. A simulated route that keeps
+earning its budget (`earning_guard` probe: the trend test always passes) runs to the
+wall in both arms. There the #1634 cross-solve has no time, so the route's bound is
+withdrawn, and with less than the 1 s floor left no fallback runs: **no dual bound**.
+Forced late handovers lose it as well. With 4.3 s or less left, the fallback produced
+no bound in 6/6 runs (it spends ~1.3 s on setup before NLP-BB starts); with 5.3 s it
+produced its root bound. portfol_classical050_1's fallback bounds with 2.4 s. The
+support cuts only made the late case more likely.
+
+**Change (flag `DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE`, default OFF).** Under the
+#1066 trend policy, from the checkpoint on, the guard hands over once 20% of the
+limit remains unless the route has converged. The earning route then hands over at
+24.6 s and keeps its bound. Pinned by `TestFallbackReserve`.
+
+**Panels** (102 routed instances, 30 s, interleaved, every incumbent verified):
+
+| panel | arms | checks / problems | certified | both-certify wall | total wall |
+|---|---|---|---|---|---|
+| E | reserve OFF -> ON | 612 / 0 | 95 -> 95 | 350.0 -> 349.8 s | 562.4 -> 562.0 s |
+| F | support cuts OFF -> ON (reserve on) | 612 / 0 | 96 -> 96 | 351.7 -> 335.5 s | 533.3 -> 517.3 s |
+
+Panel E ran while ~75 s of local tests also ran, so its absolute walls are high; the
+arms are interleaved per instance. The reserve fired once (a nested 2 s route inside
+a fallback, with no effect). In F, p_ball_10b_5p_4d_m keeps its bound in both arms,
+and no ON-arm route raised. The gains are p_ball_10b_5p_2d_m 25.2 -> 13.0 s and
+clay0204m 8.9 -> 5.5 s; clay0303hfsg is slower (4.4 -> 7.4 s). Both bars are met at
+30 s but the gain is concentrated, and the support cuts' clearest win
+(p_ball_20b_5p_2d_m, optimal in 37.3 s) is beyond a 30 s limit. The decision is taken
+on a 60 s panel of the pair.
+
+
+### 103.6 Support cuts + fallback reserve at 60 s: kept as documented opt-ins (2026-10-28)
+
+**Panel G** (the 102 routed instances, **60 s**, both flags toggled together,
+interleaved, every incumbent verified): 612 checks, 0 problems; certified 96 -> 96;
+both-certify nodes 127,560 -> 124,362, wall 376.8 -> 368.4 s; total wall 738.9 ->
+729.3 s. No ON-arm route raised. The reserve fired only on p_ball_10b_5p_4d_m, which
+keeps its bound (6.7e-7 in both arms). The only material gain is p_ball_10b_5p_2d_m
+(23.9 -> 13.3 s), which certifies in both arms. p_ball_20b_5p_2d_m (optimal in 37.3 s
+with the support cuts alone on a quiet machine) does not certify by the reserve's
+48 s hand-over under panel load.
+
+**Verdict.** Both bars are formally met (cert-clean, and faster in total), but the
+benefit is one instance of the class the cuts were built for, which section 2
+rejects as a default. Both flags are kept as documented opt-ins: the docstrings say
+why they are not the default and what would change that (the p_ball remainder in
+#2021).

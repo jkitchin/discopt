@@ -58,6 +58,20 @@ def _solve_one(nl: str, tl: float, stat: str) -> None:
     from discopt.validation.feasibility import verify_point
 
     assert discopt.__file__.startswith(str(REPO)), discopt.__file__
+    # #2013: record every #1066 route-guard verdict that fired, so a panel over a
+    # guard rule shows where it acted (section 6).
+    import discopt.solver as _solver_mod
+
+    guard_fired: list[str] = []
+    _guard_call = _solver_mod._RouteProgressGuard.__call__
+
+    def _traced_guard(self, context):
+        stop = _guard_call(self, context)
+        if stop:
+            guard_fired.append(f"{self.fired_at:.2f}s: {self.reason}")
+        return stop
+
+    _solver_mod._RouteProgressGuard.__call__ = _traced_guard
     t0 = time.perf_counter()
     r = from_nl(nl).solve(time_limit=tl, gap_tolerance=TOL)
     wall = time.perf_counter() - t0
@@ -90,6 +104,7 @@ def _solve_one(nl: str, tl: float, stat: str) -> None:
                 "spatial_picks": ss.get("tree/spatial_score_picks"),
                 "route": getattr(r, "algorithm_route", None),
                 "verify_failed": bad,
+                "guard_fired": guard_fired,
             }
         ),
         flush=True,
@@ -115,7 +130,8 @@ def run(
         for arm in ("1", "0") if idx % 2 else ("0", "1"):
             if (p["name"], arm) in done:
                 continue
-            env = dict(os.environ, **{flag: arm})
+            # ``--flag A,B`` toggles several flags together (#2013).
+            env = dict(os.environ, **dict.fromkeys(flag.split(","), arm))
             t0 = time.perf_counter()
             try:
                 proc = subprocess.run(
