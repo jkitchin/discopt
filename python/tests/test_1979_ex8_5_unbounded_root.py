@@ -128,10 +128,10 @@ def test_fbbt_domain_pass_reaches_log_inside_a_product(monkeypatch):
     assert fbbt_box(m).lb[0] == 0.0
 
 
-def _solve_ex8_5_3(monkeypatch, on: bool):
+def _solve_ex8_5_3(monkeypatch, on: bool, **budget):
     for f in BUNDLE:
         monkeypatch.setenv(f, "1" if on else "0")
-    return dm.from_nl(EX8_5_3).solve(time_limit=12)
+    return dm.from_nl(EX8_5_3).solve(**(budget or {"time_limit": 12}))
 
 
 @pytest.mark.slow
@@ -144,7 +144,11 @@ def test_ex8_5_3_has_no_bound_without_the_bundle(monkeypatch):
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_ex8_5_3_gets_a_sound_bound_with_the_bundle(monkeypatch):
-    r = _solve_ex8_5_3(monkeypatch, on=True)
+    # A node budget, not a wall-clock one: the tightness bar needs ~200 nodes, and a
+    # 12 s budget reached 217 on a laptop but 61 on a CI runner (bound -0.134, a
+    # test of the runner). Measured 2026-10-28: certifies optimal at 219 nodes,
+    # bound -0.0041359, ~15 s locally, identical over 5 runs (2 deterministic).
+    r = _solve_ex8_5_3(monkeypatch, on=True, max_nodes=300, time_limit=300)
     assert r.bound is not None, "the bundle produced no dual bound"
     assert r.bound <= EX8_5_3_BEST + 1e-9, (r.bound, EX8_5_3_BEST)
-    assert r.bound > -0.01, r.bound  # measured -0.00416 at 30 s
+    assert r.bound > -0.01, (r.bound, r.node_count)
