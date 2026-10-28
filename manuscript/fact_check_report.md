@@ -90,6 +90,7 @@ something, not that it was measured.
 - These specific numbers do NOT appear in any notebook or test
 - Tests only assert `reduction >= 0.60` (60%)
 - **Action**: Create `manuscript/piecewise_gap_reduction.ipynb`
+- **Resolved (v0.10.0)**: the notebook exists and does not reproduce these numbers. It gives 97.9% / 97.0% / 98.4% (mean gaps 6.110→0.127, 0.568→0.017, 8.138→0.128), checked against closed-form values; Table 4, the abstract and the conclusion now report those. The unbacked bilinear `>30%` row was removed.
 
 ### U2. Predictor-corrector "30–50% iteration reduction" (~line 334)
 - Standard literature claim but not benchmarked in this codebase
