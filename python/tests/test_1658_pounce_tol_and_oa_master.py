@@ -452,9 +452,12 @@ def test_lp_nlp_bb_never_certifies_an_unverified_incumbent():
         )
         for c in model._constraints
     ]
+    # 8 s, not 30: whether the master goes on to certify varies (CI: under 5 s,
+    # 24.9 s and 30 s on the same code; 8.7 s locally with DISCOPT_OA_SUPPORT_CUTS,
+    # #2021), which breached the 15 s fast-lane budget. Both exits are checked.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = solve_mip_nlp(model, method="lp_nlp_bb", milp_solver="highs", time_limit=30)
+        r = solve_mip_nlp(model, method="lp_nlp_bb", milp_solver="highs", time_limit=8)
     assert r.x is not None
     flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in model._variables])
     verdict = verify_point(model, flat)
