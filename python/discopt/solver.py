@@ -10392,7 +10392,17 @@ def _convex_route_fallback_reserve_enabled() -> bool:
     on, the guard hands over once the remaining budget falls to
     :data:`_CONVEX_ROUTE_FALLBACK_RESERVE_FRACTION` of the limit, unless the route
     has converged. It can only hand over earlier, and only under the #1066 trend
-    policy. Default OFF pending the section 5 panel. Read per call.
+    policy. Read per call.
+
+    **Kept as a documented opt-in (2026-10-28), not the default.** On the 102 routed
+    instances it is cert-clean and neutral by itself (30 s: 612 checks, 0 problems,
+    95 -> 95, total wall 562.4 -> 562.0 s). Its job is to remove the one bound
+    ``DISCOPT_OA_SUPPORT_CUTS`` loses (p_ball_10b_5p_4d_m), which it does at 30 s and
+    60 s. It stays paired with that opt-in, and graduates or retires with it (#2021).
+    The cost it would carry as a default: a route that would certify in the last 20%
+    of the budget is handed over first (none in the panels; p_ball_20b_5p_2d_m, which
+    certifies at 37.3 s of 60 s on a quiet machine, did not certify by the 48 s
+    handover under panel load). performance-plan section 103.6.
     """
     return os.environ.get("DISCOPT_CONVEX_ROUTE_FALLBACK_RESERVE", "0") != "0"
 

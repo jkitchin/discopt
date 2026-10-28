@@ -5737,9 +5737,19 @@ def _oa_support_cuts_enabled() -> bool:
     point and the master stays a relaxation. Which points are chosen only decides
     how *tight* the rows are: see :func:`_support_points_for_rows`.
 
-    Bound-changing (a tighter master), so gated per CLAUDE.md section 5 and
-    **default OFF** until the corpus-wide differential panel passes both bars.
-    Read at call time. ``DISCOPT_OA_SUPPORT_CUTS=1`` opts in.
+    Bound-changing (a tighter master), so gated per CLAUDE.md section 5. Read at
+    call time. ``DISCOPT_OA_SUPPORT_CUTS=1`` opts in.
+
+    **Kept as a documented opt-in (2026-10-28), not the default.** Panels over the
+    102 routed MINLPLib instances were cert-clean at 30 s and 60 s (612 checks each,
+    0 problems, none gained or lost), but the gain is confined to the class it was
+    built for: p_ball_10b_5p_2d_m 25.2 -> 13.0 s (30 s) and 23.9 -> 13.3 s (60 s),
+    total wall 738.9 -> 729.3 s at 60 s. Section 2 rejects a default whose benefit
+    is one instance. What would change that: the p_ball remainder in #2021 -- the
+    #1066 guard handing over a bound that climbs 2-3 units per restart, and the #1634
+    cross-solve re-proving a claim from a root bound of 0 -- after which
+    p_ball_10b_5p_4d_m / 20b_5p_2d_m certify, then the same panel rerun.
+    performance-plan section 103.6.
     """
     return os.environ.get("DISCOPT_OA_SUPPORT_CUTS", "0").strip().lower() in (
         "1",

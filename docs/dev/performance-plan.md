@@ -13155,3 +13155,21 @@ clay0204m 8.9 -> 5.5 s; clay0303hfsg is slower (4.4 -> 7.4 s). Both bars are met
 30 s but the gain is concentrated, and the support cuts' clearest win
 (p_ball_20b_5p_2d_m, optimal in 37.3 s) is beyond a 30 s limit. The decision is taken
 on a 60 s panel of the pair.
+
+
+### 103.6 Support cuts + fallback reserve at 60 s: kept as documented opt-ins (2026-10-28)
+
+**Panel G** (the 102 routed instances, **60 s**, both flags toggled together,
+interleaved, every incumbent verified): 612 checks, 0 problems; certified 96 -> 96;
+both-certify nodes 127,560 -> 124,362, wall 376.8 -> 368.4 s; total wall 738.9 ->
+729.3 s. No ON-arm route raised. The reserve fired only on p_ball_10b_5p_4d_m, which
+keeps its bound (6.7e-7 in both arms). The only material gain is p_ball_10b_5p_2d_m
+(23.9 -> 13.3 s), which certifies in both arms. p_ball_20b_5p_2d_m (optimal in 37.3 s
+with the support cuts alone on a quiet machine) does not certify by the reserve's
+48 s hand-over under panel load.
+
+**Verdict.** Both bars are formally met (cert-clean, and faster in total), but the
+benefit is one instance of the class the cuts were built for, which section 2
+rejects as a default. Both flags are kept as documented opt-ins: the docstrings say
+why they are not the default and what would change that (the p_ball remainder in
+#2021).
