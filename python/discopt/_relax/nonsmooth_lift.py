@@ -49,6 +49,7 @@ from discopt.modeling.core import (
     Variable,
     _known_shape,
     carry_builder_objective,
+    carry_validation_guards,
     rewritten_objective,
 )
 
@@ -218,6 +219,7 @@ def lift_nonsmooth_atoms(model: Model) -> Model:
         return model
     new_model._constraints = rebuilt + lifter.rows
     carry_complementarities(model, new_model, pass_name="nonsmooth epigraph lifting")
+    carry_validation_guards(model, new_model)  # #1498
     carry_builder_objective(model, new_model)  # fast-API objective; after the last aux column
     new_model._nsl_source_model = model  # type: ignore[attr-defined]
     new_model._nsl_n_orig_flat = sum(v.size for v in model._variables)  # type: ignore[attr-defined]
