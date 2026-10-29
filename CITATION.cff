@@ -28,5 +28,5 @@ keywords:
   - numpy
   - mixed-integer
   - convex relaxation
-version: 0.10.0
-date-released: 2026-10-28
+version: 0.10.1
+date-released: 2026-10-29

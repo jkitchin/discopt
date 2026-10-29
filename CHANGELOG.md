@@ -10,10 +10,15 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-29
+
+Patch release: one correctness fix to L3 sensitivities (#2039). No solver,
+relaxation, certificate or Rust changes since 0.10.0.
+
 ### Fixed
 
 - **L3 sensitivities keep every equality row in the KKT system, whatever
-  `active_tol`.**
+  `active_tol`** (#2039).
   - `find_active_set` counted an equality as active only when `|g(x*)| < tol`,
     with the bound-activity tolerance `active_tol`. A converged solve leaves
     equality residuals at the solver's tolerance: measured at ~1e-11 on a
@@ -6245,6 +6250,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.10.1]: https://github.com/jkitchin/discopt/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/jkitchin/discopt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jkitchin/discopt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jkitchin/discopt/compare/v0.7.0...v0.8.0

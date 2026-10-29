@@ -10,8 +10,8 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.10.0`** (minor bump on top of `v0.9.0`: JAX
-became an optional extra and the McCormick-"nlp" route was removed, #1873).
+The next planned release is **`v0.10.1`** (patch bump on top of `v0.10.0`: one
+correctness fix to L3 sensitivities, #2039; no solver or Rust changes).
 
 ---
 
