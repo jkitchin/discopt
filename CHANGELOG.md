@@ -10,6 +10,25 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **L3 sensitivities keep every equality row in the KKT system, whatever
+  `active_tol`.**
+  - `find_active_set` counted an equality as active only when `|g(x*)| < tol`,
+    with the bound-activity tolerance `active_tol`. A converged solve leaves
+    equality residuals at the solver's tolerance: measured at ~1e-11 on a
+    water-gas-shift steady state under pounce 0.14, ~1e-20 under pounce 0.10.
+  - So a caller that tightened `active_tol` (1e-13, so that tiny positive
+    variables are not read as pinned) silently lost equality rows. The reduced
+    system came back either singular (`l3_failed`) or finite and wrong:
+    `min (x-1)^2+(y-2)^2 s.t. x+y == p` returned `dx/dp = 0` instead of `1/2`,
+    with no failure flag.
+  - Equalities are now always active; `tol` decides inequality and bound
+    activity only. L3 already refuses a non-`OPTIMAL` solve, so the point is
+    feasible.
+  - Found by discopt-mkm, where degree-of-rate-control values went wrong
+    after the 0.10 upgrade.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added
