@@ -10,10 +10,51 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-29
+
+A debugger release. `Model.solve(debug=...)` is no longer silently bypassed on
+any route, and the debugger now reports the search tree itself. Plus one
+correctness fix to L3 sensitivities. No change to solver math: a solve without a
+debugger takes the same route and gives the same node count and objective
+(bound-neutral panel, 19 corpus instances, #2046).
+
+### Added
+
+- **The debugger reports each node's parent, depth, creating branch and status
+  (#2043, #2046).**
+  - `DebugContext.batch_lineage` (`after_select` .. `after_process`) and
+    `DebugContext.created` (`after_process`: every child the batch made,
+    including those pruned before selection) are `discopt.debug.NodeLineage`
+    arrays: `parent` (-1 for the root), `depth`, `branch_var`, `branch_side`
+    (`"down"`/`"up"`), `branch_value` (the bound the branch imposed) and
+    `status` (`branched`/`pruned`/`fathomed`/...). Shortcuts:
+    `batch_parent`, `batch_depth`, `batch_branch_var`, `batch_branch_side`,
+    `batch_branch_value`.
+  - Same fields on the Python tree and the Rust MILP engine. The branch is
+    recorded when the child is created (`Node.branch` in the Rust core), so a
+    later tightening of the child's box does not change it.
+  - `PyTreeManager.node_lineage(ids)` and `PyTreeManager.last_created()`.
+  - A frontend no longer has to rebuild the tree from box containment, which
+    was O(N^2) and missed children pruned before they were selected.
+- **`discopt.debug.instruments_this_solve()`** (#2042): True when a debugger is
+  attached to the outermost solve.
+
 ### Fixed
 
+- **`Model.solve(debug=...)` was silently bypassed on several routes (#2042,
+  #2045).**
+  - The native spatial kernel fires no checkpoint, so a debugged continuous
+    nonconvex solve recorded nothing and still returned `optimal` (105 nodes,
+    0 checkpoints). An attached debugger now routes the solve to the Python
+    tree, as the callbacks already did, and the existing route warning names
+    `debug`.
+  - A pure MILP took HiGHS, which fires none either. With a debugger attached
+    it now takes the Rust MILP engine, which fires them through its hook.
+  - Routes with no tree to step through (LP, convex QP/NLP, the convex-MINLP
+    decomposition) now warn, naming the route, when a debugged solve fires no
+    checkpoint at all. `DebugSession.checkpoints_seen` counts them.
 - **L3 sensitivities keep every equality row in the KKT system, whatever
-  `active_tol`.**
+  `active_tol` (#2039).**
   - `find_active_set` counted an equality as active only when `|g(x*)| < tol`,
     with the bound-activity tolerance `active_tol`. A converged solve leaves
     equality residuals at the solver's tolerance: measured at ~1e-11 on a
@@ -6245,6 +6286,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.11.0]: https://github.com/jkitchin/discopt/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jkitchin/discopt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jkitchin/discopt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jkitchin/discopt/compare/v0.7.0...v0.8.0
