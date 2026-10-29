@@ -894,8 +894,16 @@ def find_active_set(
     """Identify active constraints and active variable bounds at the solution.
 
     A constraint g_i(x) <= 0 is active if g_i(x*) > -tol (i.e., close to zero).
-    An equality constraint g_i(x) == 0 is always active if |g_i(x*)| < tol.
+    An equality constraint g_i(x) == 0 is always active, whatever ``tol``.
     A variable bound is active if x_i is within tol of its lb or ub.
+
+    ``tol`` decides *inequality and bound* activity only. An equality holds at every
+    feasible point, and the L3 caller only reaches here after an ``OPTIMAL`` solve,
+    whose equality residuals sit at the solver's own tolerance (~1e-11 under
+    pounce 0.14), not at zero. Gating equalities on ``tol`` dropped them from the
+    KKT system whenever a caller tightened ``tol`` below that residual (callers pass
+    ~1e-13 so that tiny positive variables are not read as pinned at a bound): the
+    reduced system came back either singular (``l3_failed``) or finite and wrong.
 
     Args:
         x_star: Optimal primal solution (flat vector).
@@ -930,8 +938,7 @@ def find_active_set(
         vals = np.ravel(np.asarray(cf(x_star, p_flat), dtype=np.float64))
         for val in vals:
             if c.sense == "==":
-                if abs(val) < tol:
-                    active_constraints.append(row)
+                active_constraints.append(row)
             elif c.sense == "<=":
                 # body - rhs <= 0; active if val > -tol (close to 0)
                 if val > -tol:

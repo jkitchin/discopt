@@ -613,6 +613,30 @@ class TestActiveSetFinder:
         active_loose, _ = find_active_set(x_star, m, constraint_fns, p_flat, tol=0.02)
         assert len(active_loose) > 0
 
+    def test_equality_active_whatever_tol(self):
+        """An equality row is active regardless of ``tol``, which is for inequalities/bounds.
+
+        A converged solve leaves equality residuals at the solver's tolerance, not
+        zero; gating them on ``tol`` dropped them from the L3 KKT system whenever a
+        caller tightened the bound-activity tolerance below that residual.
+        """
+        m = dm.Model("eq_tol")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x == p)
+        constraint_fns = [
+            _compile_parametric_constraint(c, m)
+            for c in m._constraints
+            if isinstance(c, Constraint)
+        ]
+        p_flat = _flatten_params(m)
+        # residual 1e-11, as a converged NLP leaves it; tol far tighter, and zero
+        x_star = jnp.array([3.0 + 1e-11])
+        for tol in (1e-13, 0.0):
+            active_cons, _ = find_active_set(x_star, m, constraint_fns, p_flat, tol=tol)
+            assert active_cons == [0], tol
+
 
 # ──────────────────────────────────────────────────────────
 # TestImplicitDifferentiation (L3)
@@ -739,6 +763,27 @@ class TestImplicitDifferentiation:
 
 class TestDifferentiableSolveL3:
     """Test the full differentiable_solve_l3 function."""
+
+    def test_tiny_active_tol_keeps_equality_sensitivity(self):
+        """``active_tol`` must not drop equalities from the KKT system.
+
+        min (x-1)^2 + (y-2)^2 s.t. x + y == p: dx/dp = dy/dp = 1/2. With the
+        equality dropped the KKT system is the unconstrained Hessian, and L3
+        returned a finite, wrong dx/dp = 0 (no ``l3_failed``). active_tol=0 is
+        below any residual, so this needs every equality kept.
+        """
+        m = dm.Model("l3_eq_tol")
+        p = m.parameter("p", value=4.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        y = m.continuous("y", lb=-10, ub=10)
+        m.minimize((x - 1.0) ** 2 + (y - 2.0) ** 2)
+        m.subject_to(x + y == p)
+
+        for tol in (1e-3, 1e-13, 0.0):
+            result = differentiable_solve_l3(m, active_tol=tol)
+            dx_dp = result.sensitivity_matrix()
+            assert dx_dp is not None, tol
+            np.testing.assert_allclose(np.ravel(dx_dp), [0.5, 0.5], atol=1e-6)
 
     def test_basic_parametric_lp(self):
         """min p*x s.t. x >= 1. obj* = p, dobj/dp = 1."""
