@@ -22,6 +22,13 @@ it returns ``UNBOUNDED`` and the solver correctly declines to certify.
 If a future relaxation legitimately bounds ``x0`` below on this instance, this
 probe must be re-derived rather than relaxed: the invariant under test is "no
 ``Optimal`` at the parked value", not "wallfix is uncertifiable".
+
+The probe calls ``bootstrap_finite_bounds`` directly on the declared box (#2041).
+It used to intercept the LP inside a full ``model.solve()``, and once the solve
+stopped routing wallfix through root OBBT it intercepted nothing and failed with
+"probe measured nothing"; CI skips the test (no corpus), so nothing noticed.
+Calling the bootstrap itself keeps the probe on the code that consumed the
+false ``Optimal``, whatever route a solve takes.
 """
 
 import os
@@ -69,9 +76,11 @@ def test_free_column_bootstrap_lp_is_not_certified_optimal_at_its_parked_value()
 
         return call
 
+    lb = np.array([float(np.asarray(v.lb).reshape(-1)[0]) for v in model._variables])
+    ub = np.array([float(np.asarray(v.ub).reshape(-1)[0]) for v in model._variables])
     obbt.get_exact_lp_solver = instrumented
     try:
-        model.solve(time_limit=30)
+        new_lb, _, _, _ = obbt.bootstrap_finite_bounds(model, lb, ub)
     finally:
         obbt.get_exact_lp_solver = real_get
 
@@ -82,3 +91,5 @@ def test_free_column_bootstrap_lp_is_not_certified_optimal_at_its_parked_value()
             f"free column certified {status} objective={objective!r} on an LP that is "
             "unbounded below -- the #1061 defect is back"
         )
+    # The consequence: an unbounded ``min x0`` must not finitize x0's lower bound.
+    assert not np.isfinite(new_lb[0]), f"x0 finitized to {new_lb[0]!r} by an unproven LP"

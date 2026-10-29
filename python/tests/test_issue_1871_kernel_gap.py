@@ -106,13 +106,37 @@ def _nous1_seed():
     return SV._native_kernel_seed(m, lb, ub, 1.0, 0.0, lb.size, None)
 
 
+def _enumeration_finds_nothing(monkeypatch):
+    """Make the seed's bracketed sub-NLP enumeration come back empty, as it does on
+    nous1 under Linux (#1871: all four sub-NLPs end infeasible).
+
+    The local search runs only when the enumeration yielded nothing, and whether the
+    real sub-NLPs converge on nous1 is platform-dependent: on macOS arm64 they find
+    the optimum (1.5670720326, verified) and the gate never opens (#2041). Pinning
+    the precondition makes the gate tests deterministic. An empty bracket leaves the
+    enumeration no combination to try; ``subnlp`` itself is left alone because the
+    local search repairs its points through it. Returns the call list so a test can
+    prove the stub was reached (CLAUDE.md §6).
+    """
+    calls = []
+
+    def no_values(*args, **kwargs):
+        calls.append(1)
+        return ()
+
+    monkeypatch.setattr(SV, "_native_seed_bracket", no_values)
+    return calls
+
+
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_seed_ils_gives_nous1_a_verified_seed(monkeypatch):
-    """The kernel seed's enumeration finds nothing on nous1; the local search does."""
+    """When the kernel seed's enumeration finds nothing on nous1, the local search does."""
     monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "1")
+    calls = _enumeration_finds_nothing(monkeypatch)
     SV.KERNEL_SEED_ILS_STATS.clear()
     value, point = _nous1_seed()
+    assert calls, "the enumeration never ran, so the stub measured nothing"
     assert SV.KERNEL_SEED_ILS_STATS["fired"] == 1, "the local search never ran"
     assert value is not None and point is not None
     assert value >= NOUS1_OPT - 1e-6  # a verified feasible point never beats the optimum
@@ -122,7 +146,11 @@ def test_seed_ils_gives_nous1_a_verified_seed(monkeypatch):
 
 def test_seed_ils_off_leaves_nous1_unseeded(monkeypatch):
     monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "0")
+    calls = _enumeration_finds_nothing(monkeypatch)
+    SV.KERNEL_SEED_ILS_STATS.clear()
     assert _nous1_seed() == (None, None)
+    assert calls, "the enumeration never ran, so the stub measured nothing"
+    assert SV.KERNEL_SEED_ILS_STATS.get("fired", 0) == 0
 
 
 def test_seed_ils_defaults_on(monkeypatch):
