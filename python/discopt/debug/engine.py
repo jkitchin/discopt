@@ -156,6 +156,34 @@ def _fmt(x) -> str:
     return f"{x:.6g}" if isinstance(x, float) else str(x)
 
 
+# Rows printed by ``print nodes`` / ``print created``; ``data`` always has them all.
+_MAX_LISTED = 20
+
+
+def _var_names(ctx) -> Optional[list[str]]:
+    """Variable names for branch text, when the context's model indexes the tree.
+
+    The pure-Rust MILP hook carries no model (its columns are the standard-form
+    LP's), so its branches print as ``x[j]``. A model whose size disagrees with
+    the reported box width is not trusted either (#2049).
+    """
+    from .context import flat_variable_names
+
+    if ctx.model is None:
+        return None
+    n = None
+    if ctx.batch_lb is not None and len(ctx.batch_lb) > 0:
+        n = len(ctx.batch_lb[0])
+    return flat_variable_names(ctx.model, n)
+
+
+def _lineage_text(lin, k: int, names, *, status: bool) -> str:
+    text = (
+        f"parent={int(lin.parent[k])} depth={int(lin.depth[k])} branch={lin.branch_text(k, names)}"
+    )
+    return text + f" status={lin.status[k]}" if status else text
+
+
 def _cmd_help(engine, args, ctx, session):
     return CommandResult(
         [
@@ -164,6 +192,7 @@ def _cmd_help(engine, args, ctx, session):
             "        break (list) | break del N | break clear [cond|events]",
             "watch:  watch <target> | watch | watch clear",
             "look:   info(i) | print(p) incumbent|bound|gap|stats|nodes|node <i>|relax <i>",
+            "        print created   (children this batch made, at after_process)",
             "steer:  inject <i>   (validate relax sol of batch node i; adopt if feasible)",
             "        hint <node_id> <var>",
             f"metrics: {', '.join(sorted(ctx.metrics()))}",
@@ -287,24 +316,56 @@ def _cmd_print(engine, args, ctx, session):
     if target == "nodes":
         if ctx.batch_ids is None:
             return CommandResult(["no batch live at this checkpoint"])
-        lines = [f"{ctx.n_batch} open node(s) in batch:"]
-        for i in range(min(ctx.n_batch, 20)):
-            lines.append(f"  [{i}] id={int(ctx.batch_ids[i])}")
-        return CommandResult(lines, data={"node_ids": [int(x) for x in ctx.batch_ids]})
+        lin = ctx.batch_lineage
+        names = _var_names(ctx)
+        lines = [f"{ctx.n_batch} node(s) in batch:"]
+        for i in range(min(ctx.n_batch, _MAX_LISTED)):
+            line = f"  [{i}] id={int(ctx.batch_ids[i])}"
+            if lin is not None:
+                line += f" {_lineage_text(lin, i, names, status=True)}"
+            lines.append(line)
+        if ctx.n_batch > _MAX_LISTED:
+            lines.append(f"  ... {ctx.n_batch - _MAX_LISTED} more")
+        data: dict = {"node_ids": [int(x) for x in ctx.batch_ids]}
+        if lin is not None:
+            data["nodes"] = [lin.row(i, names) for i in range(len(lin))]
+        return CommandResult(lines, data=data)
     if target == "node":
-        i = int(args[1])
-        if ctx.batch_lb is None:
+        if ctx.batch_ids is None:
             return CommandResult(["no batch live at this checkpoint"])
-        lb = np.asarray(ctx.batch_lb[i])
-        ub = np.asarray(ctx.batch_ub[i])
-        return CommandResult(
-            [
-                f"node[{i}] id={int(ctx.batch_ids[i])} box:",
+        i = int(args[1])
+        if not 0 <= i < ctx.n_batch:
+            return CommandResult(
+                [f"node index {i} out of range (batch has {ctx.n_batch})"], ok=False
+            )
+        lin = ctx.batch_lineage
+        names = _var_names(ctx)
+        lines = [f"node[{i}] id={int(ctx.batch_ids[i])}"]
+        data = {"id": int(ctx.batch_ids[i])}
+        if lin is not None:
+            lines.append(f"  {_lineage_text(lin, i, names, status=True)}")
+            data.update(lin.row(i, names))
+        if ctx.batch_lb is not None and ctx.batch_ub is not None:
+            lb = np.asarray(ctx.batch_lb[i])
+            ub = np.asarray(ctx.batch_ub[i])
+            lines += [
+                "  box:",
                 f"  lb = {np.array2string(lb, precision=4, threshold=20)}",
                 f"  ub = {np.array2string(ub, precision=4, threshold=20)}",
-            ],
-            data={"lb": lb.tolist(), "ub": ub.tolist()},
-        )
+            ]
+            data.update(lb=lb.tolist(), ub=ub.tolist())
+        return CommandResult(lines, data=data)
+    if target == "created":
+        lin = ctx.created
+        if lin is None:
+            return CommandResult(["no children created at this checkpoint"])
+        names = _var_names(ctx)
+        lines = [f"{len(lin)} child(ren) created by this batch:"]
+        for k in range(min(len(lin), _MAX_LISTED)):
+            lines.append(f"  id={int(lin.ids[k])} {_lineage_text(lin, k, names, status=True)}")
+        if len(lin) > _MAX_LISTED:
+            lines.append(f"  ... {len(lin) - _MAX_LISTED} more")
+        return CommandResult(lines, data={"created": [lin.row(k, names) for k in range(len(lin))]})
     if target == "relax":
         i = int(args[1])
         if ctx.result_sols is None:

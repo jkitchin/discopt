@@ -72,6 +72,10 @@ def _capabilities() -> dict[str, Any]:
         "resolve": False,
         "progress_events": False,
         "terminal_checkpoint": True,
+        # #2049: the pause event carries ``batch`` (the batch's ids and lineage)
+        # when the route reports lineage, and ``created`` at after_process.
+        "pause_batch_lineage": True,
+        "pause_created": True,
     }
 
 
@@ -122,6 +126,10 @@ class JsonFrontend:
             "n_batch": ctx.n_batch,
             "reason": ctx.extra.get("reason"),
         }
+        if ctx.batch_lineage is not None:
+            payload["batch"] = ctx.batch_lineage.to_dict()
+        if ctx.created is not None:
+            payload["created"] = ctx.created.to_dict()
         return payload
 
     def _result_event(self, res, command: str, req_id: Any) -> dict:
