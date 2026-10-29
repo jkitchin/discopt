@@ -61,6 +61,7 @@ from discopt.constants import DEFAULT_VARIABLE_BOUND
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import clip_start_box as _clip_start_box
+from discopt.debug import instruments_this_solve as _debug_instruments_this_solve
 from discopt.debug import outermost_solve as _debug_outermost_solve
 from discopt.modeling.core import (
     Constant,
@@ -1170,6 +1171,7 @@ def _native_kernel_bypass_reasons(
     kwargs,
     search_levers=(),
     cut_callback=None,
+    debug_attached=False,
 ) -> list[str]:
     """The requests that keep this solve off the native kernel, by option name (#789).
 
@@ -1201,6 +1203,11 @@ def _native_kernel_bypass_reasons(
         reasons.append("cut_callback")
     if kwargs.get("iteration_callback") is not None:
         reasons.append("iteration_callback")
+    # #2042: the kernel fires no debugger checkpoint -- not even ``terminated`` -- so
+    # an attached ``debug=`` session saw zero checkpoints and the solve still returned
+    # ``optimal``. The Python tree fires them all; route there, like the callbacks.
+    if debug_attached:
+        reasons.append("debug")
     if lazy_constraints:
         reasons.append("lazy_constraints")
     if initial_point is not None:
@@ -8314,10 +8321,11 @@ def _warn_native_kernel_bypassed(options: list[str], covers=None) -> None:
     The native Rust kernel (default ON) runs its own fixed best-first search and calls
     no node callback, so ``_native_kernel_bypass_reasons`` routes a solve that sets
     ``strategy``, ``rlt``, ``presolve=False``,
-    ``in_tree_presolve_stride``, ``obbt_at_root=False``, a callback,
-    ``initial_point``, ``lazy_constraints``, ``mccormick_bounds``, a solution pool
-    or an explicit ``tuning`` to the Python tree, which honours them. That is sound -- the
-    Python tree is the trusted path -- but it changes the engine, its node counts,
+    ``in_tree_presolve_stride``, ``obbt_at_root=False``, a callback, an attached
+    ``debug`` session, ``initial_point``, ``lazy_constraints``, ``mccormick_bounds``,
+    a solution pool or an explicit ``tuning`` to the Python tree, which honours them.
+    That is sound -- the Python tree is the trusted path -- but it changes the engine,
+    its node counts,
     its gap-tolerance semantics (the kernel stops absolutely at
     ``gap_tolerance <= 1e-4``; the Python tree uses absolute-OR-relative) and
     usually its wall time, and the caller was told nothing.
@@ -17700,11 +17708,15 @@ def solve_model(
                 # #1229 HiGHS route (default; DISCOPT_LP_MILP_BACKEND=rust opts out). An explicit
                 # ``nlp_solver="simplex"`` still names the Rust engine, and
                 # ``lagrangian_bound`` still needs the per-node Python path.
+                # #2042: HiGHS fires no debugger checkpoint either, so an attached
+                # session saw nothing on a pure MILP. The Rust MILP engine below
+                # fires them through its hook, so the debugger skips only HiGHS.
                 if (
                     _lpm_backend == "highs"
                     and nlp_solver != "simplex"
                     and not lagrangian_bound
                     and not _observe_tree
+                    and not _debug_instruments_this_solve()
                 ):
                     with _highs_route_options(presolve=_caller_presolve):
                         _highs_res = _solve_milp_highs(
@@ -18514,6 +18526,7 @@ def solve_model(
         kwargs=kwargs,
         search_levers=_native_search_levers,
         cut_callback=cut_callback,
+        debug_attached=_debug_instruments_this_solve(),
     )
 
     def _bypass_coverage() -> Optional[bool]:

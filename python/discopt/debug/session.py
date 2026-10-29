@@ -43,6 +43,10 @@ class DebugSession:
         self._detached = False
         self._stop_requested = False
         self._last_incumbent: Optional[float] = None
+        # Checkpoints delivered to this session, paused at or not. ``Model.solve``
+        # warns when a solve ends with none (#2042): the route it took fires no
+        # checkpoint, and silence would read as "nothing happened".
+        self.checkpoints_seen = 0
 
     # ── attachment lifecycle ──
 
@@ -69,6 +73,7 @@ class DebugSession:
             # triggered the stop already propagated True through the non-
             # detached path below.
             return False
+        self.checkpoints_seen += 1
         # Derive the new_incumbent event for event breakpoints.
         if ctx.checkpoint is Checkpoint.INCUMBENT_FOUND:
             ctx.event = "new_incumbent"

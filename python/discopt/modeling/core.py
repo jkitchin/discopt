@@ -11809,6 +11809,20 @@ class Model:
             setattr(result, "_problem_fingerprint", solution_state_fingerprint(self))
             self._last_solve_result = result
 
+        # #2042: an attached debugger must never be bypassed in silence. Routes with
+        # a search tree fire checkpoints (the native kernel and HiGHS defer to ones
+        # that do); a route with no tree to step through -- an LP, a convex QP/NLP,
+        # the convex-MINLP decomposition -- fires none, so say so.
+        if _debug_guard is not None and _debug_guard.session.checkpoints_seen == 0:
+            _route = getattr(result, "algorithm_route", None) or "unknown"
+            _warnings.warn(
+                f"debug: this solve fired no debugger checkpoints (route {_route!r} "
+                "has no branch-and-bound tree the debugger can step through), so "
+                "nothing was recorded.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         return result
 
     def _withhold_user_big_m_certificate(

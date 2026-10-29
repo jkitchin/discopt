@@ -516,6 +516,7 @@ def test_kernel_feature_safe_predicate_units():
         ({"kwargs": {"iteration_callback": lambda *a: None}}, "iteration_callback"),
         ({"kwargs": {"solution_pool": []}}, "solution_pool"),
         ({"kwargs": {"tuning": object()}}, "tuning"),
+        ({"debug_attached": True}, "debug"),
     ]:
         assert reasons(**{**base, **over}) == [name]
 
