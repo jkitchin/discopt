@@ -10,6 +10,30 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **The REPL and the JSON protocol show node lineage (#2049).** 0.11 put each
+  node's parent, depth, creating branch and status on `DebugContext` (#2043), but
+  the shared command engine never read it, so only a custom Python `Frontend`
+  could see the tree.
+  - `print node <i>` adds `parent`, `depth`, the creating branch as text
+    (`x <= 0.5`, `y[1] >= 2`, or `root`) and `status`, in the printed lines and
+    in `data`. It also works where the route reports lineage but no box.
+  - `print nodes` prints one line per node with parent, depth, branch and
+    status; `data["nodes"]` holds every row.
+  - New `print created` (at `after_process`) lists every child the batch made,
+    including those pruned before selection. Elsewhere it prints "no children
+    created at this checkpoint".
+  - The JSON `pause` event carries `batch` (`ids`, `parent`, `depth`,
+    `branch_var`, `branch_side`, `branch_value`, `status`) when the route reports
+    lineage, and `created` in the same layout at `after_process`. `n_batch` is
+    kept. The `hello` capabilities advertise `pause_batch_lineage` and
+    `pause_created`.
+  - Branch text uses the model's variable names on the Python tree. The pure-Rust
+    MILP hook carries no model, so it prints `x[j]`. A model whose size disagrees
+    with the tree's box width is not used for names.
+  - Only the debugger's output changes. No solver math is involved.
+
 ## [0.11.0] - 2026-10-29
 
 A debugger release. `Model.solve(debug=...)` is no longer silently bypassed on

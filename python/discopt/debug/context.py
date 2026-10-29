@@ -74,6 +74,72 @@ class NodeLineage:
     def __len__(self) -> int:
         return len(self.ids)
 
+    def branch_text(self, k: int, names: Optional[list[str]] = None) -> str:
+        """The branch that created node ``k`` as text: ``root``, ``x3 <= 0``, ...
+
+        ``names`` maps a flat variable index to a display name; without it (or for
+        an index it does not cover) the variable shows as ``x[j]``.
+        """
+        j = int(self.branch_var[k])
+        side = self.branch_side[k]
+        if j < 0 or side == "":
+            return "root"
+        name = names[j] if names is not None and j < len(names) else f"x[{j}]"
+        op = "<=" if side == "down" else ">="
+        return f"{name} {op} {float(self.branch_value[k]):.6g}"
+
+    def to_dict(self) -> dict[str, list]:
+        """Columnar, JSON-ready form (the ``batch``/``created`` pause fields, #2049)."""
+        return {
+            "ids": [int(v) for v in self.ids],
+            "parent": [int(v) for v in self.parent],
+            "depth": [int(v) for v in self.depth],
+            "branch_var": [int(v) for v in self.branch_var],
+            "branch_side": list(self.branch_side),
+            "branch_value": [float(v) for v in self.branch_value],
+            "status": list(self.status),
+        }
+
+    def row(self, k: int, names: Optional[list[str]] = None) -> dict[str, Any]:
+        """Node ``k`` as one record, with the creating branch rendered as text."""
+        return {
+            "id": int(self.ids[k]),
+            "parent": int(self.parent[k]),
+            "depth": int(self.depth[k]),
+            "branch": self.branch_text(k, names),
+            "branch_var": int(self.branch_var[k]),
+            "branch_side": self.branch_side[k],
+            "branch_value": float(self.branch_value[k]),
+            "status": self.status[k],
+        }
+
+
+def flat_variable_names(model: Any, n: Optional[int] = None) -> Optional[list[str]]:
+    """Display name of each flat variable index of ``model``, or ``None``.
+
+    Indices follow ``model._variables`` flattened in order, the layout the B&B tree
+    is built from (``solver._extract_variable_info``). Returns ``None`` when the
+    model has no variable list, or when ``n`` (the width of the boxes the tree
+    reports) disagrees with the model's size: then the indices belong to some
+    other variable space and naming them from this model would mislabel them.
+    """
+    variables = getattr(model, "_variables", None)
+    if not variables:
+        return None
+    names: list[str] = []
+    for v in variables:
+        shape = tuple(getattr(v, "shape", ()) or ())
+        size = int(np.prod(shape)) if shape else 1
+        if size == 1 and len(shape) <= 1:
+            names.append(str(v.name))
+            continue
+        for flat in range(size):
+            idx = np.unravel_index(flat, shape)
+            names.append(f"{v.name}[{','.join(str(int(i)) for i in idx)}]")
+    if n is not None and len(names) != n:
+        return None
+    return names
+
 
 @dataclass
 class DebugContext:
