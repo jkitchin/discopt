@@ -21,6 +21,48 @@ pub enum NodeStatus {
     Fathomed,
 }
 
+/// The branching decision that created a node (#2043): `x[var] <= value` on the
+/// down side, `x[var] >= value` on the up side. Recorded at child creation, so a
+/// later bound tightening of the child's box does not change it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BranchRecord {
+    /// Column index of the branching variable.
+    pub var: usize,
+    /// `false` for the down child (`x[var] <= value`), `true` for the up child.
+    pub up: bool,
+    /// The bound the branch imposed on `x[var]`.
+    pub value: f64,
+}
+
+/// Where a node sits in the tree and how it got there (#2043): read-only
+/// bookkeeping for the debugger, never consulted by the search.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodeLineage {
+    /// The node.
+    pub id: NodeId,
+    /// Its parent (`None` for the root).
+    pub parent: Option<NodeId>,
+    /// Depth in the tree (root = 0).
+    pub depth: usize,
+    /// The branching decision that created it (`None` for the root).
+    pub branch: Option<BranchRecord>,
+    /// Its status now (pending, evaluated, branched, pruned or fathomed).
+    pub status: NodeStatus,
+}
+
+impl NodeStatus {
+    /// Lower-case name, as the debugger reports it (#2043).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NodeStatus::Pending => "pending",
+            NodeStatus::Evaluated => "evaluated",
+            NodeStatus::Branched => "branched",
+            NodeStatus::Pruned => "pruned",
+            NodeStatus::Fathomed => "fathomed",
+        }
+    }
+}
+
 /// A single node in the B&B search tree.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -30,6 +72,8 @@ pub struct Node {
     pub parent: Option<NodeId>,
     /// Depth in the tree (root = 0).
     pub depth: usize,
+    /// The branching decision that created this node (`None` for the root).
+    pub branch: Option<BranchRecord>,
     /// Variable lower bounds at this node.
     pub lb: Vec<f64>,
     /// Variable upper bounds at this node.
@@ -65,6 +109,7 @@ impl Node {
             id,
             parent,
             depth,
+            branch: None,
             lb,
             ub,
             local_lower_bound: f64::NEG_INFINITY,

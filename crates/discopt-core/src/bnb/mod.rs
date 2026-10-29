@@ -23,6 +23,6 @@ pub use in_tree_presolve::{
     scalarize_for_fbbt, ArrayRowStats, ArrayRowViewCache, ArrayRowsOutcome, InTreeDelta,
     InTreePresolveOptions, ScalarFbbtView, ARRAY_ROW_INSTRUCTION_BUDGET,
 };
-pub use node::{Node, NodeId, NodeStatus};
+pub use node::{BranchRecord, Node, NodeId, NodeLineage, NodeStatus};
 pub use pool::{NodePool, SelectionStrategy};
 pub use tree_manager::{ExportBatch, NodeResult, ProcessingStats, TreeManager, TreeStats};

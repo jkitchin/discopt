@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::bnb::branching::VarBranchInfo;
-use crate::bnb::node::NodeId;
+use crate::bnb::node::{NodeId, NodeLineage};
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -163,6 +163,13 @@ pub struct MilpDebugState<'a> {
     pub batch_ub: Option<&'a [Vec<f64>]>,
     /// Node ids of the exported batch (AfterSelect only).
     pub batch_ids: Option<&'a [NodeId]>,
+    /// Parent, depth, creating branch and status of each batch node, aligned with
+    /// `batch_ids` (#2043). AfterSelect and AfterProcess; at AfterProcess the
+    /// status says how the node closed.
+    pub batch_lineage: Option<&'a [NodeLineage]>,
+    /// Every child the batch created, pruned-before-selection ones included
+    /// (#2043). AfterProcess only.
+    pub created: Option<&'a [NodeLineage]>,
 }
 
 /// What a debug hook tells the search to do after a checkpoint.
@@ -368,6 +375,17 @@ fn dive_batch_eligible(
 /// One predicate, used both to stop the search and to decide the reported
 /// status, so the two can never disagree about whether the gap closed -- the
 /// same discipline `solver._gap_values_converged` enforces on the Python tree.
+/// Lineage of `ids` for the debugger (#2043). Every id came from this tree, so a
+/// missing one is a bookkeeping bug, not an input to tolerate.
+fn batch_lineage(tm: &TreeManager, ids: &[NodeId]) -> Vec<NodeLineage> {
+    ids.iter()
+        .map(|&id| {
+            tm.node_lineage(id)
+                .unwrap_or_else(|| panic!("debugger lineage: unknown node {id:?}"))
+        })
+        .collect()
+}
+
 fn gap_closed(tm: &TreeManager, opts: &MilpOptions) -> bool {
     tm.gap() <= opts.gap_tol || opts.abs_gap_tol.is_some_and(|t| tm.absolute_gap() <= t)
 }
@@ -2254,7 +2272,10 @@ fn solve_milp_node_search(
     let mut dbg_iter: usize = 0;
     let mut dbg_last_inc: f64 = f64::INFINITY;
     macro_rules! fire_dbg {
-        ($cp:expr) => {{
+        ($cp:expr) => {
+            fire_dbg!($cp, None, None)
+        };
+        ($cp:expr, $lineage:expr, $created:expr) => {{
             if let Some(h) = hook {
                 let s = tm.stats();
                 let inc = tm.incumbent().map(|(_, v)| v);
@@ -2271,6 +2292,8 @@ fn solve_milp_node_search(
                     batch_lb: None,
                     batch_ub: None,
                     batch_ids: None,
+                    batch_lineage: $lineage,
+                    created: $created,
                 };
                 matches!(h.checkpoint(&state), MilpDebugControl::Stop)
             } else {
@@ -2322,6 +2345,7 @@ fn solve_milp_node_search(
         if let Some(h) = hook {
             let s = tm.stats();
             let inc = tm.incumbent().map(|(_, v)| v);
+            let lineage = batch_lineage(&tm, &batch.node_ids);
             let state = MilpDebugState {
                 checkpoint: MilpCheckpoint::AfterSelect,
                 iteration: dbg_iter,
@@ -2335,6 +2359,8 @@ fn solve_milp_node_search(
                 batch_lb: Some(&batch.lb),
                 batch_ub: Some(&batch.ub),
                 batch_ids: Some(&batch.node_ids),
+                batch_lineage: Some(&lineage),
+                created: None,
             };
             if matches!(h.checkpoint(&state), MilpDebugControl::Stop) {
                 gap_certified = false;
@@ -2852,7 +2878,20 @@ fn solve_milp_node_search(
                 }
             }
         }
-        if fire_dbg!(MilpCheckpoint::AfterProcess) {
+        let (dbg_lineage, dbg_created) = if hook.is_some() {
+            let created: Vec<NodeId> = tm.last_created().map(NodeId).collect();
+            (
+                batch_lineage(&tm, &batch.node_ids),
+                batch_lineage(&tm, &created),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        if fire_dbg!(
+            MilpCheckpoint::AfterProcess,
+            Some(&dbg_lineage),
+            Some(&dbg_created)
+        ) {
             gap_certified = false;
             break 'search;
         }

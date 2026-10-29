@@ -23204,6 +23204,7 @@ def solve_model(
             model=model,
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
+            batch_ids=batch_ids,
         ):
             _debug_quit = True
             break
@@ -28512,6 +28513,7 @@ def _solve_nlp_bb(
             model=model,
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
+            batch_ids=batch_ids,
         ):
             _debug_quit = True
             break
@@ -39095,6 +39097,7 @@ def _solve_milp_bb(
             model=model,
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
+            batch_ids=batch_ids,
         ):
             _debug_quit = True
             break
@@ -40063,6 +40066,7 @@ def _solve_miqp_bb(
             model=model,
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
+            batch_ids=batch_ids,
         ):
             _debug_quit = True
             break

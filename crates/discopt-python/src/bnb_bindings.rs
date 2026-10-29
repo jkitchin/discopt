@@ -8,7 +8,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use discopt_core::bnb::{NodeId, NodeResult, SelectionStrategy, TreeManager, VarBranchInfo};
+use discopt_core::bnb::{
+    NodeId, NodeLineage, NodeResult, SelectionStrategy, TreeManager, VarBranchInfo,
+};
 
 /// Python wrapper around the Rust TreeManager for B&B search.
 #[pyclass]
@@ -312,6 +314,34 @@ impl PyTreeManager {
             })
             .collect();
         PyArray1::from_vec(py, out)
+    }
+
+    /// Lineage of `node_ids` for the debugger (#2043): a dict of arrays aligned
+    /// with the ids -- `id`, `parent` (-1 for the root), `depth`, `branch_var`
+    /// (-1 for the root), `branch_side` ("down"/"up", "" for the root),
+    /// `branch_value` (NaN for the root) and `status`. Raises `ValueError` on an
+    /// id this tree never allocated.
+    fn node_lineage<'py>(
+        &self,
+        py: Python<'py>,
+        node_ids: PyReadonlyArray1<i64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let mut ids = Vec::new();
+        for &i in node_ids.as_array().iter() {
+            if i < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "node_lineage: negative id {i}"
+                )));
+            }
+            ids.push(NodeId(i as usize));
+        }
+        lineage_dict(py, &self.inner, &ids)
+    }
+
+    /// Ids (int64) of the nodes created by the latest `process_evaluated`, in
+    /// creation order (#2043), including children pruned before selection.
+    fn last_created<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        PyArray1::from_vec(py, self.inner.last_created().map(|i| i as i64).collect())
     }
 
     /// Replace a node's structural variable bounds with reduction-tightened ones
@@ -655,4 +685,62 @@ impl PyTreeManager {
         }
         Ok(())
     }
+}
+
+/// Lineage of `ids` in `tm` as a debugger dict (#2043); see `node_lineage`.
+fn lineage_dict<'py>(
+    py: Python<'py>,
+    tm: &TreeManager,
+    ids: &[NodeId],
+) -> PyResult<Bound<'py, PyDict>> {
+    let mut rows = Vec::with_capacity(ids.len());
+    for &id in ids {
+        rows.push(tm.node_lineage(id).ok_or_else(|| {
+            PyValueError::new_err(format!("node_lineage: unknown node id {}", id.0))
+        })?);
+    }
+    lineage_to_dict(py, &rows)
+}
+
+/// The debugger's lineage dict (#2043), shared by the Python-tree binding and the
+/// Rust MILP hook so both routes report the same fields: arrays `id`, `parent`
+/// (-1 for the root), `depth`, `branch_var` (-1 for the root), `branch_value`
+/// (NaN for the root), and string lists `branch_side` ("down"/"up"/"") and
+/// `status`.
+pub(crate) fn lineage_to_dict<'py>(
+    py: Python<'py>,
+    rows: &[NodeLineage],
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    let ids: Vec<i64> = rows.iter().map(|r| r.id.0 as i64).collect();
+    let parent: Vec<i64> = rows
+        .iter()
+        .map(|r| r.parent.map_or(-1, |p| p.0 as i64))
+        .collect();
+    let depth: Vec<i64> = rows.iter().map(|r| r.depth as i64).collect();
+    let var: Vec<i64> = rows
+        .iter()
+        .map(|r| r.branch.map_or(-1, |b| b.var as i64))
+        .collect();
+    let value: Vec<f64> = rows
+        .iter()
+        .map(|r| r.branch.map_or(f64::NAN, |b| b.value))
+        .collect();
+    let side: Vec<&str> = rows
+        .iter()
+        .map(|r| match r.branch {
+            None => "",
+            Some(b) if b.up => "up",
+            Some(_) => "down",
+        })
+        .collect();
+    let status: Vec<&str> = rows.iter().map(|r| r.status.as_str()).collect();
+    d.set_item("id", PyArray1::from_vec(py, ids))?;
+    d.set_item("parent", PyArray1::from_vec(py, parent))?;
+    d.set_item("depth", PyArray1::from_vec(py, depth))?;
+    d.set_item("branch_var", PyArray1::from_vec(py, var))?;
+    d.set_item("branch_value", PyArray1::from_vec(py, value))?;
+    d.set_item("branch_side", side)?;
+    d.set_item("status", status)?;
+    Ok(d)
 }

@@ -36,6 +36,45 @@ if TYPE_CHECKING:
 _NO_BOUND_MAGNITUDE = 1e19
 
 
+@dataclass(frozen=True)
+class NodeLineage:
+    """Where a set of nodes sits in the tree and how each got there (#2043).
+
+    Arrays are aligned with ``ids``. The root has ``parent == -1``,
+    ``branch_var == -1``, ``branch_side == ""`` and ``branch_value`` NaN. A child
+    was created by ``x[branch_var] <= branch_value`` (side ``"down"``) or
+    ``x[branch_var] >= branch_value`` (side ``"up"``); the record is taken when the
+    child is made, so a later tightening of its box does not change it.
+    ``status`` is one of ``pending``, ``evaluated``, ``branched``, ``pruned``,
+    ``fathomed`` at the moment of the checkpoint; ``pruned`` covers both a bound
+    prune and an infeasible relaxation.
+    """
+
+    ids: np.ndarray
+    parent: np.ndarray
+    depth: np.ndarray
+    branch_var: np.ndarray
+    branch_side: tuple[str, ...]
+    branch_value: np.ndarray
+    status: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "NodeLineage":
+        """From the dict ``PyTreeManager.node_lineage`` and the Rust MILP hook emit."""
+        return cls(
+            ids=np.asarray(d["id"], dtype=np.int64),
+            parent=np.asarray(d["parent"], dtype=np.int64),
+            depth=np.asarray(d["depth"], dtype=np.int64),
+            branch_var=np.asarray(d["branch_var"], dtype=np.int64),
+            branch_side=tuple(d["branch_side"]),
+            branch_value=np.asarray(d["branch_value"], dtype=np.float64),
+            status=tuple(d["status"]),
+        )
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+
 @dataclass
 class DebugContext:
     """Read-mostly view of solver state at a checkpoint.
@@ -64,6 +103,13 @@ class DebugContext:
     result_sols: Optional[np.ndarray] = None
     result_feas: Optional[np.ndarray] = None
 
+    # Tree structure (#2043). ``batch_lineage`` is aligned with ``batch_ids`` at
+    # AFTER_SELECT .. AFTER_PROCESS (at AFTER_PROCESS its ``status`` says how each
+    # node closed); ``created`` lists every child the batch made, including those
+    # pruned before they are ever selected, at AFTER_PROCESS only.
+    batch_lineage: Optional[NodeLineage] = None
+    created: Optional[NodeLineage] = None
+
     # Optional event tag (e.g. "new_incumbent") and safe-steer handle.
     event: Optional[str] = None
     steer: Optional["DebugSteer"] = None
@@ -74,6 +120,31 @@ class DebugContext:
     def n_batch(self) -> int:
         """Number of nodes in the current batch (0 if no batch is live)."""
         return 0 if self.batch_ids is None else len(self.batch_ids)
+
+    @property
+    def batch_parent(self) -> Optional[np.ndarray]:
+        """Parent id of each batch node (-1 for the root), or ``None``."""
+        return None if self.batch_lineage is None else self.batch_lineage.parent
+
+    @property
+    def batch_depth(self) -> Optional[np.ndarray]:
+        """Depth of each batch node (root = 0), or ``None``."""
+        return None if self.batch_lineage is None else self.batch_lineage.depth
+
+    @property
+    def batch_branch_var(self) -> Optional[np.ndarray]:
+        """Branching variable that created each batch node (-1 for the root)."""
+        return None if self.batch_lineage is None else self.batch_lineage.branch_var
+
+    @property
+    def batch_branch_side(self) -> Optional[tuple[str, ...]]:
+        """``"down"``/``"up"`` for each batch node (``""`` for the root)."""
+        return None if self.batch_lineage is None else self.batch_lineage.branch_side
+
+    @property
+    def batch_branch_value(self) -> Optional[np.ndarray]:
+        """Bound the creating branch imposed on each batch node (NaN for the root)."""
+        return None if self.batch_lineage is None else self.batch_lineage.branch_value
 
     def metrics(self) -> dict[str, float]:
         """Scalar metrics addressable by conditional breakpoints and ``print``."""
@@ -127,6 +198,19 @@ class DebugContext:
         if gap is not None and not np.isfinite(gap):
             gap = None
 
+        # #2043: lineage is a pure read of immutable per-node fields (plus status),
+        # so, like the reads above, it cannot perturb the search.
+        lineage_of = getattr(tree, "node_lineage", None)
+        batch_lineage = None
+        created = None
+        if lineage_of is not None:
+            if batch_ids is not None:
+                batch_lineage = NodeLineage.from_dict(
+                    lineage_of(np.asarray(batch_ids, dtype=np.int64))
+                )
+            if checkpoint == Checkpoint.AFTER_PROCESS:
+                created = NodeLineage.from_dict(lineage_of(tree.last_created()))
+
         return cls(
             checkpoint=checkpoint,
             iteration=iteration,
@@ -142,6 +226,8 @@ class DebugContext:
             result_lbs=result_lbs,
             result_sols=result_sols,
             result_feas=result_feas,
+            batch_lineage=batch_lineage,
+            created=created,
             event=event,
             steer=DebugSteer(tree, model, validator=validator) if tree is not None else None,
             model=model,
@@ -175,6 +261,12 @@ class DebugContext:
         batch_lb = np.asarray(b_lb, dtype=np.float64) if b_lb is not None else None
         batch_ub = np.asarray(b_ub, dtype=np.float64) if b_ub is not None else None
         batch_ids = np.asarray(b_ids, dtype=np.int64) if b_ids is not None else None
+        b_lin = state.get("batch_lineage")
+        c_lin = state.get("created")
+        batch_lineage = NodeLineage.from_dict(b_lin) if b_lin is not None else None
+        created = NodeLineage.from_dict(c_lin) if c_lin is not None else None
+        if batch_ids is None and batch_lineage is not None:
+            batch_ids = batch_lineage.ids
 
         return cls(
             checkpoint=cp,
@@ -188,4 +280,6 @@ class DebugContext:
             batch_lb=batch_lb,
             batch_ub=batch_ub,
             batch_ids=batch_ids,
+            batch_lineage=batch_lineage,
+            created=created,
         )
