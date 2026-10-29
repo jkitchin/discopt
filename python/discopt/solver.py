@@ -17708,11 +17708,15 @@ def solve_model(
                 # #1229 HiGHS route (default; DISCOPT_LP_MILP_BACKEND=rust opts out). An explicit
                 # ``nlp_solver="simplex"`` still names the Rust engine, and
                 # ``lagrangian_bound`` still needs the per-node Python path.
+                # #2042: HiGHS fires no debugger checkpoint either, so an attached
+                # session saw nothing on a pure MILP. The Rust MILP engine below
+                # fires them through its hook, so the debugger skips only HiGHS.
                 if (
                     _lpm_backend == "highs"
                     and nlp_solver != "simplex"
                     and not lagrangian_bound
                     and not _observe_tree
+                    and not _debug_instruments_this_solve()
                 ):
                     with _highs_route_options(presolve=_caller_presolve):
                         _highs_res = _solve_milp_highs(
