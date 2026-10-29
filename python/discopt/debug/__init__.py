@@ -38,7 +38,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional, ParamSpec, TypeVar
 
 from .checkpoints import Checkpoint
-from .context import DebugContext
+from .context import DebugContext, NodeLineage
 from .session import DebugQuit, DebugSession
 
 if TYPE_CHECKING:
@@ -49,6 +49,7 @@ __all__ = [
     "DebugContext",
     "DebugQuit",
     "DebugSession",
+    "NodeLineage",
     "attach",
     "detach",
     "current",

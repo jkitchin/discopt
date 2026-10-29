@@ -5,7 +5,7 @@
 //! on each variable, enabling reliability branching (use pseudocosts when
 //! reliable, fall back to strong branching otherwise).
 
-use crate::bnb::node::{Node, NodeId, NodeStatus};
+use crate::bnb::node::{BranchRecord, Node, NodeId, NodeStatus};
 
 /// Minimal variable info for branching decisions.
 ///
@@ -303,6 +303,11 @@ pub fn create_children(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: false,
+            value: bp,
+        }),
         lb: parent.lb.clone(),
         ub: left_ub,
         local_lower_bound: inherited_lb,
@@ -319,6 +324,11 @@ pub fn create_children(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: true,
+            value: bp + 1.0,
+        }),
         lb: right_lb,
         ub: parent.ub.clone(),
         local_lower_bound: inherited_lb,
@@ -353,6 +363,11 @@ pub fn create_children_spatial(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: false,
+            value: bp,
+        }),
         lb: parent.lb.clone(),
         ub: left_ub,
         local_lower_bound: inherited_lb,
@@ -369,6 +384,11 @@ pub fn create_children_spatial(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: true,
+            value: bp,
+        }),
         lb: right_lb,
         ub: parent.ub.clone(),
         local_lower_bound: inherited_lb,
@@ -881,6 +901,11 @@ pub fn create_children_spatial_int(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: false,
+            value: bp,
+        }),
         lb: parent.lb.clone(),
         ub: left_ub,
         local_lower_bound: inherited_lb,
@@ -896,6 +921,11 @@ pub fn create_children_spatial_int(
         id: next_id(),
         parent: Some(parent.id),
         depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: idx,
+            up: true,
+            value: bp + 1.0,
+        }),
         lb: right_lb,
         ub: parent.ub.clone(),
         local_lower_bound: inherited_lb,
@@ -1433,6 +1463,7 @@ mod tests_1978 {
             id: NodeId(0),
             parent: None,
             depth: 0,
+            branch: None,
             lb: lb.to_vec(),
             ub: ub.to_vec(),
             local_lower_bound: 0.0,

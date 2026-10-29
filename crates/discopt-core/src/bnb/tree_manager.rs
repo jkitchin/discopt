@@ -8,7 +8,7 @@ use crate::bnb::branching::{
     select_spatial_integer_branch_variable, select_spatial_score_variable, select_unbounded_branch,
     spatial_box_is_tight, BranchDecision, Pseudocosts, ScoreTerm, VarBranchInfo,
 };
-use crate::bnb::node::{Node, NodeId, NodeStatus};
+use crate::bnb::node::{Node, NodeId, NodeLineage, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
 
 /// Any imported bound at or above this is the orchestrator's *failure/exclusion
@@ -375,6 +375,10 @@ pub struct TreeManager {
     /// at it unconditionally. `-inf` (never seeded) keeps every computation
     /// byte-identical to the pre-#933 behavior.
     root_seed: f64,
+    /// First node id allocated by the latest `process_evaluated` (#2043): the
+    /// children that call created are `created_from..node_counter`. Debugger
+    /// bookkeeping only; the search never reads it.
+    created_from: usize,
 }
 
 impl TreeManager {
@@ -427,6 +431,7 @@ impl TreeManager {
             sos1_selector_cols: Vec::new(),
             unbounded_branching: false,
             root_seed: f64::NEG_INFINITY,
+            created_from: 0,
         }
     }
 
@@ -701,6 +706,7 @@ impl TreeManager {
     /// potential strong branching by the Python orchestrator.
     pub fn process_evaluated(&mut self) -> ProcessingStats {
         let mut stats = ProcessingStats::default();
+        self.created_from = self.node_counter;
 
         let pending: Vec<PendingResult> = std::mem::take(&mut self.pending_results);
 
@@ -1528,6 +1534,33 @@ impl TreeManager {
         }
     }
 
+    /// Parent, depth, creating branch decision and current status of a node
+    /// (#2043). All but the status are fixed at creation, so this is valid for
+    /// any id ever allocated, including nodes pruned before they were selected
+    /// and nodes whose box was released (#1874). Unknown ids map to `None`.
+    pub fn node_lineage(&self, id: NodeId) -> Option<NodeLineage> {
+        if id.0 < self.pool.total_count() {
+            let n = self.pool.get(id);
+            Some(NodeLineage {
+                id,
+                parent: n.parent,
+                depth: n.depth,
+                branch: n.branch,
+                status: n.status,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Ids of the nodes created by the latest `process_evaluated` call (#2043),
+    /// in creation order: every child that call made, including ones that will
+    /// be pruned before they are ever selected. Before the first call this is
+    /// the root.
+    pub fn last_created(&self) -> std::ops::Range<usize> {
+        self.created_from..self.node_counter
+    }
+
     /// The warm-start basis stored on a node (cloned), for the Rust-internal
     /// simplex MILP driver. `None` if the node has no inherited basis (root).
     pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
@@ -1855,6 +1888,69 @@ mod tests {
         let stats = tm.stats();
         assert_eq!(stats.total_nodes, 3);
         assert_eq!(stats.open_nodes, 2);
+    }
+
+    /// #2043: every child carries its parent, depth and the branch that made it,
+    /// and `last_created` names exactly the children of the latest process.
+    #[test]
+    fn test_node_lineage_records_the_branch() {
+        use crate::bnb::node::BranchRecord;
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![3.0, 3.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        assert_eq!(tm.last_created(), 0..1);
+        let root = tm.node_lineage(NodeId(0)).unwrap();
+        assert_eq!((root.parent, root.depth, root.branch), (None, 0, None));
+
+        let batch = tm.export_batch(10);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![1.5, 2.0],
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
+        tm.process_evaluated();
+        assert_eq!(tm.last_created(), 1..3);
+        assert_eq!(
+            tm.node_lineage(NodeId(0)).unwrap().status,
+            NodeStatus::Branched
+        );
+
+        let down = tm.node_lineage(NodeId(1)).unwrap();
+        let up = tm.node_lineage(NodeId(2)).unwrap();
+        for c in [down, up] {
+            assert_eq!(c.parent, Some(NodeId(0)));
+            assert_eq!(c.depth, 1);
+        }
+        // x0 = 1.5 is the only fractional column: x0 <= 1 | x0 >= 2.
+        assert_eq!(
+            down.branch,
+            Some(BranchRecord {
+                var: 0,
+                up: false,
+                value: 1.0
+            })
+        );
+        assert_eq!(
+            up.branch,
+            Some(BranchRecord {
+                var: 0,
+                up: true,
+                value: 2.0
+            })
+        );
+        // The recorded bound is the one the child's box carries.
+        let (_, dub) = tm.node_box(NodeId(1)).unwrap();
+        let (ulb, _) = tm.node_box(NodeId(2)).unwrap();
+        assert_eq!((dub[0], ulb[0]), (1.0, 2.0));
+        assert!(tm.node_lineage(NodeId(3)).is_none());
     }
 
     #[test]

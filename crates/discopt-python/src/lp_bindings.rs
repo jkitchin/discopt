@@ -844,6 +844,25 @@ impl MilpDebugHook for PyMilpHook {
                     let _ = d.set_item("n_vars", state.n_vars);
                 }
             }
+            // #2043: parent/depth/branch/status of the batch, and the children it
+            // created. A marshaling error is printed, like a callback error below:
+            // inspection never stops the search.
+            if let Some(rows) = state.batch_lineage {
+                match crate::bnb_bindings::lineage_to_dict(py, rows) {
+                    Ok(v) => {
+                        let _ = d.set_item("batch_lineage", v);
+                    }
+                    Err(e) => e.print(py),
+                }
+            }
+            if let Some(rows) = state.created {
+                match crate::bnb_bindings::lineage_to_dict(py, rows) {
+                    Ok(v) => {
+                        let _ = d.set_item("created", v);
+                    }
+                    Err(e) => e.print(py),
+                }
+            }
             match self.callback.bind(py).call1((d,)) {
                 Ok(ret) => {
                     if ret.is_truthy().unwrap_or(false) {
