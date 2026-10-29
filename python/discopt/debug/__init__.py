@@ -53,6 +53,7 @@ __all__ = [
     "detach",
     "current",
     "is_attached",
+    "instruments_this_solve",
     "fire",
     "fire_rust",
     "rust_hook",
@@ -124,6 +125,17 @@ def current() -> Optional[DebugSession]:
 
 def is_attached() -> bool:
     return _active() is not None
+
+
+def instruments_this_solve() -> bool:
+    """True when a debugger is attached AND this is the outermost solve, i.e. when
+    checkpoints fired from here would reach the session.
+
+    A route that fires no checkpoints (the native spatial kernel, #2042) must decline
+    such a solve, or the debugger is silently bypassed. A nested heuristic sub-solve
+    fires nothing either way (:func:`outermost_solve`), so it keeps its route.
+    """
+    return _active() is not None and not _suppressed()
 
 
 def make_session(
