@@ -2144,8 +2144,16 @@ def _gdp_bigm_subdivision_enabled() -> bool:
     box, so it is as valid as the plain one and never wider (it is intersected).
 
     Bound-changing (a smaller ``M`` tightens the relaxation), so it sits behind a
-    CLAUDE.md §5 flag, default OFF; see ``docs/dev/flag-retirement-audit.md``
-    for its state. Enable with ``DISCOPT_GDP_BIGM_SUBDIVISION=1``.
+    CLAUDE.md §5 flag. **Default OFF: panel ran, not net-positive** (2026-10-30,
+    ``docs/dev/data/2054-reactor-panel/``): cert-clean over 320 solves, but under
+    ``gdp_method="big-m"`` the 13 models both arms certify take identical node
+    totals (1893 = 1893), and on the issue-shaped row 8/8 certify with identical
+    node counts and a root bound of 0 in both arms. The M shrinks (2396 -> 44.6
+    in a lowered model) but at a fractional selector every disjunct row is slack
+    whatever M is. What would change it: a measured gain where the big-M model is
+    consumed by something else (an export, an external solver). Enable with
+    ``DISCOPT_GDP_BIGM_SUBDIVISION=1``; ``docs/dev/flag-retirement-audit.md``
+    records its state.
     """
     return os.environ.get("DISCOPT_GDP_BIGM_SUBDIVISION", "0").strip().lower() in (
         "1",

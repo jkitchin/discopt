@@ -2101,7 +2101,7 @@ def classify_oa_cut_convexity(
     over 100 s, all of it before LOA's first master solve. ``None`` classifies
     every row, as before.
 
-    With ``DISCOPT_OA_CONVEXITY_SUBDIVISION=1`` (default OFF, #2054) a row the
+    With ``DISCOPT_OA_CONVEXITY_SUBDIVISION`` (default ON since #2054) a row the
     whole-box certificate abstains on is retried by
     :func:`~.certificate.certify_convex_subdivided`, which certifies the
     interval Hessian on every piece of an adaptive cover of the box; ``subdivided``

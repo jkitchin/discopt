@@ -5,7 +5,7 @@ the two-CSTR rational row encloses negative curvature on ``t in [0.25, 4]``
 although both are convex there, so ``classify_oa_cut_convexity`` gave them no OA
 cuts and LOA's master treated the reactors as lossless. Bisecting the box until
 every piece is certified proves both (PSD on every piece of a cover is PSD on the
-box). Behind ``DISCOPT_OA_CONVEXITY_SUBDIVISION`` (default OFF, CLAUDE.md §5).
+box). ``DISCOPT_OA_CONVEXITY_SUBDIVISION``, default ON since its §5 panel; ``=0`` opts out.
 """
 
 from __future__ import annotations
@@ -51,8 +51,10 @@ def _numerically_convex(f, lb=TH[0], ub=TH[1]) -> bool:
     return bool((y[2:] - 2 * y[1:-1] + y[:-2] >= -1e-12).all())
 
 
-def test_flag_defaults_off(monkeypatch):
+def test_flag_defaults_on_with_an_opt_out(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
+    assert _oa_convexity_subdivision_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not _oa_convexity_subdivision_enabled()
 
 

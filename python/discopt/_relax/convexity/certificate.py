@@ -552,20 +552,28 @@ def _oa_convexity_subdivision_enabled() -> bool:
     a row whose body the whole-box interval Hessian cannot certify is retried by
     :func:`certify_convex_subdivided`, and a row it proves convex gets OA cuts.
 
-    **Default OFF.** It is bound-changing (a newly certified row adds OA cuts to
-    the master), so under CLAUDE.md §5 it stays off until a flag-ON vs flag-OFF
-    panel over the in-repo corpus passes both bars. The certificate is sound by
-    construction -- PSD on every piece of a cover of the box is PSD on the box --
-    so what the panel has to show is that it is *helpful* and that its cost (up
-    to :data:`_SUBDIVISION_MAX_PIECES` interval-Hessian walks per abstained row)
-    is paid back. Recorded in ``docs/dev/flag-retirement-audit.md``. Enable with
-    ``DISCOPT_OA_CONVEXITY_SUBDIVISION=1`` (also ``true``/``yes``/``on``).
+    **Default ON** (graduated in #2054 under CLAUDE.md §5); opt out with
+    ``DISCOPT_OA_CONVEXITY_SUBDIVISION=0`` (also ``false``/``no``/``off``), which
+    restores the whole-box verdict exactly. Bound-changing: a newly certified row
+    adds OA cuts to the master. Sound by construction -- PSD on every piece of a
+    cover of the box is PSD on the box.
+
+    Graduation panel (``docs/dev/data/2054-reactor-panel/``, 2026-10-30): 40
+    synthetic reactor-choice GDPs (30 convex-row models, 10 negative controls with
+    a nonconvex disjunct row), 30 s, arms interleaved, independent DP oracle,
+    every incumbent re-verified. Cert-clean: 0 failures over 320 solves (115
+    optimal objectives, 320 bounds, 320 incumbents checked). Under
+    ``gdp_method="loa"``: certified 13 -> 18, 0 lost; on the 13 both certify,
+    LOA iterations 83 -> 47 and wall 133.5 -> 65.6 s; on the 22 neither
+    certifies, the bound is tighter on 22, looser on 0. In-repo MINLPLib corpus
+    (74 ``.nl``): 0 rows change, so OA is unchanged there; classification costs
+    +3.3 s in total (nvs05 +0.8 s), paid only when an OA-family route runs.
     """
-    return os.environ.get("DISCOPT_OA_CONVEXITY_SUBDIVISION", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_OA_CONVEXITY_SUBDIVISION", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
