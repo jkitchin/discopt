@@ -1,10 +1,14 @@
 """#2054 graduation panel: synthetic reactor-choice GDP family, flags OFF vs ON.
 
-Two CLAUDE.md §5 flags are measured on the class #2054 reports, which the in-repo
-MINLPLib corpus does not contain (0 rows changed over its 74 instances):
+Measures ``DISCOPT_OA_CONVEXITY_SUBDIVISION`` (OA cut mask by box subdivision) on the
+class #2054 reports, which the in-repo MINLPLib corpus does not contain (0 rows
+changed over its 74 instances). Graduated default-ON on this panel (2026-10-30).
 
-* ``DISCOPT_OA_CONVEXITY_SUBDIVISION`` -- OA cut mask by box subdivision;
-* ``DISCOPT_GDP_BIGM_SUBDIVISION`` -- big-M enclosure by box subdivision.
+The recorded run (commit 9b6a3c3) also had arms for ``DISCOPT_GDP_BIGM_SUBDIVISION``
+(big-M enclosure by box subdivision). That flag was cert-clean but not net-positive
+(identical B&B node totals) and was retired with its implementation; its arms are
+gone from this script and the ``bigm`` field is always ``"0"``. See
+``docs/dev/flag-retirement-audit.md``.
 
 Each model is ``S`` reactor stages sharing a residence-time budget; each stage is a
 disjunction between two reactor types whose unconverted-feed row (and, for the
@@ -19,7 +23,7 @@ polished by SLSQP, gives a verified feasible point near the optimum. A certified
 certificate. Each incumbent is re-verified from the spec's own numpy row functions,
 which catches the other direction (an objective below the optimum is infeasible).
 
-Arms are interleaved per model: ``(SUB, BIGM) in {00, 10, 01, 11}`` under
+Arms are interleaved per model: ``SUB in {0, 1}`` under
 ``gdp_method="loa"`` and ``gdp_method="big-m"``. Prints one line per solve, a
 summary, and the executed-check counts; exits non-zero if any check fired zero times
 or any soundness check failed.
@@ -279,18 +283,15 @@ def main():
     shard_k, shard_n = (int(v) for v in args.shard.split("/"))
 
     import discopt._relax.convexity.certificate as cert
-    import discopt._relax.gdp_reformulate as G
-
     # CLAUDE.md §8: assert the code under test is the code loaded.
     assert "certify_convex_subdivided" in open(cert.__file__).read(), cert.__file__
-    assert "_subdivided_body_bounds" in open(G.__file__).read(), G.__file__
-    print("loaded", cert.__file__, G.__file__, flush=True)
+    print("loaded", cert.__file__, flush=True)
 
     checks = {"oracle_points": 0, "oracle_objective": 0, "oracle_bound": 0, "feasibility": 0,
               "solves": 0}
     failures: list[str] = []
     out = open(args.out, "w")
-    arms = [("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")]
+    arms = [("0", "0"), ("1", "0")]  # (SUB, retired BIGM arm held at "0")
     for i_spec, spec in enumerate(family(args.quick)):
         if i_spec % shard_n != shard_k:
             continue
@@ -303,7 +304,6 @@ def main():
         for method in ("loa", "big-m"):
             for sub, bigm in arms:
                 os.environ["DISCOPT_OA_CONVEXITY_SUBDIVISION"] = sub
-                os.environ["DISCOPT_GDP_BIGM_SUBDIVISION"] = bigm
                 t1 = time.perf_counter()
                 err = None
                 try:

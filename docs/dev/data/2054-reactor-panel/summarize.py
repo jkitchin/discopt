@@ -1,7 +1,7 @@
 """Summarise reactor_panel.py JSONL output per flag, per method (#2054).
 
-For each flag the comparison holds the OTHER flag OFF (arm 10 vs 00 for the OA
-subdivision flag, 01 vs 00 for the big-M one) and also reports both-ON (11 vs 00).
+Compares arm 10 vs 00 (the OA subdivision flag). The recorded 9b6a3c3 run also has
+the retired big-M arms (01, 11); they are reported when present.
 Bar 1 (cert-clean) is read from the panel's own failure list; this reports bar 2:
 certified counts, certification regressions, bound movement on the instances
 neither arm certifies, and node/iteration/wall totals over the instances both arms
