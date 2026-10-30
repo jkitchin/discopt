@@ -10,9 +10,8 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.11.0`** (minor bump on top of `v0.10.0`: the
-debugger reports node lineage, a new public API, #2043; plus debugger routing
-and L3 sensitivity fixes, #2042 and #2039).
+The next planned release is **`v0.11.1`** (patch bump on top of `v0.11.0`: the
+debugger REPL and JSON protocol show node lineage, #2049).
 
 ---
 

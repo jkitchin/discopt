@@ -10,6 +10,11 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-29
+
+A debugger follow-up to 0.11.0: the built-in frontends now show the node
+lineage that 0.11.0 put on `DebugContext`. No change to solver math.
+
 ### Added
 
 - **The REPL and the JSON protocol show node lineage (#2049).** 0.11 put each
@@ -6310,6 +6315,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.11.1]: https://github.com/jkitchin/discopt/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/jkitchin/discopt/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jkitchin/discopt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jkitchin/discopt/compare/v0.8.0...v0.9.0
