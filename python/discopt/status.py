@@ -60,6 +60,30 @@ ITERATION_LIMIT = "iteration_limit"
 # ── failures ──
 ERROR = "error"
 
+# ── undecided terminations, named by #2053 ──
+#
+# Both were returned long before they were defined here, so a caller dispatching
+# on this module had no branch for them. Neither is a proof of anything, neither
+# carries an incumbent, and neither is a failure of the code: the search ended
+# and the question it was asked is still open. The benchmark harness maps both
+# to its ``UNKNOWN`` bucket, which fails closed.
+#: The search ended with no incumbent and no proof either way: feasibility is
+#: undetermined. Typical sources: a branch-and-bound tree that drained without a
+#: rigorous fathom of every node (so ``infeasible`` would be a false
+#: certificate), an external solver whose own status had no discopt meaning
+#: (``termination`` then names it), or a decomposition loop (GDPopt LOA, Benders)
+#: that stopped with nothing feasible found. Not :data:`ERROR` -- nothing raised
+#: or failed -- and not a limit status, because no limit need have been reached.
+UNKNOWN = "unknown"
+#: The outer-approximation family's spelling of :data:`UNKNOWN` (``solver="oa"``,
+#: ``"mip_nlp"``, and the OA-based GDP routes): the master problem ran out of
+#: candidate assignments, or stopped, without one NLP subproblem producing a
+#: feasible point, AND without the proof that would license ``infeasible`` (a
+#: master that is a relaxation and was emptied only by valid rows, #1673 B4).
+#: Same claim as ``UNKNOWN`` -- none -- and scored the same way; it is kept as a
+#: separate value because callers and tests already match on it.
+NO_FEASIBLE_POINT = "no_feasible_point"
+
 # ── local (no global claim) terminations, added by #1148 ──
 #: A local stationary point of the problem actually solved. Carries **no**
 #: global claim: it may become an incumbent after independent feasibility
@@ -109,6 +133,11 @@ TERMINATION_TIME_LIMIT = "time_limit"
 TERMINATION_ITERATION_LIMIT = "iteration_limit"
 #: The user stopped the search (the interactive debugger's ``quit``).
 TERMINATION_INTERRUPTED = "interrupted"
+#: A local NLP solve stopped on Ipopt/POUNCE's ``Diverging_Iterates``: the iterate
+#: norm ran past the divergence threshold. That *suggests* an objective unbounded
+#: on the feasible set but proves nothing (#2053); the iterate, when there is
+#: one, is in ``last_iterate`` and never in ``x``.
+TERMINATION_DIVERGING = "diverging_iterates"
 #: Presolve (FBBT / OBBT / nonlinear bound tightening) proved the model
 #: infeasible before any search ran; ``status`` is ``infeasible``, ``node_count``
 #: is 0 and ``algorithm_route`` names the proving pass (#1618 C-17).
@@ -125,6 +154,28 @@ TERMINATION_REASONS = frozenset(
         TERMINATION_ITERATION_LIMIT,
         TERMINATION_INTERRUPTED,
         TERMINATION_PRESOLVE,
+        TERMINATION_DIVERGING,
+    }
+)
+
+#: Every value ``SolveResult.status`` may take (#2053). A status string a route
+#: returns that is not in this set is a defect: ``test_2053_status_vocabulary``
+#: scans the package for status literals and fails on one.
+STATUSES = frozenset(
+    {
+        OPTIMAL,
+        FEASIBLE,
+        INFEASIBLE,
+        UNBOUNDED,
+        TIME_LIMIT,
+        NODE_LIMIT,
+        ITERATION_LIMIT,
+        ERROR,
+        UNKNOWN,
+        NO_FEASIBLE_POINT,
+        LOCAL_OPTIMAL,
+        LOCAL_LIMIT,
+        LOCAL_INFEASIBLE,
     }
 )
 

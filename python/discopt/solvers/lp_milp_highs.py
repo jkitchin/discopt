@@ -1793,7 +1793,10 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
         elif name == "kUnboundedOrInfeasible":
             last_reason = "HiGHS could not decide between infeasible and unbounded"
         elif name in ("kTimeLimit", "kIterationLimit"):
-            return done(HighsOutcome("time_limit", highs_status=name, message=name))
+            # #2053: an iteration cap is not a clock. ``highs_status`` kept the
+            # truth, but ``status`` is the field callers read.
+            st = "iteration_limit" if name == "kIterationLimit" else "time_limit"
+            return done(HighsOutcome(st, highs_status=name, message=name))
         elif name == "kModelEmpty" and sf.n == 0 and sf.m == 0:
             # #1385: an LP with no columns and no rows has one feasible point --
             # the empty assignment -- so ``obj_const`` is the optimum and the
@@ -2562,7 +2565,7 @@ def _coefficient_tightening_rescue(
     if best is not None and (out.objective is None or best[1] < out.objective - 1e-12):
         out.x, out.objective = best
         out.stats["milp/incumbent_from_coef_tighten"] = 1.0
-        if out.status in ("error", "time_limit", "node_limit"):
+        if out.status in ("error", "time_limit", "node_limit", "iteration_limit"):
             out.status = "feasible"
         bounds = [b for b in (out.bound, ct.root_bound, out.root_bound) if b is not None]
         out.bound = min(max(bounds), best[1]) if bounds else None
@@ -2613,7 +2616,7 @@ def solve_milp_std(
     out.stats.update(start_stats)
     if (
         start is not None
-        and out.status in ("feasible", "time_limit", "node_limit")
+        and out.status in ("feasible", "time_limit", "node_limit", "iteration_limit")
         and (
             out.objective is None
             # HiGHS can decline a start; a better verified point still stands.
@@ -2849,7 +2852,7 @@ def _merge_uncertified_cross(
     Results that carry no bound (``error``, ``unbounded``, an uncertified
     ``infeasible``) are left as they are.
     """
-    if out.status not in ("feasible", "time_limit", "node_limit"):
+    if out.status not in ("feasible", "time_limit", "node_limit", "iteration_limit"):
         return out
     pt = None
     if cross.x is not None and (time_limit is None or time_limit > 0.0):
@@ -3555,7 +3558,7 @@ def _solve_milp_std(
             out.status, out.gap_certified, out.bound = "error", False, None
             out.message = f"HiGHS reported infeasible, unverified: {why}"
             return
-        if out.status not in ("optimal", "feasible", "time_limit", "node_limit"):
+        if out.status not in ("optimal", "feasible", "time_limit", "node_limit", "iteration_limit"):
             return
         if out.status == "optimal":
             out.status = "feasible"
@@ -3777,13 +3780,19 @@ def _solve_milp_std(
         if x is not None:
             out.status = "feasible"
         else:
-            out.status = "time_limit" if name == "kTimeLimit" else "node_limit"
+            out.status = {"kTimeLimit": "time_limit", "kIterationLimit": "iteration_limit"}.get(
+                name, "node_limit"
+            )
     else:
         out.message = f"HiGHS MILP status {name}"
         return done(out)
     if bound is not None and obj is not None:
         bound = min(bound, obj)
-    out.bound = bound if out.status in ("optimal", "feasible", "time_limit", "node_limit") else None
+    out.bound = (
+        bound
+        if out.status in ("optimal", "feasible", "time_limit", "node_limit", "iteration_limit")
+        else None
+    )
     if repaired_why is not None and out.status == "optimal":
         # #1654: kOptimal closed HiGHS's gap on the REFUSED point's objective; the
         # repaired point may sit above it, so the stop rule is asked again.
@@ -4164,6 +4173,7 @@ def solve_lp(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, time_li
         "infeasible": SolveStatus.INFEASIBLE,
         "unbounded": SolveStatus.UNBOUNDED,
         "time_limit": SolveStatus.TIME_LIMIT,
+        "iteration_limit": SolveStatus.ITERATION_LIMIT,
     }.get(out.status, SolveStatus.ERROR)
     return LPResult(
         status=status,

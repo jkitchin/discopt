@@ -26308,6 +26308,7 @@ def _solve_continuous(
     pounce_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
     equilibrate_rows: bool = False,
     midpath_out: Optional[list] = None,
+    withhold_diverging: bool = False,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -26326,6 +26327,9 @@ def _solve_continuous(
     from its own point (:func:`_pounce_midpath_continuation`); ``midpath_out``,
     when a list is passed, receives ``True`` when the returned point still
     carries that signature, i.e. it is not an established stationary point.
+    ``withhold_diverging`` (``solver="pounce"`` only, #2053) reports a
+    ``Diverging_Iterates`` stop as ``local_limit`` with the iterate in
+    ``last_iterate`` and ``termination="diverging_iterates"``, never as ``x``.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -26765,6 +26769,26 @@ def _solve_continuous(
     # here can never loosen a bound below truth (soundness is untouched).
     _last_iterate: Optional[dict] = None
     _last_iterate_violation: Optional[float] = None
+
+    def _iterate_violation() -> float:
+        """Max constraint/bound violation of the NLP's final iterate, declared box."""
+        _li = np.asarray(nlp_result.x, dtype=np.float64)
+        _cl_li, _cu_li = _infer_constraint_bounds(model, evaluator)
+        _g_li = (
+            np.asarray(evaluator.evaluate_constraints(_li), dtype=np.float64)
+            if evaluator.n_constraints
+            else np.zeros(0)
+        )
+        return float(
+            max(
+                0.0,
+                float(np.max(np.asarray(_cl_li) - _g_li)) if _g_li.size else 0.0,
+                float(np.max(_g_li - np.asarray(_cu_li))) if _g_li.size else 0.0,
+                float(np.max(np.asarray(raw_lb, dtype=np.float64) - _li)),
+                float(np.max(_li - np.asarray(raw_ub, dtype=np.float64))),
+            )
+        )
+
     if x_dict is not None and nlp_result.x is not None:
         from discopt._relax.primal_heuristics import passes_false_primal_screen
 
@@ -26784,22 +26808,7 @@ def _solve_continuous(
             # field that is never an incumbent (``x`` stays None, so the #815
             # invariant "x is feasible" holds), with its max violation beside it.
             _last_iterate = x_dict
-            _li = np.asarray(nlp_result.x, dtype=np.float64)
-            _cl_li, _cu_li = _infer_constraint_bounds(model, evaluator)
-            _g_li = (
-                np.asarray(evaluator.evaluate_constraints(_li), dtype=np.float64)
-                if evaluator.n_constraints
-                else np.zeros(0)
-            )
-            _last_iterate_violation = float(
-                max(
-                    0.0,
-                    float(np.max(np.asarray(_cl_li) - _g_li)) if _g_li.size else 0.0,
-                    float(np.max(_g_li - np.asarray(_cu_li))) if _g_li.size else 0.0,
-                    float(np.max(np.asarray(raw_lb, dtype=np.float64) - _li)),
-                    float(np.max(_li - np.asarray(raw_ub, dtype=np.float64))),
-                )
-            )
+            _last_iterate_violation = _iterate_violation()
             obj_val = None
             x_dict = None
             _c_bound = None
@@ -26809,6 +26818,35 @@ def _solve_continuous(
                 status = "unknown"
             if _error_reason is not None:
                 _error_reason += "; its final iterate failed the feasibility screen"
+
+    # #2053: Ipopt/POUNCE ``Diverging_Iterates`` stops at an iterate whose norm ran
+    # past the divergence threshold. On a problem unbounded below that point may
+    # still pass the screen above, and it came back as ``status="error"`` beside
+    # ``x`` and an objective of -1.2e22. It is not a solution of anything: the
+    # search was walking away from it. Under ``withhold_diverging`` (the
+    # ``solver="pounce"`` route) it is withheld exactly like a screened-out
+    # iterate -- ``x``/``objective`` stay None, the point goes to
+    # ``last_iterate`` -- and the caller is told why with
+    # ``termination="diverging_iterates"`` rather than a prose message.
+    _termination: Optional[str] = None
+    if (
+        withhold_diverging
+        and nlp_result.raw_status == _IPOPT_DIVERGING_ITERATES
+        and x_dict is not None
+        and nlp_result.x is not None
+    ):
+        from discopt import status as _st
+
+        _last_iterate = x_dict
+        _last_iterate_violation = _iterate_violation()
+        obj_val = None
+        x_dict = None
+        _c_bound = None
+        _c_gap = None
+        _termination = _st.TERMINATION_DIVERGING
+        status = _st.LOCAL_LIMIT
+        _error_reason = None
+        constraint_duals = bound_duals_lower = bound_duals_upper = None
 
     # #1493: an NLP failure that nevertheless left a point which PASSED the
     # false-primal screen above is not an error in the caller's terms -- it is a
@@ -26875,6 +26913,7 @@ def _solve_continuous(
         error=_error_reason if status == "error" else None,
         last_iterate=_last_iterate,
         last_iterate_violation=_last_iterate_violation,
+        termination=_termination,
     )
 
 
@@ -26888,6 +26927,8 @@ POUNCE_ROUTE_NLP = "pounce:nlp"
 _IPOPT_INFEASIBLE_PROBLEM = 2
 #: Ipopt/POUNCE ``Solved_To_Acceptable_Level`` (#1618 B-05b).
 _IPOPT_SOLVED_TO_ACCEPTABLE = 1
+#: Ipopt/POUNCE ``Diverging_Iterates`` (#2053).
+_IPOPT_DIVERGING_ITERATES = 4
 
 #: ``solve_model`` parameters ``solver="pounce"`` honours (#1533). Every other
 #: parameter left at a non-default value is reported as ignored, so the list of
@@ -27325,6 +27366,7 @@ def _solve_pounce_route(
         pounce_scaling=resolved_scaling,
         equilibrate_rows=True,
         midpath_out=midpath,
+        withhold_diverging=True,
     )
     result.wall_time = time.perf_counter() - t_start
     if result.status == "optimal" and midpath and midpath[0]:
@@ -27353,8 +27395,17 @@ def _solve_pounce_route(
         result.error = None
     elif result.status == "iteration_limit" and result.x:
         result.status = "local_limit"
-    elif result.status == "unbounded":
+    elif result.status == "unbounded" or (
+        result.status == "error" and raw_status and raw_status[0] == _IPOPT_DIVERGING_ITERATES
+    ):
+        # Diverging iterates with no point to hand back (``_solve_continuous``
+        # already turned the with-a-point case into ``local_limit``, #2053). The
+        # backend maps code 4 to ``error``; ``unbounded`` is kept for a backend that
+        # labels it so. Divergence suggests, but does not prove, unboundedness.
+        from discopt import status as _st
+
         result.status = "error"
+        result.termination = _st.TERMINATION_DIVERGING
         result.error = (
             "POUNCE's NLP iterates diverged; that suggests, but does not prove, an "
             "objective unbounded below on the feasible set."
@@ -37433,7 +37484,7 @@ def _solve_milp_highs(
         )
     if out.status == "error":
         logger.warning("HiGHS MILP route: %s", out.message)
-    _budget_bound = bound if out.status in ("time_limit", "node_limit") else None
+    _budget_bound = bound if out.status in ("time_limit", "node_limit", "iteration_limit") else None
     return SolveResult(
         status=out.status,
         # #1617: the route knows why it failed; say so on the result.
