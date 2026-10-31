@@ -21,3 +21,12 @@ eight_process, 2x on eight_process_logical); neutral on clay0203 (its restricted
 nonconvex subproblems are no cheaper to refute); 2x slower on ex_633 (1.4 s -> 2.8 s,
 the restricted solves of 3 configurations cost more than the plain ones). Not a
 graduation panel: 7 of the 24 `gdp_parity` instances (no git GDPlib here).
+
+**Correction to commit `fd6a213`'s message.** It says the GDP test files
+(`test_*gdp*`, `test_1775*`, `test_1917*`) pass. They do not all pass here: 1405
+passed, 1 failed. The failure is
+`test_1775_g0_4_pyomo_gdp.py::test_parity_checker_catches_a_wrong_row`
+(`AttributeError: 'NoneType' object has no attribute '_parent'`, inside Pyomo's
+`parent_block`). It fails identically on the base commit `4517c7b`, checked in a
+worktree with `discopt.__file__` asserted, so it is an environment failure
+(this container has Pyomo 6.10.1), not this change.
