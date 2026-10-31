@@ -2106,7 +2106,8 @@ def classify_oa_cut_convexity(
     :func:`~.certificate.certify_convex_subdivided`, which certifies the
     interval Hessian on every piece of an adaptive cover of the box; ``subdivided``
     counts the rows proved that way (including those the Taylor-form pre-test of
-    ``DISCOPT_OA_CONVEXITY_TAYLOR``, #2062, proves). Only with the certificate route on.
+    ``DISCOPT_OA_CONVEXITY_TAYLOR``, default ON since #2062, proves). Only with the
+    certificate route on.
     """
     from .certificate import (
         _oa_convexity_certificate_enabled,

@@ -6,7 +6,7 @@ correlation between numerator and denominator, so #2054's bisection needed
 ``v``. A Taylor expansion of ``f''`` about each piece's midpoint with a Lagrange
 remainder (third-order-and-up interval Taylor jets, ``interval_jet.py``) removes
 that loss at order ``w**K``: both rows certify inside the default 128-piece
-budget. ``DISCOPT_OA_CONVEXITY_TAYLOR`` gates it.
+budget. ``DISCOPT_OA_CONVEXITY_TAYLOR`` gates it (default ON, ``=0`` opts out).
 """
 
 from __future__ import annotations
@@ -77,14 +77,24 @@ def _fd2(f, t: float) -> float:
 # ── the flag ──────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_off_with_an_opt_in(monkeypatch):
+def test_flag_defaults_on_with_an_opt_out(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
-    assert not _oa_convexity_taylor_enabled()
-    for on in ("1", "true", "on"):
-        monkeypatch.setenv(FLAG, on)
-        assert _oa_convexity_taylor_enabled()
-    monkeypatch.setenv(FLAG, "0")
-    assert not _oa_convexity_taylor_enabled()
+    assert _oa_convexity_taylor_enabled()
+    for off in ("0", "false", "no", "off", " OFF "):
+        monkeypatch.setenv(FLAG, off)
+        assert not _oa_convexity_taylor_enabled()
+    monkeypatch.setenv(FLAG, "1")
+    assert _oa_convexity_taylor_enabled()
+
+
+def test_pfr_rows_certify_under_defaults(monkeypatch):
+    """Graduation: with no env var set, a plain classify cuts both PFR rows."""
+    monkeypatch.delenv(FLAG, raising=False)
+    for f, coef in ROWS:
+        m, _ = _row_model(f, coef)
+        out = classify_oa_cut_convexity(m)
+        assert out.constraint_mask == [True], f.__name__
+        assert out.subdivided == 1, f.__name__
 
 
 # ── the jets are correct ──────────────────────────────────────────────────

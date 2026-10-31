@@ -589,9 +589,18 @@ def _oa_convexity_taylor_enabled() -> bool:
 
     Bound-changing (a newly certified row gets OA cuts); sound by construction
     (Taylor's theorem with interval-enclosed coefficients, outward rounding).
+
+    **Default ON since #2062** (CLAUDE.md section 5 panel,
+    ``docs/dev/data/2062-pfr-rows-panel/``): 40 PFR/CSTR reactor-choice GDPs
+    (10 negative controls), 30 s, interleaved, independent DP+SLSQP oracle --
+    0 failures over 160 solves; under ``gdp_method="loa"`` certified 20 -> 25 with
+    0 lost, LOA iterations 93 -> 48 and wall 254 -> 113 s where both certify, total
+    wall 775 -> 524 s; neutral under big-M (that route does not read the OA mask).
+    In-repo corpus (74 ``.nl``): 0 masks change, and ``Model.solve()`` OFF vs ON
+    settles identically wherever node counts are deterministic.
     Opt-out ``DISCOPT_OA_CONVEXITY_TAYLOR=0`` (also ``false``/``no``/``off``).
     """
-    return os.environ.get("DISCOPT_OA_CONVEXITY_TAYLOR", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_OA_CONVEXITY_TAYLOR", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -694,7 +703,7 @@ def certify_convex_subdivided(
     passed ``deadline`` each abstain with ``None``; abstaining is never a claim
     of nonconvexity.
 
-    With ``DISCOPT_OA_CONVEXITY_TAYLOR`` and a single curved variable, the cover
+    With ``DISCOPT_OA_CONVEXITY_TAYLOR`` (default ON) and a single curved variable, the cover
     is first tried with the Taylor-form test of :func:`_certify_univariate_taylor`
     (#2062), whose enclosure of ``f''`` tightens at order ``w**K`` instead of
     ``w``; when it abstains, the interval-Hessian bisection above runs as before.
