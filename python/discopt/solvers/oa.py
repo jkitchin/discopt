@@ -944,6 +944,10 @@ class _MasterMILPData:
     #: carries the single aggregate epigraph and nothing else.
     perspective_start: Optional[int] = None
     perspective_terms: tuple[tuple[int, int, float], ...] = ()
+    #: #2021 §3: first column of the disaggregated split-row epigraph block
+    #: (``_PerspectiveRowEpigraph``), or ``None`` when the master has none.
+    perspective_row_start: Optional[int] = None
+    perspective_row_epigraph: Optional["_PerspectiveRowEpigraph"] = None
 
 
 @dataclass(frozen=True)
@@ -1277,6 +1281,12 @@ def _extend_master_mip_start(
     if master.slack_index is not None:
         lo, hi = master.bounds[master.slack_index]
         full[master.slack_index] = min(max(0.0, float(lo)), float(hi))
+    if master.perspective_row_start is not None and master.perspective_row_epigraph is not None:
+        # ``s_i = d_i w_i**2`` satisfies every pooled row at a feasible start; a
+        # zero there would violate the per-coordinate rows.
+        b = master.perspective_row_start
+        vals = master.perspective_row_epigraph.start_values(start[:n_vars])
+        full[b : b + vals.size] = vals
     if (
         master.integer_binary_expansion is not None
         and master.integer_binary_expansion.bit_count > 0
@@ -3173,6 +3183,187 @@ class _PerspectiveRowState:
         self.id_mismatch = 0
 
 
+class _PerspectiveRowEpigraph:
+    """#2021 §3: the disaggregated epigraph of every split quadratic row.
+
+    One master column ``s`` per split coordinate of each
+    :class:`~discopt._relax.perspective.PerspectiveRowTerm`, appended after every
+    other master block, and a pool of two kinds of rows over them:
+
+    * remainder rows ``R-tangent(x) + sum_i s_i <= rhs``
+      (:meth:`PerspectiveRowTerm.remainder_cut`);
+    * per-coordinate rows ``2 d_i r w_i - d_i r**2 z_i - s_i <= 0``
+      (:meth:`PerspectiveRowTerm.perspective_references`).
+
+    Every row is valid on the extended set ``{(x, s): x feasible, s_i = d_i
+    w_i**2}``, which projects onto the whole feasible set, so they only ever
+    tighten the master. The aggregate split cut is NOT replaced: it stays in the
+    master's ordinary cut list, which is what makes the block purely additive --
+    a pool row that never reaches a tree weakens nothing.
+
+    A row is offered to the master when the master point violates it (the pool is
+    rescored at every separation), so a reference that earns its place only at a
+    later fractional point is not lost. ``emitted`` marks rows already in the
+    master; ``remainder_rows``/``term_rows`` and ``offered`` are the CLAUDE.md §6
+    counters.
+    """
+
+    def __init__(self, terms) -> None:
+        self.terms = list(terms)
+        self.offsets: list[int] = []
+        self.positions: list[np.ndarray] = []
+        col = 0
+        for t in self.terms:
+            pos = t.split_positions()
+            self.offsets.append(col)
+            self.positions.append(pos)
+            col += int(pos.size)
+        self.n_cols = col
+        self._local = [{int(i): k for k, i in enumerate(pos)} for pos in self.positions]
+        self.by_row = {t.row: j for j, t in enumerate(self.terms)}
+        #: Remainder rows: ``(term, coeffs over n_vars, rhs)``.
+        self.rem: list[tuple[int, np.ndarray, float]] = []
+        #: Per-coordinate rows, column-wise for vectorised scoring:
+        #: ``(w col, z col, s col offset in the block, d, r)``.
+        self._w: list[int] = []
+        self._z: list[int] = []
+        self._s: list[int] = []
+        self._d: list[float] = []
+        self._r: list[float] = []
+        self._seen: set[tuple[int, int, float]] = set()
+        self._rem_seen: set[tuple[int, bytes]] = set()
+        self.rem_emitted: set[int] = set()
+        self.term_emitted: set[int] = set()
+        self.remainder_rows = 0
+        self.term_rows = 0
+        self.offered = 0
+        self.separations = 0
+
+    def _block_sum(self, j: int, x, start: int) -> float:
+        b = start + self.offsets[j]
+        return float(np.sum(x[b : b + self.positions[j].size]))
+
+    def add_point(self, term_index: int, x, n_vars: int, *, s_sum: Optional[float] = None) -> None:
+        """Pool the remainder tangent and the per-coordinate rows at ``x``.
+
+        Duplicate references are dropped (the same point reached from the ECP
+        hook and from :meth:`separate` pools once). ``s_sum``, when given, is the
+        master's ``sum_i s_i`` for this row at ``x``; the remainder tangent is then
+        pooled only if ``x`` violates it, which keeps the pool to rows that have
+        cut off a master point.
+        """
+        t = self.terms[term_index]
+        xv = np.asarray(x, dtype=np.float64).ravel()[:n_vars]
+        if not np.all(np.isfinite(xv[t.W])) or not np.all(np.isfinite(xv[t.S])):
+            return
+        rem_key = (term_index, np.round(xv[t.W], 12).tobytes())
+        if rem_key not in self._rem_seen:
+            coeffs, rhs = t.remainder_cut(xv, n_vars)
+            violated = s_sum is None or float(coeffs @ xv) + s_sum - rhs > 1e-9 * max(1.0, abs(rhs))
+            if violated and np.all(np.isfinite(coeffs)) and np.isfinite(rhs):
+                self._rem_seen.add(rem_key)
+                self.rem.append((term_index, coeffs, float(rhs)))
+                self.remainder_rows += 1
+        base = self.offsets[term_index]
+        local = self._local[term_index]
+        for i, r in t.perspective_references(xv):
+            d = float(t.d[i])
+            if 2.0 * d * r <= _PERSPECTIVE_MIN_ROW_COEFF:
+                continue  # says ``s >= 0``, which the column bound already says
+            key = (term_index, int(i), float(r))
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            self._w.append(int(t.W[i]))
+            self._z.append(int(t.z[i]))
+            self._s.append(base + local[int(i)])
+            self._d.append(d)
+            self._r.append(float(r))
+            self.term_rows += 1
+
+    def _rem_row(self, k: int, n_master: int, start: int) -> tuple[np.ndarray, float]:
+        j, coeffs, rhs = self.rem[k]
+        row = np.zeros(n_master, dtype=np.float64)
+        row[: coeffs.size] = coeffs
+        b = start + self.offsets[j]
+        row[b : b + self.positions[j].size] = 1.0
+        return row, rhs
+
+    def _term_row(self, k: int, n_master: int, start: int) -> np.ndarray:
+        row = np.zeros(n_master, dtype=np.float64)
+        d, r = self._d[k], self._r[k]
+        row[self._w[k]] += 2.0 * d * r
+        row[self._z[k]] -= d * r * r
+        row[start + self._s[k]] = -1.0
+        return row
+
+    def all_rows(self, n_master: int, start: int) -> list[tuple[np.ndarray, float]]:
+        """Every pooled row in master layout, marking each emitted."""
+        out = [self._rem_row(k, n_master, start) for k in range(len(self.rem))]
+        out += [(self._term_row(k, n_master, start), 0.0) for k in range(len(self._d))]
+        self.rem_emitted.update(range(len(self.rem)))
+        self.term_emitted.update(range(len(self._d)))
+        return out
+
+    def new_violated_rows(
+        self, master_x, n_master: int, start: int, tol: float = 1e-9
+    ) -> list[tuple[np.ndarray, float]]:
+        """Pooled rows not yet in the master that ``master_x`` violates."""
+        x = np.asarray(master_x, dtype=np.float64).ravel()
+        if x.size < start + self.n_cols:
+            return []
+        out: list[tuple[np.ndarray, float]] = []
+        for k, (j, coeffs, rhs) in enumerate(self.rem):
+            if k in self.rem_emitted:
+                continue
+            value = float(coeffs @ x[: coeffs.size]) + self._block_sum(j, x, start)
+            if value - rhs > tol * max(1.0, abs(rhs)):
+                out.append(self._rem_row(k, n_master, start))
+                self.rem_emitted.add(k)
+        if self._d:
+            w = x[np.asarray(self._w, dtype=np.intp)]
+            z = x[np.asarray(self._z, dtype=np.intp)]
+            sv = x[start + np.asarray(self._s, dtype=np.intp)]
+            d = np.asarray(self._d)
+            r = np.asarray(self._r)
+            scores = 2.0 * d * r * w - d * r * r * z - sv
+            for k in np.flatnonzero(scores > tol).tolist():
+                if k in self.term_emitted:
+                    continue
+                out.append((self._term_row(k, n_master, start), 0.0))
+                self.term_emitted.add(k)
+        self.offered += len(out)
+        return out
+
+    def separate(
+        self, master_x, n_vars: int, n_master: int, start: int
+    ) -> list[tuple[np.ndarray, float]]:
+        """Pool references at the master point and return the rows it violates.
+
+        This is the separation the ECP hook cannot do: that hook pools only when
+        the ORIGINAL row is violated, and once the master's bound passes the
+        plain relaxation's its points usually satisfy ``g <= 0`` while still
+        violating the perspective rows.
+        """
+        x = np.asarray(master_x, dtype=np.float64).ravel()
+        if x.size < start + self.n_cols:
+            return []
+        self.separations += 1
+        for j in range(len(self.terms)):
+            self.add_point(j, x[:n_vars], n_vars, s_sum=self._block_sum(j, x, start))
+        return self.new_violated_rows(x, n_master, start)
+
+    def start_values(self, x) -> np.ndarray:
+        """``s_i = d_i w_i**2`` at ``x``: the block's values at a feasible point."""
+        xv = np.asarray(x, dtype=np.float64).ravel()
+        vals = np.zeros(self.n_cols, dtype=np.float64)
+        for j, t in enumerate(self.terms):
+            pos = self.positions[j]
+            w = xv[t.W[pos]]
+            vals[self.offsets[j] : self.offsets[j] + pos.size] = t.d[pos] * w * w
+        return vals
+
+
 def _apply_perspective_row_cut(evaluator, constraint_id, coeffs, rhs, support, n_vars):
     """Replace a ``<=`` row's OA tangent with its #2021 split form, or return it.
 
@@ -3197,6 +3388,11 @@ def _apply_perspective_row_cut(evaluator, constraint_id, coeffs, rhs, support, n
     if not np.allclose(coeffs, mine, rtol=0.0, atol=1e-7 * scale):
         state.id_mismatch += 1
         return coeffs, rhs
+    row_epigraph = getattr(evaluator, "_perspective_row_epigraph", None)
+    if row_epigraph is not None:
+        j = row_epigraph.by_row.get(int(constraint_id))
+        if j is not None:
+            row_epigraph.add_point(j, support, n_vars)
     new, new_rhs, shifted = term.cut(support, n_vars)
     if not shifted:
         return coeffs, rhs
@@ -3263,6 +3459,13 @@ _PERSPECTIVE_DISAGG_NEAR_ZERO: list[int] = [0]
 #: to 6.4e18 -- and HiGHS then reported dual bounds ABOVE the master's own
 #: provable optimum (558.044 against 557.84865).
 _PERSPECTIVE_MIN_ROW_COEFF = 1e-9
+
+
+def _perspective_row_disagg_enabled() -> bool:
+    """Thin re-export of ``perspective_row_disaggregation_enabled`` (#2021 §3)."""
+    from discopt._relax.perspective import perspective_row_disaggregation_enabled
+
+    return perspective_row_disaggregation_enabled()
 
 
 def _perspective_disagg_enabled() -> bool:
@@ -4398,6 +4601,7 @@ def _build_master_milp_data(
     use_objective_epigraph=None,
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
     perspective_epigraph: Optional[_PerspectiveEpigraph] = None,
+    perspective_row_epigraph: Optional[_PerspectiveRowEpigraph] = None,
 ) -> _MasterMILPData:
     """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -4439,6 +4643,11 @@ def _build_master_milp_data(
         n_perspective = len(perspective_epigraph.terms)
         perspective_start = n_master
         n_master += n_perspective
+    # #2021 §3: the split-row epigraph block goes last, for the same reason.
+    perspective_row_start = None
+    if perspective_row_epigraph is not None and perspective_row_epigraph.n_cols > 0:
+        perspective_row_start = n_master
+        n_master += perspective_row_epigraph.n_cols
 
     # Build A_ub, b_ub from linear <= constraints + OA cuts
     A_ub_rows = []
@@ -4494,6 +4703,11 @@ def _build_master_milp_data(
                 )
             )
             b_ub_vals.append(0.0)
+    if perspective_row_start is not None:
+        assert perspective_row_epigraph is not None
+        for row, rhs in perspective_row_epigraph.all_rows(n_master, perspective_row_start):
+            A_ub_rows.append(row)
+            b_ub_vals.append(rhs)
 
     # Equality constraints from linear
     A_eq_rows = []
@@ -4551,6 +4765,10 @@ def _build_master_milp_data(
         # q_k * x_k**2 >= 0, and the lower bound is what makes the z == 0
         # reference row redundant rather than missing.
         bounds_list.extend((0.0, 1e20) for _ in range(n_perspective))
+    if perspective_row_start is not None:
+        assert perspective_row_epigraph is not None
+        # s_i stands for d_i w_i**2 / z_i >= 0; cost 0 (it is not in the objective).
+        bounds_list.extend((0.0, 1e20) for _ in range(perspective_row_epigraph.n_cols))
 
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
@@ -4582,6 +4800,10 @@ def _build_master_milp_data(
         integer_binary_start=integer_binary_start,
         perspective_start=perspective_start,
         perspective_terms=(perspective_epigraph.terms if perspective_epigraph is not None else ()),
+        perspective_row_start=perspective_row_start,
+        perspective_row_epigraph=(
+            perspective_row_epigraph if perspective_row_start is not None else None
+        ),
     )
 
 
@@ -6516,6 +6738,22 @@ def solve_lp_nlp_bb(
         )
         if perspective_epigraph is not None:
             evaluator._perspective_epigraph = perspective_epigraph  # type: ignore[attr-defined]
+    # #2021 §3: the disaggregated epigraph of each split quadratic row. Purely
+    # additive (the aggregate split cut stays), so unlike the objective block it
+    # needs no all-or-nothing guard; it is still built only on this driver's own
+    # master and not under a SHOT profile, which is where it was measured.
+    perspective_row_epigraph: Optional[_PerspectiveRowEpigraph] = None
+    row_state = getattr(evaluator, "_perspective_row_terms", None)
+    if (
+        not shot_profile
+        and row_state is not None
+        and row_state.by_row
+        and _perspective_row_disagg_enabled()
+    ):
+        candidate_epigraph = _PerspectiveRowEpigraph(row_state.by_row.values())
+        if candidate_epigraph.n_cols > 0:
+            perspective_row_epigraph = candidate_epigraph
+            evaluator._perspective_row_epigraph = perspective_row_epigraph  # type: ignore[attr-defined]
 
     #: #1658: the best fixed-NLP point the screen below refused, kept only as an
     #: UNVERIFIED warm start for a caller with no verified incumbent -- never a
@@ -6739,6 +6977,7 @@ def solve_lp_nlp_bb(
         use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
         integer_binary_expansion=integer_binary_expansion,
         perspective_epigraph=perspective_epigraph,
+        perspective_row_epigraph=perspective_row_epigraph,
     )
     #: Perspective epigraph rows already in the master. The build below takes
     #: whatever the pool holds at that moment; everything the search adds after
@@ -6750,10 +6989,18 @@ def solve_lp_nlp_bb(
         range(len(perspective_epigraph.rows)) if perspective_epigraph is not None else ()
     )
 
-    def collect_new_perspective_rows(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
-        if perspective_epigraph is None or master.perspective_start is None:
+    def collect_split_row_epigraph_rows(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        """#2021 §3: rows of the disaggregated split-row epigraph ``master_x`` violates."""
+        if master.perspective_row_epigraph is None or master.perspective_row_start is None:
             return []
+        return master.perspective_row_epigraph.separate(
+            master_x, n_vars, n_master=len(master.c), start=master.perspective_row_start
+        )
+
+    def collect_new_perspective_rows(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
         rows: list[tuple[np.ndarray, float]] = []
+        if perspective_epigraph is None or master.perspective_start is None:
+            return rows
         scores = perspective_epigraph.violations(
             master_x, perspective_start=master.perspective_start
         )
@@ -6777,7 +7024,9 @@ def solve_lp_nlp_bb(
             perspective_rows_emitted.add(row_index)
         return rows
 
-    def collect_new_lazy_cuts(start: int, master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+    def collect_new_lazy_cuts(
+        start: int, master_x: np.ndarray, *, at_incumbent: bool = False
+    ) -> list[tuple[np.ndarray, float]]:
         rows: list[tuple[np.ndarray, float]] = list(collect_new_perspective_rows(master_x))
         for idx in range(start, len(oa_A_rows)):
             relaxable = bool(oa_cut_relaxable[idx]) if idx < len(oa_cut_relaxable) else True
@@ -6797,6 +7046,13 @@ def solve_lp_nlp_bb(
             row_norm = float(np.max(np.abs(row))) if row.size else 0.0
             if float(np.dot(row, master_x)) > rhs + 1e-6 * min(1.0, row_norm):
                 rows.append((row, rhs))
+        # #2021 §3: at an incumbent a returned row REJECTS the point and rebuilds
+        # the HiGHS tree. A split-row epigraph row can be violated through its
+        # auxiliary ``s`` columns alone, with the incumbent's ``x`` feasible, so
+        # there it rides only on a restart something else already forces; the
+        # LP-relaxation rounds (``at_incumbent=False``) separate it unconditionally.
+        if not at_incumbent or rows:
+            rows.extend(collect_split_row_epigraph_rows(master_x))
         return rows
 
     def lazy_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -6916,7 +7172,9 @@ def solve_lp_nlp_bb(
                     heuristic_nogood_cuts[0] += 1
             add_oa_cuts_at(x_master)
 
-        rows = collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
+        rows = collect_new_lazy_cuts(
+            start, np.asarray(master_x, dtype=np.float64), at_incumbent=True
+        )
         _record_callback_event(
             context="mipsol",
             cuts_start=cuts_start,
@@ -7364,6 +7622,16 @@ def solve_lp_nlp_bb(
     if row_state is not None and row_state.applied:
         # #2021 §3: OA row cuts replaced by their diagonal-perspective split.
         route_stats["oa/perspective_row_cuts"] = float(row_state.applied)
+    row_epi = getattr(decomp.evaluator, "_perspective_row_epigraph", None)
+    if row_epi is not None:
+        # #2021 §3: the disaggregated split-row epigraph -- rows offered to the
+        # master (0 means the block was built and never separated, section 6).
+        route_stats["oa/perspective_row_disagg_rows"] = float(row_epi.offered)
+        route_stats["oa/perspective_row_disagg_cols"] = float(row_epi.n_cols)
+        route_stats["oa/perspective_row_disagg_pooled"] = float(
+            row_epi.remainder_rows + row_epi.term_rows
+        )
+        route_stats["oa/perspective_row_disagg_separations"] = float(row_epi.separations)
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(
