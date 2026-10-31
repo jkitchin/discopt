@@ -51,9 +51,14 @@ CHUNKS = (1, 2, 5, ser._NodeTable._CHUNK)
 
 def test_every_fixture_case_builds():
     """A case that fails to build drops out of the byte-identity tests below; it
-    must not do so silently."""
-    assert not UNBUILT, UNBUILT
-    assert len(CASES) == len(reg.CASES) >= 20
+    must not do so silently. A case retired by design (``reg.RETIRED``) must fail
+    for exactly its recorded reason."""
+    import re
+
+    assert set(UNBUILT) == set(reg.RETIRED), UNBUILT
+    for name, why in UNBUILT.items():
+        assert re.search(reg.RETIRED[name], why), (name, why)
+    assert len(CASES) + len(UNBUILT) == len(reg.CASES) >= 20
 
 
 # ── writer ───────────────────────────────────────────────────────────────────

@@ -14248,50 +14248,86 @@ def _add_nl_complementarity(
 ) -> None:
     r"""Lower one ``.nl`` complementarity row into ``Model.complementarity``.
 
-    The row asserts ``body ⊥ x`` where ``x = m._variables[var_index]`` and
-    ``body`` carries the bounds encoded by ``flag`` (AMPL MP ``ComplInfo``:
-    bit 0 ⇒ lower ``-inf``, bit 1 ⇒ upper ``+inf``; unset ⇒ 0). discopt's
-    primitive is the symmetric nonnegative complementarity
-    :math:`0 \le a \perp b \ge 0`, so we orient ``body`` and ``x`` into two
-    nonnegative quantities before handing them over.
+    The row ``5 flag i`` asserts the mixed complementarity relation
+    ``body ⊥ x ∈ [lb, ub]`` with ``x = m._variables[i - 1]``: at ``x = lb`` the
+    body is ``>= 0``, at ``x = ub`` it is ``<= 0``, strictly between it is ``0``.
+    The complementarity is against the variable's **bound**, not against 0.
 
-    Only the single-bounded MPEC forms map soundly onto that primitive: the body
-    bounded on exactly one side (``body >= 0`` or ``body <= 0``) against a
-    single-signed variable (``x >= 0`` or ``x <= 0``). Doubly-bounded / free /
-    equality-pinned complementarity rows require a richer disjunction than the
-    primitive expresses; rather than silently mis-model them we refuse loudly
-    (correctness-first — the native complementarity node is the #231 follow-up).
+    ``flag`` records which of the variable's bounds are finite. AMPL MP
+    ``ComplInfo`` (``include/mp/nl-reader.h``) names the bits after the body
+    bound they imply: ``INF_UB = 1`` (finite variable lower bound ⇒ body upper
+    bound ``+inf``, so ``body >= 0``) and ``INF_LB = 2`` (finite variable upper
+    bound ⇒ body lower bound ``-inf``, so ``body <= 0``). AMPL relies on this:
+    it drops a body variable's own 0 bound as implied by the relation. Measured
+    with AMPL on ``3 <= x <= Infinity complements y``: row ``5 1 1``, ``x``
+    written ``>= 3``, ``y``'s ``>= 0`` bound omitted (#2056).
+
+    discopt's primitive is :math:`0 \le a \perp b \ge 0`. The single-bounded
+    forms map onto it exactly:
+
+    * ``flag == 1`` (``x >= lb``): ``a = body``, ``b = x - lb``;
+    * ``flag == 2`` (``x <= ub``): ``a = -body``, ``b = ub - x``.
+
+    A flag that disagrees with the variable's finite bounds is a malformed file
+    and is refused, as are the doubly-bounded (``flag == 3``) and free
+    (``flag == 0``) forms, which need the box-MCP lowering
+    (``docs/dev/box-mcp-lowering-plan.md``) rather than this primitive.
     """
-    inf_lb = bool(flag & 1)  # ComplInfo INF_LB: body lower bound is -inf
-    inf_ub = bool(flag & 2)  # ComplInfo INF_UB: body upper bound is +inf
-    body_ge0 = (not inf_lb) and inf_ub  # body in [0, +inf)
-    body_le0 = inf_lb and (not inf_ub)  # body in (-inf, 0]
+    from discopt.constants import DEFAULT_VARIABLE_BOUND
 
     x = m._variables[var_index]
-    xlb = float(np.min(np.asarray(x.lb)))
-    xub = float(np.max(np.asarray(x.ub)))
-    x_ge0 = xlb >= 0.0  # x >= 0
-    x_le0 = xub <= 0.0  # x <= 0
+    lb_arr = np.asarray(x.lb, dtype=float)
+    ub_arr = np.asarray(x.ub, dtype=float)
+    if lb_arr.size != 1 or ub_arr.size != 1:
+        raise ValueError(
+            f"from_nl: complementarity row {index} names variable {x.name!r}, which "
+            f"is not scalar (shape {lb_arr.shape}); a .nl variable is always scalar."
+        )
+    xlb = float(lb_arr.reshape(-1)[0])
+    xub = float(ub_arr.reshape(-1)[0])
+    # A side at the default-bound sentinel means "unbounded", exactly as the .nl
+    # convention reads a magnitude >= 1e20 (see ``_downgrade_defaulted_box``).
+    _sentinel = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    lb_finite = bool(np.isfinite(xlb)) and abs(xlb) < _sentinel
+    ub_finite = bool(np.isfinite(xub)) and abs(xub) < _sentinel
+    expected_flag = int(lb_finite) | (2 * int(ub_finite))
 
     def _unsupported(reason: str) -> ValueError:
         return ValueError(
-            f"from_nl: complementarity on variable {x.name!r} has an unsupported "
-            f"bound configuration ({reason}; flag={flag}, x in [{xlb:g}, {xub:g}]). "
-            "The .nl → GDP slice (#658) handles single-bounded MPEC forms "
-            "(body >= 0 or body <= 0, complementary to a single-signed variable); "
-            "richer complementarity requires the native node tracked in #231."
+            f"from_nl: complementarity row {index} on variable {x.name!r} has an "
+            f"unsupported bound configuration ({reason}; flag={flag}, "
+            f"x in [{xlb:g}, {xub:g}]). The .nl → GDP slice handles the "
+            "single-bounded forms body ⊥ x >= lb (flag 1) and body ⊥ x <= ub "
+            "(flag 2); the doubly-bounded and free forms need box-MCP lowering "
+            "(docs/dev/box-mcp-lowering-plan.md, #231)."
         )
 
-    if not (body_ge0 or body_le0):
-        _kind = "body fixed to 0" if (not inf_lb and not inf_ub) else "body free / double-bounded"
-        raise _unsupported(_kind)
-    if not (x_ge0 or x_le0):
-        raise _unsupported("complementary variable is free / straddles 0")
+    if flag not in (0, 1, 2, 3):
+        raise _unsupported("flag is not an AMPL MP ComplInfo value in {0, 1, 2, 3}")
+    if flag != expected_flag:
+        raise ValueError(
+            f"from_nl: complementarity row {index} is malformed: flag={flag} says the "
+            f"complementary variable {x.name!r} has "
+            f"{_describe_compl_flag(flag)}, but its bounds are [{xlb:g}, {xub:g}] "
+            f"({_describe_compl_flag(expected_flag)}). AMPL derives the flag from "
+            "the variable's bounds, so the two must agree; the relation the file "
+            "intends is ambiguous and is not guessed (#2056)."
+        )
+    if flag == 3:
+        raise _unsupported("doubly-bounded complementary variable (box MCP)")
+    if flag == 0:
+        raise _unsupported("free complementary variable (body == 0)")
 
-    # Orient both sides nonnegative. Negating a side flips the sign of the zero
-    # product but not whether it is zero, so ``a * b == 0`` is preserved exactly.
-    a = body if body_ge0 else -body
-    b = x if x_ge0 else -x
+    # Orient both sides nonnegative and measure the variable from its bound.
+    # ``x - lb`` and ``ub - x`` are >= 0 by the variable's own bound, and are 0
+    # exactly when ``x`` sits at that bound, which is when the MCP lets the body
+    # be nonzero.
+    if flag == 1:
+        a = body
+        b = x - xlb if xlb != 0.0 else x
+    else:  # flag == 2
+        a = -body
+        b = xub - x
     # Name the relation after its ``.nl`` row. Two things depend on it: the rows
     # generated below are named from it (an unnamed relation falls back to
     # ``compl0`` for *every* pair, since the fallback counts within the single
@@ -14299,6 +14335,16 @@ def _add_nl_complementarity(
     # and the provenance record #1147 carries through the rebuilding passes is
     # identifiable in an error message without parsing generated identifiers.
     m.complementarity(a, b, method="gdp", name=f"nl_compl{index}")
+
+
+def _describe_compl_flag(flag: int) -> str:
+    """Human-readable bound pattern for an AMPL ``ComplInfo`` flag."""
+    return {
+        0: "no finite bound",
+        1: "only a finite lower bound",
+        2: "only a finite upper bound",
+        3: "finite lower and upper bounds",
+    }[flag]
 
 
 def from_gams(path: str) -> Model:

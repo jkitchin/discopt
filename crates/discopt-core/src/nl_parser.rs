@@ -2313,9 +2313,11 @@ mod tests {
     }
 
     /// Small MPCC with a complementarity (type-5) constraint bound:
-    ///   min (x-1)^2 + (y-1)^2   s.t.   0 <= x  ⊥  y >= 0,   x,y in [0,10]
-    /// The `r` row `5 2 2` is: type 5, flag=2 (body >= 0), complementary
-    /// variable index 2 (1-based) = y. The body is the linear expression `x`.
+    /// The `r` row `5 2 2` is: type 5, flag=2, complementary variable index 2
+    /// (1-based) = y. The body is the linear expression `x`. This is a parser-only
+    /// fixture: AMPL MP reads flag 2 as "variable upper bound finite" and would
+    /// write flag 3 for `y in [0,10]`, so `from_nl` refuses it as malformed
+    /// (#2056). The parser records the raw flag either way.
     fn complementarity_nl() -> String {
         let mut s = String::new();
         s.push_str("g3 1 1 0\n");
@@ -2347,7 +2349,7 @@ mod tests {
         s.push_str("x2\n");
         s.push_str("0 0.5\n");
         s.push_str("1 0.5\n");
-        // r: complementarity — body(=x) >= 0 (flag 2), complements var #2 (y).
+        // r: complementarity — raw flag 2, complements var #2 (y).
         s.push_str("r\n");
         s.push_str("5 2 2\n");
         // b: 0 <= x <= 10,  0 <= y <= 10

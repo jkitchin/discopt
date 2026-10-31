@@ -37,6 +37,13 @@ This is what `Model.complementarity` and the `.nl` type-5 importer produce, and
 the only form any lowering in `discopt.mpec` encodes today (GDP disjunction,
 SOS1, Scholtes regularization).
 
+A `.nl` row `5 flag i` is a box MCP `body ⊥ x_i in [lb, ub]` whose `flag`
+records which bounds of `x_i` are finite (AMPL MP `ComplInfo`: 1 = lower,
+2 = upper, 3 = both). `from_nl` lowers the single-bounded rows exactly as NCP
+pairs measured from the bound: flag 1 → `(body, x - lb)`, flag 2 →
+`(-body, ub - x)`. It refuses flag 3 and flag 0 (box MCP, not yet lowered) and
+any flag that contradicts the variable's own bounds (#2056).
+
 ### Box MCP — `F(z) ⊥ z in [l, u]`
 
 A *residual* paired with a *bounded* variable:

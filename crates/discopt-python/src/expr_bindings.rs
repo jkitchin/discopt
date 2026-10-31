@@ -754,7 +754,8 @@ impl PyModelRepr {
     /// `body_expr_id` indexes the expression arena (walk it with `get_node`);
     /// `complementary_var_index` is the 0-based variable the body is
     /// complementary to; `flag` is the raw AMPL MP `ComplInfo` bound flag
-    /// (bit 0 ⇒ body lower bound `-inf`, bit 1 ⇒ body upper bound `+inf`).
+    /// (bit 0 ⇒ variable lower bound finite, body upper bound `+inf`; bit 1 ⇒
+    /// variable upper bound finite, body lower bound `-inf`; #2056).
     fn complementarity_info(&self, i: usize) -> PyResult<(usize, usize, usize)> {
         let c = self.complementarities.get(i).ok_or_else(|| {
             pyo3::exceptions::PyIndexError::new_err(format!(

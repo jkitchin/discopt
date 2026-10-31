@@ -25,12 +25,27 @@ import discopt.modeling.core as dm
 import pytest
 from discopt._rust import parse_nl_string
 
+# The #658 fixture. It is parsed here only at the raw-row level: its flag (2, on a
+# variable with both bounds finite) was written for a swapped reading of AMPL's
+# ComplInfo bits, so ``from_nl`` now refuses it as malformed (#2056). It stays
+# byte-for-byte because the serialization golden documents pin its digest.
 _FIXTURE = Path(__file__).parent / "data" / "mpcc_complementarity.nl"
-
-# The committed fixture, inlined so the parser tests do not depend on file IO.
-#   min (x-1)^2 + (y-1)^2   s.t.   0 <= x  ⊥  y >= 0,   x,y in [0,10]
-# Global optimum: 1.0 at (0,1) or (1,0).
 _NL = _FIXTURE.read_text()
+
+# AMPL output for   min (x-1)^2 + (y-1)^2   s.t.   0 <= y <= Infinity complements x,
+# x <= 10, cap: y <= 10   (``data/nl_complementarity/ampl_base.mod``). Global
+# optimum 1.0 at (0,1) or (1,0). AMPL omits x's ``>= 0`` (implied by the relation)
+# and leaves y's ``<= 10`` as a row, so ``_load_base`` restores both declared
+# bounds for a finite big-M; the feasible set is unchanged.
+_BASE = Path(__file__).parent / "data" / "nl_complementarity" / "ampl_base.nl"
+
+
+def _load_base():
+    m = dm.from_nl(str(_BASE))
+    x0, x1 = m._variables
+    x0.lb, x0.ub = 0.0, 10.0
+    x1.lb, x1.ub = 0.0, 10.0
+    return m
 
 
 def test_parser_records_pair_and_no_fabricated_constraint():
@@ -45,7 +60,7 @@ def test_parser_records_pair_and_no_fabricated_constraint():
 
     body_id, var_index, flag = repr_.complementarity_info(0)
     assert var_index == 1  # complementary variable is y (0-based)
-    assert flag == 2  # AMPL MP ComplInfo: body >= 0
+    assert flag == 2  # raw value; AMPL MP ComplInfo INF_LB (finite variable upper bound)
     # body is the linear expression `x` (arena variable node, index 0)
     node = repr_.get_node(body_id)
     assert node["type"] == "variable"
@@ -55,7 +70,7 @@ def test_parser_records_pair_and_no_fabricated_constraint():
 def test_from_nl_lowers_to_gdp_no_native_path():
     """`from_nl` records the pair, lowers it to a disjunction, drops the native
     `.nl` fast path (the reformulated model no longer matches the raw file)."""
-    m = dm.from_nl(str(_FIXTURE))
+    m = dm.from_nl(str(_BASE))
 
     assert len(m._variables) == 2
     assert len(m._complementarities) == 1
@@ -67,7 +82,7 @@ def test_from_nl_lowers_to_gdp_no_native_path():
 
 def test_from_nl_mpcc_matches_python_build():
     """A `.nl` MPCC solves to the same global optimum as the Python build."""
-    m_nl = dm.from_nl(str(_FIXTURE))
+    m_nl = _load_base()
     res_nl = m_nl.solve()
 
     m_py = dm.Model("equiv")
@@ -88,10 +103,10 @@ def test_from_nl_mpcc_matches_python_build():
 
 
 def test_unsupported_complementarity_config_refuses_loudly():
-    """A free/double-bounded body (flag=3) that cannot map onto the nonnegative
-    primitive is refused loudly rather than silently mis-modeled (#658 scope)."""
-    # Same fixture but with the complementarity flag set to 3 (body free): the
-    # `.nl → GDP` slice cannot express this soundly, so `from_nl` must raise.
+    """A doubly-bounded complementary variable (flag=3, body free) cannot map onto
+    the nonnegative primitive and is refused loudly rather than silently
+    mis-modeled (#658 scope; box-MCP lowering is the follow-up)."""
+    # Same fixture with the flag AMPL would write for y in [0, 10]: 3.
     nl_free = _NL.replace("5 2 2", "5 3 2")
     fd, path = tempfile.mkstemp(suffix=".nl")
     os.write(fd, nl_free.encode())

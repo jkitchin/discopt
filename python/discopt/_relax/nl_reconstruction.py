@@ -157,8 +157,9 @@ def reconstruct_complementarities(
     Returns a list of ``(body_expression, var_index, flag)`` tuples, where
     ``body_expression`` is the constraint body complementary to the variable at
     ``var_index`` (0-based), and ``flag`` is the raw AMPL MP ``ComplInfo`` bound
-    flag for the body (bit 0 ⇒ lower bound ``-inf``, bit 1 ⇒ upper bound
-    ``+inf``; an unset bit means the corresponding bound is 0).
+    flag: bit 0 ⇒ the variable has a finite lower bound (body upper bound
+    ``+inf``), bit 1 ⇒ a finite upper bound (body lower bound ``-inf``). See
+    ``discopt.modeling.core._add_nl_complementarity`` (#2056).
 
     Returns an empty list when the representation carries no complementarities
     (the common, non-MPEC case), so callers can cheaply skip the arena walk.

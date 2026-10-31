@@ -31,6 +31,19 @@ NL_FILES = {
     "from_nl_mpcc": os.path.join(DATA_DIR, "mpcc_complementarity.nl"),
 }
 
+#: Cases today's discopt refuses to build, by design, with a regex the refusal must
+#: match. A golden document written from such a case stays immutable and is still
+#: loaded and reload-checked; only the "today's build equals it" comparison is
+#: replaced by "today's build refuses, for this reason".
+#:
+#: ``from_nl_mpcc``: ``mpcc_complementarity.nl`` writes flag 2 on a variable with
+#: both bounds finite. That was read through a swapped decoding of AMPL's ComplInfo
+#: bits; AMPL would write flag 3. ``from_nl`` now refuses the row as malformed
+#: (#2056), so every document written from it records the old, wrong reading.
+RETIRED = {
+    "from_nl_mpcc": r"complementarity row 0 is malformed: flag=2",
+}
+
 
 def scalar_nlp():
     import discopt.modeling as dm

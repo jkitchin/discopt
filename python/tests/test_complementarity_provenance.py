@@ -514,8 +514,12 @@ def test_lowered_model_is_row_for_row_unchanged_by_the_provenance_carry():
 def test_nl_imported_complementarity_survives_the_gdp_pass():
     from pathlib import Path
 
-    fixture = Path(__file__).parent / "data" / "mpcc_complementarity.nl"
+    fixture = Path(__file__).parent / "data" / "nl_complementarity" / "ampl_base.nl"
     m = dm.from_nl(str(fixture))
+    # AMPL leaves these sides open (implied by the relation / a cap row); big-M
+    # needs them finite. Restoring the .mod's declared bounds changes nothing.
+    for v in m._variables:
+        v.lb, v.ub = 0.0, 10.0
     assert len(m._complementarities) == 1
     pair = m._complementarities[0]
 
