@@ -235,3 +235,49 @@ For the G5 entry experiments:
   since the eps-perspective still evaluates g at 0 when y = 0, so this is not yet
   scoped to a task. (Superseded 2026-10-31: see the `_origin_free_hull_row` update under Errors.)
 * LOA's gap is 4 instances, not speed.
+
+## G4.1 part 2: per-cut big-M on LOA's OA cuts — measured, not adopted (2026-10-31, #1917)
+
+**Hypothesis.** Spec §5.3 asks for OA cuts "big-M'd onto that disjunct's indicator"
+(Pyomo `_add_cuts_to_discrete_problem`) instead of linearised through the lowered
+row's `M(1 - y)`. For a cut `a x + b y <= c` with `y` binary this is classical
+coefficient strengthening: if the cut has slack `d > 0` at `y = 0` over the whole
+box, replace `(b, c)` by `(b - d, c - d)`. That is exact at `y in {0, 1}` and tighter
+in between. Kill criterion: no fewer master iterations and no better bound on the
+instances it fires on.
+
+**Experiment.** `docs/dev/data/1917-loa-cut-strengthening/loa_strengthen.py` patches
+`LOA._cuts_at` to strengthen every new cut over the lowered box (outward-rounded).
+It runs `gdp_method="loa"` OFF/ON interleaved, at 120 s, on the 7 Pyomo GDPopt
+models (the only `gdp_parity` instances available here; see
+`1917-flag-panel-preview/README.md`). Main `4517c7b`, default master
+(`DEFAULT_MASTER_BACKEND="auto"`, the in-house MILP).
+
+| instance | coefs tightened | OFF it / status | ON it / status |
+|---|---|---|---|
+| eight_process | 1825 | 3 / optimal | 25 / feasible, **no bound** |
+| eight_process_logical | 1475 | 3 / optimal | 25 / feasible, **no bound** |
+| constrained_layout_clay0203 | 1764 | 45 / optimal (39 s) | 48 / time limit, **no bound** |
+| nonconvex_hen | 672 | 28 / optimal | 28 / optimal (identical) |
+| strip_packing_concrete, jobshop_small | 48, 12 | 1 / optimal | identical |
+| ex_633_trespalacios | 0 (no convex row) | 5 / optimal | identical |
+
+**Why.**
+- The strengthening is valid. `loa_strengthen_check.py` evaluated 876 checks of the
+  OFF run's master points against the strengthened cuts, and **0** were cut off.
+- With strengthened cuts every master on eight_process ends `iteration_limit`
+  (25 of 25), against 3 of 3 `optimal` without them (`loa_master_status.py`). With
+  no master bound, LOA walks the configurations blind.
+- On the HiGHS master (`milp_solver="highs"`) the two arms are identical (3
+  masters, same bound): HiGHS's presolve already does this strengthening.
+
+**Verdict: falsified on this slice.** The change is neutral where the master
+presolves and harmful where it does not, so it is not adopted. The other G4.1
+part 2 pieces (equality relaxation, slack penalty) give **no** valid LB (spec
+§5.3, §5.4), so they can only help where LOA fails to converge. All 7 available
+models certify under LOA, so there is no instance to measure them on: blocked
+on the full panel.
+
+**Side finding.** The in-house MILP master hits its iteration limit on
+coefficient-strengthened OA rows that HiGHS solves at once. That is a
+master-robustness defect outside #1917's scope; the probe above reproduces it.
