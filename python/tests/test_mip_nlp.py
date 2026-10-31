@@ -4228,7 +4228,7 @@ def test_oa_regularized_master_builds_linear_distance_objective(monkeypatch, mod
     assert len(captured["c"]) == 4 + expected_aux
     assert captured["c"][4:].tolist() == pytest.approx([1.0] * expected_aux)
     assert captured["integrality"][:4].tolist() == decomp.integrality.tolist()
-    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["A_ub"].toarray()[0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
     assert captured["b_ub"][0] == pytest.approx(2.0)
 
 
@@ -4262,7 +4262,7 @@ def test_oa_regularized_master_builds_l2_qp_distance_objective(monkeypatch):
     assert np.diag(captured["Q"]).tolist() == pytest.approx([2.0, 2.0, 2.0, 2.0])
     assert captured["c"].tolist() == pytest.approx([-1.0, -2.0, 0.0, -4.0])
     assert captured["integrality"].tolist() == decomp.integrality.tolist()
-    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["A_ub"].toarray()[0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
     assert captured["b_ub"][0] == pytest.approx(2.0)
 
 
@@ -4303,7 +4303,7 @@ def test_oa_regularized_master_builds_grad_lag_objective(monkeypatch):
     assert x_regularized.tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0])
     assert captured["c"].tolist() == pytest.approx([1.0, -2.0, 3.0, -4.0])
     assert captured["integrality"].tolist() == decomp.integrality.tolist()
-    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["A_ub"].toarray()[0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
     assert captured["b_ub"][0] == pytest.approx(2.0)
 
 

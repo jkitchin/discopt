@@ -251,6 +251,11 @@ def test_master_layout_puts_the_block_last_with_start_values():
 def test_the_flag_is_wired_and_keeps_the_answer(monkeypatch):
     from discopt.solvers.oa import solve_lp_nlp_bb
 
+    # This model's risk row is a norm ball, which the #2059 outer approximation
+    # (``DISCOPT_OA_SOC_OUTER``, default ON) covers, and a covered row does not get
+    # this block. The test is about this block, so it runs with that one off; the
+    # interaction is pinned in ``test_2059_soc_outer.py``.
+    monkeypatch.setenv("DISCOPT_OA_SOC_OUTER", "0")
     monkeypatch.setenv(FLAG, "0")
     off = solve_lp_nlp_bb(_portfolio(), time_limit=60.0, milp_solver="highs")
     monkeypatch.setenv(FLAG, "1")
