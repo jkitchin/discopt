@@ -489,6 +489,13 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt.decomposition.learning.store", "RecordStore", "trivial", "constructor"),
     ("discopt.mpec", "require_all_relations_lowered", "trivial", "predicate over rows"),
     (
+        "discopt.mpec",
+        "refresh_lowering_bounds",
+        "trivial",
+        "one interval walk per lowering-derived aux bound (#2061 review); "
+        "measured linear, ~92 us/bound at 50-800 bounds",
+    ),
+    (
         "discopt.ro.formulations._common",
         "check_sign_assumptions",
         "trivial",
