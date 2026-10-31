@@ -6043,6 +6043,56 @@ def _highs_master_no_submip() -> bool:
     )
 
 
+#: #2059: the share of the remaining budget an abandoned HiGHS ``lp_nlp_bb``
+#: master's #1634 cross-solve may spend under ``DISCOPT_ROUTE_ABANDON_CROSS_CHECK``.
+#: 0.10 is the issue's kill criterion, not a tuned value: the cross-solve had to
+#: confirm the route's bound inside 10% of what is left, or the idea was dead.
+_ABANDON_CROSS_CHECK_FRACTION = 0.10
+
+
+def _route_abandon_cross_check_fraction() -> float:
+    """#2059: ``DISCOPT_ROUTE_ABANDON_CROSS_CHECK`` -- let an abandoned HiGHS
+    ``lp_nlp_bb`` master confirm its bound before the #1066 hand-over.
+
+    **Defect.** When the #1066 guard hands the route over (``"abandon"``), the
+    master's #1634 presolve-free cross-solve is given no time, so its bound is
+    withdrawn -- correctly, since the primary tree runs with presolve on -- and the
+    solve publishes only the fallback's bound. No budget was ever reserved to
+    confirm it. On portfol_classical050_1 at 120 s that discards a route bound of
+    -0.096817 for the fallback's continuous -0.097767 (opt -0.094760).
+
+    **Entry experiment** (performance-plan section 103.13): a shadow cross-solve
+    on the abandoned final master, outside the solve, confirmed the claim in
+    3.0 s (71 nodes, ``DISCOPT_PERSPECTIVE_ROW_DISAGG`` tree) and solved it to
+    optimality in 2.5 s (420 nodes, main), against ~57 s left at hand-over: inside
+    the 10% kill criterion. With this on the cross-solve gets
+    :data:`_ABANDON_CROSS_CHECK_FRACTION` of the remaining budget and stops at the
+    claim; an unconfirmed bound is still lowered or withdrawn, so soundness rests
+    on exactly the rule it rested on before.
+
+    End to end at 120 s (default solve, one run per arm, incumbents verified): the
+    reported bound moves -0.097774 -> -0.097357 on main and -0.097774 -> -0.096817
+    with ``DISCOPT_PERSPECTIVE_ROW_DISAGG``; wall unchanged (~120 s). It does not
+    certify the instance: the route's master bound is the limit there.
+
+    **Graduated (default ON, #2059).** Bound-changing (a bound that was withdrawn
+    is now published) and it moves the fallback's budget, so CLAUDE.md section 5
+    regime 2. Panel over the 102 routed instances (``issue1913_pseudocost_panel.py
+    --flag DISCOPT_ROUTE_ABANDON_CROSS_CHECK``, 30 s, 2 workers, interleaved, every
+    incumbent verified): 612 checks, 0 problems, no certificate lost, total wall
+    460.4 -> 444.9 s. Tighter bounds where the guard handed over: clay0205m
+    1320.0 -> 4059.6, clay0305m 1072.5 -> 3996.3, tls4 1.86 -> 2.6 (3/3 reruns,
+    2.6-2.8 vs 1.85-1.89), portfol_classical050_1 -0.097774 -> -0.097376; every
+    other bound identical. The panel's one certificate gained (slay07m) did not
+    reproduce: 3/3 reruns certify in both arms. ``=0`` restores the withdraw-only
+    hand-over. Returns the fraction, ``0.0`` when off.
+    """
+    raw = os.environ.get("DISCOPT_ROUTE_ABANDON_CROSS_CHECK", "1").strip().lower()
+    if raw in ("0", "", "false", "no", "off"):
+        return 0.0
+    return _ABANDON_CROSS_CHECK_FRACTION
+
+
 def _oa_support_cuts_enabled() -> bool:
     """#2013 (p_ball): ``DISCOPT_OA_SUPPORT_CUTS`` -- seed the ``lp_nlp_bb`` master
     with supporting hyperplanes of every convex row at the extremes of each of its
@@ -7349,6 +7399,12 @@ def solve_lp_nlp_bb(
     highs_no_submip = lazy_backend == "highs" and _highs_master_no_submip()
     if highs_no_submip:
         lazy_kwargs["highs_options"] = dict(_HIGHS_MASTER_NO_SUBMIP_OPTIONS)
+    if lazy_backend == "highs":
+        # #2059: an abandoned master may spend a share of the remaining budget on
+        # the #1634 cross-solve that confirms its bound (0 = withdraw, as before).
+        abandon_share = _route_abandon_cross_check_fraction()
+        if abandon_share > 0.0:
+            lazy_kwargs["abandon_cross_check_fraction"] = abandon_share
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
     elif lazy_backend == "simplex":

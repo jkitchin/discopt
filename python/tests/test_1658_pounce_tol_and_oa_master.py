@@ -340,15 +340,21 @@ def test_lazy_master_does_not_judge_offers_from_a_stale_tree(monkeypatch, n, see
     assert seen and sum(int(s.get("stale_offers", 0)) for s in seen) >= 1, seen
 
 
-def test_hook_stop_does_not_spend_the_budget_on_the_cross_check():
+def test_hook_stop_does_not_spend_the_budget_on_the_cross_check(monkeypatch):
     """#1673 review B2: when the caller's termination hook stops the lazy master
     (the #1066 guard handing over to the fallback), the #1634 cross-solve must not
     run on the route's remaining budget -- on rsyn0815m03m it ran 17.0 s -> 26.2 s
     of a 30 s limit and the fallback overran to 36.3 s. The bound it would have
-    confirmed is withdrawn instead."""
+    confirmed is withdrawn instead.
+
+    Pinned to ``DISCOPT_ROUTE_ABANDON_CROSS_CHECK=0``: since #2059 the default
+    gives the cross-solve a capped share of the remaining budget, which
+    ``test_2059_abandon_cross_check.py`` covers; this keeps the opt-out honest."""
     import time
 
     from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    monkeypatch.setenv("DISCOPT_ROUTE_ABANDON_CROSS_CHECK", "0")
 
     calls = []
 
