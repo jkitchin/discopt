@@ -35,7 +35,7 @@ instance_list_inline = [
 time_limit_seconds = 60
 
 [suites.scip_wins]
-description = "4 small MINLPLib instances (<=200 vars/cons) SCIP solves in <=5 s and discopt does not in 120 s (2026-10-31 screen)"
+description = "3 small MINLPLib instances (<=200 vars/cons) SCIP solves in <=5 s and discopt does not in 120 s (2026-10-31 screen)"
 sources = ["minlplib"]
 instance_list = "config/suites/scip_wins.txt"
 time_limit_seconds = 120

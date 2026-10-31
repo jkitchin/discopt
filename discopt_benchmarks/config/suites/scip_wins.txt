@@ -3,14 +3,12 @@
 # 120 s. Measured 2026-10-31 over MINLPLib <= 200 vars/cons; method and full numbers in
 # docs/dev/scip-wins-2026-10-31.md (previous rounds: scip-wins-2026-10-25.md, -10-21.md).
 # Every instance the stage-2 screen confirmed, grouped by class; re-derive the
-# list from the screen, do not extend it by hand. The QPLIB arm of the screen is not
-# loadable here (the runner reads .nl only); it is reported in the doc.
+# list from the screen, do not extend it by hand. portfol_classical050_1 was confirmed
+# too, then certified by #2064 (29 s) before this list landed; see the doc. The QPLIB
+# arm of the screen is not loadable here (the runner reads .nl only); it is in the doc.
 #
 # Not vendored: run with --fetch (or --use-cache). Tracked in #2006 (round 3 of #1913).
 #
-# convex MBQCP, cardinality-constrained portfolio: suboptimal incumbent, the OA master's
-# tree count bounds it (performance-plan section 103, #2021) (SCIP 3.4 s)
-portfol_classical050_1
 # nonconvex QCQP: optimal incumbent, no dual bound (negative-cost open ray, #1975) (SCIP 0.02 s)
 prolog
 # nonconvex NLP, fractional powers: optimal incumbent, root gap (section 102, #2015) (SCIP 0.02 s)
