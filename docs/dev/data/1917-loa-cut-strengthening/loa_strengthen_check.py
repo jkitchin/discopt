@@ -2,7 +2,7 @@
 satisfies all original cuts; does it satisfy their strengthened versions?"""
 import sys, warnings
 import numpy as np
-sys.path.insert(0, "/tmp/claude-0/-home-user-discopt/d819391c-57a9-5bca-a621-35a69affc009/scratchpad/probes")
+sys.path.insert(0, "docs/dev/data/1917-loa-cut-strengthening")
 warnings.simplefilter("ignore")
 sys.argv = ["x", "", "60"]
 import importlib.util
