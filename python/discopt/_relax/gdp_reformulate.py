@@ -16,6 +16,7 @@ original model is returned unchanged (zero overhead).
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import warnings
 from collections.abc import Callable
@@ -138,7 +139,44 @@ def _require_reformulation_method(method: object, what: str) -> None:
         raise ValueError(f"Unknown {what} {method!r}. Choose one of: {allowed}.")
 
 
+#: ``id(row) -> cap`` for the lowering in progress (``DISCOPT_GDP_DISJUNCT_FBBT``,
+#: #1917 G5.1): :func:`_compute_big_m` returns ``min(M, cap)`` for such a row. Set
+#: only for the duration of one :func:`reformulate_gdp` call.
+_DISJUNCT_LOCAL_CAPS: contextvars.ContextVar[Optional[dict[int, float]]] = contextvars.ContextVar(
+    "discopt_gdp_disjunct_local_caps", default=None
+)
+
+
 def reformulate_gdp(
+    model: Model,
+    method: str = "big-m",
+    *,
+    respect_disjunction_methods: bool = True,
+    fbbt_deadline: Optional[float] = None,
+) -> Model:
+    """Replace GDP constraints with standard MINLP constraints.
+
+    See :func:`_reformulate_gdp` for the parameters. With ``DISCOPT_GDP_DISJUNCT_FBBT``
+    (default OFF, #1917 G5.1) every big-M of a root one-way disjunction's row is
+    capped by the bound of its body over its siblings' disjunct-local FBBT boxes
+    (:mod:`discopt.gdp.bounds`).
+    """
+    from discopt.gdp.bounds import _enabled, disjunct_local_big_m_caps
+
+    caps = disjunct_local_big_m_caps(model) if _enabled() else None
+    token = _DISJUNCT_LOCAL_CAPS.set(caps or None)
+    try:
+        return _reformulate_gdp(
+            model,
+            method,
+            respect_disjunction_methods=respect_disjunction_methods,
+            fbbt_deadline=fbbt_deadline,
+        )
+    finally:
+        _DISJUNCT_LOCAL_CAPS.reset(token)
+
+
+def _reformulate_gdp(
     model: Model,
     method: str = "big-m",
     *,
@@ -987,7 +1025,14 @@ def _compute_big_m(
 
     # Ensure M is positive and add small safety margin. ``default`` is a floor
     # (a body whose valid bound is tiny still needs a nonzero M), never a cap.
-    return max(abs(M), 1e-8) * 1.01
+    M = max(abs(M), 1e-8) * 1.01
+    # #1917 G5.1 (DISCOPT_GDP_DISJUNCT_FBBT): the body need only be bounded where
+    # the row is relaxed, i.e. over its siblings' disjunct-local boxes. Applied
+    # after every refusal above, so it only ever lowers a valid finite M.
+    caps = _DISJUNCT_LOCAL_CAPS.get()
+    if caps is not None and id(constraint) in caps:
+        M = min(M, caps[id(constraint)])
+    return M
 
 
 def _unbounded_big_m_error(constraint: Constraint, direction: str) -> ValueError:

@@ -1236,6 +1236,25 @@ class SolverTuning:
     root, 1 node; big-M 0.1 s. **State: default OFF, panel
     owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    gdp_disjunct_fbbt: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_DISJUNCT_FBBT", default=False)
+    )
+    """Cap each big-M of a root one-way disjunction's row by its body bound over the
+    siblings' disjunct-local FBBT boxes (``DISCOPT_GDP_DISJUNCT_FBBT``, default
+    **OFF**; bound-changing wherever big-M lowers a disjunction; #1775 G5.1, #1917).
+    :mod:`discopt.gdp.bounds` has the soundness argument.
+
+    Entry experiment (spec §7 kill: median M ratio >= 0.9 *and* root bound unchanged
+    on >= 90% of instances; 7 Pyomo GDPopt models, main ``4517c7b``). The pooled
+    median M ratio is 1.0 over 165 rows, but the per-instance medians are 0.64
+    (eight_process), 0.82 (eight_process_logical) and 0.35 (nonconvex_hen), with 1.0
+    on the other 4. Global FBBT alone gives 1.0 except hen at 0.76. The root bound
+    (``max_nodes=1``, big-M) changes on 3 of 7: eight_process -1195.3 -> 43.8
+    (optimum 68.01), nodes to certify 33 -> 5; eight_process_logical -1184.7 -> 57.8,
+    25 -> 3; nonconvex_hen 92919 -> 112003 (optimum 114385). Every run certified the
+    same optimum. The kill criterion is not met. **State: default OFF, panel
+    owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=False)
     )
