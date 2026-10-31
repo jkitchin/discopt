@@ -7,9 +7,10 @@ each probe is capped only by the sweep's remaining ``deadline``. Before honoring
 per-LP cap (a bound-changing change, CLAUDE.md section 5) this measures, per probe on
 the default solve path:
 
-* its wall time, and the caller's ``time_limit_per_lp`` (read from the
-  ``_solve_probe`` closure that called the probe -- the exact value the caller
-  passed, not a guess);
+* its wall time, and the ``time_limit_per_lp`` its sweep was called with
+  (``run_obbt_on_relaxation`` is wrapped to record the cap per sweep, and every probe
+  run inside that sweep is tagged with it; a probe outside a recorded sweep fails the
+  run);
 * whether its optimum would tighten the box (the raw vertex vs the current bound,
   with the sweep's ``eps``; an upper bound on what the NS-clamped sweep tightens).
 
@@ -20,7 +21,7 @@ the cap, or none that do tighten -> record and document; otherwise run the panel
 Each instance runs in its own subprocess (hard timeout ``time_limit + 60`` s) and
 appends one JSON line to ``<out>/probes.jsonl``; a rerun resumes. Every instance
 line carries its probe count, and ``--analyze`` exits non-zero when no probe fired
-anywhere (CLAUDE.md section 6).
+anywhere or no probe ran under a per-LP cap (CLAUDE.md section 6).
 
 Usage::
 
@@ -29,6 +30,8 @@ Usage::
     python -u discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py --out <dir> \\
         --corpus minlplib200 --time-limit 30 --workers 3
     python -u discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py --out <dir> \\
+        --corpus minlplib200to2000 --time-limit 60 --workers 2
+    python -u discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py --out <dir> \\
         --files <dir>/QPLIB_5875.qplib --time-limit 30 --workers 1
     python discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py --out <dir> --analyze
 """
@@ -36,7 +39,9 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import os
 import subprocess
 import sys
 import time
@@ -60,11 +65,23 @@ def _child(nl: str, tl: float) -> None:
     assert "time_limit_s=budget" in Path(obbt.__file__).read_text(), obbt.__file__
 
     probes: list[list] = []
+    sweep_caps: list = []  # stack: the ``time_limit_per_lp`` of each active sweep
+    orig_sweep = obbt.run_obbt_on_relaxation
     orig = obbt._PersistentProbeLP.solve
 
+    def sweep(*args, **kwargs):
+        bound = inspect.signature(orig_sweep).bind(*args, **kwargs)
+        bound.apply_defaults()
+        sweep_caps.append(bound.arguments["time_limit_per_lp"])
+        try:
+            return orig_sweep(*args, **kwargs)
+        finally:
+            sweep_caps.pop()
+
     def rec(self, c, lb_arr, ub_arr, warm_basis, time_limit_s=None):
-        f = sys._getframe(1)  # ``_solve_probe`` inside ``run_obbt_on_relaxation``
-        cap = f.f_locals["time_limit_per_lp"]
+        if not sweep_caps:
+            raise RuntimeError("persistent probe outside a recorded OBBT sweep")
+        cap = sweep_caps[-1]
         out = orig(self, c, lb_arr, ub_arr, warm_basis, time_limit_s=time_limit_s)
         st, obj, _d, _b, wall = out
         j = int(np.argmax(np.abs(c)))
@@ -74,6 +91,12 @@ def _child(nl: str, tl: float) -> None:
         probes.append([wall, cap, time_limit_s, str(st.value), tight])
         return out
 
+    # Replace every module-level binding of the sweep (``obbt`` itself and any module
+    # that did ``from ... import run_obbt_on_relaxation``); modules imported later
+    # read the patched ``obbt`` attribute.
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "run_obbt_on_relaxation", None) is orig_sweep:
+            mod.run_obbt_on_relaxation = sweep
     obbt._PersistentProbeLP.solve = rec
     t0 = time.perf_counter()
     if nl.endswith(".qplib"):
@@ -102,7 +125,12 @@ def _panel(corpus: str, out: Path, files: list[str]) -> list[tuple[str, Path]]:
     sys.path.insert(0, str(REPO / "discopt_benchmarks" / "scripts"))
     import scip_wins_screen as s
 
-    rows = s.build_panel(out, 200, 200, None)
+    if corpus == "minlplib200":
+        rows = s.build_panel(out, 200, 200, None)
+    else:  # minlplib200to2000: the band above the #2006 screen
+        rows = [
+            r for r in s.build_panel(out, 2000, 2000, None) if max(r["nvars"], r["ncons"]) > 200
+        ]
     res = []
     for r in rows:
         dest = out / "nl" / f"{r['name']}.nl"
@@ -122,7 +150,7 @@ def run(out: Path, corpus: str, tl: float, workers: int, files: list[str]) -> No
     def one(job):
         name, path = job
         t0 = time.perf_counter()
-        rec = {"name": name, "corpus": corpus}
+        rec = {"name": name, "corpus": corpus, "load_start": os.getloadavg()[0]}
         try:
             cp = subprocess.run(
                 [sys.executable, "-u", __file__, "--child", str(path), "--time-limit", str(tl)],
@@ -138,6 +166,7 @@ def run(out: Path, corpus: str, tl: float, workers: int, files: list[str]) -> No
         except subprocess.TimeoutExpired:
             rec.update(error="timeout")
         rec["harness_wall"] = time.perf_counter() - t0
+        rec["load_end"] = os.getloadavg()[0]
         with log.open("a") as fh:
             fh.write(json.dumps(rec) + "\n")
         n = len(rec.get("probes", []))
@@ -178,7 +207,10 @@ def analyze(out: Path) -> None:
     print(f"instances: {n_inst} ({inst_with_probes} ran a persistent probe; errors {errors})")
     print(f"probes executed: {n_probe} (tightening: {n_tight}); with a per-LP cap: {n_capped}")
     pct = 100.0 * n_over / max(n_capped, 1)
-    print(f"probes over the cap: {n_over} ({pct:.3f}%), of which tightened: {n_over_tight}")
+    print(
+        f"probes over the cap: {n_over} of {n_capped} capped ({pct:.3f}%), "
+        f"of which tightened: {n_over_tight}"
+    )
     print(f"wall spent past the cap: {over_wall:.2f} s")
     print("by time_limit_per_lp: [probes, over cap, over cap & tightened]")
     for k, v in sorted(by_cap.items()):
@@ -188,12 +220,16 @@ def analyze(out: Path) -> None:
         print(f"  {k}: [{v[0]}, {v[1]}, {v[2]:.3f}]")
     if n_probe == 0:
         sys.exit("ERROR: no probe fired -- the instrument measured nothing")
+    if n_capped == 0:
+        sys.exit("ERROR: no probe ran under a per-LP cap -- the cap question was not measured")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path)
-    ap.add_argument("--corpus", choices=["inrepo", "minlplib200"], default="inrepo")
+    ap.add_argument(
+        "--corpus", choices=["inrepo", "minlplib200", "minlplib200to2000"], default="inrepo"
+    )
     ap.add_argument("--time-limit", type=float, default=30.0)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--files", nargs="*", default=[], help=".nl/.qplib paths (overrides --corpus)")

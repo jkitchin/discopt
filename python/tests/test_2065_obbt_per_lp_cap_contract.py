@@ -15,26 +15,16 @@ import time
 import discopt._relax.obbt as obbt_mod
 import pytest
 from discopt._relax.obbt import run_obbt_on_relaxation
-from test_obbt_warm_probes import PANEL, _build_relaxation, _maxdiff
+from test_obbt_warm_probes import (
+    PANEL,
+    _build_relaxation,
+    _maxdiff,
+    record_binding_time_limits,
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
-_TIME_LIMIT_POS = 13  # positional index of ``time_limit_s`` in solve_lp_warm_csc_py
 _TINY = 1e-9  # a per-LP cap no LP can meet
-
-
-def _record_binding_limits(monkeypatch) -> list:
-    import discopt._rust as rust
-
-    orig = rust.solve_lp_warm_csc_py
-    seen: list = []
-
-    def wrapped(*args, **kwargs):
-        seen.append(kwargs.get("time_limit_s", args[_TIME_LIMIT_POS] if len(args) > 13 else None))
-        return orig(*args, **kwargs)
-
-    monkeypatch.setattr(rust, "solve_lp_warm_csc_py", wrapped)
-    return seen
 
 
 def _n_orig(model) -> int:
@@ -44,7 +34,7 @@ def _n_orig(model) -> int:
 @pytest.mark.parametrize("name", list(PANEL))
 def test_persistent_path_does_not_forward_per_lp_cap(monkeypatch, name):
     assert obbt_mod._simplex_available(), "Rust simplex binding required for this test"
-    seen = _record_binding_limits(monkeypatch)
+    seen = record_binding_time_limits(monkeypatch)
     model = PANEL[name]()
     run_obbt_on_relaxation(_build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=_TINY)
     assert seen, "probe binding never called: the instrument measured nothing"

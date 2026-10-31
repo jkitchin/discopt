@@ -15,36 +15,32 @@ sweep that finishes inside its deadline is bound-identical (checked below).
 
 from __future__ import annotations
 
+import inspect
 import time
 
 import discopt._relax.obbt as obbt_mod
 import numpy as np
 import pytest
 from discopt._relax.obbt import run_obbt_on_relaxation
-from test_obbt_warm_probes import PANEL, _build_relaxation, _maxdiff
+from test_obbt_warm_probes import (
+    PANEL,
+    _build_relaxation,
+    _maxdiff,
+    record_binding_time_limits,
+)
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
-_TIME_LIMIT_POS = 13  # positional index of ``time_limit_s`` in solve_lp_warm_csc_py
-
 
 def _record_budgets(monkeypatch):
-    """Wrap the binding; record ``(time_limit_s, seconds_left_at_call)`` per probe."""
-    import discopt._rust as rust
-
-    orig = rust.solve_lp_warm_csc_py
-    seen: list[tuple[object, float]] = []
+    """Record ``(time_limit_s, seconds_left_at_call)`` per probe."""
     state = {"deadline": None}
 
-    def wrapped(*args, **kwargs):
-        positional = args[_TIME_LIMIT_POS] if len(args) > _TIME_LIMIT_POS else None
-        tl = kwargs.get("time_limit_s", positional)
-        left = state["deadline"] - time.perf_counter() if state["deadline"] else float("nan")
-        seen.append((tl, left))
-        return orig(*args, **kwargs)
+    def left(tl):
+        rem = state["deadline"] - time.perf_counter() if state["deadline"] else float("nan")
+        return (tl, rem)
 
-    monkeypatch.setattr(rust, "solve_lp_warm_csc_py", wrapped)
-    return seen, state
+    return record_binding_time_limits(monkeypatch, on_call=left), state
 
 
 @pytest.mark.parametrize("name", list(PANEL))
@@ -90,11 +86,13 @@ def test_deadline_cut_probe_tightens_nothing(monkeypatch):
     orig = rust.solve_lp_warm_csc_py
     calls = []
 
+    sig = inspect.signature(orig)
+
     def expired(*args, **kwargs):
-        args = list(args)
-        args[_TIME_LIMIT_POS] = 0.0  # an already-elapsed budget
+        bound = sig.bind(*args, **kwargs)
+        bound.arguments["time_limit_s"] = 0.0  # an already-elapsed budget
         calls.append(1)
-        return orig(*args, **kwargs)
+        return orig(*bound.args, **bound.kwargs)
 
     monkeypatch.setattr(rust, "solve_lp_warm_csc_py", expired)
     model = PANEL["bilinear"]()
