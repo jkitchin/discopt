@@ -56,6 +56,14 @@ The release procedure that produces these entries is documented in
 - **`.nl` complementarity rows with flag 3 (both bounds) or flag 0 (free
   variable) are now imported (#2058)** as a box MCP and as `body == 0`
   respectively, instead of refused. Flags 1/2 are unchanged.
+- **OA convexity certification uses a Taylor form for one-variable rows (#2062).** A row whose
+  curvature depends on a single variable is now tested piece by piece with a Taylor expansion
+  of `f''` with a Lagrange remainder (new `_relax/convexity/interval_jet.py`) before #2054's
+  interval-Hessian bisection. The PFR rows `(1-k)(e^t-1)/(e^{(1-k)t}-1)` and
+  `(1-k) t e^t/(e^{(1-k)t}-1)` now certify in ~50 pieces instead of 2048-8192, so they get OA
+  cuts. On a 40-model reactor-choice panel under `gdp_method="loa"`: certified 20 -> 25,
+  0 lost, LOA iterations 93 -> 48. Default ON; `DISCOPT_OA_CONVEXITY_TAYLOR=0` restores the
+  previous behaviour.
 
 ## [0.11.1] - 2026-10-29
 
