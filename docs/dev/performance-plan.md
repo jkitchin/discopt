@@ -13785,8 +13785,130 @@ Neither run passes -0.0965. More rounds also make the final master harder to con
 in 10% of the budget, so the published bound gets *worse*. The rows above also show
 the cap working as designed: an unconfirmed claim is lowered, not published.
 
-**State of #2059.** Item 2 (the bound is never published) is fixed. Item 1 (the
-master is bounded by tree count) is not: (a) and (c) failed their kill criterion, and
-portfol_classical050_1 does not certify at 120 s on any arm measured. Closing the
-remaining 1.8-2.2% needs a master that is stronger per second than every arm here,
-and none of the measured routes is.
+**State of #2059 at this point.** Item 2 (the bound is never published) is fixed.
+Item 1 is not fixed by (a), (b) or (c).
+
+> **Superseded 2026-10-31 (section 103.14).** This paragraph used to end "Closing the
+> remaining 1.8-2.2% needs a master that is stronger per second than every arm here,
+> and none of the measured routes is", and the first commit of #2059 reported the
+> issue as not closable on that basis. Both are retracted. The premise of item 1
+> ("the master is bounded by tree count") was also wrong: section 103.14 measures
+> that the master is bounded by the *accuracy of its polyhedral approximation* of
+> the risk row. A static Ben-Tal--Nemirovski outer approximation certifies the
+> instance at 120 s.
+
+### 103.14 #2059: the master was bounded by approximation accuracy, not tree count; `DISCOPT_OA_SOC_OUTER` graduates (2026-10-31)
+
+**Re-reading the issue.** Item 1 says the `lp_nlp_bb` master is bounded by HiGHS
+tree rebuilds. That diagnosis came from counting trees. These measurements say
+something else.
+
+**What the master is missing.** The model's own risk row is `sum_k x_k**2 <= 0.04`,
+with free `x = S w` defined by 50 linear rows. It is a norm ball in `x`. The
+master approximates it by tangents, one dense row at a time. A tangent-only master
+of a quadratic row needs about `1/sqrt(eps)` tangents per direction for accuracy
+`eps`. A 1e-4 certificate on this objective needs the risk row accurate to about
+2e-4 relative (8e-6 absolute), and the master never gets near that.
+
+**Entry experiments** (no library code; the instance read from its `.gms`; one
+HiGHS MILP solve or a multi-tree OA loop; 4-core container, load < 1):
+
+| arm | bound | time |
+|---|---|---|
+| aggregate tangents (the master's form), OA loop | -0.100072 | 120 s, 111 rounds |
+| separable lift `s_k >= x_k**2`, per-term tangents, OA loop | -0.0947963 | 74 s |
+| same + diagonal perspective of the remainder | -0.0947704 | 67 s |
+| Ben-Tal--Nemirovski, `nu` = 6, one MILP solve | -0.0948591 | 10.9 s |
+| BN, `nu` = 7 | -0.0947803 | 14.6 s |
+| **BN, `nu` = 8** | **-0.0947649** (gap 5.0e-5 to opt) | **14.3 s** |
+| BN, `nu` = 10 | -0.0947603 | 41.8 s |
+| BN `nu` = 8 + perspective (rotated cones) | -0.0948084 | 39.5 s |
+
+Optimum: -0.0947601179.
+
+**The separable lift was built in the solver first and dropped.** It was wired into
+the HiGHS master with per-term separation. The master's best tree bound improved
+from -0.097356 to -0.095070 at 60 s, and to -0.094795 with an 81-point tangent grid
+per term. It never reached 1e-4, because HiGHS cannot separate inside a tree. On
+the in-house simplex master, which can, it reached -0.09598 at 60 s: the LP engine
+is too slow. Handing every rebuilt tree the verified incumbent through
+`Highs.setSolution` was measured too, and changed nothing. Neither ships.
+
+**Change** (`_relax/soc_outer.py`). A scalar convex quadratic row whose linear part
+lies on its quadratic support is a ball `||L x + v|| <= rho`:
+
+- `Q - 1e-9*max|Q|*I` is factored (diagonal, or eigendecomposition, clipped);
+- the square is completed;
+- the residual is charged to `rho**2` over the box.
+
+The HiGHS `lp_nlp_bb` master gets the Ben-Tal--Nemirovski outer approximation of
+that ball once, at build. It is a binary tower of 2-D cones with `nu = 8` rotation
+levels, written with no equality rows. Each `xi_j` is expanded and each cone has
+one output column `r >= xi_nu`.
+
+- **Equality-free form.** With HiGHS presolve off, which the #1634 cross-solve
+  uses, the equality form took 42.8 s against 14.3 s with presolve on. The
+  equality-free form takes 23.6 s against 19.8 s.
+- **Validity.** It is an *outer* approximation: every point of the ball extends to
+  the polyhedron, so the master stays a relaxation. This is tested on 2,160 random
+  points, including the sphere.
+- **Accuracy.** The LP reach is `1/cos(pi/512)**depth` times the radius: 1.0000753
+  for 16 leaves, equal to theory.
+- **What stays.** The rows' OA tangents stay in the master, so the block only adds
+  rows.
+- **Not built:** on other backends, under a SHOT profile or the slack heuristic,
+  past `MAX_LEAVES = 128` leaves per master, or past 2.5e7 dense entries.
+
+**On the issue's instance** (default solve, 120 s, 3 runs, incumbents verified):
+`optimal`, objective -0.0947601177, bound -0.0947601178, in 86.8 / 86.8 / 89.1 s.
+The second master tree closes at the incumbent. The #1634 cross-solve confirms the
+bound (optimal, 614 nodes), and the route does not fall back. Before this, all
+measured runs were `feasible` at 120 s.
+
+**Panel** (`issue1913_pseudocost_panel.py --flag DISCOPT_OA_SOC_OUTER
+--fired-stat oa/soc_outer_rows`, the 102 routed instances, 30 s, 2 workers,
+interleaved, marker `discopt._relax.soc_outer:r >= xi_nu` asserted per
+subprocess): 612 checks, 0 problems, certified unchanged (none gained, none lost),
+total wall 463.3 -> 462.1 s, both-certify wall 281.8 -> 280.2 s.
+
+- **Where it is built (6):** ball_mk2_10/30, nvs10/11/12 and
+  portfol_classical050_1, all with the same result.
+- **Why classical050_1 does not move at 30 s:** the #1066 guard hands it over at
+  its checkpoint (half the limit), before the first tree, about 24 s, ends.
+- **Rows that moved without the block:** tls4 2.6 -> 2.4 and p_ball_10b_5p_4d_m
+  6.65e-7 -> 0.0. The block is not built on either, so this is run-to-run noise.
+
+**Class run** (the MINLPLib portfol family, which the panel's index mostly excludes;
+120 s, interleaved, arm order alternating, fresh subprocess, incumbents verified on
+a fresh parse, every bound at or below its `.solu` reference):
+
+| instance | leaves | OFF | ON |
+|---|---|---|---|
+| portfol_classical050_1 | 50 | feasible, bound -0.097356 | **optimal, 89.1 s** |
+| portfol_robust050_34 | 50 | optimal, 40.0 s | **optimal, 9.5 s** |
+| portfol_robust100_09 | 100 | feasible, bound -0.107933 | same |
+| portfol_robust200_03 | 200 | feasible, bound -0.138382, 169.1 s | same bound, 120.8 s |
+| portfol_classical200_2 | 200 | no incumbent, bound -0.124586, 137.8 s | incumbent -0.106587, **no bound**, 170.5 s |
+| portfol_shortfall050_68 / 100_04 / 200_05 | -- | not a ball, never built | -- |
+
+**classical200_2 is why the cap exists.** It ran with the first cap of 2,000 leaves.
+A replay of its master (`writeModel`, then HiGHS alone with the master's options)
+spends 102 s in the first root on a 4,388 x 2,590 LP. Most of that is root sub-MIP
+heuristics that do not poll the interrupt; with RINS/RENS already off, the
+reduced-cost heuristic is one of them. So the master overran, the cross-solve got
+no time, and the bound was withdrawn. The OFF arm overruns too (137.8 s; also
+recorded in section 103.12). `MAX_LEAVES = 128` excludes both 200-leaf rows, which
+then run exactly as OFF. Every row the 30 s panel built the block on has at most
+50 leaves.
+
+**Verdict: graduated** (default ON; `=0` restores the tangent-only master).
+
+- **Cert-clean:** 612 panel checks and 16 class solves, 0 problems.
+- **Net-positive on the class it targets:** one new certificate, which is the
+  issue's, and one 4.2x faster certificate.
+- **Inert elsewhere.**
+- **What would move the cap:** a master whose root does not stall on a larger
+  block. One direction is lowering `nu` with tower depth; it is not measured.
+
+#2059 can be closed: portfol_classical050_1 certifies at 120 s on the default
+path.

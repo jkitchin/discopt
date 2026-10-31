@@ -948,6 +948,10 @@ class _MasterMILPData:
     #: (``_PerspectiveRowEpigraph``), or ``None`` when the master has none.
     perspective_row_start: Optional[int] = None
     perspective_row_epigraph: Optional["_PerspectiveRowEpigraph"] = None
+    #: #2059: first column of the norm-ball outer-approximation block
+    #: (:class:`~discopt._relax.soc_outer.SocOuterBlock`), or ``None``.
+    soc_outer_start: Optional[int] = None
+    soc_outer: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -1286,6 +1290,11 @@ def _extend_master_mip_start(
         # zero there would violate the per-coordinate rows.
         b = master.perspective_row_start
         vals = master.perspective_row_epigraph.start_values(start[:n_vars])
+        full[b : b + vals.size] = vals
+    if master.soc_outer_start is not None and master.soc_outer is not None:
+        # The exact lift of a feasible start; zeros there would violate the block.
+        b = master.soc_outer_start
+        vals = master.soc_outer.start_values(start[:n_vars])
         full[b : b + vals.size] = vals
     if (
         master.integer_binary_expansion is not None
@@ -4602,6 +4611,7 @@ def _build_master_milp_data(
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
     perspective_epigraph: Optional[_PerspectiveEpigraph] = None,
     perspective_row_epigraph: Optional[_PerspectiveRowEpigraph] = None,
+    soc_outer=None,
 ) -> _MasterMILPData:
     """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -4648,6 +4658,20 @@ def _build_master_milp_data(
     if perspective_row_epigraph is not None and perspective_row_epigraph.n_cols > 0:
         perspective_row_start = n_master
         n_master += perspective_row_epigraph.n_cols
+
+    # #2059: the norm-ball outer approximation goes last, for the same reason.
+    soc_outer_start = None
+    if soc_outer is not None and soc_outer.n_cols > 0:
+        soc_outer_start = n_master
+        n_master += soc_outer.n_cols
+
+    def _soc_row(x_terms, block_terms) -> np.ndarray:
+        row = np.zeros(n_master, dtype=np.float64)
+        for col, val in x_terms.items():
+            row[col] += val
+        for col, val in block_terms.items():
+            row[soc_outer_start + col] += val
+        return row
 
     # Build A_ub, b_ub from linear <= constraints + OA cuts
     A_ub_rows = []
@@ -4707,6 +4731,10 @@ def _build_master_milp_data(
         assert perspective_row_epigraph is not None
         for row, rhs in perspective_row_epigraph.all_rows(n_master, perspective_row_start):
             A_ub_rows.append(row)
+            b_ub_vals.append(rhs)
+    if soc_outer_start is not None:
+        for x_terms, block_terms, rhs in soc_outer.ub_rows:
+            A_ub_rows.append(_soc_row(x_terms, block_terms))
             b_ub_vals.append(rhs)
 
     # Equality constraints from linear
@@ -4770,6 +4798,10 @@ def _build_master_milp_data(
         # s_i stands for d_i w_i**2 / z_i >= 0; cost 0 (it is not in the objective).
         bounds_list.extend((0.0, 1e20) for _ in range(perspective_row_epigraph.n_cols))
 
+    if soc_outer_start is not None:
+        # Every block column is a norm or a rotated coordinate's magnitude: >= 0.
+        bounds_list.extend((0.0, 1e20) for _ in range(soc_outer.n_cols))
+
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
     int_vec[:n_vars] = integrality
@@ -4804,6 +4836,8 @@ def _build_master_milp_data(
         perspective_row_epigraph=(
             perspective_row_epigraph if perspective_row_start is not None else None
         ),
+        soc_outer_start=soc_outer_start,
+        soc_outer=(soc_outer if soc_outer_start is not None else None),
     )
 
 
@@ -6093,6 +6127,13 @@ def _route_abandon_cross_check_fraction() -> float:
     return _ABANDON_CROSS_CHECK_FRACTION
 
 
+def _soc_outer_enabled() -> bool:
+    """Thin re-export of ``soc_outer_enabled`` (#2059)."""
+    from discopt._relax.soc_outer import soc_outer_enabled
+
+    return soc_outer_enabled()
+
+
 def _oa_support_cuts_enabled() -> bool:
     """#2013 (p_ball): ``DISCOPT_OA_SUPPORT_CUTS`` -- seed the ``lp_nlp_bb`` master
     with supporting hyperplanes of every convex row at the extremes of each of its
@@ -6805,6 +6846,33 @@ def solve_lp_nlp_bb(
             perspective_row_epigraph = candidate_epigraph
             evaluator._perspective_row_epigraph = perspective_row_epigraph  # type: ignore[attr-defined]
 
+    # #2059: the Ben-Tal--Nemirovski outer approximation of every convex norm-ball
+    # row, added to the HiGHS master once, at build. Purely additive (the rows' OA
+    # tangents stay). Only on the HiGHS master, where it was measured; not under a
+    # SHOT profile or the slack heuristic (whose OA rows are soft, these hard).
+    soc_outer = None
+    if lazy_backend == "highs" and not shot_profile and not add_slack and _soc_outer_enabled():
+        from discopt._relax.soc_outer import SocOuterBlock, norm_ball_rows
+
+        balls = [
+            r
+            for r in norm_ball_rows(model, evaluator.constraint_row_map(), decomp.lb, decomp.ub)
+            if decomp.oa_cut_mask is None
+            or (r.row < len(decomp.oa_cut_mask) and decomp.oa_cut_mask[r.row])
+        ]
+        if balls:
+            soc_outer = SocOuterBlock(balls)
+            from discopt._relax.soc_outer import MAX_DENSE_ENTRIES
+
+            if len(soc_outer.ub_rows) * (n_vars + soc_outer.n_cols) > MAX_DENSE_ENTRIES:
+                logger.info(
+                    "LP/NLP BB: norm-ball outer approximation skipped: %d rows x %d "
+                    "columns exceeds the dense master's budget",
+                    len(soc_outer.ub_rows),
+                    n_vars + soc_outer.n_cols,
+                )
+                soc_outer = None
+
     #: #1658: the best fixed-NLP point the screen below refused, kept only as an
     #: UNVERIFIED warm start for a caller with no verified incumbent -- never a
     #: bound, never certified. The count is exported (CLAUDE.md §6).
@@ -7028,6 +7096,7 @@ def solve_lp_nlp_bb(
         integer_binary_expansion=integer_binary_expansion,
         perspective_epigraph=perspective_epigraph,
         perspective_row_epigraph=perspective_row_epigraph,
+        soc_outer=soc_outer,
     )
     #: Perspective epigraph rows already in the master. The build below takes
     #: whatever the pool holds at that moment; everything the search adds after
@@ -7688,6 +7757,11 @@ def solve_lp_nlp_bb(
             row_epi.remainder_rows + row_epi.term_rows
         )
         route_stats["oa/perspective_row_disagg_separations"] = float(row_epi.separations)
+
+    if soc_outer is not None:
+        # #2059: norm-ball rows given the outer approximation, and its size.
+        route_stats["oa/soc_outer_rows"] = float(len(soc_outer.rows))
+        route_stats["oa/soc_outer_cols"] = float(soc_outer.n_cols)
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(
