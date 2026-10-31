@@ -385,6 +385,32 @@ def perspective_disaggregation_enabled() -> bool:
     return os.environ.get("DISCOPT_PERSPECTIVE_DISAGG", "1").strip() not in ("", "0")
 
 
+def perspective_row_disaggregation_enabled() -> bool:
+    """Is the #2021 disaggregated epigraph of a split quadratic row switched on?
+
+    The split cut of :meth:`PerspectiveRowTerm.cut` is ONE row per reference,
+    so every coordinate's perspective tangent shares that reference (``r_i =
+    w^_i``). At a fractional master point that is the perspective tangent at
+    ``z_i = 1``, not at ``z_i``, and a cutting-plane loop over the aggregate row
+    approaches the perspective closure very slowly. With this on, the
+    ``lp_nlp_bb`` master gets one epigraph column ``s_i >= d_i w_i**2 / z_i`` per
+    split coordinate, the remainder tangent ``R-tangent + sum_i s_i <= 0``
+    (:meth:`PerspectiveRowTerm.remainder_cut`) and per-coordinate rows
+    (:meth:`PerspectiveRowTerm.perspective_references`), IN ADDITION to the
+    aggregate cut, which stays in the master unchanged. The master's feasible
+    set can therefore only shrink, and only by valid rows.
+
+    Measured before building (performance-plan section 103.12), as the
+    cutting-plane closure of portfol_classical050_1's continuous relaxation with
+    that solve's own split: aggregate -0.105223 after 80 LPs, -0.097474 after
+    400, -0.096991 after 4000; disaggregated -0.097138 after 80. The master gets
+    about 127 separation rounds in a 30 s solve.
+
+    Default OFF; read per call. Bound-changing (CLAUDE.md section 5 regime 2).
+    """
+    return os.environ.get("DISCOPT_PERSPECTIVE_ROW_DISAGG", "0").strip() not in ("", "0")
+
+
 # ── #2021 §3: diagonal-perspective split of a coupled quadratic ROW ───────────
 
 
@@ -416,9 +442,9 @@ class PerspectiveRowTerm:
     is the binary indicator of ``w_i`` (``-1`` where ``d[i] == 0``).
     """
 
-    __slots__ = ("row", "S", "QSS", "c_idx", "c_val", "k", "F", "f0", "W", "d", "z", "t")
+    __slots__ = ("row", "S", "QSS", "c_idx", "c_val", "k", "F", "f0", "W", "d", "z", "t", "U")
 
-    def __init__(self, row, S, QSS, c_idx, c_val, k, F, f0, W, d, z, t):
+    def __init__(self, row, S, QSS, c_idx, c_val, k, F, f0, W, d, z, t, U=None):
         self.row = int(row)
         self.S = S
         self.QSS = QSS
@@ -431,6 +457,10 @@ class PerspectiveRowTerm:
         self.d = d
         self.z = z
         self.t = float(t)
+        #: ``U[i]`` of the row ``w_i <= U_i z_i`` that licenses the split of
+        #: coordinate ``i`` (``inf`` where ``d[i] == 0``). Only the
+        #: disaggregated references use it, to clip ``w_i / z_i``.
+        self.U = np.full(len(self.d), np.inf) if U is None else np.asarray(U, dtype=np.float64)
 
     def plain_tangent(self, x, n_vars: int) -> np.ndarray:
         """The row's ordinary OA tangent coefficients at ``x`` (no split)."""
@@ -462,6 +492,66 @@ class PerspectiveRowTerm:
                 rhs -= sh
                 shifted += 1
         return coeffs, rhs, shifted
+
+    def split_positions(self) -> np.ndarray:
+        """Positions ``i`` (into ``W``/``d``/``z``) of the split coordinates."""
+        return np.flatnonzero((self.d > 0.0) & (self.z >= 0))
+
+    def remainder_cut(self, x, n_vars: int) -> tuple[np.ndarray, float]:
+        """``(coeffs, rhs)``: tangent at ``w^ = x[W]`` of the convex remainder.
+
+        ``R(w) = g(F w + f0) - sum_i d_i w_i**2`` over the split positions. The
+        row ``coeffs . x + sum_i s_i <= rhs`` (``s_i`` the disaggregated epigraph
+        columns of this row) is valid wherever ``s_i >= d_i w_i**2``, because
+        ``M - diag(d)`` is PSD (``R`` is convex, so its tangent underestimates it)
+        and ``R + sum_i d_i w_i**2 = g <= 0``. The tangent is taken at the
+        PROJECTED reference ``x^ = F w^ + f0``, as :meth:`cut` does, so it is a
+        tangent of ``R`` on the set ``x_S = F w + f0`` the model enforces.
+        """
+        wbar = np.asarray(x, dtype=np.float64)[self.W]
+        xhat = self.F @ wbar + self.f0
+        coeffs = np.zeros(n_vars, dtype=np.float64)
+        np.add.at(coeffs, self.c_idx, self.c_val)
+        coeffs[self.S] += self.QSS @ xhat
+        rhs = -self.k + 0.5 * float(xhat @ self.QSS @ xhat)
+        for i in self.split_positions():
+            wi = float(wbar[i])
+            # The tangent of ``-d_i w_i**2`` at ``w^_i`` is ``-2 d_i w^_i w_i + d_i w^_i**2``.
+            coeffs[self.W[i]] -= 2.0 * self.d[i] * wi
+            rhs -= self.d[i] * wi * wi
+        return coeffs, rhs
+
+    def perspective_references(self, x) -> list[tuple[int, float]]:
+        """``(i, r)`` references for the per-coordinate rows at the point ``x``.
+
+        Row ``(i, r)`` is ``2 d_i r w_i - d_i r**2 z_i - s_i <= 0``: the
+        Frangioni-Gentile tangent of ``d_i w_i**2 / z_i`` at the ratio ``r``,
+        valid for every real ``r`` on both integral values of ``z_i`` (``z_i = 1``:
+        ``d_i (w_i - r)**2 >= 0``; ``z_i = 0``: ``w_i = 0`` and ``s_i >= 0``).
+
+        Two references per coordinate, deduplicated: ``r = w_i``, the one the
+        aggregate :meth:`cut` uses, so the disaggregated rows together with
+        :meth:`remainder_cut` imply that cut at every point; and, where
+        ``0 < z_i < 1``, ``r = w_i / z_i`` clipped to ``U_i``, the tangent of the
+        perspective AT ``(w_i, z_i)`` -- the one reference the aggregate row cannot
+        take, since it must share one reference across all coordinates.
+        ``w_i <= 0`` gives ``r = 0``, whose row ``s_i >= 0`` is the column bound,
+        so it is not returned.
+        """
+        xv = np.asarray(x, dtype=np.float64)
+        wbar = xv[self.W]
+        out: list[tuple[int, float]] = []
+        for i in self.split_positions():
+            wi = float(wbar[i])
+            if not np.isfinite(wi) or wi <= 0.0:
+                continue
+            out.append((int(i), wi))
+            zv = float(xv[self.z[i]])
+            if np.isfinite(zv) and 0.0 < zv < 1.0:
+                r = min(wi / zv, float(self.U[i]))
+                if np.isfinite(r) and r > wi:
+                    out.append((int(i), r))
+        return out
 
 
 def _flat_lower_bounds(model: Model, n: int) -> np.ndarray:
@@ -621,15 +711,17 @@ def perspective_row_terms(model: Model, row_map) -> list[PerspectiveRowTerm]:
         if not ok:
             continue
         zcols = np.full(len(wcols), -1, dtype=np.int64)
+        ucols = np.full(len(wcols), np.inf)
         for t_i, i in enumerate(wcols):
             sc = semi.get(i)
             if sc is None or lb[i] < 0.0:
                 continue
-            ind_var, ind_elem, _u = sc
+            ind_var, ind_elem, u = sc
             zc = _compute_var_offset(ind_var, model) + ind_elem
             if zc == i:
                 continue
             zcols[t_i] = zc
+            ucols[t_i] = float(u)
         if not (zcols >= 0).any():
             continue
         M = 0.5 * F.T @ QSS @ F
@@ -658,6 +750,7 @@ def perspective_row_terms(model: Model, row_map) -> list[PerspectiveRowTerm]:
                 d,
                 zcols,
                 t,
+                ucols,
             )
         )
     return out
