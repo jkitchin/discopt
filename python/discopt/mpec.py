@@ -16,6 +16,12 @@ SOTA rule inventory:
   exactly with a Special Ordered Set of type 1, solved by the global MINLP
   branch-and-bound. Exact, at the cost of discrete search.
 
+The box-bounded mixed complementarity relation ``F(z) ⊥ z in [l, u]``
+(:func:`box_mcp`, :meth:`Model.mcp`) is lowered by every method through the same
+NCP emitters: it is split into at most two symmetric pairs on shifted slacks,
+``F = w⁺ - w⁻``, ``0 <= w⁺ ⊥ z - l``, ``0 <= w⁻ ⊥ u - z`` (one-sided boxes need
+no ``w±``, a free box is ``F = 0``). See :func:`_box_decomposition`.
+
 Both build a standard discopt model, so no solver-core changes are required and
 the global optimality machinery is reused unchanged.
 
@@ -469,10 +475,22 @@ def box_mcp(
     otherwise, since the relation's semantics *are* those bounds and guessing
     them would silently change the condition.
 
-    This slice **represents** the relation; it does not lower it. A model
-    carrying an unlowered relation is refused by :meth:`Model.solve` rather
+    ``lb``/``ub`` are scalars: every element of a vector relation shares the one
+    box. Declare per-element relations for per-element boxes.
+
+    The returned relation is only *recorded*; :meth:`Model.mcp` lowers it on
+    declaration, and :func:`reformulate_gdp` / :func:`reformulate_sos1` /
+    :func:`solve_mpec` lower a relation built here. Every lowering decomposes the
+    box into at most two NCP halves (see :func:`_box_decomposition`, #2058). A
+    model carrying a relation no lowering emitted is refused by the solver rather
     than solved with the condition quietly absent (#1147).
     """
+    if any(b is not None and np.ndim(b) != 0 for b in (lb, ub)):
+        raise ValueError(
+            f"box_mcp: lb/ub are scalars; a vector relation uses one box for every "
+            f"element (relation {name or '<unnamed>'!r}). Declare per-element relations "
+            "for per-element boxes."
+        )
     if lb is None or ub is None:
         if not (isinstance(variable, Variable) and variable.size == 1):
             raise ValueError(
@@ -888,10 +906,10 @@ def require_all_relations_lowered(model: Model, *, context: str) -> None:
         raise NotImplementedError(
             f"{context}: model declares complementarity relation(s) with no lowering: "
             + "; ".join(p.describe() for p in pending)
-            + ". The box-bounded MCP form is represented but not lowered (#1147), so "
-            "solving would silently drop the condition and certify a point it forbids. "
-            "Restrict the complementary variable to [0, +inf) and use "
-            "Model.complementarity, or reformulate the relation explicitly."
+            + ". Solving would silently drop the condition and certify a point it "
+            "forbids. Lower it with Model.complementarity / Model.mcp (which lower on "
+            "declaration), or with reformulate_gdp / reformulate_sos1 / solve_mpec on "
+            "the relation."
         )
     relaxed = relaxed_relations(model)
     if relaxed:
@@ -1086,41 +1104,203 @@ def _require_not_already_lowered(model: Model, pairs: list[Complementarity]) -> 
     )
 
 
-def _require_lowerable(pairs: list[Complementarity], method: str) -> None:
-    r"""Refuse to lower a relation whose form this slice does not encode.
+def _box_form(p: Complementarity) -> tuple[float, float]:
+    """The validated box ``(l, u)`` of a relation that is not the symmetric pair.
 
-    Every reformulation here encodes the symmetric nonnegative pair
-    :math:`0 \le f \perp g \ge 0`. A box-MCP relation on ``z in [l, u]`` is a
-    three-branch condition (``z = l``, interior, ``z = u``); handing it to a
-    two-branch lowering would encode a *different* feasible set and certify it.
-    #1147 represents the box form and deliberately does not lower it, so the
-    refusal is loud rather than an approximation (CLAUDE.md §3).
-
-    The test is :attr:`Complementarity.is_symmetric_nonnegative` — the relation's
-    **declared bounds** — never its :attr:`~Complementarity.role`. See that
-    property for what gating on the label let through.
+    A box-MCP relation declares its residual **free**, ``f_bounds == (-inf, +inf)``,
+    and its complementary side on ``[l, u]``. :class:`Complementarity` is public and
+    constructible directly, so any other residual bounds can reach a lowering; no
+    lowering here encodes them, and guessing would change the condition. An empty
+    box (``l > u``) is refused here too, since a direct construction bypasses the
+    check in :func:`box_mcp`.
     """
-    for p in pairs:
-        if not p.is_symmetric_nonnegative:
-            lo, hi = p.g_bounds
-            raise NotImplementedError(
-                f"{p.describe()} is a box-MCP relation on [{lo:g}, {hi:g}] and has no "
-                f"{method!r} lowering. The symmetric pair 0 <= f _|_ g >= 0 is the "
-                "l=0, u=+inf special case; the general box form is represented but not "
-                "lowered in this slice (#1147). Reformulate it by hand, or restrict the "
-                "complementary variable to [0, +inf)."
-            )
+    if p.f_bounds != (-_INF, _INF):
+        lo, hi = p.f_bounds
+        raise ValueError(
+            f"{p.describe()} declares residual bounds ({lo:g}, {hi:g}) with complementary "
+            f"bounds {p.g_bounds}; a box-MCP relation declares its residual free "
+            "(-inf, +inf) and the symmetric pair declares (0, +inf) on both sides. No "
+            "other form is lowered, and none is guessed."
+        )
+    lo, hi = float(p.g_bounds[0]), float(p.g_bounds[1])
+    if not lo <= hi:
+        raise ValueError(f"{p.describe()}: empty box [{lo:g}, {hi:g}]")
+    return lo, hi
+
+
+def _enclosure(model: Model, expr: Expression, p: Complementarity) -> tuple[float, float]:
+    """A finite interval enclosure of the residual ``expr``, or a loud ``ValueError``.
+
+    The split auxiliaries ``w⁺``/``w⁻`` of a two-sided box need finite upper bounds
+    for an exact big-M/SOS1 encoding. A fabricated bound could cut the optimum, so a
+    non-finite enclosure is a refusal. An exception from the interval evaluator is
+    re-raised as part of that refusal, with its text (CLAUDE.md §7).
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    try:
+        iv = evaluate_interval(expr, model)
+        lo = float(np.min(np.asarray(iv.lo)))
+        hi = float(np.max(np.asarray(iv.hi)))
+    except Exception as exc:
+        raise ValueError(
+            f"cannot bound the residual F of {p.describe()} over the declared box: the "
+            f"interval evaluation raised {type(exc).__name__}: {exc}. The split "
+            "auxiliaries w+/w- need a finite bound."
+        ) from exc
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(
+            f"cannot bound the residual F of {p.describe()} over the declared box "
+            f"(enclosure [{lo:g}, {hi:g}]). The split auxiliaries w+/w- of a "
+            "two-sided box need a finite bound, and a fabricated big-M could cut the "
+            "optimum. Declare finite bounds on the variables F reads."
+        )
+    return lo, hi
+
+
+def _half(parent: Complementarity, f: Expression, g: Expression, name: str) -> Complementarity:
+    """One NCP half ``0 <= f ⊥ g >= 0`` of a box relation's decomposition.
+
+    A lowering internal, not a declared relation: it is not appended to
+    ``model._complementarities`` and not marked lowered. The parent's
+    :class:`LoweringRecord` covers every row the half emits (see :func:`_lower_each`).
+    """
+    return Complementarity(
+        f,
+        g,
+        name,
+        role=parent.role,
+        scale=parent.scale,
+        parent=parent.parent,
+        f_shape=(),
+        g_shape=(),
+        index=parent.index,
+        source=parent.source if parent.source is not None else parent,
+    )
+
+
+def _shift(z: Expression, lb: float) -> Expression:
+    """``z - lb``, or ``z`` itself when ``lb == 0`` (the NCP rows, unchanged)."""
+    return z if lb == 0.0 else z - lb
+
+
+def _validate_relation(model: Model, p: Complementarity) -> Optional[tuple]:
+    """Everything about scalar relation ``p`` that can refuse, with no row emitted.
+
+    ``None`` for the symmetric pair (the NCP emitters handle it as they always
+    have); for a box, ``(l, u, enclosure)`` with the enclosure of ``F`` computed
+    only when the split needs it (a two-sided, non-degenerate box), else ``None``.
+    """
+    if p.is_symmetric_nonnegative:
+        return None
+    lb, ub = _box_form(p)
+    two_sided = bool(np.isfinite(lb) and np.isfinite(ub) and lb < ub)
+    return lb, ub, (_enclosure(model, p.f, p) if two_sided else None)
+
+
+def _box_decomposition(
+    model: Model,
+    p: Complementarity,
+    plan: tuple,
+    operand_lifts: Optional[list[tuple[Variable, Expression]]],
+) -> list[Complementarity]:
+    r"""Emit the box rows of a scalar box-MCP relation; return its NCP halves.
+
+    ``F ⊥ z in [l, u]`` is exactly (``docs/dev/box-mcp-lowering-plan.md`` §2.1 H1):
+
+    ====================  ==========================  ======================================
+    case                  rows emitted here           NCP halves returned
+    ====================  ==========================  ======================================
+    B0 ``l == u``         ``z >= l``, ``z <= u``      none -- ``F`` is free
+    B1 both finite        box rows, ``F == w⁺ - w⁻``  ``0 <= w⁺ ⊥ z - l``, ``0 <= w⁻ ⊥ u - z``
+    B2 ``u = +inf``       ``z >= l``                  ``0 <= F ⊥ z - l``
+    B3 ``l = -inf``       ``z <= u``                  ``0 <= -F ⊥ u - z``
+    B4 both infinite      ``F == 0``                  none
+    ====================  ==========================  ======================================
+
+    In B1, an interior ``z`` makes both slacks positive, so ``w⁺ = w⁻ = 0`` and
+    ``F = 0``; ``z = l < u`` forces ``w⁻ = 0`` so ``F = w⁺ >= 0``; ``z = u`` gives
+    ``F = -w⁻ <= 0``. Conversely ``w± = max(±F, 0)`` satisfies every row at an MCP
+    point, and the bounds ``w⁺ <= max(0, hi F)``, ``w⁻ <= max(0, -lo F)`` from a
+    valid enclosure of ``F`` cut none of them.
+
+    The box rows on ``z`` are emitted even when ``z`` is a variable whose declared
+    bounds imply them: the relation's box may be narrower than the variable's, and
+    tightening a shared ``Variable`` would mutate state other models hold.
+
+    ``plan`` is :func:`_validate_relation`'s result. :func:`_lower_each` validates
+    every scalar element of a relation before emitting any of them, so a refused
+    relation -- vector or scalar -- leaves the model untouched.
+    """
+    from discopt.modeling.core import maximum
+
+    tag = p.name or "compl"
+    lb, ub, enc = plan
+    z, F = p.g, p.f
+    if np.isfinite(lb):
+        model.subject_to(z >= lb, name=f"{tag}_z_lb")
+    if np.isfinite(ub):
+        model.subject_to(z <= ub, name=f"{tag}_z_ub")
+    if lb == ub:  # B0
+        return []
+    if enc is not None:  # B1
+        flo, fhi = enc
+        model._aux_counter += 1
+        wp = model.continuous(f"_{tag}_wp_{model._aux_counter}", lb=0.0, ub=max(0.0, fhi))
+        model._aux_counter += 1
+        wm = model.continuous(f"_{tag}_wm_{model._aux_counter}", lb=0.0, ub=max(0.0, -flo))
+        model.subject_to(F == wp - wm, name=f"{tag}_split")
+        if operand_lifts is not None:
+            operand_lifts.append((wp, maximum(F, 0.0)))
+            operand_lifts.append((wm, maximum(-F, 0.0)))
+        return [_half(p, wp, _shift(z, lb), f"{tag}_lo"), _half(p, wm, ub - z, f"{tag}_hi")]
+    if np.isfinite(lb):  # B2
+        return [_half(p, F, _shift(z, lb), f"{tag}_lo")]
+    if np.isfinite(ub):  # B3
+        return [_half(p, -F, ub - z, f"{tag}_hi")]
+    model.subject_to(F == 0, name=f"{tag}_eq")  # B4
+    return []
+
+
+def _emit_relation(
+    model: Model,
+    p: Complementarity,
+    plan: Optional[tuple],
+    emit_ncp,
+    operand_lifts: Optional[list[tuple[Variable, Expression]]],
+) -> None:
+    """Lower one validated scalar relation with a method's NCP emitter.
+
+    The symmetric pair (``plan is None``) goes straight to ``emit_ncp``, so the NCP
+    path emits exactly the rows it always did. A box relation is decomposed by
+    :func:`_box_decomposition` and each half goes to the same ``emit_ncp``. Which
+    path is taken is read off the **declared bounds**
+    (:attr:`Complementarity.is_symmetric_nonnegative`), never off ``role``.
+    """
+    if plan is None:
+        emit_ncp(p)
+        return
+    for half in _box_decomposition(model, p, plan, operand_lifts):
+        emit_ncp(half)
 
 
 # ─────────────────────────── reformulations ───────────────────────────
 
 
-def _lower_each(model: Model, todo: list[Complementarity], method: str, emit) -> None:
+def _lower_each(
+    model: Model,
+    todo: list[Complementarity],
+    method: str,
+    emit_ncp,
+    operand_lifts: Optional[list[tuple[Variable, Expression]]] = None,
+) -> None:
     """Lower each relation in turn, recording **that relation's own** rows.
 
-    ``emit`` is called once per scalar element of one relation; the rows it
-    appends to ``model._constraints`` between the relation's start and end
-    positions are the rows attributed to it.
+    ``emit_ncp`` is a method's emitter for one scalar NCP pair; every scalar
+    element of a relation is validated first (:func:`_validate_relation`) and only
+    then emitted, so a relation whose k-th element refuses leaves no rows from
+    elements ``0..k-1`` behind. The rows appended to ``model._constraints``
+    between the relation's start and end positions are the rows attributed to it.
 
     Per relation, not per call. The first version took one slice around the whole
     list and assigned that aggregate to *every* pair, so
@@ -1147,8 +1327,10 @@ def _lower_each(model: Model, todo: list[Complementarity], method: str, emit) ->
     """
     for parent in todo:
         start = len(model._constraints)
-        for elem in _scalarize_pairs(model, [parent]):
-            emit(elem)
+        elems = _scalarize_pairs(model, [parent])
+        plans = [_validate_relation(model, e) for e in elems]
+        for elem, plan in zip(elems, plans):
+            _emit_relation(model, elem, plan, emit_ncp, operand_lifts)
         parent.mark_lowered(model, method, list(model._constraints[start:]))
 
 
@@ -1163,7 +1345,6 @@ def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
     (see :func:`_pending`).
     """
     todo = _pending(model, pairs)
-    _require_lowerable(todo, "scholtes")
 
     def emit(p: Complementarity) -> None:
         tag = p.name
@@ -1191,7 +1372,6 @@ def reformulate_sos1(
     (see :func:`_pending`).
     """
     todo = _pending(model, pairs)
-    _require_lowerable(todo, "sos1")
 
     def emit(p: Complementarity) -> None:
         tag = p.name
@@ -1213,7 +1393,7 @@ def reformulate_sos1(
                 members.append(aux)
         model.sos1(members, name=f"{tag}_sos1")
 
-    _lower_each(model, todo, "sos1", emit)
+    _lower_each(model, todo, "sos1", emit, _operand_lifts)
 
 
 def reformulate_gdp(
@@ -1246,7 +1426,6 @@ def reformulate_gdp(
     (see :func:`_pending`).
     """
     todo = _pending(model, pairs)
-    _require_lowerable(todo, "gdp")
 
     def emit(p: Complementarity) -> None:
         # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
@@ -1257,7 +1436,7 @@ def reformulate_gdp(
         model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
         model.either_or([[fv == 0], [gv == 0]], name=tag)
 
-    _lower_each(model, todo, "gdp", emit)
+    _lower_each(model, todo, "gdp", emit, _operand_lifts)
 
 
 def _gdp_operand(
@@ -1311,8 +1490,10 @@ def tighten_complementarity_bounds(model: Model, pairs: list[Complementarity]) -
             # The implication "one side strictly positive => partner is 0" is a
             # property of the *nonnegative* pair. On a box relation the partner is
             # pinned to a bound of [l, u], not to 0, so applying this rule would
-            # fabricate a bound and could cut the solution out of the box. Keyed
-            # to the declared bounds, not to ``role`` (review of #1149, HIGH 2).
+            # fabricate a bound and could cut the solution out of the box. The box
+            # generalization is a separate change (plan §10.3 of
+            # docs/dev/box-mcp-lowering-plan.md). Keyed to the declared bounds,
+            # not to ``role`` (review of #1149, HIGH 2).
             continue
         f_var = p.f if isinstance(p.f, Variable) and p.f.size == 1 else None
         g_var = p.g if isinstance(p.g, Variable) and p.g.size == 1 else None

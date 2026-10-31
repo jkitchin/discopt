@@ -10,6 +10,25 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Exact lowering of box-constrained MCP relations (#2058).** `F(x) ⊥ z ∈ [l, u]`
+  (`Model.mcp`, `mpec.box_mcp`) used to be represented but refused at solve time.
+  Every exact lowering (`mpec.gdp`, `mpec.sos1`) and Scholtes now reduce it to the
+  existing NCP halves: a fixed box gives rows only; a one-sided box gives one
+  half; a free variable gives `F == 0`; a two-sided box splits
+  `F == w⁺ - w⁻` with `(w⁺, z - l)` and `(w⁻, u - z)`, where `w±` are bounded
+  by the interval enclosure of `F`. A residual with a non-finite enclosure, an
+  empty box, array bounds or declared residual bounds other than the box's own
+  are refused with a `ValueError`, and a refused vector relation leaves no rows
+  behind. `Model.mcp(..., method="gdp"|"sos1")` lowers on the spot.
+
+### Changed
+
+- **`.nl` complementarity rows with flag 3 (both bounds) or flag 0 (free
+  variable) are now imported (#2058)** as a box MCP and as `body == 0`
+  respectively, instead of refused. Flags 1/2 are unchanged.
+
 ## [0.11.1] - 2026-10-29
 
 A debugger follow-up to 0.11.0: the built-in frontends now show the node
