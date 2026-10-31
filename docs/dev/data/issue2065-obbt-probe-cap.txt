@@ -1,0 +1,60 @@
+# #2065 entry experiment: persistent OBBT probes vs the caller's time_limit_per_lp
+#
+# Script: discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py
+# Code under test: branch base 8c92949 (PR #2066 head: the #2006 deadline cap is present;
+#   the child asserts it). Linux, 4 cores, Python 3.13, release build.
+# Solve: Model.solve(time_limit=30, gap_tolerance=1e-4), one subprocess per instance,
+#   3 workers (1-min load average 4-6 during the runs, so walls are inflated, which
+#   biases toward MORE over-cap probes, not fewer).
+# "tightened" = the probe's raw optimum moves the bound past eps=1e-7, an upper bound
+#   on what the NS-clamped sweep keeps.
+# Kill criterion (issue): < ~1% of probes exceed the cap, or none that do tighten.
+# Verdict: KILLED on both corpora (0.077% and 0.031%), no §5 panel run.
+#
+# ---- in-repo corpus (python/tests/data/minlplib_nl, 74 .nl) ----
+instances: 74 (38 ran a persistent probe; errors [])
+probes executed: 12927 (tightening: 4815); with a per-LP cap: 12927
+probes over the cap: 10 (0.077%), of which tightened: 0
+wall spent past the cap: 0.78 s
+by time_limit_per_lp: [probes, over cap, over cap & tightened]
+  0.1: [1952, 1, 0]
+  0.2: [4049, 9, 0]
+  0.3: [6926, 0, 0]
+instances with over-cap probes: name [over, over&tight, max probe wall s]
+  bchoco08: [7, 0, 0.424]
+  bchoco07: [2, 0, 0.254]
+  ex14_1_7: [1, 0, 0.101]
+#
+# ---- #2006 screen panel: MINLPLib <= 200 vars/cons, proven status (384) ----
+instances: 384 (201 ran a persistent probe; errors [])
+probes executed: 64870 (tightening: 16529); with a per-LP cap: 64870
+probes over the cap: 20 (0.031%), of which tightened: 1
+wall spent past the cap: 2.94 s
+by time_limit_per_lp: [probes, over cap, over cap & tightened]
+  0.1: [13335, 20, 1]
+  0.2: [21023, 0, 0]
+  0.3: [30512, 0, 0]
+instances with over-cap probes: name [over, over&tight, max probe wall s]
+  graphpart_clique-50: [7, 0, 0.616]
+  graphpart_clique-60: [3, 0, 0.411]
+  graphpart_clique-40: [9, 0, 0.289]
+  ex14_1_7: [1, 1, 0.148]
+#
+# ---- probe wall-time percentiles (s) by caller cap ----
+# corpus  cap  probes  p50     p99     p99.9   max
+# inrepo  0.1   1952   0.0015  0.0311  0.0860  0.101
+# inrepo  0.2   4049   0.0020  0.0870  0.2572  0.424
+# inrepo  0.3   6926   0.0007  0.0160  0.0313  0.044
+# m200    0.1  13335   0.0007  0.0199  0.1826  0.616
+# m200    0.2  21023   0.0007  0.0099  0.0358  0.087
+# m200    0.3  30512   0.0006  0.0064  0.0202  0.070
+# The one over-cap probe that tightened: ex14_1_7, 0.148 s against 0.1 s (it ran
+# 0.101 s and tightened nothing in the in-repo run: a contention artifact at the
+# margin, not a class of slow-but-useful probes).
+#
+# ---- QPLIB_5875 (the #2006 motivating instance), alone, no other load ----
+# time_limit=30: status feasible, 30.4 s, 0 persistent probes, no bound.
+# time_limit=90: status feasible, 111.3 s, 0 persistent probes, bound 405113.
+# On this machine the solve never reaches a persistent OBBT probe, so the
+# #2006 49.6 s probe does not reproduce here. The 21 s overrun at time_limit=90
+# is outside OBBT's persistent path and is not attributed here.

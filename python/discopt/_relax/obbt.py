@@ -342,7 +342,9 @@ class _PersistentProbeLP:
         ``time_limit_s`` (seconds, ``None`` = unbounded) is this one LP's wall-clock
         budget, forwarded to the simplex's polled deadline; a solve it cuts short is
         non-optimal and so tightens nothing (#2006: without it a single root-OBBT
-        probe on QPLIB_5875 ran 49.6 s inside a 5 s phase budget).
+        probe on QPLIB_5875 ran 49.6 s inside a 5 s phase budget). The sweep passes
+        its remaining ``deadline`` here, not the caller's ``time_limit_per_lp``
+        (#2065; see :func:`run_obbt_on_relaxation`).
 
         Returns ``(status, objective, dual_values, basis, wall_time)`` — ``status``
         a :class:`SolveStatus`, ``objective``/``dual_values`` ``None`` on any
@@ -1113,7 +1115,24 @@ def run_obbt_on_relaxation(
     candidate_idxs : list[int], optional
         Subset of column indices to tighten.  Defaults to all original columns.
     time_limit_per_lp : float, optional
-        Per-LP time limit in seconds.  ``None`` for no limit.
+        Per-LP time limit in seconds.  ``None`` for no limit.  Honored by the
+        seam-oracle probes and the ``top_k`` scoring LP. **The default persistent
+        probe path (Rust simplex binding available) deliberately ignores it**:
+        each of its probes is bounded only by the remaining ``deadline`` (#2006),
+        or runs to convergence when ``deadline`` is ``None``.  Honoring the
+        per-LP cap there would change bounds, since a probe stopped at the cap
+        tightens nothing.  The #2065 entry experiment
+        (``discopt_benchmarks/scripts/issue2065_obbt_probe_cap.py``,
+        ``docs/dev/data/issue2065-obbt-probe-cap.txt``) found too little to gain.
+        On the in-repo corpus, 10 of 12 927 probes (0.077%) ran past the
+        caller's cap, and none of them tightened.  On MINLPLib <= 200 vars/cons
+        (384 instances), 20 of 64 870 probes (0.031%) ran past it, and 1
+        tightened.  The worst overrun was 0.62 s against a 0.1 s cap, and the
+        total wall time past the cap was 0.78 s and 2.94 s respectively.  That
+        is under the issue's 1% kill criterion, so no §5 panel was run.  What
+        would change this: a corpus where cap-exceeding probes are a material
+        share of OBBT wall time.  An unbounded single probe is the ``deadline``'s
+        job, not this cap's.
     incumbent_cutoff : float, optional
         Cutoff on ``c_obj^T x + obj_offset`` — the relaxation objective, which
         is in the **internal minimization space** (``-f`` for a maximize model),
@@ -1315,7 +1334,9 @@ def run_obbt_on_relaxation(
         # unbounded past it. Capped by the remaining time only, so a sweep that
         # finishes inside its deadline is unchanged. An exhausted budget skips the
         # probe outright (non-optimal, tightens nothing) rather than handing a backend
-        # a zero limit it might read as "no limit".
+        # a zero limit it might read as "no limit". #2065: the persistent path
+        # deliberately does not also apply ``time_limit_per_lp`` (see this function's
+        # docstring).
         budget = None if deadline is None else deadline - _time.perf_counter()
         if budget is not None and budget <= 0.0:
             return SolveStatus.TIME_LIMIT, None, None
