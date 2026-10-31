@@ -314,3 +314,17 @@ Re-open only with a Rust prototype measured on such instances.
 
 That run also surfaced a HiGHS false-optimum on the `lp_nlp_bb` master:
 `docs/dev/data/1917-highs-false-milp-optimum/README.md`.
+
+## G5.4: advisor extension — deferred on its dependency (2026-10-31, #1917)
+
+Plan §7 scopes G5.4 as extending `gdp_advisor` to consider G2.2 and G2.3, with
+the kill rule that it graduates only if `auto` beats `big-m` net-positive.
+- G2.2 (hull local vars) was retired with no measurement.
+- G2.3 (`DISCOPT_MBIGM_CONDITIONED`) is a default-OFF flag whose own panel is
+  owed. On the 7-model preview (`data/1917-flag-panel-preview/`) it is neutral to
+  slightly worse: identical nodes on 5 models, more on clay0203 (135 -> 161) and
+  nonconvex_hen (3 -> 5).
+An advisor that routes to an option not yet shown net-positive cannot pass G5.4's
+own kill rule. **G5.4 waits for G2.3's panel**: if that graduates the flag, the
+advisor extension is the follow-on; if it retires it, G5.4 has nothing left to
+advise on and closes with it.
