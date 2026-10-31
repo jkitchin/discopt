@@ -200,6 +200,8 @@ def test_master_carries_the_block_and_certifies(monkeypatch):
     stats = on.solver_stats or {}
     assert stats.get("oa/soc_outer_rows") == 1.0, stats  # the probe fired (section 6)
     assert stats.get("oa/soc_outer_cols", 0) > 0
+    # Linear objective: master points inside the approximation are accepted.
+    assert stats.get("oa/soc_outer_accepted", 0) > 0, stats
     assert "oa/soc_outer_rows" not in (off.solver_stats or {})
     for r in (off, on):
         assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
@@ -228,3 +230,50 @@ def test_issue_2059_portfol_classical050_1_certifies_at_120s(monkeypatch):
     fresh = from_nl(str(nl))
     flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in fresh._variables])
     assert verify_point(fresh, flat).ok
+
+
+def test_a_covered_row_does_not_also_get_the_split_row_epigraph(monkeypatch):
+    """#2059 x #2021: with both blocks on, the outer approximation supersedes the
+    #2021 split-row epigraph on the rows it covers (performance-plan 103.15), and
+    the answer is unchanged."""
+    pytest.importorskip("highspy")
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    monkeypatch.setenv("DISCOPT_PERSPECTIVE_ROW_DISAGG", "1")
+    out = {}
+    for flag in ("0", "1"):
+        monkeypatch.setenv(FLAG, flag)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out[flag] = solve_mip_nlp(
+                _card_portfolio(), method="lp_nlp_bb", milp_solver="highs", time_limit=60
+            )
+    off, on = out["0"], out["1"]
+    assert (off.solver_stats or {}).get("oa/perspective_row_disagg_cols", 0) > 0
+    on_stats = on.solver_stats or {}
+    assert on_stats.get("oa/soc_outer_rows") == 1.0
+    assert "oa/perspective_row_disagg_cols" not in on_stats
+    assert "oa/soc_outer_accepted" in on_stats  # the acceptance counter is exported
+    for r in (off, on):
+        assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
+    assert on.objective == pytest.approx(off.objective, rel=1e-6)
+
+
+def test_no_master_point_is_accepted_under_a_nonlinear_objective(monkeypatch):
+    """With an objective epigraph the master's value under-estimates the objective
+    at a point, so accepting it would let HiGHS prune with a value nothing attains
+    (measured on nvs12: 0.6 -> 5.1 s and a fallback). The block is still built."""
+    pytest.importorskip("highspy")
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    monkeypatch.setenv(FLAG, "1")
+    m = _card_portfolio()
+    w = next(v for v in m._variables if v.name == "w")
+    m.minimize(dm.sum(lambda j: (w[j] - 0.3) ** 2, over=range(w.size)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(m, method="lp_nlp_bb", milp_solver="highs", time_limit=60)
+    stats = r.solver_stats or {}
+    assert stats.get("oa/soc_outer_rows") == 1.0, stats
+    assert stats.get("oa/soc_outer_accepted") == 0.0, stats
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)

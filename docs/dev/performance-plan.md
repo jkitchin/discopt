@@ -13912,3 +13912,89 @@ then run exactly as OFF. Every row the 30 s panel built the block on has at most
 
 #2059 can be closed: portfol_classical050_1 certifies at 120 s on the default
 path.
+
+### 103.15 #2059 on top of #2060: the outer approximation supersedes the split-row epigraph, and accepts points it bounds (2026-10-31)
+
+**What the rebase broke.** Section 103.14 was measured on `285d4d4`, before #2060
+merged `DISCOPT_PERSPECTIVE_ROW_DISAGG` (default ON, section 103.12). On the rebased
+tree, the 120 s test failed. Both blocks were then in the master:
+
+| `..._ROW_DISAGG` | first tree | its bound | incumbent | 120 s result |
+|---|---|---|---|---|
+| 1 (main's default) | 34.0 s | -0.0947735 | -0.0945259 | feasible: the guard abandons at 66 s |
+| 0 | 27.5 s | -0.0947726 | -0.0947601 | optimal, 90.2 s |
+
+**Diagnosis.**
+
+- **The bound does not explain it.** With the outer approximation present, the
+  split-row epigraph added nothing to the tree's bound (-0.0947735 vs -0.0947726)
+  and cost 6.5 s per tree.
+- **The incumbent does.** Logging every fixed NLP (`_solve_fixed_nlp_subproblem_attempt`)
+  shows only 4 distinct supports in 60 s in either arm. With both blocks, the
+  optimal support is never proposed. HiGHS is deterministic, so this is a property
+  of the search path, not noise.
+- **Even without the split-row block, the certificate raced the guard.** It needed
+  two trees of ~27 s. The first ends when HiGHS's best point is about 4e-6 over the
+  true risk row: the lazy separator cuts it, and the tree is rebuilt. While the
+  second tree runs, the published bound sits still, and the #1066 bound-stall rule
+  can abandon the route before that tree finishes. One rebased run did exactly
+  that.
+
+**Changes (all inside `DISCOPT_OA_SOC_OUTER`):**
+
+1. **A row the block covers does not also get the #2021 split-row epigraph.** The
+   aggregate split cut (`DISCOPT_PERSPECTIVE_ROW_CUT`) is a different mechanism and
+   stays.
+2. **An integer master point is accepted when the only original rows it violates
+   are rows the block covers** (`_within_soc_outer`, counter
+   `oa/soc_outer_accepted`). The block bounds such rows by construction, to
+   `1/cos(pi/512)**depth`, so the tangent that would reject the point refines
+   nothing the certificate needs, while the rejection costs a full HiGHS rebuild.
+   - Why this is sound: the master stays a relaxation whatever HiGHS keeps as its
+     incumbent, and `solve_lp_nlp_bb` takes its incumbent only from verified NLP
+     points (`accept_incumbent`). The fixed NLP is still solved at every such point,
+     and any other violated row, or a no-good cut, still rejects as before.
+   - **Only with a linear objective.** Under an objective epigraph, the master's
+     value under-estimates the objective at the point. A first version without this
+     gate accepted points worth about -483 on nvs12, whose fixed NLP gave -437.8.
+     HiGHS pruned with that value, the master ended `feasible` and handed over, and
+     nvs12 went from 0.6 to 5.1 s (nvs11 0.3 -> 1.6 s). With the gate, both match
+     OFF.
+3. **With acceptance on, the HiGHS master stops at 0.1 x `gap_tolerance`.** Its
+   incumbent can be an accepted point that sits below the verified incumbent by up
+   to the approximation error. Without this, one run stopped with bound -0.0947726
+   against incumbent -0.0947601 (gap 1.3e-4). The driver's 1 s check-in stops the
+   master at the true certificate.
+
+**Result on the issue's instance** (default solve, 120 s, 4 runs, incumbent verified):
+`optimal`, bound -0.0947649 (gap 5.0e-5), in 58.1 / 56.3 / 55.6 / 52.3 s. That is
+one tree, cross-solve confirmed (472 nodes), no fallback.
+
+**Panel, retaken** (102 routed instances, 30 s, interleaved, incumbents verified,
+marker `discopt.solvers.oa:soc_outer is not None and decomp.obj_is_linear`): 612
+checks, 0 problems, certified unchanged, total wall 434.1 -> 436.8 s. The block is
+built on 6 instances, with the same result on 5. On portfol_classical050_1 the 30 s
+bound is looser: -0.097110 OFF against -0.097498 ON. At 30 s the guard hands over
+at 15 s, before the single tree ends, and OFF's split-row epigraph gives the better
+hand-over bound. This is the price at short budgets.
+
+**Class run, retaken** (120 s, interleaved, incumbents verified, no bound past its
+reference):
+
+| instance | OFF (main, with #2060) | ON |
+|---|---|---|
+| portfol_classical050_1 | feasible, bound -0.096817 | **optimal, 52.3 s** |
+| portfol_robust050_34 | optimal, 17.1 s | **optimal, 8.4 s** |
+| portfol_robust100_09 | feasible, bound -0.1079171 | feasible, bound -0.1079333 |
+| classical200_2, robust200_03, shortfall* | not built | identical |
+
+robust100_09 is the other price. ON gives the same bound it gave before #2060; OFF
+gained 1.6e-5 from the split-row epigraph, which ON now supersedes on that row.
+Neither arm certifies.
+
+**Verdict: the graduation stands.** It is cert-clean. On the target class it gains
+a certificate (classical050_1) and halves another certificate's time
+(robust050_34). Against that: robust100_09's bound is 1.6e-5 looser, and
+classical050_1's 30 s bound is looser. Everything else is unchanged. The 120 s test
+(`test_issue_2059_portfol_classical050_1_certifies_at_120s`) now runs on the merged
+code.

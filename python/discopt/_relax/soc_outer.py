@@ -79,19 +79,21 @@ def soc_outer_enabled() -> bool:
     every convex norm-ball row to the ``lp_nlp_bb`` HiGHS master (#2059).
 
     **Graduated (default ON, #2059); ``=0`` restores the tangent-only master.**
-    Bound-changing, so CLAUDE.md section 5 regime 2 (performance-plan 103.14):
+    Bound-changing, so CLAUDE.md section 5 regime 2. Evidence as re-taken on main
+    with #2060's ``DISCOPT_PERSPECTIVE_ROW_DISAGG`` (performance-plan 103.15),
+    which this block supersedes on the rows it covers:
 
     * panel over the 102 routed instances, 30 s, interleaved, every incumbent
       verified: 612 checks, 0 problems, certified unchanged (none gained or lost),
-      total wall 463.3 -> 462.1 s; the block is built on 6 (ball_mk2_10/30,
-      nvs10/11/12, portfol_classical050_1), all with the same result. At 30 s the
-      #1066 guard hands portfol_classical050_1 over before its first tree ends;
+      total wall 434.1 -> 436.8 s; the block is built on 6 (ball_mk2_10/30,
+      nvs10/11/12, portfol_classical050_1), with the same result on all but the
+      last, whose bound at 30 s is looser (-0.097110 -> -0.097498: the #1066 guard
+      hands over before its single tree ends);
     * the MINLPLib portfol family at the issue's 120 s, interleaved, incumbents
       verified, no bound past its reference: portfol_classical050_1 feasible ->
-      **optimal, 89.1 s** (86.8 s in two further runs), portfol_robust050_34
-      optimal 40.0 -> **9.5 s**; robust100_09 unchanged; the 200-asset rows are
-      beyond :data:`MAX_LEAVES` (one of them lost its bound when the cap was
-      2000); the shortfall rows are not balls.
+      **optimal, 52.3 s**; portfol_robust050_34 optimal 17.1 -> **8.4 s**;
+      robust100_09 uncertified in both, bound 1.6e-5 looser; the 200-asset rows
+      are past :data:`MAX_LEAVES`; the shortfall rows are not balls.
     """
     return os.environ.get("DISCOPT_OA_SOC_OUTER", "1").strip().lower() not in (
         "0",

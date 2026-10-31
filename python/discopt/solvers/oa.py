@@ -6127,6 +6127,11 @@ def _route_abandon_cross_check_fraction() -> float:
     return _ABANDON_CROSS_CHECK_FRACTION
 
 
+#: #2059: the share of ``gap_tolerance`` the HiGHS master stops at when it carries
+#: the norm-ball outer approximation (see the use site in ``solve_lp_nlp_bb``).
+_SOC_OUTER_MASTER_GAP_SHARE = 0.1
+
+
 def _soc_outer_enabled() -> bool:
     """Thin re-export of ``soc_outer_enabled`` (#2059)."""
     from discopt._relax.soc_outer import soc_outer_enabled
@@ -6872,6 +6877,57 @@ def solve_lp_nlp_bb(
                     n_vars + soc_outer.n_cols,
                 )
                 soc_outer = None
+    #: #2059: integer master points accepted by ``_within_soc_outer`` (section 6).
+    soc_outer_accepted = [0]
+    soc_covered_rows = (
+        np.array(sorted({r.row for r in soc_outer.rows}), dtype=np.intp)
+        if soc_outer is not None
+        else np.zeros(0, dtype=np.intp)
+    )
+
+    def _within_soc_outer(x_master: np.ndarray) -> bool:
+        """Does ``x_master`` violate no original row except ones the block covers?
+
+        Only with a linear objective: under an objective epigraph the master's value
+        ``eta`` under-estimates ``f`` at the point, and accepting it lets HiGHS prune
+        with a value no point attains. Measured on nvs12 (quadratic objective): the
+        master accepted points worth about -483 whose fixed NLP gave -437.8, ended
+        ``feasible`` and handed over; the solve went 0.6 -> 5.1 s.
+        """
+        if soc_outer is None or not decomp.obj_is_linear:
+            return False
+        g = np.asarray(evaluator.evaluate_constraints(x_master), dtype=np.float64)
+        senses = decomp.constraint_senses
+        if len(senses) != g.size:
+            raise RuntimeError(
+                f"lp_nlp_bb: {g.size} constraint rows but {len(senses)} senses (#2059)"
+            )
+        viol = np.zeros(g.size)
+        for k, sense in enumerate(senses):
+            if sense == "<=":
+                viol[k] = g[k]
+            elif sense == ">=":
+                viol[k] = -g[k]
+            else:
+                viol[k] = abs(g[k])
+        viol[soc_covered_rows] = 0.0
+        return bool(np.all(np.isfinite(g)) and float(viol.max(initial=0.0)) <= 1e-6)
+
+    if soc_outer is not None and perspective_row_epigraph is not None:
+        # #2059: a row the outer approximation covers does not also get the #2021
+        # split-row epigraph. With the ball approximated to ~1e-5, the epigraph
+        # added nothing to the bound on portfol_classical050_1 (first tree
+        # -0.0947735 with it, -0.0947726 without) and cost the tree time (34.0 vs
+        # 27.5 s); with both, the search never proposed the optimal support and the
+        # solve did not certify at 120 s (performance-plan 103.15).
+        covered = {r.row for r in soc_outer.rows}
+        kept = [t for t in perspective_row_epigraph.terms if t.row not in covered]
+        if len(kept) != len(perspective_row_epigraph.terms):
+            narrowed = _PerspectiveRowEpigraph(kept) if kept else None
+            perspective_row_epigraph = (
+                narrowed if narrowed is not None and narrowed.n_cols > 0 else None
+            )
+            evaluator._perspective_row_epigraph = perspective_row_epigraph  # type: ignore[attr-defined]
 
     #: #1658: the best fixed-NLP point the screen below refused, kept only as an
     #: UNVERIFIED warm start for a caller with no verified incumbent -- never a
@@ -7294,6 +7350,15 @@ def solve_lp_nlp_bb(
         rows = collect_new_lazy_cuts(
             start, np.asarray(master_x, dtype=np.float64), at_incumbent=True
         )
+        if rows and not integer_cut_added and _within_soc_outer(x_master):
+            # #2059: the point violates only rows the norm-ball outer approximation
+            # already bounds (to 1/cos(pi/2**(nu+1)) per tower level), so a tangent
+            # there refines nothing the certificate needs; rejecting it costs a full
+            # HiGHS rebuild. Accepting it keeps the tree. Sound: the master is still
+            # a relaxation whatever HiGHS keeps as its incumbent, and this driver's
+            # incumbent is only ever a verified NLP point (``accept_incumbent``).
+            soc_outer_accepted[0] += 1
+            rows = []
         _record_callback_event(
             context="mipsol",
             cuts_start=cuts_start,
@@ -7468,6 +7533,16 @@ def solve_lp_nlp_bb(
     highs_no_submip = lazy_backend == "highs" and _highs_master_no_submip()
     if highs_no_submip:
         lazy_kwargs["highs_options"] = dict(_HIGHS_MASTER_NO_SUBMIP_OPTIONS)
+    if soc_outer is not None and decomp.obj_is_linear:
+        # #2059: with points accepted inside the outer approximation (see
+        # ``_within_soc_outer``), HiGHS's incumbent can sit below the verified NLP
+        # incumbent by up to the approximation error, so a tree that stops at
+        # ``gap_tolerance`` against ITS incumbent stops short of the certificate:
+        # measured on portfol_classical050_1, bound -0.0947726 against -0.0947601
+        # (1.3e-4). The driver's check-in (``callback_terminate``) stops the master
+        # the moment the bound meets the verified incumbent, so the tree's own
+        # stopping rule is tightened instead of trusted.
+        lazy_kwargs["gap_tolerance"] = gap_tolerance * _SOC_OUTER_MASTER_GAP_SHARE
     if lazy_backend == "highs":
         # #2059: an abandoned master may spend a share of the remaining budget on
         # the #1634 cross-solve that confirms its bound (0 = withdraw, as before).
@@ -7762,6 +7837,7 @@ def solve_lp_nlp_bb(
         # #2059: norm-ball rows given the outer approximation, and its size.
         route_stats["oa/soc_outer_rows"] = float(len(soc_outer.rows))
         route_stats["oa/soc_outer_cols"] = float(soc_outer.n_cols)
+        route_stats["oa/soc_outer_accepted"] = float(soc_outer_accepted[0])
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(
