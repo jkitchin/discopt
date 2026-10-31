@@ -69,10 +69,6 @@ MAX_SUPPORT = 500
 #: its first root (4,388 x 2,590 LP) and lost its dual bound.
 MAX_LEAVES = 128
 
-#: The master is built dense (``oa._build_master_milp_data``): a block whose rows
-#: times the master's columns exceed this many entries is not built.
-MAX_DENSE_ENTRIES = 25_000_000
-
 
 def soc_outer_enabled() -> bool:
     """``DISCOPT_OA_SOC_OUTER``: add the Ben-Tal--Nemirovski outer approximation of

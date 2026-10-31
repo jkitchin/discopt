@@ -14036,3 +14036,71 @@ code.
 | ball_mk2_10, ball_mk2_30, nvs10/11/12 | 30 s | optimal in both arms, same objective |
 | portfol_robust050_34 | 120 s | optimal, 17.7 -> 8.2 s |
 | portfol_robust100_09 | 120 s | unchanged from the panel |
+
+### 103.16 #2064 review: the OA / LP/NLP-BB masters are assembled sparse (2026-10-31)
+
+**What was dense.** Every master builder stacked full-width `np.ndarray` rows and
+handed the result to the backend:
+
+- `_build_master_milp_data` (multi-tree OA and the `lp_nlp_bb` master);
+- `_solve_regularized_master`;
+- `_solve_integer_projection_mip` (FP).
+
+`_decompose_model` also stored every linear row at full width. A model with `m`
+linear rows and `n` columns therefore cost `8 m n` bytes twice before any solver
+ran, whatever its sparsity. Every backend then converted the stack to CSR or CSC
+itself: HiGHS, the in-house simplex and Gurobi through `sp.csr_matrix`, and POUNCE
+by densifying again.
+
+**Change.** The rows are now held sparse from end to end:
+
+- **Decomposition:** linear rows are stored as `_SparseRow` (sorted nonzero
+  columns and values plus the width). `__array__`, `__len__` and `__neg__` keep
+  every reader of a dense vector working with identical values. `_state_fingerprint`
+  (#1710) hashes them exactly instead of raising.
+- **Mapping:** `_master_row_entries` maps a stored row into the master's columns
+  without allocating the full width. The old `_stored_row_to_master_layout` is now
+  a scatter over it, so there is one definition of the layout.
+- **Assembly:** the builders collect rows in a `_MasterRows` and emit canonical
+  CSR: same row order, no explicit zeros, sorted indices.
+- **Helpers:** the binary-link, no-good and distance rows are emitted as entries.
+- **Size cap removed:** the #2059 block's dense-entry cap guarded memory that the
+  sparse master no longer spends. `MAX_LEAVES` (an LP-cost guard) stays.
+
+**Bound-neutral check** (CLAUDE.md section 5, regime 1). A probe hooks every
+backend entry point and hashes the dense form of
+`(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)` for every MILP received. It
+compared the old tree (`b83dca88`, a worktree) with the new one, both asserting
+their own paths and the new one a source marker:
+
+- **Coverage:** the 102 routed instances (default solve, 20 s), plus their 30
+  fastest under `oa`, `oa` + `level_L1` and `fp` (10 s) — 192 pairs.
+- **Deterministic pairs** (both under 60% of the limit): 178, covering 463
+  masters. **Every master is bit-identical**, and status, objective and bound are
+  identical on all 178.
+- **The one node-count difference** (clay0204m, 902 vs 1006) is the 1 s
+  check-in's clock. Three alternating reruns per tree gave 883 / 826 / 865 (old)
+  and 855 / 874 / 837 (new), with the same master hash and result each time.
+- **Clocked pairs:** 14 were time-limited and are listed separately. Their
+  masters are identical too, up to where the clock cut them.
+- **Disclosure:** the new arm's run started before the cap's removal was edited
+  in. That cap cannot fire on these instances: at most about 1,000 x 700 against
+  2.5e7 entries.
+
+**Memory** (`mem_master.py`: 20,000 continuous columns, 8,020 five-term linear
+rows, 20 binaries, one ball row; decomposition + master build; fresh process per
+tree):
+
+| | old (dense) | new (CSR) |
+|---|---|---|
+| peak RSS over the model | 3,619 MB | 117 MB |
+| `_decompose_model` | 4.72 s | 4.63 s |
+| `_build_master_milp_data` | 10.95 s | 0.05 s |
+
+**Still dense.** This change does not cover:
+
+- **OA cut rows** (`oa_A_rows`): one `n_vars` vector per cut. Their count grows
+  with iterations, not with the model.
+- **Per-row extraction:** `_extract_body_coeffs` still builds a dense vector per
+  row, which is compressed immediately. That costs time, not memory.
+- **POUNCE's MILP wrapper**, which densifies internally.

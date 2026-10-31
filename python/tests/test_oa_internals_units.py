@@ -444,20 +444,20 @@ def test_integer_binary_expansion_bit_math():
 def test_append_integer_binary_link_rows():
     decomp = oa._decompose_model(_cvx_minlp())
     exp = oa._build_integer_binary_expansion(decomp, enabled=True)
-    a_eq, b_eq = [], []
+    a_eq, b_eq = oa._MasterRows(), []
     # Master layout [i, x, b0, b1, b2]: link row i - b0 - 2 b1 - 4 b2 == lower(=0).
     oa._append_integer_binary_link_rows(
         a_eq, b_eq, n_master=5, integer_binary_expansion=exp, integer_binary_start=2
     )
     assert len(a_eq) == 1
-    np.testing.assert_allclose(a_eq[0], [1.0, 0.0, -1.0, -2.0, -4.0])
+    np.testing.assert_allclose(a_eq.to_csr(5).toarray()[0], [1.0, 0.0, -1.0, -2.0, -4.0])
     assert b_eq == [0.0]
     # Disabled expansion appends nothing.
-    a_eq2, b_eq2 = [], []
+    a_eq2, b_eq2 = oa._MasterRows(), []
     oa._append_integer_binary_link_rows(
         a_eq2, b_eq2, n_master=5, integer_binary_expansion=None, integer_binary_start=None
     )
-    assert a_eq2 == [] and b_eq2 == []
+    assert len(a_eq2) == 0 and a_eq2.to_csr(5) is None and b_eq2 == []
 
 
 # ── unit: primal reduction cut ────────────────────────────────

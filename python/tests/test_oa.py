@@ -558,7 +558,7 @@ class TestOARobustnessOptions:
         )
 
         assert captured["c"].tolist() == pytest.approx([0.0, 17.0])
-        np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, -1.0]]))
+        np.testing.assert_allclose(captured["A_ub"].toarray(), np.array([[1.0, -1.0]]))
         assert captured["b_ub"].tolist() == pytest.approx([2.0])
         assert captured["bounds"] == [(0.0, 10.0), (0.0, 5.0)]
         assert captured["integrality"].tolist() == [0, 0]
@@ -617,7 +617,7 @@ class TestOARobustnessOptions:
             oa_cut_relaxable=oa_cut_relaxable,
         )
 
-        np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, 0.0]]))
+        np.testing.assert_allclose(captured["A_ub"].toarray(), np.array([[1.0, 0.0]]))
         assert captured["b_ub"].tolist() == pytest.approx([0.0])
 
     def test_no_good_cut_uses_binary_indices_only_for_mixed_assignment(self):
@@ -738,9 +738,9 @@ class TestOARobustnessOptions:
         assert len(master.c) == 4
         assert master.bounds[2:] == [(0.0, 1.0), (0.0, 1.0)]
         assert master.integrality.tolist() == [1, 1, 1, 1]
-        np.testing.assert_allclose(master.A_ub, np.array([[1.0, 0.0, -1.0, 1.0]]))
+        np.testing.assert_allclose(master.A_ub.toarray(), np.array([[1.0, 0.0, -1.0, 1.0]]))
         assert master.b_ub.tolist() == pytest.approx([1.0])
-        np.testing.assert_allclose(master.A_eq, np.array([[0.0, 1.0, -1.0, -2.0]]))
+        np.testing.assert_allclose(master.A_eq.toarray(), np.array([[0.0, 1.0, -1.0, -2.0]]))
         assert master.b_eq.tolist() == pytest.approx([0.0])
 
     def test_integer_binary_expansion_rejects_unbounded_integer(self):
@@ -778,13 +778,14 @@ class TestOARobustnessOptions:
         from discopt.solvers.oa import (
             _append_binary_no_good_projection_cut,
             _decompose_model,
+            _MasterRows,
         )
 
         m = dm.Model("binary_projection_no_good")
         y = m.binary("y", shape=(2,))
         m.minimize(y[0] + y[1])
         decomp = _decompose_model(m)
-        a_rows = []
+        a_rows = _MasterRows()
         b_rows = []
 
         added = _append_binary_no_good_projection_cut(
@@ -796,7 +797,7 @@ class TestOARobustnessOptions:
         )
 
         assert added is True
-        np.testing.assert_allclose(a_rows[0], np.array([1.0, -1.0]))
+        np.testing.assert_allclose(a_rows.to_csr(2).toarray()[0], np.array([1.0, -1.0]))
         assert b_rows == pytest.approx([0.0])
 
     def test_projection_no_good_cut_skips_mixed_integer_model(self):

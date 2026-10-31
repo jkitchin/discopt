@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import numpy as np
+import scipy.sparse as sp
 
 from discopt._work_budget import WorkBudget
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
@@ -930,9 +931,10 @@ class _MasterMILPData:
     """Matrix data for an OA-style MILP master."""
 
     c: np.ndarray
-    A_ub: Optional[np.ndarray]
+    #: CSR since the #2064 review (rows assembled sparse); ``None`` when empty.
+    A_ub: Optional[sp.csr_matrix]
     b_ub: Optional[np.ndarray]
-    A_eq: Optional[np.ndarray]
+    A_eq: Optional[sp.csr_matrix]
     b_eq: Optional[np.ndarray]
     bounds: list[tuple[float, float]]
     integrality: np.ndarray
@@ -1086,6 +1088,105 @@ def _stored_row_uses_integer_binary_expansion(
     )
 
 
+class _SparseRow:
+    """One stored linear row kept by its nonzeros (#2064 review).
+
+    The master builders used to receive and emit full-width ``np.ndarray`` rows, so
+    a model with ``m`` linear rows and ``n`` columns cost ``8 m n`` bytes before any
+    solver ran (20,000 x 20,000 is 3.2 GB) whatever its sparsity. ``idx``/``val``
+    are the sorted nonzero columns and their values; ``n`` is the full width.
+
+    ``__array__`` and ``__len__`` keep the row usable wherever a dense vector was
+    read (``np.asarray(row)``, ``len(row)``), with identical values; the master
+    builders read ``idx``/``val`` directly and never densify it.
+    """
+
+    __slots__ = ("idx", "val", "n")
+
+    def __init__(self, idx: np.ndarray, val: np.ndarray, n: int) -> None:
+        self.idx = np.asarray(idx, dtype=np.intp)
+        self.val = np.asarray(val, dtype=np.float64)
+        self.n = int(n)
+
+    @classmethod
+    def from_dense(cls, row) -> "_SparseRow":
+        v = np.asarray(row, dtype=np.float64).ravel()
+        nz = np.flatnonzero(v)
+        return cls(nz, v[nz].copy(), v.size)
+
+    def toarray(self) -> np.ndarray:
+        out = np.zeros(self.n, dtype=np.float64)
+        out[self.idx] = self.val
+        return out
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        out = self.toarray()
+        return out if dtype is None else out.astype(dtype)
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __neg__(self) -> "_SparseRow":
+        return _SparseRow(self.idx, -self.val, self.n)
+
+
+def _row_nonzeros(row) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(columns, values, length)`` of a stored row, dense or :class:`_SparseRow`."""
+    if isinstance(row, _SparseRow):
+        return row.idx, row.val, row.n
+    raw = np.asarray(row, dtype=np.float64).ravel()
+    nz = np.flatnonzero(raw)
+    return nz.astype(np.intp), raw[nz], raw.size
+
+
+def _master_row_entries(
+    row,
+    *,
+    n_vars: int,
+    n_master: int,
+    use_objective_epigraph: bool,
+    slack_index: Optional[int],
+    relaxable: bool,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
+    integer_binary_start: Optional[int] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A stored OA row in the master's column layout, as ``(columns, values)``.
+
+    The single definition of the layout (``_stored_row_to_master_layout`` scatters
+    it): columns are unique, and no value is zero.
+    """
+    cols, vals, length = _row_nonzeros(row)
+    if (
+        integer_binary_expansion is not None
+        and integer_binary_expansion.bit_count > 0
+        and length == n_vars + 1 + integer_binary_expansion.bit_count
+    ):
+        if integer_binary_start is None:
+            raise ValueError("integer-binary cut row requires expansion columns in master")
+        keep = cols < n_vars
+        if use_objective_epigraph:
+            keep |= cols == n_vars
+        bits = cols > n_vars
+        out_cols = np.concatenate(
+            [cols[keep], integer_binary_start + (cols[bits] - (n_vars + 1))]
+        ).astype(np.intp)
+        out_vals = np.concatenate([vals[keep], vals[bits]])
+    else:
+        if not (use_objective_epigraph and length == n_vars) and length > n_master:
+            raise ValueError(
+                f"OA cut has {length} coefficients but master has {n_master} variables"
+            )
+        out_cols, out_vals = cols, vals
+    if slack_index is not None:
+        # The dense layout wrote the slack entry over whatever was there.
+        other = out_cols != slack_index
+        out_cols, out_vals = out_cols[other], out_vals[other]
+        if relaxable:
+            out_cols = np.append(out_cols, np.intp(slack_index))
+            out_vals = np.append(out_vals, -1.0)
+    return out_cols, out_vals
+
+
 def _stored_row_to_master_layout(
     row,
     *,
@@ -1097,35 +1198,68 @@ def _stored_row_to_master_layout(
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
     integer_binary_start: Optional[int] = None,
 ) -> np.ndarray:
-    """Copy a stored OA row into the active MILP master column layout."""
-    raw = np.asarray(row, dtype=np.float64).ravel()
+    """Copy a stored OA row into the active MILP master column layout (dense)."""
     out = np.zeros(n_master, dtype=np.float64)
-    if _stored_row_uses_integer_binary_expansion(raw, n_vars, integer_binary_expansion):
-        assert integer_binary_expansion is not None
-        if integer_binary_start is None:
-            raise ValueError("integer-binary cut row requires expansion columns in master")
-        out[:n_vars] = raw[:n_vars]
-        if use_objective_epigraph:
-            out[n_vars] = raw[n_vars]
-        out[integer_binary_start : integer_binary_start + integer_binary_expansion.bit_count] = raw[
-            n_vars + 1 :
-        ]
-    else:
-        if use_objective_epigraph and len(raw) == n_vars:
-            out[:n_vars] = raw
-        else:
-            if len(raw) > n_master:
-                raise ValueError(
-                    f"OA cut has {len(raw)} coefficients but master has {n_master} variables"
-                )
-            out[: len(raw)] = raw
-    if slack_index is not None:
-        out[slack_index] = -1.0 if relaxable else 0.0
+    cols, vals = _master_row_entries(
+        row,
+        n_vars=n_vars,
+        n_master=n_master,
+        use_objective_epigraph=use_objective_epigraph,
+        slack_index=slack_index,
+        relaxable=relaxable,
+        integer_binary_expansion=integer_binary_expansion,
+        integer_binary_start=integer_binary_start,
+    )
+    out[cols] = vals
     return out
 
 
+class _MasterRows:
+    """Rows of a master MILP collected sparse and emitted as canonical CSR (#2064).
+
+    Replaces the ``list[np.ndarray]`` + ``np.array(rows)`` the builders used: a dense
+    row handed to :meth:`append` is reduced to its nonzeros on arrival, and
+    :meth:`append_entries` takes ``(columns, values)`` directly. Rows keep their
+    order, explicit zeros are dropped, and indices are sorted, so the CSR is what
+    every backend's own ``sp.csr_matrix(dense)`` would have produced from the old
+    dense stack.
+    """
+
+    def __init__(self) -> None:
+        self._cols: list[np.ndarray] = []
+        self._vals: list[np.ndarray] = []
+
+    def append(self, row) -> None:
+        cols, vals, _ = _row_nonzeros(row)
+        self.append_entries(cols, vals)
+
+    def append_entries(self, cols, vals) -> None:
+        cols = np.asarray(cols, dtype=np.intp)
+        vals = np.asarray(vals, dtype=np.float64)
+        keep = vals != 0.0
+        self._cols.append(cols[keep])
+        self._vals.append(vals[keep])
+
+    def __len__(self) -> int:
+        return len(self._cols)
+
+    def to_csr(self, n_cols: int) -> Optional[sp.csr_matrix]:
+        if not self._cols:
+            return None
+        lengths = np.fromiter((c.size for c in self._cols), dtype=np.intp, count=len(self._cols))
+        indptr = np.concatenate([[0], np.cumsum(lengths)]).astype(np.intp)
+        indices = np.concatenate(self._cols) if indptr[-1] else np.zeros(0, dtype=np.intp)
+        data = np.concatenate(self._vals) if indptr[-1] else np.zeros(0, dtype=np.float64)
+        if indices.size and (indices.min() < 0 or indices.max() >= n_cols):
+            raise ValueError(f"master row entry outside the {n_cols} master columns")
+        out = sp.csr_matrix((data, indices, indptr), shape=(len(self._cols), n_cols))
+        out.sum_duplicates()
+        out.sort_indices()
+        return out
+
+
 def _append_integer_binary_link_rows(
-    a_eq_rows: list[np.ndarray],
+    a_eq_rows: "_MasterRows",
     b_eq_vals: list[float],
     *,
     n_master: int,
@@ -1141,11 +1275,13 @@ def _append_integer_binary_link_rows(
     for spec in integer_binary_expansion.variables:
         if spec.bit_count <= 0:
             continue
-        row = np.zeros(n_master, dtype=np.float64)
-        row[spec.index] = 1.0
-        for bit in range(spec.bit_count):
-            row[integer_binary_start + spec.bit_start + bit] = -float(1 << bit)
-        a_eq_rows.append(row)
+        bit_cols = integer_binary_start + spec.bit_start + np.arange(spec.bit_count)
+        if bit_cols.size and int(bit_cols[-1]) >= n_master:
+            raise ValueError("integer-binary link row exceeds the master's columns")
+        a_eq_rows.append_entries(
+            np.concatenate([[spec.index], bit_cols]),
+            np.concatenate([[1.0], [-float(1 << bit) for bit in range(spec.bit_count)]]),
+        )
         b_eq_vals.append(float(spec.lower))
 
 
@@ -1326,7 +1462,9 @@ class _DecomposedProblem:
     binary_indices: list[int]
     general_integer_indices: list[int]
     integrality: np.ndarray
-    linear_A_rows: list[np.ndarray]
+    #: :class:`_SparseRow` per linear row (#2064 review); dense rows are still
+    #: accepted by every master builder.
+    linear_A_rows: list[Any]
     linear_b_rows: list[float]
     linear_senses: list[str]
     nonlinear_indices: list[int]
@@ -1531,7 +1669,8 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         coeffs = _extract_body_coeffs(c.body, model, n_vars) if n_rows == 1 else None
         if coeffs is not None:
             c_vec, off = coeffs
-            linear_A_rows.append(c_vec)
+            # #2064 review: stored by its nonzeros, not at full width.
+            linear_A_rows.append(_SparseRow.from_dense(c_vec))
             linear_b_rows.append(-off)
             linear_senses.append(c.sense)
         else:
@@ -2804,7 +2943,7 @@ def _append_binary_no_good_projection_cut(
     decomp: _DecomposedProblem,
     assignment: tuple[float, ...],
     n_master: int,
-    a_rows: list[np.ndarray],
+    a_rows: "_MasterRows",
     b_rows: list[float],
 ) -> bool:
     """Append a binary assignment exclusion cut to the projection MILP."""
@@ -2815,17 +2954,12 @@ def _append_binary_no_good_projection_cut(
         return False
 
     assignment_by_index = dict(zip(decomp.int_indices, assignment))
-    coeffs = np.zeros(n_master, dtype=np.float64)
-    count_ones = 0
-    for idx in decomp.binary_indices:
-        val = assignment_by_index[idx]
-        if val >= 0.5:
-            coeffs[idx] = 1.0
-            count_ones += 1
-        else:
-            coeffs[idx] = -1.0
-    a_rows.append(coeffs)
-    b_rows.append(float(count_ones - 1))
+    cols = np.asarray(sorted(set(decomp.binary_indices)), dtype=np.intp)
+    if cols.size and int(cols[-1]) >= n_master:
+        raise ValueError("binary no-good row exceeds the projection MILP's columns")
+    vals = np.array([1.0 if assignment_by_index[i] >= 0.5 else -1.0 for i in cols.tolist()])
+    a_rows.append_entries(cols, vals)
+    b_rows.append(float(np.count_nonzero(vals > 0.0) - 1))
     return True
 
 
@@ -2868,9 +3002,9 @@ def _solve_integer_projection_mip(
         return _snap_integer_assignment(decomp, target)
     use_linf = projection_norm == "L_infinity"
 
-    a_ub_rows: list[np.ndarray] = []
+    a_ub_rows = _MasterRows()
     b_ub_vals: list[float] = []
-    a_eq_rows: list[np.ndarray] = []
+    a_eq_rows = _MasterRows()
     b_eq_vals: list[float] = []
 
     if use_linf:
@@ -2882,16 +3016,9 @@ def _solve_integer_projection_mip(
         bounds.append((0.0, 1e20))
 
         for idx in distance_indices:
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = 1.0
-            row[deviation_index] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, deviation_index], [1.0, -1.0])
             b_ub_vals.append(float(target[idx]))
-
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = -1.0
-            row[deviation_index] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, deviation_index], [-1.0, -1.0])
             b_ub_vals.append(float(-target[idx]))
     else:
         n_dev = len(distance_indices)
@@ -2904,16 +3031,9 @@ def _solve_integer_projection_mip(
             width = max(float(decomp.ub[idx] - decomp.lb[idx]), 1.0)
             bounds.append((0.0, width))
 
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = 1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [1.0, -1.0])
             b_ub_vals.append(float(target[idx]))
-
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = -1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [-1.0, -1.0])
             b_ub_vals.append(float(-target[idx]))
 
     for row, rhs, sense in zip(
@@ -2921,16 +3041,17 @@ def _solve_integer_projection_mip(
         decomp.linear_b_rows,
         decomp.linear_senses,
     ):
-        master_row = np.zeros(n_master, dtype=np.float64)
-        master_row[:n_vars] = row
+        cols, vals, length = _row_nonzeros(row)
+        if length != n_vars:
+            raise ValueError(f"linear row has {length} coefficients, expected {n_vars}")
         if sense == "<=":
-            a_ub_rows.append(master_row)
+            a_ub_rows.append_entries(cols, vals)
             b_ub_vals.append(rhs)
         elif sense == ">=":
-            a_ub_rows.append(-master_row)
+            a_ub_rows.append_entries(cols, -vals)
             b_ub_vals.append(-rhs)
         elif sense == "==":
-            a_eq_rows.append(master_row)
+            a_eq_rows.append_entries(cols, vals)
             b_eq_vals.append(rhs)
 
     for assignment in seen_assignments:
@@ -2940,9 +3061,9 @@ def _solve_integer_projection_mip(
     integrality[:n_vars] = decomp.integrality
     result = solve_milp(
         c=c,
-        A_ub=np.asarray(a_ub_rows, dtype=np.float64) if a_ub_rows else None,
+        A_ub=a_ub_rows.to_csr(n_master),
         b_ub=np.asarray(b_ub_vals, dtype=np.float64) if b_ub_vals else None,
-        A_eq=np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None,
+        A_eq=a_eq_rows.to_csr(n_master),
         b_eq=np.asarray(b_eq_vals, dtype=np.float64) if b_eq_vals else None,
         bounds=bounds,
         integrality=integrality,
@@ -4666,20 +4787,14 @@ def _build_master_milp_data(
         soc_outer_start = n_master
         n_master += soc_outer.n_cols
 
-    def _soc_row(x_terms, block_terms) -> np.ndarray:
-        row = np.zeros(n_master, dtype=np.float64)
-        for col, val in x_terms.items():
-            row[col] += val
-        for col, val in block_terms.items():
-            row[soc_outer_start + col] += val
-        return row
-
-    # Build A_ub, b_ub from linear <= constraints + OA cuts
-    A_ub_rows = []
+    # Build A_ub, b_ub from linear <= constraints + OA cuts. Sparse (#2064 review):
+    # the rows go into a ``_MasterRows`` and leave as CSR, in the same order and
+    # with the same values the dense stack had.
+    A_ub_rows = _MasterRows()
     b_ub_vals = []
 
-    for i, sense in enumerate(linear_senses):
-        row = _stored_row_to_master_layout(
+    def _linear_entries(i: int) -> tuple[np.ndarray, np.ndarray]:
+        return _master_row_entries(
             linear_A_rows[i],
             n_vars=n_vars,
             n_master=n_master,
@@ -4689,24 +4804,28 @@ def _build_master_milp_data(
             integer_binary_expansion=integer_binary_expansion,
             integer_binary_start=integer_binary_start,
         )
+
+    for i, sense in enumerate(linear_senses):
         if sense == "<=":
-            A_ub_rows.append(row)
+            cols, vals = _linear_entries(i)
+            A_ub_rows.append_entries(cols, vals)
             b_ub_vals.append(linear_b_rows[i])
         elif sense == ">=":
-            A_ub_rows.append(-row)
+            cols, vals = _linear_entries(i)
+            A_ub_rows.append_entries(cols, -vals)
             b_ub_vals.append(-linear_b_rows[i])
 
     # OA cuts (all in <= form already)
     # Constraint cuts have length n_vars; objective cuts carry the eta column.
     for i in range(len(oa_A_rows)):
-        original_len = len(np.asarray(oa_A_rows[i], dtype=np.float64).ravel())
+        original_len = len(oa_A_rows[i])
         # Relax only constraint OA/feasibility cuts. Objective epigraph cuts and
         # hard integer-exclusion cuts must remain unrelaxed.
         if oa_cut_relaxable is None:
             relax_cut = original_len == n_vars
         else:
             relax_cut = bool(oa_cut_relaxable[i])
-        row = _stored_row_to_master_layout(
+        cols, vals = _master_row_entries(
             oa_A_rows[i],
             n_vars=n_vars,
             n_master=n_master,
@@ -4716,7 +4835,7 @@ def _build_master_milp_data(
             integer_binary_expansion=integer_binary_expansion,
             integer_binary_start=integer_binary_start,
         )
-        A_ub_rows.append(row)
+        A_ub_rows.append_entries(cols, vals)
         b_ub_vals.append(oa_b_rows[i])
 
     if perspective_start is not None:
@@ -4736,25 +4855,19 @@ def _build_master_milp_data(
     if soc_outer_start is not None:
         assert soc_outer is not None
         for x_terms, block_terms, rhs in soc_outer.ub_rows:
-            A_ub_rows.append(_soc_row(x_terms, block_terms))
+            A_ub_rows.append_entries(
+                list(x_terms) + [soc_outer_start + col for col in block_terms],
+                list(x_terms.values()) + list(block_terms.values()),
+            )
             b_ub_vals.append(rhs)
 
     # Equality constraints from linear
-    A_eq_rows = []
+    A_eq_rows = _MasterRows()
     b_eq_vals = []
     for i, sense in enumerate(linear_senses):
         if sense == "==":
-            row = _stored_row_to_master_layout(
-                linear_A_rows[i],
-                n_vars=n_vars,
-                n_master=n_master,
-                use_objective_epigraph=bool(use_objective_epigraph),
-                slack_index=None,
-                relaxable=False,
-                integer_binary_expansion=integer_binary_expansion,
-                integer_binary_start=integer_binary_start,
-            )
-            A_eq_rows.append(row)
+            cols, vals = _linear_entries(i)
+            A_eq_rows.append_entries(cols, vals)
             b_eq_vals.append(linear_b_rows[i])
     _append_integer_binary_link_rows(
         A_eq_rows,
@@ -4764,9 +4877,9 @@ def _build_master_milp_data(
         integer_binary_start=integer_binary_start,
     )
 
-    A_ub = np.array(A_ub_rows) if A_ub_rows else None
+    A_ub = A_ub_rows.to_csr(n_master)
     b_ub = np.array(b_ub_vals) if b_ub_vals else None
-    A_eq = np.array(A_eq_rows) if A_eq_rows else None
+    A_eq = A_eq_rows.to_csr(n_master)
     b_eq = np.array(b_eq_vals) if b_eq_vals else None
 
     # Objective
@@ -5138,13 +5251,15 @@ def _solve_regularized_master(
     else:  # pragma: no cover - guarded by _normalize_regularization
         raise ValueError(f"Unsupported regularization mode {add_regularization!r}.")
 
-    a_ub_rows: list[np.ndarray] = []
+    a_ub_rows = _MasterRows()
     b_ub_vals: list[float] = []
-    a_eq_rows: list[np.ndarray] = []
+    a_eq_rows = _MasterRows()
     b_eq_vals: list[float] = []
 
-    def base_row(coeffs, *, relaxable: bool = False, slack: bool = False) -> np.ndarray:
-        return _stored_row_to_master_layout(
+    def base_row(
+        coeffs, *, relaxable: bool = False, slack: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return _master_row_entries(
             coeffs,
             n_vars=n_vars,
             n_master=n_master,
@@ -5160,25 +5275,25 @@ def _solve_regularized_master(
         decomp.linear_b_rows,
         decomp.linear_senses,
     ):
-        master_row = base_row(row)
+        cols, vals = base_row(row)
         if sense == "<=":
-            a_ub_rows.append(master_row)
+            a_ub_rows.append_entries(cols, vals)
             b_ub_vals.append(float(rhs))
         elif sense == ">=":
-            a_ub_rows.append(-master_row)
+            a_ub_rows.append_entries(cols, -vals)
             b_ub_vals.append(float(-rhs))
         elif sense == "==":
-            a_eq_rows.append(master_row)
+            a_eq_rows.append_entries(cols, vals)
             b_eq_vals.append(float(rhs))
 
     for i, cut_row in enumerate(oa_A_rows):
-        original_len = len(np.asarray(cut_row, dtype=np.float64).ravel())
+        original_len = len(cut_row)
         if oa_cut_relaxable is None:
             relax_cut = original_len == n_vars
         else:
             relax_cut = bool(oa_cut_relaxable[i])
-        master_row = base_row(cut_row, relaxable=relax_cut, slack=True)
-        a_ub_rows.append(master_row)
+        cols, vals = base_row(cut_row, relaxable=relax_cut, slack=True)
+        a_ub_rows.append_entries(cols, vals)
         b_ub_vals.append(float(oa_b_rows[i]))
 
     _append_integer_binary_link_rows(
@@ -5206,31 +5321,17 @@ def _solve_regularized_master(
         assert aux_start is not None
         for idx in range(n_vars):
             dev_idx = aux_start + idx
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = 1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [1.0, -1.0])
             b_ub_vals.append(float(target[idx]))
-
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = -1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [-1.0, -1.0])
             b_ub_vals.append(float(-target[idx]))
     elif add_regularization == "level_L_infinity":
         assert aux_start is not None
         dev_idx = aux_start
         for idx in range(n_vars):
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = 1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [1.0, -1.0])
             b_ub_vals.append(float(target[idx]))
-
-            row = np.zeros(n_master, dtype=np.float64)
-            row[idx] = -1.0
-            row[dev_idx] = -1.0
-            a_ub_rows.append(row)
+            a_ub_rows.append_entries([idx, dev_idx], [-1.0, -1.0])
             b_ub_vals.append(float(-target[idx]))
 
     bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
@@ -5259,9 +5360,9 @@ def _solve_regularized_master(
                 + spec.bit_start
                 + spec.bit_count
             ] = bit_integrality
-    A_ub = np.asarray(a_ub_rows, dtype=np.float64) if a_ub_rows else None
+    A_ub = a_ub_rows.to_csr(n_master)
     b_ub = np.asarray(b_ub_vals, dtype=np.float64) if b_ub_vals else None
-    A_eq = np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None
+    A_eq = a_eq_rows.to_csr(n_master)
     b_eq = np.asarray(b_eq_vals, dtype=np.float64) if b_eq_vals else None
 
     if add_regularization in _QP_REGULARIZATION_MODES:
@@ -5588,6 +5689,11 @@ def _state_fingerprint(*parts: object) -> bytes:
                 raise TypeError("_state_fingerprint: object-dtype arrays are not hashable exactly")
             h.update(b"A" + arr.dtype.str.encode() + repr(arr.shape).encode())
             h.update(arr.tobytes())
+        elif isinstance(obj, _SparseRow):
+            # Exact: the full width and every nonzero (#2064 review).
+            h.update(b"R" + str(obj.n).encode() + b":")
+            feed(obj.idx.astype(np.int64))
+            feed(obj.val)
         elif isinstance(obj, (list, tuple)):
             h.update(b"L" + str(len(obj)).encode() + b"[")
             for item in obj:
@@ -6857,7 +6963,6 @@ def solve_lp_nlp_bb(
     # tangents stay). Only on the HiGHS master, where it was measured; not under a
     # SHOT profile or the slack heuristic (whose OA rows are soft, these hard).
     from discopt._relax.soc_outer import (
-        MAX_DENSE_ENTRIES,
         SocOuterBlock,
         norm_ball_rows,
         soc_outer_enabled,
@@ -6873,28 +6978,6 @@ def solve_lp_nlp_bb(
         ]
         if balls:
             soc_outer = SocOuterBlock(balls)
-            # The master's full width: every block ``_build_master_milp_data``
-            # appends, not only ``n_vars`` (review of #2064).
-            width = (
-                n_vars
-                + int(not decomp.obj_is_linear and decomp.oa_objective_is_convex)
-                + (
-                    integer_binary_expansion.bit_count
-                    if integer_binary_expansion is not None
-                    else 0
-                )
-                + (len(perspective_epigraph.terms) if perspective_epigraph is not None else 0)
-                + (perspective_row_epigraph.n_cols if perspective_row_epigraph is not None else 0)
-                + soc_outer.n_cols
-            )
-            if len(soc_outer.ub_rows) * width > MAX_DENSE_ENTRIES:
-                logger.info(
-                    "LP/NLP BB: norm-ball outer approximation skipped: %d rows x %d "
-                    "columns exceeds the dense master's budget",
-                    len(soc_outer.ub_rows),
-                    width,
-                )
-                soc_outer = None
     #: #2059: integer master points accepted by ``_within_soc_outer`` (section 6).
     soc_outer_accepted = [0]
     #: #2059: rows an accepted point would have returned. Nothing is discarded:
