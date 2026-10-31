@@ -577,6 +577,87 @@ def _oa_convexity_subdivision_enabled() -> bool:
     )
 
 
+def _oa_convexity_taylor_enabled() -> bool:
+    """Whether :func:`certify_convex_subdivided` tries a Taylor-form test first (#2062).
+
+    On a row whose curvature depends on one variable ``t``, each piece is first
+    tested with a Taylor form of ``f''`` about the piece midpoint with a Lagrange
+    remainder (:func:`~.interval_jet.second_derivative_enclosure`), which removes
+    the dependency loss of the natural interval Hessian at order ``w**K`` in the
+    piece width instead of ``w``. Only when that abstains does the interval-Hessian
+    bisection of #2054 run, so every row #2054 certifies is still certified.
+
+    Bound-changing (a newly certified row gets OA cuts); sound by construction
+    (Taylor's theorem with interval-enclosed coefficients, outward rounding).
+    Opt-out ``DISCOPT_OA_CONVEXITY_TAYLOR=0`` (also ``false``/``no``/``off``).
+    """
+    return os.environ.get("DISCOPT_OA_CONVEXITY_TAYLOR", "0").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _certify_univariate_taylor(
+    expr: Expression,
+    model: Model,
+    var,
+    lo: float,
+    hi: float,
+    *,
+    max_pieces: int,
+    deadline: Optional[float],
+) -> Optional[Curvature]:
+    """Certify ``expr``'s curvature in the scalar ``var`` on ``[lo, hi]``, or ``None`` (#2062).
+
+    The caller guarantees the interval Hessian of ``expr`` has a single nonzero
+    entry, ``d2f/dvar2`` (every other variable enters with no curvature), so the
+    Hessian is PSD exactly where that entry is nonnegative. Pieces are bisected
+    breadth-first and tested a whole level at a time in one vectorised jet walk.
+
+    A piece whose enclosure is ``>= 0`` is convex, ``<= 0`` concave; a piece with
+    both (``f'' = 0`` there) is compatible with either. The verdict is returned
+    only when every piece of the cover is decided and all agree; mixed verdicts,
+    a jet outside its atom table, an exhausted ``max_pieces`` (counted per piece
+    tested) or a passed ``deadline`` return ``None``.
+    """
+    from .interval_jet import JetAbstain, second_derivative_enclosure
+
+    pend_lo = np.array([lo], dtype=np.float64)
+    pend_hi = np.array([hi], dtype=np.float64)
+    tested = 0
+    convex_seen = concave_seen = False
+    while pend_lo.size:
+        if tested + pend_lo.size > max_pieces:
+            return None
+        if deadline is not None and time.perf_counter() >= deadline:
+            return None
+        tested += pend_lo.size
+        try:
+            enc_lo, enc_hi = second_derivative_enclosure(expr, var, {}, pend_lo, pend_hi)
+        except JetAbstain:
+            return None
+        with np.errstate(invalid="ignore"):
+            convex = enc_lo >= 0.0
+            concave = enc_hi <= 0.0
+        convex_seen |= bool(np.any(convex & ~concave))
+        concave_seen |= bool(np.any(concave & ~convex))
+        if convex_seen and concave_seen:
+            return None
+        open_ = ~(convex | concave)
+        a, b = pend_lo[open_], pend_hi[open_]
+        mid = 0.5 * (a + b)
+        if not bool(np.all((a < mid) & (mid < b))):
+            return None
+        pend_lo = np.concatenate([a, mid])
+        pend_hi = np.concatenate([mid, b])
+    if concave_seen:
+        return Curvature.CONCAVE
+    # Every piece convex, or ``f'' = 0`` on all of them (affine: convex too).
+    return Curvature.CONVEX
+
+
 #: Most interval-Hessian walks one :func:`certify_convex_subdivided` call makes.
 #: On the #2054 reactor rows adaptive bisection needs 31 (PFR) and 59 (two CSTRs),
 #: against 16 and 32 uniform pieces; past the budget the call abstains.
@@ -612,6 +693,11 @@ def certify_convex_subdivided(
     wider than ``max_dims``, an array variable, an exhausted ``max_pieces`` or a
     passed ``deadline`` each abstain with ``None``; abstaining is never a claim
     of nonconvexity.
+
+    With ``DISCOPT_OA_CONVEXITY_TAYLOR`` and a single curved variable, the cover
+    is first tried with the Taylor-form test of :func:`_certify_univariate_taylor`
+    (#2062), whose enclosure of ``f''`` tightens at order ``w**K`` instead of
+    ``w``; when it abstains, the interval-Hessian bisection above runs as before.
     """
     from discopt.export._common import variable_flat_offsets
     from discopt.modeling.core import Variable
@@ -645,6 +731,14 @@ def certify_convex_subdivided(
     start = {
         v: (float(np.asarray(v.lb).reshape(())), float(np.asarray(v.ub).reshape(()))) for v in split
     }
+    if len(split) == 1 and _oa_convexity_taylor_enabled():
+        # #2062: one curved variable -- try the Taylor form of f'' first.
+        (v0,) = split
+        verdict = _certify_univariate_taylor(
+            expr, model, v0, *start[v0], max_pieces=max_pieces, deadline=deadline
+        )
+        if verdict is not None:
+            return verdict
     work: list[dict] = [start]
     target: Optional[Curvature] = None
     walks = 0
