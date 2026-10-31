@@ -336,8 +336,13 @@ class _PersistentProbeLP:
         self._data = np.ascontiguousarray(a_std.data, dtype=np.float64)
         self._b = np.ascontiguousarray(b_vec, dtype=np.float64)
 
-    def solve(self, c, lb_arr, ub_arr, warm_basis):
+    def solve(self, c, lb_arr, ub_arr, warm_basis, time_limit_s=None):
         """Solve ``min c^T x  s.t.  A_ub x <= b_ub, lb <= x <= ub`` at this box.
+
+        ``time_limit_s`` (seconds, ``None`` = unbounded) is this one LP's wall-clock
+        budget, forwarded to the simplex's polled deadline; a solve it cuts short is
+        non-optimal and so tightens nothing (#2006: without it a single root-OBBT
+        probe on QPLIB_5875 ran 49.6 s inside a 5 s phase budget).
 
         Returns ``(status, objective, dual_values, basis, wall_time)`` — ``status``
         a :class:`SolveStatus`, ``objective``/``dual_values`` ``None`` on any
@@ -375,6 +380,7 @@ class _PersistentProbeLP:
             bv0,
             1e-9,
             100_000,
+            time_limit_s,
         )
         wall = _time.perf_counter() - t0
         status_map = {
@@ -1305,8 +1311,15 @@ def run_obbt_on_relaxation(
         """
         nonlocal warm_basis, n_lp_solves, total_lp_time
         n_lp_solves += 1
+        # #2006: the sweep's ``deadline`` also bounds each probe LP. Polling it only
+        # between probes let one probe that started just inside the deadline run
+        # unbounded past it. Capped by the remaining time only, so a sweep that
+        # finishes inside its deadline is unchanged.
+        budget = None if deadline is None else max(0.0, deadline - _time.perf_counter())
         if _probe_lp is not None:
-            st, obj, duals, basis, wall = _probe_lp.solve(c, lb_arr, ub_arr, warm_basis)
+            st, obj, duals, basis, wall = _probe_lp.solve(
+                c, lb_arr, ub_arr, warm_basis, time_limit_s=budget
+            )
             total_lp_time += wall
             if st == SolveStatus.OPTIMAL and obj is not None:
                 warm_basis = basis
@@ -1319,7 +1332,14 @@ def run_obbt_on_relaxation(
             b_ub=b_ub,
             bounds=_bounds_list(),
             warm_basis=warm_basis,
-            time_limit=time_limit_per_lp,
+            # Floored above 0: some backends read a 0.0 time limit as "no limit".
+            time_limit=(
+                time_limit_per_lp
+                if budget is None
+                else max(
+                    1e-3, budget if time_limit_per_lp is None else min(time_limit_per_lp, budget)
+                )
+            ),
         )
         total_lp_time += result.wall_time
         if result.status == SolveStatus.OPTIMAL and result.objective is not None:
