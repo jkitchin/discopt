@@ -4,7 +4,8 @@
 and every model-rebuilding pass.
 **Issue:** [#1147](https://github.com/jkitchin/discopt/issues/1147) (slice 1 of
 the MCP/MPEC RFC, [#1123](https://github.com/jkitchin/discopt/issues/1123)),
-the companion of [disjunction semantics](disjunction_semantics.md) (#1124).
+the companion of [disjunction semantics](disjunction_semantics.md) (#1124); box
+lowering [#2058](https://github.com/jkitchin/discopt/issues/2058).
 
 This document fixes what a complementarity condition *is* at the source level,
 so a later consumer — a source residual, a KKT diagnostic, a native MCP backend —
@@ -33,16 +34,19 @@ So: **the relation is the durable object; the rows are a lowering of it.**
 ### NCP pair — `0 <= f ⊥ g >= 0`
 
 Both operands are declared nonnegative and at most one is nonzero (`f·g = 0`).
-This is what `Model.complementarity` and the `.nl` type-5 importer produce, and
-the only form any lowering in `discopt.mpec` encodes today (GDP disjunction,
-SOS1, Scholtes regularization).
+This is what `Model.complementarity` produces, and the form every lowering in
+`discopt.mpec` (GDP disjunction, SOS1, Scholtes regularization) encodes directly;
+the box form below is reduced to it.
 
 A `.nl` row `5 flag i` is a box MCP `body ⊥ x_i in [lb, ub]` whose `flag`
 records which bounds of `x_i` are finite (AMPL MP `ComplInfo`: 1 = lower,
 2 = upper, 3 = both). `from_nl` lowers the single-bounded rows exactly as NCP
 pairs measured from the bound: flag 1 → `(body, x - lb)`, flag 2 →
-`(-body, ub - x)`. It refuses flag 3 and flag 0 (box MCP, not yet lowered) and
-any flag that contradicts the variable's own bounds (#2056).
+`(-body, ub - x)` (#2056). Flag 3 (both bounds) and flag 0 (free `x_i`, i.e.
+`body == 0`) go through `Model.mcp` and the box lowering below (#2058). The
+body's own bound is always 0 in the format, so a non-zero complementarity bound
+lives in the variable (Ferris, Fourer and Gay, SIAM J. Optim. 9(4), 1999). A flag
+that contradicts the variable's own bounds is refused as malformed.
 
 ### Box MCP — `F(z) ⊥ z in [l, u]`
 
@@ -60,12 +64,40 @@ they share. (Bounds at discopt's ±9.999e19 unbounded sentinel are normalized to
 infinities first; comparing `ub == inf` literally would misclassify
 `m.continuous("a", lb=0)` as a general box.)
 
-The general box form is **represented and not lowered** in this slice. It is a
-three-branch condition, so handing it to a two-branch lowering would encode a
-different feasible set and certify it. Both entry points refuse loudly instead:
-`mpec.reformulate_{gdp,sos1,scholtes}` raise `NotImplementedError`, and the
-**solver boundary** refuses any model carrying a relation no lowering emitted
-rows for — a declared condition solved as if it were absent is a false
+The general box form is lowered **exactly** (#2058) by splitting it into at
+most two NCP pairs on shifted slacks, each handed to the method's unchanged NCP
+emitter:
+
+| case | rows emitted | NCP halves |
+|---|---|---|
+| B0 `l == u` | `z >= l`, `z <= u` | none — `F` is free |
+| B1 `l, u` finite, `l < u` | box rows, `F == w⁺ − w⁻` | `0 <= w⁺ ⊥ z − l >= 0`, `0 <= w⁻ ⊥ u − z >= 0` |
+| B2 `u = +inf` | `z >= l` | `0 <= F ⊥ z − l >= 0` |
+| B3 `l = −inf` | `z <= u` | `0 <= −F ⊥ u − z >= 0` |
+| B4 both infinite | `F == 0` | none |
+
+Exactness of B1: an interior `z` makes both slacks positive, so `w⁺ = w⁻ = 0`
+and `F = 0`; `z = l < u` forces `w⁻ = 0`, so `F = w⁺ >= 0`; `z = u` gives
+`F = −w⁻ <= 0`. Conversely `w± = max(±F, 0)` satisfies every row at any point of
+the relation. `w±` are bounded by the interval enclosure of `F`, which is a valid
+bound and cuts nothing; when that enclosure is not finite the lowering **refuses**
+(`ValueError`) rather than fabricate a big-M. The box rows on `z` are always
+emitted, because the relation's box may be narrower than `z`'s declared bounds.
+
+All three lowerings accept the box: `Model.mcp(..., method="gdp" | "sos1")` lowers
+on declaration, and `solve_mpec(model, [mpec.box_mcp(...)], method="scholtes")`
+regularizes each half (a relaxation, so its result is local; §8). The halves are
+lowering internals: they are not recorded in `model._complementarities`, and the
+parent relation's lowering record owns every row they emit, so the source
+residual measures the box condition itself, never the halves. Every scalar
+element of a relation is validated before any row is emitted, so a refused
+relation leaves the model unchanged. A relation declaring residual bounds other
+than free (box) or `[0, +inf)` (NCP) is refused by every lowering — no other
+form is encoded, and none is guessed.
+
+The **solver boundary** still refuses any model carrying a relation no lowering
+emitted rows for (one built with `mpec.box_mcp` and registered without being
+lowered) — a declared condition solved as if it were absent is a false
 certificate, not a missing feature.
 
 That boundary is `solve_model`, not `Model.solve`. `Model.solve` checks too (so

@@ -30,6 +30,7 @@ from discopt.mpec import (
     box_mcp,
     carry_complementarities,
     flat_source_indices,
+    register_relations,
     resolve_source_variables,
     source_variables,
     unlowered_relations,
@@ -274,9 +275,9 @@ def test_broadcast_relation_keeps_elementwise_identity():
     ],
 )
 def test_box_mcp_round_trips_through_a_rebuilding_pass(lb, ub, case):
-    """Every box configuration is represented and forwarded unchanged. The
-    ``l=0, u=+inf`` case is the NCP pair and is covered by its own test, since
-    it is the one configuration this slice *does* lower."""
+    """Every box configuration is represented, lowered on declaration (#2058) and
+    forwarded unchanged through a rebuilding pass. The ``l=0, u=+inf`` case is
+    the NCP pair and is covered by its own test."""
     m = dm.Model("mcp")
     z = m.continuous("z", lb=max(lb, -50.0), ub=min(ub, 50.0))
     w = m.continuous("w", lb=0, ub=10)
@@ -288,8 +289,10 @@ def test_box_mcp_round_trips_through_a_rebuilding_pass(lb, ub, case):
     assert rel.g_bounds == (float(lb), float(ub))
     assert rel.f_bounds == (-np.inf, np.inf), "the residual side of a box MCP is free"
 
-    # An unlowered relation emits no GDP rows, so drive a pass that does rebuild
-    # the model for its own reasons: the integer-product expansion.
+    assert rel.is_lowered_into(m) and rel.lowering_in(m) == "gdp", case
+
+    # Drive a pass that rebuilds the model for its own reasons: the
+    # integer-product expansion.
     k = m.integer("k", lb=0, ub=3)
     v = m.continuous("v", lb=0, ub=5)
     m.subject_to(k * v <= 4)
@@ -300,6 +303,8 @@ def test_box_mcp_round_trips_through_a_rebuilding_pass(lb, ub, case):
     assert carried is rel, "the relation object itself must be forwarded"
     assert carried.role is ComplementarityRole.BOX_MCP
     assert carried.g_bounds == (float(lb), float(ub))
+    assert carried.lowering_in(out) == "gdp", case
+    assert carried.rows_in(out) is None, "a carried relation's rows are untracked"
     _assert_resolves_to(out, carried, [z, w])
 
 
@@ -354,27 +359,64 @@ def test_solve_refuses_a_model_carrying_an_unlowered_relation():
     z = m.continuous("z", lb=-2, ub=5)
     w = m.continuous("w", lb=0, ub=10)
     m.minimize(z * z + w)
-    rel = m.mcp(z + w - 1, z, name="mcp0")
+    # ``Model.mcp`` lowers on declaration (#2058); a relation recorded without a
+    # lowering is built with ``box_mcp`` and registered directly.
+    rel = box_mcp(z + w - 1, z, name="mcp0")
+    register_relations(m, [rel])
 
     assert unlowered_relations(m) == [rel]
     with pytest.raises(NotImplementedError) as exc:
         m.solve(time_limit=5.0)
     assert "mcp0" in str(exc.value)
+    assert "no lowering" in str(exc.value)
+    assert "#1147" not in str(exc.value), "box relations are lowerable now"
 
 
-def test_box_mcp_is_refused_by_every_lowering_rather_than_mis_encoded():
-    from discopt.mpec import reformulate_gdp as mpec_gdp
-    from discopt.mpec import reformulate_scholtes, reformulate_sos1
-
+def _box_model():
     m = dm.Model("box_lower")
     z = m.continuous("z", lb=-2, ub=5)
     m.minimize(z)
+    return m, z
+
+
+@pytest.mark.parametrize("method", ["gdp", "sos1"])
+def test_box_mcp_is_lowered_by_every_lowering(method):
+    """``F = z`` on ``z in [-2, 5]``: ``z = -2`` needs ``F >= 0`` (no), ``z = 5``
+    needs ``F <= 0`` (no), the interior needs ``F = 0``. Unique point ``z = 0``,
+    so ``min z`` is 0, where an NCP mis-encoding (``z >= 0``) would also give 0
+    but ``max z`` would give 5 -- both senses are solved."""
+    from discopt.mpec import reformulate_gdp as mpec_gdp
+    from discopt.mpec import reformulate_sos1
+
+    lower = {"gdp": mpec_gdp, "sos1": reformulate_sos1}[method]
+    solved = 0
+    for sense in ("minimize", "maximize"):
+        m, z = _box_model()
+        getattr(m, sense)(z)
+        rel = box_mcp(z, z, lb=-2.0, ub=5.0, name="boxed")
+        lower(m, [rel])
+        assert rel.is_lowered_into(m) and rel.lowering_in(m) == method
+        names = {c.name for c in m._constraints}
+        assert {"boxed_z_lb", "boxed_z_ub", "boxed_split"} <= names, names
+        aux = [v.name for v in m._variables if v.name.startswith("_boxed_w")]
+        assert len([a for a in aux if a.startswith("_boxed_wp_")]) == 1, aux
+        assert len([a for a in aux if a.startswith("_boxed_wm_")]) == 1, aux
+        res = m.solve(time_limit=30.0)
+        assert res.status == "optimal", res.status
+        assert res.objective == pytest.approx(0.0, abs=1e-6), (sense, res.objective)
+        solved += 1
+    assert solved == 2
+
+
+def test_box_mcp_is_lowered_by_scholtes():
+    from discopt.mpec import reformulate_scholtes
+
+    m, z = _box_model()
     rel = box_mcp(z, z, lb=-2.0, ub=5.0, name="boxed")
-    for lower in (mpec_gdp, reformulate_sos1):
-        with pytest.raises(NotImplementedError, match="box-MCP"):
-            lower(m, [rel])
-    with pytest.raises(NotImplementedError, match="box-MCP"):
-        reformulate_scholtes(m, [rel], 0.1)
+    n_rows = len(m._constraints)
+    reformulate_scholtes(m, [rel], 0.1)
+    assert rel.lowering_in(m) == "scholtes"
+    assert len(m._constraints) > n_rows
 
 
 def test_complementarity_bound_tightening_skips_box_relations():
@@ -545,7 +587,8 @@ def test_solve_model_refuses_an_unlowered_relation_too():
     m = dm.Model("bypass")
     z = m.continuous("z", lb=-1, ub=1)
     m.maximize(z)
-    m.mcp(z + 1.0, z, name="p0")
+    # Recorded but not lowered: ``Model.mcp`` lowers on declaration (#2058).
+    register_relations(m, [box_mcp(z + 1.0, z, name="p0")])
 
     with pytest.raises(NotImplementedError, match="p0"):
         solve_model(m, time_limit=5.0)
@@ -569,11 +612,19 @@ def test_lowering_is_gated_on_declared_bounds_not_on_role():
 
     assert boxed.role is ComplementarityRole.NCP_PAIR, "the label says NCP..."
     assert boxed.is_box_mcp, "...but the declared bounds say box, and bounds decide"
-    for lower in (mpec_gdp, reformulate_sos1):
-        with pytest.raises(NotImplementedError, match="box-MCP"):
+    assert boxed.f_bounds == (0.0, np.inf), "the NCP label also defaults F >= 0"
+    # ``F >= 0`` together with a box on ``z`` is neither the box MCP (``F`` free)
+    # nor the symmetric pair, so every lowering refuses it (#2058) -- before any
+    # row is emitted. It used to emit ``g >= 0`` against the declared ``lb = -1``.
+    refused = 0
+    for lower in (mpec_gdp, reformulate_sos1, lambda m, p: reformulate_scholtes(m, p, 0.1)):
+        n_rows = len(m._constraints)
+        with pytest.raises(ValueError, match="declares residual bounds"):
             lower(m, [boxed])
-    with pytest.raises(NotImplementedError, match="box-MCP"):
-        reformulate_scholtes(m, [boxed], 0.1)
+        assert len(m._constraints) == n_rows, "nothing emitted before the refusal"
+        assert not boxed.is_lowered_into(m)
+        refused += 1
+    assert refused == 3
 
 
 def test_a_mislabelled_box_relation_is_skipped_by_bound_tightening():

@@ -2233,6 +2233,9 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
             raise SerializationError(f"{rel.describe()} is marked lowered twice")
         lowered[rel] = LoweringRecord(method=method, rows=positions)
     model._lowered_complementarities = lowered
+    from discopt.mpec import snapshot_lowering_baseline
+
+    snapshot_lowering_baseline(model)
 
 
 # ── the rest of the model's state ──────────────────────────────────────────
@@ -2276,7 +2279,11 @@ _STATE_IN_OWN_SECTION = frozenset(
 
 #: Attributes rebuilt as a side effect of restoring the sections above, so writing
 #: them would be writing a derived value that could disagree with its source.
-_STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache"})
+#: ``_if_else_auxes`` (#2061 review) is recovered from the ``if_else`` hull
+#: disjunctions themselves (``_recover_if_else_auxes``), conservatively: a box
+#: read from a file is kept and a widening past it refused, since the document
+#: cannot say which of ``w``'s bounds were derived and which the user set.
+_STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache", "_if_else_auxes"})
 
 #: Attributes deliberately NOT carried: session-local state that a reloaded model
 #: must start without, rather than inherit from whoever saved the file.
@@ -3270,6 +3277,16 @@ def _document_parts(
     changes that layout, so it keeps the one-call path.
     """
     _refuse_unsupported(model)
+    # if_else auxiliaries' derived boxes, likewise re-derived before writing.
+    model._refresh_if_else_bounds(context="save")
+    if getattr(model, "_lowered_complementarities", None):
+        # The document records a lowering's auxiliary bounds, not their derivation
+        # (``LoweringRecord.derived``), so they are re-derived for the box being
+        # written -- or, for a lowering itself read from a file, refused when that
+        # box was widened -- before they are frozen into the file (#2061 review).
+        from discopt.mpec import refresh_lowering_bounds
+
+        refresh_lowering_bounds(model, context="save")
 
     import discopt
 
@@ -3876,6 +3893,11 @@ def _decode_document(doc: dict, minor: int) -> Model:
     _dec_complementarities(doc.get("complementarities"), model, nodes, minor)
     _dec_state(doc.get("state"), model, list(model._constraints), nodes, minor)
     _check_block_state(model)
+    # if_else's hull disjunctions: their aux box is derived, which the document
+    # does not record; a widening after load is refused (#2061 review).
+    from discopt.modeling.core import _recover_if_else_auxes
+
+    _recover_if_else_auxes(model)
 
     # An entry naming a variable this document does not declare is dead weight
     # at best: `solve()` looks the point up by name, so the value is dropped

@@ -14354,9 +14354,13 @@ def solve_model(
     # that never touch ``Model.solve`` (differentiable_solve, primal_heuristics).
     # A declared-but-unlowered relation would otherwise be solved as if absent
     # and certified against a feasible set the model does not describe.
-    from discopt.mpec import require_all_relations_lowered
+    from discopt.mpec import refresh_lowering_bounds, require_all_relations_lowered
 
     require_all_relations_lowered(model, context="solve_model")
+    # Auxiliary bounds a lowering derived from the box at lowering time are
+    # re-derived for the box being solved (#2061 review).
+    model._refresh_if_else_bounds(context="solve_model")
+    refresh_lowering_bounds(model, context="solve_model")
 
     # solve_model is public and does not go through Model.validate(): re-check a
     # robust counterpart's recorded sign assumptions here too, or a certain

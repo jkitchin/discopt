@@ -10,8 +10,52 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Exact lowering of box-constrained MCP relations (#2058).** `F(x) ⊥ z ∈ [l, u]`
+  (`Model.mcp`, `mpec.box_mcp`) used to be represented but refused at solve time.
+  Every exact lowering (`mpec.gdp`, `mpec.sos1`) and Scholtes now reduce it to the
+  existing NCP halves: a fixed box gives rows only; a one-sided box gives one
+  half; a free variable gives `F == 0`; a two-sided box splits
+  `F == w⁺ - w⁻` with `(w⁺, z - l)` and `(w⁻, u - z)`, where `w±` are bounded
+  by the interval enclosure of `F`. A residual with a non-finite enclosure, an
+  empty box, array bounds or declared residual bounds other than the box's own
+  are refused with a `ValueError`, as is a box pinned at `±inf`; a refused call
+  (any relation of it, any element) leaves no rows behind and registers nothing.
+  `w±` are enclosed over `z` restricted to the relation's own `[l, u]`.
+  `Model.mcp(..., method="gdp"|"sos1")` lowers on the spot.
+
+### Fixed
+
+- **Lowering-derived auxiliary bounds are re-derived at every solve (#2061
+  review).** The split `w±` of a box MCP, the SOS1 aux and the GDP operand lift
+  of an NCP pair are bounded from an interval enclosure over the model's box at
+  lowering time. Widening a variable afterwards (`x.ub = 50` after declaring
+  `x <= 1`) left that bound in place, and the stale big-M cut the optimum: a
+  certified `optimal` -10 against a true -50. The NCP lifts had the same defect
+  before #2058. `Model.solve`, `solve_model` and `save` now recompute every such
+  bound (`mpec.refresh_lowering_bounds`; an unchanged model is left exactly as
+  it was). A lowering read from a file carries no derivation, so widening a
+  bound or moving a parameter it reads after `load` is refused at solve and save.
+  An enclosure that reads discopt's default `±9.999e19` bounds now counts as
+  unbounded rather than as a finite big-M.
+- **`Model.if_else`'s auxiliary box is re-derived at every solve and save
+  (#2061 review).** `w = m.if_else(x >= 0.5, x, 2 * x)` on `x in [0, 1]`, then
+  `x.ub = 10`, `maximize(w)` was certified `optimal` at 1 against a true 10:
+  `w`'s bounds were the branches' enclosure at declaration. Bounds the user sets
+  on `w` are kept (the new derivation is intersected with them). A model read
+  from a file has its `if_else` disjunctions recognised; a widening that the
+  saved box no longer encloses is refused at solve and save.
+- A GDP-lowered complementarity whose side has no finite enclosure (typically a
+  box relation whose `z` is declared free) is still refused at solve, but the
+  error now names the relation and the side, and says to give `z` its own
+  bounds; it used to stop at `constraint '<unnamed>'`.
+
 ### Changed
 
+- **`.nl` complementarity rows with flag 3 (both bounds) or flag 0 (free
+  variable) are now imported (#2058)** as a box MCP and as `body == 0`
+  respectively, instead of refused. Flags 1/2 are unchanged.
 - **OA convexity certification uses a Taylor form for one-variable rows (#2062).** A row whose
   curvature depends on a single variable is now tested piece by piece with a Taylor expansion
   of `f''` with a Lagrange remainder (new `_relax/convexity/interval_jet.py`) before #2054's
