@@ -159,7 +159,14 @@ impl PyTreeManager {
     ///         proved. Omitted means "none are justified" — the conservative arm,
     ///         which treats a sentinel as unbounded rather than as grounds to
     ///         prune.
-    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None, sentinel_is_exclusion=None))]
+    ///     point_values: [N] optional float array (#2067). The objective of each
+    ///         node's returned point when it differs from the node's proved
+    ///         bound in ``lower_bounds``: an integral convex node records it as
+    ///         the incumbent value and leaves its bound as a floor on the global
+    ///         dual bound. A non-finite entry, or omitting the array, means "the
+    ///         same as the bound" -- the pre-#2067 behaviour.
+    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None, sentinel_is_exclusion=None, point_values=None))]
+    #[allow(clippy::too_many_arguments)]
     fn import_results(
         &mut self,
         node_ids: PyReadonlyArray1<i64>,
@@ -176,6 +183,7 @@ impl PyTreeManager {
         // arm that treats a sentinel as unbounded rather than as grounds to
         // prune.
         sentinel_is_exclusion: Option<PyReadonlyArray1<bool>>,
+        point_values: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<()> {
         let ids = node_ids.as_array();
         let lbs = lower_bounds.as_array();
@@ -233,7 +241,15 @@ impl PyTreeManager {
             })
             .collect();
 
-        self.inner.import_results(&results);
+        match point_values {
+            Some(pv) => {
+                let pv = pv.as_array().to_vec();
+                self.inner
+                    .import_results_with_point_values(&results, &pv)
+                    .map_err(PyValueError::new_err)?;
+            }
+            None => self.inner.import_results(&results),
+        }
         Ok(())
     }
 
@@ -467,6 +483,7 @@ impl PyTreeManager {
         dict.set_item("gap", s.gap)?;
         dict.set_item("bound_unresolved", s.bound_unresolved)?;
         dict.set_item("unresolved_floor", s.unresolved_floor)?;
+        dict.set_item("safe_fathom_floor", s.safe_fathom_floor)?;
         Ok(dict)
     }
 

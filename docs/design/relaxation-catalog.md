@@ -221,10 +221,28 @@ dual bound**, not merely a feasible value. Two guards enforce this:
   `bound`/`gap` whenever a result claims certification but `bound` is `None` or non-finite
   (e.g. a time-limit termination with a `−∞` lower bound). `status="infeasible"` is
   exempt (it certifies infeasibility, not a gap).
+- **A convex node's NLP objective is not a bound either (issue #2067).** On a
+  certified-convex model the node NLP's *optimum* bounds the node, but the solver returns
+  the objective of an *approximate* minimiser, above that optimum by the interior-point
+  method's terminal residuals. NLP-B&B imported it as the node bound, and QPLIB_8153's
+  root sat 1.49e-7 past a reference point feasible to 2.7e-15 (the certified tree bound
+  crossed it by 1.57e-7 on macOS). Both convex-mode node loops (`_solve_nlp_bb` and the
+  spatial loop in `solve_model`) now import
+  `solvers/convex_node_bound.convex_node_safe_bound` instead: every row and the objective
+  are linearised at the node's point -- an outer approximation at *any* point of the box,
+  because each is a convex function on the correct side (that is what the certificate
+  proves) -- and the bound is the Neumaier-Shcherbina bound on that LP. The NLP objective
+  is kept only as the incumbent value of an integral node; such a node's proved bound
+  floors the tree bound (`TreeStats::safe_fathom_floor`), since the subtree it closes was
+  proved only down to it. A node with no proved bound abstains (inherited parent bound).
+  Measured cost: 2.7 ms/node median on QPLIB_8153; on a 48-instance convex panel, 0
+  certificate changes and +0.3% to +5.8% nodes where it fired. The opt-out
+  `DISCOPT_CONVEX_NODE_SAFE_BOUND=0` restores the unsound import, for A/B only.
 
 **Practical rule:** the rigorous dual-bound paths are **LP** (default for relaxable
 nonlinearity), **α-BB**, and the **spatial B&B** that branches on them; the convex-NLP
-bound is rigorous only when the model is convex.
+bound is rigorous only when the model is convex, and then only through a proved bound
+on the NLP's point (above), never through the NLP objective itself.
 
 ---
 

@@ -185,6 +185,12 @@ pub struct TreeStats {
     /// tell "tree drained rigorously" (may certify `Infeasible` on an empty
     /// tree) from "tree drained with unproven removals" (may not).
     pub unresolved_floor: f64,
+    /// Minimum over the proved bounds of convex integral nodes fathomed at a
+    /// point whose objective exceeds that bound (#2067); `+inf` when none.
+    /// Already folded into `global_lower_bound`. Unlike `unresolved_floor` it
+    /// marks no unproven removal: each such subtree WAS bounded, just by a value
+    /// below the objective of the point that closed it.
+    pub safe_fathom_floor: f64,
     /// True when an integral node's own relaxation value came in BELOW the
     /// bound it inherited from its ancestors (#1296). The node's box is a subset
     /// of every ancestor's, so a feasible point there proves some ancestor bound
@@ -343,6 +349,13 @@ pub struct TreeManager {
     /// ([`Self::raise_tight_fathom_floor`]), e.g. an interval enclosure of the
     /// objective, when the node's relaxation bound is loose.
     tight_floors: HashMap<NodeId, f64>,
+    /// Per-node objective of the returned point, when the driver imported it
+    /// separately from the node's proved bound
+    /// ([`Self::import_results_with_point_values`], #2067). Consumed by
+    /// [`Self::process_evaluated`].
+    point_values: HashMap<NodeId, f64>,
+    /// See [`TreeStats::safe_fathom_floor`] (#2067). Never raised within a solve.
+    safe_fathom_floor: f64,
     /// Tight-fathomed node ids not yet handed to the driver by
     /// [`Self::take_tight_fathoms`].
     tight_unread: Vec<NodeId>,
@@ -425,6 +438,8 @@ impl TreeManager {
             bound_unresolved: false,
             unresolved_floor: f64::INFINITY,
             tight_floors: HashMap::new(),
+            point_values: HashMap::new(),
+            safe_fathom_floor: f64::INFINITY,
             tight_unread: Vec::new(),
             bound_contradicted: false,
             branch_var_counts: vec![0; n_vars],
@@ -699,6 +714,43 @@ impl TreeManager {
             }));
     }
 
+    /// [`Self::import_results`] for a driver whose node **bound** and the
+    /// objective of the node's **point** are different numbers (#2067).
+    ///
+    /// A convex node NLP's objective is the objective of an approximate
+    /// minimiser, not a bound: it sits above the relaxation's minimum by the
+    /// solver's terminal residuals (QPLIB_8153's root measured 1.49e-7 past a
+    /// feasible point). Such a driver imports a proved bound as
+    /// `NodeResult::lower_bound` -- that is what prunes and floors -- and the
+    /// point's objective here, which is what an integral node records as the
+    /// incumbent value. A trusted integral node whose bound is below its point
+    /// value then leaves its bound as a floor on the global dual bound
+    /// ([`TreeStats::safe_fathom_floor`]): the subtree it closes was proved only
+    /// down to that bound.
+    ///
+    /// `point_values[i]` is ignored when not finite, and then the node behaves
+    /// exactly as under [`Self::import_results`].
+    pub fn import_results_with_point_values(
+        &mut self,
+        results: &[NodeResult],
+        point_values: &[f64],
+    ) -> Result<(), String> {
+        if point_values.len() != results.len() {
+            return Err(format!(
+                "import_results_with_point_values: {} point values for {} results",
+                point_values.len(),
+                results.len()
+            ));
+        }
+        for (r, &v) in results.iter().zip(point_values) {
+            if v.is_finite() {
+                self.point_values.insert(r.node_id, v);
+            }
+        }
+        self.import_results(results);
+        Ok(())
+    }
+
     /// Process all evaluated nodes: prune, check integrality, branch.
     ///
     /// Uses pseudocost-based branching when enabled and sufficient observations
@@ -713,6 +765,9 @@ impl TreeManager {
         for result in &pending {
             let node_lb = self.pool.get(result.node_id).local_lower_bound;
             let score_point = self.spatial_score_points.remove(&result.node_id);
+            // #2067: taken for every pending node, whichever arm it reaches, so
+            // no entry outlives its node.
+            let point_value = self.point_values.remove(&result.node_id);
 
             // 0. Retroactively update pseudocosts from this child's result.
             if let Some(record) = self.branch_records.remove(&result.node_id) {
@@ -812,9 +867,16 @@ impl TreeManager {
                     // floored value then paired a point with an objective it does
                     // not have (reported objective != c·x), and the tree's dual
                     // bound is no longer a certificate.
-                    let value = result.raw_lower_bound;
+                    let value = point_value.unwrap_or(result.raw_lower_bound);
                     if node_lb > value + 1e-6 * (1.0 + value.abs()) {
                         self.bound_contradicted = true;
+                    }
+                    // #2067: the subtree is closed, but proved only down to
+                    // `node_lb`; when that is below the point's own value the
+                    // difference is not covered by the incumbent cap, so it
+                    // stays on the global dual bound.
+                    if point_value.is_some() && node_lb < value {
+                        self.safe_fathom_floor = self.safe_fathom_floor.min(node_lb);
                     }
                     if value < self.incumbent_value {
                         self.incumbent_value = value;
@@ -1303,7 +1365,10 @@ impl TreeManager {
         // subtree removed without proof still constrains the global dual bound
         // at its valid inherited bound, permanently. `+inf` (no such fathom)
         // leaves the computation unchanged.
-        let mut min_lb = self.unresolved_floor.min(self.tight_floor());
+        let mut min_lb = self
+            .unresolved_floor
+            .min(self.tight_floor())
+            .min(self.safe_fathom_floor);
         for i in 0..self.pool.total_count() {
             let node = self.pool.get(NodeId(i));
             match node.status {
@@ -1404,6 +1469,7 @@ impl TreeManager {
             // report through one floor: a driver must not certify an empty tree
             // over either.
             unresolved_floor: self.unresolved_floor.min(self.tight_floor()),
+            safe_fathom_floor: self.safe_fathom_floor,
             bound_contradicted: self.bound_contradicted,
         }
     }
@@ -3280,6 +3346,85 @@ mod tests {
             assert_eq!(tm.incumbent().unwrap().1, raw);
             assert!(!tm.stats().bound_contradicted, "raw {raw} flagged");
         }
+    }
+
+    fn integral_result(node_id: NodeId, bound: f64) -> NodeResult {
+        NodeResult {
+            node_id,
+            lower_bound: bound,
+            solution: vec![3.0],
+            is_feasible: true,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }
+    }
+
+    /// Branch a root at bound 3.0, then close BOTH children as integral: the
+    /// first with `bound` and point value `pv`, the second at 9.0 (pruned once
+    /// the first is the incumbent). Leaves no open node.
+    fn closed_children(bound: f64, pv: f64) -> TreeManager {
+        let (mut tm, first) = branched_child(3.0);
+        let second = tm.export_batch(1).node_ids[0];
+        tm.import_results_with_point_values(
+            &[integral_result(first, bound), integral_result(second, 9.0)],
+            &[pv, f64::NAN],
+        )
+        .unwrap();
+        tm.process_evaluated();
+        assert_eq!(tm.stats().open_nodes, 0);
+        tm
+    }
+
+    /// #2067: a convex integral node imported with a proved bound BELOW its
+    /// point's objective records the point's objective as the incumbent and keeps
+    /// the proved bound as the global dual bound, so the tree never reports a
+    /// bound above what it proved -- the closed subtree may hold a point down to
+    /// the proved bound.
+    #[test]
+    fn point_value_above_bound_keeps_bound_as_floor_2067() {
+        let tm = closed_children(3.5, 3.5 + 2e-7);
+        assert_eq!(tm.incumbent().unwrap().1, 3.5 + 2e-7);
+        let ts = tm.stats();
+        assert_eq!(ts.safe_fathom_floor, 3.5);
+        // The pre-#2067 tree reports the point value here: a bound 2e-7 above
+        // what the node proved.
+        assert_eq!(ts.global_lower_bound, 3.5);
+        assert!(!ts.bound_contradicted);
+        assert!(tm.point_values.is_empty());
+    }
+
+    /// A non-finite point value is the pre-#2067 import: the bound is the point
+    /// value, and no floor is recorded. A length mismatch is refused.
+    #[test]
+    fn missing_point_value_is_the_legacy_import_2067() {
+        for pv in [f64::NAN, f64::INFINITY] {
+            let tm = closed_children(3.5, pv);
+            assert_eq!(tm.incumbent().unwrap().1, 3.5);
+            assert_eq!(tm.stats().safe_fathom_floor, f64::INFINITY);
+            assert_eq!(tm.stats().global_lower_bound, 3.5);
+        }
+        let (mut tm, child) = branched_child(3.0);
+        assert!(tm
+            .import_results_with_point_values(&[integral_result(child, 3.5)], &[])
+            .is_err());
+    }
+
+    /// The floor never lifts above a later, better incumbent: the global bound is
+    /// still capped there.
+    #[test]
+    fn safe_floor_is_capped_by_a_better_incumbent_2067() {
+        let mut tm = closed_children(4.0, 4.0 + 1e-7);
+        assert_eq!(tm.stats().safe_fathom_floor, 4.0);
+        assert!(tm.inject_incumbent(vec![3.0], 3.2));
+        // `inject_incumbent` does not recompute the bound; the next processing
+        // pass does.
+        tm.process_evaluated();
+        let ts = tm.stats();
+        assert!(
+            ts.global_lower_bound <= 3.2,
+            "bound {} above incumbent",
+            ts.global_lower_bound
+        );
     }
 
     /// Build the shape of the defect: the root branches; one child returns a
