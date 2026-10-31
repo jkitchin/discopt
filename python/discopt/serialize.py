@@ -2233,6 +2233,9 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
             raise SerializationError(f"{rel.describe()} is marked lowered twice")
         lowered[rel] = LoweringRecord(method=method, rows=positions)
     model._lowered_complementarities = lowered
+    from discopt.mpec import snapshot_lowering_baseline
+
+    snapshot_lowering_baseline(model)
 
 
 # ── the rest of the model's state ──────────────────────────────────────────
@@ -3270,6 +3273,14 @@ def _document_parts(
     changes that layout, so it keeps the one-call path.
     """
     _refuse_unsupported(model)
+    if getattr(model, "_lowered_complementarities", None):
+        # The document records a lowering's auxiliary bounds, not their derivation
+        # (``LoweringRecord.derived``), so they are re-derived for the box being
+        # written -- or, for a lowering itself read from a file, refused when that
+        # box was widened -- before they are frozen into the file (#2061 review).
+        from discopt.mpec import refresh_lowering_bounds
+
+        refresh_lowering_bounds(model, context="save")
 
     import discopt
 

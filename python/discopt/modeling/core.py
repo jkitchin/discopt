@@ -8783,6 +8783,7 @@ class Model:
         *,
         lb: Optional[float] = None,
         ub: Optional[float] = None,
+        method: str = "gdp",
         name: Optional[str] = None,
         scale: Optional[float] = None,
     ):
@@ -8799,12 +8800,27 @@ class Model:
         :math:`l = 0, u = +\infty` is exactly :meth:`complementarity`, and is
         recorded as such so the two forms never diverge on the case they share.
 
-        This slice **represents** the relation and does not lower it (#1147).
-        Consequently a model carrying a general box relation is *refused* by
-        :meth:`solve` — a declared condition that no lowering emitted would
-        otherwise be solved as if it were absent, and certified. The relation
-        still round-trips through every rebuilding pass, which is what the
-        source-residual work of #1148 needs.
+        The relation is lowered on declaration, exactly, by splitting it into at
+        most two symmetric NCP pairs on shifted slacks (#2058):
+
+        * both bounds finite, ``l < u``: ``F = w⁺ − w⁻`` with
+          ``0 <= w⁺ ⊥ z − l >= 0`` and ``0 <= w⁻ ⊥ u − z >= 0``. ``w±`` are
+          bounded by the interval enclosure of ``F``; if that enclosure is not
+          finite the declaration is refused (declare finite bounds on the
+          variables ``F`` reads);
+        * ``u = +inf``: ``0 <= F ⊥ z − l >= 0``; ``l = -inf``:
+          ``0 <= −F ⊥ u − z >= 0``;
+        * both infinite: ``F == 0``; ``l == u``: ``z`` is pinned and ``F`` free.
+
+        Each pair goes to the same lowering :meth:`complementarity` uses, and
+        the rows ``z >= l`` / ``z <= u`` are emitted as constraints (the box may
+        be narrower than ``z``'s declared bounds). The relation keeps its source
+        operands and round-trips through every rebuilding pass, so the residual
+        report measures the box condition itself (the natural map
+        ``|z − mid(l, u, z − F)|``), not the rows.
+
+        A vector relation uses the same scalar box for every element; declare
+        per-element relations for per-element boxes.
 
         Parameters
         ----------
@@ -8816,6 +8832,11 @@ class Model:
             The box. Default to ``variable``'s declared bounds when it is a
             plain scalar :class:`Variable`; required otherwise, since the
             relation's semantics *are* those bounds.
+        method : {"gdp", "sos1"}, default "gdp"
+            The exact lowering each NCP half goes to, as in
+            :meth:`complementarity`. For the Scholtes homotopy build the relation
+            with :func:`discopt.mpec.box_mcp` and call
+            :func:`discopt.mpec.solve_mpec` with ``method="scholtes"``.
         name : str, optional
             Name of the relation.
         scale : float, optional
@@ -8826,17 +8847,43 @@ class Model:
         -------
         discopt.mpec.Complementarity
             The recorded relation.
+
+        Raises
+        ------
+        ValueError
+            For an empty box, array ``lb``/``ub``, an unknown method, or a
+            two-sided box whose residual has no finite interval enclosure. A
+            refused declaration leaves the model unchanged.
+
+        Examples
+        --------
+        >>> # Excess supply F(p) = (2p - 2) - (10 - p) = 3p - 12 on p in [0, 3].
+        >>> # Uncapped, the market clears at p = 4; with the cap p_max = 3 it
+        >>> # clears at the cap with excess demand, F(3) = -3 <= 0.
+        >>> m = dm.Model("price_cap")
+        >>> p = m.continuous("p", lb=0, ub=3)
+        >>> m.minimize((p - 10) ** 2)
+        >>> rel = m.mcp(3 * p - 12, p)  # the box defaults to p's bounds [0, 3]
+        >>> round(m.solve().objective, 6)
+        49.0
         """
         from discopt import mpec
+        from discopt.transformations import get as _get_transformation
 
+        if method == "scholtes":
+            raise ValueError(
+                "method='scholtes' is a solve-time regularization homotopy, not "
+                "a static reformulation. Build the relation with "
+                "discopt.mpec.box_mcp(...) and call "
+                "discopt.mpec.solve_mpec(model, [relation], method='scholtes')."
+            )
+        if method not in ("gdp", "sos1"):
+            raise ValueError(
+                f"unknown complementarity method {method!r}; use 'gdp' or 'sos1' "
+                "(or discopt.mpec.solve_mpec for 'scholtes')."
+            )
         pair = mpec.box_mcp(_wrap(residual), _wrap(variable), lb=lb, ub=ub, name=name, scale=scale)
-        if pair.role is mpec.ComplementarityRole.NCP_PAIR:
-            # l=0, u=+inf IS the symmetric pair; lower it exactly as
-            # ``complementarity`` would rather than leaving an unlowered
-            # relation the solver must refuse.
-            from discopt.transformations import get as _get_transformation
-
-            _get_transformation("mpec.gdp").apply(self, pairs=[pair])
+        _get_transformation(f"mpec.{method}").apply(self, pairs=[pair])
         self._complementarities.append(pair)
         return pair
 
@@ -10150,6 +10197,12 @@ class Model:
             from discopt.mpec import require_all_relations_lowered
 
             require_all_relations_lowered(self, context="Model.solve")
+        if getattr(self, "_lowered_complementarities", None):
+            # A lowering's auxiliary bounds were derived from the box at lowering
+            # time; re-derive them for the box being solved (#2061 review).
+            from discopt.mpec import refresh_lowering_bounds
+
+            refresh_lowering_bounds(self, context="Model.solve")
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling
@@ -14246,7 +14299,7 @@ def nl_file_sha256(path: str) -> str:
 def _add_nl_complementarity(
     m: "Model", body: "Expression", var_index: int, flag: int, *, index: int = 0
 ) -> None:
-    r"""Lower one ``.nl`` complementarity row into ``Model.complementarity``.
+    r"""Lower one ``.nl`` complementarity row exactly.
 
     The row ``5 flag i`` asserts the mixed complementarity relation
     ``body ⊥ x ∈ [lb, ub]`` with ``x = m._variables[i - 1]``: at ``x = lb`` the
@@ -14268,10 +14321,18 @@ def _add_nl_complementarity(
     * ``flag == 1`` (``x >= lb``): ``a = body``, ``b = x - lb``;
     * ``flag == 2`` (``x <= ub``): ``a = -body``, ``b = ub - x``.
 
+    The doubly-bounded and free forms are general box relations and go through
+    :meth:`Model.mcp`, which splits them into NCP halves (#2058):
+
+    * ``flag == 3`` (``lb <= x <= ub``): ``body ⊥ x in [lb, ub]``. The split
+      needs a finite interval enclosure of ``body``; without one the row is
+      refused (AMPL omits a body variable's bound the relation implies, so a
+      file may need bounds restored before it can be lowered);
+    * ``flag == 0`` (``x`` free): ``body == 0``.
+
     A flag that disagrees with the variable's finite bounds is a malformed file
-    and is refused, as are the doubly-bounded (``flag == 3``) and free
-    (``flag == 0``) forms, which need the box-MCP lowering
-    (``docs/dev/box-mcp-lowering-plan.md``) rather than this primitive.
+    and is refused. Ferris, Fourer and Gay (SIAM J. Optim. 9(4), 1999) give the
+    AMPL semantics.
     """
     from discopt.constants import DEFAULT_VARIABLE_BOUND
 
@@ -14292,18 +14353,11 @@ def _add_nl_complementarity(
     ub_finite = bool(np.isfinite(xub)) and abs(xub) < _sentinel
     expected_flag = int(lb_finite) | (2 * int(ub_finite))
 
-    def _unsupported(reason: str) -> ValueError:
-        return ValueError(
-            f"from_nl: complementarity row {index} on variable {x.name!r} has an "
-            f"unsupported bound configuration ({reason}; flag={flag}, "
-            f"x in [{xlb:g}, {xub:g}]). The .nl → GDP slice handles the "
-            "single-bounded forms body ⊥ x >= lb (flag 1) and body ⊥ x <= ub "
-            "(flag 2); the doubly-bounded and free forms need box-MCP lowering "
-            "(docs/dev/box-mcp-lowering-plan.md, #231)."
-        )
-
     if flag not in (0, 1, 2, 3):
-        raise _unsupported("flag is not an AMPL MP ComplInfo value in {0, 1, 2, 3}")
+        raise ValueError(
+            f"from_nl: complementarity row {index} on variable {x.name!r} has "
+            f"flag={flag}, which is not an AMPL MP ComplInfo value in {{0, 1, 2, 3}}."
+        )
     if flag != expected_flag:
         raise ValueError(
             f"from_nl: complementarity row {index} is malformed: flag={flag} says the "
@@ -14313,10 +14367,19 @@ def _add_nl_complementarity(
             "the variable's bounds, so the two must agree; the relation the file "
             "intends is ambiguous and is not guessed (#2056)."
         )
+    # Name the relation after its ``.nl`` row. Two things depend on it: the rows
+    # generated below are named from it (an unnamed relation falls back to
+    # ``compl0`` for *every* pair, since the fallback counts within the single
+    # pair handed to the lowering — a name collision across a multi-pair file),
+    # and the provenance record #1147 carries through the rebuilding passes is
+    # identifiable in an error message without parsing generated identifiers.
+    rel_name = f"nl_compl{index}"
     if flag == 3:
-        raise _unsupported("doubly-bounded complementary variable (box MCP)")
+        m.mcp(body, x, lb=xlb, ub=xub, method="gdp", name=rel_name)
+        return
     if flag == 0:
-        raise _unsupported("free complementary variable (body == 0)")
+        m.mcp(body, x, lb=-np.inf, ub=np.inf, method="gdp", name=rel_name)
+        return
 
     # Orient both sides nonnegative and measure the variable from its bound.
     # ``x - lb`` and ``ub - x`` are >= 0 by the variable's own bound, and are 0
@@ -14328,13 +14391,7 @@ def _add_nl_complementarity(
     else:  # flag == 2
         a = -body
         b = xub - x
-    # Name the relation after its ``.nl`` row. Two things depend on it: the rows
-    # generated below are named from it (an unnamed relation falls back to
-    # ``compl0`` for *every* pair, since the fallback counts within the single
-    # pair handed to the lowering — a name collision across a multi-pair file),
-    # and the provenance record #1147 carries through the rebuilding passes is
-    # identifiable in an error message without parsing generated identifiers.
-    m.complementarity(a, b, method="gdp", name=f"nl_compl{index}")
+    m.complementarity(a, b, method="gdp", name=rel_name)
 
 
 def _describe_compl_flag(flag: int) -> str:

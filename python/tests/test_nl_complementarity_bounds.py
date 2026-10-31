@@ -137,11 +137,21 @@ def test_zero_bound_ncp_matches_python_build():
 # ── refusals ─────────────────────────────────────────────────────────────────
 
 
-def test_doubly_bounded_row_is_refused_not_misread():
-    """``3 <= x <= 10 complements y`` (AMPL flag 3) is a box MCP. It needs the
-    box-MCP lowering; until then the import refuses rather than approximates."""
-    with pytest.raises(ValueError, match="doubly-bounded"):
-        dm.from_nl(str(_DATA / "ampl_box.nl"))
+def test_doubly_bounded_row_lowers_as_a_box():
+    """``3 <= x <= 10 complements y`` (AMPL flag 3) is the box MCP
+    ``y ⊥ x in [3, 10]``, lowered since #2058 (it was refused). AMPL keeps ``y``'s
+    declared ``[0, 10]`` here, so the split has a finite enclosure without any
+    restored bound. ``x = 3`` leaves ``y >= 0`` free: optimum 0 at ``(3, 1)``."""
+    from discopt.mpec import ComplementarityRole
+
+    m = _load("box")
+    rel = _relation(m)
+    assert rel.role is ComplementarityRole.BOX_MCP
+    assert rel.g_bounds == (3.0, 10.0)
+    res = _solve(m)
+    assert res.objective == pytest.approx(0.0, abs=1e-6)
+    assert float(res.x["x0"]) == pytest.approx(3.0, abs=1e-5)
+    assert float(res.x["x1"]) == pytest.approx(1.0, abs=1e-5)
 
 
 @pytest.mark.parametrize("flag", [0, 2, 3])

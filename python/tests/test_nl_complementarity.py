@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 import discopt.modeling.core as dm
+import numpy as np
 import pytest
 from discopt._rust import parse_nl_string
 
@@ -102,17 +103,72 @@ def test_from_nl_mpcc_matches_python_build():
     assert xv * yv == pytest.approx(0.0, abs=1e-5)
 
 
-def test_unsupported_complementarity_config_refuses_loudly():
-    """A doubly-bounded complementary variable (flag=3, body free) cannot map onto
-    the nonnegative primitive and is refused loudly rather than silently
-    mis-modeled (#658 scope; box-MCP lowering is the follow-up)."""
-    # Same fixture with the flag AMPL would write for y in [0, 10]: 3.
-    nl_free = _NL.replace("5 2 2", "5 3 2")
+def _from_text(text: str) -> dm.Model:
+    """``from_nl`` on ``text`` written to a temporary ``.nl`` file, after locking
+    the #658 regression: one complementarity, no fabricated range row."""
+    repr_ = parse_nl_string(text)
+    assert repr_.n_complementarities == 1
+    assert repr_.n_constraints == 0
     fd, path = tempfile.mkstemp(suffix=".nl")
-    os.write(fd, nl_free.encode())
+    os.write(fd, text.encode())
     os.close(fd)
     try:
-        with pytest.raises(ValueError, match="unsupported bound configuration"):
-            dm.from_nl(path)
+        return dm.from_nl(path)
     finally:
         os.unlink(path)
+
+
+def _legacy_variant(*, flag: int, x_bounds: str, y_bounds: str, x_target: str, y_target: str):
+    """The #658 fixture -- ``min (x - a)^2 + (y - b)^2`` with ``x ⊥ y`` -- with the
+    flag, both variables' ``b``-segment lines and the targets ``a, b`` replaced.
+    Only the replaced fields differ from the committed file."""
+    text = _NL.replace("5 2 2", f"5 {flag} 2")
+    head, rest = text.split("\nb\n")
+    bounds, tail = rest.split("\nk1\n")
+    assert bounds == "0 0 10\n0 0 10"
+    head = head.replace("v0\nn1\n", f"v0\nn{x_target}\n", 1)
+    head = head.replace("v1\nn1\n", f"v1\nn{y_target}\n", 1)
+    return head + "\nb\n" + f"{x_bounds}\n{y_bounds}" + "\nk1\n" + tail
+
+
+def test_doubly_bounded_row_lowers_as_a_box():
+    """``x ⊥ y in [0, 10]`` (AMPL flag 3) with ``x in [-10, 10]`` free in sign and
+    ``min (x + 1)^2 + (y - 10)^2``. The box admits ``y = 10, x <= 0``, so the
+    optimum is 0 at ``(-1, 10)``; an NCP reading (``x >= 0``) gives 1. Was
+    refused as an unsupported bound configuration before #2058."""
+    from discopt.mpec import ComplementarityRole
+
+    m = _from_text(
+        _legacy_variant(
+            flag=3, x_bounds="0 -10 10", y_bounds="0 0 10", x_target="-1", y_target="10"
+        )
+    )
+    rel = m._complementarities[0]
+    assert rel.role is ComplementarityRole.BOX_MCP
+    assert rel.g_bounds == (0.0, 10.0)
+    assert rel.lowering_in(m) == "gdp"
+    assert not hasattr(m, "_source_nl_path")
+    res = m.solve(time_limit=60.0)
+    assert res.status == "optimal", res.status
+    assert res.objective == pytest.approx(0.0, abs=1e-6)
+    assert res.objective < 0.5, "an NCP reading certifies 1.0"
+    assert float(res.x["x0"]) == pytest.approx(-1.0, abs=1e-5)
+    assert float(res.x["x1"]) == pytest.approx(10.0, abs=1e-5)
+
+
+def test_free_variable_row_lowers_as_an_equation():
+    """``x ⊥ y`` with ``y`` free (AMPL flag 0) is ``x == 0``. With
+    ``min (x - 1)^2 + (y - 1)^2`` the optimum is 1 at ``(0, 1)`` (0 if the row
+    were dropped). Was refused before #2058."""
+    m = _from_text(
+        _legacy_variant(flag=0, x_bounds="0 -10 10", y_bounds="3", x_target="1", y_target="1")
+    )
+    rel = m._complementarities[0]
+    assert rel.g_bounds == (-np.inf, np.inf)
+    assert rel.lowering_in(m) == "gdp"
+    assert [c.name for c in m._constraints] == ["nl_compl0_eq"]
+    res = m.solve(time_limit=60.0)
+    assert res.status == "optimal", res.status
+    assert res.objective == pytest.approx(1.0, abs=1e-6)
+    assert float(res.x["x0"]) == pytest.approx(0.0, abs=1e-6)
+    assert float(res.x["x1"]) == pytest.approx(1.0, abs=1e-5)
