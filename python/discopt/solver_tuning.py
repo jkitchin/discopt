@@ -1236,6 +1236,31 @@ class SolverTuning:
     root, 1 node; big-M 0.1 s. **State: default OFF, panel
     owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    gdp_enumerate_cutoff: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=False)
+    )
+    """Bound each enumerated configuration against the incumbent
+    (``DISCOPT_GDP_ENUMERATE_CUTOFF``, default **OFF**; bound-changing on
+    ``gdp_method="enumerate"``; #1917 G4.2).
+
+    Once there is an incumbent ``UB``, each configuration's global subproblem gets
+    the row ``f <= c``, ``c = UB - delta`` (``delta`` half the allowed gap at
+    ``UB``). A configuration that cannot beat ``c`` ends on a certified
+    infeasibility proof, often found by FBBT on that row alone, instead of a full
+    certification, and contributes ``c`` to the LB. Every other bound obtained
+    under the cutoff is recorded as ``min(bound, c)``. That is valid whether the
+    configuration's minimum is below ``c`` (the row removes no minimizer) or above
+    it (then ``c`` itself is below the minimum). The reported LB is looser, up to
+    ``delta`` below ``UB``, but still within the gap tolerance.
+
+    Entry measurement (7 Pyomo GDPopt models, main ``4517c7b``, one interleaved
+    OFF/ON run each, load ~1, every run certified in both arms):
+    strip_packing_concrete 74.9 -> 24.1 s (4090 of 4095 configurations closed by
+    the cutoff), eight_process 14.3 -> 5.5 s, eight_process_logical 18.6 -> 9.3 s,
+    nonconvex_hen 1.2 -> 0.9 s, constrained_layout_clay0203 127.8 -> 131.7 s,
+    ex_633_trespalacios 1.2 -> 2.7 s. **State: default OFF, panel owed**; audit row
+    in ``docs/dev/flag-retirement-audit.md``."""
+
     hull_lifted_ratio: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_LIFTED_RATIO", default=False)
     )

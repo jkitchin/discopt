@@ -132,17 +132,35 @@ def solve_subproblem(
     gap_tolerance: float = 1e-4,
     nlp_solver: str = "pounce",
     time_cap: Optional[float] = None,
+    cutoff: Optional[float] = None,
 ) -> SubproblemResult:
     """Solve ``model`` with the disjuncts ``selected`` fixed; see the module docstring.
 
     The time limit is ``deadline.sub_limit(time_cap)``; with nothing left the
     result is ``"unresolved"`` and nothing is solved.
+
+    ``cutoff`` (model units, #1917) adds the row ``f <= cutoff`` (``>=`` for a
+    maximization) to the subproblem: points no better than ``cutoff`` are cut, so a
+    configuration that cannot beat it ends as a (certified) infeasibility proof
+    instead of a full certification. The result is then about the *restricted*
+    subproblem; the caller turns it into a bound on the configuration (see
+    :meth:`discopt.gdp.algorithms.enumerate.Enumerate.iterate`).
     """
     if mode not in SUBPROBLEM_MODES:
         raise ValueError(f"mode must be one of {SUBPROBLEM_MODES}, got {mode!r}")
     if nlp_solver not in ("pounce", "ipopt"):
         raise ValueError(f"nlp_solver must be 'pounce' or 'ipopt', got {nlp_solver!r}")
     sub = reduced_subproblem(model, selected)
+    if cutoff is not None:
+        from discopt.modeling.core import ObjectiveSense
+
+        if sub._objective is None:
+            raise ValueError("solve_subproblem: a cutoff needs an objective")
+        f = sub._objective.expression
+        if sub._objective.sense == ObjectiveSense.MAXIMIZE:
+            sub.subject_to(f >= float(cutoff), name="_gdp_subproblem_cutoff")
+        else:
+            sub.subject_to(f <= float(cutoff), name="_gdp_subproblem_cutoff")
     limit = deadline.sub_limit(time_cap)
     if not limit > 0.0:
         return SubproblemResult("unresolved", reason="deadline expired")
