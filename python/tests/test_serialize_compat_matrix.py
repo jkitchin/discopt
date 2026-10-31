@@ -210,6 +210,13 @@ def test_unbuildable_cases_are_recorded_not_skipped():
 
 @pytest.mark.parametrize("version, case, entry", FIXTURE_PARAMS)
 def test_every_golden_fixture_loads(version, case, entry):
+    if case in reg.RETIRED:
+        # The document still loads; today's builder refuses its input (see
+        # ``reg.RETIRED``), so there is no model of today to compare it with.
+        with pytest.raises(ValueError, match=reg.RETIRED[case]):
+            reg.build(case)
+        assert isinstance(loads(_read(version, entry)), dm.Model)
+        return
     # Built FIRST: a registered atom's tag is re-derived on load only for a name the
     # loading process has registered, and building the case is what registers it --
     # as a program registers its atoms at import, before it loads anything.

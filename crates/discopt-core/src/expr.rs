@@ -624,9 +624,12 @@ pub struct ConstraintRepr {
 /// owned by the accompanying `ModelRepr`.
 ///
 /// `flag` is the raw type-5 bound flag from the `.nl` `r` segment, with AMPL MP
-/// `ComplInfo` semantics: bit 0 set ⇒ the body's lower bound is `-inf` (else 0),
-/// bit 1 set ⇒ the body's upper bound is `+inf` (else 0). The standard MPEC form
-/// `0 <= body ⊥ x >= 0` is `flag == 2`.
+/// `ComplInfo` semantics (`include/mp/nl-reader.h`): bit 0 (`INF_UB`) set ⇒ the
+/// variable has a finite lower bound, so the body's upper bound is `+inf`; bit 1
+/// (`INF_LB`) set ⇒ the variable has a finite upper bound, so the body's lower
+/// bound is `-inf`. The relation is `body ⊥ x ∈ [lb, ub]`, complementary to the
+/// variable's *bound*; the standard MPEC form `0 <= body ⊥ x >= 0` is `flag == 1`
+/// (#2056 — this comment used to state the two bits swapped).
 #[derive(Debug, Clone)]
 pub struct ComplementarityRepr {
     /// Arena id of the constraint body `f` complementary to the variable.

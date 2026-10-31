@@ -13,7 +13,7 @@ Corpora:
 
 * the in-repo floor (always): ``python/tests/data/minlplib_nl/*.nl``,
   ``python/tests/data/minlplib/*.nl`` (deduplicated by name), the vendored QPLIB
-  instances, ``data/binary_nl/*`` and ``data/mpcc_complementarity.nl``;
+  instances, ``data/binary_nl/*`` and ``data/nl_complementarity/ampl_base.nl``;
 * the full MINLPLib ``.nl`` set from ``DISCOPT_MINLPLIB_NL_DIR`` (default
   ``~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl``);
 * the full QPLIB set from ``DISCOPT_QPLIB_DIR`` (default
@@ -73,7 +73,9 @@ def in_repo_instances() -> list[Instance]:
                 out.append(Instance(corpus, p.stem, p, "nl"))
     for p in sorted((DATA / "binary_nl").glob("*.nl")):
         out.append(Instance("binary_nl", p.stem, p, "nl"))
-    out.append(Instance("mpcc", "mpcc_complementarity", DATA / "mpcc_complementarity.nl", "nl"))
+    # AMPL-written MPCC (#2056). The #658 hand-written ``mpcc_complementarity.nl`` is
+    # refused by ``from_nl`` as malformed (its flag contradicts its bounds).
+    out.append(Instance("mpcc", "ampl_base", DATA / "nl_complementarity" / "ampl_base.nl", "nl"))
     for p in sorted((DATA / "qplib" / "qplib").glob("*.qplib")):
         out.append(Instance("qplib_in_repo", p.stem, p, "qplib"))
     return out
