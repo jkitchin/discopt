@@ -13549,3 +13549,135 @@ showcase instances on the default path. Both certify without the seed:
 heuristic that offers a trivial point as an incumbent *candidate*, without making it
 the root's `initial_point`, should be judged against both lists: the gain set and
 the 9 lost certificates.
+
+### 103.12 #2021 section 3: the split row's perspective is disaggregated; `DISCOPT_PERSPECTIVE_ROW_DISAGG` graduates (2026-10-31)
+
+Section 103.10 left portfol_classical050_1 uncertified, with the master bound stuck at
+-0.09777. This section finds why the split cut does not move that bound, and fixes it in
+the master. It does **not** certify the instance, for a second reason recorded below.
+
+**Where the reported bound comes from** (probe wrapping `milp_highs.solve_milp_with_lazy_cuts`,
+30 s, no library edit). The #1066 guard stops the master at 15.75 s (`abandoned`), and the
+#1634 cross-solve then reports `withdrawn: no time budget left for the presolve-free
+cross-solve`. The master's own bound is dropped. The published -0.0977738 is the continuous
+relaxation bound, which the default-path fallback reproduces. The master's tree bounds at
+that moment were near -0.0975. Withdrawing an unconfirmed bound at hand-over is the #1634
+policy (the primary tree runs with presolve on) and is left alone here. It is not the
+bottleneck anyway: -0.0975 is still 3% from the optimum -0.094760.
+
+**Why the split cut does not close the root gap.** At each master LP point the split cut's
+violation equals the plain row's to three digits (probe on `_add_ecp_cuts`: 127 points,
+e.g. 7.547e-3 against 7.548e-3). The split cut is ONE row per reference. Each coordinate's
+perspective tangent `d_i (2 r w_i - r**2 z_i)` therefore takes `r_i = w^_i`, which is the
+tangent at `z_i = 1`. At a fractional `z^_i` the tight reference is `w^_i / z^_i`. The fix
+is one column per coordinate, so each can take its own reference.
+
+**Entry experiment** (no library edit; a Kelley loop on HiGHS LPs over the model's own linear
+rows, with the solve's own split `t = 0.1257`, 50 coordinates):
+
+| LP rounds | plain row | aggregate split cut | disaggregated |
+|---|---|---|---|
+| 40 | -0.105693 | -0.114526 | -0.098406 |
+| 80 | -0.099512 | -0.105223 | -0.097138 |
+| 400 | -0.097775 | -0.097474 | -- |
+| converged | -0.0977741 | -0.0969912 (4000 rounds) | -0.0969913 |
+
+The converged perspective bound reproduces the issue's -0.096990. The master gets about 127
+separation rounds in a 30 s solve, so the aggregate form cannot reach it. Two cheaper
+variants were measured in the solver first and rejected:
+
+- Replacing the reference with `w^/z^` inside the single row: the master's LP rounds end at
+  -0.1045 against -0.0975. A perspective tangent is homogeneous in `(w, z)`, so on its own
+  it is a poor cutting-plane step.
+- Adding that row next to the existing one: -0.097474 against -0.097499, no change.
+
+**Change** (`DISCOPT_PERSPECTIVE_ROW_DISAGG`). The `lp_nlp_bb` master gets one column
+`s_i >= 0` per split coordinate of each `PerspectiveRowTerm`, appended after every other
+block (`_PerspectiveRowEpigraph`). Two kinds of rows are pooled:
+
+- the remainder tangent `R-tangent(x) + sum_i s_i <= 0`, where `R = g - sum_i d_i w_i**2` is
+  convex (`PerspectiveRowTerm.remainder_cut`, taken at the projected reference like the
+  split cut);
+- per-coordinate rows `2 d_i r w_i - d_i r**2 z_i - s_i <= 0` at `r = w^_i` and, where
+  `0 < z^_i < 1`, at `r = min(w^_i / z^_i, U_i)` (`perspective_references`).
+
+Every row is valid at `s_i = d_i w_i**2`. The rows at `r = w^` plus the remainder row sum
+exactly to the split cut. The split cut itself stays in the master, so the block only adds
+rows. The master's LP-relaxation rounds separate the block at every master point, and not
+only when the original row is violated: past the plain bound, master points usually satisfy
+`g <= 0` while still violating the perspective. At an incumbent, the block's rows ride only
+on a restart something else already forces. A row violated only through `s` would
+otherwise reject a feasible point and rebuild the HiGHS tree. Stats: `oa/perspective_row_disagg_{cols,pooled,separations,rows}`.
+
+**On portfol_classical050_1** (marker asserted, every incumbent verified on a fresh parse):
+
+| | OFF | ON |
+|---|---|---|
+| 30 s: last LP-round bound | -0.097499 | -0.097124 |
+| 30 s: best HiGHS tree bound | -0.097376 | -0.096853 |
+| 30 s: trees built | 15 | 8 |
+| 120 s: best HiGHS tree bound | -0.097356 | -0.096817 |
+| 120 s: reported bound (both arms) | -0.0977669 | -0.0977669 |
+| incumbent (4/4 at 30 s) | -0.0947601 (the optimum) | -0.0943908 |
+
+The master gets past the continuous perspective bound, because branching now gets the
+perspective. The reported bound does not change, because the guard hands over and the
+route's bound is withdrawn in both arms (above). ON builds fewer trees, finds fewer NLP
+points, and its incumbent is 0.4% worse.
+
+**Portfol class** (the four instances the split cut fires on; 30 s, 4 reps of which 3
+interleaved with the arm order alternating; load ~1):
+
+| instance | OFF | ON |
+|---|---|---|
+| portfol_robust050_34 | feasible, bound -0.0721484, 30.2-31.2 s (4/4) | **optimal, 16.5-18.6 s (4/4)** |
+| portfol_robust100_09 | incumbent at the optimum, bound -0.10826 / -0.10825 / -0.10826 / -0.10836 | same incumbent, bound -0.10827 (3/4), no bound (1/4) |
+| portfol_classical200_2 | no incumbent, no bound, 38.6-39.8 s (4/4) | incumbent -0.0961430, no bound, 45.3-49.0 s (4/4) |
+| portfol_classical050_1 | as above | as above |
+
+The bound-less robust100_09 run (1/4) is the #1066 guard's allocation tail, as for tls4 in
+section 103.7. The slower ON master handed over 1.5 s later (16.84 s vs 15.30 s), and the
+fallback needs about 24 s to publish a bound: OFF's ran to 39.4 s. The route's own tree
+bound was -0.10792 in both arms. Both arms overrun on classical200_2; ON by 6-9 s more.
+
+**Retraction of section 103.10's robust050_34 row.** Section 103.10 had the split-cut arm
+certifying robust050_34 in 13.9-14.1 s at 30 s. On this tree (613d6b0) with highspy 1.15.1,
+that arm (this section's OFF) is uncertified at 30 s in 5/5 runs. It is not #2054's
+convexity subdivision: `DISCOPT_OA_CONVEXITY_SUBDIVISION=0` also leaves it uncertified.
+Section 103.9 records the master behaving differently across highspy versions. That is a
+candidate cause, not bisected.
+
+**Panel** (`issue1913_pseudocost_panel.py`, the 102 routed instances from a fresh
+`issue2013_route_census.py` run (identical list), 30 s, 2 workers, interleaved, every
+subprocess asserting `discopt.solvers.oa:class _PerspectiveRowEpigraph`, load 0.5-1.2):
+
+| checks | problems | certified OFF -> ON | both-certify | total wall |
+|---|---|---|---|---|
+| 612 | 0 | unchanged (none gained, none lost) | nodes 145,349 -> 145,337, wall 245.4 -> 247.8 s | 427.2 -> 428.9 s |
+
+The block is built on one routed instance, portfol_classical050_1 (1,185 rows pooled).
+The other 101 are untouched. Of the six that certify in neither arm, only clay0205m's bound
+moved (990 -> 1320, optimum 8092.5), and the flag never fires there.
+
+**Verdict.** Cert-clean: 612 panel checks plus 32 class solves, 0 problems, every bound at
+or below its `.solu` value, every incumbent verified. Net-positive on the class it targets:
+one certificate (robust050_34, 4/4) and one incumbent (classical200_2, 4/4), against a 0.4%
+worse incumbent on classical050_1 (4/4) and a longer overrun on classical200_2. It is inert
+on the rest of the routed panel. **Graduated** default ON in the PR that introduces it;
+`=0` restores the aggregate-only master. The audit marker is unchanged.
+
+**What is left on portfol_classical050_1.** Two things stand between the instance and a
+certificate.
+
+- The route's bound is not published. The guard abandons the route, and an abandoned master
+  gets no #1634 cross-solve. That is a #1634/#1066 design question, not a relaxation one.
+- More decisively, the master itself does not get there. With the guard off
+  (`DISCOPT_CONVEX_ROUTE_GUARD=0`, 120 s, one run per arm) the route still hands over at its
+  half-limit, 60 s, in both arms. Its best tree bound is -0.096817 ON (18 trees) against
+  -0.097354 OFF (32 trees). That is still 2.2% from the optimum -0.094760.
+
+HiGHS 1.15 cannot add a row inside a tree, so every lazy cut costs a full tree (section
+103.7). The tree count, not the relaxation, now bounds this instance. Closing it needs a
+master that keeps its tree across cuts (the in-house simplex master has the node hook,
+#1141) or more separation per rebuilt tree. Both are outside section 3's scope, which was
+the relaxation.

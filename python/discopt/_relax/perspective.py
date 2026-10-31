@@ -406,9 +406,21 @@ def perspective_row_disaggregation_enabled() -> bool:
     400, -0.096991 after 4000; disaggregated -0.097138 after 80. The master gets
     about 127 separation rounds in a 30 s solve.
 
-    Default OFF; read per call. Bound-changing (CLAUDE.md section 5 regime 2).
+    **Default ON (graduated with #2021, performance-plan section 103.12).**
+    Bound-changing (CLAUDE.md section 5 regime 2). Panel over the 102 routed
+    MINLPLib instances (30 s, interleaved, every incumbent verified): 612 checks,
+    0 problems, certified unchanged, total wall 427.2 -> 428.9 s; it fires only on
+    portfol_classical050_1. On the portfol class the split cut fires on (4
+    instances, 4 interleaved reps): portfol_robust050_34 certifies in 16.5-18.6 s
+    against uncertified at 30 s (4/4), portfol_classical200_2 finds an incumbent
+    (4/4 vs 0/4), portfol_robust100_09 is neutral, and portfol_classical050_1's
+    master bound improves (best tree bound -0.09738 -> -0.09685) but its reported
+    bound does not (the #1066 guard hands over and the unconfirmed route bound is
+    withdrawn in both arms) and its incumbent is 0.4% worse (4/4).
+    ``DISCOPT_PERSPECTIVE_ROW_DISAGG=0`` restores the aggregate-only master. Read
+    per call, not cached at import, so a test can flip it.
     """
-    return os.environ.get("DISCOPT_PERSPECTIVE_ROW_DISAGG", "0").strip() not in ("", "0")
+    return os.environ.get("DISCOPT_PERSPECTIVE_ROW_DISAGG", "1").strip() not in ("", "0")
 
 
 # ── #2021 §3: diagonal-perspective split of a coupled quadratic ROW ───────────

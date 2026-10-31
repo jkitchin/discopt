@@ -1,7 +1,7 @@
 """#2021 section 3: the disaggregated epigraph of a split quadratic ``<=`` row.
 
-``DISCOPT_PERSPECTIVE_ROW_DISAGG`` gives the ``lp_nlp_bb`` master one column
-``s_i >= d_i w_i**2 / z_i`` per split coordinate of each
+``DISCOPT_PERSPECTIVE_ROW_DISAGG`` (default ON; ``=0`` opts out) gives the
+``lp_nlp_bb`` master one column ``s_i >= d_i w_i**2 / z_i`` per split coordinate of each
 ``PerspectiveRowTerm``, a remainder row ``R-tangent + sum_i s_i <= 0`` and
 per-coordinate Frangioni-Gentile rows, in ADDITION to the aggregate split cut.
 Measurement and panel: performance-plan section 103.12.
@@ -45,13 +45,14 @@ def _fractional_point(m, rng):
 
 
 @pytest.mark.smoke
-def test_the_flag_is_off_by_default(monkeypatch):
+def test_the_flag_is_on_by_default(monkeypatch):
+    """Graduated on its panels (performance-plan section 103.12); ``=0`` opts out."""
     monkeypatch.delenv(FLAG, raising=False)
-    assert not P.perspective_row_disaggregation_enabled()
-    assert not oa._perspective_row_disagg_enabled()
-    monkeypatch.setenv(FLAG, "1")
     assert P.perspective_row_disaggregation_enabled()
     assert oa._perspective_row_disagg_enabled()
+    monkeypatch.setenv(FLAG, "0")
+    assert not P.perspective_row_disaggregation_enabled()
+    assert not oa._perspective_row_disagg_enabled()
 
 
 @pytest.mark.smoke
