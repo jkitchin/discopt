@@ -2068,6 +2068,8 @@ class OACutConvexity:
     constraint_mask: list[bool]
     #: Rows left unclassified because ``deadline`` passed (counted not convex).
     truncated: int = 0
+    #: Rows proved convex only by the box-subdivision certificate (#2054).
+    subdivided: int = 0
 
 
 def classify_oa_cut_convexity(
@@ -2098,8 +2100,18 @@ def classify_oa_cut_convexity(
     ``truncated`` says how many. Measured on kaibel (GDPlib): the full pass took
     over 100 s, all of it before LOA's first master solve. ``None`` classifies
     every row, as before.
+
+    With ``DISCOPT_OA_CONVEXITY_SUBDIVISION`` (default ON since #2054) a row the
+    whole-box certificate abstains on is retried by
+    :func:`~.certificate.certify_convex_subdivided`, which certifies the
+    interval Hessian on every piece of an adaptive cover of the box; ``subdivided``
+    counts the rows proved that way. Only with the certificate route on.
     """
-    from .certificate import _oa_convexity_certificate_enabled
+    from .certificate import (
+        _oa_convexity_certificate_enabled,
+        _oa_convexity_subdivision_enabled,
+        certify_convex_subdivided,
+    )
 
     certificate_route = _oa_convexity_certificate_enabled()
     if use_certificate is None:
@@ -2119,14 +2131,20 @@ def classify_oa_cut_convexity(
 
     constraint_mask: list[bool] = []
     truncated = 0
+    subdivide = _oa_convexity_subdivision_enabled()
+    subdivided = 0
     for c in model._constraints:
         if deadline is not None and time.perf_counter() >= deadline:
             constraint_mask.append(False)
             truncated += isinstance(c, Constraint)
         elif isinstance(c, Constraint):
-            constraint_mask.append(
-                classify_constraint(c, model, cache, use_certificate=use_certificate)
-            )
+            convex = classify_constraint(c, model, cache, use_certificate=use_certificate)
+            if not convex and use_certificate and subdivide and c.sense in ("<=", ">="):
+                # #2054: the whole-box certificate abstained; retry on a cover.
+                cert = certify_convex_subdivided(c.body, model, deadline=deadline)
+                convex = cert is not None and _constraint_convex_from_curvature(cert, c.sense)
+                subdivided += convex
+            constraint_mask.append(convex)
         else:
             constraint_mask.append(False)
 
@@ -2134,6 +2152,7 @@ def classify_oa_cut_convexity(
         objective_is_convex=obj_convex,
         constraint_mask=constraint_mask,
         truncated=truncated,
+        subdivided=subdivided,
     )
 
 

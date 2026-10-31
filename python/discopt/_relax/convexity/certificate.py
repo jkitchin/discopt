@@ -545,6 +545,136 @@ def certify_convex(
     return None
 
 
+def _oa_convexity_subdivision_enabled() -> bool:
+    """Whether OA's cut classifier retries an abstained row by box subdivision (#2054).
+
+    Governs the subdivision fallback in :func:`~.rules.classify_oa_cut_convexity`:
+    a row whose body the whole-box interval Hessian cannot certify is retried by
+    :func:`certify_convex_subdivided`, and a row it proves convex gets OA cuts.
+
+    **Default ON** (graduated in #2054 under CLAUDE.md §5); opt out with
+    ``DISCOPT_OA_CONVEXITY_SUBDIVISION=0`` (also ``false``/``no``/``off``), which
+    restores the whole-box verdict exactly. Bound-changing: a newly certified row
+    adds OA cuts to the master. Sound by construction -- PSD on every piece of a
+    cover of the box is PSD on the box.
+
+    Graduation panel (``docs/dev/data/2054-reactor-panel/``, 2026-10-30): 40
+    synthetic reactor-choice GDPs (30 convex-row models, 10 negative controls with
+    a nonconvex disjunct row), 30 s, arms interleaved, independent DP oracle,
+    every incumbent re-verified. Cert-clean: 0 failures over 320 solves (115
+    optimal objectives, 320 bounds, 320 incumbents checked). Under
+    ``gdp_method="loa"``: certified 13 -> 18, 0 lost; on the 13 both certify,
+    LOA iterations 83 -> 47 and wall 133.5 -> 65.6 s; on the 22 neither
+    certifies, the bound is tighter on 22, looser on 0. In-repo MINLPLib corpus
+    (74 ``.nl``): 0 rows change, so OA is unchanged there; classification costs
+    +3.3 s in total (nvs05 +0.8 s), paid only when an OA-family route runs.
+    """
+    return os.environ.get("DISCOPT_OA_CONVEXITY_SUBDIVISION", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+#: Most interval-Hessian walks one :func:`certify_convex_subdivided` call makes.
+#: On the #2054 reactor rows adaptive bisection needs 31 (PFR) and 59 (two CSTRs),
+#: against 16 and 32 uniform pieces; past the budget the call abstains.
+_SUBDIVISION_MAX_PIECES = 128
+#: Most variables a row's Hessian may depend on for subdivision to be tried. A
+#: cover of a ``d``-dimensional box at width ``w`` costs ``(1/w)**d`` pieces, so
+#: the method is a univariate/bivariate tool; anything wider abstains at once.
+_SUBDIVISION_MAX_DIMS = 2
+
+
+def certify_convex_subdivided(
+    expr: Expression,
+    model: Model,
+    *,
+    max_pieces: int = _SUBDIVISION_MAX_PIECES,
+    max_dims: int = _SUBDIVISION_MAX_DIMS,
+    deadline: Optional[float] = None,
+) -> Optional[Curvature]:
+    """:func:`certify_convex` over a cover of the declared box, or ``None`` (#2054).
+
+    The whole-box interval Hessian treats every occurrence of a variable as
+    independent, so on a wide box it can enclose negative curvature that no
+    point has: ``1/(exp(a*t) - 1)`` and the two-CSTR rational row of #2054 are
+    convex on ``t in [0.25, 4]`` and abstain there. On narrower boxes the
+    enclosure tightens, so the box is bisected -- adaptively, only the pieces
+    that abstain, along the widest of the variables the Hessian depends on --
+    until every piece is certified with the *same* curvature.
+
+    Sound: a twice-differentiable function whose Hessian is PSD at every point
+    of a convex set is convex on it, and the pieces cover the box, so a CONVEX
+    verdict on each piece is PSD everywhere (likewise NSD for CONCAVE). A piece
+    certified with the other curvature, an unbounded split variable, a support
+    wider than ``max_dims``, an array variable, an exhausted ``max_pieces`` or a
+    passed ``deadline`` each abstain with ``None``; abstaining is never a claim
+    of nonconvexity.
+    """
+    from discopt.export._common import variable_flat_offsets
+    from discopt.modeling.core import Variable
+
+    try:
+        ad = interval_hessian(expr, model, compact=True)
+    except ValueError:
+        return None
+    support = ad.support
+    if support is None:
+        return None
+    hess = ad.hess
+    curved = (hess.lo != 0.0) | (hess.hi != 0.0)
+    rows = np.flatnonzero(curved.any(axis=1))
+    if rows.size == 0 or rows.size > max_dims:
+        return None
+    offsets = variable_flat_offsets(model)
+    by_offset = {offsets[id(v)]: v for v in model._variables}
+    split: list[Variable] = []
+    for j in rows.tolist():
+        var = by_offset.get(int(support[j]))
+        if var is None or var.shape != ():
+            return None
+        lo, hi = float(np.asarray(var.lb).reshape(())), float(np.asarray(var.ub).reshape(()))
+        if not (np.isfinite(lo) and np.isfinite(hi) and abs(lo) < 1e15 and abs(hi) < 1e15):
+            return None
+        if hi <= lo:
+            return None
+        split.append(var)
+
+    start = {
+        v: (float(np.asarray(v.lb).reshape(())), float(np.asarray(v.ub).reshape(()))) for v in split
+    }
+    work: list[dict] = [start]
+    target: Optional[Curvature] = None
+    walks = 0
+    while work:
+        if walks >= max_pieces or (deadline is not None and time.perf_counter() >= deadline):
+            return None
+        piece = work.pop()
+        walks += 1
+        verdict = certify_convex(
+            expr,
+            model,
+            box={v: Interval(np.array(a), np.array(b)) for v, (a, b) in piece.items()},
+        )
+        if verdict is None:
+            # Bisect the widest split variable, relative to its declared width.
+            v = max(split, key=lambda u: (piece[u][1] - piece[u][0]) / (start[u][1] - start[u][0]))
+            a, b = piece[v]
+            mid = 0.5 * (a + b)
+            if not (a < mid < b):
+                return None
+            work.append({**piece, v: (mid, b)})
+            work.append({**piece, v: (a, mid)})
+            continue
+        if target is None:
+            target = verdict
+        elif verdict != target:
+            return None
+    return target
+
+
 def refresh_convex_mask(
     model: Model,
     root_mask: list[bool],

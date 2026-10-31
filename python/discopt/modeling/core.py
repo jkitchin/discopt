@@ -4673,7 +4673,15 @@ class SolveResult:
         and the two **local** statuses added by #1148 —
         ``"local_optimal"`` (a local stationary point, no global claim) and
         ``"local_infeasible"`` (a local solver found no point, which is *not* an
-        infeasibility proof; a stalled MPEC continuation lands here).
+        infeasibility proof; a stalled MPEC continuation lands here), plus
+        ``"local_limit"`` (a local search stopped on a limit at a point it did not
+        establish as stationary). Two more say the search ended with no incumbent
+        and no proof either way (#2053): ``"unknown"`` (feasibility undetermined
+        -- e.g. a tree drained without a rigorous fathom, or a decomposition loop
+        that found nothing feasible) and ``"no_feasible_point"`` (the
+        outer-approximation routes' spelling of the same claim). Neither is an
+        infeasibility proof nor an error. ``discopt.status.STATUSES`` is the
+        complete set.
 
         The local statuses are a distinct status rather than a flag beside
         ``"optimal"`` on purpose: a consumer that has never heard of the local
