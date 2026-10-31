@@ -1310,12 +1310,16 @@ def run_obbt_on_relaxation(
         identical regardless of which oracle ran.
         """
         nonlocal warm_basis, n_lp_solves, total_lp_time
-        n_lp_solves += 1
         # #2006: the sweep's ``deadline`` also bounds each probe LP. Polling it only
         # between probes let one probe that started just inside the deadline run
         # unbounded past it. Capped by the remaining time only, so a sweep that
-        # finishes inside its deadline is unchanged.
-        budget = None if deadline is None else max(0.0, deadline - _time.perf_counter())
+        # finishes inside its deadline is unchanged. An exhausted budget skips the
+        # probe outright (non-optimal, tightens nothing) rather than handing a backend
+        # a zero limit it might read as "no limit".
+        budget = None if deadline is None else deadline - _time.perf_counter()
+        if budget is not None and budget <= 0.0:
+            return SolveStatus.TIME_LIMIT, None, None
+        n_lp_solves += 1
         if _probe_lp is not None:
             st, obj, duals, basis, wall = _probe_lp.solve(
                 c, lb_arr, ub_arr, warm_basis, time_limit_s=budget
@@ -1332,13 +1336,10 @@ def run_obbt_on_relaxation(
             b_ub=b_ub,
             bounds=_bounds_list(),
             warm_basis=warm_basis,
-            # Floored above 0: some backends read a 0.0 time limit as "no limit".
             time_limit=(
                 time_limit_per_lp
                 if budget is None
-                else max(
-                    1e-3, budget if time_limit_per_lp is None else min(time_limit_per_lp, budget)
-                )
+                else (budget if time_limit_per_lp is None else min(time_limit_per_lp, budget))
             ),
         )
         total_lp_time += result.wall_time

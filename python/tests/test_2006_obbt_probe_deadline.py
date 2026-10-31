@@ -37,7 +37,8 @@ def _record_budgets(monkeypatch):
     state = {"deadline": None}
 
     def wrapped(*args, **kwargs):
-        tl = kwargs.get("time_limit_s", args[_TIME_LIMIT_POS] if len(args) > 13 else None)
+        positional = args[_TIME_LIMIT_POS] if len(args) > _TIME_LIMIT_POS else None
+        tl = kwargs.get("time_limit_s", positional)
         left = state["deadline"] - time.perf_counter() if state["deadline"] else float("nan")
         seen.append((tl, left))
         return orig(*args, **kwargs)

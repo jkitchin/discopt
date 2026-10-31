@@ -77,6 +77,16 @@ GAP = 1e-4
 #: SCIP's QPLIB ``.lp`` must reproduce the published objective at the reference
 #: point to this relative accuracy (the published values carry ~10 digits).
 FIDELITY_RTOL = 1e-6
+#: Wall-clock limit of that fixed-point solve; added to the SCIP job's hard timeout
+#: so the fidelity check cannot push a row into HARD_TIMEOUT on its own (#2066 review).
+FIDELITY_TIME_LIMIT = 60.0
+#: A dual bound past the oracle by more than this (relative, floor 1 in magnitude) is a
+#: certificate violation. Feasibility scale, deliberately NOT ``GAP``: the oracle is a
+#: proven optimum (MINLPLib) or a verified feasible point (QPLIB), so a bound may sit
+#: within the gap of it but never beyond it. 1e-6 covers the ~10-digit rounding of the
+#: published values and LP feasibility noise (#2066 review: a ``GAP``-scale check here
+#: could not see a 5e-5 relative crossing).
+BOUND_RTOL = 1e-6
 
 
 def _load(path: str):
@@ -197,7 +207,7 @@ def _scip_fidelity(lp: str, sol: str) -> dict:
             val = float(round(val))
         m.fixVar(v, val)
         fixed += 1
-    m.setParam("limits/time", 60)
+    m.setParam("limits/time", FIDELITY_TIME_LIMIT)
     m.optimize()
     obj = m.getObjVal() if m.getNSols() > 0 else None
     return {"fidelity_obj": obj, "fidelity_fixed": fixed, "fidelity_status": m.getStatus()}
@@ -314,6 +324,12 @@ def build_panel(out: Path, max_vars: int, max_cons: int, names: set[str] | None)
     return panel
 
 
+def _job_timeout(tl: float, extra: list[str]) -> float:
+    """Hard wall limit of one solver subprocess: the solve, 30 s of slack, and --
+    when a reference ``.sol`` is passed -- the SCIP fidelity solve that follows it."""
+    return tl + 30 + (FIDELITY_TIME_LIMIT if extra else 0.0)
+
+
 def run(out: Path, panel: list[dict], tl: float, workers: int) -> Path:
     results = out / f"results_tl{int(tl)}.jsonl"
     done = set()
@@ -346,7 +362,7 @@ def run(out: Path, panel: list[dict], tl: float, workers: int) -> Path:
                 [sys.executable, __file__, "--_solve", solver, path, str(tl), *extra],
                 capture_output=True,
                 text=True,
-                timeout=tl + 30,
+                timeout=_job_timeout(tl, extra),
             )
             lines = [ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")]
             res = (
@@ -423,7 +439,13 @@ def verdict(res: dict, opt: float | None, sense: str = "min", proven: bool = Tru
         return "OK" if st == "infeasible" else ("WRONG" if obj is not None else "FAIL")
     if st in ("optimal", "gaplimit"):  # SCIP stops on limits/gap with "gaplimit"
         if not proven:
-            return "WRONG" if _worse(obj, opt, sense) else "OK"
+            if _worse(obj, opt, sense):
+                return "WRONG"
+            if _beats(obj, opt, sense) and not res.get("verified"):
+                # Better than a verified feasible reference, at a point nobody checked
+                # (SCIP's rows carry no verification): not evidence of a win.
+                return "BEATS_REF_UNVERIFIED"
+            return "OK"
         return "OK" if _close(obj, opt) else "WRONG"
     if st == "infeasible":
         return "WRONG"
@@ -445,6 +467,7 @@ def analyze(
         res[(j["name"], j["solver"])] = j
     rows, bound_checks, verify_checks, violations, unverified = [], 0, 0, [], []
     fidelity_checks, fidelity_bad, fidelity_missing = 0, [], []
+    fidelity_unchecked: list[tuple[str, str]] = []
     for p in panel:
         d, s = res.get((p["name"], "discopt")), res.get((p["name"], "scip"))
         if d is None or s is None:
@@ -454,6 +477,8 @@ def analyze(
             if "fidelity_obj" not in s and "fidelity_error" not in s:
                 if s["status"] not in ("CRASH", "HARD_TIMEOUT"):
                     fidelity_missing.append(p["name"])
+                else:  # no result at all; never a win, but say so rather than hide it
+                    fidelity_unchecked.append((p["name"], s["status"]))
             else:
                 fidelity_checks += 1
                 fo = s.get("fidelity_obj")
@@ -463,7 +488,7 @@ def analyze(
         b = d.get("bound")
         if opt is not None and b is not None:
             bound_checks += 1
-            tol = GAP * max(1.0, abs(opt)) + 1e-6
+            tol = BOUND_RTOL * max(1.0, abs(opt))
             if (b > opt + tol) if p["sense"] == "min" else (b < opt - tol):
                 violations.append((p["name"], b, opt))
         if "verified" in d or "verify_error" in d:
@@ -485,7 +510,10 @@ def analyze(
     print(f"discopt dual-bound checks: {bound_checks}, oracle violations: {violations}")
     print(f"discopt incumbents verified: {verify_checks}")
     if any("files" in p for p in panel):
-        print(f"SCIP input fidelity checks: {fidelity_checks}, mismatches: {len(fidelity_bad)}")
+        print(
+            f"SCIP input fidelity checks: {fidelity_checks}, mismatches: {len(fidelity_bad)}, "
+            f"unchecked (SCIP job crashed/timed out): {fidelity_unchecked}"
+        )
         for name, fo, ref, err in fidelity_bad:
             print(f"  {name:26s} SCIP .lp objective at the reference {fo} vs {ref} {err or ''}")
         better = [
@@ -507,6 +535,8 @@ def analyze(
                 f"verified_obj={d.get('verified_obj')} opt={r['opt']} "
                 f"{d.get('verify_reason') or d.get('verify_error') or ''}"
             )
+    beats_ref = [r["name"] for r in rows if r["vs"] == "BEATS_REF_UNVERIFIED"]
+    print(f"SCIP claims better than the verified reference, unchecked (not wins): {beats_ref}")
     wins = [
         r for r in rows if r["vs"] == "OK" and r["vd"] != "OK" and r["s"]["wall"] <= max_scip_time
     ]

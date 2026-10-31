@@ -279,3 +279,55 @@ def test_scip_fidelity_reproduces_the_reference_and_detects_a_wrong_point(tmp_pa
     bad_sol.write_text("\n".join(lines) + "\n")
     bad = screen._scip_fidelity(lp, str(bad_sol))
     assert bad["fidelity_obj"] is None or abs(bad["fidelity_obj"] - REF) > 1e-6 * REF
+
+
+# --- #2066 review ------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_unverified_claim_better_than_a_best_known_reference_is_not_ok():
+    # SCIP rows carry no verification: "optimal" below a verified feasible
+    # reference is unchecked, never a win (it may be a misread model).
+    s = {"status": "optimal", "objective": REF - 1.0, "bound": REF - 1.0}
+    assert verdict(s, REF, "min", proven=False) == "BEATS_REF_UNVERIFIED"
+    assert verdict(dict(s, status="gaplimit"), REF, "min", proven=False) == "BEATS_REF_UNVERIFIED"
+    assert verdict(dict(s, objective=REF + 1.0), REF, "max", proven=False) == (
+        "BEATS_REF_UNVERIFIED"
+    )
+    # Verified, it is a genuine improvement; at the reference it is plain OK.
+    assert verdict(dict(s, verified=True), REF, "min", proven=False) == "OK"
+    assert verdict(dict(s, objective=REF), REF, "min", proven=False) == "OK"
+
+
+@pytest.mark.unit
+def test_analyze_does_not_count_an_unverified_better_claim_as_a_win(tmp_path, capsys):
+    s = {"status": "optimal", "objective": REF - 1.0, "bound": REF - 1.0, "fidelity_obj": REF}
+    d = dict(D_OK, status="time_limit", objective=20.0, verified_obj=20.0)
+    analyze([_qplib_row()], _write_q(tmp_path, d, s), 5.0)
+    out = capsys.readouterr().out
+    assert "discopt not OK: 0" in out and "not wins): ['p1']" in out
+
+
+@pytest.mark.unit
+def test_analyze_reports_a_timed_out_scip_row_as_fidelity_unchecked(tmp_path, capsys):
+    assert analyze([_qplib_row()], _write_q(tmp_path, D_OK, {"status": "HARD_TIMEOUT"}), 5.0) == 0
+    assert "unchecked (SCIP job crashed/timed out): [('p1', 'HARD_TIMEOUT')]" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.unit
+def test_scip_job_timeout_includes_the_fidelity_solve():
+    assert screen._job_timeout(30, ["ref.sol"]) == 30 + 30 + screen.FIDELITY_TIME_LIMIT
+    assert screen._job_timeout(30, []) == 60
+
+
+@pytest.mark.unit
+def test_bound_check_is_feasibility_scale_not_gap_scale(tmp_path):
+    # A dual bound 5e-5 (relative) past a proven optimum sits inside GAP=1e-4 and
+    # was invisible to the old check; it is a certificate violation.
+    d = {"status": "optimal", "objective": OPT, "bound": OPT * (1 + 5e-5), "verified": True}
+    d["verified_obj"] = OPT
+    assert analyze([_panel_row()], _write(tmp_path, d, SCIP_OK), 5.0) == 1
+    d["bound"] = OPT * (1 + 1e-7)  # rounding-scale: still clean
+    assert analyze([_panel_row()], _write(tmp_path, d, SCIP_OK), 5.0) == 0
