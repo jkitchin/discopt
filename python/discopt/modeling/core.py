@@ -10197,6 +10197,12 @@ class Model:
             from discopt.mpec import require_all_relations_lowered
 
             require_all_relations_lowered(self, context="Model.solve")
+        if getattr(self, "_lowered_complementarities", None):
+            # A lowering's auxiliary bounds were derived from the box at lowering
+            # time; re-derive them for the box being solved (#2061 review).
+            from discopt.mpec import refresh_lowering_bounds
+
+            refresh_lowering_bounds(self, context="Model.solve")
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling

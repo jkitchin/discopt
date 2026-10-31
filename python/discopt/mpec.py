@@ -42,7 +42,7 @@ Example
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Optional, cast
 
@@ -68,6 +68,7 @@ __all__ = [
     "reformulate_gdp",
     "reformulate_scholtes",
     "reformulate_sos1",
+    "refresh_lowering_bounds",
     "require_all_relations_lowered",
     "RELAXING_METHODS",
     "register_relations",
@@ -301,7 +302,13 @@ class Complementarity:
 
     # ── lowering state ──
 
-    def mark_lowered(self, model: Model, method: str, rows: Optional[list] = None) -> None:
+    def mark_lowered(
+        self,
+        model: Model,
+        method: str,
+        rows: Optional[list] = None,
+        derived: Optional[list] = None,
+    ) -> None:
         """Record that ``model``'s rows already encode this relation.
 
         Kept per-model on purpose. The same relation object may legitimately be
@@ -330,8 +337,11 @@ class Complementarity:
         holds both can show it. ``None`` means "not tracked for this model",
         which is what a rebuilding pass must record: it carries the relation
         forward, but the rows in the rebuilt model are different objects.
+
+        ``derived`` lists the auxiliary bounds the lowering derived from the
+        model's other bounds (see :attr:`LoweringRecord.derived`).
         """
-        _lowered_map(model)[self] = LoweringRecord(method=method, rows=rows)
+        _lowered_map(model)[self] = LoweringRecord(method=method, rows=rows, derived=derived)
 
     def is_lowered_into(self, model: Model) -> bool:
         """True when ``model`` already carries the rows generated from this relation."""
@@ -404,6 +414,19 @@ class LoweringRecord:
 
     method: str
     rows: Optional[list] = None
+    #: The auxiliary-variable bounds this lowering DERIVED from other bounds of the
+    #: model (the split ``w±`` of a two-sided box, an SOS1 aux, a GDP operand
+    #: lift), as :class:`DerivedBound` entries. A derived bound is a fact about the
+    #: box it was computed over; :func:`refresh_lowering_bounds` recomputes every
+    #: one at the solve boundary, so widening a variable after lowering cannot
+    #: leave a stale big-M that cuts the optimum (#2061 review, blocker). ``None``
+    #: means "not tracked" -- a rebuilding pass, or a model read from a file.
+    derived: Optional[list] = field(default=None, compare=False, repr=False)
+    #: For a record read from a file (which does not carry ``derived``): the
+    #: bounds and parameter values the relation's operands read at load time, as
+    #: ``[(leaf, lb, ub)]`` / ``[(param, value)]``. A widening after load cannot be
+    #: refreshed, so it is refused (:func:`refresh_lowering_bounds`).
+    baseline: Optional[list] = field(default=None, compare=False, repr=False)
 
     @property
     def is_exact(self) -> bool:
@@ -504,6 +527,12 @@ def box_mcp(
     if not (lo <= hi):
         who = name or "<unnamed>"
         raise ValueError(f"box_mcp: empty box [{lo:g}, {hi:g}] for relation {who!r}")
+    if lo == hi and not np.isfinite(lo):
+        who = name or "<unnamed>"
+        raise ValueError(
+            f"box_mcp: box [{lo:g}, {hi:g}] for relation {who!r} pins the variable at "
+            "infinity, which no real value satisfies"
+        )
     role = (
         ComplementarityRole.NCP_PAIR if (lo == 0.0 and hi == _INF) else ComplementarityRole.BOX_MCP
     )
@@ -941,20 +970,265 @@ def _elem_shape(model: Model, expr: Expression) -> tuple[int, ...]:
     return tuple(int(d) for d in np.asarray(iv.lo).shape)
 
 
+def _enclosure_of(
+    model: Model, expr: Expression, box: Optional[dict] = None
+) -> tuple[float, float]:
+    """The interval enclosure ``(lo, hi)`` of ``expr``, with discopt's sentinels as infinities.
+
+    The one place every lowering-derived auxiliary bound is computed. A variable on
+    its default bounds (``±9.999e19``) is *unbounded*; an enclosure read straight
+    off it is a huge but finite number, which a ``np.isfinite`` test passes and a
+    big-M then uses as if it were a real bound (#2061 review). Both endpoints go
+    through :func:`_normalize_bound`, so such an enclosure reads as infinite here.
+    An exception from the interval evaluator propagates; each caller decides what
+    an unevaluable operand means for it.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    iv = evaluate_interval(expr, model, box)
+    lo = _normalize_bound(float(np.min(np.asarray(iv.lo))))
+    hi = _normalize_bound(float(np.max(np.asarray(iv.hi))))
+    return lo, hi
+
+
 def _aux_upper_bound(model: Model, expr: Expression) -> float:
     """Finite upper bound for an SOS1 aux mirroring a nonnegative operand.
 
     Uses the static interval enclosure of ``expr``; returns ``+inf`` when the
-    enclosure is non-finite so the SOS1→big-M lowering can raise its clear
-    "add a finite upper bound" error instead of silently fabricating a huge M.
+    enclosure is non-finite -- or cannot be computed -- so the SOS1→big-M lowering
+    raises its clear "add a finite upper bound" error instead of silently
+    fabricating a huge M. The evaluator's exception is not lost: that downstream
+    refusal is the loud outcome it maps to.
     """
-    from discopt._relax.convexity.interval_eval import evaluate_interval
-
     try:
-        hi = float(np.max(np.asarray(evaluate_interval(expr, model).hi)))
+        return _enclosure_of(model, expr)[1]
     except Exception:
-        return float("inf")
-    return hi if np.isfinite(hi) else float("inf")
+        return _INF
+
+
+class DerivedBound:
+    """One auxiliary bound a lowering derived from the model's other bounds.
+
+    ``kind`` names the derivation, so :func:`refresh_lowering_bounds` recomputes it
+    with the same function that set it:
+
+    * ``"split_pos"`` / ``"split_neg"`` -- ``w⁺ <= max(0, hi F)`` /
+      ``w⁻ <= max(0, -lo F)`` of a two-sided box (:func:`_box_decomposition`),
+      ``F`` enclosed over the box narrowed by the relation's own ``[l, u]`` on
+      ``z`` (``zbox``). A non-finite enclosure is a refusal.
+    * ``"sos1_aux"`` -- ``0 <= aux <= hi expr`` (:func:`reformulate_sos1`).
+    * ``"gdp_lift"`` -- ``u`` enclosing a nonlinear GDP operand
+      (:func:`_gdp_operand`, via ``Model._branch_bounds``).
+
+    Plain attributes, no ``__eq__``: ``copy.deepcopy`` and ``pickle`` carry it with
+    the model's own memo, so a clone's entry points at the clone's variables.
+    """
+
+    __slots__ = ("var", "expr", "kind", "zbox", "relation")
+
+    def __init__(
+        self,
+        var: Variable,
+        expr: Expression,
+        kind: str,
+        relation: Complementarity,
+        zbox: Optional[tuple] = None,
+    ):
+        self.var = var
+        self.expr = expr
+        self.kind = kind
+        self.relation = relation
+        self.zbox = zbox
+
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
+    def bounds(self, model: Model) -> tuple[float, float]:
+        """The ``(lb, ub)`` the lowering would give this aux over the model's current box."""
+        if self.kind in ("split_pos", "split_neg"):
+            flo, fhi = _split_enclosure(model, self.expr, self.relation, self.zbox)
+            return (0.0, max(0.0, fhi)) if self.kind == "split_pos" else (0.0, max(0.0, -flo))
+        if self.kind == "sos1_aux":
+            return 0.0, _aux_upper_bound(model, self.expr)
+        if self.kind == "gdp_lift":
+            return model._branch_bounds(self.expr, self.expr)
+        raise ValueError(f"unknown derived-bound kind {self.kind!r}")
+
+
+def _relation_zbox(p: Complementarity, lb: float, ub: float) -> Optional[tuple]:
+    """``(variable, flat element or None, l, u)`` when ``p.g`` is one variable element.
+
+    The relation's box ``[l, u]`` constrains ``z`` wherever the relation holds, so
+    ``F`` need only be enclosed over ``z``'s declared bounds intersected with it
+    (#2061 review). Only a plain variable (or a static element of one) is narrowed;
+    any other ``g`` keeps the declared box, which is always sound.
+    """
+    from discopt.modeling.core import IndexExpression
+
+    g = p.g
+    if isinstance(g, Variable) and g.size == 1:
+        return (g, None, lb, ub)
+    if isinstance(g, IndexExpression) and isinstance(g.base, Variable):
+        k = _static_flat_element(g.base, g.index)
+        if k is not None:
+            return (g.base, k, lb, ub)
+    return None
+
+
+def _zbox_override(zbox: Optional[tuple]) -> Optional[dict]:
+    """The ``evaluate_interval`` box override for ``zbox`` at the variable's CURRENT bounds."""
+    if zbox is None:
+        return None
+    from discopt._relax.convexity.interval import Interval
+
+    var, k, lb, ub = zbox
+    lo = np.array(np.asarray(var.lb, dtype=np.float64), dtype=np.float64, copy=True)
+    hi = np.array(np.asarray(var.ub, dtype=np.float64), dtype=np.float64, copy=True)
+    flat_lo, flat_hi = lo.reshape(-1), hi.reshape(-1)
+    idx = slice(None) if k is None else k
+    nlo = np.maximum(flat_lo[idx], lb)
+    nhi = np.minimum(flat_hi[idx], ub)
+    if np.any(nlo > nhi):
+        # The declared bounds miss the relation's box entirely: the model is
+        # infeasible, and the declared box is still a sound enclosure domain.
+        return None
+    flat_lo[idx], flat_hi[idx] = nlo, nhi
+    return {var: Interval(lo, hi)}
+
+
+def _split_enclosure(
+    model: Model, expr: Expression, p: Complementarity, zbox: Optional[tuple]
+) -> tuple[float, float]:
+    """A finite enclosure of the residual of a two-sided box, or a loud ``ValueError``.
+
+    The split auxiliaries ``w⁺``/``w⁻`` need finite upper bounds for an exact
+    big-M/SOS1 encoding. A fabricated bound could cut the optimum, so a non-finite
+    enclosure is a refusal. An exception from the interval evaluator is re-raised
+    as part of that refusal, with its text (CLAUDE.md §7).
+    """
+    where = (
+        "over the declared box with z restricted to the relation's [l, u]"
+        if zbox is not None
+        else "over the declared box"
+    )
+    try:
+        lo, hi = _enclosure_of(model, expr, _zbox_override(zbox))
+    except Exception as exc:
+        raise ValueError(
+            f"cannot bound the residual F of {p.describe()} {where}: the interval "
+            f"evaluation raised {type(exc).__name__}: {exc}. The split auxiliaries "
+            "w+/w- need a finite bound."
+        ) from exc
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(
+            f"cannot bound the residual F of {p.describe()} {where} (enclosure "
+            f"[{lo:g}, {hi:g}]). The split auxiliaries w+/w- of a two-sided box need a "
+            "finite bound, and a fabricated big-M could cut the optimum. Declare finite "
+            "bounds on the variables F reads."
+        )
+    return lo, hi
+
+
+def _set_bounds_if_changed(var: Variable, lo: float, hi: float) -> bool:
+    """Rebind ``var``'s box to ``(lo, hi)`` only when it differs; True when it did.
+
+    Assigning an equal box is skipped so an unchanged model's refresh is a no-op
+    (the bound-neutral regime, CLAUDE.md §5).
+    """
+    cur_lo = np.asarray(var.lb, dtype=np.float64)
+    cur_hi = np.asarray(var.ub, dtype=np.float64)
+    if np.all(cur_lo == lo) and np.all(cur_hi == hi):
+        return False
+    var.lb = np.full(cur_lo.shape, lo, dtype=np.float64) if cur_lo.ndim else lo
+    var.ub = np.full(cur_hi.shape, hi, dtype=np.float64) if cur_hi.ndim else hi
+    return True
+
+
+def _operand_leaves(pair: Complementarity) -> tuple[list, list]:
+    """The variables and parameters ``pair``'s operands read, each once."""
+    from discopt.modeling.core import Parameter
+
+    vs, ps = [], []
+    for node in _walk_operands(pair):
+        if isinstance(node, Variable):
+            vs.append(node)
+        elif isinstance(node, Parameter):
+            ps.append(node)
+    return vs, ps
+
+
+def snapshot_lowering_baseline(model: Model) -> None:
+    """Record, for each lowering read from a file, the box its derived bounds hold for.
+
+    A saved document carries a lowering's rows and its auxiliaries' bounds, not the
+    derivation of those bounds (:attr:`LoweringRecord.derived`). The bounds are
+    valid for the box they were computed over, and stay valid when it narrows; a
+    widening (or a moved parameter) is what can make one cut the optimum. The
+    loader calls this, and :func:`refresh_lowering_bounds` refuses a solve or save
+    after such a change.
+    """
+    for rel, rec in _lowered_map(model).items():
+        if rec.derived is not None or rec.method in RELAXING_METHODS:
+            continue
+        vs, ps = _operand_leaves(rel)
+        rec.baseline = [
+            (v, np.array(v.lb, dtype=np.float64), np.array(v.ub, dtype=np.float64)) for v in vs
+        ] + [(q, np.array(q.value, dtype=np.float64)) for q in ps]
+
+
+def refresh_lowering_bounds(model: Model, *, context: str) -> int:
+    """Recompute every auxiliary bound a lowering derived; return how many changed.
+
+    A lowering that introduces an auxiliary (the split ``w±`` of a two-sided box,
+    an SOS1 aux, a GDP operand lift) bounds it from an interval enclosure over the
+    model's box *at lowering time*. Widening a variable afterwards -- ``x.ub = 50``
+    on a model declared with ``x <= 1`` -- left that bound in place, and the stale
+    big-M cut the optimum: ``status=optimal`` at -10 against a true -50 (#2061
+    review, blocker). Every solve boundary calls this next to
+    :func:`require_all_relations_lowered`, so the aux bounds always enclose the box
+    actually being solved. An unchanged model is left exactly as it was.
+
+    A record read from a file carries no derivation; for it, a widened bound or a
+    moved parameter on a variable the relation reads is refused here (see
+    :func:`snapshot_lowering_baseline`), never solved on bounds that may be stale.
+    """
+    changed = 0
+    for rel, rec in _lowered_map(model).items():
+        if rec.derived is not None:
+            for d in rec.derived:
+                lo, hi = d.bounds(model)
+                changed += _set_bounds_if_changed(d.var, lo, hi)
+        elif rec.baseline is not None:
+            _refuse_widened_baseline(rel, rec.baseline, context)
+    return changed
+
+
+def _refuse_widened_baseline(rel: Complementarity, baseline: list, context: str) -> None:
+    for entry in baseline:
+        if len(entry) == 3:
+            v, lb0, ub0 = entry
+            lb, ub = np.asarray(v.lb), np.asarray(v.ub)
+            if lb.shape == lb0.shape and not (np.any(lb < lb0) or np.any(ub > ub0)):
+                continue
+            what = f"variable {v.name!r} was widened"
+        else:
+            q, val0 = entry
+            val = np.asarray(q.value)
+            if val.shape == val0.shape and np.array_equal(val, val0):
+                continue
+            what = f"parameter {q.name!r} changed value"
+        raise ValueError(
+            f"{context}: {what} after this model was read from a file, and "
+            f"{rel.describe()} was lowered before it was saved. The file records the "
+            "auxiliary bounds that lowering derived from the box at save time, not how "
+            "they were derived, so they may no longer enclose the widened box and "
+            "could cut the optimum. Re-declare the relation on a model built in this "
+            "session (or narrow the bound back) before solving or saving."
+        )
 
 
 def _index(expr: Expression, shape: tuple[int, ...], k: int) -> Expression:
@@ -1014,13 +1288,8 @@ def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complem
     out: list[Complementarity] = []
     for p in pairs:
         tag = _ensure_relation_name(model, p)
-        fs = p.f_shape if p.f_shape is not None else _elem_shape(model, p.f)
-        gs = p.g_shape if p.g_shape is not None else _elem_shape(model, p.g)
-        p.f_shape, p.g_shape = fs, gs
-        nf = _n_elements(fs)
-        ng = _n_elements(gs)
-        n = max(nf, ng)
-        if n == 1:
+        ops = _element_operands(model, p)
+        if ops is None:
             # The relation IS its own single element. Returning a fresh child
             # here broke the documented contract *and* the identity-keyed
             # provenance this module advertises: ``elements(m)[0] is pair`` was
@@ -1028,19 +1297,39 @@ def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complem
             # #1149, LOW 7).
             out.append(p)
             continue
-        if nf not in (1, n) or ng not in (1, n):
-            raise ValueError(
-                f"complementarity {tag!r} has incompatible operand shapes "
-                f"{fs} ⊥ {gs}: sides must have equal element counts, or one side "
-                "must be scalar to broadcast."
-            )
-        shape = fs if nf == n else gs
-        for k in range(n):
-            fk = p.f if nf == 1 else _index(p.f, fs, k)
-            gk = p.g if ng == 1 else _index(p.g, gs, k)
-            idx = tuple(int(v) for v in np.unravel_index(k, shape))
+        for k, (fk, gk, idx) in enumerate(ops):
             out.append(_element_of(p, fk, gk, f"{tag}_{k}", idx))
     return out
+
+
+def _element_operands(model: Model, p: Complementarity) -> Optional[list[tuple]]:
+    """``[(f_k, g_k, index)]`` for each element of ``p``, or ``None`` for a scalar relation.
+
+    Names nothing: :func:`_lower_each` validates every relation of a call through
+    this before any is named or emitted. Caches the operand shapes on ``p`` (see
+    :func:`_scalarize_pairs`).
+    """
+    fs = p.f_shape if p.f_shape is not None else _elem_shape(model, p.f)
+    gs = p.g_shape if p.g_shape is not None else _elem_shape(model, p.g)
+    p.f_shape, p.g_shape = fs, gs
+    nf = _n_elements(fs)
+    ng = _n_elements(gs)
+    n = max(nf, ng)
+    if n == 1:
+        return None
+    if nf not in (1, n) or ng not in (1, n):
+        raise ValueError(
+            f"complementarity {p.name or '<unnamed>'!r} has incompatible operand shapes "
+            f"{fs} ⊥ {gs}: sides must have equal element counts, or one side "
+            "must be scalar to broadcast."
+        )
+    shape = fs if nf == n else gs
+    ops = []
+    for k in range(n):
+        fk = p.f if nf == 1 else _index(p.f, fs, k)
+        gk = p.g if ng == 1 else _index(p.g, gs, k)
+        ops.append((fk, gk, tuple(int(v) for v in np.unravel_index(k, shape))))
+    return ops
 
 
 def _pending(model: Model, pairs: list[Complementarity]) -> list[Complementarity]:
@@ -1122,38 +1411,17 @@ def _box_form(p: Complementarity) -> tuple[float, float]:
             "(-inf, +inf) and the symmetric pair declares (0, +inf) on both sides. No "
             "other form is lowered, and none is guessed."
         )
-    lo, hi = float(p.g_bounds[0]), float(p.g_bounds[1])
+    lo, hi = _normalize_bound(p.g_bounds[0]), _normalize_bound(p.g_bounds[1])
     if not lo <= hi:
         raise ValueError(f"{p.describe()}: empty box [{lo:g}, {hi:g}]")
-    return lo, hi
-
-
-def _enclosure(model: Model, expr: Expression, p: Complementarity) -> tuple[float, float]:
-    """A finite interval enclosure of the residual ``expr``, or a loud ``ValueError``.
-
-    The split auxiliaries ``w⁺``/``w⁻`` of a two-sided box need finite upper bounds
-    for an exact big-M/SOS1 encoding. A fabricated bound could cut the optimum, so a
-    non-finite enclosure is a refusal. An exception from the interval evaluator is
-    re-raised as part of that refusal, with its text (CLAUDE.md §7).
-    """
-    from discopt._relax.convexity.interval_eval import evaluate_interval
-
-    try:
-        iv = evaluate_interval(expr, model)
-        lo = float(np.min(np.asarray(iv.lo)))
-        hi = float(np.max(np.asarray(iv.hi)))
-    except Exception as exc:
+    if lo == hi and not np.isfinite(lo):
+        # ``l == u == ±inf`` reads as B0 (``l == u``) but pins z at a value no real z
+        # takes: the B0 rows ``z >= l``/``z <= u`` are both dropped as infinite, so
+        # the relation lowered to NO rows and the solve went on as if it were absent
+        # (#2061 review). The box is empty over the reals.
         raise ValueError(
-            f"cannot bound the residual F of {p.describe()} over the declared box: the "
-            f"interval evaluation raised {type(exc).__name__}: {exc}. The split "
-            "auxiliaries w+/w- need a finite bound."
-        ) from exc
-    if not (np.isfinite(lo) and np.isfinite(hi)):
-        raise ValueError(
-            f"cannot bound the residual F of {p.describe()} over the declared box "
-            f"(enclosure [{lo:g}, {hi:g}]). The split auxiliaries w+/w- of a "
-            "two-sided box need a finite bound, and a fabricated big-M could cut the "
-            "optimum. Declare finite bounds on the variables F reads."
+            f"{p.describe()}: box [{lo:g}, {hi:g}] pins the variable at infinity, which no "
+            "real value satisfies"
         )
     return lo, hi
 
@@ -1188,14 +1456,20 @@ def _validate_relation(model: Model, p: Complementarity) -> Optional[tuple]:
     """Everything about scalar relation ``p`` that can refuse, with no row emitted.
 
     ``None`` for the symmetric pair (the NCP emitters handle it as they always
-    have); for a box, ``(l, u, enclosure)`` with the enclosure of ``F`` computed
-    only when the split needs it (a two-sided, non-degenerate box), else ``None``.
+    have); for a box, ``(l, u, zbox)`` where ``zbox`` (:func:`_relation_zbox`) is
+    the narrowing of ``z`` the split's enclosure of ``F`` uses, and ``False`` when
+    the box needs no split (not two-sided, or ``l == u``). The enclosure itself is
+    computed here, so a non-finite one refuses before any row is emitted, and
+    again at every solve boundary (:func:`refresh_lowering_bounds`).
     """
     if p.is_symmetric_nonnegative:
         return None
     lb, ub = _box_form(p)
-    two_sided = bool(np.isfinite(lb) and np.isfinite(ub) and lb < ub)
-    return lb, ub, (_enclosure(model, p.f, p) if two_sided else None)
+    if not (np.isfinite(lb) and np.isfinite(ub) and lb < ub):
+        return lb, ub, False
+    zbox = _relation_zbox(p, lb, ub)
+    _split_enclosure(model, p.f, p, zbox)
+    return lb, ub, zbox
 
 
 def _box_decomposition(
@@ -1203,6 +1477,8 @@ def _box_decomposition(
     p: Complementarity,
     plan: tuple,
     operand_lifts: Optional[list[tuple[Variable, Expression]]],
+    derived: list,
+    box_rows: set,
 ) -> list[Complementarity]:
     r"""Emit the box rows of a scalar box-MCP relation; return its NCP halves.
 
@@ -1229,26 +1505,37 @@ def _box_decomposition(
     tightening a shared ``Variable`` would mutate state other models hold.
 
     ``plan`` is :func:`_validate_relation`'s result. :func:`_lower_each` validates
-    every scalar element of a relation before emitting any of them, so a refused
-    relation -- vector or scalar -- leaves the model untouched.
+    every element of every relation of a call before emitting any of them, so a
+    refused call leaves the model untouched.
+
+    The ``w±`` upper bounds are *derived* from the box, so each is recorded in
+    ``derived`` (:class:`DerivedBound`) and recomputed at every solve boundary.
+    ``box_rows`` holds the ``(z, l, u)`` whose rows this relation already emitted:
+    a vector residual against one scalar ``z`` shares a single box, and its rows
+    are written once, not once per element (#2061 review).
     """
     from discopt.modeling.core import maximum
 
     tag = p.name or "compl"
-    lb, ub, enc = plan
+    lb, ub, zbox = plan
     z, F = p.g, p.f
-    if np.isfinite(lb):
-        model.subject_to(z >= lb, name=f"{tag}_z_lb")
-    if np.isfinite(ub):
-        model.subject_to(z <= ub, name=f"{tag}_z_ub")
+    key = (id(z), lb, ub)
+    if key not in box_rows:
+        box_rows.add(key)
+        if np.isfinite(lb):
+            model.subject_to(z >= lb, name=f"{tag}_z_lb")
+        if np.isfinite(ub):
+            model.subject_to(z <= ub, name=f"{tag}_z_ub")
     if lb == ub:  # B0
         return []
-    if enc is not None:  # B1
-        flo, fhi = enc
+    if zbox is not False:  # B1
+        flo, fhi = _split_enclosure(model, F, p, zbox)
         model._aux_counter += 1
         wp = model.continuous(f"_{tag}_wp_{model._aux_counter}", lb=0.0, ub=max(0.0, fhi))
         model._aux_counter += 1
         wm = model.continuous(f"_{tag}_wm_{model._aux_counter}", lb=0.0, ub=max(0.0, -flo))
+        derived.append(DerivedBound(wp, F, "split_pos", p, zbox))
+        derived.append(DerivedBound(wm, F, "split_neg", p, zbox))
         model.subject_to(F == wp - wm, name=f"{tag}_split")
         if operand_lifts is not None:
             operand_lifts.append((wp, maximum(F, 0.0)))
@@ -1268,6 +1555,8 @@ def _emit_relation(
     plan: Optional[tuple],
     emit_ncp,
     operand_lifts: Optional[list[tuple[Variable, Expression]]],
+    derived: list,
+    box_rows: set,
 ) -> None:
     """Lower one validated scalar relation with a method's NCP emitter.
 
@@ -1278,13 +1567,24 @@ def _emit_relation(
     (:attr:`Complementarity.is_symmetric_nonnegative`), never off ``role``.
     """
     if plan is None:
-        emit_ncp(p)
+        emit_ncp(p, derived)
         return
-    for half in _box_decomposition(model, p, plan, operand_lifts):
-        emit_ncp(half)
+    for half in _box_decomposition(model, p, plan, operand_lifts, derived, box_rows):
+        emit_ncp(half, derived)
 
 
 # ─────────────────────────── reformulations ───────────────────────────
+
+
+def _validate_all(model: Model, todo: list[Complementarity]) -> None:
+    """Run every refusal a lowering of ``todo`` can raise, emitting and naming nothing."""
+    for parent in todo:
+        ops = _element_operands(model, parent)
+        if ops is None:
+            _validate_relation(model, parent)
+            continue
+        for fk, gk, idx in ops:
+            _validate_relation(model, _element_of(parent, fk, gk, parent.name or "", idx))
 
 
 def _lower_each(
@@ -1296,10 +1596,14 @@ def _lower_each(
 ) -> None:
     """Lower each relation in turn, recording **that relation's own** rows.
 
-    ``emit_ncp`` is a method's emitter for one scalar NCP pair; every scalar
-    element of a relation is validated first (:func:`_validate_relation`) and only
-    then emitted, so a relation whose k-th element refuses leaves no rows from
-    elements ``0..k-1`` behind. The rows appended to ``model._constraints``
+    ``emit_ncp(pair, derived)`` is a method's emitter for one scalar NCP pair; it
+    appends a :class:`DerivedBound` to ``derived`` for every auxiliary bound it
+    derives from the model's box. Every scalar element of **every relation in
+    ``todo``** is validated first (:func:`_validate_relation`) and only then is
+    anything emitted, so a call whose k-th relation (or element) refuses leaves
+    no rows from the ones before it behind (#2061 review: the first version
+    validated per relation, and ``reformulate_gdp(m, [r1, r2])`` with ``r2``
+    unbounded left ``r1``'s 18 rows in the model). The rows appended to ``model._constraints``
     between the relation's start and end positions are the rows attributed to it.
 
     Per relation, not per call. The first version took one slice around the whole
@@ -1325,13 +1629,16 @@ def _lower_each(
     which is a *measured* answer and distinct from the untracked ``None`` a
     rebuilding pass leaves behind.
     """
+    _validate_all(model, todo)
     for parent in todo:
         start = len(model._constraints)
         elems = _scalarize_pairs(model, [parent])
-        plans = [_validate_relation(model, e) for e in elems]
-        for elem, plan in zip(elems, plans):
-            _emit_relation(model, elem, plan, emit_ncp, operand_lifts)
-        parent.mark_lowered(model, method, list(model._constraints[start:]))
+        derived: list = []
+        box_rows: set = set()
+        for elem in elems:
+            plan = _validate_relation(model, elem)
+            _emit_relation(model, elem, plan, emit_ncp, operand_lifts, derived, box_rows)
+        parent.mark_lowered(model, method, list(model._constraints[start:]), derived=derived)
 
 
 def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
@@ -1346,7 +1653,7 @@ def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
     """
     todo = _pending(model, pairs)
 
-    def emit(p: Complementarity) -> None:
+    def emit(p: Complementarity, derived: list) -> None:
         tag = p.name
         model.subject_to(p.f >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(p.g >= 0, name=f"{tag}_g_nonneg")
@@ -1373,7 +1680,7 @@ def reformulate_sos1(
     """
     todo = _pending(model, pairs)
 
-    def emit(p: Complementarity) -> None:
+    def emit(p: Complementarity, derived: list) -> None:
         tag = p.name
         members: list[Variable] = []
         for side, expr in (("f", p.f), ("g", p.g)):
@@ -1387,6 +1694,7 @@ def reformulate_sos1(
                 aux = model.continuous(
                     f"{tag}_{side}_aux", lb=0.0, ub=_aux_upper_bound(model, expr)
                 )
+                derived.append(DerivedBound(aux, expr, "sos1_aux", p))
                 model.subject_to(aux == expr, name=f"{tag}_{side}_link")
                 if _operand_lifts is not None:
                     _operand_lifts.append((aux, expr))
@@ -1427,11 +1735,11 @@ def reformulate_gdp(
     """
     todo = _pending(model, pairs)
 
-    def emit(p: Complementarity) -> None:
+    def emit(p: Complementarity, derived: list) -> None:
         # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
         tag = p.name or "compl"
-        fv = _gdp_operand(model, p.f, tag, "f", _operand_lifts)
-        gv = _gdp_operand(model, p.g, tag, "g", _operand_lifts)
+        fv = _gdp_operand(model, p.f, tag, "f", _operand_lifts, derived, p)
+        gv = _gdp_operand(model, p.g, tag, "g", _operand_lifts, derived, p)
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
         model.either_or([[fv == 0], [gv == 0]], name=tag)
@@ -1445,11 +1753,15 @@ def _gdp_operand(
     tag: str,
     side: str,
     operand_lifts: Optional[list[tuple[Variable, Expression]]] = None,
+    derived: Optional[list] = None,
+    pair: Optional[Complementarity] = None,
 ) -> Expression:
     """Return a linear operand for a GDP complementarity disjunct.
 
     Linear expressions are used directly; nonlinear bodies are lifted to a
-    scalar auxiliary variable with finite interval bounds.
+    scalar auxiliary variable with finite interval bounds. Those bounds are
+    derived from the model's box, so the lift is recorded in ``derived`` and
+    recomputed at every solve boundary (:func:`refresh_lowering_bounds`).
     """
     from discopt._relax.gdp_reformulate import _is_linear
 
@@ -1458,6 +1770,8 @@ def _gdp_operand(
     lo, hi = model._branch_bounds(expr, expr)
     model._aux_counter += 1
     u = model.continuous(f"_{tag}_{side}_{model._aux_counter}", lb=lo, ub=hi)
+    if derived is not None and pair is not None:
+        derived.append(DerivedBound(u, expr, "gdp_lift", pair))
     model.subject_to(u == expr, name=f"{tag}_{side}_lift")
     if operand_lifts is not None:
         operand_lifts.append((u, expr))
@@ -1756,6 +2070,9 @@ def solve_mpec(
     # lowered, so ``model._complementarities`` describes the model afterwards and a
     # later ``source_residuals(model, result)`` measures the relations that were
     # actually solved rather than an empty list.
+    # Validated first: a relation the lowering will refuse must not be registered
+    # on the model on its way to the refusal (#2061 review).
+    _validate_all(model, _pending(model, list(pairs) or list(model._complementarities)))
     register_relations(model, list(pairs))
     report_pairs = list(pairs) if pairs else list(model._complementarities)
     snapshot = _source_snapshot(model)

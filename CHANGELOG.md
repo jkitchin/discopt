@@ -20,8 +20,25 @@ The release procedure that produces these entries is documented in
   `F == w⁺ - w⁻` with `(w⁺, z - l)` and `(w⁻, u - z)`, where `w±` are bounded
   by the interval enclosure of `F`. A residual with a non-finite enclosure, an
   empty box, array bounds or declared residual bounds other than the box's own
-  are refused with a `ValueError`, and a refused vector relation leaves no rows
-  behind. `Model.mcp(..., method="gdp"|"sos1")` lowers on the spot.
+  are refused with a `ValueError`, as is a box pinned at `±inf`; a refused call
+  (any relation of it, any element) leaves no rows behind and registers nothing.
+  `w±` are enclosed over `z` restricted to the relation's own `[l, u]`.
+  `Model.mcp(..., method="gdp"|"sos1")` lowers on the spot.
+
+### Fixed
+
+- **Lowering-derived auxiliary bounds are re-derived at every solve (#2061
+  review).** The split `w±` of a box MCP, the SOS1 aux and the GDP operand lift
+  of an NCP pair are bounded from an interval enclosure over the model's box at
+  lowering time. Widening a variable afterwards (`x.ub = 50` after declaring
+  `x <= 1`) left that bound in place, and the stale big-M cut the optimum: a
+  certified `optimal` -10 against a true -50. The NCP lifts had the same defect
+  before #2058. `Model.solve`, `solve_model` and `save` now recompute every such
+  bound (`mpec.refresh_lowering_bounds`; an unchanged model is left exactly as
+  it was). A lowering read from a file carries no derivation, so widening a
+  bound or moving a parameter it reads after `load` is refused at solve and save.
+  An enclosure that reads discopt's default `±9.999e19` bounds now counts as
+  unbounded rather than as a finite big-M.
 
 ### Changed
 

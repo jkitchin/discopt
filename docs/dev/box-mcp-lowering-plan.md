@@ -1153,10 +1153,34 @@ the two disagree, the measurement wins (CLAUDE.md §4).
   The plan assumed the role would be ignored and the relation lowered. That would
   have silently dropped the declared `F >= 0`.
   `test_lowering_is_gated_on_declared_bounds_not_on_role` asserts the refusal.
-* **Validation happens before any emission, per parent relation.** Every scalar
-  element of a vector relation is validated (and its enclosure computed) before the
-  first row is emitted. A refusal on element *k* therefore leaves no rows from
-  elements `< k`.
+* **Validation happens before any emission, across the whole call.** Every scalar
+  element of every relation handed to one lowering call is validated (and its
+  enclosure computed) before the first row is emitted, and `solve_mpec` validates
+  before it registers the relations. *Retraction:* the first version of this PR
+  validated per parent relation only and this record said a refusal "leaves the
+  model untouched"; that was false for a multi-relation call —
+  `reformulate_gdp(m, [r1, r2])` with `r2` unbounded left `r1`'s 18 rows behind,
+  and `solve_mpec` had already registered both relations (PR #2061 review).
+* **Derived auxiliary bounds go stale; they are now refreshed (PR #2061 review,
+  blocker).** `w⁺ <= max(0, hi F)` is a fact about the box at lowering time.
+  Measured: `m.mcp(x - z, z, lb=0, ub=10)` with `x <= 1`, then `x.ub = 50`,
+  `min -x` → certified `optimal` -10; the truth is -50. The NCP lowerings had the
+  same defect before this PR (the GDP operand lift and the SOS1 aux of `x*x`
+  stayed at 1 after `x.ub = 3`). Each derived bound is now recorded on the
+  relation's `LoweringRecord` (`DerivedBound`) and recomputed by
+  `refresh_lowering_bounds` at `Model.solve`, `solve_model` and `save`. Clone,
+  deepcopy and pickle carry the records. A saved document carries the refreshed
+  bounds but not their derivation (persisting it would be a schema-1.8 bump
+  with forward cells from every older reader); after `load`, a widened variable
+  or changed parameter that a lowered relation reads is refused instead —
+  narrowing stays valid, since an enclosure over a larger box encloses a smaller one.
+* **Sentinel bounds and infinite pins.** The enclosure finiteness test now reads
+  `±9.999e19` as infinite (a default-bounded `z` passed as a 1e20 big-M), and a
+  box `l == u == ±inf` (which emitted no rows at all) is refused.
+* **The split's enclosure uses the relation's own box on `z`** when `g` is a
+  variable or a static element of one: `F = x - z`, `x in [0, 1]`, `z` declared
+  on `[-100, 100]` but complementary on `[0, 2]` gives `w⁺ <= 1`, `w⁻ <= 2`
+  (was 101 / 100). A vector `F` against one scalar `z` writes the box rows once.
 * **The differential's feasible arm requires at least one point, not three.**
   Shapes A, G and `narrow` have a single solution point, so random samples almost
   never land on it. The feasible arm now requires every hand-picked boundary
@@ -1167,7 +1191,8 @@ the two disagree, the measurement wins (CLAUDE.md §4).
   relation from a box and was moved to `register_relations(box_mcp(...))`.
 * **Bound-neutral panel:** 12/12 rows (NCP models through all three lowerings
   and the `.nl` flag-1/2 fixtures) are identical before and after: status,
-  objective, node count, constraint count and variable count.
+  objective, node count, constraint count and variable count. Re-run after the
+  review fixes (solve-time refresh included): still 12/12 identical.
 * **Fail-before:** with `mpec.py` and `modeling/core.py` at `285d4d45`, and the
   `_box_decomposition` marker asserted absent, 92 of the new and updated tests
   fail. The only new test that passes there checks the closed-form projection,

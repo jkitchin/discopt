@@ -32,10 +32,12 @@ from discopt.mpec import (
     ComplementarityRole,
     _result_point,
     box_mcp,
+    complementarity,
     generated_rows,
     reformulate_gdp,
     reformulate_scholtes,
     reformulate_sos1,
+    refresh_lowering_bounds,
     solve_mpec,
     source_residuals,
 )
@@ -553,3 +555,209 @@ def test_model_mcp_refuses_methods_it_cannot_apply(method, match):
     with pytest.raises(ValueError, match=match):
         m.mcp(-z, z, method=method)
     assert m._constraints == [] and m._complementarities == []
+
+
+# ── #2061 review ─────────────────────────────────────────────────────────────
+
+
+def _ub(m, prefix):
+    return [float(v.ub) for v in m._variables if v.name.startswith(prefix)]
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_widening_after_lowering_does_not_cut_the_optimum(method):
+    """Blocker: ``w⁺ <= 1`` was derived from ``x <= 1`` at declaration and kept after
+    ``x.ub = 50``, so the solve certified -10 against a true -50. ``F = x - z`` with
+    ``z in [0, 10]``: ``x = 50, z = 0`` gives ``F = 40 >= 0`` at ``z = l``."""
+    m = dm.Model("widen")
+    x = m.continuous("x", lb=0, ub=1)
+    z = m.continuous("z", lb=0, ub=10)
+    rel = box_mcp(x - z, z, 0, 10)
+    (reformulate_gdp if method == "gdp" else reformulate_sos1)(m, [rel])
+    x.ub = 50.0
+    m.minimize(-x)
+    _assert_box_optimum(m, [rel], objective=-50.0, point={"x": 50.0, "z": 0.0})
+
+
+def test_widening_after_model_mcp_does_not_cut_the_optimum():
+    """The reviewer's exact repro, through ``Model.mcp``."""
+    m = dm.Model("widen_mcp")
+    x = m.continuous("x", lb=0, ub=1)
+    z = m.continuous("z", lb=0, ub=10)
+    m.mcp(x - z, z, lb=0, ub=10)
+    x.ub = 50.0
+    m.minimize(-x)
+    r = m.solve(time_limit=30.0)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(-50.0, abs=_TOL)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_ncp_operand_aux_bounds_follow_a_widening(method):
+    """The same staleness in the NCP lowerings: the GDP lift / SOS1 aux of ``x*x``
+    was bounded by ``x <= 1`` and stayed at 1 after ``x.ub = 3``. ``max x`` subject to
+    ``0 <= x*x ⊥ y >= 0`` with ``y = 0`` admits ``x = 3``."""
+    m = dm.Model("ncp_widen")
+    x = m.continuous("x", lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=10)
+    rel = complementarity(x * x, y, name="p")
+    (reformulate_gdp if method == "gdp" else reformulate_sos1)(m, [rel])
+    x.ub = 3.0
+    m.minimize(-x + y)
+    r = m.solve(time_limit=30.0)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(-3.0, abs=_TOL)
+
+
+def test_refresh_is_a_no_op_on_an_unchanged_model():
+    m = dm.Model("noop")
+    x = m.continuous("x", shape=(2,), lb=-1, ub=1)
+    z = m.continuous("z", shape=(2,), lb=-5, ub=5)
+    m.mcp(x * x - z, z, lb=-1, ub=2)
+    m.complementarity(x[0] * x[1] + 1, z[0] + 5)
+    assert refresh_lowering_bounds(m, context="t") == 0
+
+
+def test_refresh_tracks_a_narrowing_and_refuses_an_unbounded_widening():
+    m = dm.Model("narrow")
+    x = m.continuous("x", lb=0, ub=4)
+    z = m.continuous("z", lb=0, ub=10)
+    m.mcp(x - z, z, lb=0, ub=10)
+    assert _ub(m, "_compl0_wp_") == [pytest.approx(4.0)]
+    x.ub = 2.0
+    assert refresh_lowering_bounds(m, context="t") == 1
+    assert _ub(m, "_compl0_wp_") == [pytest.approx(2.0)]
+    x.ub = np.inf
+    m.minimize(-x)
+    with pytest.raises(ValueError, match="cannot bound the residual"):
+        m.solve()
+
+
+@pytest.mark.parametrize("how", ["clone", "pickle"])
+def test_widening_a_copy_refreshes_the_copy(how):
+    m = dm.Model("copy_widen")
+    x = m.continuous("x", lb=0, ub=1)
+    z = m.continuous("z", lb=0, ub=10)
+    m.mcp(x - z, z, lb=0, ub=10)
+    m.minimize(-x)
+    c = m.clone() if how == "clone" else pickle.loads(pickle.dumps(m))
+    next(v for v in c._variables if v.name == "x").ub = 50.0
+    r = c.solve(time_limit=30.0)
+    assert r.status == "optimal" and r.objective == pytest.approx(-50.0, abs=_TOL)
+    # the original is untouched by the copy's refresh
+    assert _ub(m, "_compl0_wp_") == [pytest.approx(1.0)]
+
+
+def test_save_writes_refreshed_bounds_and_load_refuses_a_widening():
+    from discopt.serialize import dumps, loads
+
+    m = dm.Model("saved")
+    x = m.continuous("x", lb=0, ub=1)
+    z = m.continuous("z", lb=0, ub=10)
+    m.mcp(x - z, z, lb=0, ub=10)
+    m.minimize(-x)
+    x.ub = 50.0
+    # widened in-session, then saved: the file carries the refreshed w+ bound
+    r = loads(dumps(m)).solve(time_limit=30.0)
+    assert r.status == "optimal" and r.objective == pytest.approx(-50.0, abs=_TOL)
+
+    x.ub = 1.0
+    doc = dumps(m)
+    narrowed = loads(doc)
+    next(v for v in narrowed._variables if v.name == "x").ub = 0.5
+    assert narrowed.solve(time_limit=30.0).objective == pytest.approx(-0.5, abs=_TOL)
+
+    widened = loads(doc)
+    next(v for v in widened._variables if v.name == "x").ub = 50.0
+    with pytest.raises(ValueError, match="was widened after this model was read"):
+        widened.solve()
+    with pytest.raises(ValueError, match="was widened after this model was read"):
+        dumps(widened)
+
+
+def test_refuses_residual_enclosure_on_default_sentinel_bounds():
+    """``z`` on default bounds encloses ``y - z`` in ``±9.999e19`` -- finite to
+    ``np.isfinite``, unbounded to the model. It was accepted as a real big-M."""
+    m = dm.Model("sentinel")
+    z = m.continuous("z")
+    y = m.continuous("y", lb=0, ub=1)
+    n = len(m._constraints)
+    with pytest.raises(ValueError, match="cannot bound the residual"):
+        m.mcp(y - z, y, lb=0, ub=1)
+    assert len(m._constraints) == n
+
+
+@pytest.mark.parametrize("pin", [np.inf, -np.inf])
+def test_refuses_a_box_pinned_at_infinity(pin):
+    """``l == u == ±inf`` read as B0 and emitted no rows at all; the solve then
+    ignored the relation (-5 for ``min z`` over ``[-5, 5]``)."""
+    m = dm.Model("pinned")
+    z = m.continuous("z", lb=-5, ub=5)
+    with pytest.raises(ValueError, match="pins the variable at infinity"):
+        m.mcp(z - 1, z, lb=pin, ub=pin)
+    direct = Complementarity(
+        z - 1,
+        z,
+        "d",
+        role=ComplementarityRole.BOX_MCP,
+        f_bounds=(-np.inf, np.inf),
+        g_bounds=(pin, pin),
+    )
+    with pytest.raises(ValueError, match="pins the variable at infinity"):
+        reformulate_gdp(m, [direct])
+    assert not m._constraints
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_multi_relation_refusal_leaves_no_rows_from_earlier_relations(method):
+    m = dm.Model("multi")
+    a = m.continuous("a", lb=0, ub=1)
+    b = m.continuous("b")
+    w = m.continuous("w", lb=0, ub=2)
+    r1 = box_mcp(a * a - 0.5, a, 0, 1, name="r1")
+    r2 = box_mcp(b - w, w, 0, 2, name="r2")
+    nv = len(m._variables)
+    with pytest.raises(ValueError, match="cannot bound the residual"):
+        (reformulate_gdp if method == "gdp" else reformulate_sos1)(m, [r1, r2])
+    assert not m._constraints and len(m._variables) == nv
+    assert not r1.is_lowered_into(m)
+    with pytest.raises(ValueError, match="cannot bound the residual"):
+        solve_mpec(m, [r1, r2], method=method)
+    assert not m._constraints and not m._complementarities
+
+
+def test_split_enclosure_uses_the_relations_box_on_z():
+    """``F = x - z`` with ``x in [0, 1]``, ``z`` declared on ``[-100, 100]`` but
+    complementary on ``[0, 2]``: ``w⁺ <= 1``, ``w⁻ <= 2`` -- not 101 / 100."""
+    m = dm.Model("zbox")
+    x = m.continuous("x", lb=0, ub=1)
+    z = m.continuous("z", lb=-100, ub=100)
+    rel = box_mcp(x - z, z, 0, 2)
+    reformulate_gdp(m, [rel])
+    assert _ub(m, f"_{rel.name}_wp_") == [pytest.approx(1.0)]
+    assert _ub(m, f"_{rel.name}_wm_") == [pytest.approx(2.0)]
+    m.minimize(-x)
+    _assert_box_optimum(m, [rel], objective=-1.0)
+
+
+def test_split_enclosure_uses_the_relations_box_on_an_element():
+    m = dm.Model("zbox_elem")
+    x = m.continuous("x", shape=(2,), lb=0, ub=1)
+    z = m.continuous("z", shape=(2,), lb=-100, ub=100)
+    rel = box_mcp(x - z, z, 0, 2)
+    reformulate_gdp(m, [rel])
+    assert sorted(_ub(m, f"_{rel.name}_0_wm_") + _ub(m, f"_{rel.name}_1_wm_")) == [
+        pytest.approx(2.0),
+        pytest.approx(2.0),
+    ]
+
+
+def test_vector_residual_against_scalar_z_emits_box_rows_once():
+    m = dm.Model("dedupe")
+    x = m.continuous("x", shape=(3,), lb=0, ub=1)
+    z = m.continuous("z", lb=0, ub=1)
+    rel = box_mcp(x - z, z, 0, 1)
+    reformulate_gdp(m, [rel])
+    names = [c.name for c in rel.rows_in(m) if c.name]
+    assert sum(n.endswith("_z_lb") for n in names) == 1
+    assert sum(n.endswith("_z_ub") for n in names) == 1
