@@ -149,6 +149,16 @@ refutes:
   that is not finite at the origin, so the eps-perspective cannot cancel its residual
   there. This is a loud refusal, not a wrong answer, and it is hull's largest
   capability gap on this panel.
+  * **Update 2026-10-31 (#1917):** such a row is now lowered by the eps-free lifted
+    perspective (`_origin_free_hull_row`: `v - y t = 0`, `t` in the disjunct's own
+    box, row `y g(t) <sense> y rhs`), which needs no `g(0)`, whenever `g` has a finite
+    interval enclosure on that box; the refusal stands otherwise (e.g. `1/x` or
+    `log x` on a box reaching 0). Verified on synthetic `log`/`1/x` disjuncts
+    (differential battery, hull = big-M). **Not yet measured on the 4 instances**:
+    the session that built it had only the PyPI GDPlib, where `kaibel`/`hda` do not
+    exist and `gdp_col`/`stranded_gas` do not build. `stranded_gas`'s 18 rows are
+    `log` of a capacity sum whose box includes 0 (#1182 scan), so they likely
+    still refuse.
 * **discopt LOA on stranded_gas** refuses because a row inside a disjunct has no
   finite lower bound for big-M.
 * **Killed (SIGKILL; presumed OOM), exit -9: 18 runs, scored `unsolved`.**
@@ -223,5 +233,5 @@ For the G5 entry experiments:
 * The hull origin refusals need a hull form that never evaluates the body at 0 for a
   de-selected disjunct. G2.2's perspective variants do not obviously provide one,
   since the eps-perspective still evaluates g at 0 when y = 0, so this is not yet
-  scoped to a task.
+  scoped to a task. (Superseded 2026-10-31: see the `_origin_free_hull_row` update under Errors.)
 * LOA's gap is 4 instances, not speed.

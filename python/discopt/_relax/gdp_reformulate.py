@@ -3158,6 +3158,9 @@ def _reformulate_disjunction_hull(
     # ratio[k][name] = t, the lifted v/yhat of disjunct k (one per variable, shared
     # by every nonlinear row of the disjunct).
     ratio: list[dict[str, Variable]] = [{} for _ in range(n_disjuncts)]
+    # origin_ratio[k][name] = t of the eps-free lifted perspective (#1917), used only
+    # by rows whose g(0) is not finite.
+    origin_ratio: list[dict[str, Variable]] = [{} for _ in range(n_disjuncts)]
     for k, rows_k in enumerate(rows):
         y_k = selectors[k]
         # The perspective divides every variable owned by disjunct k by yhat_k:
@@ -3234,57 +3237,80 @@ def _reformulate_disjunction_hull(
                 # 3.86e-09 (the on disjunct). Shrinking eps does not help --
                 # the model is still exactly infeasible at eps = 1e-14 -- which is
                 # why only cancelling the terms, not making them small, fixes it.
-                g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
-                y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
-                if lifted:
-                    # DISCOPT_HULL_LIFTED_RATIO (#1917): g sees a bounded t = v/yhat
-                    # (see SolverTuning.hull_lifted_ratio for the exactness proof).
-                    in_body = _collect_variables(con.body)
-                    persp_map: dict[str, Expression] = {}
-                    for vname, v in [
-                        *((n, disagg[k][n]) for n in all_vars),
-                        *local[k].items(),
-                    ]:
-                        if vname not in in_body:
-                            continue
-                        if vname not in ratio[k]:
-                            t = Variable(
-                                model._fresh_name(f"_hull_{prefix}_t_{vname}_{k}"),
-                                VarType.CONTINUOUS,
-                                v.shape,
-                                v.lb,
-                                v.ub,
-                                model,
-                            )
-                            new_vars.append(t)
-                            model._register_generated_variable(t)
-                            new_cons.append(
-                                Constraint(
-                                    body=v - y_clamp * t,
-                                    sense="==",
-                                    rhs=0.0,
-                                    name=f"_hull_ratio_{prefix}_{vname}_{k}",
-                                )
-                            )
-                            ratio[k][vname] = t
-                        persp_map[vname] = ratio[k][vname]
+                try:
+                    g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
+                    g0_live = _parametric_body_at_zero(con.body, zero_vars)
+                except HullPerspectiveOriginError as origin_exc:
+                    # #1917: g(0) is not finite, so the eps-perspective cannot cancel
+                    # its residual. The eps-free lifted perspective needs no g(0);
+                    # it is used when g is bounded on the disjunct's own box, and the
+                    # refusal stands otherwise (_origin_free_hull_row).
+                    hull_body, rhs_expr = _origin_free_hull_row(
+                        con,
+                        y_k,
+                        [*((n, disagg[k][n]) for n in all_vars), *local[k].items()],
+                        disjunct_bounds[k],
+                        origin_ratio[k],
+                        model,
+                        f"{prefix}_{k}",
+                        new_vars,
+                        new_cons,
+                        origin_exc,
+                    )
+                    g0_live = None
+                    origin_free = True
                 else:
-                    persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
-                    persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
-                subst_body = _substitute_vars(con.body, persp_map)
-                hull_body = subst_body * y_clamp
-                g0_live = _parametric_body_at_zero(con.body, zero_vars)
-                if g0_live is not None:
-                    # A Parameter in the body: g(0) must track its live value, or a
-                    # model lowered once (``transformations.create_using``) keeps
-                    # ``eps * g0_old`` after ``p.value`` changes and leaves an
-                    # off-disjunct residual -- the #1043 false-infeasible class
-                    # (PR #1862 review).
-                    g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
-                    hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
-                elif g0 != 0.0:
-                    hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
-                rhs_expr = _wrap(con.rhs) * y_clamp
+                    origin_free = False
+                if not origin_free:
+                    y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
+                    if lifted:
+                        # DISCOPT_HULL_LIFTED_RATIO (#1917): g sees a bounded t = v/yhat
+                        # (see SolverTuning.hull_lifted_ratio for the exactness proof).
+                        in_body = _collect_variables(con.body)
+                        persp_map: dict[str, Expression] = {}
+                        for vname, v in [
+                            *((n, disagg[k][n]) for n in all_vars),
+                            *local[k].items(),
+                        ]:
+                            if vname not in in_body:
+                                continue
+                            if vname not in ratio[k]:
+                                t = Variable(
+                                    model._fresh_name(f"_hull_{prefix}_t_{vname}_{k}"),
+                                    VarType.CONTINUOUS,
+                                    v.shape,
+                                    v.lb,
+                                    v.ub,
+                                    model,
+                                )
+                                new_vars.append(t)
+                                model._register_generated_variable(t)
+                                new_cons.append(
+                                    Constraint(
+                                        body=v - y_clamp * t,
+                                        sense="==",
+                                        rhs=0.0,
+                                        name=f"_hull_ratio_{prefix}_{vname}_{k}",
+                                    )
+                                )
+                                ratio[k][vname] = t
+                            persp_map[vname] = ratio[k][vname]
+                    else:
+                        persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                        persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
+                    subst_body = _substitute_vars(con.body, persp_map)
+                    hull_body = subst_body * y_clamp
+                    if g0_live is not None:
+                        # A Parameter in the body: g(0) must track its live value, or a
+                        # model lowered once (``transformations.create_using``) keeps
+                        # ``eps * g0_old`` after ``p.value`` changes and leaves an
+                        # off-disjunct residual -- the #1043 false-infeasible class
+                        # (PR #1862 review).
+                        g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
+                        hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
+                    elif g0 != 0.0:
+                        hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
+                    rhs_expr = _wrap(con.rhs) * y_clamp
 
             if con.sense == "<=":
                 new_cons.append(
@@ -3323,6 +3349,95 @@ def _reformulate_disjunction_hull(
                 )
 
     return new_vars, new_cons
+
+
+def _origin_free_hull_row(
+    con: Constraint,
+    y_k: Expression,
+    owned: list[tuple[str, Variable]],
+    bounds_k: dict[str, tuple[float, float]],
+    cache: dict[str, Variable],
+    model: Model,
+    stem: str,
+    new_vars: list[Variable],
+    new_cons: list[Constraint],
+    origin_exc: HullPerspectiveOriginError,
+) -> tuple[Expression, Expression]:
+    """The hull of a row whose ``g(0)`` is not finite: the eps-free lifted perspective.
+
+    For each variable ``x`` of the row, disjunct ``k`` owns a copy ``v``; this emits
+    ``t`` in the disjunct's OWN box ``[dlb, dub]`` (which need not contain 0) with
+    ``v - y_k * t = 0``, and returns the row ``y_k * g(t)`` against ``y_k * rhs`` in
+    the row's own sense. Exact, and no ``g(0)`` anywhere:
+
+    * ``y_k = 1``: ``t = v``, the original row.
+    * ``y_k = 0``: the bound links pin ``v = 0``, and the row reads ``0 <sense> 0``,
+      which holds for every ``t`` -- nothing to cancel, which is the residual the
+      eps-perspective needs ``g(0)`` for (#1043).
+    * fractional ``y_k``: ``t = v / y_k``, the perspective itself; the links
+      ``dlb y_k <= v <= dub y_k`` put it inside ``[dlb, dub]``, so ``t``'s bounds cut
+      no feasible point.
+
+    ``g`` is evaluated only on the disjunct's own box, where the model itself
+    evaluates it. That is required, not assumed: when the interval enclosure of
+    ``g(t)`` over the box is not finite (``1/x`` or ``log x`` on a box reaching 0),
+    the row's relaxation would be unbounded too, so the original refusal is
+    re-raised instead. Unlike the eps-perspective this form is bilinear, so a
+    convex disjunct row does not stay convex; it is used only where the
+    eps-perspective cannot be formed at all, and a model it does not touch lowers
+    byte-identically.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    if "not collected" in str(origin_exc):  # an internal inconsistency, not g(0)
+        raise origin_exc
+    in_body = _collect_variables(con.body)
+    fresh: list[tuple[str, Variable, Variable]] = []
+    persp_map: dict[str, Expression] = {}
+    for vname, v in owned:
+        if vname not in in_body:
+            continue
+        t = cache.get(vname)
+        if t is None:
+            lo, hi = bounds_k.get(vname, (float(np.min(v.lb)), float(np.max(v.ub))))
+            t = Variable(
+                model._fresh_name(f"_hull_{stem}_t0_{vname}"),
+                VarType.CONTINUOUS,
+                v.shape,
+                lo,
+                hi,
+                model,
+            )
+            fresh.append((vname, v, t))
+        persp_map[vname] = t
+    g_t = _substitute_vars(con.body, persp_map)
+    try:
+        enc = evaluate_interval(g_t, None)
+        finite = bool(
+            np.all(np.isfinite(np.asarray(enc.lo))) and np.all(np.isfinite(np.asarray(enc.hi)))
+        )
+        why = f"enclosure [{np.min(enc.lo):g}, {np.max(enc.hi):g}]"
+    except Exception as exc:  # noqa: BLE001 - re-raised below as the refusal, with cause
+        finite, why = False, f"no enclosure ({type(exc).__name__}: {exc})"
+    if not finite:
+        raise HullPerspectiveOriginError(
+            f"{origin_exc}; and the row is not bounded on its disjunct's own box "
+            f"({why}), so the eps-free lifted perspective would have an unbounded "
+            "relaxation as well (#1917)"
+        ) from origin_exc
+    for vname, v, t in fresh:
+        new_vars.append(t)
+        model._register_generated_variable(t)
+        new_cons.append(
+            Constraint(
+                body=v - y_k * t,
+                sense="==",
+                rhs=0.0,
+                name=f"_hull_ratio0_{stem}_{vname}",
+            )
+        )
+        cache[vname] = t
+    return g_t * y_k, _wrap(con.rhs) * y_k
 
 
 def _hull_lifted_ratio_enabled() -> bool:
