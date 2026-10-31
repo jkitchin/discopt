@@ -31,3 +31,9 @@ Not covered in-repo: `C=B`, `C=D` and `O=C`. The smallest instance of each is
 
 `instancedata.csv` and `qplib.solu` are the upstream metadata and best-known
 objective values, subset to these nine rows.
+
+`lp/QPLIB_0031.lp` is QPLIB's own CPLEX LP rendering of `QPLIB_0031`
+(`https://qplib.zib.de/lp/QPLIB_0031.lp`, unmodified). The `scip_wins` screen's
+QPLIB arm (#2006) hands that format to SCIP, and
+`discopt_benchmarks/tests/test_2006_scip_wins_verdict.py` checks the screen's
+input-fidelity probe against it and `sol/QPLIB_0031.sol`.
