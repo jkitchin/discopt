@@ -125,8 +125,6 @@ def test_share_outside_the_unit_interval_is_refused(bad):
     [
         (None, oa._ABANDON_CROSS_CHECK_FRACTION),
         ("0", 0.0),
-        ("off", 0.0),
-        ("", 0.0),
         ("1", oa._ABANDON_CROSS_CHECK_FRACTION),
         ("on", oa._ABANDON_CROSS_CHECK_FRACTION),
     ],

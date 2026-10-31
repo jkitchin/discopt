@@ -32,9 +32,10 @@ dual bound stays valid.
 
 What makes ``||L x + v|| <= rho`` hold at every feasible ``x``:
 
-* ``L`` is factored from ``Q - margin*I`` (eigenvalues clipped at zero), so
-  ``||L x||^2 <= x'Qx - margin*||x||^2 + (clipped near-null part, >= 0 for a
-  convex row)``; a row whose smallest eigenvalue is below ``-margin`` is declined;
+* ``L'L <= Q`` in the PSD order, proved rather than assumed (:func:`_factor`): a
+  diagonal ``Q`` with any negative entry is declined, and any other ``Q`` must be
+  proved ``>= margin*I`` by ``rigorous_psd_shift``, its factor's residual bounded
+  below ``margin / 2``;
 * ``v`` solves ``2 L'v = c_S`` in least squares; its residual ``delta`` is
   charged to ``rho**2`` as ``sum_j |delta_j| max(|lb_j|, |ub_j|)``, and a row with a
   nonzero residual on an unbounded column is declined;
@@ -47,7 +48,6 @@ read, supports with fewer than two terms or more than :data:`MAX_SUPPORT`.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -95,13 +95,9 @@ def soc_outer_enabled() -> bool:
       robust100_09 uncertified in both, bound 1.6e-5 looser; the 200-asset rows
       are past :data:`MAX_LEAVES`; the shortfall rows are not balls.
     """
-    return os.environ.get("DISCOPT_OA_SOC_OUTER", "1").strip().lower() not in (
-        "0",
-        "",
-        "false",
-        "no",
-        "off",
-    )
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_OA_SOC_OUTER", default=True)
 
 
 @dataclass
@@ -116,28 +112,57 @@ class NormBallRow:
 
 
 def _factor(Q: np.ndarray, margin: float) -> list[tuple[np.ndarray, np.ndarray]] | None:
-    """Rows ``L_k`` (support-local) with ``L'L <= Q - margin*I`` on their span, or ``None``."""
+    """Rows ``L_k`` (support-local) with ``L'L <= Q`` in the PSD order, or ``None``.
+
+    The guarantee is rigorous, not "PSD to within roundoff" (#1679/#1682); a row
+    it cannot prove is declined. Review of #2064: the first version dropped
+    eigenvalues in ``[-margin, 0)`` uncharged, and on ``x1**2 + x2**2 - 1e-10 x3**2
+    <= 1`` the ball cut off the feasible point ``(0.9, 0.9, 1e5)``.
+
+    * **Diagonal ``Q``.** Any negative entry declines the row. A kept term is
+      ``fl(sqrt(fl(q - margin)))**2 <= (q - margin)(1 + 4u) <= q`` because
+      ``margin >= 4u q``; an entry ``q <= margin`` is dropped, contributing
+      ``q x**2 >= 0``.
+    * **Otherwise.** ``Q >= margin*I`` is proved with
+      :func:`~discopt._relax.convexity.eigenvalue.rigorous_psd_shift` on
+      ``Q - 2 margin I`` (shift at most ``margin / 2``, the diagonal subtraction's
+      rounding being far below that), ``L`` is taken from ``Q - margin I``, and the
+      residual ``T = Q - margin I - L'L`` is bounded in the 2-norm by its computed
+      Frobenius norm plus the entrywise error bound ``gamma_{k+3}(|L'||L| + |Q| +
+      margin)`` (Higham 2002, eq. 3.13). With ``||T||_2 <= margin / 2``,
+      ``Q - L'L = T + margin I >= 0``. A singular or near-singular ``Q`` therefore
+      declines.
+    """
+    from .convexity.eigenvalue import rigorous_psd_shift
+
     m = Q.shape[0]
+    u = np.finfo(np.float64).eps / 2.0
     if not np.any(Q - np.diag(np.diag(Q))):
         q = np.diag(Q)
-        if float(q.min()) < -margin:
+        if float(q.min()) < 0.0:
             return None
         return [
             (np.array([j], dtype=np.intp), np.array([math.sqrt(float(q[j]) - margin)]))
             for j in range(m)
             if float(q[j]) - margin > 0.0
         ]
-    evals, vecs = np.linalg.eigh(Q)
-    if float(evals.min()) < -margin:
+    delta = rigorous_psd_shift(Q - 2.0 * margin * np.eye(m))
+    if delta is None or delta > 0.5 * margin:
+        return None
+    evals, vecs = np.linalg.eigh(Q - margin * np.eye(m))
+    if float(evals.min()) <= 0.0:
+        return None
+    L = (vecs * np.sqrt(evals)).T  # rows L_k; L'L ~ Q - margin I
+    k = L.shape[0]
+    gamma = (k + 3) * u / (1.0 - (k + 3) * u)
+    resid = (Q - margin * np.eye(m)) - L.T @ L
+    err = gamma * (np.abs(L.T) @ np.abs(L) + np.abs(Q) + margin)
+    if float(np.linalg.norm(resid)) + float(np.linalg.norm(err)) > 0.5 * margin:
         return None
     rows = []
-    for j in range(m):
-        lam = float(evals[j]) - margin
-        if lam <= 0.0:
-            continue
-        vec = vecs[:, j] * math.sqrt(lam)
-        keep = np.flatnonzero(vec != 0.0)
-        rows.append((keep.astype(np.intp), vec[keep]))
+    for t in range(k):
+        keep = np.flatnonzero(L[t] != 0.0)
+        rows.append((keep.astype(np.intp), L[t, keep]))
     return rows
 
 

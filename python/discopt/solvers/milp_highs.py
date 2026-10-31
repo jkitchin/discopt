@@ -1103,7 +1103,9 @@ def solve_milp_with_lazy_cuts(
     withdrawn. The soundness rule does not move -- a bound the cross-solve does
     not confirm inside that share is lowered or withdrawn exactly as before; the
     cross-solve already stops the moment its dual bound reaches the claim (#2013),
-    so the share is a ceiling, not a cost.
+    so the share is a ceiling, not a cost. Without a ``time_limit`` there is no
+    remaining budget to take a share of, so an abandoned master still gets no
+    cross-solve and its bound is withdrawn, whatever the share.
 
     The in-tree poll is what makes a progress budget honest: restarts alone are
     not a clock. On ``rsyn0820m02m`` the master separates rarely enough that a

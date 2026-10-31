@@ -54,6 +54,7 @@ from discopt.solvers.mip_nlp_options import (
 
 if TYPE_CHECKING:
     from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt._relax.soc_outer import SocOuterBlock
     from discopt.solvers import SolveStatus
 
 logger = logging.getLogger(__name__)
@@ -951,7 +952,7 @@ class _MasterMILPData:
     #: #2059: first column of the norm-ball outer-approximation block
     #: (:class:`~discopt._relax.soc_outer.SocOuterBlock`), or ``None``.
     soc_outer_start: Optional[int] = None
-    soc_outer: Optional[Any] = None
+    soc_outer: Optional["SocOuterBlock"] = None
 
 
 @dataclass(frozen=True)
@@ -4611,7 +4612,7 @@ def _build_master_milp_data(
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
     perspective_epigraph: Optional[_PerspectiveEpigraph] = None,
     perspective_row_epigraph: Optional[_PerspectiveRowEpigraph] = None,
-    soc_outer=None,
+    soc_outer: Optional["SocOuterBlock"] = None,
 ) -> _MasterMILPData:
     """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -4733,6 +4734,7 @@ def _build_master_milp_data(
             A_ub_rows.append(row)
             b_ub_vals.append(rhs)
     if soc_outer_start is not None:
+        assert soc_outer is not None
         for x_terms, block_terms, rhs in soc_outer.ub_rows:
             A_ub_rows.append(_soc_row(x_terms, block_terms))
             b_ub_vals.append(rhs)
@@ -4799,6 +4801,7 @@ def _build_master_milp_data(
         bounds_list.extend((0.0, 1e20) for _ in range(perspective_row_epigraph.n_cols))
 
     if soc_outer_start is not None:
+        assert soc_outer is not None
         # Every block column is a norm or a rotated coordinate's magnitude: >= 0.
         bounds_list.extend((0.0, 1e20) for _ in range(soc_outer.n_cols))
 
@@ -6121,22 +6124,20 @@ def _route_abandon_cross_check_fraction() -> float:
     reproduce: 3/3 reruns certify in both arms. ``=0`` restores the withdraw-only
     hand-over. Returns the fraction, ``0.0`` when off.
     """
-    raw = os.environ.get("DISCOPT_ROUTE_ABANDON_CROSS_CHECK", "1").strip().lower()
-    if raw in ("0", "", "false", "no", "off"):
+    from discopt.solver_tuning import _env_flag
+
+    if not _env_flag("DISCOPT_ROUTE_ABANDON_CROSS_CHECK", default=True):
         return 0.0
     return _ABANDON_CROSS_CHECK_FRACTION
 
 
-#: #2059: the share of ``gap_tolerance`` the HiGHS master stops at when it carries
-#: the norm-ball outer approximation (see the use site in ``solve_lp_nlp_bb``).
-_SOC_OUTER_MASTER_GAP_SHARE = 0.1
-
-
-def _soc_outer_enabled() -> bool:
-    """Thin re-export of ``soc_outer_enabled`` (#2059)."""
-    from discopt._relax.soc_outer import soc_outer_enabled
-
-    return soc_outer_enabled()
+#: #2059: an integer master point is accepted only when the fixed NLP at its
+#: assignment is within this share of ``gap_tolerance`` of the master's value
+#: there; the HiGHS master then stops at the remaining share, so the two add up to
+#: ``gap_tolerance`` (see ``_within_soc_outer``). 0.7 because the outer
+#: approximation's own error on portfol_classical050_1 is 5.0e-5 relative (one
+#: HiGHS solve of the approximated MILP), which a 0.5 share would sit exactly on.
+_SOC_OUTER_ACCEPT_GAP_SHARE = 0.7
 
 
 def _oa_support_cuts_enabled() -> bool:
@@ -6855,10 +6856,15 @@ def solve_lp_nlp_bb(
     # row, added to the HiGHS master once, at build. Purely additive (the rows' OA
     # tangents stay). Only on the HiGHS master, where it was measured; not under a
     # SHOT profile or the slack heuristic (whose OA rows are soft, these hard).
-    soc_outer = None
-    if lazy_backend == "highs" and not shot_profile and not add_slack and _soc_outer_enabled():
-        from discopt._relax.soc_outer import SocOuterBlock, norm_ball_rows
+    from discopt._relax.soc_outer import (
+        MAX_DENSE_ENTRIES,
+        SocOuterBlock,
+        norm_ball_rows,
+        soc_outer_enabled,
+    )
 
+    soc_outer: Optional[SocOuterBlock] = None
+    if lazy_backend == "highs" and not shot_profile and not add_slack and soc_outer_enabled():
         balls = [
             r
             for r in norm_ball_rows(model, evaluator.constraint_row_map(), decomp.lb, decomp.ub)
@@ -6867,51 +6873,80 @@ def solve_lp_nlp_bb(
         ]
         if balls:
             soc_outer = SocOuterBlock(balls)
-            from discopt._relax.soc_outer import MAX_DENSE_ENTRIES
-
-            if len(soc_outer.ub_rows) * (n_vars + soc_outer.n_cols) > MAX_DENSE_ENTRIES:
+            # The master's full width: every block ``_build_master_milp_data``
+            # appends, not only ``n_vars`` (review of #2064).
+            width = (
+                n_vars
+                + int(not decomp.obj_is_linear and decomp.oa_objective_is_convex)
+                + (
+                    integer_binary_expansion.bit_count
+                    if integer_binary_expansion is not None
+                    else 0
+                )
+                + (len(perspective_epigraph.terms) if perspective_epigraph is not None else 0)
+                + (perspective_row_epigraph.n_cols if perspective_row_epigraph is not None else 0)
+                + soc_outer.n_cols
+            )
+            if len(soc_outer.ub_rows) * width > MAX_DENSE_ENTRIES:
                 logger.info(
                     "LP/NLP BB: norm-ball outer approximation skipped: %d rows x %d "
                     "columns exceeds the dense master's budget",
                     len(soc_outer.ub_rows),
-                    n_vars + soc_outer.n_cols,
+                    width,
                 )
                 soc_outer = None
     #: #2059: integer master points accepted by ``_within_soc_outer`` (section 6).
     soc_outer_accepted = [0]
-    soc_covered_rows = (
-        np.array(sorted({r.row for r in soc_outer.rows}), dtype=np.intp)
-        if soc_outer is not None
-        else np.zeros(0, dtype=np.intp)
-    )
+    #: #2059: rows an accepted point would have returned. Nothing is discarded:
+    #: they ride the next rejection, which is what every later tree is built on.
+    soc_deferred_rows: list[tuple[np.ndarray, float]] = []
+    soc_uncovered = np.ones(n_cons, dtype=bool)
+    if soc_outer is not None:
+        soc_uncovered[[r.row for r in soc_outer.rows]] = False
+    soc_sense = np.asarray(decomp.constraint_senses, dtype=object)
+    if soc_outer is not None and soc_sense.size != n_cons:
+        raise RuntimeError(
+            f"lp_nlp_bb: {n_cons} constraint rows but {soc_sense.size} senses (#2059)"
+        )
 
-    def _within_soc_outer(x_master: np.ndarray) -> bool:
-        """Does ``x_master`` violate no original row except ones the block covers?
+    def _within_soc_outer(x_master: np.ndarray, x_nlp, obj_nlp) -> bool:
+        """May the integer master point ``x_master`` be accepted (#2059)?
 
-        Only with a linear objective: under an objective epigraph the master's value
-        ``eta`` under-estimates ``f`` at the point, and accepting it lets HiGHS prune
-        with a value no point attains. Measured on nvs12 (quadratic objective): the
-        master accepted points worth about -483 whose fixed NLP gave -437.8, ended
-        ``feasible`` and handed over; the solve went 0.6 -> 5.1 s.
+        All of:
+
+        * a linear objective -- under an objective epigraph the master's value
+          under-estimates ``f`` at the point (nvs12: accepted points worth about
+          -483 whose fixed NLP gave -437.8; 0.6 -> 5.1 s and a fallback);
+        * the fixed NLP at its assignment succeeded, and its objective is within
+          ``_SOC_OUTER_ACCEPT_GAP_SHARE * gap_tolerance`` of the master's value
+          there, so HiGHS never holds an incumbent value no point comes close to
+          (review of #2064: an infeasible assignment was accepted);
+        * every row the outer approximation does not cover holds at the point, its
+          violation judged per unit of its gradient's largest entry when that is
+          below 1, as ``collect_new_lazy_cuts`` judges a cut (#1658).
         """
-        if soc_outer is None or not decomp.obj_is_linear:
+        if soc_outer is None or not decomp.obj_is_linear or decomp.obj_coeffs is None:
             return False
+        if x_nlp is None or obj_nlp is None or not np.isfinite(float(obj_nlp)):
+            return False
+        c_vec, off = decomp.obj_coeffs
+        master_value = float(np.asarray(c_vec) @ x_master[:n_vars]) + float(off)
+        if _compute_gap(master_value, float(obj_nlp)) > (
+            _SOC_OUTER_ACCEPT_GAP_SHARE * gap_tolerance
+        ):
+            return False
+        if not np.any(soc_uncovered):
+            return True
         g = np.asarray(evaluator.evaluate_constraints(x_master), dtype=np.float64)
-        senses = decomp.constraint_senses
-        if len(senses) != g.size:
-            raise RuntimeError(
-                f"lp_nlp_bb: {g.size} constraint rows but {len(senses)} senses (#2059)"
-            )
-        viol = np.zeros(g.size)
-        for k, sense in enumerate(senses):
-            if sense == "<=":
-                viol[k] = g[k]
-            elif sense == ">=":
-                viol[k] = -g[k]
-            else:
-                viol[k] = abs(g[k])
-        viol[soc_covered_rows] = 0.0
-        return bool(np.all(np.isfinite(g)) and float(viol.max(initial=0.0)) <= 1e-6)
+        viol = np.where(soc_sense == "<=", g, np.where(soc_sense == ">=", -g, np.abs(g)))
+        viol = np.where(soc_uncovered, viol, 0.0)
+        if not np.all(np.isfinite(viol)):
+            return False
+        if float(viol.max(initial=0.0)) <= 0.0:
+            return True
+        jac = np.asarray(evaluator.evaluate_jacobian(x_master), dtype=np.float64)
+        scale = np.minimum(1.0, np.max(np.abs(jac), axis=1, initial=0.0))
+        return bool(np.all(viol <= 1e-6 * scale))
 
     if soc_outer is not None and perspective_row_epigraph is not None:
         # #2059: a row the outer approximation covers does not also get the #2021
@@ -7350,15 +7385,20 @@ def solve_lp_nlp_bb(
         rows = collect_new_lazy_cuts(
             start, np.asarray(master_x, dtype=np.float64), at_incumbent=True
         )
-        if rows and not integer_cut_added and _within_soc_outer(x_master):
+        if rows and not integer_cut_added and _within_soc_outer(x_master, x_nlp, obj_nlp):
             # #2059: the point violates only rows the norm-ball outer approximation
             # already bounds (to 1/cos(pi/2**(nu+1)) per tower level), so a tangent
             # there refines nothing the certificate needs; rejecting it costs a full
             # HiGHS rebuild. Accepting it keeps the tree. Sound: the master is still
             # a relaxation whatever HiGHS keeps as its incumbent, and this driver's
             # incumbent is only ever a verified NLP point (``accept_incumbent``).
+            # The rows are deferred, not dropped: they join the next rejection.
             soc_outer_accepted[0] += 1
+            soc_deferred_rows.extend(rows)
             rows = []
+        elif rows and soc_deferred_rows:
+            rows = soc_deferred_rows + rows
+            soc_deferred_rows.clear()
         _record_callback_event(
             context="mipsol",
             cuts_start=cuts_start,
@@ -7534,15 +7574,14 @@ def solve_lp_nlp_bb(
     if highs_no_submip:
         lazy_kwargs["highs_options"] = dict(_HIGHS_MASTER_NO_SUBMIP_OPTIONS)
     if soc_outer is not None and decomp.obj_is_linear:
-        # #2059: with points accepted inside the outer approximation (see
-        # ``_within_soc_outer``), HiGHS's incumbent can sit below the verified NLP
-        # incumbent by up to the approximation error, so a tree that stops at
-        # ``gap_tolerance`` against ITS incumbent stops short of the certificate:
-        # measured on portfol_classical050_1, bound -0.0947726 against -0.0947601
-        # (1.3e-4). The driver's check-in (``callback_terminate``) stops the master
-        # the moment the bound meets the verified incumbent, so the tree's own
-        # stopping rule is tightened instead of trusted.
-        lazy_kwargs["gap_tolerance"] = gap_tolerance * _SOC_OUTER_MASTER_GAP_SHARE
+        # #2059: HiGHS measures its gap against its own incumbent, which may be a
+        # point accepted by ``_within_soc_outer``. Such a point's value is within
+        # ``_SOC_OUTER_ACCEPT_GAP_SHARE * gap_tolerance`` of a verified NLP value
+        # (the acceptance test), so stopping the tree at the remaining share keeps
+        # the bound within ``gap_tolerance`` of the verified incumbent whatever the
+        # approximation error is. Measured before this split, with the tree at
+        # ``gap_tolerance``: bound -0.0947726 against -0.0947601 (1.3e-4).
+        lazy_kwargs["gap_tolerance"] = gap_tolerance * (1.0 - _SOC_OUTER_ACCEPT_GAP_SHARE)
     if lazy_backend == "highs":
         # #2059: an abandoned master may spend a share of the remaining budget on
         # the #1634 cross-solve that confirms its bound (0 = withdraw, as before).

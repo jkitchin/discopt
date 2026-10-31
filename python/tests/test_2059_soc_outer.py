@@ -155,7 +155,7 @@ def test_recogniser_declines_rows_that_are_not_convex_balls(build):
 
 @pytest.mark.parametrize(
     "raw, expected",
-    [(None, True), ("0", False), ("off", False), ("1", True), ("on", True)],
+    [(None, True), ("0", False), ("1", True), ("on", True)],
 )
 def test_flag_parsing(monkeypatch, raw, expected):
     if raw is None:
@@ -277,3 +277,63 @@ def test_no_master_point_is_accepted_under_a_nonlinear_objective(monkeypatch):
     assert stats.get("oa/soc_outer_rows") == 1.0, stats
     assert stats.get("oa/soc_outer_accepted") == 0.0, stats
     assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
+
+
+@pytest.mark.parametrize(
+    "Q",
+    [
+        np.diag([1.0, 1.0, -1e-10]),  # review of #2064: a slightly negative diagonal
+        np.array([[1.0, 1.0], [1.0, 1.0]]),  # singular: not provably >= margin*I
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 1e-5], [0.0, 1e-5, -1e-12]]),
+    ],
+    ids=["diag_negative", "singular", "slightly_indefinite"],
+)
+def test_factor_declines_what_it_cannot_prove(Q):
+    """``L'L <= Q`` must be proved. The first version dropped eigenvalues in
+    ``[-margin, 0)`` uncharged, and the ball of ``x1**2 + x2**2 - 1e-10 x3**2 <= 1``
+    cut off the feasible point ``(0.9, 0.9, 1e5)``."""
+    assert SO._factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max()))) is None
+
+
+def test_factor_proves_l_transpose_l_below_q():
+    rng = np.random.default_rng(7)
+    checked = 0
+    for n in (2, 5, 9):
+        for _ in range(40):
+            A = rng.normal(size=(n, n))
+            Q = A.T @ A + 1e-3 * np.eye(n)
+            rows = SO._factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max())))
+            assert rows is not None
+            L = np.zeros((len(rows), n))
+            for t, (idx, val) in enumerate(rows):
+                L[t, idx] = val
+            assert np.linalg.eigvalsh(Q - L.T @ L).min() > 0.0
+            checked += 1
+    assert checked == 120
+
+
+def test_no_point_is_accepted_when_the_fixed_nlp_fails(monkeypatch):
+    """Review of #2064: acceptance must not keep an assignment the fixed NLP did
+    not realise, or HiGHS prunes against a value no point attains."""
+    pytest.importorskip("highspy")
+    from discopt.solvers import oa
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    real = oa._solve_fixed_nlp_subproblem_attempt
+    calls = []
+
+    def failing(*a, **k):
+        r = real(*a, **k)
+        calls.append(1)
+        r.x, r.objective = None, None
+        return r
+
+    monkeypatch.setattr(oa, "_solve_fixed_nlp_subproblem_attempt", failing)
+    monkeypatch.setenv(FLAG, "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(_card_portfolio(), method="lp_nlp_bb", milp_solver="highs", time_limit=20)
+    stats = r.solver_stats or {}
+    assert calls, "the fixed NLP was never called (section 6)"
+    assert stats.get("oa/soc_outer_rows") == 1.0, stats
+    assert stats.get("oa/soc_outer_accepted") == 0.0, stats

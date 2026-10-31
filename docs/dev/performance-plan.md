@@ -13998,3 +13998,41 @@ a certificate (classical050_1) and halves another certificate's time
 classical050_1's 30 s bound is looser. Everything else is unchanged. The 120 s test
 (`test_issue_2059_portfol_classical050_1_certifies_at_120s`) now runs on the merged
 code.
+
+**Review of #2064 (2026-10-31), acted on in the same PR.**
+
+- **Soundness (`_factor`).** Eigenvalues in `[-margin, 0)` were dropped and not
+  charged. On `x1**2 + x2**2 - 1e-10 x3**2 <= 1` with `x3 in [0, 1e5]`, the ball cut
+  off the feasible point `(0.9, 0.9, 1e5)` (row -0.38, `||Lx||^2 = 1.62`); this was
+  reproduced. The bound `L'L <= Q` is now proved:
+  - a diagonal `Q` with any negative entry is declined;
+  - any other `Q` must be shown `>= margin*I` by `rigorous_psd_shift` (#1682), and
+    its factor's residual is bounded below `margin / 2`, so singular rows decline.
+
+  None of the measured instances was affected: the portfol, ball and nvs rows are
+  all diagonal with nonnegative entries.
+- **Acceptance (`_within_soc_outer`).**
+  - It now also requires the fixed NLP at the point's assignment to have
+    succeeded, with its objective within `0.7 x gap_tolerance` of the master's
+    value there. Before, an infeasible assignment could be accepted, and HiGHS
+    pruned against a value no point attains.
+  - Uncovered rows are judged per unit of their gradient's largest entry, as in
+    #1658.
+  - Rows an accepted point would have returned are deferred to the next
+    rejection instead of being discarded.
+- **Gap share.** The fixed 0.1x gap share became `1 - 0.7`. The acceptance bound
+  makes the tree's stop provably within `gap_tolerance` of the verified incumbent,
+  whatever the approximation error.
+- **Smaller fixes.**
+  - The dense-size cap now counts the master's full width.
+  - The flags are read through `solver_tuning._env_flag`.
+  - The master field is typed `Optional[SocOuterBlock]`.
+
+**Re-measured after the review fixes.**
+
+| instance | limit | result |
+|---|---|---|
+| portfol_classical050_1 | 120 s | optimal, 53.6 / 53.1 s, same bound and cross-check |
+| ball_mk2_10, ball_mk2_30, nvs10/11/12 | 30 s | optimal in both arms, same objective |
+| portfol_robust050_34 | 120 s | optimal, 17.7 -> 8.2 s |
+| portfol_robust100_09 | 120 s | unchanged from the panel |
