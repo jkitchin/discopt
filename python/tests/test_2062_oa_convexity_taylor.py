@@ -298,3 +298,65 @@ def test_bivariate_rows_keep_the_interval_hessian_route(monkeypatch):
     m.subject_to(sum((1 - KAP) / (dm.exp((1 - KAP) * x) - 1) for x in xs) <= 10)
     body = m._constraints[0].body
     assert certify_convex_subdivided(body, m, max_dims=2, max_pieces=1024) == Curvature.CONVEX
+
+
+# ── §5 differential bound test on fixed boxes ─────────────────────────────
+
+
+def _fd1(f, t: float) -> float:
+    def d1(h):
+        return (f(t + h, np) - f(t - h, np)) / (2 * h)
+
+    h = 1e-4 * max(1.0, abs(t))
+    return float((4 * d1(h / 2) - d1(h)) / 3)
+
+
+def _oa_master_bound(f, coef, a, b, cut, points):
+    """min W over theta in [a, b], W >= 0, with OA tangent cuts at ``points`` if ``cut``."""
+    from scipy.optimize import linprog
+
+    if not cut:
+        return 0.0  # the row contributes nothing: W at its lower bound
+    A, rhs = [], []
+    for x in points:
+        g, d = coef * f(x, np), coef * _fd1(f, x)
+        # W >= g + d (theta - x)  <=>  d theta - W <= d x - g
+        A.append([d, -1.0])
+        rhs.append(d * x - g)
+    res = linprog([0.0, 1.0], A_ub=A, b_ub=rhs, bounds=[(a, b), (0.0, 1e4)], method="highs")
+    assert res.status == 0, res.message
+    return float(res.fun)
+
+
+@pytest.mark.parametrize("f, coef", ROWS, ids=["c", "v"])
+@pytest.mark.parametrize("box", [(0.25, 4.0), (0.25, 1.0), (1.0, 4.0), (0.6, 2.2), (2.5, 3.1)])
+def test_fixed_box_bound_is_tighter_and_valid_and_cuts_no_feasible_point(f, coef, box, monkeypatch):
+    a, b = box
+    masks = {}
+    for arm in ("0", "1"):
+        monkeypatch.setenv(FLAG, arm)
+        m, _ = _row_model(f, coef, a, b)
+        masks[arm] = classify_oa_cut_convexity(m).constraint_mask[0]
+    assert masks["1"] or not masks["0"]  # the flag never removes a certificate
+    assert masks["1"], f"row not certified on {box} with the flag"
+    points = np.linspace(a, b, 5)
+    off = _oa_master_bound(f, coef, a, b, masks["0"], points)
+    on = _oa_master_bound(f, coef, a, b, masks["1"], points)
+    grid = np.linspace(a, b, 200001)
+    true_opt = float(np.min(coef * f(grid, np)))  # f is smooth: grid error << tol here
+    tol = 1e-6 * max(1.0, abs(true_opt))
+    assert on >= off - tol
+    assert on <= true_opt + tol
+    # Feasible-point sampling: no point with W >= coef f(theta) violates any cut.
+    rng = np.random.default_rng(int(1000 * a + b))
+    th = rng.uniform(a, b, 4000)
+    w = (
+        coef * f(th, np)
+        + rng.uniform(0.0, 1.0, th.size) * np.array([0.0, 1.0])[rng.integers(0, 2, th.size)]
+    )
+    checked = 0
+    for x in points:
+        cut = coef * f(x, np) + coef * _fd1(f, x) * (th - x)
+        assert np.all(cut <= w + 1e-7 * np.maximum(1.0, np.abs(w)))
+        checked += th.size
+    assert checked == 5 * 4000
