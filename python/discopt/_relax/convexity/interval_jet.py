@@ -107,7 +107,7 @@ def _const(x: Interval, order: int) -> Jet:
 
 
 def _scalar_interval(lo, hi) -> Interval:
-    return Interval(np.float64(lo), np.float64(hi))
+    return Interval(np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64))
 
 
 def _leaf_value(expr: Constant | Parameter) -> Interval:
