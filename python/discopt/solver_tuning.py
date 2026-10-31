@@ -1236,6 +1236,33 @@ class SolverTuning:
     root, 1 node; big-M 0.1 s. **State: default OFF, panel
     owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    hull_lifted_ratio: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_LIFTED_RATIO", default=False)
+    )
+    """Lift the eps-perspective ratio ``v / yhat`` into a bounded variable
+    (``DISCOPT_HULL_LIFTED_RATIO``, default **OFF**; bound-changing on the
+    ``"hull"`` route; #1917).
+
+    Today a nonlinear disjunct row is ``yhat * g(v / yhat) - eps * g(0) * (1 - y)
+    <= 0`` with ``yhat = (1 - eps) y + eps``, ``eps = 1e-8``. An interior-point
+    iterate keeps the variable bounds but not the linking rows ``dlb y <= v <=
+    dub y`` until it converges, so it can sit at ``v ~ dub``, ``y ~ 0``, where
+    ``v / yhat ~ dub / eps``: ``g`` and its derivatives overflow there and the node
+    NLP stops on ``Invalid_Number_Detected``. With the flag each such ratio is a
+    variable ``t`` with ``v - yhat * t = 0`` and ``t`` in ``v``'s own box
+    ``[min(dlb, 0), max(dub, 0)]``, and ``g`` is evaluated at ``t``. Exact: on the
+    feasible set ``yhat >= y`` and ``dlb y <= v <= dub y`` put ``v / yhat`` inside
+    that box already, so no feasible point is cut, and the integer faces are the
+    unlifted ones (``y = 0``: ``v = 0`` forces ``t = 0``; ``y = 1``: ``t = v``).
+    The relaxation of ``g`` is now taken over ``t``'s box instead of the interval
+    of ``v / yhat`` (``[dlb, dub / eps]``), so the flag changes bounds.
+
+    Entry measurement (``pyomo.ex_633_trespalacios``, hull, main ``4517c7b``): 165
+    of 192 node NLPs end ``Invalid_Number_Detected``, every one at an iterate with
+    ``max v / (yhat dub)`` > 1.01 (median 3.3e5); no successful NLP leaves the box.
+    **State: default OFF, panel owed**; audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
     )

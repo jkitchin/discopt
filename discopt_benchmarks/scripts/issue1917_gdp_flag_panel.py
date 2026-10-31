@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""#1917: CLAUDE.md section 5 panels for the three default-OFF GDP reformulation flags.
+"""#1917: CLAUDE.md section 5 panels for the default-OFF GDP reformulation flags.
 
 ``DISCOPT_MBIGM_CONDITIONED`` (#1775 G2.3), ``DISCOPT_GDP_BOUND_PRETRANSFORM``
-(G2.4) and ``DISCOPT_HULL_CONIC_QUADRATIC`` each change the lowering of a GDP
-model, so their panel is the ``gdp_parity`` panel (24 GDPlib instances,
+(G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC`` and ``DISCOPT_HULL_LIFTED_RATIO`` (#1917)
+each change the lowering of a GDP model, so their panel is the ``gdp_parity`` panel
+(24 GDPlib instances,
 :data:`gdplib_runner.GDP_PARITY`) under the route each flag gates. A flag
 graduates only on a run that is BOTH
 
@@ -67,6 +68,7 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_MBIGM_CONDITIONED": ("mbigm",),
     "DISCOPT_GDP_BOUND_PRETRANSFORM": ("big-m", "mbigm"),
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
+    "DISCOPT_HULL_LIFTED_RATIO": ("hull",),
 }
 _TRANSFORM = {"big-m": "gdp.bigm", "mbigm": "gdp.mbigm", "hull": "gdp.hull"}
 
