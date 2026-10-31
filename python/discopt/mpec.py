@@ -50,7 +50,7 @@ import numpy as np
 
 from discopt import status as _status
 from discopt.constants import CONSTRAINT_INF
-from discopt.modeling.core import Expression, Model, Variable
+from discopt.modeling.core import Constraint, Expression, Model, Variable
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import SolveResult
@@ -1742,9 +1742,33 @@ def reformulate_gdp(
         gv = _gdp_operand(model, p.g, tag, "g", _operand_lifts, derived, p)
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
-        model.either_or([[fv == 0], [gv == 0]], name=tag)
+        model.either_or(
+            [[_gdp_zero_row(p, fv, tag, "f")], [_gdp_zero_row(p, gv, tag, "g")]], name=tag
+        )
 
     _lower_each(model, todo, "gdp", emit, _operand_lifts)
+
+
+def _gdp_zero_row(p: Complementarity, operand: Expression, tag: str, side: str) -> Constraint:
+    """The disjunct ``operand == 0``, with a hint for an unbounded big-M.
+
+    The GDP pass refuses a disjunct whose body has no finite enclosure, which
+    read as ``cannot bound the body of constraint '<unnamed>'`` with no pointer
+    back to the relation (#2061 review). The commonest cause is a box relation
+    whose ``z`` is declared unbounded: ``[l, u]`` is enforced by rows, and a
+    big-M reads only declared variable bounds. The row stays unnamed -- a name is
+    written by ``save`` and would change every lowered document -- so the hint
+    carries the relation instead. It is session-local (a loaded row has none).
+    """
+    row = cast(Constraint, operand == 0)
+    row._big_m_hint = (  # type: ignore[attr-defined]
+        f" This disjunct ({side} == 0) comes from {p.describe()}, lowered with "
+        "method='gdp'. A "
+        "complementarity's box [l, u] is enforced by rows, which a big-M does not "
+        "read: declare finite bounds on the variables of this side (for a box "
+        "relation, give z its own lb/ub, e.g. within [l, u])."
+    )
+    return row
 
 
 def _gdp_operand(

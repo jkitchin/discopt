@@ -1174,6 +1174,27 @@ the two disagree, the measurement wins (CLAUDE.md §4).
   with forward cells from every older reader); after `load`, a widened variable
   or changed parameter that a lowered relation reads is refused instead —
   narrowing stays valid, since an enclosure over a larger box encloses a smaller one.
+* **`if_else` had the same stale-derived-bound defect (found while fixing the
+  above, fixed in this PR at the owner's request).** `w = if_else(x >= 0.5, x,
+  2 * x)`, `x in [0, 1]`, then `x.ub = 10`, `maximize(w)` → certified `optimal`
+  1; truth 10. `Model._refresh_if_else_bounds` re-derives `w`'s box at every
+  solve and save, before the complementarity refresh (an enclosure may read
+  `w`). Two subtleties, each measured: (a) the solve boundary
+  (`_solve_owns_model`) restores every box on exit, so the refresh records the
+  box it wrote only outside a solve -- otherwise the restored box reads as a
+  user edit on the next solve and the stale bound returns; (b) a box the user
+  set on `w` is a model constraint, so a user-edited box is intersected with
+  the derivation, not replaced. On load, the hull disjunction's exact shape and
+  names are recognised (`_recover_if_else_auxes`) and a widening past the saved
+  box is refused, as for a loaded lowering.
+* **Review leftover: a free `z` under `method="gdp"`.** `m.mcp(z - 2, z, lb=0,
+  ub=1)` with `z` declared free declares, then the GDP pass refuses the big-M of
+  `z - l == 0`. That refusal is sound and stays at solve time (bounds may still
+  change before then, and `gdp_method="binary_multiplication"` needs no big-M),
+  but the error now carries the relation, the side and the remedy. The disjunct
+  rows stay unnamed: a name is written by `save`, and naming them changed every
+  lowered document (all 16 lowered golden fixtures in
+  `test_serialize_compat_matrix.py` failed when tried).
 * **Sentinel bounds and infinite pins.** The enclosure finiteness test now reads
   `±9.999e19` as infinite (a default-bounded `z` passed as a 1e20 big-M), and a
   box `l == u == ±inf` (which emitted no rows at all) is refused.

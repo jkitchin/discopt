@@ -39,6 +39,17 @@ The release procedure that produces these entries is documented in
   bound or moving a parameter it reads after `load` is refused at solve and save.
   An enclosure that reads discopt's default `±9.999e19` bounds now counts as
   unbounded rather than as a finite big-M.
+- **`Model.if_else`'s auxiliary box is re-derived at every solve and save
+  (#2061 review).** `w = m.if_else(x >= 0.5, x, 2 * x)` on `x in [0, 1]`, then
+  `x.ub = 10`, `maximize(w)` was certified `optimal` at 1 against a true 10:
+  `w`'s bounds were the branches' enclosure at declaration. Bounds the user sets
+  on `w` are kept (the new derivation is intersected with them). A model read
+  from a file has its `if_else` disjunctions recognised; a widening that the
+  saved box no longer encloses is refused at solve and save.
+- A GDP-lowered complementarity whose side has no finite enclosure (typically a
+  box relation whose `z` is declared free) is still refused at solve, but the
+  error now names the relation and the side, and says to give `z` its own
+  bounds; it used to stop at `constraint '<unnamed>'`.
 
 ### Changed
 

@@ -1002,6 +1002,7 @@ def _unbounded_big_m_error(constraint: Constraint, direction: str) -> ValueError
         f"m.continuous(..., lb=..., ub=...)). The 'hull' reformulation "
         f"(method='hull') needs no big-M, but it too needs a finite bound on every "
         f"variable of the disjunction, within each disjunct (#1617)."
+        + getattr(constraint, "_big_m_hint", "")
     )
 
 

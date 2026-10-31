@@ -14359,6 +14359,7 @@ def solve_model(
     require_all_relations_lowered(model, context="solve_model")
     # Auxiliary bounds a lowering derived from the box at lowering time are
     # re-derived for the box being solved (#2061 review).
+    model._refresh_if_else_bounds(context="solve_model")
     refresh_lowering_bounds(model, context="solve_model")
 
     # solve_model is public and does not go through Model.validate(): re-check a

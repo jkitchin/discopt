@@ -761,3 +761,19 @@ def test_vector_residual_against_scalar_z_emits_box_rows_once():
     names = [c.name for c in rel.rows_in(m) if c.name]
     assert sum(n.endswith("_z_lb") for n in names) == 1
     assert sum(n.endswith("_z_ub") for n in names) == 1
+
+
+def test_gdp_refusal_on_an_unbounded_z_names_the_relation():
+    # #2061 review leftover: z declared free, box [0, 1] enforced only by rows. The
+    # GDP big-M cannot read rows, so the solve refuses -- and now says which
+    # relation, and why -- not just "constraint '<unnamed>'".
+    m = dm.Model()
+    z = m.continuous("z")
+    m.mcp(z - 2, z, lb=0.0, ub=1.0, method="gdp", name="cap")
+    m.minimize(z)
+    hint = r"\(g == 0\) comes from complementarity 'cap_lo'.*own lb/ub"
+    with pytest.raises(ValueError, match=hint):
+        m.solve(time_limit=30)
+    # Declaring z's own bounds is the fix the message names.
+    z.lb, z.ub = 0.0, 1.0
+    assert m.solve(time_limit=30).objective == pytest.approx(1.0, abs=1e-6)

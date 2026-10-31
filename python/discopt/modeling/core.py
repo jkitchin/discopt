@@ -6462,6 +6462,76 @@ def _condition_box(cond) -> Optional[dict]:
     return box or None
 
 
+class _IfElseAux:
+    """The derivation of one :meth:`Model.if_else` auxiliary's box.
+
+    ``last`` is the box last derived (``None`` for one recovered from a file,
+    whose derivation is unknown). Plain attributes so ``copy.deepcopy`` and
+    ``pickle`` carry it with the model's own memo.
+    """
+
+    __slots__ = ("w", "then_expr", "else_expr", "cond", "complement", "last")
+
+    def __init__(self, w, then_expr, else_expr, cond, complement, last):
+        self.w = w
+        self.then_expr = then_expr
+        self.else_expr = else_expr
+        self.cond = cond
+        self.complement = complement
+        self.last = last
+
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
+
+_IF_ELSE_DISJ_NAME = re.compile(r"^_(.+)_(\d+)_disj$")
+
+
+def _recover_if_else_auxes(model: "Model") -> int:
+    """Re-register the :meth:`Model.if_else` disjunctions of a model read from a file.
+
+    The document stores the hull disjunction ``[cond, w == a] v [-cond, w == b]``
+    and ``w``'s bounds, not that ``w``'s bounds were derived from ``a`` and ``b``.
+    The disjunction is recognised by exactly the shape and names ``if_else``
+    emits; each match is registered with ``last=None``, so
+    :meth:`Model._refresh_if_else_bounds` refuses a box widened after loading
+    rather than solving on bounds that no longer enclose the branches.
+    """
+    found = 0
+    for c in model._constraints:
+        if not isinstance(c, _DisjunctiveConstraint) or c.method != "hull":
+            continue
+        mt = _IF_ELSE_DISJ_NAME.match(c.name or "")
+        if mt is None or len(c.disjuncts) != 2 or any(len(d) != 2 for d in c.disjuncts):
+            continue
+        ws, exprs = [], []
+        for d in c.disjuncts:
+            eq = d[1]
+            body = eq.body
+            if not (
+                isinstance(eq, Constraint)
+                and eq.sense == "=="
+                and isinstance(body, BinaryOp)
+                and body.op == "-"
+                and isinstance(body.left, Variable)
+            ):
+                break
+            ws.append(body.left)
+            exprs.append(body.right)
+        else:
+            w = ws[0]
+            if ws[1] is w and w.size == 1 and w.name == f"_{mt.group(1)}_{mt.group(2)}":
+                model._if_else_auxes.append(
+                    _IfElseAux(w, exprs[0], exprs[1], c.disjuncts[0][0], c.disjuncts[1][0], None)
+                )
+                found += 1
+    return found
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -6551,6 +6621,8 @@ class Model:
         # not solver input — nothing on the solve path reads it.
         self._initial_point: dict[tuple[str, int], float] = {}
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
+        # How each if_else auxiliary's box was derived (#2061 review).
+        self._if_else_auxes: list[_IfElseAux] = []
         # Complementarity conditions added via ``complementarity()``/``mcp()``;
         # recorded for introspection and bound tightening (see ``discopt.mpec``),
         # and forwarded by every model-rebuilding pass (#1147).
@@ -8930,6 +9002,55 @@ class Model:
             his.append(hi)
         return min(los), max(his)
 
+    def _refresh_if_else_bounds(self, *, context: str) -> int:
+        """Re-derive every :meth:`if_else` auxiliary's box; return how many changed.
+
+        ``w``'s bounds are :meth:`_branch_bounds` of the two branches over the box
+        *at declaration*. Widening a variable a branch reads afterwards left them in
+        place: ``w = if_else(x >= 0.5, x, 2 * x)`` on ``x in [0, 1]``, then
+        ``x.ub = 10``, ``maximize(w)`` was certified ``optimal`` at 1, against a true
+        10 (#2061 review; the same stale-derived-bound defect as the complementarity
+        lowerings). Every solve boundary and ``save`` call this first.
+
+        Bounds the user set on ``w`` themselves are model constraints, not
+        derivations: when ``w``'s box differs from the one last derived, the new
+        derivation is intersected with it rather than replacing it. An auxiliary
+        read from a file (``last is None``, :func:`_recover_if_else_auxes`) has no
+        record of which bounds were derived, so its box is kept, and a box that no
+        longer encloses the branches is refused instead of solved on.
+        """
+        # Inside a solve the boundary restores every box on exit
+        # (:func:`_solve_owns_model`), so a write there is temporary and must
+        # not move ``last`` -- else the restored box would read as a user edit.
+        persistent = id(self) not in _SOLVE_OWNED_MODELS.get()
+        changed = 0
+        for a in getattr(self, "_if_else_auxes", ()):
+            lo, hi = self._branch_bounds(a.then_expr, a.else_expr, a.cond, a.complement)
+            cur = (float(np.asarray(a.w.lb)), float(np.asarray(a.w.ub)))
+            if a.last is None:
+                if lo < cur[0] or hi > cur[1]:
+                    raise ValueError(
+                        f"{context}: the if_else auxiliary {a.w.name!r} was read from a "
+                        f"file with bounds [{cur[0]:g}, {cur[1]:g}], but its branches now "
+                        f"range over [{lo:g}, {hi:g}]: a variable they read was widened "
+                        "after loading. The file records the bounds if_else derived at "
+                        "save time, not how they were derived, so they could cut the "
+                        "optimum. Re-declare the if_else on a model built in this session "
+                        "(or narrow the bound back) before solving or saving."
+                    )
+                continue
+            if cur != a.last:
+                # The user re-bounded w: keep that constraint, tighten within it.
+                ilo, ihi = max(lo, cur[0]), min(hi, cur[1])
+                lo, hi = (ilo, ihi) if ilo <= ihi else cur
+            if (lo, hi) != cur:
+                a.w.lb = lo
+                a.w.ub = hi
+                changed += 1
+            if persistent:
+                a.last = (lo, hi)
+        return changed
+
     def if_else(
         self,
         condition: "Constraint",
@@ -9002,6 +9123,11 @@ class Model:
         self._aux_counter += 1
         base = name or "ifelse"
         w = self.continuous(f"_{base}_{self._aux_counter}", lb=lb, ub=ub)
+        # w's box is derived from the branches' box; it is re-derived at every
+        # solve and save (:meth:`_refresh_if_else_bounds`, #2061 review).
+        self._if_else_auxes.append(
+            _IfElseAux(w, then_expr, else_expr, condition, complement, (lb, ub))
+        )
         # Force the hull (perspective) reformulation: it disaggregates the
         # disjunct variables, so each branch's nonlinear body is relaxed only
         # over its own active region. Big-M keeps every branch's equation in
@@ -10197,6 +10323,8 @@ class Model:
             from discopt.mpec import require_all_relations_lowered
 
             require_all_relations_lowered(self, context="Model.solve")
+        # if_else auxiliaries first: a lowering's enclosure may read one.
+        self._refresh_if_else_bounds(context="Model.solve")
         if getattr(self, "_lowered_complementarities", None):
             # A lowering's auxiliary bounds were derived from the box at lowering
             # time; re-derive them for the box being solved (#2061 review).
