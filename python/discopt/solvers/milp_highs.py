@@ -1043,6 +1043,7 @@ def solve_milp_with_lazy_cuts(
     node_lp_rounds: int = 0,
     node_hook_cut_cap: int = 500,
     highs_options: Optional[dict[str, object]] = None,
+    abandon_cross_check_fraction: float = 0.0,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
 
@@ -1095,6 +1096,17 @@ def solve_milp_with_lazy_cuts(
     convergence stop (plain ``True``) keeps the cross-solve, which is what
     confirms its certificate.
 
+    ``abandon_cross_check_fraction`` (#2059) is the share of the remaining budget
+    an abandoned master's cross-solve may still spend, so that a route handing
+    over with a better bound than its fallback's can confirm and publish it.
+    ``0`` (the default) is the behaviour above: nothing, and the bound is
+    withdrawn. The soundness rule does not move -- a bound the cross-solve does
+    not confirm inside that share is lowered or withdrawn exactly as before; the
+    cross-solve already stops the moment its dual bound reaches the claim (#2013),
+    so the share is a ceiling, not a cost. Without a ``time_limit`` there is no
+    remaining budget to take a share of, so an abandoned master still gets no
+    cross-solve and its bound is withdrawn, whatever the share.
+
     The in-tree poll is what makes a progress budget honest: restarts alone are
     not a clock. On ``rsyn0820m02m`` the master separates rarely enough that a
     restart-only hook had nothing to judge at the checkpoint and abandoned a run
@@ -1126,6 +1138,10 @@ def solve_milp_with_lazy_cuts(
     highspy = _require_highspy()
     t0 = time.time()
 
+    if not 0.0 <= float(abandon_cross_check_fraction) <= 1.0:
+        raise ValueError(
+            f"abandon_cross_check_fraction must be in [0, 1], got {abandon_cross_check_fraction!r}"
+        )
     if lazy_callback is None:
         raise ValueError(
             "solve_milp_with_lazy_cuts requires lazy_callback; use solve_milp for a "
@@ -1501,9 +1517,14 @@ def solve_milp_with_lazy_cuts(
     time_left = None if time_limit is None else float(time_limit) - (time.time() - t0)
     if abandoned[0]:
         # The caller stopped this search to spend its budget elsewhere (see the
-        # docstring): the cross-solve gets none, and the unconfirmed bound is
-        # withdrawn rather than published.
-        time_left = 0.0
+        # docstring): the cross-solve gets only the share the caller reserved for
+        # it (#2059; none by default), and a bound it cannot confirm in that share
+        # is withdrawn rather than published.
+        time_left = (
+            0.0
+            if time_left is None
+            else max(0.0, float(abandon_cross_check_fraction) * float(time_left))
+        )
     status, bound, cross_diag = _cross_check_lazy_master(
         h, highspy, status, bound, time_left, objective=obj_out, extra_options=highs_options
     )
