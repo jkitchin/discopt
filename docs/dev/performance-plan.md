@@ -13549,3 +13549,112 @@ showcase instances on the default path. Both certify without the seed:
 heuristic that offers a trivial point as an incumbent *candidate*, without making it
 the root's `initial_point`, should be judged against both lists: the gain set and
 the 9 lost certificates.
+
+### 103.13 #2059: an abandoned route master confirms its bound; `DISCOPT_ROUTE_ABANDON_CROSS_CHECK` graduates; (a) and (c) killed (2026-10-31)
+
+(Numbered after #2060's 103.12, which this section's measurements also ran on.)
+
+**Defect.** When the #1066 guard hands the `lp_nlp_bb` route over, the HiGHS master's
+termination hook answers `"abandon"` and `milp_highs.solve_milp_with_lazy_cuts` gave
+the #1634 presolve-free cross-solve `time_left = 0`. The route's bound was therefore
+withdrawn on every hand-over, and the solve published only the fallback's. That
+withdrawal is correct policy for an *unconfirmed* bound; the defect was that no
+budget was ever reserved to confirm one. On portfol_classical050_1 at 120 s this
+published the fallback's continuous -0.097767 over a route tree bound of -0.096817
+(opt -0.094760).
+
+**Environment.** 4-core Linux container, highspy 1.15.1, extension built from the
+tree under test. "Main" is `285d4d4`; "#2060" is `5fbc4f7`
+(`DISCOPT_PERSPECTIVE_ROW_DISAGG` ON, the issue's tree) with the extension copied in,
+asserted by `discopt.__file__` and a source marker in every probe. One run per arm
+unless stated; load <= 1 at the start of each 120 s run except where noted.
+
+**(b) entry experiment.** A probe wrapped `_cross_check_lazy_master`: when it was
+called with no budget, it also ran the cross-solve with 600 s, timed it, and returned
+the original withdrawn answer, so the solve itself was unchanged. EXECUTED 1 per tree.
+
+| tree | claim at hand-over | cross-solve | time | nodes |
+|---|---|---|---|---|
+| main | -0.0973563 | optimal -0.0973559 (claim kept) | 2.52 s | 420 |
+| #2060 | -0.0968172 | interrupted at the claim | 3.01 s | 71 |
+
+About 57 s remained at hand-over, so both are inside the issue's kill criterion (10%,
+about 5.7 s). Not killed.
+
+**Change.** `solve_milp_with_lazy_cuts(abandon_cross_check_fraction=...)`: an
+abandoned master's cross-solve gets that share of the remaining budget (0 keeps the
+old behaviour). `solve_lp_nlp_bb` passes `oa._ABANDON_CROSS_CHECK_FRACTION = 0.10`
+(the kill criterion, not a tuned value) under `DISCOPT_ROUTE_ABANDON_CROSS_CHECK`.
+Soundness is unchanged: the cross-solve still stops at the claim (#2013), and a
+claim it does not reach inside the share is lowered to its own dual bound or
+withdrawn, exactly as before. The merge (`_merge_route_and_fallback`) already keeps
+the tighter of the two valid bounds.
+
+**End to end** (`solve(time_limit=120)`, flag OFF/ON, incumbents verified on a fresh
+parse):
+
+| tree | OFF bound | ON bound | ON cross-solve | wall OFF / ON |
+|---|---|---|---|---|
+| main | -0.0977738 | **-0.0973566** | optimal, 420 nodes | 120.3 / 120.6 s |
+| #2060 | -0.0977738 | **-0.0968172** | reached claim, 71 nodes | 120.5 / 120.3 s |
+
+The instance still does not certify: the gap is 2.2% on the #2060 tree, and it is
+the master's bound, not the hand-over.
+
+**Panel** (`issue1913_pseudocost_panel.py --flag DISCOPT_ROUTE_ABANDON_CROSS_CHECK`,
+the 102 routed instances re-derived by `issue2013_route_census.py`, 30 s, 2 workers,
+interleaved, every incumbent verified, marker
+`discopt.solvers.oa:def _route_abandon_cross_check_fraction` asserted per subprocess):
+612 checks, 0 problems, no certificate lost, total wall 460.4 -> 444.9 s,
+both-certify nodes 144,156 -> 144,028. The guard handed over on 8 instances; the
+bound moved on 4, all tighter:
+
+| instance | OFF bound | ON bound | opt |
+|---|---|---|---|
+| clay0205m | 1320.0 | 4059.6 | 8092.5 |
+| clay0305m | 1072.5 | 3996.3 | 8092.5 |
+| tls4 | 1.863 | 2.6 | 8.3 |
+| portfol_classical050_1 | -0.097774 | -0.097376 | -0.094760 |
+
+p_ball_10b_5p_4d_m, p_ball_20b_5p_2d_m and cvxnonsep_pcon30 handed over in both arms
+with identical results. The panel credited ON with a certificate on slay07m, where
+the guard fired OFF only. That did not reproduce: in 3 interleaved reruns at 1 worker,
+slay07m certified in both arms (1100 nodes, 17.6-19.7 s), so it is load noise and is
+not counted. tls4's bound held in 3/3 reruns (ON 2.6 / 2.6 / 2.8, OFF 1.888 / 1.863 /
+1.853).
+
+**Verdict: graduated** (default ON; `=0` restores the withdraw-only hand-over). It is
+cert-clean, and it is net-positive on three families (clay, tls, portfol) with no
+wall cost. The guard-off path (`DISCOPT_CONVEX_ROUTE_GUARD=0`) is unchanged: there the
+route runs to its own wall, so there is no remaining budget to share.
+
+**(a) killed: the in-house simplex master** (`solver="mip-nlp"`,
+`mip_nlp_method="lp_nlp_bb"`, `milp_solver="simplex"`, node cuts on; criterion: the
+best master bound at 60 s must pass -0.0965):
+
+| tree | 60 s bound | 120 s bound |
+|---|---|---|
+| main | -0.097206 | -- |
+| #2060 | -0.096628 | -0.096485 (feasible, not certified) |
+
+On the #2060 tree it beats the HiGHS master's -0.096817, but it misses the criterion,
+and it does not certify at 120 s either.
+
+**(c) killed: more LP separation rounds per rebuilt tree**
+(`DISCOPT_HIGHS_MASTER_LP_CUT_ROUNDS`, default 10; #2060 tree, flag ON, 120 s):
+
+| rounds | claim at hand-over | published (cross-solve did not reach it in its share) |
+|---|---|---|
+| 10 | -0.096817 | -0.096817 |
+| 30 | -0.096696 | -0.097085 |
+| 100 | -0.096666 | -0.097053 |
+
+Neither run passes -0.0965. More rounds also make the final master harder to confirm
+in 10% of the budget, so the published bound gets *worse*. The rows above also show
+the cap working as designed: an unconfirmed claim is lowered, not published.
+
+**State of #2059.** Item 2 (the bound is never published) is fixed. Item 1 (the
+master is bounded by tree count) is not: (a) and (c) failed their kill criterion, and
+portfol_classical050_1 does not certify at 120 s on any arm measured. Closing the
+remaining 1.8-2.2% needs a master that is stronger per second than every arm here,
+and none of the measured routes is.
