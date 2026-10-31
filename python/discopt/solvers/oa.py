@@ -6983,6 +6983,23 @@ def solve_lp_nlp_bb(
     #: #2059: rows an accepted point would have returned. Nothing is discarded:
     #: they ride the next rejection, which is what every later tree is built on.
     soc_deferred_rows: list[tuple[np.ndarray, float]] = []
+    #: Rows held and rows delivered (section 6): ``flushed < held`` only when no
+    #: later tree was ever built, which is the case where none was needed.
+    soc_deferred_counts = {"held": 0, "flushed": 0}
+
+    def _flush_deferred(rows: list[tuple[np.ndarray, float]]) -> list[tuple[np.ndarray, float]]:
+        """Prepend the held rows to rows that will reach the next tree (#2064 review).
+
+        Called on every path a row takes into a tree: a rejection at an incumbent
+        (which rebuilds it) and the LP-relaxation rounds before each tree.
+        """
+        if not soc_deferred_rows:
+            return rows
+        out = soc_deferred_rows + rows
+        soc_deferred_counts["flushed"] += len(soc_deferred_rows)
+        soc_deferred_rows.clear()
+        return out
+
     soc_uncovered = np.ones(n_cons, dtype=bool)
     if soc_outer is not None:
         soc_uncovered[[r.row for r in soc_outer.rows]] = False
@@ -7478,10 +7495,10 @@ def solve_lp_nlp_bb(
             # The rows are deferred, not dropped: they join the next rejection.
             soc_outer_accepted[0] += 1
             soc_deferred_rows.extend(rows)
+            soc_deferred_counts["held"] += len(rows)
             rows = []
-        elif rows and soc_deferred_rows:
-            rows = soc_deferred_rows + rows
-            soc_deferred_rows.clear()
+        elif rows:
+            rows = _flush_deferred(rows)
         _record_callback_event(
             context="mipsol",
             cuts_start=cuts_start,
@@ -7513,7 +7530,7 @@ def solve_lp_nlp_bb(
             oa_cut_relaxable=oa_cut_relaxable,
             cut_provenance=cut_provenance,
         )
-        rows = collect_new_lazy_cuts(start, full_master_x)
+        rows = _flush_deferred(collect_new_lazy_cuts(start, full_master_x))
         _record_callback_event(
             context="mipnode",
             cuts_start=cuts_start,
@@ -7960,6 +7977,8 @@ def solve_lp_nlp_bb(
         route_stats["oa/soc_outer_rows"] = float(len(soc_outer.rows))
         route_stats["oa/soc_outer_cols"] = float(soc_outer.n_cols)
         route_stats["oa/soc_outer_accepted"] = float(soc_outer_accepted[0])
+        route_stats["oa/soc_outer_deferred_held"] = float(soc_deferred_counts["held"])
+        route_stats["oa/soc_outer_deferred_flushed"] = float(soc_deferred_counts["flushed"])
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(

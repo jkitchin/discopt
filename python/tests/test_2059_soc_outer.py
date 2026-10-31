@@ -283,33 +283,88 @@ def test_no_master_point_is_accepted_under_a_nonlinear_objective(monkeypatch):
     "Q",
     [
         np.diag([1.0, 1.0, -1e-10]),  # review of #2064: a slightly negative diagonal
-        np.array([[1.0, 1.0], [1.0, 1.0]]),  # singular: not provably >= margin*I
-        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 1e-5], [0.0, 1e-5, -1e-12]]),
+        np.array([[1.0, 0.5], [0.5, -1e-3]]),  # clearly indefinite
     ],
-    ids=["diag_negative", "singular", "slightly_indefinite"],
+    ids=["diag_negative", "indefinite"],
 )
 def test_factor_declines_what_it_cannot_prove(Q):
-    """``L'L <= Q`` must be proved. The first version dropped eigenvalues in
-    ``[-margin, 0)`` uncharged, and the ball of ``x1**2 + x2**2 - 1e-10 x3**2 <= 1``
-    cut off the feasible point ``(0.9, 0.9, 1e5)``."""
+    """The first version dropped eigenvalues in ``[-margin, 0)`` uncharged, and the
+    ball of ``x1**2 + x2**2 - 1e-10 x3**2 <= 1`` cut off the feasible point
+    ``(0.9, 0.9, 1e5)``."""
     assert SO._factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max()))) is None
 
 
-def test_factor_proves_l_transpose_l_below_q():
+def _L(rows, n):
+    L = np.zeros((len(rows), n))
+    for t, (idx, val) in enumerate(rows):
+        L[t, idx] = val
+    return L
+
+
+@pytest.mark.parametrize(
+    "Q, shifted",
+    [
+        (np.array([[2.0, 0.5], [0.5, 1.0]]), False),  # well-conditioned PD: no shift
+        (np.array([[1.0, 1.0], [1.0, 1.0]]), True),  # singular PSD (rank one)
+        (np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 1e-5], [0.0, 1e-5, -1e-12]]), True),
+    ],
+    ids=["pd", "singular", "slightly_indefinite"],
+)
+def test_factor_proves_l_transpose_l_below_q_plus_shift(Q, shifted):
+    margin = 1e-9 * max(1.0, float(np.abs(Q).max()))
+    out = SO._factor(Q, margin)
+    assert out is not None
+    rows, shift = out
+    assert (shift > 0.0) is shifted
+    L = _L(rows, Q.shape[0])
+    assert np.linalg.eigvalsh(Q + shift * np.eye(Q.shape[0]) - L.T @ L).min() > 0.0
+
+
+def test_factor_proves_l_transpose_l_below_q_on_random_pd():
     rng = np.random.default_rng(7)
     checked = 0
     for n in (2, 5, 9):
         for _ in range(40):
             A = rng.normal(size=(n, n))
             Q = A.T @ A + 1e-3 * np.eye(n)
-            rows = SO._factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max())))
-            assert rows is not None
-            L = np.zeros((len(rows), n))
-            for t, (idx, val) in enumerate(rows):
-                L[t, idx] = val
+            out = SO._factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max())))
+            assert out is not None and out[1] == 0.0
+            L = _L(out[0], n)
             assert np.linalg.eigvalsh(Q - L.T @ L).min() > 0.0
             checked += 1
     assert checked == 120
+
+
+def _rank_one_model(ub):
+    m = dm.Model("factor_model")
+    x = m.continuous("x", shape=(3,), lb=-ub, ub=ub)
+    m.minimize(-x[0] - x[1] - x[2])
+    # (x0 + x1 + x2)**2 + x2**2 <= 4, written expanded (the extractor does not
+    # expand a product of sums): Q = [[1,1,1],[1,1,1],[1,1,2]], singular along x0 - x1.
+    s01, s02, s12 = x[0] * x[1], x[0] * x[2], x[1] * x[2]
+    m.subject_to(
+        x[0] * x[0] + x[1] * x[1] + 2.0 * x[2] * x[2] + 2.0 * s01 + 2.0 * s02 + 2.0 * s12 <= 4.0
+    )
+    return m
+
+
+def test_a_rank_deficient_row_needs_a_bounded_box_and_stays_sound():
+    """Review of #2064, item 1: a singular PSD row keeps the block when its support
+    is bounded, the shift charged to the radius; never on an unbounded one."""
+    assert _rows(_rank_one_model(1e20)) == []
+    rows = _rows(_rank_one_model(3.0))
+    assert len(rows) == 1
+    r = rows[0]
+    rng = np.random.default_rng(11)
+    checked = 0
+    for _ in range(4000):
+        x = rng.uniform(-3.0, 3.0, 3)
+        if (x.sum()) ** 2 + x[2] ** 2 > 4.0:
+            continue  # not feasible for the row
+        u = [float(val @ x[idx] + r.v[k]) for k, (idx, val) in enumerate(zip(r.L_idx, r.L_val))]
+        assert np.linalg.norm(u) <= r.rho * (1.0 + 1e-12), (x, np.linalg.norm(u), r.rho)
+        checked += 1
+    assert checked > 500
 
 
 def test_no_point_is_accepted_when_the_fixed_nlp_fails(monkeypatch):
@@ -337,3 +392,90 @@ def test_no_point_is_accepted_when_the_fixed_nlp_fails(monkeypatch):
     assert calls, "the fixed NLP was never called (section 6)"
     assert stats.get("oa/soc_outer_rows") == 1.0, stats
     assert stats.get("oa/soc_outer_accepted") == 0.0, stats
+
+
+@pytest.mark.parametrize("path", ["rejection", "lp_rounds"])
+def test_rows_held_at_an_accepted_point_reach_the_next_tree(monkeypatch, path):
+    """Review of #2064, item 3: rows an accepted point would have returned are held,
+    then delivered with the next rejection (or the LP rounds before the next tree).
+
+    A scripted master drives ``lazy_callback`` with two points of the cardinality
+    portfolio: A sits just outside the risk ball with every linear row exact (so it
+    is accepted), B puts all weight on one asset, far outside the ball (rejected).
+    """
+    pytest.importorskip("highspy")
+    from discopt.solvers import MILPResult, SolveStatus, milp_highs
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    monkeypatch.setenv(FLAG, "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = solve_mip_nlp(_card_portfolio(), method="lp_nlp_bb", milp_solver="highs")
+    assert ref.status == "optimal"
+    rng = np.random.default_rng(4)  # the _card_portfolio seed: rebuild S and mu
+    n = 8
+    rng.uniform(0.02, 0.15, n)
+    S = np.round(np.eye(n) * rng.uniform(0.2, 0.45, n) + rng.normal(0, 0.02, (n, n)), 4)
+    w_opt = np.clip(np.asarray(ref.x["w"], dtype=np.float64), 0.0, None)  # NLP roundoff
+    w_opt /= w_opt.sum()
+    z_opt = np.round(np.asarray(ref.x["z"], dtype=np.float64))
+    support = np.flatnonzero(w_opt > 1e-6)
+    assert support.size >= 2
+    i, j = int(support[0]), int(support[1])
+
+    def risk(w):
+        return float(np.sum((S @ w) ** 2))
+
+    d = np.zeros(n)
+    d[i], d[j] = 1.0, -1.0
+    sign = 1.0 if risk(w_opt + 1e-6 * d) > risk(w_opt) else -1.0
+    lo, hi = 0.0, 1e-2
+    for _ in range(60):  # risk just above 0.04, inside the outer approximation
+        mid = 0.5 * (lo + hi)
+        if risk(w_opt + sign * mid * d) < 0.04 * (1.0 + 2e-5):
+            lo = mid
+        else:
+            hi = mid
+    w_a = w_opt + sign * hi * d
+    assert 0.04 < risk(w_a) < 0.04 * (1.0 + 1e-4) and np.all(w_a >= 0.0)
+    k = int(np.argmax(np.sum(S**2, axis=0)))
+    w_b = np.zeros(n)
+    w_b[k] = 1.0
+    z_b = np.zeros(n)
+    z_b[k] = 1.0
+    assert risk(w_b) > 0.08
+
+    returns: list = []
+    node_returns: list = []
+
+    def point(w, z, n_master):
+        x = np.zeros(n_master)
+        x[:n], x[n : 2 * n], x[2 * n : 3 * n] = w, z, S @ w
+        return x
+
+    def scripted(**kw):
+        n_master = len(kw["c"])
+        returns.append(list(kw["lazy_callback"](point(w_a, z_opt, n_master))))
+        if path == "lp_rounds":
+            assert kw.get("node_callback") is not None, "the LP-round path is not wired"
+            # At the optimum itself no row of its own is violated, so whatever the LP
+            # rounds receive here is exactly the held rows.
+            node_returns.append(list(kw["node_callback"](point(w_opt, z_opt, n_master))))
+        returns.append(list(kw["lazy_callback"](point(w_b, z_b, n_master))))
+        return MILPResult(status=SolveStatus.TIME_LIMIT, x=None, objective=None, bound=None)
+
+    monkeypatch.setattr(milp_highs, "solve_milp_with_lazy_cuts", scripted)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(_card_portfolio(), method="lp_nlp_bb", milp_solver="highs")
+    stats = r.solver_stats or {}
+    assert stats.get("oa/soc_outer_accepted") == 1.0, stats
+    held = int(stats["oa/soc_outer_deferred_held"])
+    assert held > 0 and returns[0] == []  # A accepted, its rows held
+    assert stats.get("oa/soc_outer_deferred_flushed") == float(held)
+    if path == "lp_rounds":
+        # Delivered before the next tree by the LP rounds, so B no longer carries them.
+        assert len(node_returns[0]) == held
+    else:
+        # B's rejection carries A's held rows ahead of its own.
+        assert len(returns[1]) > held

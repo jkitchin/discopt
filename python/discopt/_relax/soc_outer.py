@@ -32,10 +32,11 @@ dual bound stays valid.
 
 What makes ``||L x + v|| <= rho`` hold at every feasible ``x``:
 
-* ``L'L <= Q`` in the PSD order, proved rather than assumed (:func:`_factor`): a
-  diagonal ``Q`` with any negative entry is declined, and any other ``Q`` must be
-  proved ``>= margin*I`` by ``rigorous_psd_shift``, its factor's residual bounded
-  below ``margin / 2``;
+* ``L'L <= Q + shift*I`` in the PSD order, proved by a residual bound rather than
+  assumed (:func:`_factor`), with ``shift * max_box ||x_S||**2`` charged to
+  ``rho**2``: a diagonal ``Q`` with any negative entry is declined (shift 0), a
+  well-conditioned PD ``Q`` needs no shift, a singular or near-singular PSD ``Q``
+  needs a bounded support, and a clearly indefinite ``Q`` is declined;
 * ``v`` solves ``2 L'v = c_S`` in least squares; its residual ``delta`` is
   charged to ``rho**2`` as ``sum_j |delta_j| max(|lb_j|, |ub_j|)``, and a row with a
   nonzero residual on an unbounded column is declined;
@@ -107,59 +108,70 @@ class NormBallRow:
     rho: float
 
 
-def _factor(Q: np.ndarray, margin: float) -> list[tuple[np.ndarray, np.ndarray]] | None:
-    """Rows ``L_k`` (support-local) with ``L'L <= Q`` in the PSD order, or ``None``.
+def _factor(
+    Q: np.ndarray, margin: float
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], float] | None:
+    """``(rows, shift)`` with ``L'L <= Q + shift*I`` in the PSD order, or ``None``.
 
-    The guarantee is rigorous, not "PSD to within roundoff" (#1679/#1682); a row
-    it cannot prove is declined. Review of #2064: the first version dropped
-    eigenvalues in ``[-margin, 0)`` uncharged, and on ``x1**2 + x2**2 - 1e-10 x3**2
-    <= 1`` the ball cut off the feasible point ``(0.9, 0.9, 1e5)``.
+    ``rows`` are the ``L_k`` (support-local ``(idx, val)``). The caller charges
+    ``shift * max_{x in box} ||x_S||**2`` to ``rho**2``, so a positive shift needs a
+    bounded support. The guarantee is proved, not "PSD to within roundoff"
+    (#1679/#1682). Review of #2064: the first version dropped eigenvalues in
+    ``[-margin, 0)`` uncharged, and on ``x1**2 + x2**2 - 1e-10 x3**2 <= 1`` the ball
+    cut off the feasible point ``(0.9, 0.9, 1e5)``.
 
-    * **Diagonal ``Q``.** Any negative entry declines the row. A kept term is
-      ``fl(sqrt(fl(q - margin)))**2 <= (q - margin)(1 + 4u) <= q`` because
-      ``margin >= 4u q``; an entry ``q <= margin`` is dropped, contributing
+    * **Diagonal ``Q``.** Any negative entry declines the row; ``shift = 0``. A
+      kept term is ``fl(sqrt(fl(q - margin)))**2 <= (q - margin)(1 + 4u) <= q``
+      because ``margin >= 4u q``; an entry ``q <= margin`` is dropped, contributing
       ``q x**2 >= 0``.
-    * **Otherwise.** ``Q >= margin*I`` is proved with
-      :func:`~discopt._relax.convexity.eigenvalue.rigorous_psd_shift` on
-      ``Q - 2 margin I`` (shift at most ``margin / 2``, the diagonal subtraction's
-      rounding being far below that), ``L`` is taken from ``Q - margin I``, and the
-      residual ``T = Q - margin I - L'L`` is bounded in the 2-norm by its computed
-      Frobenius norm plus the entrywise error bound ``gamma_{k+3}(|L'||L| + |Q| +
-      margin)`` (Higham 2002, eq. 3.13). With ``||T||_2 <= margin / 2``,
-      ``Q - L'L = T + margin I >= 0``. A singular or near-singular ``Q`` therefore
-      declines.
+    * **Otherwise.** A computed ``lambda_min(Q) < -margin`` declines the row (it is
+      not convex as far as this code can tell). Else ``shift = max(0, 2 margin -
+      lambda_min)`` -- zero for a well-conditioned PD ``Q``, positive for a singular
+      or near-singular PSD one (a factor-model covariance ``F F'``) -- and ``L`` is
+      taken from ``fl(Q + shift I) - margin I``. **The proof is the residual bound
+      alone**: ``T = (Q + shift I) - margin I - L'L`` is bounded in the 2-norm by
+      the computed Frobenius norms of the residual and of the entrywise error bound
+      ``gamma_{k+3}(|L'||L| + |Q| + (shift + margin) I)`` (Higham 2002, eq. 3.13,
+      which covers forming ``Q + shift I``, the subtraction and the product), each
+      inflated by ``1/(1 - gamma_{N+2})`` for its own rounding and the sum by a
+      further ``8u``. ``||T||_2 <= margin / 2`` gives ``Q + shift I - L'L = T +
+      margin I >= 0``. The computed spectrum only *chooses* ``shift``; it carries
+      no part of the proof.
     """
-    from .convexity.eigenvalue import rigorous_psd_shift
-
     m = Q.shape[0]
     u = np.finfo(np.float64).eps / 2.0
     if not np.any(Q - np.diag(np.diag(Q))):
         q = np.diag(Q)
         if float(q.min()) < 0.0:
             return None
-        return [
+        rows = [
             (np.array([j], dtype=np.intp), np.array([math.sqrt(float(q[j]) - margin)]))
             for j in range(m)
             if float(q[j]) - margin > 0.0
         ]
-    delta = rigorous_psd_shift(Q - 2.0 * margin * np.eye(m))
-    if delta is None or delta > 0.5 * margin:
+        return rows, 0.0
+    lam_min = float(np.linalg.eigvalsh(Q).min())
+    if lam_min < -margin:
         return None
-    evals, vecs = np.linalg.eigh(Q - margin * np.eye(m))
+    shift = max(0.0, 2.0 * margin - lam_min)
+    evals, vecs = np.linalg.eigh(Q + (shift - margin) * np.eye(m))
     if float(evals.min()) <= 0.0:
         return None
-    L = (vecs * np.sqrt(evals)).T  # rows L_k; L'L ~ Q - margin I
+    L = (vecs * np.sqrt(evals)).T  # rows L_k; L'L ~ Q + shift I - margin I
     k = L.shape[0]
     gamma = (k + 3) * u / (1.0 - (k + 3) * u)
-    resid = (Q - margin * np.eye(m)) - L.T @ L
-    err = gamma * (np.abs(L.T) @ np.abs(L) + np.abs(Q) + margin)
-    if float(np.linalg.norm(resid)) + float(np.linalg.norm(err)) > 0.5 * margin:
+    resid = (Q + (shift - margin) * np.eye(m)) - L.T @ L
+    err = gamma * (np.abs(L.T) @ np.abs(L) + np.abs(Q) + (shift + margin) * np.eye(m))
+    n_sq = m * m + 2
+    inflate = 1.0 / (1.0 - n_sq * u / (1.0 - n_sq * u))
+    bound = (float(np.linalg.norm(resid)) + float(np.linalg.norm(err))) * inflate * (1.0 + 8.0 * u)
+    if not np.isfinite(bound) or bound > 0.5 * margin:
         return None
     rows = []
     for t in range(k):
         keep = np.flatnonzero(L[t] != 0.0)
         rows.append((keep.astype(np.intp), L[t, keep]))
-    return rows
+    return rows, shift
 
 
 def norm_ball_rows(model, row_map, lb, ub) -> list[NormBallRow]:
@@ -198,9 +210,16 @@ def norm_ball_rows(model, row_map, lb, ub) -> list[NormBallRow]:
         if not np.allclose(H, H.T, rtol=0.0, atol=1e-12 * scale):
             continue
         Q = 0.25 * sign * (H + H.T)  # body = 0.5 x'Hx + c'x + k  =>  Q = H / 2
-        factor = _factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max())))
-        if factor is None or len(factor) < 2:
+        factored = _factor(Q, 1e-9 * max(1.0, float(np.abs(Q).max())))
+        if factored is None or len(factored[0]) < 2:
             continue
+        factor, shift = factored
+        reach = np.maximum(np.abs(lo[S]), np.abs(hi[S]))
+        bounded = np.isfinite(reach) & (reach < 1e20)
+        # ``L'L <= Q + shift I``: a positive shift is paid for over the box.
+        if shift > 0.0 and not np.all(bounded):
+            continue
+        charge = shift * float(reach @ reach) * (1.0 + 1e-12) if shift > 0.0 else 0.0
         L = np.zeros((len(factor), S.size))
         for t, (idx, val) in enumerate(factor):
             L[t, idx] = val
@@ -210,14 +229,12 @@ def norm_ball_rows(model, row_map, lb, ub) -> list[NormBallRow]:
             delta = c_S - 2.0 * L.T @ v
             if np.any(np.abs(delta) > 1e-9 * max(1.0, float(np.abs(c_S).max()))):
                 continue  # c_S is not in the range of Q: not a ball
-            reach = np.maximum(np.abs(lo[S]), np.abs(hi[S]))
             hit = delta != 0.0
-            if np.any(hit & ~(np.isfinite(reach) & (reach < 1e20))):
+            if np.any(hit & ~bounded):
                 continue
-            charge = float(np.sum(np.abs(delta[hit]) * reach[hit]))
+            charge += float(np.sum(np.abs(delta[hit]) * reach[hit]))
         else:
             v = np.zeros(len(factor))
-            charge = 0.0
         rho2 = -sign * float(k) + float(v @ v) + charge
         if not np.isfinite(rho2) or rho2 <= 0.0:
             continue

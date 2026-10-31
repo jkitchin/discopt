@@ -14104,3 +14104,34 @@ tree):
 - **Per-row extraction:** `_extract_body_coeffs` still builds a dense vector per
   row, which is compressed immediately. That costs time, not memory.
 - **POUNCE's MILP wrapper**, which densifies internally.
+
+**Re-review of #2064 (2026-10-31, on `b83dca8`), acted on in the same PR.**
+
+1. **Rank-deficient rows are no longer simply declined.**
+   - A singular or near-singular PSD `Q` (a factor-model covariance `F F'`) is now
+     factored as `Q + shift I`, with `shift = max(0, 2 margin - lambda_min)`.
+   - `shift * max_box ||x_S||**2` is charged to `rho**2`, so a positive shift needs
+     a bounded support.
+   - A well-conditioned PD `Q` has shift 0 and still works on free columns.
+   - A clearly indefinite `Q` (computed `lambda_min < -margin`) is still declined.
+2. **The proof is the residual bound alone.** The `rigorous_psd_shift` call is gone,
+   because `||Q + shift I - margin I - L'L||_2 <= margin/2` proves
+   `L'L <= Q + shift I` by itself. The computed spectrum only chooses `shift`.
+3. **Held rows also reach the LP rounds before each tree.** `_flush_deferred` is
+   called from `node_callback` too, not only on the next rejection. Counters
+   `oa/soc_outer_deferred_held` and `oa/soc_outer_deferred_flushed` are exported.
+   A scripted master forces one acceptance and then one rejection (or one
+   LP-round call): the held rows arrive in both cases. The LP-round case fails
+   with the flush removed.
+4. **The residual bound's Frobenius norms are inflated for their own rounding**,
+   by `1/(1 - gamma_{N+2})`, and the sum by a further `8u`.
+5. **The width estimate** was already gone with the sparse master (103.16).
+
+**Re-measured.**
+
+| instance | limit | result |
+|---|---|---|
+| portfol_classical050_1 | 120 s | optimal, 52.5 / 51.1 s |
+| ball_mk2_10, ball_mk2_30, nvs10/11/12 | 30 s | identical in both arms |
+| portfol_robust050_34 | 120 s | optimal, 16.9 -> 8.8 s |
+| portfol_robust100_09 | 120 s | unchanged |
