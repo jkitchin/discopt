@@ -15,6 +15,31 @@ Entry-experiment results in this document are **measured** on this tree
 (Rust extension built from `677af90`, Linux, `pounce-solver` installed) unless a
 paragraph says **proposed**. The scripts are reproduced in Appendix B.
 
+
+> **Erratum (2026-10-31, #2056 — read this before §2.1 H2, §4 commit 5, §6.5 N1–N4,
+> Appendix A).** This plan took the `.nl` type-5 flag bits from discopt's importer as it
+> was at `677af90`, and that importer had them **swapped**. AMPL MP `ComplInfo`
+> (`include/mp/nl-reader.h`) defines `INF_UB = 1` = *finite variable lower bound* and
+> `INF_LB = 2` = *finite variable upper bound*; Pyomo's `mpec4` writer agrees (+1 for a
+> lower bound, +2 for an upper bound); and AMPL itself writes `3 <= x <= Infinity
+> complements y` as `5 1 1`, `-Infinity <= x <= -3 complements y` as `5 2 1`,
+> `3 <= x <= 10 complements y` as `5 3 1`. So **flag 1 → box `[lb, +∞)` (body ≥ 0 at
+> lb)** and **flag 2 → box `(−∞, ub]`**, the reverse of the commit-5 table, the
+> `inf_lb, inf_ub = bool(flag & 1), bool(flag & 2)` line, probe H, N1–N4 and A.1–A.5.
+> Consequences:
+> * The "one committed fixture" `mpcc_complementarity.nl` (flag 2 on `y ∈ [0, 10]`) is
+>   **malformed** under AMPL's semantics (AMPL would write flag 3), so "bit-for-bit on the
+>   NCP path for that fixture" is not a valid regression target. Since #2056 `from_nl`
+>   refuses it as malformed; the file is kept only because serialization golden
+>   documents pin its digest. Use `python/tests/data/nl_complementarity/ampl_*.nl`
+>   (genuine AMPL output, each with its `.mod`) instead.
+> * The fix for #2056 already does the single-bounded half of commit 5: flag 1 is lowered
+>   as `body ⊥ (x − lb)`, flag 2 as `(−body) ⊥ (ub − x)`, and a flag inconsistent with the
+>   variable's declared bounds is refused as malformed. Commit 5 reduces to routing the
+>   still-refused **flag 3** (doubly bounded, `ampl_box.nl`) and **flag 0** (free, body
+>   = 0) through `Model.mcp`, using the corrected table above.
+> * Swap flags 1 and 2 throughout the N- and A-tests before implementing them.
+
 ---
 
 ## 0. One-paragraph summary
