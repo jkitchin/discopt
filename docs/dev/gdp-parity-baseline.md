@@ -281,3 +281,36 @@ on the full panel.
 **Side finding.** The in-house MILP master hits its iteration limit on
 coefficient-strengthened OA rows that HiGHS solves at once. That is a
 master-robustness defect outside #1917's scope; the probe above reproduces it.
+
+## G5.2: native k-way disjunction branching — entry experiment, killed on the available slice (2026-10-31, #1917)
+
+Plan §7: count big-M B&B branches on selector binaries, then compare node counts
+against disjunction-wise branching prototyped in the Python LBB. Kill: median
+node-count ratio >= 0.95; then k-way stays an LBB-only route.
+
+Measured on the 5 Pyomo GDPopt models with a non-trivial tree (main `4517c7b`,
+120 s). Branch counts come from the instrumentation-only `_R3A_BRANCH_COUNT_SINK`.
+
+| instance | big-M nodes | branches on selectors / all | LBB nodes | ratio |
+|---|---|---|---|---|
+| eight_process | 33 | 15 / 16 | 59 | 1.79 |
+| eight_process_logical | 25 | 12 / 12 | >= 64 (time limit) | >= 2.6 |
+| constrained_layout_clay0203 | 135 | 67 / 67 | >= 237 (time limit) | >= 1.8 |
+| ex_633_trespalacios | 13 | 1 / 6 | 5 | 0.38 |
+| nonconvex_hen | 3 | 1 / 1 | 13 | 4.3 |
+
+**Median ratio about 1.8: killed.** k-way branching stays LBB's.
+
+Two caveats:
+- LBB's node relaxation is also weaker: it drops the nonlinear rows of undecided
+  disjunctions. So this is the plan's experiment, not a pure test of the branching
+  rule.
+- Big-M B&B already branches almost only on selectors. For a two-disjunct
+  disjunction that *is* a 2-way disjunction branch, so a Rust k-way rule could
+  differ only on disjunctions with three or more disjuncts (clay0203's four-way
+  non-overlap, positioning).
+
+Re-open only with a Rust prototype measured on such instances.
+
+That run also surfaced a HiGHS false-optimum on the `lp_nlp_bb` master:
+`docs/dev/data/1917-highs-false-milp-optimum/README.md`.
