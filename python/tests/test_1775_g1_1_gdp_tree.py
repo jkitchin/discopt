@@ -24,6 +24,18 @@ from discopt.validation.feasibility import verify_point
 pytestmark = pytest.mark.smoke
 
 
+@pytest.fixture
+def legacy_big_m(monkeypatch):
+    """The big-M lowering without the bound pretransform (``=0``).
+
+    Since #1917 ``DISCOPT_GDP_BOUND_PRETRANSFORM`` is default ON and replaces a
+    SELECT_ONE disjunction's univariate rows by bound rows, so those rows never get
+    a big-M. A test whose subject is the big-M rows themselves (their text, their
+    M, or a relaxation loose enough to separate) opts out explicitly.
+    """
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
+
 def _two(m=None):
     m = m or dm.Model("two")
     x = m.continuous("x", lb=0, ub=10)
@@ -194,6 +206,7 @@ _PRE_G1_1_ROWS: dict[str, list[str]] = {
 }
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 @pytest.mark.parametrize("method", sorted(_PRE_G1_1_ROWS))
 def test_unread_indicators_lower_bit_identically(method):
     """Selector names, order and every row are those of the pre-G1.1 lowering."""

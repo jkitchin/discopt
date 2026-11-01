@@ -31,6 +31,18 @@ from discopt.validation.feasibility import verify_point
 pytestmark = pytest.mark.smoke
 
 
+@pytest.fixture
+def legacy_big_m(monkeypatch):
+    """The big-M lowering without the bound pretransform (``=0``).
+
+    Since #1917 ``DISCOPT_GDP_BOUND_PRETRANSFORM`` is default ON and replaces a
+    SELECT_ONE disjunction's univariate rows by bound rows, so those rows never get
+    a big-M. A test whose subject is the big-M rows themselves (their text, their
+    M, or a relaxation loose enough to separate) opts out explicitly.
+    """
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
+
 def _squares(obj):
     """[x, y <= 2] | [x, y >= 8, x <= 9], and [x + y <= 3] | [x + y >= 15] on [0, 10]^2."""
     m = dm.Model("squares")
@@ -83,6 +95,7 @@ def test_cuts_keep_the_optimum_and_never_loosen_the_relaxation(build, obj, truth
     assert r.objective == pytest.approx(truth, abs=1e-5)
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 def test_the_cuts_tighten_the_big_m_relaxation():
     out, rep = cuttingplane(_squares(lambda x, y: x - 2 * y), max_cuts=10)
     assert rep.cuts >= 1
@@ -91,6 +104,7 @@ def test_the_cuts_tighten_the_big_m_relaxation():
     assert sum(c.name is not None and c.name.startswith("_gdp_cp_cut_") for c in out._constraints)
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 @pytest.mark.parametrize("build", [_squares, _circles])
 def test_every_cut_holds_at_every_feasible_point(build):
     """A grid over the box; every point the declared model accepts satisfies every
@@ -247,6 +261,7 @@ def _as(r, **over):
     return SimpleNamespace(**d)
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 def test_the_cut_constant_is_the_bound_not_the_objective(monkeypatch):
     """A back-off stopped at its time limit: its objective is a primal value above
     min g.x, and only the bound is a valid cut constant."""
@@ -260,6 +275,7 @@ def test_the_cut_constant_is_the_bound_not_the_objective(monkeypatch):
     assert rep.cut_rows[0][1] < fake.objective - 0.5
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 def test_an_uncertified_bound_adds_no_cut(monkeypatch):
     calls = _back_off_returning(monkeypatch, lambda r: _as(r, bound_valid=False))
     out, rep = cuttingplane(_squares(lambda x, y: x - 2 * y), max_cuts=3)
@@ -304,6 +320,7 @@ def _min_gx_bound(m, g, linear):
         lambda x, y: 0.9 * x - 0.3 * y + 0.05 * x**2 <= 1.9,  # convex nonlinear global row
     ],
 )
+@pytest.mark.usefixtures("legacy_big_m")
 def test_the_back_off_keeps_the_global_rows(row, nonlinear_disjuncts):
     """Each cut constant must be a bound over a set with the global rows: without
     them it is far looser. The probe asserts it saw a cut where the rows matter."""

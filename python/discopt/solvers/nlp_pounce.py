@@ -252,6 +252,105 @@ def _invalid_option_error(opts: dict) -> PounceOptionError:
     )
 
 
+#: Ipopt's ``Not_Enough_Degrees_Of_Freedom``: fewer free columns than equality
+#: rows once the fixed columns are removed, refused before iteration 0.
+_NOT_ENOUGH_DEGREES_OF_FREEDOM = -10
+
+#: Largest violation (absolute, in the row's own units) at which a row whose
+#: columns are all fixed is accepted as satisfied and dropped by the retry in
+#: :func:`solve_nlp`. The NLP-BB exit gate's absolute tolerance; a row violated
+#: by more is kept, and the refusal stands.
+_CONSTANT_ROW_TOL = 1e-6
+
+
+class _RowSubsetCallbacks:
+    """POUNCE callbacks restricted to the rows ``keep`` of ``base`` (#1917).
+
+    The rows left out depend only on fixed columns: they are constants, with no
+    gradient in any free column. The Lagrangian Hessian gives each of them a zero
+    multiplier, which is what removing a constant row means.
+    """
+
+    def __init__(self, base, keep: np.ndarray, m: int) -> None:
+        self._base = base
+        self._keep = keep
+        self._m = m
+        rows, cols = base.jacobianstructure()
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        new_index = np.full(m, -1, dtype=np.int64)
+        new_index[keep] = np.arange(keep.size, dtype=np.int64)
+        self._jac_mask = new_index[rows] >= 0
+        self._jac_structure = (new_index[rows[self._jac_mask]], cols[self._jac_mask])
+
+    def objective(self, x):
+        return self._base.objective(x)
+
+    def gradient(self, x):
+        return self._base.gradient(x)
+
+    def constraints(self, x):
+        return np.asarray(self._base.constraints(x), dtype=np.float64)[self._keep]
+
+    def jacobianstructure(self):
+        return self._jac_structure
+
+    def jacobian(self, x):
+        return np.asarray(self._base.jacobian(x), dtype=np.float64)[self._jac_mask]
+
+    def hessianstructure(self):
+        return self._base.hessianstructure()
+
+    def hessian(self, x, lagrange, obj_factor):
+        full = np.zeros(self._m, dtype=np.float64)
+        full[self._keep] = lagrange
+        return self._base.hessian(x, full, obj_factor)
+
+
+def _constant_row_retry(callbacks, lb, ub, cl, cu, x0):
+    """``(keep, callbacks)`` for a re-solve after ``Not_Enough_Degrees_Of_Freedom``.
+
+    A row whose structural columns are all fixed (``lb == ub``) is a constant, but
+    Ipopt counts it against the free columns all the same. A model whose fixings
+    leave more such rows than free columns is refused before iteration 0. Measured
+    on a GDPlib ``small_batch`` configuration subproblem (``gdp_method="enumerate"``,
+    #1917), which fixes indicators and disjunct-local parameters by equality rows:
+    42 equality rows, 37 columns, 30 of them fixed. All 12 feasible configurations
+    came back ERROR, so enumerate returned ``unknown``.
+
+    Each such row holds or fails at the fixed point alone. If every one holds
+    within :data:`_CONSTANT_ROW_TOL`, what is left is the same NLP, and it is
+    re-solved without them. If any fails, return ``None``: the refusal stands,
+    since this path never declares anything infeasible.
+    """
+    m = int(np.asarray(cl).size)
+    if m == 0:
+        return None
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    fixed = lb == ub
+    if not fixed.any():
+        return None
+    rows, cols = callbacks.jacobianstructure()
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    touches_free = np.zeros(m, dtype=bool)
+    touches_free[rows[~fixed[cols]]] = True
+    constant = ~touches_free
+    if not constant.any():
+        return None
+    point = np.where(fixed, lb, np.clip(np.asarray(x0, dtype=np.float64), lb, ub))
+    g = np.asarray(callbacks.constraints(point), dtype=np.float64)[constant]
+    lo = np.asarray(cl, dtype=np.float64)[constant]
+    hi = np.asarray(cu, dtype=np.float64)[constant]
+    if not np.all(np.isfinite(g)):
+        return None
+    if np.any(g < lo - _CONSTANT_ROW_TOL) or np.any(g > hi + _CONSTANT_ROW_TOL):
+        return None
+    keep = np.flatnonzero(touches_free)
+    return keep, _RowSubsetCallbacks(callbacks, keep, m)
+
+
 def solve_nlp(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -386,146 +485,175 @@ def solve_nlp(
 
     callbacks = _IpoptCallbacks(evaluator)
 
-    problem = pounce.Problem(
-        n=n,
-        m=m,
-        problem_obj=callbacks,
-        lb=lb,
-        ub=ub,
-        cl=cl,
-        cu=cu,
-    )
-
-    for key, value in opts.items():
-        try:
-            if isinstance(value, (np.floating, float)):
-                problem.add_option(key, float(value))
-            elif isinstance(value, (np.integer, int)):
-                problem.add_option(key, int(value))
-            else:
-                problem.add_option(key, value)
-        except (TypeError, ValueError, RuntimeError) as exc:
-            # #1247: a rejected option used to vanish at DEBUG, so a misspelled
-            # or unsupported key silently did nothing — the caller believed it
-            # was solving under an option the solver never saw. Warn, once per
-            # key per process so a backend-wide default that this pounce build
-            # does not know cannot turn into per-solve spam.
-            if key not in _WARNED_REJECTED_OPTIONS:
-                _WARNED_REJECTED_OPTIONS.add(key)
-                _logger.warning(
-                    "pounce rejected the option %r (value %r): %s: %s. It is NOT in effect "
-                    "for this solve [pounce-option-rejected].",
-                    key,
-                    value,
-                    type(exc).__name__,
-                    exc,
-                )
-
-    # #1620 B-04: user scaling, ``(obj_scaling, x_scaling)`` in this NLP's own
-    # units (``x_scaling`` one positive factor per column, or ``None``). POUNCE
-    # applies it only under ``nlp_scaling_method="user-scaling"``; a different
-    # method passed alongside it would leave the factors silently unused, so that
-    # combination is refused.
-    if problem_scaling is not None:
-        obj_s, x_s = problem_scaling
-        method = opts.get("nlp_scaling_method", "user-scaling")
-        if method != "user-scaling":
-            raise ValueError(
-                f"user problem scaling was passed together with nlp_scaling_method="
-                f"{method!r}; POUNCE applies the factors only under "
-                "nlp_scaling_method='user-scaling'. Drop one of the two."
-            )
-        if x_s is not None and np.shape(x_s) != (n,):
-            raise ValueError(
-                f"variable scaling has shape {np.shape(x_s)}, but this NLP has {n} columns"
-            )
-        problem.add_option("nlp_scaling_method", "user-scaling")
-        problem.set_problem_scaling(
-            float(obj_s),
-            None if x_s is None else np.asarray(x_s, dtype=np.float64),
-            None,
+    def _solve_with(obj_, m_, cl_, cu_, schur_, ordering_, blocks_, ws_):
+        # One POUNCE solve of ``obj_`` (``m_`` rows). Factored out so the
+        # degrees-of-freedom retry below reuses the option, scaling and
+        # passthrough handling unchanged (#1917).
+        problem = pounce.Problem(
+            n=n,
+            m=m_,
+            problem_obj=obj_,
+            lb=lb,
+            ub=ub,
+            cl=cl_,
+            cu=cu_,
         )
 
-    # Structure-aware KKT passthroughs (pounce#180). Both are correctness-safe:
-    # pounce transparently falls back to the full-space path when the partition
-    # or ordering is unsuitable, so only factorization time changes. Guarded so
-    # an older pounce without these methods degrades gracefully to the
-    # full-space solve rather than raising.
-    if kkt_schur_block is not None:
-        block = [int(i) for i in kkt_schur_block]
-        if hasattr(problem, "set_kkt_schur_block"):
+        for key, value in opts.items():
             try:
-                problem.set_kkt_schur_block(block)
-            except (TypeError, ValueError, RuntimeError):
-                _logger.debug("pounce rejected kkt_schur_block, using full space")
-        else:
-            _logger.debug("pounce has no set_kkt_schur_block; ignoring passthrough")
-    if ordering is not None:
-        order = [int(i) for i in ordering]
-        if hasattr(problem, "set_ordering"):
-            try:
-                problem.set_ordering(order)
-            except (TypeError, ValueError, RuntimeError):
-                _logger.debug("pounce rejected ordering, using default")
-        else:
-            _logger.debug("pounce has no set_ordering; ignoring passthrough")
-    if block_structure is not None:
-        var_blocks, con_blocks = block_structure
-        vb = [int(b) for b in var_blocks]
-        cb = [int(b) for b in con_blocks]
-        if len(vb) != n or len(cb) != m:
-            # Not pounce's fallback territory: a length mismatch means the labels
-            # were built against a different problem than the one being solved,
-            # and a partition that is merely in-range names the wrong columns.
-            raise ValueError(
-                f"block_structure has {len(vb)} variable and {len(cb)} constraint labels, "
-                f"but this NLP has {n} columns and {m} rows. Build the labels from the "
-                "evaluator that serves the solve (discopt.block_structure."
-                "resolve_block_structure)."
+                if isinstance(value, (np.floating, float)):
+                    problem.add_option(key, float(value))
+                elif isinstance(value, (np.integer, int)):
+                    problem.add_option(key, int(value))
+                else:
+                    problem.add_option(key, value)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                # #1247: a rejected option used to vanish at DEBUG, so a misspelled
+                # or unsupported key silently did nothing — the caller believed it
+                # was solving under an option the solver never saw. Warn, once per
+                # key per process so a backend-wide default that this pounce build
+                # does not know cannot turn into per-solve spam.
+                if key not in _WARNED_REJECTED_OPTIONS:
+                    _WARNED_REJECTED_OPTIONS.add(key)
+                    _logger.warning(
+                        "pounce rejected the option %r (value %r): %s: %s. It is NOT in effect "
+                        "for this solve [pounce-option-rejected].",
+                        key,
+                        value,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        # #1620 B-04: user scaling, ``(obj_scaling, x_scaling)`` in this NLP's own
+        # units (``x_scaling`` one positive factor per column, or ``None``). POUNCE
+        # applies it only under ``nlp_scaling_method="user-scaling"``; a different
+        # method passed alongside it would leave the factors silently unused, so that
+        # combination is refused.
+        if problem_scaling is not None:
+            obj_s, x_s = problem_scaling
+            method = opts.get("nlp_scaling_method", "user-scaling")
+            if method != "user-scaling":
+                raise ValueError(
+                    f"user problem scaling was passed together with nlp_scaling_method="
+                    f"{method!r}; POUNCE applies the factors only under "
+                    "nlp_scaling_method='user-scaling'. Drop one of the two."
+                )
+            if x_s is not None and np.shape(x_s) != (n,):
+                raise ValueError(
+                    f"variable scaling has shape {np.shape(x_s)}, but this NLP has {n} columns"
+                )
+            problem.add_option("nlp_scaling_method", "user-scaling")
+            problem.set_problem_scaling(
+                float(obj_s),
+                None if x_s is None else np.asarray(x_s, dtype=np.float64),
+                None,
             )
-        if hasattr(problem, "set_block_structure"):
-            try:
-                problem.set_block_structure(vb, cb)
-            except (TypeError, ValueError, RuntimeError):
-                _logger.debug("pounce rejected block_structure, using full space")
-        else:
-            # pounce-solver 0.12.0, the current pin, has no such method: the
-            # block-structured KKT path is pounce#955 and unreleased. Degrade to
-            # the full-space solve rather than raising (#394's pattern).
-            _logger.debug("pounce has no set_block_structure; ignoring passthrough")
 
-    # #1615 B-08: pounce derives ``mu_init`` from the warm start's captured barrier
-    # parameter and that derived value overrides ``options["mu_init"]``, so an
-    # explicit ``mu_init`` was silently discarded whenever a warm start was given.
-    # ``WarmStart.mu_init`` is pounce's own explicit-override field; route the
-    # caller's value through it. (Under pounce's default
-    # ``warm_start_recentering="residual"`` it is a floor the solver may raise.)
-    if warm_start is not None and "mu_init" in opts:
-        import dataclasses
+        # Structure-aware KKT passthroughs (pounce#180). Both are correctness-safe:
+        # pounce transparently falls back to the full-space path when the partition
+        # or ordering is unsuitable, so only factorization time changes. Guarded so
+        # an older pounce without these methods degrades gracefully to the
+        # full-space solve rather than raising.
+        if schur_ is not None:
+            block = [int(i) for i in schur_]
+            if hasattr(problem, "set_kkt_schur_block"):
+                try:
+                    problem.set_kkt_schur_block(block)
+                except (TypeError, ValueError, RuntimeError):
+                    _logger.debug("pounce rejected kkt_schur_block, using full space")
+            else:
+                _logger.debug("pounce has no set_kkt_schur_block; ignoring passthrough")
+        if ordering_ is not None:
+            order = [int(i) for i in ordering_]
+            if hasattr(problem, "set_ordering"):
+                try:
+                    problem.set_ordering(order)
+                except (TypeError, ValueError, RuntimeError):
+                    _logger.debug("pounce rejected ordering, using default")
+            else:
+                _logger.debug("pounce has no set_ordering; ignoring passthrough")
+        if blocks_ is not None:
+            var_blocks, con_blocks = blocks_
+            vb = [int(b) for b in var_blocks]
+            cb = [int(b) for b in con_blocks]
+            if len(vb) != n or len(cb) != m_:
+                # Not pounce's fallback territory: a length mismatch means the labels
+                # were built against a different problem than the one being solved,
+                # and a partition that is merely in-range names the wrong columns.
+                raise ValueError(
+                    f"block_structure has {len(vb)} variable and {len(cb)} constraint labels, "
+                    f"but this NLP has {n} columns and {m_} rows. Build the labels from the "
+                    "evaluator that serves the solve (discopt.block_structure."
+                    "resolve_block_structure)."
+                )
+            if hasattr(problem, "set_block_structure"):
+                try:
+                    problem.set_block_structure(vb, cb)
+                except (TypeError, ValueError, RuntimeError):
+                    _logger.debug("pounce rejected block_structure, using full space")
+            else:
+                # pounce-solver 0.12.0, the current pin, has no such method: the
+                # block-structured KKT path is pounce#955 and unreleased. Degrade to
+                # the full-space solve rather than raising (#394's pattern).
+                _logger.debug("pounce has no set_block_structure; ignoring passthrough")
 
-        warm_start = dataclasses.replace(cast(Any, warm_start), mu_init=float(opts["mu_init"]))
+        # #1615 B-08: pounce derives ``mu_init`` from the warm start's captured barrier
+        # parameter and that derived value overrides ``options["mu_init"]``, so an
+        # explicit ``mu_init`` was silently discarded whenever a warm start was given.
+        # ``WarmStart.mu_init`` is pounce's own explicit-override field; route the
+        # caller's value through it. (Under pounce's default
+        # ``warm_start_recentering="residual"`` it is a floor the solver may raise.)
+        if ws_ is not None and "mu_init" in opts:
+            import dataclasses
 
-    t0 = time.perf_counter()
-    try:
-        x, info, report = _run_solve(problem, x0, warm_start, solve_report)
-    except RuntimeError as exc:
-        # #1247: pounce validates option NAMES at solve time, not at
-        # ``add_option`` time, so a misspelled key reaches here as a raw Rust
-        # ``OPTION_INVALID`` out of the middle of the solver. Name the option and
-        # where it came from instead. The solve still fails — an option the
-        # caller asked for that the solver will not honour is a refusal, not
-        # something to drop and carry on with (CLAUDE.md §3).
-        msg = str(exc)
-        if "OPTION_INVALID" in msg or "Unknown option" in msg:
-            raise PounceOptionError(
-                f"POUNCE rejected a solver option: {msg.splitlines()[0]}. Options reaching the "
-                f"NLP backend on this solve: {sorted(opts)}. Fix or drop the offending key "
-                "(Model.solve(ipopt_options={...}))."
-            ) from exc
-        raise
-    wall_time = time.perf_counter() - t0
+            ws_ = dataclasses.replace(cast(Any, ws_), mu_init=float(opts["mu_init"]))
 
+        t0 = time.perf_counter()
+        try:
+            x, info, report = _run_solve(problem, x0, ws_, solve_report)
+        except RuntimeError as exc:
+            # #1247: pounce validates option NAMES at solve time, not at
+            # ``add_option`` time, so a misspelled key reaches here as a raw Rust
+            # ``OPTION_INVALID`` out of the middle of the solver. Name the option and
+            # where it came from instead. The solve still fails — an option the
+            # caller asked for that the solver will not honour is a refusal, not
+            # something to drop and carry on with (CLAUDE.md §3).
+            msg = str(exc)
+            if "OPTION_INVALID" in msg or "Unknown option" in msg:
+                raise PounceOptionError(
+                    f"POUNCE rejected a solver option: {msg.splitlines()[0]}. Options reaching the "
+                    f"NLP backend on this solve: {sorted(opts)}. Fix or drop the offending key "
+                    "(Model.solve(ipopt_options={...}))."
+                ) from exc
+            raise
+        wall_time = time.perf_counter() - t0
+        return x, info, report, wall_time
+
+    x, info, report, wall_time = _solve_with(
+        callbacks, m, cl, cu, kkt_schur_block, ordering, block_structure, warm_start
+    )
     status_code = info.get("status", -100)
+    if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM:
+        dof_retry = _constant_row_retry(callbacks, lb, ub, cl, cu, x0)
+        if dof_retry is not None:
+            keep, sub = dof_retry
+            blocks_kept = None
+            if block_structure is not None:
+                blocks_kept = (block_structure[0], [block_structure[1][i] for i in keep])
+            # The KKT-space hints and the warm start describe the full row set;
+            # neither is valid for the reduced one, and both are optional.
+            x, info, report, retry_wall = _solve_with(
+                sub, int(keep.size), cl[keep], cu[keep], None, None, blocks_kept, None
+            )
+            wall_time += retry_wall
+            mult = info.get("mult_g", None)
+            if mult is not None and len(mult) == keep.size:
+                full = np.zeros(m, dtype=np.float64)
+                full[keep] = np.asarray(mult, dtype=np.float64)
+                info = dict(info)
+                info["mult_g"] = full
+            status_code = info.get("status", -100)
+
     if status_code == _INVALID_OPTION:
         # #1585: a refused option VALUE stops the solve before iteration 0. It is
         # the caller's error, not a solver outcome -- raise with the reason.

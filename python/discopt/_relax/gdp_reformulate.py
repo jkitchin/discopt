@@ -356,38 +356,26 @@ def reformulate_gdp(
     if method == "mbigm" or "mbigm" in auto_advice.values():
         lp_data = _precompute_lp_relaxation(model)
 
-    # #1775 G2.3 (flag DISCOPT_MBIGM_CONDITIONED, default OFF): under "mbigm", a
-    # SELECT_ONE disjunction without nesting -- an either_or, or a complete
-    # add_disjunction block group -- gets M conditioned on each other disjunct.
-    # Anything the conditioned route declines keeps today's route.
-    _mbc_on = lp_data is not None and _mbigm_conditioned_enabled()
-    _mbc_groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]] = {}
-    if _mbc_on and method == "mbigm":
-        _mbc_groups = {
-            key: (dc, sels)
-            for key, (dc, sels) in _collect_indicator_hull_groups(model).groups.items()
-            if not any(isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d)
-        }
-    _mbc_done: dict[str, Optional[list[Constraint]]] = {}
-
-    # #1775 G2.4 (flag DISCOPT_GDP_BOUND_PRETRANSFORM, default OFF): under big-M and
+    # #1775 G2.4 (flag DISCOPT_GDP_BOUND_PRETRANSFORM, default ON): under big-M and
     # mbigm, the univariate rows of each complete top-level block group without
     # nesting become the bound rows of gdp.bound_pretransformation, on the block's
     # own indicators; the replaced indicator rows are skipped below. (either_or
     # disjunctions are handled inside _reformulate_disjunction.)
     _pt_on = method in ("big-m", "mbigm") and _bound_pretransform_enabled()
-    _pt_dropped: set[int] = set()
+    # (group key, disjunct k, id(constraint)): a row is skipped only as a member
+    # of the block it was pretransformed in. The same Constraint object may also
+    # sit in an if_then or another block (#1794 B1), and that row must stay.
+    _pt_dropped: set[tuple[str, int, int]] = set()
     if _pt_on:
         from discopt.gdp.bound_pretransform import pretransform_disjunction
 
         for key, (dc, sels) in _collect_indicator_hull_groups(model).groups.items():
-            if key in _mbc_groups or any(
+            if getattr(dc, "big_m", None) is not None or any(
                 isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d
             ):
-                continue
+                continue  # nesting is out of scope; user big-Ms (G2.6) are the user's
             drop = pretransform_disjunction(dc.disjuncts, sels, new_model, new_model._constraints)
-            _pt_dropped.update(*drop)
-    _mbc_budget = [_MBIGM_CONDITIONED_LP_BUDGET]  # shared by the whole lowering
+            _pt_dropped.update((key, k, i) for k, ids in enumerate(drop) for i in ids)
 
     # #1775 G2.6: user big-M values (``either_or(..., big_m=...)``), validated
     # against the *declared* model. Used by the big-M lowering only.
@@ -433,23 +421,6 @@ def reformulate_gdp(
         if (
             isinstance(c, _IndicatorConstraint)
             and c.disjunction is not None
-            and c.disjunction[0] in _mbc_groups
-        ):
-            key = c.disjunction[0]
-            if key not in _mbc_done:
-                dc, sels = _mbc_groups[key]
-                res = _reformulate_disjunction_mbigm_conditioned(
-                    dc, new_model, _add_aux_binary, lp_data, selectors=sels, budget=_mbc_budget
-                )
-                _mbc_done[key] = None if res is None else res[1]
-                if res is not None:
-                    new_model._constraints.extend(res[1])
-            if _mbc_done[key] is not None:
-                continue  # the whole group was lowered above
-            # declined: this row takes today's route below
-        if (
-            isinstance(c, _IndicatorConstraint)
-            and c.disjunction is not None
             and c.disjunction[0] in _hull_groups
         ):
             key = c.disjunction[0]
@@ -465,7 +436,10 @@ def reformulate_gdp(
                 )
                 new_model._constraints.extend(new_cons)
         elif isinstance(c, _IndicatorConstraint):
-            if id(c.constraint) in _pt_dropped:
+            if (
+                c.disjunction is not None
+                and (c.disjunction[0], c.disjunction[1], id(c.constraint)) in _pt_dropped
+            ):
                 continue  # replaced by a bound row (#1775 G2.4)
             new_cons = _reformulate_indicator(
                 c,
@@ -536,32 +510,17 @@ def reformulate_gdp(
                     # as Pyomo's gdp.mbigm does.
                     _require_supported_semantics(c)
                 disj_lp = lp_data if chosen == "mbigm" else None
-                res = (
-                    _reformulate_disjunction_mbigm_conditioned(
-                        c,
-                        new_model,
-                        _add_aux_binary,
-                        lp_data,
-                        selectors=own_sels,
-                        budget=_mbc_budget,
-                    )
-                    if chosen == "mbigm" and _mbc_on
-                    else None
+                new_vars, new_cons = _reformulate_disjunction(
+                    c,
+                    new_model,
+                    _add_aux_binary,
+                    lp_data=disj_lp,
+                    selectors=own_sels,
+                    pretransform=_pt_on and chosen in ("big-m", "mbigm"),
+                    multiply=chosen == "binary_multiplication",
+                    user_ms=_user_ms(c, nested=False) if chosen == "big-m" else None,
+                    disagg=_disagg,
                 )
-                if res is not None:
-                    new_vars, new_cons = res
-                else:
-                    new_vars, new_cons = _reformulate_disjunction(
-                        c,
-                        new_model,
-                        _add_aux_binary,
-                        lp_data=disj_lp,
-                        selectors=own_sels,
-                        pretransform=_pt_on and chosen in ("big-m", "mbigm"),
-                        multiply=chosen == "binary_multiplication",
-                        user_ms=_user_ms(c, nested=False) if chosen == "big-m" else None,
-                        disagg=_disagg,
-                    )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
             new_cons = _reformulate_sos(
@@ -987,7 +946,8 @@ def _compute_big_m(
 
     # Ensure M is positive and add small safety margin. ``default`` is a floor
     # (a body whose valid bound is tiny still needs a nonzero M), never a cap.
-    return max(abs(M), 1e-8) * 1.01
+    M = max(abs(M), 1e-8) * 1.01
+    return M
 
 
 def _unbounded_big_m_error(constraint: Constraint, direction: str) -> ValueError:
@@ -1423,127 +1383,12 @@ def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
     return bounds_list
 
 
-#: Exact LPs one lowering may spend on conditioned Ms (#1775 G2.3). Sizing found
-#: ~0.1 s per LP on batch_processing (450 LPs, 41 s) and >5,000 on kaibel; past the
-#: budget the remaining rows keep today's unconditioned M, so a large model cannot
-#: spend its whole time limit before branch-and-bound starts.
-_MBIGM_CONDITIONED_LP_BUDGET = 1000
-
-#: Smallest conditioned M, relative to today's, short of dropping the term
-#: (#1824 review): a valid M only has to be ``>=`` the rigorous LP bound, and a
-#: coefficient within 1e3 of today's keeps the matrix's range near today's.
-_MBIGM_CONDITIONED_MIN_REL = 1e-3
-
-
 def _bound_pretransform_enabled() -> bool:
     """Is #1775 G2.4's automatic bound pretransformation on? (``DISCOPT_GDP_BOUND_PRETRANSFORM``,
-    default OFF)."""
+    default ON; ``=0`` opts out)."""
     from discopt.solver_tuning import current as _tuning
 
     return bool(_tuning().gdp_bound_pretransform)
-
-
-def _mbigm_conditioned_enabled() -> bool:
-    """Is #1775 G2.3's conditioned mbigm on? (``DISCOPT_MBIGM_CONDITIONED``, default OFF)."""
-    from discopt.solver_tuning import current as _tuning
-
-    return bool(_tuning().mbigm_conditioned)
-
-
-def _conditioned_ms(
-    con: Constraint,
-    k: int,
-    linear_rows: list[tuple[list, list, list, list]],
-    model: Model,
-    lp_data: tuple,
-    box: list[tuple[float, float]],
-    solve_lp,
-    budget: Optional[list[int]] = None,
-) -> tuple[list[float], list[float]]:
-    """Per-other-disjunct big-Ms of row ``con`` of disjunct ``k`` (#1775 G2.3).
-
-    Returns ``(up, down)``, one entry per disjunct (``0.0`` at ``k``): ``up[j]``
-    bounds ``body`` from above and ``down[j]`` bounds ``-body``, over the global
-    linear rows, disjunct ``j``'s linear rows and the box. Dropping ``j``'s
-    nonlinear rows only enlarges the LP region, so each M stays valid.
-
-    Every M starts at today's unconditioned value (:func:`_compute_big_m_lp`,
-    which also refuses an unbounded or undefined body exactly as before) and is
-    lowered only by a *rigorous* upper bound ``safe`` on the LP maximum
-    (:func:`_safe_lp_max`, the Neumaier-Shcherbina bound read off the OPTIMAL
-    vertex's duals), never by the raw vertex objective: a float simplex optimum
-    can undershoot the true maximum by an amount set by its dual-feasibility
-    tolerance times the box widths, which no fixed tolerance bounds. With ``safe``:
-
-    * ``safe <= 0`` -- every point of disjunct ``j``'s LP region has ``body <= 0``,
-      so disjunct ``j`` implies the row and the term is dropped (``M = 0``). This
-      removes no point at all, so no LP accuracy enters the argument.
-    * ``safe > 0`` -- ``M = max(1.01 * safe, _MBIGM_CONDITIONED_MIN_REL * M_now)``
-      (capped at today's M): valid because it is ``>= safe``, and never a tiny
-      coefficient. A tiny one is what broke med_term_purchasing: a ``1e-6`` floor
-      put 940 such coefficients into it and HiGHS's root LP on that matrix failed
-      discopt's certificate check (primal/dual pair dual-infeasible).
-
-    The first version snapped ``M`` to 0 whenever the raw objective was below
-    ``1e-9 * max(1, |offset|, M_now)``. That tolerance grows with the box, so on
-    ``x, z in [0, 1e6]`` it dropped a term whose true maximum was ``1e-4`` and
-    certified a wrong optimum (#1824 review). A body or rhs that is not a single
-    scalar keeps today's M (see :func:`_is_scalar_linear_row`).
-
-    A status that is not OPTIMAL -- INFEASIBLE included -- or an OPTIMAL exit
-    without finite duals keeps today's M: an LP-infeasible disjunct could justify
-    ``M = 0`` (it can never be selected), but only on a checked certificate, which
-    this route does not take. ``budget`` is a one-element list counting the exact
-    LPs this lowering may still run; at 0 the remaining rows keep today's M
-    (deterministic, unlike a wall-clock cap).
-    """
-    from discopt.solvers import SolveStatus
-
-    M_now = _compute_big_m_lp(con, model, lp_data)
-    n = len(linear_rows)
-    up = [0.0 if j == k else M_now for j in range(n)]
-    down = list(up)
-    A_ub, b_ub, A_eq, b_eq, n_vars = lp_data
-    if not _is_scalar_linear_row(con):
-        return up, down  # array-valued body or rhs: today's M for every j
-    coeffs = _extract_body_coeffs(con.body, model, n_vars)
-    if coeffs is None:
-        return up, down  # nonlinear body: today's M for every j
-    c_vec, offset = coeffs
-    want_up = con.sense in ("<=", "==")
-    want_down = con.sense in (">=", "==")
-    for j, (ub_rows, ub_rhs, eq_rows, eq_rhs) in enumerate(linear_rows):
-        if j == k:
-            continue
-        Au, bu = _stack_rows(A_ub, b_ub, ub_rows, ub_rhs)
-        Ae, be = _stack_rows(A_eq, b_eq, eq_rows, eq_rhs)
-        for side, wanted, sign in (("up", want_up, -1.0), ("down", want_down, 1.0)):
-            if not wanted:
-                continue
-            if budget is not None:
-                if budget[0] <= 0:
-                    continue  # budget spent: today's M
-                budget[0] -= 1
-            # up: max body = -min(-c.x); down: max(-body) = -min(c.x) - offset.
-            res = solve_lp(c=sign * c_vec, A_ub=Au, b_ub=bu, A_eq=Ae, b_eq=be, bounds=box)
-            if res.status != SolveStatus.OPTIMAL or res.objective is None:
-                continue
-            safe = _safe_lp_max(sign * c_vec, res, Au, bu, Ae, be, box)
-            if safe is None:
-                continue  # no rigorous bound: today's M
-            safe += offset if side == "up" else -offset
-            safe += 4.0 * FLOAT_EPS * abs(offset)  # the rounding of that addition
-            if not np.isfinite(safe) or abs(safe) >= _BIGM_SENTINEL:
-                continue
-            if safe <= 0.0:
-                M_j = 0.0  # body <= safe <= 0 on all of disjunct j: the row is implied
-            else:
-                M_j = max(1.01 * safe, _MBIGM_CONDITIONED_MIN_REL * M_now)
-            if side == "up":
-                up[j] = min(up[j], M_j)
-            else:
-                down[j] = min(down[j], M_j)
-    return up, down
 
 
 def _safe_lp_max(f, res, A_ub, b_ub, A_eq, b_eq, box) -> Optional[float]:
@@ -1636,115 +1481,6 @@ def _disjunct_linear_rows(disjunct: list, model: Model, n_vars: int):
             eq_rows.append(a)
             eq_rhs.append(rhs)
     return ub_rows, ub_rhs, eq_rows, eq_rhs
-
-
-def _reformulate_disjunction_mbigm_conditioned(
-    dc: _DisjunctiveConstraint,
-    model: Model,
-    add_aux_binary,
-    lp_data: Optional[tuple],
-    selectors: Optional[list[Variable]] = None,
-    budget: Optional[list[int]] = None,
-) -> tuple[list[Variable], list[Constraint]] | None:
-    """Multiple big-M conditioned on each disjunct (#1775 G2.3, flag-gated).
-
-    A row ``body <= 0`` of disjunct ``k`` becomes ``body <= sum_{j != k} M_{c,j}
-    y_j`` (``>=`` and ``==`` likewise), with the ``M_{c,j}`` of
-    :func:`_conditioned_ms`. With exactly one ``y_j = 1`` the row is ``body <= 0``
-    when ``k`` is selected and ``body <= M_{c,j}`` -- a valid bound over disjunct
-    ``j``'s region -- otherwise: exact at every integer point. Each ``M_{c,j}`` is
-    at most today's M, so the relaxation is at least as tight as unconditioned
-    mbigm.
-
-    SELECT_ONE disjunctions without nesting only; returns ``None`` (the caller
-    keeps today's route) for anything else, when there is no LP relaxation, or
-    when no exact LP oracle exists.
-    ``selectors`` as in :func:`_reformulate_disjunction`: given ones are the
-    caller's, whose select row the model already carries. ``budget`` is the
-    lowering's shared LP budget (see :func:`_conditioned_ms`).
-    """
-    if lp_data is None:
-        return None  # no LP relaxation to condition on
-    items = [it for d in dc.disjuncts for it in d]
-    if _is_or(dc) or any(isinstance(it, _DisjunctiveConstraint) for it in items):
-        return None
-    # Big-M bounds ``body`` against 0 (operator-built rows always have rhs 0); a
-    # row with a nonzero rhs keeps today's route rather than a new convention.
-    if any(np.any(np.asarray(it.rhs, dtype=np.float64) != 0.0) for it in items):
-        return None
-    try:
-        from discopt.solvers.lp_backend import get_exact_lp_solver
-
-        solve_lp = get_exact_lp_solver()
-    except ImportError:
-        return None
-    if solve_lp is None:
-        return None
-    _require_supported_semantics(dc)
-    n_disjuncts = len(dc.disjuncts)
-    new_vars: list[Variable] = []
-    new_cons: list[Constraint] = []
-    if selectors is not None:
-        if len(selectors) != n_disjuncts:
-            raise ValueError(
-                f"mbigm of disjunction {dc.name or 'anon'!r}: {len(selectors)} selectors "
-                f"for {n_disjuncts} disjuncts."
-            )
-        selectors = list(selectors)
-    else:
-        selectors = []
-        for k in range(n_disjuncts):
-            y_k = add_aux_binary(f"disj_{dc.name or 'anon'}_{k}")
-            selectors.append(y_k)
-            new_vars.append(y_k)
-        sum_expr: Expression = selectors[0]
-        for k in range(1, n_disjuncts):
-            sum_expr = sum_expr + selectors[k]
-        new_cons.append(
-            Constraint(
-                body=sum_expr - _wrap(1.0),
-                sense="==",
-                rhs=0.0,
-                name=f"_gdp_select_{dc.name}" if dc.name else None,
-            )
-        )
-
-    n_vars = lp_data[4]
-    box = _lp_box(model, n_vars)
-    if budget is None:
-        budget = [_MBIGM_CONDITIONED_LP_BUDGET]
-    linear_rows = [_disjunct_linear_rows(d, model, n_vars) for d in dc.disjuncts]
-    for k, disjunct in enumerate(dc.disjuncts):
-        for j, con in enumerate(disjunct):
-            up, down = _conditioned_ms(con, k, linear_rows, model, lp_data, box, solve_lp, budget)
-            cname = f"_gdp_mbc_{dc.name}_d{k}_c{j}" if dc.name else None
-
-            def _relax(ms: list[float]) -> Expression:
-                terms = [_wrap(m) * selectors[i] for i, m in enumerate(ms) if i != k and m != 0.0]
-                out: Expression = _wrap(0.0)
-                for t in terms:
-                    out = out + t
-                return out
-
-            if con.sense in ("<=", "=="):
-                new_cons.append(
-                    Constraint(
-                        body=con.body - _relax(up),
-                        sense="<=",
-                        rhs=0.0,
-                        name=(cname + "_le") if cname and con.sense == "==" else cname,
-                    )
-                )
-            if con.sense in (">=", "=="):
-                new_cons.append(
-                    Constraint(
-                        body=con.body + _relax(down),
-                        sense=">=",
-                        rhs=0.0,
-                        name=(cname + "_ge") if cname and con.sense == "==" else cname,
-                    )
-                )
-    return new_vars, new_cons
 
 
 def _extract_body_coeffs(
@@ -2675,10 +2411,13 @@ def _reformulate_disjunction(
     # gdp.bound_pretransformation's bound rows on these selectors (``pretransform``,
     # set only under DISCOPT_GDP_BOUND_PRETRANSFORM); the rows they replace are
     # skipped below.
+    # A disjunction carrying user big-M values (#1775 G2.6) is left to them: the user
+    # chose those Ms, and G2.6's certificate guard is built around their use.
     dropped: list[set[int]] = [set() for _ in dc.disjuncts]
     if (
         pretransform
         and not _is_or(dc)
+        and dc.big_m is None
         and not any(isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d)
     ):
         from discopt.gdp.bound_pretransform import pretransform_disjunction
@@ -3154,6 +2893,9 @@ def _reformulate_disjunction_hull(
                 )
 
     # --- Constraint reformulation per disjunct ---
+    # origin_ratio[k][name] = t of the eps-free lifted perspective (#1917), used only
+    # by rows whose g(0) is not finite.
+    origin_ratio: list[dict[str, Variable]] = [{} for _ in range(n_disjuncts)]
     for k, rows_k in enumerate(rows):
         y_k = selectors[k]
         # The perspective divides every variable owned by disjunct k by yhat_k:
@@ -3230,24 +2972,47 @@ def _reformulate_disjunction_hull(
                 # 3.86e-09 (the on disjunct). Shrinking eps does not help --
                 # the model is still exactly infeasible at eps = 1e-14 -- which is
                 # why only cancelling the terms, not making them small, fixes it.
-                g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
-                y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
-                persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
-                persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
-                subst_body = _substitute_vars(con.body, persp_map)
-                hull_body = subst_body * y_clamp
-                g0_live = _parametric_body_at_zero(con.body, zero_vars)
-                if g0_live is not None:
-                    # A Parameter in the body: g(0) must track its live value, or a
-                    # model lowered once (``transformations.create_using``) keeps
-                    # ``eps * g0_old`` after ``p.value`` changes and leaves an
-                    # off-disjunct residual -- the #1043 false-infeasible class
-                    # (PR #1862 review).
-                    g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
-                    hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
-                elif g0 != 0.0:
-                    hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
-                rhs_expr = _wrap(con.rhs) * y_clamp
+                try:
+                    g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
+                    g0_live = _parametric_body_at_zero(con.body, zero_vars)
+                except HullPerspectiveOriginError as origin_exc:
+                    # #1917: g(0) is not finite, so the eps-perspective cannot cancel
+                    # its residual. The eps-free lifted perspective needs no g(0);
+                    # it is used when g is bounded on the disjunct's own box, and the
+                    # refusal stands otherwise (_origin_free_hull_row).
+                    hull_body, rhs_expr = _origin_free_hull_row(
+                        con,
+                        y_k,
+                        [*((n, disagg[k][n]) for n in all_vars), *local[k].items()],
+                        disjunct_bounds[k],
+                        origin_ratio[k],
+                        model,
+                        f"{prefix}_{k}",
+                        new_vars,
+                        new_cons,
+                        origin_exc,
+                    )
+                    g0_live = None
+                    origin_free = True
+                else:
+                    origin_free = False
+                if not origin_free:
+                    y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
+                    persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                    persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
+                    subst_body = _substitute_vars(con.body, persp_map)
+                    hull_body = subst_body * y_clamp
+                    if g0_live is not None:
+                        # A Parameter in the body: g(0) must track its live value, or a
+                        # model lowered once (``transformations.create_using``) keeps
+                        # ``eps * g0_old`` after ``p.value`` changes and leaves an
+                        # off-disjunct residual -- the #1043 false-infeasible class
+                        # (PR #1862 review).
+                        g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
+                        hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
+                    elif g0 != 0.0:
+                        hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
+                    rhs_expr = _wrap(con.rhs) * y_clamp
 
             if con.sense == "<=":
                 new_cons.append(
@@ -3286,6 +3051,99 @@ def _reformulate_disjunction_hull(
                 )
 
     return new_vars, new_cons
+
+
+def _origin_free_hull_row(
+    con: Constraint,
+    y_k: Expression,
+    owned: list[tuple[str, Variable]],
+    bounds_k: dict[str, tuple[float, float]],
+    cache: dict[str, Variable],
+    model: Model,
+    stem: str,
+    new_vars: list[Variable],
+    new_cons: list[Constraint],
+    origin_exc: HullPerspectiveOriginError,
+) -> tuple[Expression, Expression]:
+    """The hull of a row whose ``g(0)`` is not finite: the eps-free lifted perspective.
+
+    For each variable ``x`` of the row, disjunct ``k`` owns a copy ``v``; this emits
+    ``t`` in the disjunct's OWN box ``[dlb, dub]`` (which need not contain 0) with
+    ``v - y_k * t = 0``, and returns the row ``y_k * g(t)`` against ``y_k * rhs`` in
+    the row's own sense. Exact, and no ``g(0)`` anywhere:
+
+    * ``y_k = 1``: ``t = v``, the original row.
+    * ``y_k = 0``: the bound links pin ``v = 0``, and the row reads ``0 <sense> 0``,
+      which holds for every ``t`` -- nothing to cancel, which is the residual the
+      eps-perspective needs ``g(0)`` for (#1043).
+    * fractional ``y_k``: ``t = v / y_k``, the perspective itself; the links
+      ``dlb y_k <= v <= dub y_k`` put it inside ``[dlb, dub]``, so ``t``'s bounds cut
+      no feasible point.
+
+    ``g`` is evaluated only on the disjunct's own box, where the model itself
+    evaluates it. That is required, not assumed: when the interval enclosure of
+    ``g(t)`` over the box is not finite (``1/x`` or ``log x`` on a box reaching 0),
+    the row's relaxation would be unbounded too, so the original refusal is
+    re-raised instead. Unlike the eps-perspective this form is bilinear, so a
+    convex disjunct row does not stay convex; it is used only where the
+    eps-perspective cannot be formed at all, and a model it does not touch lowers
+    byte-identically.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    if "not collected" in str(origin_exc):  # an internal inconsistency, not g(0)
+        raise origin_exc
+    in_body = _collect_variables(con.body)
+    fresh: list[tuple[str, Variable, Variable]] = []
+    persp_map: dict[str, Expression] = {}
+    for vname, v in owned:
+        if vname not in in_body:
+            continue
+        t = cache.get(vname)
+        if t is None:
+            lo, hi = bounds_k.get(vname, (float(np.min(v.lb)), float(np.max(v.ub))))
+            t = Variable(
+                model._fresh_name(f"_hull_{stem}_t0_{vname}"),
+                VarType.CONTINUOUS,
+                v.shape,
+                lo,
+                hi,
+                model,
+            )
+            fresh.append((vname, v, t))
+        persp_map[vname] = t
+    g_t = _substitute_vars(con.body, persp_map)
+    try:
+        enc = evaluate_interval(g_t, None)
+        finite = bool(
+            np.all(np.isfinite(np.asarray(enc.lo))) and np.all(np.isfinite(np.asarray(enc.hi)))
+        )
+        why = f"enclosure [{np.min(enc.lo):g}, {np.max(enc.hi):g}]"
+    except Exception as exc:  # noqa: BLE001 - re-raised below as the refusal, with cause
+        finite, why = False, f"no enclosure ({type(exc).__name__}: {exc})"
+    if not finite:
+        raise HullPerspectiveOriginError(
+            f"{origin_exc}; and the row is not bounded on its disjunct's own box "
+            f"({why}), so the eps-free lifted perspective would have an unbounded "
+            "relaxation as well (#1917)"
+        ) from origin_exc
+    for vname, v, t in fresh:
+        # Every ``t`` of this row was constructed before any was registered (so a
+        # refusal above leaves the model untouched), which gave them all the same
+        # column; give each its own now (#1917, GDPlib ``hda``).
+        t._index = len(model._variables)
+        new_vars.append(t)
+        model._register_generated_variable(t)
+        new_cons.append(
+            Constraint(
+                body=v - y_k * t,
+                sense="==",
+                rhs=0.0,
+                name=f"_hull_ratio0_{stem}_{vname}",
+            )
+        )
+        cache[vname] = t
+    return g_t * y_k, _wrap(con.rhs) * y_k
 
 
 def _hull_conic_quadratic_enabled() -> bool:

@@ -149,6 +149,28 @@ refutes:
   that is not finite at the origin, so the eps-perspective cannot cancel its residual
   there. This is a loud refusal, not a wrong answer, and it is hull's largest
   capability gap on this panel.
+  * **Update 2026-10-31 (#1917):** such a row is now lowered by the eps-free lifted
+    perspective (`_origin_free_hull_row`: `v - y t = 0`, `t` in the disjunct's own
+    box, row `y g(t) <sense> y rhs`), which needs no `g(0)`, whenever `g` has a finite
+    interval enclosure on that box; the refusal stands otherwise (e.g. `1/x` or
+    `log x` on a box reaching 0). Verified on synthetic `log`/`1/x` disjuncts
+    (differential battery, hull = big-M).
+  * **Measured 2026-11-01, superseding the "not yet measured" this bullet used to
+    carry (§11).** These are single 120 s hull solves on GDPlib master, at host load
+    about 15, so the walls are not measurements.
+    * stranded_gas still refuses: its `log` rows are unbounded on their own box, as
+      predicted.
+    * gdp_col and kaibel lower and end at `time_limit`. gdp_col reaches bound 1000
+      with no incumbent; kaibel reaches neither a bound nor an incumbent.
+    * hda lowers and ends at `time_limit` at 300 s with bound 112572 ≥ 5965.856
+      (maximize) and no incumbent.
+    * **The first measurement of these instances was wrong.** The origin-free row
+      gave every `t` of a row the same column, and hull returned a false
+      `infeasible` on hda. Fixed in `064efbf5`; the evidence is in
+      `data/1917-flag-panel/README.md`.
+    * Status: three of the four refusals became sound lowerings, and none of the
+      three solves within the limit yet. That is a performance gap. It is not a
+      parity result.
 * **discopt LOA on stranded_gas** refuses because a row inside a disjunct has no
   finite lower bound for big-M.
 * **Killed (SIGKILL; presumed OOM), exit -9: 18 runs, scored `unsolved`.**
@@ -223,5 +245,127 @@ For the G5 entry experiments:
 * The hull origin refusals need a hull form that never evaluates the body at 0 for a
   de-selected disjunct. G2.2's perspective variants do not obviously provide one,
   since the eps-perspective still evaluates g at 0 when y = 0, so this is not yet
-  scoped to a task.
+  scoped to a task. (Superseded 2026-10-31: see the `_origin_free_hull_row` update under Errors.)
 * LOA's gap is 4 instances, not speed.
+
+## G4.1 part 2: per-cut big-M on LOA's OA cuts — measured, not adopted (2026-10-31, #1917)
+
+**Hypothesis.** Spec §5.3 asks for OA cuts "big-M'd onto that disjunct's indicator"
+(Pyomo `_add_cuts_to_discrete_problem`) instead of linearised through the lowered
+row's `M(1 - y)`. For a cut `a x + b y <= c` with `y` binary this is classical
+coefficient strengthening: if the cut has slack `d > 0` at `y = 0` over the whole
+box, replace `(b, c)` by `(b - d, c - d)`. That is exact at `y in {0, 1}` and tighter
+in between. Kill criterion: no fewer master iterations and no better bound on the
+instances it fires on.
+
+**Experiment.** `docs/dev/data/1917-loa-cut-strengthening/loa_strengthen.py` patches
+`LOA._cuts_at` to strengthen every new cut over the lowered box (outward-rounded).
+It runs `gdp_method="loa"` OFF/ON interleaved, at 120 s, on the 7 Pyomo GDPopt
+models (the only `gdp_parity` instances available here; see
+`1917-flag-panel-preview/README.md`). Main `4517c7b`, default master
+(`DEFAULT_MASTER_BACKEND="auto"`, the in-house MILP).
+
+| instance | coefs tightened | OFF it / status | ON it / status |
+|---|---|---|---|
+| eight_process | 1825 | 3 / optimal | 25 / feasible, **no bound** |
+| eight_process_logical | 1475 | 3 / optimal | 25 / feasible, **no bound** |
+| constrained_layout_clay0203 | 1764 | 45 / optimal (39 s) | 48 / time limit, **no bound** |
+| nonconvex_hen | 672 | 28 / optimal | 28 / optimal (identical) |
+| strip_packing_concrete, jobshop_small | 48, 12 | 1 / optimal | identical |
+| ex_633_trespalacios | 0 (no convex row) | 5 / optimal | identical |
+
+**Why.**
+- The strengthening is valid. `loa_strengthen_check.py` evaluated 876 checks of the
+  OFF run's master points against the strengthened cuts, and **0** were cut off.
+- With strengthened cuts every master on eight_process ends `iteration_limit`
+  (25 of 25), against 3 of 3 `optimal` without them (`loa_master_status.py`). With
+  no master bound, LOA walks the configurations blind.
+- On the HiGHS master (`milp_solver="highs"`) the two arms are identical (3
+  masters, same bound): HiGHS's presolve already does this strengthening.
+
+**Verdict: falsified on this slice.** The change is neutral where the master
+presolves and harmful where it does not, so it is not adopted. The other G4.1
+part 2 pieces (equality relaxation, slack penalty) give **no** valid LB (spec
+§5.3, §5.4), so they can only help where LOA fails to converge. All 7 available
+models certify under LOA, so there is no instance to measure them on: blocked
+on the full panel.
+
+**Side finding.** The in-house MILP master hits its iteration limit on
+coefficient-strengthened OA rows that HiGHS solves at once. That is a
+master-robustness defect outside #1917's scope; the probe above reproduces it.
+
+## G5.2: native k-way disjunction branching — entry experiment, killed on the available slice (2026-10-31, #1917)
+
+Plan §7: count big-M B&B branches on selector binaries, then compare node counts
+against disjunction-wise branching prototyped in the Python LBB. Kill: median
+node-count ratio >= 0.95; then k-way stays an LBB-only route.
+
+Measured on the 5 Pyomo GDPopt models with a non-trivial tree (main `4517c7b`,
+120 s). Branch counts come from the instrumentation-only `_R3A_BRANCH_COUNT_SINK`.
+
+| instance | big-M nodes | branches on selectors / all | LBB nodes | ratio |
+|---|---|---|---|---|
+| eight_process | 33 | 15 / 16 | 59 | 1.79 |
+| eight_process_logical | 25 | 12 / 12 | >= 64 (time limit) | >= 2.6 |
+| constrained_layout_clay0203 | 135 | 67 / 67 | >= 237 (time limit) | >= 1.8 |
+| ex_633_trespalacios | 13 | 1 / 6 | 5 | 0.38 |
+| nonconvex_hen | 3 | 1 / 1 | 13 | 4.3 |
+
+**Median ratio about 1.8: killed.** k-way branching stays LBB's.
+
+Two caveats:
+- LBB's node relaxation is also weaker: it drops the nonlinear rows of undecided
+  disjunctions. So this is the plan's experiment, not a pure test of the branching
+  rule.
+- Big-M B&B already branches almost only on selectors. For a two-disjunct
+  disjunction that *is* a 2-way disjunction branch, so a Rust k-way rule could
+  differ only on disjunctions with three or more disjuncts (clay0203's four-way
+  non-overlap, positioning).
+
+Re-open only with a Rust prototype measured on such instances.
+
+That run also surfaced a HiGHS false-optimum on the `lp_nlp_bb` master:
+`docs/dev/data/1917-highs-false-milp-optimum/README.md`.
+
+## G5.4: advisor extension — closed, nothing to advise on (2026-11-01, #1917)
+
+Plan §7 scopes G5.4 as extending `gdp_advisor` to consider G2.2 and G2.3, with
+the kill rule that it graduates only if `auto` beats `big-m` net-positive.
+- G2.2 (hull local vars) was retired with no measurement.
+- G2.3 (`DISCOPT_MBIGM_CONDITIONED`) was retired by its §5 panel (below).
+
+With both options gone, G5.4 has nothing left to route to and closes.
+
+## §5 panels for the GDP flags (2026-11-01, #1917)
+
+Full `gdp_parity` panel (24 GDPlib instances from git), 3 reps at 120 s, OFF/ON
+interleaved, load-gated. Data and method: `data/1917-flag-panel/`. Every panel was
+cert-clean: 0 incorrect, 0 dual bounds past an oracle, 0 instances lost.
+
+| flag | cells fired | solved gained | SGM wall OFF -> ON | verdict |
+|---|---|---|---|---|
+| `DISCOPT_GDP_BOUND_PRETRANSFORM` (G2.4) | 32 (big-m + mbigm) | syngas mbigm 0/3 -> 3/3 | 36.15 -> 35.39 s; wall down on 15 of the 16 cells solved in both arms (modprodnet big-m 8.2 -> 8.3 s the exception) | **graduated** (default ON) |
+| `DISCOPT_MBIGM_CONDITIONED` (G2.3) | 21 | none | 26.88 -> 27.49 s; med_term 4.9 -> 10.6 s | **retired** |
+| `DISCOPT_GDP_DISJUNCT_FBBT` (G5.1) | 17 | syngas 0/3 -> 2/3 | 34.55 -> 35.73 s; positioning 26.4 -> 39.4 s, med_term 4.5 -> 8.7 s | **retired** (gain on one instance only) |
+| `DISCOPT_GDP_ENUMERATE_CUTOFF` (G4.2) | all | see audit row | see audit row | **graduated** (`f9b9e7a5`) |
+
+BOUND_PRETRANSFORM costs nodes on three cells (spectralog 411 -> 651,
+nonconvex_hen 3 -> 5, med_term_purchasing mbigm 57 -> 95) while still cutting their
+wall; the gain is not confined to one instance. Graduating it surfaced two gaps,
+both closed in the same PR and both bound-neutral on the panel (no converted
+instance has an array-valued disjunct row or a user `big_m`): array rows are now
+pretransformed (otherwise the two #1215 idioms lower differently), and a user's
+`big_m` is no longer silently replaced. A third was a false certificate: a block
+row whose `Constraint` object an `if_then` also wraps was dropped from both, so the
+implication disappeared (smoke caught it; objective 1 against a true 5). It was
+latent on `main` under `=1`, and the panel could not see it, since no converted
+instance shares a constraint between indicator rows (16,648 references, 0 shared).
+Rows are now dropped only as members of their own block disjunct.
+
+Side findings from the panels:
+- `small_batch` under `enumerate` returned `unknown`: every configuration NLP was
+  refused by POUNCE with `Not_Enough_Degrees_Of_Freedom` (more all-fixed equality
+  rows than free columns). `140da1b1` re-solves without the all-fixed rows when they
+  all hold; enumerate now certifies 167427.657 (`test_1917_nlp_constant_rows.py`).
+- The mbigm lowering exceeds 600 s on `biofuel` and `stranded_gas`, and the big-M
+  setup on `stranded_gas` takes about 120 s. Both are open performance gaps.

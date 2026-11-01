@@ -351,16 +351,26 @@ class _Lowered:
         v = self._max_violation(z1)
         if v <= ADMIT_TOL:
             return True, f"affine-row LP witness, max violation {v:.2e}"
-        if self._pinned(z0, g0, J0, rows):
+        pinned = self._pinned(z0, g0, J0, rows)
+        if pinned.all():
             # The affine rows leave exactly one ``a``; it violates a nonlinear row.
             return False, f"unique affine-row witness violates by {v:.2e}"
+        # #1917: some coordinates are free -- e.g. the lifted hull ratio ``t`` of an
+        # inactive disjunct, whose row ``v - eps * t = 0`` holds within ADMIT_TOL
+        # for every ``t`` in the box. A violated row whose value depends only on
+        # pinned coordinates is violated by every completion (up to its gradient
+        # times the pinning width), so the point is still rejected exactly.
+        bad = self._violated_on_pinned(z1, pinned)
+        if bad is not None:
+            return False, bad
         raise RuntimeError(
             "a lowered row is nonlinear in the continuous auxiliaries and the affine rows "
             "do not pin them; the battery has no solver-free verdict for this point"
         )
 
-    def _pinned(self, z0, g0, J0, rows) -> bool:
-        """True when the affine rows (met exactly) admit a single ``a`` (width <= 1e-9)."""
+    def _pinned(self, z0, g0, J0, rows) -> np.ndarray:
+        """Per coordinate of ``a``: do the affine rows (met within ADMIT_TOL) leave it a
+        single value (width <= 10 * ADMIT_TOL)?"""
         from scipy.optimize import linprog
 
         c = self.cont_cols
@@ -369,17 +379,58 @@ class _Lowered:
         A = self._signed_jac(J0)
         b = -(self._signed(g0) - A @ z0[c]) + ADMIT_TOL
         bounds = list(zip(self.lb[c], self.ub[c]))
+        pinned = np.zeros(len(c), dtype=bool)
         for j in range(len(c)):
             e = np.zeros(len(c))
             e[j] = 1.0
             lo = linprog(e, A_ub=A, b_ub=b, bounds=bounds, method="highs")
             hi = linprog(-e, A_ub=A, b_ub=b, bounds=bounds, method="highs")
             if lo.status != 0 or hi.status != 0:
-                return False
+                continue
             # ADMIT_TOL of row slack moves a pinned coordinate by O(ADMIT_TOL).
-            if -hi.fun - lo.fun > 10 * ADMIT_TOL:
-                return False
-        return True
+            pinned[j] = -hi.fun - lo.fun <= 10 * ADMIT_TOL
+        return pinned
+
+    def _violated_on_pinned(self, z1: np.ndarray, pinned: np.ndarray) -> str | None:
+        """A reason when a row violated at ``z1`` depends on pinned coordinates only.
+
+        A row's dependence on ``a`` is its Jacobian support, unioned over ``z1`` and
+        random points of the box (an accidental zero at one point cannot hide a
+        coordinate). Its value moves by at most ``|grad| * 10 * ADMIT_TOL`` across
+        the pinning width, so only a violation past that margin is a proof."""
+        c = self.cont_cols
+        rng = np.random.default_rng(2)
+        support = np.zeros((len(self.senses), len(c)), dtype=bool)
+        grad = np.zeros((len(self.senses), len(c)))
+        for i in range(4):
+            z = z1.copy()
+            if i:
+                z[c] = self.lb[c] + rng.random(len(c)) * (self.ub[c] - self.lb[c])
+            J = np.asarray(self.ev.evaluate_jacobian(z), dtype=np.float64)[:, c]
+            if not np.all(np.isfinite(J)):
+                return None
+            support |= J != 0.0
+            if not i:
+                grad = J
+        free_ok = ~np.any(support & ~pinned[None, :], axis=1)  # depends on pinned only
+        g = np.asarray(self.ev.evaluate_constraints(z1), dtype=np.float64)
+        margin = ADMIT_TOL + 10 * ADMIT_TOL * np.abs(grad).sum(axis=1)
+        # ``_signed`` stacks [<=, >=, ==, ==]; map each stacked residual to its row.
+        idx = np.arange(len(self.senses))
+        rows_of = np.concatenate(
+            [
+                idx[self.senses == "<="],
+                idx[self.senses == ">="],
+                idx[self.senses == "=="],
+                idx[self.senses == "=="],
+            ]
+        )
+        viol = self._signed(g) - margin[rows_of]
+        hit = (viol > 0.0) & free_ok[rows_of]
+        if np.any(hit):
+            r = int(rows_of[np.argmax(np.where(hit, viol, -np.inf))])
+            return f"row {r} depends on pinned auxiliaries only and is violated"
+        return None
 
     def _affine_rows(self, z0, g0, J0) -> np.ndarray:
         """Rows whose value is affine in the continuous auxiliaries at fixed ``x``."""

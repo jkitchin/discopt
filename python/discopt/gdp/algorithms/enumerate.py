@@ -153,6 +153,10 @@ class Enumerate(GDPAlgorithm):
         #: Each solved configuration's bound (minimization convention): ``+inf``
         #: when certified infeasible, ``None`` when there is no valid bound.
         self.config_bounds: list[Optional[float]] = []
+        #: Configurations closed by the incumbent cutoff (#1917).
+        self.n_cutoff_dominated = 0
+        #: Configurations re-solved without the cutoff (no proof under it).
+        self.n_cutoff_retried = 0
 
     def iterate(self) -> bool:
         from discopt.gdp.algorithms.subproblem import solve_subproblem
@@ -162,17 +166,50 @@ class Enumerate(GDPAlgorithm):
             self._finish()
             return False
         index = len(self.config_bounds)
+        c = self._cutoff()
         res = solve_subproblem(
             self.space.work,
             selection,
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
+            cutoff=None if c is None else self.obj_sign * c,
         )
         self.n_subproblems += 1
         if res.x is not None:
             self.offer_incumbent(res.x)
+        if c is not None and res.status not in ("infeasible", "optimal"):
+            # Neither proof came: a configuration whose optimum ties the incumbent
+            # leaves the restriction infeasible by only ``delta``, which a solve may
+            # not certify (measured: a point violating the cutoff row by 6.5e-6 and
+            # no bound). Solve the configuration as without the flag instead.
+            self.n_cutoff_retried += 1
+            c = None
+            res = solve_subproblem(
+                self.space.work,
+                selection,
+                self.deadline,
+                mode="global",
+                gap_tolerance=self.gap_tolerance,
+            )
+            self.n_subproblems += 1
+            if res.x is not None:
+                self.offer_incumbent(res.x)
         bound = None if res.bound is None else self.obj_sign * float(res.bound)
+        if c is not None:
+            # The result is about the configuration restricted to f <= c. Its
+            # minimum m is either <= c (the restriction removes no minimizer, so a
+            # bound b on the restricted problem has b <= m) or > c (the restricted
+            # problem is empty, and whatever bound it reported says nothing). In
+            # both cases min(b, c) <= m, and a certified-empty restriction proves
+            # m > c, so c is its bound.
+            if res.status == "infeasible":
+                self.n_cutoff_dominated += 1
+                self.config_bounds.append(c)
+                self.mark_solved(index)
+                return True
+            if bound is not None:
+                bound = min(bound, c)
         if res.status == "infeasible":
             self.config_bounds.append(math.inf)
             self.mark_solved(index)
@@ -183,6 +220,21 @@ class Enumerate(GDPAlgorithm):
             self.config_bounds.append(bound)
             self.mark_unresolved(index)
         return True
+
+    def _cutoff(self) -> Optional[float]:
+        """The incumbent cutoff for the next configuration (minimization convention).
+
+        ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (default ON, #1917): ``UB - delta`` with
+        ``delta`` half the gap the convergence test allows at ``UB``, so a
+        configuration bounded by it keeps the final gap within tolerance. ``None``
+        with the flag off or no incumbent yet.
+        """
+        from discopt.solver_tuning import current as _tuning
+
+        if not _tuning().gdp_enumerate_cutoff or not math.isfinite(self.ub):
+            return None
+        delta = 0.5 * self.gap_tolerance * abs(self.ub) + 0.5 * self.abs_gap_tolerance
+        return self.ub - delta
 
     def _finish(self) -> None:
         if len(self.config_bounds) != self.n_configurations:
@@ -203,6 +255,8 @@ class Enumerate(GDPAlgorithm):
             "n_configurations": int(self.n_configurations),
             "n_configurations_raw": int(self.n_configurations_raw),
             "n_configurations_solved": len(self.config_bounds),
+            "n_cutoff_dominated": int(self.n_cutoff_dominated),
+            "n_cutoff_retried": int(self.n_cutoff_retried),
         }
 
 

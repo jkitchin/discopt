@@ -108,18 +108,63 @@ def test_lowered_model_tracks_a_parameter_change():
         assert r.objective == pytest.approx(truth, abs=1e-4), value
 
 
-def test_parameter_in_an_unsafe_origin_value_is_refused():
-    # log(q) at the origin may become undefined for a later q, where a lowered
-    # model can no longer refuse: refused at lowering, as before #1846.
-    from discopt._relax.gdp_reformulate import reformulate_gdp
-
+def _log_q_model():
     m = dm.Model()
     x = m.continuous("x", lb=0, ub=5)
     q = m.parameter("q", value=3.0)
     m.either_or([[dm.exp(x) + dm.log(q) <= 4], [x >= 4]])
-    m.minimize(x)
-    with pytest.raises(ValueError, match="may become undefined"):
-        reformulate_gdp(m, "hull")
+    m.minimize(-x)
+    return m, q
+
+
+@pytest.mark.parametrize("value", [3.0, 1.0, 20.0])
+def test_parameter_in_an_unsafe_origin_value_takes_the_origin_free_hull(value):
+    # log(q) at the origin may become undefined for a later q, so the eps-perspective
+    # (which bakes eps * g(0) into the row) was refused here before #1917. The
+    # eps-free lifted perspective has no g(0) term -- the row is y * g(t) with the
+    # Parameter live in g -- so a model lowered once stays exact after q changes.
+    # Truth: x <= log(4 - log q) in the first disjunct, x >= 4 in the second; the
+    # maximum of x is 5 (second disjunct) whenever it is feasible, which it is.
+    import discopt.transformations as dt
+    from discopt._relax.gdp_reformulate import reformulate_gdp
+
+    low = reformulate_gdp(_log_q_model()[0], "hull")
+    assert any(c.name and c.name.startswith("_hull_ratio0_") for c in low._constraints)
+
+    m, _ = _log_q_model()
+    lowered = dt.create_using("gdp.hull", m)
+    next(p for p in lowered._parameters if p.name == "q").value = value
+    fresh, q = _log_q_model()
+    q.value = value
+    # big-M refuses log(q) (its #1779 domain check), so a hull lowered at the new
+    # q is the comparison, alongside the known optimum.
+    r, r_fresh = _solve(lowered), _solve(fresh, gdp_method="hull")
+    assert r.status == r_fresh.status == "optimal"
+    assert r.objective == pytest.approx(r_fresh.objective, abs=1e-6)
+    assert r.objective == pytest.approx(-5.0, abs=1e-6)
+
+
+def test_lifted_origin_free_row_tracks_the_parameter():
+    # Make the first disjunct the only feasible one (x <= 3) so the answer depends
+    # on q through log(q): x* = log(4 - log q), re-solved after q changes.
+    import discopt.transformations as dt
+
+    def build():
+        m = dm.Model()
+        x = m.continuous("x", lb=0, ub=3)
+        q = m.parameter("q", value=3.0)
+        m.either_or([[dm.exp(x) + dm.log(q) <= 4], [x >= 4]])
+        m.minimize(-x)
+        return m, q
+
+    m, _ = build()
+    lowered = dt.create_using("gdp.hull", m)
+    for value in (3.0, 1.0, 20.0):
+        next(p for p in lowered._parameters if p.name == "q").value = value
+        r = _solve(lowered)
+        assert r.status == "optimal", (value, r.status)
+        truth = -np.log(4.0 - np.log(value))
+        assert r.objective == pytest.approx(truth, abs=1e-5), value
 
 
 def test_bool_index_is_not_an_integer_index():

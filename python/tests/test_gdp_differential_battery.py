@@ -21,6 +21,19 @@ import pytest
 from discopt.modeling.core import _DisjunctiveConstraint
 from gdp_differential import METHODS, Shape, run_shape
 
+
+@pytest.fixture
+def legacy_big_m(monkeypatch):
+    """The big-M lowering without the bound pretransform (``=0``).
+
+    Since #1917 ``DISCOPT_GDP_BOUND_PRETRANSFORM`` is default ON and replaces a
+    SELECT_ONE disjunction's univariate rows by bound rows, so those rows never get
+    a big-M. A test whose subject is the big-M rows themselves (their text, their
+    M, or a relaxation loose enough to separate) opts out explicitly.
+    """
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
+
 # ---------------------------------------------------------------------------
 # Review §4 shapes
 # ---------------------------------------------------------------------------
@@ -265,6 +278,28 @@ def _domain_restricted_wrapped():
     return m
 
 
+def _log_off_origin():
+    """#1917: ``log(x)`` is not finite at the origin, so the eps-perspective cannot
+    be formed; the disjunct's own ``x >= 1`` keeps it bounded on its box, so the
+    eps-free lifted perspective lowers it (``_origin_free_hull_row``)."""
+    m = dm.Model("log_off_origin")
+    x = m.continuous("x", lb=0, ub=10)
+    z = m.continuous("z", lb=-5, ub=5)
+    m.either_or([[dm.log(x) >= z, x >= 1], [x <= 0.2, z <= -1]], name="d")
+    m.minimize((x - 4) ** 2 - z)
+    return m
+
+
+def _recip_off_origin():
+    """#1917: ``1/x`` divides by zero at the origin; ``x >= 0.5`` in the disjunct."""
+    m = dm.Model("recip_off_origin")
+    x = m.continuous("x", lb=0, ub=10)
+    z = m.continuous("z", lb=-5, ub=5)
+    m.either_or([[1.0 / x <= z + 1, x >= 0.5], [x <= 0.2, z <= -1]], name="d")
+    m.minimize((x - 4) ** 2 - z)
+    return m
+
+
 def _block_disjunction():
     """``add_disjunction`` blocks: the indicators are user-visible model columns."""
     m = dm.Model("block_disjunction")
@@ -394,6 +429,24 @@ _UNBOUNDED_REFUSAL = (ValueError, r"(?i)bound")
 _DOMAIN_REFUSAL = (ValueError, r"undefined on part of the variable box")
 
 SHAPES: list[Shape] = [
+    Shape(
+        "log_off_origin",
+        _log_off_origin,
+        lambda v, t: (
+            (v["x"] >= 1 - t and math.log(max(v["x"], 1e-300)) >= v["z"] - t)
+            or (v["x"] <= 0.2 + t and v["z"] <= -1 + t)
+        ),
+        points=[{"x": 1.0, "z": 0.0}, {"x": math.e, "z": 1.0}, {"x": 0.2, "z": -1.0}],
+    ),
+    Shape(
+        "recip_off_origin",
+        _recip_off_origin,
+        lambda v, t: (
+            (v["x"] >= 0.5 - t and 1.0 / max(v["x"], 1e-300) <= v["z"] + 1 + t)
+            or (v["x"] <= 0.2 + t and v["z"] <= -1 + t)
+        ),
+        points=[{"x": 0.5, "z": 1.0}, {"x": 2.0, "z": -0.5}, {"x": 0.2, "z": -1.0}],
+    ),
     Shape("two_way", _two_way, lambda v, t: v["x"] <= 2 + t or v["x"] >= 5 - t),
     Shape(
         "multi_row",
@@ -733,6 +786,7 @@ def test_harness_catches_a_dropped_hull_aggregation_row(monkeypatch):
         rep.assert_sound()
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 def test_harness_catches_a_too_small_big_m(monkeypatch):
     """A big-M a tenth of the valid one cuts feasible points of the active disjunct."""
     import discopt._relax.gdp_reformulate as gr

@@ -159,11 +159,24 @@ def test_hull_on_add_disjunction_is_honoured():
     assert r.root_bound == pytest.approx(9.0, abs=1e-4)
 
 
-def test_bigm_on_add_disjunction_is_unchanged():
-    # Control: big-M on the same blocks keeps its weaker root bound.
+def test_bigm_on_add_disjunction_is_unchanged(monkeypatch):
+    # Control: plain big-M on the same blocks keeps its weaker root bound. The
+    # bound pretransformation (default ON since #1917) is pinned off: it turns
+    # the univariate block rows into bound rows and closes the gap (next test).
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
     r = _twobox("make_disjunct").solve(gdp_method="big-m")
     assert r.objective == pytest.approx(9.0, abs=1e-6)
     assert r.root_bound == pytest.approx(6.3, abs=1e-4)
+
+
+def test_bigm_with_the_bound_pretransform_closes_the_root_gap(monkeypatch):
+    # #1917: with the pretransformation (the default), big-M on the blocks reaches
+    # the hull's root bound, and never passes the optimum.
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "1")
+    r = _twobox("make_disjunct").solve(gdp_method="big-m")
+    assert r.objective == pytest.approx(9.0, abs=1e-6)
+    assert r.root_bound == pytest.approx(9.0, abs=1e-4)
+    assert r.root_bound <= r.objective + 1e-6
 
 
 def test_hull_on_add_disjunction_uses_the_user_indicators():

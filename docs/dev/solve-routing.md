@@ -285,6 +285,33 @@ a mapping with Pyomo GDPopt's key names (`iterlim`, `init_algorithm`,
 chosen method does not read yet, and any `gdp_options` with a reformulation method
 raise `ValueError` at entry. `loa` (#1775 G4.1, `discopt.gdp.algorithms.loa.LOA`) reads `iterlim` (default: `max_nodes`), `init_algorithm` (default `no_init`), `set_cover_iterlim` and discopt's own `subproblem`: `"global"` (the default) certifies each configuration's reduced subproblem with discopt and falls back to the local NLP step when that proves nothing; `"nlp"` is the pre-G4.1 loop (fixed-integer NLP on the big-M lowering). Measured on the `gdp_parity` panel at 60 s: `nlp` 8 solved, `global` 12, 0 incorrect. `loa`, `gloa`, `ric` and `ldsda` also read discopt's own `subproblem_time_limit` (#1984): each global subproblem's wall budget in seconds, default a tenth of the run within [1 s, 30 s] (#1153, LBB's node budget). Before #1984 LOA's global subproblem had no cap, and one nested `Model.solve` took 849 s of a 3600 s run. A subproblem stopped by the cap is uncertified, never excluded as resolved. LOA logs one INFO line per iteration to the `discopt.solvers.gdpopt_loa` logger (master bound, selected disjuncts, subproblem outcome and time, bound and incumbent in model units). `gloa` (#1775 G4.3, `discopt.gdp.algorithms.gloa.GLOA`) reads `iterlim`, `init_algorithm` and `set_cover_iterlim`; its subproblems are always global, so it reads no `subproblem` key. `ric` (#1775 G4.2) reads the same three keys; `enumerate` reads only discopt's own `max_configurations` (an integer ≥ 1). `lbb` (#1775 G4.4, `discopt.gdp.algorithms.lbb.LBB`) reads `iterlim` (a node limit) and `check_sat` (a bool; default on here, since logic propagation is exact and replaces Pyomo's z3 check). `ldsda` (#1775 G4.5, `discopt.gdp.algorithms.ldsda.LDSDA`) reads Pyomo's `starting_point`, `logical_constraint_list` and `disjunction_list` (the *names* of `exactly(1)` logical constraints and root disjunctions; Pyomo takes the components), `direction_norm` (`"L2"` or `"Linf"`), `iterlim`, `check_sat`, and `subproblem` (`"local"`, the default, or `"global"`). With no lists, every root exactly-one disjunction is an external variable; with no `starting_point`, each group takes its first value the logic does not refute.
 
+**Reformulation details added by #1917** (2026-10-31). They change none of the
+contract above.
+
+- **`hull`, a row whose `g(0)` is not finite** (`log x`, `1/x`). It used to raise
+  `HullPerspectiveOriginError`, because the eps-perspective needs `g(0)`. It is now
+  lowered by the eps-free lifted perspective whenever `g` is bounded on its
+  disjunct's own box: `v - y t = 0`, `t` in that box, row `y g(t) <sense> y rhs`
+  (`_relax/gdp_reformulate.py` `_origin_free_hull_row`). The refusal stands when
+  `g` is unbounded there. Every row whose `g(0)` is finite keeps the
+  eps-perspective, byte for byte.
+- **Graduated by their §5 panels** (default ON; `=0` restores the legacy route;
+  data in `docs/dev/data/1917-flag-panel/`):
+  - `DISCOPT_GDP_ENUMERATE_CUTOFF` (`enumerate`): each configuration bounded
+    against the incumbent.
+  - `DISCOPT_GDP_BOUND_PRETRANSFORM` (big-m / mbigm): the univariate rows of a
+    SELECT_ONE disjunction become `sum_k L_k y_k <= x <= sum_k U_k y_k`.
+- **Retired** (flag and implementation deleted; the audit rows record why):
+  - `DISCOPT_HULL_LIFTED_RATIO` (the eps-perspective evaluated at a lifted
+    `t = v / yhat`). Its panel failed cert-clean, and on the Python tree it
+    certified a false optimum.
+  - `DISCOPT_MBIGM_CONDITIONED` (mbigm with per-sibling exact-LP Ms): cert-clean,
+    no instance gained, SGM slightly worse.
+  - `DISCOPT_GDP_DISJUNCT_FBBT` (big-M bounded over the siblings' FBBT boxes):
+    cert-clean, one instance gained (syngas 0/3 -> 2/3), slower on others.
+- The GDP-algorithms notebook (`docs/notebooks/gdp_algorithms.ipynb`) walks
+  through the native methods, `gdp_options` and these flags on one model.
+
 **Axis 2 — `solver` / `mip_nlp_method`: *how the resulting algebraic MIP/MINLP is
 solved.*** With `solver="mip-nlp"`, `mip_nlp_method` selects the decomposition
 algorithm: `oa`, `ecp`, `fp`, `goa`, `lp_nlp_bb` (implemented); `roa` (reserved).

@@ -1165,52 +1165,28 @@ class SolverTuning:
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
     gdp_bound_pretransform: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_GDP_BOUND_PRETRANSFORM", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_GDP_BOUND_PRETRANSFORM", default=True)
     )
     """Apply ``gdp.bound_pretransformation`` inside the big-M and mbigm lowerings
-    (``DISCOPT_GDP_BOUND_PRETRANSFORM``, default **OFF**; #1775 G2.4, bound-changing
-    on the ``"big-m"`` / ``"mbigm"`` routes).
+    (``DISCOPT_GDP_BOUND_PRETRANSFORM``, default **ON** -- graduated by the §5 panel
+    below; opt out with ``DISCOPT_GDP_BOUND_PRETRANSFORM=0``, which keeps the legacy
+    lowering; #1775 G2.4, bound-changing on the ``"big-m"`` / ``"mbigm"`` routes).
 
     A disjunct row bounding one variable becomes part of ``sum_k L_k y_k <= x <=
     sum_k U_k y_k`` on the lowering's own selectors (exact under SELECT_ONE)
-    instead of a big-M row. The transformation itself is NC and user-selected
-    (``transformations.apply_to("gdp.bound_pretransformation", m)``); only its
-    automatic use is gated here. Default OFF until the §5 flag panel (CLAUDE.md)
-    shows it cert-clean and net-positive; the audit row is in
-    ``docs/dev/flag-retirement-audit.md``."""
+    instead of a big-M row. The transformation itself is also user-selectable
+    (``transformations.apply_to("gdp.bound_pretransformation", m)``).
 
-    mbigm_conditioned: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_MBIGM_CONDITIONED", default=False)
-    )
-    """Multiple big-M conditioned on each disjunct (``DISCOPT_MBIGM_CONDITIONED``,
-    default **OFF**; #1775 G2.3, bound-changing on the ``"mbigm"`` route).
-
-    Today ``gdp_method="mbigm"`` gives each disjunct row one M: an exact LP of its
-    body over the global linear rows and the box. With the flag ON, a row ``c`` of
-    disjunct ``k`` in a SELECT_ONE disjunction gets one ``M_{c,j}`` per *other*
-    disjunct ``j`` -- the exact-LP bound of its body over the global linear rows
-    **plus disjunct j's linear rows** -- and becomes ``body <= sum_{j != k}
-    M_{c,j} y_j`` (Pyomo's ``gdp.mbigm``). Exactly one ``y`` is 1, so the row is
-    exact at every integer point; each ``M_{c,j}`` is never above today's M, so
-    the LP relaxation is at least as tight. Sizing on the ``gdp_parity`` panel
-    (#1775, 2026-10-20): conditioning tightens 35-60 % of the rows on 6 of 23
-    measured instances.
-
-    **State: default OFF, panel owed** (owner decision 2026-10-20; tracking item
-    #1775 G2.3; audit row in ``docs/dev/flag-retirement-audit.md``). The entry
-    panel ran 2026-10-20 (21 ``gdp_parity`` instances, mbigm, 60 s, OFF/ON
-    interleaved) and was **cert-clean but not net-positive**: node counts fell on
-    med_term_purchasing, ex1_linan_2023 and small_batch, but modprodnet lost its
-    certificate and gdp_col, mod_hens and spectralog lost or worsened their
-    incumbent. Blocker: the conditioning LPs run before branch-and-bound and
-    ignore the solve's time limit -- the deterministic budget of 1,000 LPs does
-    not count :func:`~discopt._relax.gdp_reformulate._compute_big_m_lp`'s own LPs
-    and is not a deadline (stranded_gas spent >10 min in setup). What would
-    change it: deadline-aware conditioning (fall back to today's M once a share of
-    the time limit is spent), then the corpus panel decides graduate vs retire.
-    That panel ran before the #1824 review's soundness fixes (rigorous
-    Neumaier-Shcherbina M, no term dropped on a positive maximum, array-valued
-    rows keep today's M), so it is owed again on the fixed route."""
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, the 24-instance ``gdp_parity``
+    panel under big-M and mbigm, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): fires on 32 of 48 lowerings. Cert-clean (0
+    incorrect, 0 bound crossings, 0 solved lost). Net-positive: syngas under mbigm
+    0/3 -> 3/3 solved, and the wall falls on 15 of the 16 cells solved in both
+    arms (modprodnet big-M 8.2 -> 8.3 s is the exception; e.g. med_term_purchasing
+    big-M 4.6 -> 3.2 s, small_batch 2.3 -> 1.8 s); SGM over the 32 cells 36.15 ->
+    35.39 s. Nodes rise on spectralog (411 -> 651), nonconvex_hen (3 -> 5) and
+    med_term_purchasing under mbigm (57 -> 95), at a lower wall in each. Audit row
+    in ``docs/dev/flag-retirement-audit.md``."""
 
     hull_conic_quadratic: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
@@ -1233,8 +1209,50 @@ class SolverTuning:
     Entry measurement (flat three-circle disjunction, 5 objectives x 3 interleaved
     reps, all optimal and equal to big-M): 76.8 s per rep with today's hull ->
     0.54 s smoothed (11.3 s with the unsmoothed cone), certified convex at the
-    root, 1 node; big-M 0.1 s. **State: default OFF, panel
-    owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
+    root, 1 node; big-M 0.1 s.
+
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, the 24-instance
+    ``gdp_parity`` panel under hull, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): fires on 2 lowerings
+    (``constrained_layout_clay0203``, ``syngas``), identical on 21. Cert-clean (0
+    incorrect, 0 bound crossings, 0 solved lost); clay0203 53.4 -> 12.3 s, 301 -> 111
+    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s. **State: default OFF;
+    graduation is the owner's call** (cert-clean and net-positive where it fires,
+    but it helps on one corpus instance); audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
+
+    gdp_enumerate_cutoff: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
+    )
+    """Bound each enumerated configuration against the incumbent
+    (``DISCOPT_GDP_ENUMERATE_CUTOFF``, default **ON** -- graduated by the §5 panel
+    below; opt out with ``DISCOPT_GDP_ENUMERATE_CUTOFF=0``; bound-changing on
+    ``gdp_method="enumerate"``; #1917 G4.2).
+
+    Once there is an incumbent ``UB``, each configuration's global subproblem gets
+    the row ``f <= c``, ``c = UB - delta`` (``delta`` half the allowed gap at
+    ``UB``). A configuration that cannot beat ``c`` ends on a certified
+    infeasibility proof, often found by FBBT on that row alone, instead of a full
+    certification, and contributes ``c`` to the LB. Every other bound obtained
+    under the cutoff is recorded as ``min(bound, c)``. That is valid whether the
+    configuration's minimum is below ``c`` (the row removes no minimizer) or above
+    it (then ``c`` itself is below the minimum). The reported LB is looser, up to
+    ``delta`` below ``UB``, but still within the gap tolerance.
+
+    Entry measurement (7 Pyomo GDPopt models, main ``4517c7b``, one interleaved
+    OFF/ON run each, load ~1, every run certified in both arms):
+    strip_packing_concrete 74.9 -> 24.1 s (4090 of 4095 configurations closed by
+    the cutoff), eight_process 14.3 -> 5.5 s, eight_process_logical 18.6 -> 9.3 s,
+    nonconvex_hen 1.2 -> 0.9 s, constrained_layout_clay0203 127.8 -> 131.7 s,
+    ex_633_trespalacios 1.2 -> 2.7 s.
+
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, all 24 ``gdp_parity``
+    instances under enumerate, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): cert-clean (0 incorrect, 0 bound crossings,
+    0 solved lost; 9 instances certified in both arms); strip_packing 34.7 -> 12.8 s,
+    eight_process 5.5 -> 2.2 s, eight_process_logical 6.5 -> 3.5 s, ex_633 0.6 ->
+    1.0 s, clay0203 45.5 -> 47.7 s; SGM over the 18 cells that ran 30.40 -> 28.02 s.
+    **State: graduated, default ON**."""
 
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)

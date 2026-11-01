@@ -23,6 +23,19 @@ from discopt.modeling.core import (
     _IndicatorConstraint,
 )
 
+
+@pytest.fixture
+def legacy_big_m(monkeypatch):
+    """The big-M lowering without the bound pretransform (``=0``).
+
+    Since #1917 ``DISCOPT_GDP_BOUND_PRETRANSFORM`` is default ON and replaces a
+    SELECT_ONE disjunction's univariate rows by bound rows, so those rows never get
+    a big-M. A test whose subject is the big-M rows themselves (their text, their
+    M, or a relaxation loose enough to separate) opts out explicitly.
+    """
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
+
 # ── Model with no GDP constraints passes through unchanged ──
 
 
@@ -288,6 +301,7 @@ class TestDisjunctionReformulation:
         n_aux = len(new_m._variables) - len(m._variables)
         assert n_aux == 2
 
+    @pytest.mark.usefixtures("legacy_big_m")
     def test_three_disjuncts(self):
         m = dm.Model("t")
         x = m.continuous("x", lb=0, ub=30)
@@ -304,6 +318,7 @@ class TestDisjunctionReformulation:
         n_aux = len(new_m._variables) - len(m._variables)
         assert n_aux == 3
 
+    @pytest.mark.usefixtures("legacy_big_m")
     def test_disjunction_with_eq_constraint(self):
         m = dm.Model("t")
         x = m.continuous("x", lb=0, ub=10)
