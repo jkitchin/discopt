@@ -154,11 +154,23 @@ refutes:
     box, row `y g(t) <sense> y rhs`), which needs no `g(0)`, whenever `g` has a finite
     interval enclosure on that box; the refusal stands otherwise (e.g. `1/x` or
     `log x` on a box reaching 0). Verified on synthetic `log`/`1/x` disjuncts
-    (differential battery, hull = big-M). **Not yet measured on the 4 instances**:
-    the session that built it had only the PyPI GDPlib, where `kaibel`/`hda` do not
-    exist and `gdp_col`/`stranded_gas` do not build. `stranded_gas`'s 18 rows are
-    `log` of a capacity sum whose box includes 0 (#1182 scan), so they likely
-    still refuse.
+    (differential battery, hull = big-M).
+  * **Measured 2026-11-01, superseding the "not yet measured" this bullet used to
+    carry (§11).** These are single 120 s hull solves on GDPlib master, at host load
+    about 15, so the walls are not measurements.
+    * stranded_gas still refuses: its `log` rows are unbounded on their own box, as
+      predicted.
+    * gdp_col and kaibel lower and end at `time_limit`. gdp_col reaches bound 1000
+      with no incumbent; kaibel reaches neither a bound nor an incumbent.
+    * hda lowers and ends at `time_limit` at 300 s with bound 112572 ≥ 5965.856
+      (maximize) and no incumbent.
+    * **The first measurement of these instances was wrong.** The origin-free row
+      gave every `t` of a row the same column, and hull returned a false
+      `infeasible` on hda. Fixed in `064efbf5`; the evidence is in
+      `data/1917-flag-panel/README.md`.
+    * Status: three of the four refusals became sound lowerings, and none of the
+      three solves within the limit yet. That is a performance gap. It is not a
+      parity result.
 * **discopt LOA on stranded_gas** refuses because a row inside a disjunct has no
   finite lower bound for big-M.
 * **Killed (SIGKILL; presumed OOM), exit -9: 18 runs, scored `unsolved`.**
