@@ -1110,12 +1110,13 @@ def _engine_gap(rel_gap: float, ref: Optional[float]) -> float:
     return 0.5 * max(float(rel_gap) * scale, 1e-9) / max(scale, 1.0)
 
 
-#: #2069: share of the confirmation budget the in-house engine gets when SCIP is
-#: installed to take over after it (see :func:`_confirm_lazy_master_independently`).
-_SIMPLEX_SHARE_BEFORE_SCIP = 0.25
-#: ... and its floor in seconds, so a short budget does not starve the engine that
-#: confirms most masters in well under a second.
-_SIMPLEX_FLOOR_S = 2.0
+#: #2069: seconds the in-house engine gets when SCIP is installed to take over
+#: after it (see :func:`_confirm_lazy_master_independently`). Measured over the 92
+#: confirmations of the routed panel (Rust only): median 0.08 s, p90 0.83 s; the
+#: masters it could not confirm (clay0303hfsg, m6) it failed on for 2.9 and 15.5 s
+#: while SCIP confirms them in under 1 s. A fraction of the remaining budget spent
+#: those seconds for nothing on every such master.
+_SIMPLEX_BUDGET_BEFORE_SCIP_S = 1.0
 
 
 def _run_simplex_engine(arrays, budget, gap, seed):
@@ -1135,7 +1136,7 @@ def _scip_available() -> bool:
     return True
 
 
-def _run_scip_engine(arrays, budget, gap, seed):
+def _run_scip_engine(arrays, budget, gap, seed, feastol=None):
     """SCIP on *arrays*: ``(status, bound or None, nodes)``.
 
     SCIP closes on ``|primal - dual| / min(|primal|, |dual|)``; *gap* is passed as
@@ -1147,6 +1148,18 @@ def _run_scip_engine(arrays, budget, gap, seed):
     s = pyscipopt.Model()
     s.hideOutput()
     s.setParam("limits/gap", float(gap))
+    # FAST presolve: measured on the three panel masters only SCIP confirmed
+    # (#2069), SCIP's default spent 8.47 / 0.87 / 1.57 s on clay0303hfsg / m6 /
+    # slay07m and FAST 0.46 / 0.77 / 0.60 s, same bounds. A presolve setting does
+    # not change what SCIP's dual bound means.
+    s.setPresolve(pyscipopt.SCIP_PARAMSETTING.FAST)
+    if feastol is not None:
+        # #2069: judge feasibility AND integrality at the tolerance HiGHS solved the
+        # master at. SCIP's default 1e-6 accepts an integer column at 3.999999; on
+        # the #1561 epsilon witness that point is -8 against an exact master
+        # optimum of -7, so a correct HiGHS claim (-7.00027) was "refuted" by
+        # tolerance slack alone. The in-house engine's 1e-5 is a Rust constant.
+        s.setParam("numerics/feastol", float(feastol))
     if budget is not None:
         s.setParam("limits/time", max(0.0, float(budget)))
     c = arrays["c"]
@@ -1225,8 +1238,9 @@ def _confirm_lazy_master_independently(
     when ``pyscipopt`` is installed. The in-house engine cannot bound every master
     HiGHS can (measured on ``m6``: 62.83 after 38 594 nodes and 11 s against a
     claim of 82.26 that SCIP confirms in 0.3 s), so with SCIP present it gets
-    ``_SIMPLEX_SHARE_BEFORE_SCIP`` of the budget (at least ``_SIMPLEX_FLOOR_S``) and
-    SCIP the rest; the chain stops at the first engine that confirms.
+    at most ``_SIMPLEX_BUDGET_BEFORE_SCIP_S`` and SCIP the rest; the chain stops at
+    the first engine that confirms. SCIP runs at HiGHS's own
+    ``primal_feasibility_tolerance`` (see :func:`_run_scip_engine`).
 
     Every engine's dual bound is valid at every exit, so the best of them is an
     independent bound; the published bound is ``min`` of it and HiGHS's, i.e. a
@@ -1257,6 +1271,9 @@ def _confirm_lazy_master_independently(
         return status, None, diag
     arrays = _lp_as_arrays(h.getLp(), highspy)
     offset = arrays.pop("offset")
+    st_tol, feastol = h.getOptionValue("primal_feasibility_tolerance")
+    if st_tol != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"HiGHS would not report primal_feasibility_tolerance ({st_tol})")
     ref = objective if objective is not None else bound
     seed = None if infeasible or x_seed is None else x_seed
     t_c = time.time()
@@ -1269,11 +1286,11 @@ def _confirm_lazy_master_independently(
             break
         budget = remaining
         if engine == "simplex" and k + 1 < len(engines) and remaining is not None:
-            budget = min(remaining, max(_SIMPLEX_FLOOR_S, _SIMPLEX_SHARE_BEFORE_SCIP * remaining))
+            budget = min(remaining, _SIMPLEX_BUDGET_BEFORE_SCIP_S)
         if engine == "simplex":
             run = _run_simplex_engine(arrays, budget, _engine_gap(rel_gap, ref), seed)
         elif engine == "scip":
-            run = _run_scip_engine(arrays, budget, 0.5 * float(rel_gap), seed)
+            run = _run_scip_engine(arrays, budget, 0.5 * float(rel_gap), seed, feastol)
         else:
             raise ValueError(f"unknown confirmation engine {engine!r}")
         est, eb, nodes = run
