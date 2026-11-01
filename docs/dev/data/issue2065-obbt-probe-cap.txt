@@ -9,7 +9,12 @@
 # "tightened" = the probe's raw optimum moves the bound past eps=1e-7, an upper bound
 #   on what the NS-clamped sweep keeps.
 # Kill criterion (issue): < ~1% of probes exceed the cap, or none that do tighten.
-# Verdict: KILLED on both corpora (0.077% and 0.031%), no §5 panel run.
+# Verdict (first version, <= 200 vars/cons only): killed on both corpora (0.077% and
+#   0.031%). RETRACTED for the general claim by the 200-2000 band below (#2068 review):
+#   by count it is still under 1%, but probes past the cap are 25% of probe wall time
+#   there and 3 of them tightened, which is the condition the first docstring named
+#   as what would change the decision. Outcome: DISCOPT_OBBT_PROBE_PER_LP_CAP (default
+#   OFF) plus the section 5 ON/OFF panel (docs/dev/flag-retirement-audit.md).
 #
 # ---- in-repo corpus (python/tests/data/minlplib_nl, 74 .nl) ----
 instances: 74 (38 ran a persistent probe; errors [])
@@ -58,3 +63,38 @@ instances with over-cap probes: name [over, over&tight, max probe wall s]
 # On this machine the solve never reaches a persistent OBBT probe, so the
 # #2006 49.6 s probe does not reproduce here. The 21 s overrun at time_limit=90
 # is outside OBBT's persistent path and is not attributed here.
+#
+# ==== MINLPLib 200 < max(vars, cons), vars <= 2000 and cons <= 2000, proven status ====
+# (#2068 review: the band above the #2006 screen.) 139 instances, time_limit=60,
+# 2 workers on 4 cores; 1-min load average 0.1-4.7 across instances (recorded per
+# instance in probes.jsonl). Cap recorded per OBBT sweep (run_obbt_on_relaxation
+# wrapped), not read from a caller frame. Code: 5e6a489 (the pre-rebase head, on
+# #2066's 8c92949; the #2006 deadline cap present, the child asserts it).
+instances: 139 (30 ran a persistent probe; errors [])
+probes executed: 13834 (tightening: 980); with a per-LP cap: 13834
+probes over the cap: 64 of 13834 capped (0.463%), of which tightened: 3
+wall spent past the cap: 28.30 s
+by time_limit_per_lp: [probes, over cap, over cap & tightened]
+  0.1: [1559, 46, 0]
+  0.2: [12275, 18, 3]
+instances with over-cap probes: name [over, over&tight, max probe wall s]
+  edgecross14-156: [1, 0, 4.048]
+  edgecross14-176: [2, 0, 3.978]
+  edgecross14-117: [1, 0, 3.855]
+  edgecross14-137: [1, 0, 3.741]
+  edgecross14-098: [2, 0, 3.723]
+  edgecross14-078: [7, 0, 2.031]
+  kan_r3_h1_n3: [4, 2, 1.418]
+  edgecross10-060: [16, 0, 0.497]
+  edgecross10-080: [7, 0, 0.461]
+  camcns: [13, 0, 0.432]
+  edgecross14-039: [9, 0, 0.321]
+  gastrans040: [1, 1, 0.226]
+#
+# probe wall percentiles (s): cap 0.1: 1559 probes, p50 0.0016 p99 0.2095 p99.9 3.909 max 4.048
+#                             cap 0.2: 12275 probes, p50 0.0025 p99 0.0358 p99.9 0.380 max 1.418
+# total persistent-probe wall 112.7 s, of which 28.3 s (25%) past the cap.
+# Over-cap probes that tightened: gastrans040 (0.226 s vs 0.2), kan_r3_h1_n3 (0.321 and
+# 0.447 s vs 0.2). The 4 s edgecross14 probes (cap 0.1) tightened nothing.
+# Halfway through this run (70 instances) the over-cap share read 1.17%; that was a
+# partial figure, superseded by the full 0.463% above.
