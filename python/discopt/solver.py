@@ -19660,6 +19660,11 @@ def solve_model(
                         _probe.status == "infeasible" or _probe.lower_bound is not None
                     )
                     if _probe_useful and _vub_cmir_root_enabled() and not _deadline_exhausted():
+                        # Same saturated grant as the probe above (#1153).
+                        _vub_cmir_budget = min(
+                            _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
+                            max(_setup_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
+                        )
                         _install_root_vub_cmir_rows(
                             model,
                             _mc_lp_relaxer,
@@ -19669,12 +19674,7 @@ def solve_model(
                             n_vars,
                             int_offsets,
                             int_sizes,
-                            _role2_budget(
-                                min(
-                                    _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
-                                    max(_setup_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
-                                )
-                            ),
+                            _role2_budget(_vub_cmir_budget),
                             _vub_cmir_stats,
                         )
                     if not _probe_useful:
