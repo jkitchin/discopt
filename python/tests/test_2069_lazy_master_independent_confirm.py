@@ -242,3 +242,73 @@ def test_clay0203_never_certifies_above_the_optimum():
         assert r.bound <= CLAY_OPT + 1e-2, (r.bound, r.objective)
     if r.gap_certified:
         assert r.objective == pytest.approx(CLAY_OPT, abs=1e-2)
+
+
+# --- #2069: every other HiGHS-mastered route, on the same master ---------------
+
+
+def _raw_arrays(path: str) -> dict:
+    """The master exactly as written in the MPS, unscaled: what a route would pass."""
+    import scipy.sparse as sp
+
+    lp = _highs(path).getLp()
+    n, m = lp.num_col_, lp.num_row_
+    A = sp.csc_matrix(
+        (lp.a_matrix_.value_, lp.a_matrix_.index_, lp.a_matrix_.start_), shape=(m, n)
+    ).tocsr()
+    rl, ru = np.asarray(lp.row_lower_), np.asarray(lp.row_upper_)
+    inf = highspy.kHighsInf
+    eq = rl == ru
+    up, lo = ~eq & (ru < inf), ~eq & (rl > -inf)
+    return dict(
+        c=np.asarray(lp.col_cost_),
+        A_ub=sp.vstack([A[up], -A[lo]]).tocsr(),
+        b_ub=np.concatenate([ru[up], -rl[lo]]),
+        A_eq=A[eq],
+        b_eq=rl[eq],
+        bounds=list(zip(lp.col_lower_, lp.col_upper_)),
+        integrality=np.array([int(t == highspy.HighsVarType.kInteger) for t in lp.integrality_]),
+    )
+
+
+def test_the_plain_highs_master_never_bounds_above_the_optimum(mps):
+    """``milp_highs.solve_milp`` is the master of multi-tree OA and of GDP LOA with
+    ``milp_solver="highs"``. Raw HiGHS reports 56725.53 on this model; the route's
+    presolve rules and #1634 cross-check must not let any of that through."""
+    r = milp_highs.solve_milp(**_raw_arrays(mps), time_limit=60)
+    assert r.bound is not None, r
+    assert r.bound <= TRUTH + _slack(TRUTH), (r.status, r.bound)
+    if r.status == SolveStatus.OPTIMAL:
+        assert r.objective == pytest.approx(TRUTH, rel=1e-6)
+
+
+@pytest.mark.correctness
+def test_the_pure_milp_route_never_bounds_above_the_optimum(mps):
+    """The same MILP through ``Model.solve``: the verified HiGHS LP/MILP route."""
+    import discopt.modeling as dm
+
+    a = _raw_arrays(mps)
+    m = dm.Model("clay0203_master")
+    xs = []
+    for j, (lo, hi) in enumerate(a["bounds"]):
+        if a["integrality"][j]:
+            xs.append(m.integer(f"x{j}", lb=lo, ub=hi))
+        else:
+            xs.append(m.continuous(f"x{j}", lb=max(lo, -1e19), ub=min(hi, 1e19)))
+
+    def rows(M, b, eq):
+        for i in range(M.shape[0]):
+            lo_i, hi_i = M.indptr[i], M.indptr[i + 1]
+            e = sum(float(v) * xs[int(j)] for j, v in zip(M.indices[lo_i:hi_i], M.data[lo_i:hi_i]))
+            m.subject_to(e == float(b[i]) if eq else e <= float(b[i]))
+
+    rows(a["A_ub"], a["b_ub"], False)
+    rows(a["A_eq"].tocsr(), a["b_eq"], True)
+    m.minimize(sum(float(cj) * xs[j] for j, cj in enumerate(a["c"]) if cj))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=120)
+    assert r.bound is None or r.bound <= TRUTH + _slack(TRUTH), (r.status, r.bound)
+    assert r.objective is not None and r.objective >= TRUTH - _slack(TRUTH)
+    if r.gap_certified:
+        assert r.objective == pytest.approx(TRUTH, rel=1e-6)
