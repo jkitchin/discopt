@@ -20,16 +20,23 @@
   subproblem stopped by its cap is uncertified; when its solve kept a valid
   bound the configuration leaves the master with ``max(that bound, LB)`` in
   ``excluded_floor`` (``LOA._exclude_bounded``), so the search moves on instead
-  of stopping when the master proposes it again.
+  of stopping when the master proposes it again. A configuration whose global
+  solve kept neither a point nor a certificate falls back to the fixed-integer
+  NLP and stays in the master; if the master proposes it again it leaves then,
+  with the same floor (``LOA._exclude_reproposed``, #2082), instead of ending
+  the run.
 
 Bounds (§5.4): the master is a relaxation -- OA cuts go only on rows (and an
 objective) certified convex -- so its dual bound is a valid LB when the
 objective is linear or certified convex. A configuration excluded because it
 was certified *optimal* (not infeasible) leaves the master, so the LB is then
 ``min(master bound, best excluded configuration bound)``. The same holds for
-a configuration excluded uncertified with its valid bound. Unresolved
-configurations (no point, no bound) never leave the master: they block
-``optimal``, not the bound.
+a configuration excluded uncertified with its valid bound. In NLP mode an
+unresolved configuration (no point, no bound) never leaves the master; in
+global mode it leaves only with a floor, and an unresolved one still blocks
+``optimal``. When the run stops on a re-proposal it cannot exclude,
+``stop_reason`` is ``"reproposal"`` (``"unresolved_reproposal"`` for a
+configuration no step resolved), not ``"exhausted"`` (#2082).
 """
 
 from __future__ import annotations
@@ -136,6 +143,10 @@ class LOA(GDPAlgorithm):
         #: Best certified bound (min convention) of a configuration excluded as
         #: dominated: the master no longer bounds it.
         self.excluded_floor = math.inf
+        #: The global subproblem's bound (minimization convention) for each
+        #: configuration it left unresolved and handed to the NLP fallback
+        #: (#2082), or ``None`` when it kept none; ``_exclude_reproposed`` reads it.
+        self.fallback_bound: dict[tuple, Optional[float]] = {}
         self.init_report: Any = None
 
     # ── pieces ────────────────────────────────────────────────────────────
@@ -211,7 +222,7 @@ class LOA(GDPAlgorithm):
             self.excluded_floor = min(self.excluded_floor, bound_min)
         self.master.exclude(config)
 
-    def _exclude_bounded(self, config: tuple, sub_bound: Optional[float]) -> None:
+    def _exclude_bounded(self, config: tuple, sub_bound: Optional[float]) -> bool:
         """Exclude an uncertified configuration whose global solve kept a valid bound (#1984).
 
         Left in the master, a configuration whose subproblem stopped at its cap
@@ -225,13 +236,44 @@ class LOA(GDPAlgorithm):
         master with that bound in ``excluded_floor``, and ``min(master bound,
         excluded_floor)`` stays a valid LB. Only a finite bound excludes: an
         infinite floor would read a later empty master as an infeasibility proof.
+        Returns whether the configuration was excluded.
         """
         cands = [] if sub_bound is None else [self.obj_sign * float(sub_bound)]
         if self.lb_valid and math.isfinite(self.lb):
             cands.append(self.lb)
         bound = max(cands, default=-math.inf)
-        if math.isfinite(bound):
-            self._exclude_certified(config, bound)
+        if not math.isfinite(bound):
+            return False
+        self._exclude_certified(config, bound)
+        return True
+
+    def _exclude_reproposed(self, config: tuple) -> bool:
+        """Exclude a configuration the global step could not resolve, now re-proposed (#2082).
+
+        Its global subproblem stopped with neither a point nor a certificate
+        (typically at ``subproblem_time_limit``) and the fixed-integer NLP step
+        took over, which neither bounds it nor excludes it. When the master
+        proposes it again no new cut can follow, and the #1611 C-11 rule ended
+        the whole run there -- reported as ``"exhausted"`` with most of the time
+        limit unused and configurations never proposed (measured: the book's
+        flowsheet GDP, stopped at iteration 3 of 8 at 13.8 s of 45 s, incumbent
+        2276.14 against the optimum 1948.58).
+
+        It leaves the master as ``_exclude_bounded`` leaves it, with
+        ``max(that subproblem's bound, LB)`` in ``excluded_floor``. The LB was
+        just raised by the master that re-proposed it, and a valid LB bounds
+        every configuration's optimum, so ``min(master bound, excluded_floor)``
+        stays valid; the price is that the bound can never pass that floor.
+        Only configurations of the global fallback qualify: an NLP-mode
+        configuration keeps the C-11 stop. Returns whether it was excluded.
+        """
+        if self.subproblem != "global" or config not in self.fallback_bound:
+            return False
+        bound = self.fallback_bound[config]
+        if not self._exclude_bounded(config, None if bound is None else self.obj_sign * bound):
+            return False
+        del self.fallback_bound[config]
+        return True
 
     def _offer_master_bound(self, bound: Optional[float]) -> None:
         if bound is None or not self.master.bound_valid:
@@ -327,6 +369,18 @@ class LOA(GDPAlgorithm):
         self._offer_master_bound(r.bound)
         assert r.config is not None
         if r.config in self.solved:
+            if self._exclude_reproposed(r.config):
+                logger.info(
+                    "%s iter %d: master re-proposed configuration %s, unresolved by its "
+                    "global subproblem; excluded (excluded floor %s, bound %s incumbent %s)",
+                    self._log_name(),
+                    k,
+                    self._fmt_selection(r.x),
+                    self._fmt(self.excluded_floor),
+                    self._fmt(self.lb),
+                    self._fmt(self.ub),
+                )
+                return True
             logger.info(
                 "%s iter %d: master re-proposed configuration %s, already solved; "
                 "stopping (bound %s incumbent %s)",
@@ -336,7 +390,10 @@ class LOA(GDPAlgorithm):
                 self._fmt(self.lb),
                 self._fmt(self.ub),
             )
-            return False  # a re-proposal adds no cut: stop (#1611 C-11)
+            # A re-proposal adds no cut: stop (#1611 C-11). Not an exhausted
+            # search space, so not reported as one (#2082).
+            self.stop_detail = "reproposal"
+            return False
         t0 = time.perf_counter()
         self._step_log = ""
         if self.subproblem == "global":
@@ -411,9 +468,12 @@ class LOA(GDPAlgorithm):
         if rigorous:
             self.master.exclude(config)
             self.mark_solved(config)
+            self.fallback_bound.pop(config, None)
             return True
         seen = config in self.unresolved
         self.mark_unresolved(config)
+        if seen:
+            self.stop_detail = "unresolved_reproposal"
         return not seen  # C-35: never a no-good on a local failure; stop on a repeat
 
     def _global_step(self, x_master: np.ndarray, config: tuple) -> bool:
@@ -451,8 +511,22 @@ class LOA(GDPAlgorithm):
             # worse than it (measured: small_batch, positioning, where discopt
             # could not bound the reduced model but the fixed-integer NLP solves).
             global_status = self._step_log
+            # Remembered for ``_exclude_reproposed`` (#2082); the NLP step drops
+            # it when it proves the configuration infeasible. Every attempt's
+            # bound is valid, so the best one is kept.
+            cands = [b for b in (self.fallback_bound.get(config),) if b is not None]
+            if res.bound is not None:
+                cands.append(self.obj_sign * float(res.bound))
+            self.fallback_bound[config] = max(cands, default=None)
             more = self._nlp_step(x_master, config)
             self._step_log = f"{global_status}, then {self._step_log}"
+            if not more and self._exclude_reproposed(config):
+                # A repeat with no point from either step: leave with the floor
+                # rather than end the run; it stays unresolved, so it still
+                # blocks ``optimal``.
+                self.stop_detail = ""
+                self._step_log += ", excluded with floor"
+                return True
             return more
         return True
 
