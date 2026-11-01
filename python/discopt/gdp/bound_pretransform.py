@@ -20,6 +20,13 @@ Rules, each of which keeps the transformation exact:
 * **No defaulted infinity** (spec §0.2 item 5). A side is emitted only when every
   disjunct's ``L_k`` (or ``U_k``) is finite; otherwise the rows on that side stay
   in their disjuncts, untouched.
+* **Array rows.** An array-valued row (``x <= 3`` over a vector ``x``) is read
+  element by element from its exact affine map and emitted as one array-valued
+  bound row, so it lowers exactly as the per-element rows it stands for while
+  staying one object (#1215). It is dropped only when every element is univariate
+  and every side it bounds was emitted.
+* **User big-Ms.** Inside the big-M lowerings a disjunction carrying user
+  ``big_m`` values (#1775 G2.6) is not pretransformed: the user's M stands.
 * **Scope.** ``either_or`` disjunctions and complete top-level
   ``add_disjunction`` block groups without nesting. A disjunction that contains a
   nested one, a block nested in a disjunct, and anything else is left as it is --
@@ -110,15 +117,106 @@ def _univariate(con: Constraint, model: Model, n_vars: int):
     if nz.size != 1:
         return None
     slot = int(nz[0])
-    a = float(c_vec[slot])
     leaf = _leaf_for_slot(con.body, slot, model)
     if leaf is None:
         return None
+    return _bound_of(con.sense, slot, leaf, float(c_vec[slot]), off)
+
+
+def _bound_of(sense: str, slot: int, leaf: Expression, a: float, off: float):
+    """``(slot, leaf, lower, upper)`` of the row ``a*x + off  (sense)  0``."""
     value = -off / a  # a*x + off  (sense)  0   =>   x  vs  -off/a
-    if con.sense == "==":
+    if sense == "==":
         return slot, leaf, value, value
-    upper_side = (con.sense == "<=") == (a > 0)
+    upper_side = (sense == "<=") == (a > 0)
     return (slot, leaf, None, value) if upper_side else (slot, leaf, value, None)
+
+
+def _emit(leaf, vals, selectors, sense, out_rows, report) -> None:
+    """Append ``leaf - sum_k vals[k] * y_k  (sense)  0``; a zero term is left out."""
+    total: Expression = leaf
+    for v, y in zip(vals, selectors):
+        if np.ndim(v) == 0:
+            if v != 0.0:
+                total = total - float(v) * y
+        elif np.any(v != 0.0):
+            total = total - np.asarray(v, dtype=np.float64) * y
+    out_rows.append(Constraint(body=total, sense=sense, rhs=0.0))
+    report.rows_added += 1
+
+
+def _slot_var(slot: int, model: Model) -> tuple[int, int]:
+    """``(position in model._variables, flat element)`` of the flat ``slot``."""
+    off = 0
+    for i, v in enumerate(model._variables):
+        if slot < off + v.size:
+            return i, slot - off
+        off += v.size
+    raise IndexError(f"slot {slot} is past the model's {off} columns")
+
+
+def _slot_leaf(slot: int, model: Model) -> Expression | None:
+    """``x[i]`` for the flat ``slot`` (the variable itself when it is scalar)."""
+    off = 0
+    for v in model._variables:
+        if slot < off + v.size:
+            if v.shape == ():
+                return v
+            leaf: Expression = v[np.unravel_index(slot - off, v.shape)]
+            return leaf
+        off += v.size
+    return None
+
+
+def _row_bounds(con: Constraint, model: Model, n_vars: int):
+    """Every element of ``con`` as ``(slot, leaf, lower, upper)``, and whether that
+    covers the row.
+
+    A scalar row is :func:`_univariate`. An array-valued row (``x <= 3`` over a
+    vector ``x``; #1215 keeps it one row) is read element by element from its exact
+    affine map (:func:`discopt._relax.affine_array.affine_of`), so it is
+    pretransformed exactly as the per-element rows ``x[i] <= 3`` it stands for. The
+    row is covered only when every element bounds exactly one slot; a row that is
+    not covered is never dropped, and the bounds read from it are still valid.
+    """
+    if _is_array(con):
+        return _array_row_bounds(con, model, n_vars)
+    u = _univariate(con, model, n_vars)
+    return ([u], True) if u is not None else ([], False)
+
+
+def _is_array(con: Constraint) -> bool:
+    shape = getattr(con.body, "shape", ())
+    return bool(shape) and int(np.prod(shape)) > 1
+
+
+def _array_row_bounds(con: Constraint, model: Model, n_vars: int):
+    from discopt._relax.affine_array import NotAffineError, affine_of
+
+    try:
+        aff = affine_of(con.body, model._flat_var_offset, n_vars)
+    except NotAffineError:
+        return [], False
+    size = int(np.prod(aff.shape)) if aff.shape else 1
+    if aff.M is None or aff.M.shape[0] != size:
+        return [], False
+    rhs = np.broadcast_to(np.asarray(con.rhs, dtype=np.float64), aff.shape).ravel()
+    b = np.broadcast_to(np.asarray(aff.b, dtype=np.float64), aff.shape).ravel()
+    M = aff.M.tocsr()
+    out: list[tuple[int, Expression, float | None, float | None]] = []
+    for i in range(size):
+        lo, hi = M.indptr[i], M.indptr[i + 1]
+        cols, vals = M.indices[lo:hi], M.data[lo:hi]
+        keep = vals != 0.0
+        cols, vals = cols[keep], vals[keep]
+        if cols.size != 1:
+            return out, False
+        slot = int(cols[0])
+        leaf = _slot_leaf(slot, model)
+        if leaf is None:
+            return out, False
+        out.append(_bound_of(con.sense, slot, leaf, float(vals[0]), float(b[i] - rhs[i])))
+    return out, True
 
 
 def _transform_one(
@@ -134,22 +232,24 @@ def _transform_one(
     disjunct, the ``id`` of each row the appended rows replace."""
     # per slot: leaf, and per disjunct the tightest bound each side
     found: dict[int, dict[str, Any]] = {}
-    rows_of: dict[tuple[int, int, str], list[int]] = {}
+    parsed: dict[int, tuple[list, bool]] = {}
     for k, rows in enumerate(disjuncts):
         for con in rows:
-            u = _univariate(con, model, n_vars)
-            if u is None:
-                continue
-            slot, leaf, lo, hi = u
-            rec = found.setdefault(slot, {"leaf": leaf, "lo": {}, "hi": {}})
-            if lo is not None:
-                rec["lo"][k] = max(rec["lo"].get(k, -np.inf), lo)
-                rows_of.setdefault((slot, k, "lo"), []).append(id(con))
-            if hi is not None:
-                rec["hi"][k] = min(rec["hi"].get(k, np.inf), hi)
-                rows_of.setdefault((slot, k, "hi"), []).append(id(con))
+            entries, covered = _row_bounds(con, model, n_vars)
+            parsed[id(con)] = (entries, covered)
+            from_array = _is_array(con)
+            for slot, leaf, lo, hi in entries:
+                rec = found.setdefault(slot, {"leaf": leaf, "lo": {}, "hi": {}, "array": True})
+                rec["array"] = rec["array"] and from_array
+                if lo is not None:
+                    rec["lo"][k] = max(rec["lo"].get(k, -np.inf), lo)
+                if hi is not None:
+                    rec["hi"][k] = min(rec["hi"].get(k, np.inf), hi)
 
     emitted: set[tuple[int, str]] = set()
+    # (variable position, side) -> {element: per-disjunct values}, for slots read
+    # only from array rows; emitted below as one array row per variable (#1215).
+    grouped: dict[tuple[int, str], dict[int, list[float]]] = {}
     for slot, rec in found.items():
         glo, ghi = box[slot]
         for side, per, fallback, sense in (
@@ -161,24 +261,39 @@ def _transform_one(
             vals = [per.get(k, fallback) for k in range(len(disjuncts))]
             if not all(np.isfinite(v) and abs(v) < _INF for v in vals):
                 continue  # a disjunct would contribute an infinite bound: keep the rows
-            total: Expression = rec["leaf"]
-            for v, y in zip(vals, selectors):
-                if v != 0.0:
-                    total = total - float(v) * y
-            out_rows.append(Constraint(body=total, sense=sense, rhs=0.0))
-            report.rows_added += 1
             emitted.add((slot, side))
+            if rec["array"]:
+                vi, pos = _slot_var(slot, model)
+                grouped.setdefault((vi, side), {})[pos] = vals
+                continue
+            _emit(rec["leaf"], vals, selectors, sense, out_rows, report)
+    for (vi, side), per_pos in grouped.items():
+        var = model._variables[vi]
+        sense = ">=" if side == "lo" else "<="
+        if len(per_pos) == var.size:
+            # Every element bounded on this side: one array row over the whole
+            # variable, C order -- the per-element rows, unexpanded.
+            table = np.array([per_pos[i] for i in range(var.size)], dtype=np.float64)
+            cols = [table[:, k].reshape(var.shape) for k in range(len(disjuncts))]
+            _emit(var, cols, selectors, sense, out_rows, report)
+        else:
+            for pos, vals in sorted(per_pos.items()):
+                leaf = var[np.unravel_index(pos, var.shape)]
+                _emit(leaf, vals, selectors, sense, out_rows, report)
 
     # A row goes only when every side it bounds was emitted (an equality bounds both).
     drop: list[set[int]] = [set() for _ in disjuncts]
     for k, rows in enumerate(disjuncts):
         for con in rows:
-            u = _univariate(con, model, n_vars)
-            if u is None:
+            entries, covered = parsed[id(con)]
+            if not covered:
                 continue
-            slot, _leaf, lo, hi = u
-            sides = [s for s, b in (("lo", lo), ("hi", hi)) if b is not None]
-            if all((slot, s) in emitted for s in sides):
+            if all(
+                (slot, side) in emitted
+                for slot, _leaf, lo, hi in entries
+                for side, b in (("lo", lo), ("hi", hi))
+                if b is not None
+            ):
                 drop[k].add(id(con))
     return drop
 
@@ -246,15 +361,23 @@ def bound_pretransform(model: Model) -> PretransformReport:
             report.skipped.append(f"{key}: contains a nested disjunction")
             continue
         drop = _transform_one(dc.disjuncts, sels, model, n_vars, box, report, model._constraints)
-        gone = set().union(*drop)
-        if not gone:
+        if not any(drop):
             continue
         report.disjunctions += 1
         before = len(model._constraints)
+        # Drop a row only as a member of *this* group's disjunct k. The same
+        # Constraint object may also sit in an if_then or another block
+        # (#1794 B1); matching on ``id(r.constraint)`` alone deleted that row
+        # too, and the solve certified an incumbent violating it.
         model._constraints[:] = [
             r
             for r in model._constraints
-            if not (isinstance(r, _IndicatorConstraint) and id(r.constraint) in gone)
+            if not (
+                isinstance(r, _IndicatorConstraint)
+                and r.disjunction is not None
+                and r.disjunction[0] == key
+                and id(r.constraint) in drop[r.disjunction[1]]
+            )
         ]
         report.rows_removed += before - len(model._constraints)
     return report
@@ -272,7 +395,7 @@ def pretransform_disjunction(
     each row they replace -- rows the caller then does not lower. ``selectors`` are
     the lowering's own (one per disjunct, exactly one of them 1); ``model`` supplies
     the columns and the global box. Used by ``reformulate_gdp`` under
-    ``DISCOPT_GDP_BOUND_PRETRANSFORM`` (BC, default OFF).
+    ``DISCOPT_GDP_BOUND_PRETRANSFORM`` (BC, default ON).
     """
     n_vars = sum(v.size for v in model._variables)
     return _transform_one(

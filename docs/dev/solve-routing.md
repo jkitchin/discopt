@@ -299,13 +299,16 @@ contract above.
   data in `docs/dev/data/1917-flag-panel/`):
   - `DISCOPT_GDP_ENUMERATE_CUTOFF` (`enumerate`): each configuration bounded
     against the incumbent.
-- **Default-OFF opt-ins**, each a `SolverTuning` field and an environment
-  variable, each with a row in `docs/dev/flag-retirement-audit.md`:
-  - `DISCOPT_GDP_DISJUNCT_FBBT` (every big-M lowering): `M` bounded over the
-    sibling disjuncts' FBBT boxes (`gdp/bounds.py`).
-- **Retired**: `DISCOPT_HULL_LIFTED_RATIO` (the eps-perspective evaluated at a
-  lifted `t = v / yhat`). Its panel failed cert-clean, and on the Python tree it
-  certified a false optimum; the audit row records why.
+  - `DISCOPT_GDP_BOUND_PRETRANSFORM` (big-m / mbigm): the univariate rows of a
+    SELECT_ONE disjunction become `sum_k L_k y_k <= x <= sum_k U_k y_k`.
+- **Retired** (flag and implementation deleted; the audit rows record why):
+  - `DISCOPT_HULL_LIFTED_RATIO` (the eps-perspective evaluated at a lifted
+    `t = v / yhat`). Its panel failed cert-clean, and on the Python tree it
+    certified a false optimum.
+  - `DISCOPT_MBIGM_CONDITIONED` (mbigm with per-sibling exact-LP Ms): cert-clean,
+    no instance gained, SGM slightly worse.
+  - `DISCOPT_GDP_DISJUNCT_FBBT` (big-M bounded over the siblings' FBBT boxes):
+    cert-clean, one instance gained (syngas 0/3 -> 2/3), slower on others.
 - The GDP-algorithms notebook (`docs/notebooks/gdp_algorithms.ipynb`) walks
   through the native methods, `gdp_options` and these flags on one model.
 

@@ -3,7 +3,7 @@
 
 ``DISCOPT_MBIGM_CONDITIONED`` (#1775 G2.3), ``DISCOPT_GDP_BOUND_PRETRANSFORM``
 (G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC`` and ``DISCOPT_GDP_DISJUNCT_FBBT``
-(G5.1) each change the lowering of a GDP model;
+(G5.1) each changed the lowering of a GDP model;
 ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (G4.2) acts inside ``gdp_method="enumerate"``,
 so its fire phase marks every instance (there is no lowering to compare). Their
 panel is the ``gdp_parity`` panel
@@ -66,7 +66,13 @@ REPO = HERE.parents[2]
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(HERE.parent))
 
-#: flag -> the ``gdp_method`` values whose lowering it gates.
+#: flag -> the ``gdp_method`` values whose lowering it gates. The panels this
+#: script ran (2026-11-01, ``docs/dev/data/1917-flag-panel/``) retired
+#: ``DISCOPT_MBIGM_CONDITIONED`` and ``DISCOPT_GDP_DISJUNCT_FBBT`` (their code is
+#: gone, so a fresh fire phase finds every lowering identical) and graduated
+#: ``DISCOPT_GDP_BOUND_PRETRANSFORM`` and ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (default
+#: ON; the OFF arm is now ``=0``). The entries stay so ``--report`` can re-derive
+#: the recorded verdicts.
 FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_MBIGM_CONDITIONED": ("mbigm",),
     "DISCOPT_GDP_BOUND_PRETRANSFORM": ("big-m", "mbigm"),

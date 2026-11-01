@@ -21,6 +21,19 @@ import pytest
 from discopt.modeling.core import _DisjunctiveConstraint
 from gdp_differential import METHODS, Shape, run_shape
 
+
+@pytest.fixture
+def legacy_big_m(monkeypatch):
+    """The big-M lowering without the bound pretransform (``=0``).
+
+    Since #1917 ``DISCOPT_GDP_BOUND_PRETRANSFORM`` is default ON and replaces a
+    SELECT_ONE disjunction's univariate rows by bound rows, so those rows never get
+    a big-M. A test whose subject is the big-M rows themselves (their text, their
+    M, or a relaxation loose enough to separate) opts out explicitly.
+    """
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
+
 # ---------------------------------------------------------------------------
 # Review §4 shapes
 # ---------------------------------------------------------------------------
@@ -773,6 +786,7 @@ def test_harness_catches_a_dropped_hull_aggregation_row(monkeypatch):
         rep.assert_sound()
 
 
+@pytest.mark.usefixtures("legacy_big_m")
 def test_harness_catches_a_too_small_big_m(monkeypatch):
     """A big-M a tenth of the valid one cuts feasible points of the active disjunct."""
     import discopt._relax.gdp_reformulate as gr

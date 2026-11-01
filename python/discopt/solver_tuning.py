@@ -1165,52 +1165,28 @@ class SolverTuning:
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
     gdp_bound_pretransform: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_GDP_BOUND_PRETRANSFORM", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_GDP_BOUND_PRETRANSFORM", default=True)
     )
     """Apply ``gdp.bound_pretransformation`` inside the big-M and mbigm lowerings
-    (``DISCOPT_GDP_BOUND_PRETRANSFORM``, default **OFF**; #1775 G2.4, bound-changing
-    on the ``"big-m"`` / ``"mbigm"`` routes).
+    (``DISCOPT_GDP_BOUND_PRETRANSFORM``, default **ON** -- graduated by the §5 panel
+    below; opt out with ``DISCOPT_GDP_BOUND_PRETRANSFORM=0``, which keeps the legacy
+    lowering; #1775 G2.4, bound-changing on the ``"big-m"`` / ``"mbigm"`` routes).
 
     A disjunct row bounding one variable becomes part of ``sum_k L_k y_k <= x <=
     sum_k U_k y_k`` on the lowering's own selectors (exact under SELECT_ONE)
-    instead of a big-M row. The transformation itself is NC and user-selected
-    (``transformations.apply_to("gdp.bound_pretransformation", m)``); only its
-    automatic use is gated here. Default OFF until the §5 flag panel (CLAUDE.md)
-    shows it cert-clean and net-positive; the audit row is in
-    ``docs/dev/flag-retirement-audit.md``."""
+    instead of a big-M row. The transformation itself is also user-selectable
+    (``transformations.apply_to("gdp.bound_pretransformation", m)``).
 
-    mbigm_conditioned: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_MBIGM_CONDITIONED", default=False)
-    )
-    """Multiple big-M conditioned on each disjunct (``DISCOPT_MBIGM_CONDITIONED``,
-    default **OFF**; #1775 G2.3, bound-changing on the ``"mbigm"`` route).
-
-    Today ``gdp_method="mbigm"`` gives each disjunct row one M: an exact LP of its
-    body over the global linear rows and the box. With the flag ON, a row ``c`` of
-    disjunct ``k`` in a SELECT_ONE disjunction gets one ``M_{c,j}`` per *other*
-    disjunct ``j`` -- the exact-LP bound of its body over the global linear rows
-    **plus disjunct j's linear rows** -- and becomes ``body <= sum_{j != k}
-    M_{c,j} y_j`` (Pyomo's ``gdp.mbigm``). Exactly one ``y`` is 1, so the row is
-    exact at every integer point; each ``M_{c,j}`` is never above today's M, so
-    the LP relaxation is at least as tight. Sizing on the ``gdp_parity`` panel
-    (#1775, 2026-10-20): conditioning tightens 35-60 % of the rows on 6 of 23
-    measured instances.
-
-    **State: default OFF, panel owed** (owner decision 2026-10-20; tracking item
-    #1775 G2.3; audit row in ``docs/dev/flag-retirement-audit.md``). The entry
-    panel ran 2026-10-20 (21 ``gdp_parity`` instances, mbigm, 60 s, OFF/ON
-    interleaved) and was **cert-clean but not net-positive**: node counts fell on
-    med_term_purchasing, ex1_linan_2023 and small_batch, but modprodnet lost its
-    certificate and gdp_col, mod_hens and spectralog lost or worsened their
-    incumbent. Blocker: the conditioning LPs run before branch-and-bound and
-    ignore the solve's time limit -- the deterministic budget of 1,000 LPs does
-    not count :func:`~discopt._relax.gdp_reformulate._compute_big_m_lp`'s own LPs
-    and is not a deadline (stranded_gas spent >10 min in setup). What would
-    change it: deadline-aware conditioning (fall back to today's M once a share of
-    the time limit is spent), then the corpus panel decides graduate vs retire.
-    That panel ran before the #1824 review's soundness fixes (rigorous
-    Neumaier-Shcherbina M, no term dropped on a positive maximum, array-valued
-    rows keep today's M), so it is owed again on the fixed route."""
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, the 24-instance ``gdp_parity``
+    panel under big-M and mbigm, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): fires on 32 of 48 lowerings. Cert-clean (0
+    incorrect, 0 bound crossings, 0 solved lost). Net-positive: syngas under mbigm
+    0/3 -> 3/3 solved, and the wall falls on 15 of the 16 cells solved in both
+    arms (modprodnet big-M 8.2 -> 8.3 s is the exception; e.g. med_term_purchasing
+    big-M 4.6 -> 3.2 s, small_batch 2.3 -> 1.8 s); SGM over the 32 cells 36.15 ->
+    35.39 s. Nodes rise on spectralog (411 -> 651), nonconvex_hen (3 -> 5) and
+    med_term_purchasing under mbigm (57 -> 95), at a lower wall in each. Audit row
+    in ``docs/dev/flag-retirement-audit.md``."""
 
     hull_conic_quadratic: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
@@ -1244,25 +1220,6 @@ class SolverTuning:
     graduation is the owner's call** (cert-clean and net-positive where it fires,
     but it helps on one corpus instance); audit row in
     ``docs/dev/flag-retirement-audit.md``."""
-
-    gdp_disjunct_fbbt: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_GDP_DISJUNCT_FBBT", default=False)
-    )
-    """Cap each big-M of a root one-way disjunction's row by its body bound over the
-    siblings' disjunct-local FBBT boxes (``DISCOPT_GDP_DISJUNCT_FBBT``, default
-    **OFF**; bound-changing wherever big-M lowers a disjunction; #1775 G5.1, #1917).
-    :mod:`discopt.gdp.bounds` has the soundness argument.
-
-    Entry experiment (spec §7 kill: median M ratio >= 0.9 *and* root bound unchanged
-    on >= 90% of instances; 7 Pyomo GDPopt models, main ``4517c7b``). The pooled
-    median M ratio is 1.0 over 165 rows, but the per-instance medians are 0.64
-    (eight_process), 0.82 (eight_process_logical) and 0.35 (nonconvex_hen), with 1.0
-    on the other 4. Global FBBT alone gives 1.0 except hen at 0.76. The root bound
-    (``max_nodes=1``, big-M) changes on 3 of 7: eight_process -1195.3 -> 43.8
-    (optimum 68.01), nodes to certify 33 -> 5; eight_process_logical -1184.7 -> 57.8,
-    25 -> 3; nonconvex_hen 92919 -> 112003 (optimum 114385). Every run certified the
-    same optimum. The kill criterion is not met. **State: default OFF, panel
-    owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)

@@ -327,16 +327,45 @@ Re-open only with a Rust prototype measured on such instances.
 That run also surfaced a HiGHS false-optimum on the `lp_nlp_bb` master:
 `docs/dev/data/1917-highs-false-milp-optimum/README.md`.
 
-## G5.4: advisor extension — deferred on its dependency (2026-10-31, #1917)
+## G5.4: advisor extension — closed, nothing to advise on (2026-11-01, #1917)
 
 Plan §7 scopes G5.4 as extending `gdp_advisor` to consider G2.2 and G2.3, with
 the kill rule that it graduates only if `auto` beats `big-m` net-positive.
 - G2.2 (hull local vars) was retired with no measurement.
-- G2.3 (`DISCOPT_MBIGM_CONDITIONED`) is a default-OFF flag whose own panel is
-  owed. On the 7-model preview (`data/1917-flag-panel-preview/`) it is neutral to
-  slightly worse: identical nodes on 5 models, more on clay0203 (135 -> 161) and
-  nonconvex_hen (3 -> 5).
-An advisor that routes to an option not yet shown net-positive cannot pass G5.4's
-own kill rule. **G5.4 waits for G2.3's panel**: if that graduates the flag, the
-advisor extension is the follow-on; if it retires it, G5.4 has nothing left to
-advise on and closes with it.
+- G2.3 (`DISCOPT_MBIGM_CONDITIONED`) was retired by its §5 panel (below).
+
+With both options gone, G5.4 has nothing left to route to and closes.
+
+## §5 panels for the GDP flags (2026-11-01, #1917)
+
+Full `gdp_parity` panel (24 GDPlib instances from git), 3 reps at 120 s, OFF/ON
+interleaved, load-gated. Data and method: `data/1917-flag-panel/`. Every panel was
+cert-clean: 0 incorrect, 0 dual bounds past an oracle, 0 instances lost.
+
+| flag | cells fired | solved gained | SGM wall OFF -> ON | verdict |
+|---|---|---|---|---|
+| `DISCOPT_GDP_BOUND_PRETRANSFORM` (G2.4) | 32 (big-m + mbigm) | syngas mbigm 0/3 -> 3/3 | 36.15 -> 35.39 s; wall down on 15 of the 16 cells solved in both arms (modprodnet big-m 8.2 -> 8.3 s the exception) | **graduated** (default ON) |
+| `DISCOPT_MBIGM_CONDITIONED` (G2.3) | 21 | none | 26.88 -> 27.49 s; med_term 4.9 -> 10.6 s | **retired** |
+| `DISCOPT_GDP_DISJUNCT_FBBT` (G5.1) | 17 | syngas 0/3 -> 2/3 | 34.55 -> 35.73 s; positioning 26.4 -> 39.4 s, med_term 4.5 -> 8.7 s | **retired** (gain on one instance only) |
+| `DISCOPT_GDP_ENUMERATE_CUTOFF` (G4.2) | all | see audit row | see audit row | **graduated** (`f9b9e7a5`) |
+
+BOUND_PRETRANSFORM costs nodes on three cells (spectralog 411 -> 651,
+nonconvex_hen 3 -> 5, med_term_purchasing mbigm 57 -> 95) while still cutting their
+wall; the gain is not confined to one instance. Graduating it surfaced two gaps,
+both closed in the same PR and both bound-neutral on the panel (no converted
+instance has an array-valued disjunct row or a user `big_m`): array rows are now
+pretransformed (otherwise the two #1215 idioms lower differently), and a user's
+`big_m` is no longer silently replaced. A third was a false certificate: a block
+row whose `Constraint` object an `if_then` also wraps was dropped from both, so the
+implication disappeared (smoke caught it; objective 1 against a true 5). It was
+latent on `main` under `=1`, and the panel could not see it, since no converted
+instance shares a constraint between indicator rows (16,648 references, 0 shared).
+Rows are now dropped only as members of their own block disjunct.
+
+Side findings from the panels:
+- `small_batch` under `enumerate` returned `unknown`: every configuration NLP was
+  refused by POUNCE with `Not_Enough_Degrees_Of_Freedom` (more all-fixed equality
+  rows than free columns). `140da1b1` re-solves without the all-fixed rows when they
+  all hold; enumerate now certifies 167427.657 (`test_1917_nlp_constant_rows.py`).
+- The mbigm lowering exceeds 600 s on `biofuel` and `stranded_gas`, and the big-M
+  setup on `stranded_gas` takes about 120 s. Both are open performance gaps.

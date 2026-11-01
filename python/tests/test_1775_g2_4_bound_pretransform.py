@@ -6,8 +6,8 @@ like any other row (a big-M row, or a hull disaggregation).
 After: a registered, user-selected transformation (NC) replaces the univariate rows
 of each SELECT_ONE disjunction by ``sum_k L_k y_k <= x <= sum_k U_k y_k`` on its
 indicators. Its automatic use inside the big-M and mbigm lowerings is BC, behind
-``DISCOPT_GDP_BOUND_PRETRANSFORM`` (default OFF); with the flag OFF the lowering is
-today's, which ``test_flag_off_lowering_is_unchanged`` pins.
+``DISCOPT_GDP_BOUND_PRETRANSFORM`` (default ON since the #1917 §5 panel); with ``=0``
+the lowering is the legacy one, which ``test_flag_off_lowering_is_unchanged`` pins.
 """
 
 from __future__ import annotations
@@ -125,10 +125,15 @@ def test_flag_off_lowering_is_unchanged(build, monkeypatch):
     monkeypatch.setenv(FLAG, "0")
     m, _, _ = build()
     off = [str(c) for c in reformulate_gdp(m, "big-m")._constraints]
+    assert not called  # =0 never reaches the pretransform
+    monkeypatch.setenv(FLAG, "1")
+    m, _, _ = build()
+    on = [str(c) for c in reformulate_gdp(m, "big-m")._constraints]
     monkeypatch.delenv(FLAG)
     m, _, _ = build()
     unset = [str(c) for c in reformulate_gdp(m, "big-m")._constraints]
-    assert off == unset and not called
+    # Graduated by the #1917 §5 panel: unset is ON, and =0 is the legacy lowering.
+    assert unset == on and off != on
 
 
 def test_or_disjunction_is_refused():
@@ -168,3 +173,52 @@ def test_transformations_check_runs_in_isolation():
     m.minimize(x + y)
     rep = dt.check("gdp.bound_pretransformation", m)
     assert rep.result is not m
+
+
+# ── a Constraint object shared with an if_then (#1794 B1) ───────────────────
+
+
+def _shared_with_if_then():
+    """``c: x >= 5`` sits in block disjunct A *and* in ``if_then(z, [c])`` with
+    ``z == 1``, so ``x >= 5`` must hold whichever disjunct is chosen: optimum 5.
+    Dropping A's copy of ``c`` once matched every indicator row wrapping ``c`` and
+    deleted the if_then row too; the solve then reported x = 1."""
+    m = dm.Model("shared")
+    x = m.continuous("x", lb=0, ub=10)
+    z = m.binary("z")
+    c = x >= 5
+    a = m.make_disjunct("A")
+    a.subject_to(c)
+    b = m.make_disjunct("B")
+    b.subject_to(x >= 1)
+    m.add_disjunction([a, b], name="D1")
+    m.if_then(z, [c])
+    m.subject_to(z >= 1)
+    m.minimize(x)
+    return m
+
+
+@pytest.mark.parametrize("method", ["big-m", "mbigm"])
+def test_flag_on_keeps_an_if_then_row_sharing_a_block_constraint(method, monkeypatch):
+    monkeypatch.setenv(FLAG, "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = _shared_with_if_then().solve(gdp_method=method, time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=1e-6)
+
+
+def test_the_transformation_keeps_an_if_then_row_sharing_a_block_constraint():
+    from discopt.modeling.core import _IndicatorConstraint
+
+    m = _shared_with_if_then()
+    bound_pretransform(m)
+    left = [
+        r for r in m._constraints if isinstance(r, _IndicatorConstraint) and r.disjunction is None
+    ]
+    assert len(left) == 1  # the if_then row survives; only block A's copy went
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=1e-6)

@@ -94,3 +94,18 @@ silently. After the fix, hda hull is sound: `time_limit` at 300 s, bound 112572 
 
 The MBIGM_CONDITIONED, DISJUNCT_FBBT and BOUND_PRETRANSFORM panels lower with big-M
 or mbigm only, so this defect does not touch them.
+
+## Verdicts (2026-11-01)
+
+Re-derive each with `--report`; all four panels are cert-clean.
+
+| flag | verdict | why |
+|---|---|---|
+| `DISCOPT_GDP_ENUMERATE_CUTOFF` | graduated (`f9b9e7a5`) | see its audit row |
+| `DISCOPT_GDP_BOUND_PRETRANSFORM` | graduated | syngas mbigm 0/3 -> 3/3; wall down on 15 of the 16 cells solved in both arms; SGM 36.15 -> 35.39 s |
+| `DISCOPT_MBIGM_CONDITIONED` | retired | no solve gained; SGM 26.88 -> 27.49 s |
+| `DISCOPT_GDP_DISJUNCT_FBBT` | retired | one solve gained (syngas 0/3 -> 2/3), slower elsewhere; SGM 34.55 -> 35.73 s |
+| `DISCOPT_HULL_LIFTED_RATIO` | retired (`f9b9e7a5`) | not cert-clean |
+
+The retired flags' code is deleted, so re-running their fire phase now finds every
+lowering identical; the `.jsonl` files are the record.

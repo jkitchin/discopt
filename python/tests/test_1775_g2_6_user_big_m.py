@@ -85,7 +85,12 @@ def test_the_lowering_uses_the_user_m():
     assert "((5 - x) - (7 * (1 - _gdp_aux_disj_d_1_1))) <= 0.0" in rows
 
 
-def test_rows_without_a_user_m_lower_as_before():
+def test_rows_without_a_user_m_lower_as_before(monkeypatch):
+    # The baseline is the plain big-M lowering. Since #1917 the bound pretransform
+    # (default ON) rewrites a disjunction without user Ms; one with user Ms is left
+    # to them, so the comparison is against the legacy lowering (=0).
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
+
     def build(with_m):
         m = dm.Model("same")
         x = m.continuous("x", lb=0, ub=10)
@@ -96,6 +101,17 @@ def test_rows_without_a_user_m_lower_as_before():
     plain, partial = _rows(build(False)), _rows(build(True))
     assert plain[0] == partial[0] and plain[2] == partial[2]  # select row, x >= 5 row
     assert plain[1] != partial[1]
+
+
+def test_a_disjunction_with_user_ms_is_not_pretransformed(monkeypatch):
+    """The bound pretransform (#1775 G2.4, default ON since #1917) would replace
+    ``x <= 2`` by a bound row and silently discard the user's M; it must not."""
+    monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "1")
+    m = dm.Model("keep")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 2
+    m.either_or([[c], [x >= 5]], name="d", big_m={c: 9.0})
+    assert "((x - 2) - (9 * (1 - _gdp_aux_disj_d_0_0))) <= 0.0" in _rows(m)
 
 
 # ── certified: the solve keeps its certificate ───────────────────────────────

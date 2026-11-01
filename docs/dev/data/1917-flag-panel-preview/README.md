@@ -1,5 +1,9 @@
 # #1917 §5 flag panels: partial preview (2026-10-31, main `4517c7b`)
 
+**Superseded** by the full 24-instance panels in `../1917-flag-panel/` (2026-11-01),
+which graduated `DISCOPT_GDP_BOUND_PRETRANSFORM` and retired
+`DISCOPT_MBIGM_CONDITIONED`. Kept as the record of what the preview showed.
+
 **Not a graduation or retirement panel.** The container had only the PyPI GDPlib
 (20.6.2): 13 of the 24 `gdp_parity` instances do not exist in it, and the 4 that
 do (`biofuel`, `gdp_col`, `stranded_gas`, `syngas`) fail to build (missing data
