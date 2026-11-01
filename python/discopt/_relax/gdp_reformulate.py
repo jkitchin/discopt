@@ -433,6 +433,7 @@ def reformulate_gdp(
                     _add_aux_binary,
                     selectors=sels,
                     child_selectors=_hull_plan.child_selectors,
+                    arg_split=_disagg,
                 )
                 new_model._constraints.extend(new_cons)
         elif isinstance(c, _IndicatorConstraint):
@@ -500,7 +501,7 @@ def reformulate_gdp(
                 )
             elif chosen == "hull":
                 new_vars, new_cons = _reformulate_disjunction_hull(
-                    c, new_model, _add_aux_binary, selectors=own_sels
+                    c, new_model, _add_aux_binary, selectors=own_sels, arg_split=_disagg
                 )
             else:
                 # big-m and mbigm both go through _reformulate_disjunction;
@@ -546,6 +547,7 @@ def reformulate_gdp(
                 _add_aux_binary,
                 selectors=sels,
                 child_selectors=_hull_plan.child_selectors,
+                arg_split=_disagg,
             )
             new_model._constraints.extend(new_cons)
 
@@ -2622,6 +2624,7 @@ def _reformulate_disjunction_hull(
     prefix: Optional[str] = None,
     child_selectors: Optional[dict[int, list[Variable]]] = None,
     cone_rows: Optional[set[int]] = None,
+    arg_split: Optional[_ArgumentDisaggregator] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via convex hull relaxation.
 
@@ -2662,6 +2665,9 @@ def _reformulate_disjunction_hull(
         (``DISCOPT_HULL_CONIC_QUADRATIC``, :func:`_conic_hull_body`), so a parent
         hulling this disjunction as a child keeps them as they are rather than
         nesting a perspective inside them (see the comment at that branch).
+    arg_split : _ArgumentDisaggregator, optional
+        Splits the restricted operands out of a row the hull would otherwise
+        refuse (#1917; see :func:`_hull_split_rows`). ``None`` keeps the refusal.
 
     Nesting (#1775 G2.1) is lowered from the leaves up, as Pyomo's ``gdp.hull``
     does: a disjunction nested in disjunct ``k`` is hulled first, on its own fresh
@@ -2753,6 +2759,7 @@ def _reformulate_disjunction_hull(
                     prefix=f"{prefix}_d{k}_{item.name or j}",
                     child_selectors=child_selectors,
                     cone_rows=child_cones,
+                    arg_split=arg_split,
                 )
                 # A block's indicators -- the child's and, below it, its own
                 # children's -- are zero whenever y_k is (their ``sum == parent``
@@ -2765,6 +2772,8 @@ def _reformulate_disjunction_hull(
                 new_vars.extend(child_vars)
             else:
                 rows_k.append(item)
+        if arg_split is not None:
+            rows_k = _hull_split_rows(dc.disjuncts[k], rows_k, model, arg_split)
         rows.append(rows_k)
         local.append(local_k)
 
@@ -3051,6 +3060,90 @@ def _reformulate_disjunction_hull(
                 )
 
     return new_vars, new_cons
+
+
+def _hull_origin_unbounded(con: Constraint, bounds_k: dict[str, tuple[float, float]]) -> bool:
+    """Would the hull refuse ``con`` for want of a finite ``g(0)`` (#1917)?
+
+    True exactly when the hull's two forms both fail: ``g(0)`` is not finite (so
+    the eps-perspective cannot cancel its residual, :func:`_body_at_zero`) and the
+    body has no finite enclosure on the disjunct's own box ``bounds_k`` (so the
+    eps-free lifted perspective, :func:`_origin_free_hull_row`, refuses too). The
+    same tests on the same box, so a row this answers ``False`` for is lowered
+    exactly as before.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    if _is_linear(con.body):
+        return False
+    body_vars = _collect_variables(con.body)
+    try:
+        _body_at_zero(con.body, body_vars)
+        _parametric_body_at_zero(con.body, body_vars)
+        return False
+    except HullPerspectiveOriginError as exc:
+        if "not collected" in str(exc):
+            return False  # an internal inconsistency: the lowering refuses it as before
+    scratch = Model("_hull_split_probe")
+    probe: dict[str, Expression] = {
+        n: Variable(
+            n,
+            VarType.CONTINUOUS,
+            v.shape,
+            *bounds_k.get(n, (float(np.min(v.lb)), float(np.max(v.ub)))),
+            scratch,
+        )
+        for n, v in body_vars.items()
+    }
+    try:
+        enc = evaluate_interval(_substitute_vars(con.body, probe), None)
+    except Exception:  # noqa: BLE001 - no enclosure: the lowering refuses, naming the cause
+        return True
+    return not (np.all(np.isfinite(np.asarray(enc.lo))) and np.all(np.isfinite(np.asarray(enc.hi))))
+
+
+def _hull_split_rows(
+    disjunct: list,
+    rows_k: list[Constraint],
+    model: Model,
+    disagg: _ArgumentDisaggregator,
+) -> list[Constraint]:
+    """``rows_k`` with each row the hull would refuse replaced by its argument split.
+
+    A row such as ``lf == 0.9 ** (log(S) / log 2)`` (GDPlib ``stranded_gas``,
+    ``S`` a sum of 360 columns) has no hull when ``S``'s box reaches 0: ``g(0)`` is
+    ``log(0)``, and on the disjunct's box ``log(S)`` is unbounded below. Yet the
+    disjunct's own row ``S >= 1`` keeps ``S`` inside ``log``'s domain wherever the
+    disjunct holds; only a multivariate row says so, so neither the disjunct's
+    variable bounds nor variable-level FBBT can see it.
+
+    :meth:`_ArgumentDisaggregator.split` (#1999) replaces ``S`` by a fresh column
+    ``w`` boxed to ``W``, a rigorous LP enclosure of ``S`` over the disjunct's own
+    linear rows (then the model's), and adds ``S - w == 0`` to the disjunct. The
+    lifted disjunct is in bijection with the original (``w`` is determined by
+    ``x`` wherever the disjunct holds, and ``W`` contains every such value), so its
+    hull projects onto the original variables exactly as the hull of the original
+    disjunct would. ``w`` is an ordinary shared column of the hull, disaggregated
+    like any other: it appears in no other disjunct, so its copies there are free
+    in ``W`` and constrain nothing. The split row's ``g(0)`` is still not finite,
+    but its body is bounded on ``W``, so the lifted perspective takes it.
+
+    Only the disjunct's own rows are split (a nested child's rows were split, if
+    at all, by the child's own hull), and the refusal stands for any row the split
+    cannot bound. A row the hull lowers today is never touched.
+    """
+    own = [c for c in disjunct if isinstance(c, Constraint)]
+    own_ids = {id(c) for c in own}
+    bounds_k = _extract_disjunct_bounds(own, model)
+    out: list[Constraint] = []
+    for con in rows_k:
+        if id(con) in own_ids and _hull_origin_unbounded(con, bounds_k):
+            split = disagg.split(con, own)
+            if split is not None:
+                out.extend(split)
+                continue
+        out.append(con)
+    return out
 
 
 def _origin_free_hull_row(
