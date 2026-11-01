@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 
 from discopt._flat_index import resolve_scalar_slot
+from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt._relax.scalarize import scalar_leaf_value, sum_is_full_reduction
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
@@ -55,6 +56,35 @@ _OBBT_COND_LIMIT = 1e10
 # avoiding spurious box perturbations on knife-edge instances (st_e11) — while the
 # gross ill-conditioned drift that prunes a feasible optimum is caught.
 _OBBT_NS_GUARD = 1e-6
+
+
+def _obbt_ns_strict() -> bool:
+    """``DISCOPT_OBBT_NS_STRICT`` (#1917, default OFF): see ``SolverTuning.obbt_ns_strict``.
+
+    The 1e-6 guard above accepts a vertex up to ~1e-6 above the true LP minimum as a
+    bound; the hull eps-perspective lift amplified one such vertex into a false
+    certificate. ON, every tightening takes ``min(raw, g)`` and none happens without
+    ``g``."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().obbt_ns_strict)
+
+
+def _ns_select(
+    raw: float, g: Optional[float], *, require_ns: bool, strict: bool
+) -> Optional[float]:
+    """The value an OBBT probe may tighten to, given the vertex ``raw`` and NS bound ``g``.
+
+    ``None`` means "do not tighten". Strict: ``min(raw, g)``, and ``None`` without
+    ``g``. Legacy: ``g`` only when ``raw`` exceeds it by the ``_OBBT_NS_GUARD``
+    margin, else ``raw``; without ``g`` the raw vertex unless ``require_ns``."""
+    if g is None:
+        return None if (strict or require_ns) else raw
+    if strict:
+        return min(float(raw), float(g))
+    if raw > g + _OBBT_NS_GUARD * (1.0 + abs(raw)):
+        return float(g)
+    return float(raw)
 
 
 def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0.0, n_eq=0):
@@ -938,6 +968,7 @@ def run_obbt(
         _max_abs(_bound_vals),
     )
     require_ns = _cond > _OBBT_COND_LIMIT
+    _strict = _obbt_ns_strict()
     if require_ns and not _use_ns:
         return ObbtResult(
             tightened_lb=lb,
@@ -995,15 +1026,12 @@ def run_obbt(
         leaves the bound untightened. See ``_ns_safe_lp_lower_bound``.
         """
         if not _use_ns:
-            return raw
+            # Strict: no NS oracle means no rigorous bound, so no tightening.
+            return None if _strict else raw
         g = _ns_safe_lp_lower_bound(
             c_vec, getattr(result, "dual_values", None), _ns_A, _ns_b, lb, ub, n_eq=_ns_neq
         )
-        if g is None:
-            return None if require_ns else raw
-        if raw > g + _OBBT_NS_GUARD * (1.0 + abs(raw)):
-            return float(g)
-        return raw
+        return _ns_select(raw, g, require_ns=require_ns, strict=_strict)
 
     for var_idx in candidates:
         lp_time_limit = _lp_time_limit()
@@ -1213,6 +1241,7 @@ def run_obbt_on_relaxation(
     # yet whose boxes (x5,x6 spanning [~0, 1.36e4]) only shrink once OBBT runs --
     # while never tightening from a non-rigorous value.
     require_ns = _cond > _OBBT_COND_LIMIT
+    _strict = _obbt_ns_strict()
     if require_ns and not _use_ns:
         return ObbtResult(
             tightened_lb=np.array([b[0] for b in bounds[:n_orig]], dtype=np.float64),
@@ -1383,16 +1412,13 @@ def run_obbt_on_relaxation(
         if status == SolveStatus.OPTIMAL and objective is not None:
             new_lb = objective
             if _use_ns:
-                # Distrust the vertex only when the rigorous safe bound sits well
-                # below it (ill-conditioned basis); otherwise keep it bit-for-bit.
+                # Legacy: distrust the vertex only when the rigorous safe bound sits
+                # well below it (ill-conditioned basis); otherwise keep it
+                # bit-for-bit. Strict (#1917): ``min(raw, g)``, nothing without ``g``.
                 g = _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lb_arr, ub_arr)
-                if g is None:
-                    if require_ns:
-                        # Ill-conditioned LP and no rigorous safe bound available:
-                        # the raw vertex is untrustworthy here, so do not tighten.
-                        new_lb = None
-                elif new_lb > g + _OBBT_NS_GUARD * (1.0 + abs(new_lb)):
-                    new_lb = g
+                new_lb = _ns_select(new_lb, g, require_ns=require_ns, strict=_strict)
+            elif _strict:
+                new_lb = None
             if new_lb is not None and new_lb > lb_arr[var_idx] + eps:
                 # Don't cross the upper bound.
                 lb_arr[var_idx] = min(new_lb, ub_arr[var_idx])
@@ -1407,15 +1433,12 @@ def run_obbt_on_relaxation(
         if status == SolveStatus.OPTIMAL and objective is not None:
             lp_min = objective  # = min(-x_i) = -max(x_i)
             if _use_ns:
-                # Same guard: ``g`` bounds ``min(-x_i)`` from below, so when the
-                # vertex sits well above it the basis is ill-conditioned and the
-                # safe bound ``-g`` is the sound (looser) upper bound on ``x_i``.
+                # Same selection: ``g`` bounds ``min(-x_i)`` from below, so the safe
+                # bound ``-g`` is the sound (looser) upper bound on ``x_i``.
                 g = _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lb_arr, ub_arr)
-                if g is None:
-                    if require_ns:
-                        lp_min = None
-                elif lp_min > g + _OBBT_NS_GUARD * (1.0 + abs(lp_min)):
-                    lp_min = g
+                lp_min = _ns_select(lp_min, g, require_ns=require_ns, strict=_strict)
+            elif _strict:
+                lp_min = None
             if lp_min is not None:
                 new_ub = -lp_min
                 if new_ub < ub_arr[var_idx] - eps:
@@ -1519,7 +1542,35 @@ def dbbt_on_relaxation(
     ):
         return _noop()
 
-    z_lp = float(result.objective) + obj_offset
+    d = np.asarray(result.reduced_costs, dtype=np.float64)
+    # Per-column round-off bound on ``d_j``; zero on the legacy path.
+    d_slack = np.zeros(d.shape[0], dtype=np.float64)
+    if _obbt_ns_strict():
+        # #1917 strict: ``z_lp`` must be the NS-safe bound (the
+        # ``node_reduce._dbbt_from_reduced_costs`` contract), and the reduced costs
+        # must come from the SAME multiplier ``y``: for every x in the box with
+        # ``A_ub x <= b_ub``, ``c^T x - g(y) >= sum_j d_j (x_j - bound_j)`` with
+        # ``d = c + A_ub^T y``, which is exactly the inequality DBBT divides. No
+        # safe bound -> abstain.
+        dual = getattr(result, "dual_values", None)
+        lo_all = np.array([b[0] for b in bounds], dtype=np.float64)
+        hi_all = np.array([b[1] for b in bounds], dtype=np.float64)
+        c_arr = np.asarray(c_obj, dtype=np.float64)
+        g = _ns_safe_lp_lower_bound(c_arr, dual, A_ub, b_ub, lo_all, hi_all)
+        if g is None:
+            return _noop()
+        y = np.clip(-np.asarray(dual, dtype=np.float64), 0.0, None)
+        if sp.issparse(A_ub):
+            d = c_arr + np.asarray(A_ub.T @ y).ravel()
+            absum = np.abs(c_arr) + np.asarray(abs(A_ub).T @ y).ravel()
+        else:
+            A_dense = np.asarray(A_ub, dtype=np.float64)
+            d = c_arr + A_dense.T @ y
+            absum = np.abs(c_arr) + np.abs(A_dense).T @ y
+        d_slack = ROUNDOFF_OPS * FLOAT_EPS * absum
+        z_lp = float(g) + obj_offset
+    else:
+        z_lp = float(result.objective) + obj_offset
     gap = float(incumbent_cutoff) - z_lp
     if not np.isfinite(gap) or gap < 0.0:
         # gap < 0 means the relaxation already excludes the incumbent value; the
@@ -1528,7 +1579,6 @@ def dbbt_on_relaxation(
     # Safety margin so any residual dual tolerance cannot over-tighten.
     gap += 1e-6 * (1.0 + abs(float(incumbent_cutoff)))
 
-    d = np.asarray(result.reduced_costs, dtype=np.float64)
     lb = base_lb.copy()
     ub = base_ub.copy()
     n_tightened = 0
@@ -1536,13 +1586,18 @@ def dbbt_on_relaxation(
         dj = float(d[j])
         if not np.isfinite(dj):
             continue
-        if dj > rc_tol:
-            new_ub = lb[j] + gap / dj
+        # Divide by the smallest |d_true| consistent with the computed d_j
+        # (``d_slack`` is 0 on the legacy path, so this is bit-for-bit there).
+        d_safe = abs(dj) - float(d_slack[j])
+        if not np.isfinite(d_safe):
+            continue
+        if dj > rc_tol and d_safe > rc_tol:
+            new_ub = lb[j] + gap / d_safe
             if new_ub < ub[j] - eps:
                 ub[j] = max(lb[j], new_ub)
                 n_tightened += 1
-        elif dj < -rc_tol:
-            new_lb = ub[j] - gap / (-dj)
+        elif dj < -rc_tol and d_safe > rc_tol:
+            new_lb = ub[j] - gap / d_safe
             if new_lb > lb[j] + eps:
                 lb[j] = min(ub[j], new_lb)
                 n_tightened += 1

@@ -94,6 +94,12 @@ pub fn solve_spatial_tree_py<'py>(
     int_tol: f64,
     mccormick_tol: f64,
     min_box_width: f64,
+    // Dormant (default `false`, and no Python caller sets it). Before anyone enables
+    // it: `discopt-core/src/bnb/obbt_sweep.rs` tightens to the raw LP vertex
+    // `sol.obj` with no margin, which is the #1917 defect the Python
+    // `DISCOPT_OBBT_NS_STRICT` path fixes (a vertex ~1e-7 above the true LP minimum
+    // cut the optimum on the lifted clay0203 hull). It must first be clamped to a
+    // Neumaier-Shcherbina safe bound `min(raw, g)`, refusing to tighten without `g`.
     run_obbt: bool,
     run_propagation: bool,
     propagation_rounds: usize,

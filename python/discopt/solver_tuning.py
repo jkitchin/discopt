@@ -1188,6 +1188,26 @@ class SolverTuning:
     med_term_purchasing under mbigm (57 -> 95), at a lower wall in each. Audit row
     in ``docs/dev/flag-retirement-audit.md``."""
 
+    obbt_ns_strict: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_OBBT_NS_STRICT", default=False)
+    )
+    """Tighten OBBT/DBBT only to the rigorous Neumaier-Shcherbina bound
+    (``DISCOPT_OBBT_NS_STRICT``, default **OFF**; bound-changing on every route that
+    runs Python OBBT/DBBT; #1917).
+
+    Today ``run_obbt`` and ``run_obbt_on_relaxation`` replace the LP vertex
+    objective ``raw`` by the safe bound ``g`` only when ``raw > g + 1e-6 * (1 +
+    |raw|)`` (``_OBBT_NS_GUARD``), and keep ``raw`` when ``g`` is unavailable; DBBT
+    sizes its gap from the raw ``z_lp``. A vertex up to ~1e-6 above the true LP
+    minimum is therefore accepted as a bound. Measured on the (retired) lifted hull
+    of GDPlib ``constrained_layout_clay0203``: a min probe returned raw 1.56e-7
+    against g = -1.35e-7, the 1e-6 guard accepted it, the bound cut the optimum,
+    and the solve certified 41709.77 for an optimum of 41573.26. ON: OBBT tightens to
+    ``min(raw, g)`` and never tightens when ``g`` is ``None``; DBBT sizes the gap
+    from the NS-safe ``z_lp`` and reduced costs recomputed from the same dual ``y``
+    (the ``node_reduce._dbbt_from_reduced_costs`` contract), and abstains when no
+    safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``."""
+
     hull_conic_quadratic: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
     )
