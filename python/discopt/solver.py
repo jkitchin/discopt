@@ -4480,6 +4480,17 @@ def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
     return float(tangent_min - margin)
 
 
+def _interval_bound_past_deadline(iteration, deadline):
+    """Whether the per-node interval objective bound should be skipped (#2071).
+
+    True once the solve deadline has passed, except on the root iteration, whose
+    nodes have no parent bound to fall back on (#928 rule 1). Skipping is sound:
+    the interval bound is only ever ``max()``-combined with other valid bounds, so
+    a node that does not get it keeps a valid, possibly looser, bound.
+    """
+    return iteration >= 1 and time.perf_counter() >= deadline
+
+
 def _compute_interval_bound(model, node_lb, node_ub, negate):
     """Sound interval-arithmetic lower bound on the objective over a node box.
 
@@ -21116,6 +21127,14 @@ def solve_model(
             # soundness.
             if not _model_is_convex and model._objective is not None:
                 for i in range(n_batch):
+                    # #2071: one enclosure is a Python walk of the objective DAG
+                    # (~1 s on a 15,771-term bilinear objective), so an unchecked
+                    # batch ran ~20 s past ``time_limit``. Past the deadline, stop:
+                    # a skipped node keeps the bound it already has, and max() of
+                    # valid bounds means omitting one is sound. The root batch is
+                    # exempt (#928 rule 1): it holds no parent bound to fall back on.
+                    if _interval_bound_past_deadline(iteration, _deadline):
+                        break
                     if result_lbs[i] < _SENTINEL_THRESHOLD:
                         iv_lb = _compute_interval_bound(
                             model, batch_lb[i], batch_ub[i], _obj_negate
@@ -21513,7 +21532,11 @@ def solve_model(
                     # Cheap, always-valid interval-arithmetic bound. Keeps
                     # nonconvex nodes off -inf so the global lower bound
                     # tightens every iteration. max() of valid bounds stays valid.
-                    if not _model_is_convex:
+                    # #2071: past the deadline, skip the enclosure (see the batch
+                    # path); convex_lb stays at what it already holds, a valid bound.
+                    if not _model_is_convex and not _interval_bound_past_deadline(
+                        iteration, _deadline
+                    ):
                         iv_lb = _compute_interval_bound(model, node_lb, node_ub, _obj_negate)
                         if np.isfinite(iv_lb):
                             convex_lb = max(convex_lb, iv_lb)
@@ -23367,7 +23390,11 @@ def solve_model(
         # interval enclosure of the objective over the SAME box is equally valid,
         # so offer it; the tree keeps the larger. ``_compute_interval_bound``
         # returns -inf when it cannot enclose, which leaves the node bound.
+        # #2071: past the deadline, stop offering enclosures; an un-offered node
+        # keeps its own (valid, looser) bound as its floor.
         for _tf_id in tree.take_tight_fathoms():
+            if _interval_bound_past_deadline(iteration, _deadline):
+                break
             _tf_lo, _tf_hi = tree.node_box(int(_tf_id))
             tree.raise_tight_fathom_floor(
                 int(_tf_id), _compute_interval_bound(model, _tf_lo, _tf_hi, _obj_negate)
