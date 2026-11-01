@@ -162,3 +162,41 @@ def test_default_box_opening_keeps_declared_sides():
     got = _default_box_opened(kw)
     assert got == [(-_INF, _INF), (-5.0, _INF), (0.0, 1e15), (-np.inf, 3.0)]
     assert _default_box_opened({"c": np.zeros(1), "bounds": [(0.0, 1e15)]}) is None
+
+
+# ── LOA re-solves a configuration its subproblem cap stopped ──────────────
+
+
+def test_loa_raises_the_cap_instead_of_stopping_on_a_capped_repeat(monkeypatch):
+    """A global subproblem stopped by its cap proves nothing, so the master
+    proposes the configuration again; LOA used to stop there (C-35's repeat
+    rule) with the budget unspent. GDPlib syngas at ``time_limit=60``: 6 s cap,
+    28 s needed, stopped at 20 s with no incumbent. Simulated here: a subproblem
+    resolves only with a cap of at least 2 s, and the fixed-integer NLP fails."""
+    import discopt.gdp.algorithms.subproblem as sub
+    from discopt.gdp.algorithms.loa import LOA
+
+    real = sub.solve_subproblem
+    caps: list = []
+
+    def capped(*a, time_cap=None, **k):
+        caps.append(time_cap)
+        if time_cap is not None and time_cap < 2.0:
+            return sub.SubproblemResult("unresolved", reason="cap (test)")
+        return real(*a, time_cap=time_cap, **k)
+
+    monkeypatch.setattr(sub, "solve_subproblem", capped)
+    monkeypatch.setattr(LOA, "_fixed_integer_nlp", lambda self, x: (None, False))
+
+    m = dm.Model("capped")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.subject_to(x * y >= 2)
+    m.either_or([[x >= 3], [y >= 4]], name="d")
+    m.minimize(x + y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        r = LOA(m, time_limit=60, subproblem_time_limit=1.0).run()
+    assert 1.0 in caps and 4.0 in caps, caps  # the probe fired, then escalated
+    assert r.status == "optimal", (r.status, caps)
+    assert r.objective == pytest.approx(3 + 2 / 3, rel=1e-4)  # x = 3, y = 2/3
