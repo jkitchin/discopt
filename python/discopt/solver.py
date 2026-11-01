@@ -9921,8 +9921,64 @@ def _objective_syntactically_convex(model: Model) -> bool:
         return False
 
 
-def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
+#: The GDP lowerings the MIP-NLP branch accepts (``solve_model``'s ``gdp_methods``).
+_ROUTE_GDP_LOWERINGS = frozenset({"big-m", "hull", "mbigm", "auto"})
+
+
+def _convex_route_gdp_lowered_enabled() -> bool:
+    """Classify a GDP model's convexity on its lowering for the #1059 route (#1917).
+
+    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED``, **default OFF** (it changes the
+    algorithm a GDP model is solved by, which is bound-changing under CLAUDE.md
+    §5). The convex-MINLP auto-route is decided on the model the caller passed,
+    *before* GDP lowering, and the convexity classifier reports every
+    ``_IndicatorConstraint`` as unproven -- a linear one included. So no model
+    with a disjunction is ever routed, even when the lowering the route would
+    solve (``solve_model``'s ``mip-nlp`` branch lowers before solving) is
+    certified convex row for row. Measured on GDPlib ``batch_processing``
+    (#1917): raw model 450 of 700 rows unproven, its big-M lowering 790 of 790
+    convex. With the flag on, a model carrying GDP constraints under a lowering
+    ``gdp_method`` is classified on ``reformulate_gdp(model, gdp_method)``,
+    which is exactly the model the routed solve runs on.
+    """
+    val = os.environ.get("DISCOPT_CONVEX_ROUTE_GDP_LOWERED", "0").strip().lower()
+    return val in ("1", "true", "on", "yes")
+
+
+def _model_has_gdp_constraints(model: Model) -> bool:
+    """Whether ``model`` carries a constraint ``reformulate_gdp`` would lower."""
+    return _model_has_gdp_constraints_list(model._constraints)
+
+
+def _model_has_gdp_constraints_list(constraints: Any) -> bool:
+    """Whether any of ``constraints`` is one ``reformulate_gdp`` would lower."""
+    from discopt.modeling.core import (
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _LogicalConstraint,
+        _SOSConstraint,
+    )
+
+    return any(
+        isinstance(
+            c,
+            (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint, _LogicalConstraint),
+        )
+        for c in constraints
+    )
+
+
+def _convex_minlp_auto_route(
+    model: Model, gdp_method: Optional[str] = None
+) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
+
+    ``gdp_method`` is the caller's GDP lowering. With
+    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED`` on and ``model`` carrying GDP
+    constraints, every gate below is evaluated on that lowering -- the model the
+    routed solve actually runs on -- instead of on the disjunctive model, whose
+    indicator rows the classifier cannot prove (see
+    :func:`_convex_route_gdp_lowered_enabled`).
 
     Returns ``(method, reason, options)`` where ``method`` is the
     ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
@@ -10034,6 +10090,40 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     if not _convex_minlp_route_enabled():
         return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
+    _lowered_note = ""
+    if (
+        gdp_method in _ROUTE_GDP_LOWERINGS
+        and _convex_route_gdp_lowered_enabled()
+        and _model_has_gdp_constraints(model)
+    ):
+        from discopt.transformations import get as _get_transformation
+
+        # Lowering rewrites only the GDP rows; every other row is copied as is.
+        # So when the caller's model already has a NON-GDP row the classifier
+        # rejects, the lowering cannot be certified either -- skip it rather
+        # than pay a second lowering and a full classification to learn that.
+        _raw_known, _raw_convex, _raw_mask = _classify_model_convexity(
+            model, failure_label="convex-MINLP route convexity detection failed"
+        )
+        if _raw_known and not _raw_convex and _raw_mask is not None:
+            if len(_raw_mask) != len(model._constraints):
+                raise AssertionError(
+                    f"convexity mask has {len(_raw_mask)} entries for "
+                    f"{len(model._constraints)} constraints"
+                )
+            if any(
+                not _ok and not _model_has_gdp_constraints_list([_c])
+                for _c, _ok in zip(model._constraints, _raw_mask)
+            ):
+                return None, "not routed: a non-GDP row is not convex", {}
+        # #1917: judge the model the route will solve. ``apply`` returns a new
+        # model and leaves the caller's untouched; the route lowers again on its
+        # own (box-tightened) copy, and lowering is deterministic in structure,
+        # so every row-convexity verdict made here holds there (a tighter box
+        # changes big-M constants, which enter linearly, never a Hessian).
+        model = _get_transformation("gdp").apply(model, method=gdp_method)
+        _lowered_note = f" (GDP lowered by {gdp_method}; DISCOPT_CONVEX_ROUTE_GDP_LOWERED)"
+
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
@@ -10105,7 +10195,7 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
         method,
         (
             f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
-            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
+            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master}){_lowered_note}"
         ),
         {"milp_solver": master},
     )
@@ -15270,7 +15360,7 @@ def solve_model(
                 _auto_route_method,
                 _auto_route_reason,
                 _auto_route_options,
-            ) = _convex_minlp_auto_route(model)
+            ) = _convex_minlp_auto_route(model, gdp_method=gdp_method)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
