@@ -38,7 +38,6 @@ differ between the POUNCE native, callback and Ipopt node engines) cannot matter
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 import numpy as np
@@ -53,10 +52,10 @@ from discopt._relax._numeric import roundoff_slack
 #: otherwise multiply a rounding-sized reduced cost into a useless one.
 _OPEN_SIDE = 1e15
 
-#: Wall-clock cap on the certificate ladder's exact dual correction per node. The
-#: correction is a fallback rung; a node it cannot certify inside this budget gets no
-#: safe bound (``None``), never a guessed one.
-_LADDER_BUDGET_S = 0.5
+#: The certificate ladder's exact dual correction is bounded by a deterministic
+#: operation count (``lp_milp_highs.EXACT_MAX_WORK``/``EXACT_MAX_TOTAL_WORK``), not by a
+#: clock of its own: a wall cap here made a node's bound a function of machine speed
+#: (#912). Only the caller's ``deadline`` -- its own ``time_limit`` -- can stop it.
 
 
 def _as_csr(J, m: int, n: int) -> sp.csr_matrix:
@@ -285,9 +284,7 @@ def convex_node_safe_bound(
     if y.shape != (sf.m,) or not np.all(np.isfinite(y)):
         return None, "linearised node LP dual is not finite"
     lp_obj = lp_val + sf.obj_const
-    budget = time.perf_counter() + _LADDER_BUDGET_S
-    ladder_deadline = budget if deadline is None else min(budget, float(deadline))
-    bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=ladder_deadline)
+    bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline)
     if bound is None or not np.isfinite(bound):
         return None, reason or "no finite Neumaier-Shcherbina bound from the LP dual"
     return float(bound), ""
