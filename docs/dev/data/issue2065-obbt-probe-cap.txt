@@ -98,3 +98,25 @@ instances with over-cap probes: name [over, over&tight, max probe wall s]
 # 0.447 s vs 0.2). The 4 s edgecross14 probes (cap 0.1) tightened nothing.
 # Halfway through this run (70 instances) the over-cap share read 1.17%; that was a
 # partial figure, superseded by the full 0.463% above.
+#
+# ==== Section 5 ON/OFF panel: DISCOPT_OBBT_PROBE_PER_LP_CAP (ON = persistent probes get
+#      min(deadline budget, time_limit_per_lp)) -- flag implemented in 8ea2b32 ====
+# discopt_benchmarks/scripts/flag_onoff_corpus_panel.py, time_limit=30, 3 jobs, arms
+# interleaved per instance; 1-min load average 5-7 on 4 cores (wall times are noisy).
+# Instances: the 74 in-repo .nl plus every MINLPLib instance above on which a
+# persistent probe fired (201 at <= 200, 30 in 200-2000; 23 overlap) = 282.
+# Rows: docs/dev/data/issue2065-panel/panel_obbt_probe_per_lp_cap.jsonl
+# Summary: 1 instance with a problem; certified OFF 226 -> ON 225, gained [],
+#   lost [gastrans040]; no bound where OFF had none; errors []; 525 incumbent
+#   feasibility checks executed (all feasible); no bound past its oracle.
+# gastrans040 re-run alone, 3 interleaved reps per arm, time_limit=30, load 2:
+#   OFF optimal cert 30.3/30.1/30.4 s, ON optimal cert 30.4/30.2/30.1 s -- certifies
+#   at the time limit in both arms; the panel loss is load timing, not the flag.
+# Wall: total OFF 2425.4 s, ON 2386.0 s (-1.6%); both-certified (225) 702.3 -> 681.2 s.
+# Nodes: 15 both-certified instances changed node count, sum 46378 -> 44510.
+# Bounds on 19 uncertified instances differ (12 better ON, 7 worse). Repeats show this
+#   is noise: graphpart_clique-40 OFF alone gave bound 47.5, 47.5, 108.5 (ON 39.0,
+#   47.5, 82.5); squfl010-025persp OFF alone gave 105.9, 105.9, 18.0.
+# Verdict: cert-clean, NOT net-positive (no certificate gained; bound and wall
+#   changes within run-to-run spread). Per CLAUDE.md section 5 three outcomes:
+#   RETIRED -- flag and implementation deleted in the same PR (#2068).

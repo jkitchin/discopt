@@ -11,7 +11,6 @@ Uses the HiGHS LP solver with warm-starting for efficiency.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -275,23 +274,6 @@ def _simplex_available() -> bool:
         return bool(SIMPLEX_AVAILABLE)
     except ImportError:
         return False
-
-
-def _persistent_probe_per_lp_cap() -> bool:
-    """``DISCOPT_OBBT_PROBE_PER_LP_CAP``: apply ``time_limit_per_lp`` to persistent probes.
-
-    Default OFF (#2065). The persistent OBBT probe path is bounded by the sweep's
-    remaining ``deadline`` only (#2006); the seam path and the ``top_k`` scoring LP
-    already honor ``time_limit_per_lp``. ON forwards ``min(deadline budget,
-    time_limit_per_lp)`` to every persistent probe. That is bound-changing: a probe
-    stopped at the cap is non-optimal and tightens nothing (sound -- a skipped
-    tightening never invalidates a bound -- but possibly weaker). The #2065 entry
-    experiment found probes past the cap rare below 200 vars/cons and above the
-    issue's 1% threshold in the 200-2000 band (``docs/dev/data/
-    issue2065-obbt-probe-cap.txt``), so this ships default-OFF pending the CLAUDE.md
-    section 5 ON/OFF panel recorded in ``docs/dev/flag-retirement-audit.md``.
-    """
-    return os.environ.get("DISCOPT_OBBT_PROBE_PER_LP_CAP", "0") != "0"
 
 
 class _PersistentProbeLP:
@@ -1134,17 +1116,21 @@ def run_obbt_on_relaxation(
         Subset of column indices to tighten.  Defaults to all original columns.
     time_limit_per_lp : float, optional
         Per-LP time limit in seconds.  ``None`` for no limit.  Honored by the
-        seam-oracle probes and the ``top_k`` scoring LP.  By default the
-        persistent probe path (Rust simplex binding available) does **not**
-        apply it: each persistent probe is bounded only by the remaining
-        ``deadline`` (#2006), or runs to convergence when ``deadline`` is
-        ``None``.  ``DISCOPT_OBBT_PROBE_PER_LP_CAP=1`` forwards
-        ``min(deadline budget, time_limit_per_lp)`` to persistent probes too
-        (#2065; default OFF because it is bound-changing -- a probe stopped at
-        the cap tightens nothing -- pending its CLAUDE.md section 5 panel).  The
-        measurement behind the flag, by size band, is in
-        ``docs/dev/data/issue2065-obbt-probe-cap.txt``; its state is in
-        ``docs/dev/flag-retirement-audit.md``.
+        seam-oracle probes and the ``top_k`` scoring LP.  **The default
+        persistent probe path (Rust simplex binding available) deliberately
+        does not apply it**: each persistent probe is bounded only by the
+        remaining ``deadline`` (#2006), or runs to convergence when ``deadline``
+        is ``None``.  Applying the cap there is bound-changing (a probe stopped
+        at the cap tightens nothing).  #2065 measured it on the in-repo corpus and
+        MINLPLib up to 2000 vars/cons, then ran it as a default-OFF flag through
+        the CLAUDE.md section 5 ON/OFF panel: sound, but no certificate gained
+        and no bound or wall-time change beyond run-to-run noise, so the flag was
+        retired.  QPLIB was not measured.  Figures:
+        ``docs/dev/data/issue2065-obbt-probe-cap.txt``; verdict:
+        ``docs/dev/flag-retirement-audit.md``.  What would change this: a class
+        where capping persistent probes gains certificates or wall time in a
+        repeated, interleaved panel.  A single runaway probe is the
+        ``deadline``'s job, not this cap's.
     incumbent_cutoff : float, optional
         Cutoff on ``c_obj^T x + obj_offset`` — the relaxation objective, which
         is in the **internal minimization space** (``-f`` for a maximize model),
@@ -1330,7 +1316,6 @@ def run_obbt_on_relaxation(
     # primal-checked in Rust and falls to a cold two-phase solve when unusable,
     # so warming can only change speed, never the (differential-neutral) bound.
     _probe_lp = _PersistentProbeLP(A_ub, b_ub, n_total) if _simplex_available() else None
-    per_lp_cap_on = _persistent_probe_per_lp_cap()
 
     def _solve_probe(c):
         """Solve ``min c^T x`` over the current box; returns ``(status, obj, duals)``.
@@ -1347,21 +1332,16 @@ def run_obbt_on_relaxation(
         # unbounded past it. Capped by the remaining time only, so a sweep that
         # finishes inside its deadline is unchanged. An exhausted budget skips the
         # probe outright (non-optimal, tightens nothing) rather than handing a backend
-        # a zero limit it might read as "no limit". #2065: by default the persistent
-        # path does not also apply ``time_limit_per_lp``; ``DISCOPT_OBBT_PROBE_PER_LP_CAP``
-        # turns that on (see :func:`_persistent_probe_per_lp_cap`).
+        # a zero limit it might read as "no limit". #2065: the persistent path
+        # deliberately does not also apply ``time_limit_per_lp`` (see this function's
+        # docstring).
         budget = None if deadline is None else deadline - _time.perf_counter()
         if budget is not None and budget <= 0.0:
             return SolveStatus.TIME_LIMIT, None, None
         n_lp_solves += 1
         if _probe_lp is not None:
-            probe_limit = budget
-            if per_lp_cap_on and time_limit_per_lp is not None:
-                probe_limit = (
-                    time_limit_per_lp if budget is None else min(budget, time_limit_per_lp)
-                )
             st, obj, duals, basis, wall = _probe_lp.solve(
-                c, lb_arr, ub_arr, warm_basis, time_limit_s=probe_limit
+                c, lb_arr, ub_arr, warm_basis, time_limit_s=budget
             )
             total_lp_time += wall
             if st == SolveStatus.OPTIMAL and obj is not None:

@@ -1,11 +1,12 @@
-"""#2065: ``time_limit_per_lp`` on the persistent OBBT probe path.
+"""#2065: the persistent OBBT probe path ignores ``time_limit_per_lp`` on purpose.
 
-The seam-oracle probes honor the per-LP cap. The default persistent probe path
-(``_PersistentProbeLP``) is bounded only by the sweep's remaining ``deadline``
-(#2006). ``DISCOPT_OBBT_PROBE_PER_LP_CAP=1`` (default OFF, bound-changing, pending
-its section 5 panel) forwards ``min(budget, time_limit_per_lp)`` instead. These
-tests pin both arms: OFF is unchanged, ON caps every probe and is bound-identical
-whenever the cap does not bind.
+``run_obbt_on_relaxation``'s docstring states the contract and the measurement
+behind it. The seam-oracle probes honor the per-LP cap. The default persistent
+probe path (``_PersistentProbeLP``) is bounded only by the sweep's remaining
+``deadline`` (#2006). Forwarding the per-LP cap there is bound-changing; #2065 ran
+it as a default-OFF flag through the section 5 panel, found it sound but not
+net-positive, and retired it. These tests pin the contract so that a change to it
+also revisits that verdict (``docs/dev/flag-retirement-audit.md``).
 """
 
 from __future__ import annotations
@@ -29,12 +30,6 @@ _TINY = 1e-9  # a per-LP cap no LP can meet
 
 def _n_orig(model) -> int:
     return sum(v.size for v in model._variables)
-
-
-@pytest.fixture(autouse=True)
-def _flag_off(monkeypatch):
-    """Every test starts from the shipped default (flag unset)."""
-    monkeypatch.delenv("DISCOPT_OBBT_PROBE_PER_LP_CAP", raising=False)
 
 
 @pytest.mark.parametrize("name", list(PANEL))
@@ -97,72 +92,3 @@ def test_seam_path_honors_per_lp_cap(monkeypatch):
     run_obbt_on_relaxation(_build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=0.7)
     assert seen, "seam oracle never called: the instrument measured nothing"
     assert all(tl == 0.7 for tl in seen), seen
-
-
-@pytest.mark.parametrize("name", list(PANEL))
-def test_flag_on_forwards_per_lp_cap(monkeypatch, name):
-    monkeypatch.setenv("DISCOPT_OBBT_PROBE_PER_LP_CAP", "1")
-    seen = record_binding_time_limits(monkeypatch)
-    model = PANEL[name]()
-    run_obbt_on_relaxation(_build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=0.7)
-    assert seen, "probe binding never called: the instrument measured nothing"
-    # No deadline: the per-LP cap itself.
-    assert all(tl == 0.7 for tl in seen), seen
-    n = len(seen)
-
-    seen.clear()
-    deadline = time.perf_counter() + 60.0
-    run_obbt_on_relaxation(
-        _build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=0.7, deadline=deadline
-    )
-    assert seen
-    # A deadline far away: still the per-LP cap (the smaller of the two).
-    assert all(tl == 0.7 for tl in seen), seen
-
-    seen.clear()
-    run_obbt_on_relaxation(
-        _build_relaxation(model),
-        n_orig=_n_orig(model),
-        time_limit_per_lp=60.0,
-        deadline=time.perf_counter() + 5.0,
-    )
-    assert seen
-    # A deadline nearer than the cap: the remaining time.
-    assert all(tl is not None and tl <= 5.0 for tl in seen), seen
-    print(f"EXECUTED {n + 2 * len(seen)} flag-ON probe-limit assertions")
-
-
-def test_flag_on_is_bound_identical_when_cap_does_not_bind(monkeypatch):
-    n_tightened = 0
-    for make in PANEL.values():
-        model = make()
-        monkeypatch.setenv("DISCOPT_OBBT_PROBE_PER_LP_CAP", "0")
-        off = run_obbt_on_relaxation(
-            _build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=60.0
-        )
-        monkeypatch.setenv("DISCOPT_OBBT_PROBE_PER_LP_CAP", "1")
-        on = run_obbt_on_relaxation(
-            _build_relaxation(model), n_orig=_n_orig(model), time_limit_per_lp=60.0
-        )
-        assert on.n_lp_solves == off.n_lp_solves > 0
-        assert on.n_tightened == off.n_tightened
-        assert _maxdiff(on.tightened_lb, off.tightened_lb) == 0.0
-        assert _maxdiff(on.tightened_ub, off.tightened_ub) == 0.0
-        n_tightened += off.n_tightened
-    assert n_tightened > 0
-
-
-def test_flag_on_cut_short_probe_tightens_nothing(monkeypatch):
-    """A cap no LP can meet stops every probe; no bound moves (sound, weaker)."""
-    import numpy as np
-
-    monkeypatch.setenv("DISCOPT_OBBT_PROBE_PER_LP_CAP", "1")
-    model = PANEL["bilinear"]()
-    rel = _build_relaxation(model)
-    n = _n_orig(model)
-    box = np.asarray(rel._bounds[:n], dtype=np.float64)
-    res = run_obbt_on_relaxation(rel, n_orig=n, time_limit_per_lp=0.0)
-    assert res.n_lp_solves > 0
-    assert res.n_tightened == 0
-    assert np.array_equal(res.tightened_lb[:n], box[:, 0])
-    assert np.array_equal(res.tightened_ub[:n], box[:, 1])
