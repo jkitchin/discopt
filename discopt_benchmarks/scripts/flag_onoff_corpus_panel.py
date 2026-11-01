@@ -47,6 +47,8 @@ from discopt.warm_start import check_feasibility
 path, tl = sys.argv[1], float(sys.argv[2])
 t = time.time()
 out = {}
+import discopt
+out["discopt_file"] = discopt.__file__
 try:
     m = dm.from_nl(path)
     out["sense"] = int(objective_sense_sign(m))
@@ -54,7 +56,8 @@ try:
     out.update(status=r.status, obj=r.objective, bound=r.bound,
                cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count,
                route=str(r.algorithm_route)[:60], stats={k: v for k, v in
-               (r.solver_stats or {}).items() if k.startswith("tree/py_spatial")})
+               (r.solver_stats or {}).items()
+               if k.startswith(("tree/py_spatial", "vub_cmir/"))})
     if r.x is not None and r.objective is not None:
         flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
         ok, viol = check_feasibility(m, flat, tol=1e-5)
