@@ -458,6 +458,7 @@ class ObbtResult:
 
 def _extract_linear_constraints(
     model: Model,
+    sparse: bool = False,
 ) -> tuple[
     Optional[np.ndarray],
     Optional[np.ndarray],
@@ -473,6 +474,15 @@ def _extract_linear_constraints(
     Returns:
         (A_ub, b_ub, A_eq, b_eq, n_vars) or (None, None, None, None, n_vars)
         if no linear constraints found.
+
+    With ``sparse=True`` the two matrices are ``scipy.sparse.csr_matrix`` with
+    sorted column indices and no stored zeros -- exactly
+    ``csr_matrix(dense)`` of the default output, which is what
+    :func:`discopt.solvers.lp_simplex.solve_lp` builds from a dense input, so a
+    caller that hands them to the exact LP oracle solves the identical LP. The
+    dense form of a GDPlib model can be gigabytes at 0.02% density (#1917:
+    stranded_gas, 14887 x 57810, 6.4 GiB), and re-sparsifying it on every LP is
+    what made mbigm lowering take more than 600 s.
     """
     from discopt.modeling.core import (
         BinaryOp,
@@ -641,6 +651,11 @@ def _extract_linear_constraints(
         for _dterms, _dconst, _dlo in affine_domain_rows(model):
             ub_rows.append(({j: -a for j, a in _dterms.items()}, _dconst - _dlo))
 
+    if sparse:
+        A_ub_s, b_ub_s = _rows_to_csr(ub_rows, n_vars)
+        A_eq_s, b_eq_s = _rows_to_csr(eq_rows, n_vars)
+        return A_ub_s, b_ub_s, A_eq_s, b_eq_s, n_vars
+
     A_ub = None
     b_ub = None
     if ub_rows:
@@ -664,6 +679,40 @@ def _extract_linear_constraints(
             b_eq[i] = rhs
 
     return A_ub, b_ub, A_eq, b_eq, n_vars
+
+
+def _rows_to_csr(rows: list[tuple[dict[int, float], float]], n_vars: int):
+    """``(dict-row, rhs)`` pairs as a CSR matrix and rhs vector, or ``(None, None)``.
+
+    Matches ``csr_matrix`` of the dense matrix the default path of
+    :func:`_extract_linear_constraints` builds: columns past ``n_vars`` are dropped
+    as there, each row's columns are sorted, and zero coefficients are not stored.
+    """
+    import scipy.sparse as sp
+
+    if not rows:
+        return None, None
+    indptr = [0]
+    indices: list[int] = []
+    data: list[float] = []
+    b = np.zeros(len(rows), dtype=np.float64)
+    for i, (coeffs, rhs) in enumerate(rows):
+        for var_idx in sorted(coeffs):
+            coeff = float(coeffs[var_idx])
+            if var_idx < n_vars and coeff != 0.0:
+                indices.append(var_idx)
+                data.append(coeff)
+        indptr.append(len(indices))
+        b[i] = rhs
+    A = sp.csr_matrix(
+        (
+            np.asarray(data, dtype=np.float64),
+            np.asarray(indices, dtype=np.int32),
+            np.asarray(indptr, dtype=np.int32),
+        ),
+        shape=(len(rows), n_vars),
+    )
+    return A, b
 
 
 def _internal_cutoff_row(model: Model, obj_coeffs: np.ndarray) -> np.ndarray:

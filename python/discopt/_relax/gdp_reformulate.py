@@ -1327,20 +1327,33 @@ def _compute_big_m_lp(
     def _solve_bound(maximize: bool) -> float | None:
         """Solve LP to get bound. Returns None if LP fails."""
         obj = -c_vec if maximize else c_vec
-        # #1520: no except. The exact LP oracle (``lp_simplex.solve_lp``) declines
-        # by status, handled here; a raise is a defect -- e.g. the ``copy_from_slice``
-        # length mismatch described above, which this handler used to turn into
-        # "use the default big-M" instead of a bug report.
-        result = solve_lp(
-            c=obj,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            A_eq=A_eq,
-            b_eq=b_eq,
-            bounds=bounds_list,
-        )
-        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
-            val = -result.objective if maximize else result.objective
+        optima: dict | None = getattr(lp_data, "optima", None)
+        key = None
+        if optima is not None:
+            key = (
+                np.ascontiguousarray(obj, dtype=np.float64).tobytes(),
+                np.asarray(bounds_list, dtype=np.float64).tobytes(),
+            )
+        if optima is not None and key is not None and key in optima:
+            status, objective = optima[key]
+        else:
+            # #1520: no except. The exact LP oracle (``lp_simplex.solve_lp``) declines
+            # by status, handled here; a raise is a defect -- e.g. the
+            # ``copy_from_slice`` length mismatch described above, which this handler
+            # used to turn into "use the default big-M" instead of a bug report.
+            result = solve_lp(
+                c=obj,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds_list,
+            )
+            status, objective = result.status, result.objective
+            if optima is not None and key is not None:
+                optima[key] = (status, objective)
+        if status == SolveStatus.OPTIMAL and objective is not None:
+            val = -objective if maximize else objective
             return float(val) + offset
         return None
 
@@ -1600,18 +1613,33 @@ def _extract_body_coeffs(
     return c_vec, offset
 
 
-def _precompute_lp_relaxation(model: Model) -> tuple | None:
+class _LPData(tuple):
+    """``(A_ub, b_ub, A_eq, b_eq, n_vars)`` plus a per-lowering memo of LP optima.
+
+    A tuple, so every caller that unpacks five fields is unchanged. ``optima`` maps
+    ``(maximize, c bytes, box bytes)`` to the oracle's result: the exact simplex is
+    deterministic, so a repeated objective over the same polytope and box returns the
+    same optimum (#1917: biofuel's 12048 mbigm LPs have 5929 distinct objectives).
+    """
+
+    optima: dict
+
+
+def _precompute_lp_relaxation(model: Model) -> tuple:
     """Precompute LP relaxation data from the model for MBM.
 
-    Returns (A_ub, b_ub, A_eq, b_eq, n_vars) or None if no linear
-    constraints found or HiGHS is unavailable.
-    """
-    try:
-        from discopt._relax.obbt import _extract_linear_constraints
+    Returns an :class:`_LPData` ``(A_ub, b_ub, A_eq, b_eq, n_vars)``; either
+    matrix is ``None`` when the model has no such linear rows. The matrices are
+    sparse CSR (#1917): the dense form was gigabytes on GDPlib's larger models.
 
-        return _extract_linear_constraints(model)
-    except (ImportError, Exception):
-        return None
+    No ``except`` (#1917, CLAUDE.md §7): this used to swallow any exception and
+    return ``None``, which silently replaced every LP-optimum M by its interval M.
+    """
+    from discopt._relax.obbt import _extract_linear_constraints
+
+    data = _LPData(_extract_linear_constraints(model, sparse=True))
+    data.optima = {}
+    return data
 
 
 def _sumover_enabled() -> bool:
