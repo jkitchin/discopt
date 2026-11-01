@@ -105,10 +105,11 @@ class LOA(GDPAlgorithm):
         self.subproblem_time_limit = float(subproblem_time_limit)
         #: What the last iteration's subproblem step did, for its log line.
         self._step_log = ""
+        deadline = self.start_deadline(time_limit, kw)
         self.space = GDPSpace.from_model(model)
         super().__init__(
             self.space.work,
-            time_limit=time_limit,
+            deadline=deadline,
             gap_tolerance=gap_tolerance,
             iteration_limit=iteration_limit,
             **kw,
@@ -383,6 +384,12 @@ class LOA(GDPAlgorithm):
         sub_ub = np.array(self.ub_box, dtype=np.float64)
         for idx in self.master.int_indices:
             sub_lb[idx] = sub_ub[idx] = round(float(x_master[idx]))
+        if self.deadline.expired():
+            # Nothing left to give the NLP: a solve launched with the 0.05 s floor
+            # still ran 4-5 s on GDPlib ``stranded_gas`` past the limit (#2079).
+            # No point is not a proof; the interval check below is one, and cheap.
+            self._step_log = "nlp skipped (deadline expired)"
+            return None, _fixed_subproblem_rigorously_infeasible(self.evaluator, sub_lb, sub_ub)
         x = _solve_nlp_subproblem(
             self.evaluator, sub_lb, sub_ub, self.nlp_solver, time_limit=self._nlp_limit()
         )

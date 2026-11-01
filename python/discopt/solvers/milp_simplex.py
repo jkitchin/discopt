@@ -1165,7 +1165,11 @@ def solve_milp(
     ``mip_start`` (#2069) is a structural point offered to the driver as its first
     incumbent. The driver re-validates it against these rows and drops one it cannot
     prove feasible, so a seed can only prune, never manufacture a bound.
+
+    ``time_limit`` counts from this call: marshaling the rows into CSC is charged
+    to it (#2079, measured 6 s past the limit on a 7909 x 57828 GDP master).
     """
+    t_enter = time.perf_counter()
     try:
         from discopt._rust import solve_milp_csc_py
     except ImportError as err:  # pragma: no cover - exercised via the selector
@@ -1177,6 +1181,12 @@ def solve_milp(
     n = c_arr.shape[0]
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m
+
+    def _left() -> Optional[float]:
+        """What is left of ``time_limit`` (``None``: no limit), never negative."""
+        if time_limit is None:
+            return None
+        return max(0.0, float(time_limit) - (time.perf_counter() - t_enter))
 
     # Interactive debugger: install the Rust checkpoint hook only when a debugger
     # is attached now, so the pure-Rust search stays bound-neutral otherwise.
@@ -1278,7 +1288,7 @@ def solve_milp(
         # Flag off, or a pure LP whose short-circuit already replaced the cut
         # budget with "no integer machinery at all": one solve, legacy budget,
         # byte-for-byte the pre-#1066 path.
-        return _drive(cut_kwargs=std.lp_kwargs, node_cap=max_nodes, budget=time_limit, seed=seed0)
+        return _drive(cut_kwargs=std.lp_kwargs, node_cap=max_nodes, budget=_left(), seed=seed0)
 
     # --- #1066 escalation --------------------------------------------------
     # Measurement (docs/dev/performance-plan.md §23) killed the obvious fix of
@@ -1294,11 +1304,10 @@ def solve_milp(
     # Soundness: both attempts bound the same MILP, so either one's dual bound is
     # valid and either one's incumbent is feasible. The merge takes the better of
     # each, which cannot invent a bound neither attempt proved.
-    t_probe = time.perf_counter()
     probe = _drive(
         cut_kwargs=legacy_kwargs,
         node_cap=min(int(max_nodes), _PROBE_MAX_NODES),
-        budget=time_limit,
+        budget=_left(),
         seed=seed0,
     )
     if probe.status in _PROBE_FINAL_STATUSES:
@@ -1306,9 +1315,8 @@ def solve_milp(
         # common case — escalating here would be pure overhead.
         return probe
 
-    remaining = None
-    if time_limit is not None:
-        remaining = max(0.0, float(time_limit) - (time.perf_counter() - t_probe))
+    remaining = _left()
+    if remaining is not None:
         if remaining <= 0.0:
             # The probe spent the whole budget. A second attempt with no time
             # cannot improve on it, and #928 makes 0.0 a real (spent) budget

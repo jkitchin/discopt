@@ -101,13 +101,18 @@ class GDPAlgorithm:
         abs_gap_tolerance: float = 1e-6,
         iteration_limit: Optional[int] = None,
         clock: Callable[[], float] = time.perf_counter,
+        deadline: Optional[Deadline] = None,
     ) -> None:
+        if deadline is not None and time_limit is not None:
+            raise ValueError("GDPAlgorithm: pass time_limit or deadline, not both")
         if model._objective is None:
             raise ValueError(f"{type(self).__name__}: the model has no objective.")
         if iteration_limit is not None and iteration_limit < 0:
             raise ValueError(f"iteration_limit must be >= 0 or None, got {iteration_limit!r}")
         self.model = model
-        self.deadline = Deadline(time_limit, clock=clock)
+        #: A subclass that lowers the model before calling this starts the clock
+        #: first (:meth:`start_deadline`), so the lowering is charged (#2079).
+        self.deadline = deadline if deadline is not None else Deadline(time_limit, clock=clock)
         self.gap_tolerance = float(gap_tolerance)
         self.abs_gap_tolerance = float(abs_gap_tolerance)
         self.iteration_limit = iteration_limit
@@ -126,6 +131,18 @@ class GDPAlgorithm:
         self.n_subproblems = 0
         self.trace: list[tuple[int, float, float, float]] = []
         self.stop_reason = ""
+
+    @staticmethod
+    def start_deadline(time_limit: Optional[float], kw: dict[str, Any]) -> Deadline:
+        """The run's :class:`Deadline`, started now; pops ``clock`` from ``kw``.
+
+        A subclass calls it first in ``__init__`` and passes the result on as
+        ``deadline=``, so the work it does before ``GDPAlgorithm.__init__`` -- the
+        GDP lowering (:meth:`GDPSpace.from_model`), the evaluator and master build
+        -- is charged to ``time_limit``. Started after them, the clock missed
+        20-25 s of GDPlib ``stranded_gas`` and the run overran its limit (#2079).
+        """
+        return Deadline(time_limit, clock=kw.pop("clock", time.perf_counter))
 
     # ── reporting, for subclasses ─────────────────────────────────────────
 
