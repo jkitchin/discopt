@@ -27,6 +27,17 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A convex node's NLP objective is no longer imported as its lower bound
+  (#2067).** NLP-B&B (and the spatial loop's convex mode) used the objective of
+  the node NLP's approximate minimiser as the node bound; it sits above the
+  relaxation's optimum by the solver's residuals, and QPLIB_8153 certified a
+  bound 1.57e-7 past a reference point feasible to 2.7e-15. Each convex node now
+  imports a Neumaier-Shcherbina bound on its LP linearisation
+  (`discopt.solvers.convex_node_bound`), valid at any point of the box; the NLP
+  objective stays the incumbent value of an integral node, whose proved bound
+  floors the tree bound (`safe_fathom_floor` in the tree stats; a
+  `point_values=` argument on `PyTreeManager.import_results`). Opt-out for A/B
+  only: `DISCOPT_CONVEX_NODE_SAFE_BOUND=0`.
 - **Lowering-derived auxiliary bounds are re-derived at every solve (#2061
   review).** The split `w±` of a box MCP, the SOS1 aux and the GDP operand lift
   of an NCP pair are bounded from an interval enclosure over the model's box at
