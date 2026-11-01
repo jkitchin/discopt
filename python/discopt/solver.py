@@ -9921,8 +9921,64 @@ def _objective_syntactically_convex(model: Model) -> bool:
         return False
 
 
-def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
+#: The GDP lowerings the MIP-NLP branch accepts (``solve_model``'s ``gdp_methods``).
+_ROUTE_GDP_LOWERINGS = frozenset({"big-m", "hull", "mbigm", "auto"})
+
+
+def _convex_route_gdp_lowered_enabled() -> bool:
+    """Classify a GDP model's convexity on its lowering for the #1059 route (#1917).
+
+    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED``, **default OFF** (it changes the
+    algorithm a GDP model is solved by, which is bound-changing under CLAUDE.md
+    §5). The convex-MINLP auto-route is decided on the model the caller passed,
+    *before* GDP lowering, and the convexity classifier reports every
+    ``_IndicatorConstraint`` as unproven -- a linear one included. So no model
+    with a disjunction is ever routed, even when the lowering the route would
+    solve (``solve_model``'s ``mip-nlp`` branch lowers before solving) is
+    certified convex row for row. Measured on GDPlib ``batch_processing``
+    (#1917): raw model 450 of 700 rows unproven, its big-M lowering 790 of 790
+    convex. With the flag on, a model carrying GDP constraints under a lowering
+    ``gdp_method`` is classified on ``reformulate_gdp(model, gdp_method)``,
+    which is exactly the model the routed solve runs on.
+    """
+    val = os.environ.get("DISCOPT_CONVEX_ROUTE_GDP_LOWERED", "0").strip().lower()
+    return val in ("1", "true", "on", "yes")
+
+
+def _model_has_gdp_constraints(model: Model) -> bool:
+    """Whether ``model`` carries a constraint ``reformulate_gdp`` would lower."""
+    return _model_has_gdp_constraints_list(model._constraints)
+
+
+def _model_has_gdp_constraints_list(constraints: Any) -> bool:
+    """Whether any of ``constraints`` is one ``reformulate_gdp`` would lower."""
+    from discopt.modeling.core import (
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _LogicalConstraint,
+        _SOSConstraint,
+    )
+
+    return any(
+        isinstance(
+            c,
+            (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint, _LogicalConstraint),
+        )
+        for c in constraints
+    )
+
+
+def _convex_minlp_auto_route(
+    model: Model, gdp_method: Optional[str] = None
+) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
+
+    ``gdp_method`` is the caller's GDP lowering. With
+    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED`` on and ``model`` carrying GDP
+    constraints, every gate below is evaluated on that lowering -- the model the
+    routed solve actually runs on -- instead of on the disjunctive model, whose
+    indicator rows the classifier cannot prove (see
+    :func:`_convex_route_gdp_lowered_enabled`).
 
     Returns ``(method, reason, options)`` where ``method`` is the
     ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
@@ -10034,6 +10090,40 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     if not _convex_minlp_route_enabled():
         return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
+    _lowered_note = ""
+    if (
+        gdp_method in _ROUTE_GDP_LOWERINGS
+        and _convex_route_gdp_lowered_enabled()
+        and _model_has_gdp_constraints(model)
+    ):
+        from discopt.transformations import get as _get_transformation
+
+        # Lowering rewrites only the GDP rows; every other row is copied as is.
+        # So when the caller's model already has a NON-GDP row the classifier
+        # rejects, the lowering cannot be certified either -- skip it rather
+        # than pay a second lowering and a full classification to learn that.
+        _raw_known, _raw_convex, _raw_mask = _classify_model_convexity(
+            model, failure_label="convex-MINLP route convexity detection failed"
+        )
+        if _raw_known and not _raw_convex and _raw_mask is not None:
+            if len(_raw_mask) != len(model._constraints):
+                raise AssertionError(
+                    f"convexity mask has {len(_raw_mask)} entries for "
+                    f"{len(model._constraints)} constraints"
+                )
+            if any(
+                not _ok and not _model_has_gdp_constraints_list([_c])
+                for _c, _ok in zip(model._constraints, _raw_mask)
+            ):
+                return None, "not routed: a non-GDP row is not convex", {}
+        # #1917: judge the model the route will solve. ``apply`` returns a new
+        # model and leaves the caller's untouched; the route lowers again on its
+        # own (box-tightened) copy, and lowering is deterministic in structure,
+        # so every row-convexity verdict made here holds there (a tighter box
+        # changes big-M constants, which enter linearly, never a Hessian).
+        model = _get_transformation("gdp").apply(model, method=gdp_method)
+        _lowered_note = f" (GDP lowered by {gdp_method}; DISCOPT_CONVEX_ROUTE_GDP_LOWERED)"
+
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
@@ -10105,7 +10195,7 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
         method,
         (
             f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
-            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
+            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master}){_lowered_note}"
         ),
         {"milp_solver": master},
     )
@@ -15270,7 +15360,7 @@ def solve_model(
                 _auto_route_method,
                 _auto_route_reason,
                 _auto_route_options,
-            ) = _convex_minlp_auto_route(model)
+            ) = _convex_minlp_auto_route(model, gdp_method=gdp_method)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
@@ -19111,6 +19201,8 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
+    # #1917 root VUB c-MIR evidence (``DISCOPT_VUB_CMIR_ROOT``); empty when off.
+    _vub_cmir_stats: dict[str, float] = {}
     # CUT-INHERIT-GRAD diagnostic: the fraction of the ONE root pool separation
     # solve's wall spent in the square+PSD point-separation loops. Surfaced in
     # ``solver_stats`` for observability; NOT the gate predicate (the entry
@@ -19567,6 +19659,24 @@ def solve_model(
                     _probe_useful = _probe is not None and (
                         _probe.status == "infeasible" or _probe.lower_bound is not None
                     )
+                    if _probe_useful and _vub_cmir_root_enabled() and not _deadline_exhausted():
+                        # Same saturated grant as the probe above (#1153).
+                        _vub_cmir_budget = min(
+                            _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
+                            max(_setup_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
+                        )
+                        _install_root_vub_cmir_rows(
+                            model,
+                            _mc_lp_relaxer,
+                            tree,
+                            _probe_lb,
+                            _probe_ub,
+                            n_vars,
+                            int_offsets,
+                            int_sizes,
+                            _role2_budget(_vub_cmir_budget),
+                            _vub_cmir_stats,
+                        )
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
@@ -24663,6 +24773,7 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    _solver_stats.update(_vub_cmir_stats)
     if _model_is_convex and _sp_safe_bound_on:
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
@@ -36725,6 +36836,82 @@ def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
     if res.status == SolveStatus.OPTIMAL and res.x is not None:
         return np.asarray(res.x, dtype=np.float64)
     return None
+
+
+def _vub_cmir_root_enabled() -> bool:
+    """``DISCOPT_VUB_CMIR_ROOT`` (#1917, default OFF); see :mod:`discopt._relax.vub_cmir`."""
+    from discopt._relax.vub_cmir import vub_cmir_root_enabled
+
+    return vub_cmir_root_enabled()
+
+
+def _install_root_vub_cmir_rows(
+    model: Model,
+    relaxer,
+    tree,
+    root_lb: np.ndarray,
+    root_ub: np.ndarray,
+    n_vars: int,
+    int_offsets,
+    int_sizes,
+    budget: Optional[float],
+    stats: dict,
+) -> None:
+    """Root path-aggregation c-MIR rows into the spatial McCormick LP (#1917).
+
+    Gated by ``DISCOPT_VUB_CMIR_ROOT`` (default OFF; see
+    :func:`discopt._relax.vub_cmir.vub_cmir_root_enabled`). Separates rounds of
+    :func:`~discopt._relax.vub_cmir.root_vub_cmir_cuts` over the root box and
+    installs the rows with :meth:`MccormickLPRelaxer.set_root_rows`, so every
+    node LP carries them. Sound: each row is valid for every mixed-integer point
+    of an outer relaxation over the root box, and every node box is a subset of
+    it. A verified-feasible incumbent (if one exists yet) screens every row; a
+    rejection is a separator defect and is logged as a WARNING.
+    """
+    from discopt._relax.vub_cmir import root_vub_cmir_cuts
+
+    n_orig = int(relaxer._n_orig)
+    inc = tree.incumbent()
+    screen = _verified_cut_screen_points(
+        model,
+        [None if inc is None else inc[0]],
+        n_vars,
+        n_orig,
+        int_offsets,
+        int_sizes,
+    )
+    t0 = time.perf_counter()
+    res = root_vub_cmir_cuts(
+        model,
+        root_lb,
+        root_ub,
+        n_orig,
+        deadline=t0 + (30.0 if budget is None else max(float(budget), 0.0)),
+        screen_points=screen,
+    )
+    if res.A is not None:
+        relaxer.set_root_rows(res.A, res.b)
+    n_rows = 0 if res.b is None else int(res.b.shape[0])
+    stats["vub_cmir/rows"] = float(n_rows)
+    stats["vub_cmir/rounds"] = float(res.rounds)
+    stats["vub_cmir/vub"] = float(res.n_vub)
+    stats["vub_cmir/screen_points"] = float(len(screen))
+    stats["vub_cmir/rejected"] = float(res.rejected_by_screen)
+    stats["vub_cmir/wall"] = time.perf_counter() - t0
+    if res.rejected_by_screen:
+        logger.warning(
+            "root VUB c-MIR: %d cut(s) violated a verified-feasible point and were "
+            "dropped -- a separator defect (#1917)",
+            res.rejected_by_screen,
+        )
+    logger.info(
+        "Root VUB c-MIR (#1917): %d rows over %d rounds (%d VUBs, stop=%s), LP bound %s",
+        n_rows,
+        res.rounds,
+        res.n_vub,
+        res.stop_reason,
+        " -> ".join(f"{v:.4g}" for v in res.bound_trace[:1] + res.bound_trace[-1:]),
+    )
 
 
 def _verified_cut_screen_points(

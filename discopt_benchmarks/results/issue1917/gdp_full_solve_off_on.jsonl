@@ -1,0 +1,6 @@
+{"inst": "pyomo.constrained_layout_clay0203", "meth": "big-m", "strict": "0", "status": "optimal", "obj": 41573.26252221325, "bound": 41573.262502781, "cert": true, "nodes": 133}
+{"inst": "pyomo.constrained_layout_clay0203", "meth": "big-m", "strict": "1", "status": "optimal", "obj": 41573.26252221325, "bound": 41573.262502781, "cert": true, "nodes": 123}
+{"inst": "pyomo.ex_633_trespalacios", "meth": "big-m", "strict": "0", "status": "optimal", "obj": 4.46036761713799, "bound": 4.460364898905878, "cert": true, "nodes": 13}
+{"inst": "pyomo.ex_633_trespalacios", "meth": "big-m", "strict": "1", "status": "optimal", "obj": 4.46036761713799, "bound": 4.460364898905878, "cert": true, "nodes": 13}
+{"inst": "pyomo.ex_633_trespalacios", "meth": "hull", "strict": "0", "status": "optimal", "obj": 4.460367620446681, "bound": 4.460328901605402, "cert": true, "nodes": 75}
+{"inst": "pyomo.ex_633_trespalacios", "meth": "hull", "strict": "1", "status": "optimal", "obj": 4.460367620446681, "bound": 4.460328901605402, "cert": true, "nodes": 75}

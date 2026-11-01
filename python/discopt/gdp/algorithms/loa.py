@@ -69,6 +69,43 @@ def default_subproblem_time_limit(time_limit: Optional[float]) -> float:
     return min(SUBPROBLEM_TIME_LIMIT, max(1.0, 0.1 * float(time_limit)))
 
 
+def _oa_cut_rows(evaluator: Any, low: Model, oa_rows: Any) -> Any:
+    """``oa_rows`` with every row the master already carries exactly taken out of
+    its cut mask (#1917).
+
+    :func:`~discopt.gdp.algorithms.master.build_master` puts every scalar
+    ``Constraint`` whose body :func:`_extract_body_coeffs` reads as affine into
+    the master as one exact row. An affine row is convex, so the convexity mask
+    marks it and :func:`_add_oa_cuts` linearized it as well, every iteration:
+    measured on GDPlib med_term_purchasing (all 924 rows affine), 708 such
+    cuts per iteration, 35449 after 50 iterations, against a master whose rows
+    they duplicate. This is the defect ``solvers/oa.py``'s
+    ``_oa_cut_eligible_mask`` fixed for OA, where the floating-point
+    re-derivation of an ``==`` row in both directions made the master infeasible
+    by construction (a false infeasibility certificate on ``bchoco07``). Skipping
+    the cut is bound-neutral in exact arithmetic: the cut *is* the master row.
+    """
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt.modeling.core import Constraint
+    from discopt.solvers.oa import _OARows
+
+    n = sum(int(v.size) for v in low._variables)
+    # Only ``low._constraints`` reach the master; the evaluator's row map also
+    # covers builder rows that list does not hold (#840), which keep their cuts.
+    in_master = {id(c) for c in low._constraints if isinstance(c, Constraint)}
+    mask = list(oa_rows.convex_mask)
+    for start, stop, c in evaluator.constraint_row_map():
+        if (
+            stop - start == 1
+            and id(c) in in_master
+            and _extract_body_coeffs(c.body, low, n) is not None
+        ):
+            mask[start] = False
+    return _OARows(
+        senses=list(oa_rows.senses), convex_mask=mask, has_unclassified=oa_rows.has_unclassified
+    )
+
+
 class LOA(GDPAlgorithm):
     """Logic-based OA; see the module docstring."""
 
@@ -103,6 +140,8 @@ class LOA(GDPAlgorithm):
             raise ValueError(f"subproblem_time_limit must be > 0, got {subproblem_time_limit!r}")
         #: Each global subproblem's wall budget (#1984).
         self.subproblem_time_limit = float(subproblem_time_limit)
+        #: Per-configuration escalated subproblem caps (#1917): config -> seconds.
+        self._sub_caps: dict = {}
         #: What the last iteration's subproblem step did, for its log line.
         self._step_log = ""
         deadline = self.start_deadline(time_limit, kw)
@@ -125,6 +164,9 @@ class LOA(GDPAlgorithm):
         convexity = self._oa_convexity(low)
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
+        #: The rows OA cuts may go on: certified convex AND not already one exact
+        #: master row. ``oa_rows`` stays the pure convexity certificate.
+        self.oa_cut_rows = _oa_cut_rows(self.evaluator, low, self.oa_rows)
         self.objective_certified_convex = bool(convexity.objective_is_convex)
         self.master = self._make_master(milp_solver)
         self.obj_is_linear = self.master.objective is not None
@@ -181,7 +223,7 @@ class LOA(GDPAlgorithm):
             self.master.cuts,
             self.master.cut_rhs,
             self.obj_is_linear,
-            self.oa_rows,
+            self.oa_cut_rows,
             self.master.objective_convex,
         )
 
@@ -420,13 +462,14 @@ class LOA(GDPAlgorithm):
         from discopt.gdp.algorithms.subproblem import solve_subproblem
 
         selection = self.space.selection_from_x(x_master)
+        cap = self._sub_caps.get(config, self.subproblem_time_limit)
         res = solve_subproblem(
             self.space.work,
             selection,
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
-            time_cap=self.subproblem_time_limit,
+            time_cap=cap,
         )
         self.n_subproblems += 1
         self._step_log = f"global {res.status}"
@@ -453,6 +496,19 @@ class LOA(GDPAlgorithm):
             global_status = self._step_log
             more = self._nlp_step(x_master, config)
             self._step_log = f"{global_status}, then {self._step_log}"
+            if config in self.unresolved and cap < self.deadline.remaining():
+                # #1917: the cap, not the configuration, stopped this solve. The
+                # master will propose it again (nothing excluded or cut it), and
+                # C-35's stop-on-a-repeat would end the run with budget left
+                # (measured: GDPlib syngas at time_limit=60 stopped at 20 s with
+                # no incumbent -- the 6 s cap is short of the 28 s that proves its
+                # first configuration infeasible). Re-solve it on its next
+                # proposal with four times the cap; the run stops on a repeat
+                # only once the cap already covered what was left. Certificates
+                # still come only from the subproblem, so no bound changes.
+                self._sub_caps[config] = 4.0 * cap
+                self._step_log += f"; cap raised to {4.0 * cap:.3g} s"
+                more = True
             return more
         return True
 
