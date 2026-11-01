@@ -51,12 +51,15 @@ module exists to remove -- not an interval-arithmetic proof.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 import scipy.sparse as sp
 
 from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
+
+logger = logging.getLogger(__name__)
 
 #: A node box side at or beyond this magnitude is treated as open (the house
 #: ``±9.999e19`` "no bound" box and the ``1e20`` sentinel alike). Opening a side only
@@ -80,9 +83,13 @@ class SafeBoundBudget:
 
     * ``exact_left`` -- exact corrections the solve may still run; past it a node whose
       cheap rungs do not close keeps the best cheap bound (or abstains).
-    * ``suspend_after`` -- consecutive nodes with no bound at all after which the solve
-      stops trying and every later node abstains at once. Abstaining is the sound
-      answer either way; this only stops paying for a ladder that keeps failing.
+    * ``SUSPEND_AFTER`` -- consecutive nodes with no bound at all after which the exact
+      rung is suspended for the rest of the solve (``suspended``). Only that rung: every
+      later node still gets the cheap rungs (~3 ms/node on QPLIB_8153) and abstains only
+      if they fail too. Suspending every attempt instead let a hard early stretch cost
+      the whole later tree its pruning and the solve its certificate, even where tight
+      deeper boxes certify on the cheap rungs alone (#2070 review). A trip is logged
+      once and reported in the solve's stats.
     """
 
     EXACT_CALLS = 64
@@ -98,8 +105,18 @@ class SafeBoundBudget:
             self.consecutive_failures = 0
             return
         self.consecutive_failures += 1
-        if self.consecutive_failures >= self.SUSPEND_AFTER:
+        if self.consecutive_failures >= self.SUSPEND_AFTER and not self.suspended:
             self.suspended = True
+            logger.warning(
+                "Convex node safe bounds (#2067): %d consecutive nodes got no proved bound; "
+                "the exact dual correction is suspended for the rest of this solve (the "
+                "cheap certificate rungs still run on every node)",
+                self.SUSPEND_AFTER,
+            )
+
+    @property
+    def exact_allowed(self) -> bool:
+        return self.exact_left > 0 and not self.suspended
 
 
 def _as_csr(J, m: int, n: int) -> sp.csr_matrix:
@@ -268,8 +285,6 @@ def convex_node_safe_bound(
 
     ``budget`` (one per solve) rations the expensive paths; see :class:`SafeBoundBudget`.
     """
-    if budget is not None and budget.suspended:
-        return None, (f"suspended after {budget.SUSPEND_AFTER} consecutive nodes without a bound")
     bound, why = _safe_bound(evaluator, x, node_lb, node_ub, cl, cu, deadline, budget)
     if budget is not None:
         budget.record(bound is not None)
@@ -345,7 +360,7 @@ def _safe_bound(evaluator, x, node_lb, node_ub, cl, cu, deadline, budget):
     lp_obj = lp_val + sf.obj_const
     bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline, exact=False)
     closed = bound is not None and lp_obj - bound <= CERT_ABS + CERT_REL * abs(lp_obj)
-    if not closed and (budget is None or budget.exact_left > 0):
+    if not closed and (budget is None or budget.exact_allowed):
         # The cheap rungs fell short; the exact correction is the expensive one, so it
         # runs only while this solve's ration lasts.
         if budget is not None:

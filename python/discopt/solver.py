@@ -24632,6 +24632,9 @@ def solve_model(
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
         _solver_stats["spatial/convex_safe_bound_raised"] = float(_sp_safe_counts[2])
+        _solver_stats["spatial/convex_safe_bound_exact_suspended"] = float(
+            _sp_safe_budget.suspended
+        )
     if _spatial_score_registered:
         _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
@@ -29747,6 +29750,7 @@ def _solve_nlp_bb(
         _ext_stats["nlpbb/convex_safe_bound_nodes"] = float(_safe_proved)
         _ext_stats["nlpbb/convex_safe_bound_abstained"] = float(_safe_abstained)
         _ext_stats["nlpbb/convex_safe_bound_raised"] = float(_safe_raised)
+        _ext_stats["nlpbb/convex_safe_bound_exact_suspended"] = float(_safe_budget.suspended)
         _ext_stats["nlpbb/convex_safe_fathom_floor"] = float(
             stats.get("safe_fathom_floor", float("inf"))
         )

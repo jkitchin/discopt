@@ -270,10 +270,13 @@ def test_qplib_8153_legacy_import_still_crosses(monkeypatch):
     assert r.bound > ref
 
 
-def test_budget_rations_the_exact_rung_and_suspends_a_failing_ladder():
-    """#2070 review: one budget per solve, two deterministic counts and no clock.
-    A node that abstains under the budget proves nothing either way, so suspension
-    can only cost bound strength, never soundness."""
+def test_budget_suspends_only_the_exact_rung_after_a_failing_stretch(caplog):
+    """#2070 review: one budget per solve, deterministic counts and no clock. A run
+    of nodes without a bound suspends the exact correction only; later nodes still
+    get the cheap rungs, so a hard early stretch cannot cost the rest of the tree its
+    bounds. The trip is logged."""
+    import logging
+
     from discopt.solvers.convex_node_bound import SafeBoundBudget
 
     m, lo, hi = _norm_cone_model()
@@ -288,10 +291,15 @@ def test_budget_rations_the_exact_rung_and_suspends_a_failing_ladder():
     good, why = convex_node_safe_bound(ev, np.zeros(3), lo, hi, cl, cu, budget=budget)
     assert good is not None, why
     assert budget.consecutive_failures == 0
-    for _ in range(SafeBoundBudget.SUSPEND_AFTER):
-        convex_node_safe_bound(ev, bad, lo, hi, cl, cu, budget=budget)
-    assert budget.suspended
-    bound, why = convex_node_safe_bound(ev, np.zeros(3), lo, hi, cl, cu, budget=budget)
-    assert bound is None and "suspended" in why
+    with caplog.at_level(logging.WARNING, logger="discopt.solvers.convex_node_bound"):
+        for _ in range(SafeBoundBudget.SUSPEND_AFTER):
+            convex_node_safe_bound(ev, bad, lo, hi, cl, cu, budget=budget)
+    assert budget.suspended and not budget.exact_allowed
+    assert sum("suspended" in r.getMessage() for r in caplog.records) == 1
+    # Suspended, a node whose cheap rungs close still gets its bound.
+    after, why = convex_node_safe_bound(ev, np.zeros(3), lo, hi, cl, cu, budget=budget)
+    assert after is not None, why
+    assert after == pytest.approx(good)
+    assert after <= 0.0
     # The exact-rung ration never goes negative.
     assert 0 <= budget.exact_left <= SafeBoundBudget.EXACT_CALLS
