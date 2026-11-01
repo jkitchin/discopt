@@ -162,3 +162,19 @@ def test_setup_over_the_work_budget_computes_no_cap_and_runs_no_fbbt(monkeypatch
     assert calls == []
     monkeypatch.setattr(gb, "WORK_BUDGET", n_disjuncts * n_scalars)
     assert disjunct_local_big_m_caps(m)
+
+
+def test_a_near_zero_cap_is_floored_relative_to_todays_m(monkeypatch):
+    """A body bounded by ~0 on every sibling box caps M at the 1e-8 floor; a 1e-8
+    big-M coefficient made modprodnet's node LPs ~6x costlier. The cap is floored at
+    ``_DISJUNCT_CAP_FLOOR * M_today``, which is still >= the cap (valid)."""
+    m = _plant()
+    row = next(c for c in m._constraints if hasattr(c, "body"))  # any plain row
+    today = _REAL_COMPUTE_BIG_M(row, m)
+    tok = grm._DISJUNCT_LOCAL_CAPS.set({id(row): 1.01e-8})
+    try:
+        floored = _REAL_COMPUTE_BIG_M(row, m)
+    finally:
+        grm._DISJUNCT_LOCAL_CAPS.reset(tok)
+    assert floored == pytest.approx(grm._DISJUNCT_CAP_FLOOR * today)
+    assert 1.01e-8 < floored <= today

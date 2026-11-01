@@ -142,6 +142,10 @@ def _require_reformulation_method(method: object, what: str) -> None:
 #: ``id(row) -> cap`` for the lowering in progress (``DISCOPT_GDP_DISJUNCT_FBBT``,
 #: #1917 G5.1): :func:`_compute_big_m` returns ``min(M, cap)`` for such a row. Set
 #: only for the duration of one :func:`reformulate_gdp` call.
+#: Smallest fraction of today's M a disjunct-local cap may set (the same relative
+#: floor ``DISCOPT_MBIGM_CONDITIONED`` uses for a positive bound).
+_DISJUNCT_CAP_FLOOR = 1e-3
+
 _DISJUNCT_LOCAL_CAPS: contextvars.ContextVar[Optional[dict[int, float]]] = contextvars.ContextVar(
     "discopt_gdp_disjunct_local_caps", default=None
 )
@@ -1029,9 +1033,14 @@ def _compute_big_m(
     # #1917 G5.1 (DISCOPT_GDP_DISJUNCT_FBBT): the body need only be bounded where
     # the row is relaxed, i.e. over its siblings' disjunct-local boxes. Applied
     # after every refusal above, so it only ever lowers a valid finite M.
+    # The cap is floored at ``_DISJUNCT_CAP_FLOOR * M``: a body bounded by ~0 on
+    # every sibling box gives a cap at the 1e-8 floor, i.e. a ~1e-8 big-M
+    # coefficient beside O(1e4) ones, and those rows made the node LPs ~6x
+    # costlier on ``modprodnet`` (#1917: wall 8.0 s OFF, 15.8 s ON, 9.5 s floored;
+    # same 5 nodes). The floored M is still ``>=`` the cap, so still valid.
     caps = _DISJUNCT_LOCAL_CAPS.get()
     if caps is not None and id(constraint) in caps:
-        M = min(M, caps[id(constraint)])
+        M = min(M, max(caps[id(constraint)], _DISJUNCT_CAP_FLOOR * M))
     return M
 
 
