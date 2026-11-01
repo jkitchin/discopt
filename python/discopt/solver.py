@@ -16288,14 +16288,22 @@ def solve_model(
             loa_kwargs["algorithm"] = gdp_method
         else:
             _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
-        return solve_gdpopt_loa(
+        # #2079: what is LEFT of the budget, not ``time_limit``: the passes above
+        # ran on this solve's clock (34 s of them on GDPlib ``stranded_gas``), and
+        # handing the decomposition a fresh ``time_limit`` let the run overrun by
+        # exactly that much.
+        _gdp_result = solve_gdpopt_loa(
             model,
-            time_limit=time_limit,
+            time_limit=_remaining_budget(),
             gap_tolerance=gap_tolerance,
             max_iterations=loa_max_iter,
             nlp_solver=nlp_solver,
             **loa_kwargs,
         )
+        # The decomposition's clock starts at its own entry; the caller's wall is
+        # this solve's (#2079).
+        _gdp_result.wall_time = time.perf_counter() - _solve_t0
+        return _gdp_result
 
     # Capture any modeler-provided GAMS start (``x.l`` -> _gams_initial_values)
     # BEFORE the reform passes below rebuild ``model`` into fresh objects that

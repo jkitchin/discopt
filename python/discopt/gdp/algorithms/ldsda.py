@@ -85,10 +85,11 @@ class LDSDA(GDPAlgorithm):
         iteration_limit: Optional[int] = None,
         **kw: Any,
     ) -> None:
+        deadline = self.start_deadline(time_limit, kw)
         self.space = GDPSpace.from_model(model)
         super().__init__(
             self.space.work,
-            time_limit=time_limit,
+            deadline=deadline,
             gap_tolerance=gap_tolerance,
             iteration_limit=iteration_limit,
             **kw,

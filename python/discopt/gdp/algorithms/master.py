@@ -15,10 +15,12 @@ experiment on the ``gdp_parity`` panel's LOA masters confirmed (see
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
+import scipy.sparse as sp
 
 #: The master backend the framework's algorithms use unless told otherwise:
 #: ``"auto"``, the Rust simplex (#356). Re-measured by the G3.2 entry experiment
@@ -130,6 +132,36 @@ def _build_no_good_augmentation(no_good_configs, int_indices, lb, ub, n_base):
     return rows, rhs, n_aux
 
 
+def _stack_sparse(
+    rows: list[np.ndarray], width: int, signs: Optional[list[float]] = None
+) -> sp.csr_matrix:
+    """``rows`` (dense, each at most ``width`` long) as a ``len(rows) x width`` CSR
+    matrix, row ``k`` scaled by ``signs[k]``; a short row is zero-padded on the right.
+
+    Exactly the nonzeros of the dense stack, in row order and sorted by column
+    (#2079): building the dense stack first cost 39 s on a 7909 x 57828 master.
+    """
+    indptr = np.zeros(len(rows) + 1, dtype=np.int64)
+    cols: list[np.ndarray] = []
+    vals: list[np.ndarray] = []
+    for k, row in enumerate(rows):
+        row = np.asarray(row, dtype=np.float64).ravel()
+        if row.shape[0] > width:
+            raise ValueError(f"master row {k} has {row.shape[0]} entries; the master has {width}")
+        nz = np.flatnonzero(row)
+        cols.append(nz)
+        vals.append(row[nz] if signs is None or signs[k] == 1.0 else signs[k] * row[nz])
+        indptr[k + 1] = indptr[k] + nz.size
+    return sp.csr_matrix(
+        (
+            np.concatenate(vals) if vals else np.zeros(0),
+            np.concatenate(cols) if cols else np.zeros(0, dtype=np.int64),
+            indptr,
+        ),
+        shape=(len(rows), width),
+    )
+
+
 def _solve_master_milp(
     linear_A_rows,
     linear_b_rows,
@@ -149,7 +181,11 @@ def _solve_master_milp(
     no_good_configs=None,
     int_indices=None,
 ):
-    """Build and solve the master MILP."""
+    """Build and solve the master MILP within ``time_limit`` seconds of this call.
+
+    The build is charged to ``time_limit`` (#2079): the MILP gets what is left.
+    """
+    t_enter = time.perf_counter()
     try:
         from discopt.solvers.lp_backend import get_milp_solver
 
@@ -172,64 +208,55 @@ def _solve_master_milp(
     if use_objective_epigraph:
         n_master += 1  # epigraph variable eta
 
-    # Build A_ub, b_ub from linear <= constraints + OA cuts
-    A_ub_rows = []
-    b_ub_vals = []
-
+    # #2079: the rows are stacked SPARSE. A dense ``np.array`` of them is
+    # ``rows x columns`` floats -- 7909 x 57828 (3.7 GB) on GDPlib
+    # ``stranded_gas``, 39 s to build per master solve, all of it after the
+    # caller's time limit was read. Every backend takes a scipy matrix, and each
+    # converted the dense one to sparse anyway (dropping the same zeros), so the
+    # rows the engine sees are unchanged. Padding -- the epigraph column, the
+    # no-good auxiliaries -- is implicit in the width.
+    ub_rows: list[np.ndarray] = []
+    ub_sign: list[float] = []
+    b_ub_vals: list[float] = []
     for i, sense in enumerate(linear_senses):
-        row = linear_A_rows[i]
-        rhs = linear_b_rows[i]
-        if use_objective_epigraph:
-            row = np.append(row, 0.0)
         if sense == "<=":
-            A_ub_rows.append(row)
-            b_ub_vals.append(rhs)
+            ub_rows.append(linear_A_rows[i])
+            ub_sign.append(1.0)
+            b_ub_vals.append(linear_b_rows[i])
         elif sense == ">=":
-            A_ub_rows.append(-row)
-            b_ub_vals.append(-rhs)
+            ub_rows.append(linear_A_rows[i])
+            ub_sign.append(-1.0)
+            b_ub_vals.append(-linear_b_rows[i])
 
     # OA cuts (all <= form)
     for i in range(len(oa_A_rows)):
-        row = oa_A_rows[i]
-        if use_objective_epigraph and len(row) == n_vars:
-            row = np.append(row, 0.0)
-        A_ub_rows.append(row)
+        ub_rows.append(oa_A_rows[i])
+        ub_sign.append(1.0)
         b_ub_vals.append(oa_b_rows[i])
 
     # Equality constraints from linear
-    A_eq_rows = []
-    b_eq_vals = []
-    for i, sense in enumerate(linear_senses):
-        if sense == "==":
-            row = linear_A_rows[i]
-            if use_objective_epigraph:
-                row = np.append(row, 0.0)
-            A_eq_rows.append(row)
-            b_eq_vals.append(linear_b_rows[i])
+    eq_rows = [linear_A_rows[i] for i, sense in enumerate(linear_senses) if sense == "=="]
+    b_eq_vals = [linear_b_rows[i] for i, sense in enumerate(linear_senses) if sense == "=="]
 
     # #756: exact single-point integer no-good exclusions add auxiliary binary
-    # columns to the master. Pad the existing rows with zeros for those columns and
-    # append the exclusion rows (all <= form).
+    # columns to the master, after every existing column, and their rows (all
+    # <= form).
     n_extra = 0
-    ng_rows: list[np.ndarray] = []
-    ng_rhs: list[float] = []
     if no_good_configs:
         if int_indices is None:
             int_indices = [i for i in range(n_vars) if integrality[i]]
         ng_rows, ng_rhs, n_extra = _build_no_good_augmentation(
             no_good_configs, int_indices, lb, ub, n_master
         )
-    if n_extra > 0:
-        A_ub_rows = [np.concatenate([r, np.zeros(n_extra)]) for r in A_ub_rows]
-        A_eq_rows = [np.concatenate([r, np.zeros(n_extra)]) for r in A_eq_rows]
-        A_ub_rows.extend(ng_rows)
+        ub_rows.extend(ng_rows)
+        ub_sign.extend([1.0] * len(ng_rows))
         b_ub_vals = list(b_ub_vals) + list(ng_rhs)
 
-    # Build arrays
-    A_ub = np.array(A_ub_rows) if A_ub_rows else None
-    b_ub = np.array(b_ub_vals) if b_ub_vals else None
-    A_eq = np.array(A_eq_rows) if A_eq_rows else None
-    b_eq = np.array(b_eq_vals) if b_eq_vals else None
+    width = n_master + n_extra
+    A_ub = _stack_sparse(ub_rows, width, ub_sign) if ub_rows else None
+    b_ub = np.array(b_ub_vals, dtype=np.float64) if b_ub_vals else None
+    A_eq = _stack_sparse(eq_rows, width) if eq_rows else None
+    b_eq = np.array(b_eq_vals, dtype=np.float64) if b_eq_vals else None
 
     # Objective
     if obj_is_linear:
@@ -267,7 +294,11 @@ def _solve_master_milp(
         b_eq=b_eq,
         bounds=bounds_list,
         integrality=int_vec,
-        time_limit=time_limit,
+        time_limit=(
+            None
+            if time_limit is None
+            else max(0.0, float(time_limit) - (time.perf_counter() - t_enter))
+        ),
         gap_tolerance=gap_tolerance,
     )
 
