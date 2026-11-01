@@ -20,16 +20,23 @@
   subproblem stopped by its cap is uncertified; when its solve kept a valid
   bound the configuration leaves the master with ``max(that bound, LB)`` in
   ``excluded_floor`` (``LOA._exclude_bounded``), so the search moves on instead
-  of stopping when the master proposes it again.
+  of stopping when the master proposes it again. A configuration whose global
+  solve kept neither a point nor a certificate falls back to the fixed-integer
+  NLP and stays in the master; if the master proposes it again it leaves then,
+  with the same floor (``LOA._exclude_reproposed``, #2082), instead of ending
+  the run.
 
 Bounds (§5.4): the master is a relaxation -- OA cuts go only on rows (and an
 objective) certified convex -- so its dual bound is a valid LB when the
 objective is linear or certified convex. A configuration excluded because it
 was certified *optimal* (not infeasible) leaves the master, so the LB is then
 ``min(master bound, best excluded configuration bound)``. The same holds for
-a configuration excluded uncertified with its valid bound. Unresolved
-configurations (no point, no bound) never leave the master: they block
-``optimal``, not the bound.
+a configuration excluded uncertified with its valid bound. In NLP mode an
+unresolved configuration (no point, no bound) never leaves the master; in
+global mode it leaves only with a floor, and an unresolved one still blocks
+``optimal``. When the run stops on a re-proposal it cannot exclude,
+``stop_reason`` is ``"reproposal"`` (``"unresolved_reproposal"`` for a
+configuration no step resolved), not ``"exhausted"`` (#2082).
 """
 
 from __future__ import annotations
@@ -69,6 +76,43 @@ def default_subproblem_time_limit(time_limit: Optional[float]) -> float:
     return min(SUBPROBLEM_TIME_LIMIT, max(1.0, 0.1 * float(time_limit)))
 
 
+def _oa_cut_rows(evaluator: Any, low: Model, oa_rows: Any) -> Any:
+    """``oa_rows`` with every row the master already carries exactly taken out of
+    its cut mask (#1917).
+
+    :func:`~discopt.gdp.algorithms.master.build_master` puts every scalar
+    ``Constraint`` whose body :func:`_extract_body_coeffs` reads as affine into
+    the master as one exact row. An affine row is convex, so the convexity mask
+    marks it and :func:`_add_oa_cuts` linearized it as well, every iteration:
+    measured on GDPlib med_term_purchasing (all 924 rows affine), 708 such
+    cuts per iteration, 35449 after 50 iterations, against a master whose rows
+    they duplicate. This is the defect ``solvers/oa.py``'s
+    ``_oa_cut_eligible_mask`` fixed for OA, where the floating-point
+    re-derivation of an ``==`` row in both directions made the master infeasible
+    by construction (a false infeasibility certificate on ``bchoco07``). Skipping
+    the cut is bound-neutral in exact arithmetic: the cut *is* the master row.
+    """
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt.modeling.core import Constraint
+    from discopt.solvers.oa import _OARows
+
+    n = sum(int(v.size) for v in low._variables)
+    # Only ``low._constraints`` reach the master; the evaluator's row map also
+    # covers builder rows that list does not hold (#840), which keep their cuts.
+    in_master = {id(c) for c in low._constraints if isinstance(c, Constraint)}
+    mask = list(oa_rows.convex_mask)
+    for start, stop, c in evaluator.constraint_row_map():
+        if (
+            stop - start == 1
+            and id(c) in in_master
+            and _extract_body_coeffs(c.body, low, n) is not None
+        ):
+            mask[start] = False
+    return _OARows(
+        senses=list(oa_rows.senses), convex_mask=mask, has_unclassified=oa_rows.has_unclassified
+    )
+
+
 class LOA(GDPAlgorithm):
     """Logic-based OA; see the module docstring."""
 
@@ -103,6 +147,8 @@ class LOA(GDPAlgorithm):
             raise ValueError(f"subproblem_time_limit must be > 0, got {subproblem_time_limit!r}")
         #: Each global subproblem's wall budget (#1984).
         self.subproblem_time_limit = float(subproblem_time_limit)
+        #: Per-configuration escalated subproblem caps (#1917): config -> seconds.
+        self._sub_caps: dict = {}
         #: What the last iteration's subproblem step did, for its log line.
         self._step_log = ""
         deadline = self.start_deadline(time_limit, kw)
@@ -125,6 +171,9 @@ class LOA(GDPAlgorithm):
         convexity = self._oa_convexity(low)
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
+        #: The rows OA cuts may go on: certified convex AND not already one exact
+        #: master row. ``oa_rows`` stays the pure convexity certificate.
+        self.oa_cut_rows = _oa_cut_rows(self.evaluator, low, self.oa_rows)
         self.objective_certified_convex = bool(convexity.objective_is_convex)
         self.master = self._make_master(milp_solver)
         self.obj_is_linear = self.master.objective is not None
@@ -136,6 +185,10 @@ class LOA(GDPAlgorithm):
         #: Best certified bound (min convention) of a configuration excluded as
         #: dominated: the master no longer bounds it.
         self.excluded_floor = math.inf
+        #: The global subproblem's bound (minimization convention) for each
+        #: configuration it left unresolved and handed to the NLP fallback
+        #: (#2082), or ``None`` when it kept none; ``_exclude_reproposed`` reads it.
+        self.fallback_bound: dict[tuple, Optional[float]] = {}
         self.init_report: Any = None
 
     # ── pieces ────────────────────────────────────────────────────────────
@@ -181,7 +234,7 @@ class LOA(GDPAlgorithm):
             self.master.cuts,
             self.master.cut_rhs,
             self.obj_is_linear,
-            self.oa_rows,
+            self.oa_cut_rows,
             self.master.objective_convex,
         )
 
@@ -211,7 +264,7 @@ class LOA(GDPAlgorithm):
             self.excluded_floor = min(self.excluded_floor, bound_min)
         self.master.exclude(config)
 
-    def _exclude_bounded(self, config: tuple, sub_bound: Optional[float]) -> None:
+    def _exclude_bounded(self, config: tuple, sub_bound: Optional[float]) -> bool:
         """Exclude an uncertified configuration whose global solve kept a valid bound (#1984).
 
         Left in the master, a configuration whose subproblem stopped at its cap
@@ -225,13 +278,44 @@ class LOA(GDPAlgorithm):
         master with that bound in ``excluded_floor``, and ``min(master bound,
         excluded_floor)`` stays a valid LB. Only a finite bound excludes: an
         infinite floor would read a later empty master as an infeasibility proof.
+        Returns whether the configuration was excluded.
         """
         cands = [] if sub_bound is None else [self.obj_sign * float(sub_bound)]
         if self.lb_valid and math.isfinite(self.lb):
             cands.append(self.lb)
         bound = max(cands, default=-math.inf)
-        if math.isfinite(bound):
-            self._exclude_certified(config, bound)
+        if not math.isfinite(bound):
+            return False
+        self._exclude_certified(config, bound)
+        return True
+
+    def _exclude_reproposed(self, config: tuple) -> bool:
+        """Exclude a configuration the global step could not resolve, now re-proposed (#2082).
+
+        Its global subproblem stopped with neither a point nor a certificate
+        (typically at ``subproblem_time_limit``) and the fixed-integer NLP step
+        took over, which neither bounds it nor excludes it. When the master
+        proposes it again no new cut can follow, and the #1611 C-11 rule ended
+        the whole run there -- reported as ``"exhausted"`` with most of the time
+        limit unused and configurations never proposed (measured: the book's
+        flowsheet GDP, stopped at iteration 3 of 8 at 13.8 s of 45 s, incumbent
+        2276.14 against the optimum 1948.58).
+
+        It leaves the master as ``_exclude_bounded`` leaves it, with
+        ``max(that subproblem's bound, LB)`` in ``excluded_floor``. The LB was
+        just raised by the master that re-proposed it, and a valid LB bounds
+        every configuration's optimum, so ``min(master bound, excluded_floor)``
+        stays valid; the price is that the bound can never pass that floor.
+        Only configurations of the global fallback qualify: an NLP-mode
+        configuration keeps the C-11 stop. Returns whether it was excluded.
+        """
+        if self.subproblem != "global" or config not in self.fallback_bound:
+            return False
+        bound = self.fallback_bound[config]
+        if not self._exclude_bounded(config, None if bound is None else self.obj_sign * bound):
+            return False
+        del self.fallback_bound[config]
+        return True
 
     def _offer_master_bound(self, bound: Optional[float]) -> None:
         if bound is None or not self.master.bound_valid:
@@ -327,6 +411,18 @@ class LOA(GDPAlgorithm):
         self._offer_master_bound(r.bound)
         assert r.config is not None
         if r.config in self.solved:
+            if self._exclude_reproposed(r.config):
+                logger.info(
+                    "%s iter %d: master re-proposed configuration %s, unresolved by its "
+                    "global subproblem; excluded (excluded floor %s, bound %s incumbent %s)",
+                    self._log_name(),
+                    k,
+                    self._fmt_selection(r.x),
+                    self._fmt(self.excluded_floor),
+                    self._fmt(self.lb),
+                    self._fmt(self.ub),
+                )
+                return True
             logger.info(
                 "%s iter %d: master re-proposed configuration %s, already solved; "
                 "stopping (bound %s incumbent %s)",
@@ -336,7 +432,10 @@ class LOA(GDPAlgorithm):
                 self._fmt(self.lb),
                 self._fmt(self.ub),
             )
-            return False  # a re-proposal adds no cut: stop (#1611 C-11)
+            # A re-proposal adds no cut: stop (#1611 C-11). Not an exhausted
+            # search space, so not reported as one (#2082).
+            self.stop_detail = "reproposal"
+            return False
         t0 = time.perf_counter()
         self._step_log = ""
         if self.subproblem == "global":
@@ -411,22 +510,26 @@ class LOA(GDPAlgorithm):
         if rigorous:
             self.master.exclude(config)
             self.mark_solved(config)
+            self.fallback_bound.pop(config, None)
             return True
         seen = config in self.unresolved
         self.mark_unresolved(config)
+        if seen:
+            self.stop_detail = "unresolved_reproposal"
         return not seen  # C-35: never a no-good on a local failure; stop on a repeat
 
     def _global_step(self, x_master: np.ndarray, config: tuple) -> bool:
         from discopt.gdp.algorithms.subproblem import solve_subproblem
 
         selection = self.space.selection_from_x(x_master)
+        cap = self._sub_caps.get(config, self.subproblem_time_limit)
         res = solve_subproblem(
             self.space.work,
             selection,
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
-            time_cap=self.subproblem_time_limit,
+            time_cap=cap,
         )
         self.n_subproblems += 1
         self._step_log = f"global {res.status}"
@@ -451,8 +554,40 @@ class LOA(GDPAlgorithm):
             # worse than it (measured: small_batch, positioning, where discopt
             # could not bound the reduced model but the fixed-integer NLP solves).
             global_status = self._step_log
+            # Remembered for ``_exclude_reproposed`` (#2082); the NLP step drops
+            # it when it proves the configuration infeasible. Every attempt's
+            # bound is valid, so the best one is kept.
+            cands = [b for b in (self.fallback_bound.get(config),) if b is not None]
+            if res.bound is not None:
+                cands.append(self.obj_sign * float(res.bound))
+            self.fallback_bound[config] = max(cands, default=None)
             more = self._nlp_step(x_master, config)
             self._step_log = f"{global_status}, then {self._step_log}"
+            if config in self.unresolved and cap < self.deadline.remaining():
+                # #1917: the cap, not the configuration, stopped this solve. The
+                # master will propose it again (nothing excluded or cut it), and
+                # C-35's stop-on-a-repeat would end the run with budget left
+                # (measured: GDPlib syngas at time_limit=60 stopped at 20 s with
+                # no incumbent -- the 6 s cap is short of the 28 s that proves its
+                # first configuration infeasible). Re-solve it on its next
+                # proposal with four times the cap; the run stops on a repeat
+                # only once the cap already covered what was left. Certificates
+                # still come only from the subproblem, so no bound changes.
+                self._sub_caps[config] = 4.0 * cap
+                self._step_log += f"; cap raised to {4.0 * cap:.3g} s"
+                more = True
+                # The NLP step may have labelled a repeat stop that this
+                # escalation overrides; a stale label would misname a later stop.
+                self.stop_detail = ""
+            # Escalate first: a cap-limited repeat earns a longer re-solve. Only a
+            # repeat the cap already covered is excluded with its floor (#2082).
+            if not more and self._exclude_reproposed(config):
+                # A repeat with no point from either step: leave with the floor
+                # rather than end the run; it stays unresolved, so it still
+                # blocks ``optimal``.
+                self.stop_detail = ""
+                self._step_log += ", excluded with floor"
+                return True
             return more
         return True
 

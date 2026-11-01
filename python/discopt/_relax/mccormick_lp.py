@@ -732,6 +732,10 @@ class MccormickLPRelaxer:
         # appends them. Unlike ``inherited_cuts`` they are constraints, not an
         # accelerator, so the C-42 strip-and-retry never removes them.
         self._model_rows: Optional[tuple[np.ndarray, np.ndarray]] = None
+        # Valid inequalities over the original columns separated once at the root
+        # box (#1917: ``DISCOPT_VUB_CMIR_ROOT``), installed by
+        # :meth:`set_root_rows`. Appended exactly like the model rows above.
+        self._root_rows: Optional[tuple[np.ndarray, np.ndarray]] = None
         # Integer-ratio partition bound (issue #309, flag-gated default-OFF):
         # attached by the solver when the pre-reform model carries a
         # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
@@ -1367,11 +1371,37 @@ class MccormickLPRelaxer:
             )
         self._model_rows = (A, b)
 
+    def set_root_rows(self, A: Optional[np.ndarray], b: Optional[np.ndarray]) -> None:
+        """Install root-separated valid inequalities ``A x <= b`` (#1917).
+
+        Rows over the original columns, valid at every feasible point inside the
+        root box every node box is a subset of (the separator's contract, see
+        :func:`discopt._relax.vub_cmir.root_vub_cmir_cuts`). They ride with the
+        model rows of :meth:`set_model_rows` into every node build, cold and
+        incremental, without replacing them.
+        """
+        if A is None or b is None or len(b) == 0:
+            self._root_rows = None
+            return
+        A = np.atleast_2d(np.asarray(A, dtype=np.float64))
+        b = np.asarray(b, dtype=np.float64).ravel()
+        if A.shape != (b.shape[0], self._n_orig):
+            raise ValueError(
+                f"root rows must be (k, {self._n_orig}) with k rhs entries; "
+                f"got A{A.shape}, b{b.shape}"
+            )
+        self._root_rows = (A, b)
+
     def _padded_model_rows(self, ncol: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
-        """The installed model rows widened to ``ncol`` columns, or ``None``."""
-        if self._model_rows is None:
+        """The installed model (and root) rows widened to ``ncol`` columns, or ``None``."""
+        parts = [r for r in (self._model_rows, self._root_rows) if r is not None]
+        if not parts:
             return None
-        A, b = self._model_rows
+        if len(parts) == 1:
+            A, b = parts[0]
+        else:
+            A = np.vstack([p[0] for p in parts])
+            b = np.concatenate([p[1] for p in parts])
         if ncol < self._n_orig:
             raise ValueError(f"layout width {ncol} < original column count {self._n_orig}")
         out = np.zeros((A.shape[0], ncol), dtype=np.float64)

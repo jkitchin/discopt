@@ -1598,6 +1598,21 @@ def _extract_body_coeffs(
                     if not rc:
                         return {k: ro * v for k, v in lc.items()}, lo * ro
                 return None
+            if e.op == "/":
+                # #1917: linear / nonzero constant is linear. Declining it dropped
+                # every ``cost == (a*flow + b)*k/8000`` row of GDPlib syngas from
+                # the LOA/GLOA/RIC master (57 rows), so the master's objective
+                # had nothing tying it to the flows: RIC's master bound sat at 0
+                # against an optimum of 4669 and LOA's at 19.9. Only a constant,
+                # finite, nonzero divisor is folded; anything else stays declined.
+                le, ri = _extract(e.left), _extract(e.right)
+                if le is None or ri is None:
+                    return None
+                lc, lo = le
+                rc, ro = ri
+                if rc or not np.isfinite(ro) or ro == 0.0:
+                    return None
+                return {k: v / ro for k, v in lc.items()}, lo / ro
         if isinstance(e, SumOverExpression):
             # #1039: fold the indexed summation term by term. This is what
             # lets the OA/LOA row extraction see the ``exactly-one`` row that

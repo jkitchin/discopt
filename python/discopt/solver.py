@@ -5601,7 +5601,66 @@ def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
     return changed
 
 
+def _integer_column_mask(model: Model, n: int) -> np.ndarray:
+    """Flat mask of the integer and binary columns among the first ``n``."""
+    mask = np.zeros(n, dtype=bool)
+    off = 0
+    for v in model._variables:
+        if off >= n:
+            break
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            mask[off : min(off + v.size, n)] = True
+        off += v.size
+    return mask
+
+
+def _round_integer_bounds(
+    model: Model, lb: np.ndarray, ub: np.ndarray, tol: Optional[float] = None
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Round integer columns' bounds to integers: ``ceil(lb - tol)``, ``floor(ub + tol)``.
+
+    ``(lb, ub, crossed)``; ``crossed`` when some integer column then holds no
+    integer, which is a proof that the box is empty. ``tol`` is the integrality
+    tolerance a solution is accepted at, so no accepted point is cut.
+
+    #2081: node FBBT handed per-node OBBT a binary at ``[0, 1 - 1.6e-13]`` (and
+    its complement at ``[1.6e-13, 1]``); OBBT rounded ``lb`` up to ``1`` while
+    ``ub`` stayed below it, and its envelope build raised ``Interval lo > hi``.
+    That bound came from the nonlinear pass, which clipped binaries without
+    rounding (fixed there), but the linear-row sweep is integrality-blind too
+    (``2 w <= 1`` leaves a binary ``w`` at ``[0, 0.5]``), so the node box is
+    rounded here, once, whatever produced it.
+    """
+    is_int = _integer_column_mask(model, len(lb))
+    if not np.any(is_int):
+        return lb, ub, False
+    if tol is None:
+        tol = _ROUTE_BOX_INT_TOL
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    with np.errstate(invalid="ignore"):
+        lb[is_int] = np.ceil(lb[is_int] - tol)
+        ub[is_int] = np.floor(ub[is_int] + tol)
+    crossed = bool(np.any(lb[is_int] > ub[is_int]))
+    return lb, ub, crossed
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
+    """FBBT for a single B&B node (``_fbbt_node_box``), integer bounds rounded (#2081).
+
+    Same parameters and returns as :func:`_fbbt_node_box`. A box whose integer
+    column holds no integer after rounding is reported infeasible.
+    """
+    lb, ub, infeasible = _fbbt_node_box(
+        evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=max_rounds
+    )
+    if infeasible:
+        return lb, ub, True
+    lb, ub, crossed = _round_integer_bounds(evaluator._model, lb, ub)
+    return lb, ub, crossed
+
+
+def _fbbt_node_box(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
     Uses the constraint Jacobian to propagate implied variable bounds.
@@ -19279,6 +19338,8 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
+    # #1917 root VUB c-MIR evidence (``DISCOPT_VUB_CMIR_ROOT``); empty when off.
+    _vub_cmir_stats: dict[str, float] = {}
     # CUT-INHERIT-GRAD diagnostic: the fraction of the ONE root pool separation
     # solve's wall spent in the square+PSD point-separation loops. Surfaced in
     # ``solver_stats`` for observability; NOT the gate predicate (the entry
@@ -19735,6 +19796,24 @@ def solve_model(
                     _probe_useful = _probe is not None and (
                         _probe.status == "infeasible" or _probe.lower_bound is not None
                     )
+                    if _probe_useful and _vub_cmir_root_enabled() and not _deadline_exhausted():
+                        # Same saturated grant as the probe above (#1153).
+                        _vub_cmir_budget = min(
+                            _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
+                            max(_setup_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
+                        )
+                        _install_root_vub_cmir_rows(
+                            model,
+                            _mc_lp_relaxer,
+                            tree,
+                            _probe_lb,
+                            _probe_ub,
+                            n_vars,
+                            int_offsets,
+                            int_sizes,
+                            _role2_budget(_vub_cmir_budget),
+                            _vub_cmir_stats,
+                        )
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
@@ -24831,6 +24910,7 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    _solver_stats.update(_vub_cmir_stats)
     if _model_is_convex and _sp_safe_bound_on:
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
@@ -36893,6 +36973,82 @@ def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
     if res.status == SolveStatus.OPTIMAL and res.x is not None:
         return np.asarray(res.x, dtype=np.float64)
     return None
+
+
+def _vub_cmir_root_enabled() -> bool:
+    """``DISCOPT_VUB_CMIR_ROOT`` (#1917, default OFF); see :mod:`discopt._relax.vub_cmir`."""
+    from discopt._relax.vub_cmir import vub_cmir_root_enabled
+
+    return vub_cmir_root_enabled()
+
+
+def _install_root_vub_cmir_rows(
+    model: Model,
+    relaxer,
+    tree,
+    root_lb: np.ndarray,
+    root_ub: np.ndarray,
+    n_vars: int,
+    int_offsets,
+    int_sizes,
+    budget: Optional[float],
+    stats: dict,
+) -> None:
+    """Root path-aggregation c-MIR rows into the spatial McCormick LP (#1917).
+
+    Gated by ``DISCOPT_VUB_CMIR_ROOT`` (default OFF; see
+    :func:`discopt._relax.vub_cmir.vub_cmir_root_enabled`). Separates rounds of
+    :func:`~discopt._relax.vub_cmir.root_vub_cmir_cuts` over the root box and
+    installs the rows with :meth:`MccormickLPRelaxer.set_root_rows`, so every
+    node LP carries them. Sound: each row is valid for every mixed-integer point
+    of an outer relaxation over the root box, and every node box is a subset of
+    it. A verified-feasible incumbent (if one exists yet) screens every row; a
+    rejection is a separator defect and is logged as a WARNING.
+    """
+    from discopt._relax.vub_cmir import root_vub_cmir_cuts
+
+    n_orig = int(relaxer._n_orig)
+    inc = tree.incumbent()
+    screen = _verified_cut_screen_points(
+        model,
+        [None if inc is None else inc[0]],
+        n_vars,
+        n_orig,
+        int_offsets,
+        int_sizes,
+    )
+    t0 = time.perf_counter()
+    res = root_vub_cmir_cuts(
+        model,
+        root_lb,
+        root_ub,
+        n_orig,
+        deadline=t0 + (30.0 if budget is None else max(float(budget), 0.0)),
+        screen_points=screen,
+    )
+    if res.A is not None:
+        relaxer.set_root_rows(res.A, res.b)
+    n_rows = 0 if res.b is None else int(res.b.shape[0])
+    stats["vub_cmir/rows"] = float(n_rows)
+    stats["vub_cmir/rounds"] = float(res.rounds)
+    stats["vub_cmir/vub"] = float(res.n_vub)
+    stats["vub_cmir/screen_points"] = float(len(screen))
+    stats["vub_cmir/rejected"] = float(res.rejected_by_screen)
+    stats["vub_cmir/wall"] = time.perf_counter() - t0
+    if res.rejected_by_screen:
+        logger.warning(
+            "root VUB c-MIR: %d cut(s) violated a verified-feasible point and were "
+            "dropped -- a separator defect (#1917)",
+            res.rejected_by_screen,
+        )
+    logger.info(
+        "Root VUB c-MIR (#1917): %d rows over %d rounds (%d VUBs, stop=%s), LP bound %s",
+        n_rows,
+        res.rounds,
+        res.n_vub,
+        res.stop_reason,
+        " -> ".join(f"{v:.4g}" for v in res.bound_trace[:1] + res.bound_trace[-1:]),
+    )
 
 
 def _verified_cut_screen_points(

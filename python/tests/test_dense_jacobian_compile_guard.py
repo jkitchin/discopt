@@ -24,8 +24,14 @@ than fail this test).
 
 from __future__ import annotations
 
+import types
+
 import discopt.solver as S
 import numpy as np
+
+#: An opaque model with no variables: the fallback is monkeypatched below, and the
+#: node FBBT's integer rounding (#2081) reads ``_variables`` and finds none.
+_NO_VARS_MODEL = types.SimpleNamespace(_variables=())
 
 
 class _ExplodingEvaluator:
@@ -34,7 +40,7 @@ class _ExplodingEvaluator:
 
     def __init__(self, n_constraints: int):
         self.n_constraints = n_constraints
-        self._model = object()  # opaque; the fallback is monkeypatched below
+        self._model = _NO_VARS_MODEL  # opaque; the fallback is monkeypatched below
 
     def evaluate_jacobian(self, x):  # pragma: no cover - must not be reached
         raise AssertionError(
@@ -88,7 +94,7 @@ def test_small_model_still_attempts_jacobian_test(monkeypatch):
 
     class _SmallEval:
         n_constraints = m
-        _model = object()
+        _model = _NO_VARS_MODEL
 
         def evaluate_jacobian(self, x):
             entered["jac"] = True
