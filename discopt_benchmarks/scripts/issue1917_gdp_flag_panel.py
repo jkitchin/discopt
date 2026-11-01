@@ -79,6 +79,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
     "DISCOPT_GDP_DISJUNCT_FBBT": ("big-m",),
     "DISCOPT_GDP_ENUMERATE_CUTOFF": ("enumerate",),
+    # Acts on the route decision, not on the lowering (identical in both arms),
+    # so its fire phase reports nothing: solve with ``--all --include`` over the
+    # instances whose route the flag changes (``_convex_minlp_auto_route``).
+    "DISCOPT_CONVEX_ROUTE_GDP_LOWERED": ("big-m",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
