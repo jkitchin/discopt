@@ -149,6 +149,42 @@ def _charge_evaluator(method):
     return wrapper
 
 
+#: Ipopt's and POUNCE's ``Index`` is a 32-bit signed int, and the KKT triplet
+#: count is carried in it. Past this the solver does not raise: POUNCE's FERAL
+#: backend panicked with ``assertion left == right`` (2553513213 vs the same
+#: count wrapped through i32), which reaches Python as a ``BaseException``.
+_INT32_MAX = 2**31 - 1
+
+
+class NLPIndexOverflowError(ValueError):
+    """The NLP's KKT triplet count does not fit the solver's 32-bit index."""
+
+
+def _check_kkt_index_capacity(n: int, m: int, jac_nnz: int, hess_nnz: int, dense: bool) -> None:
+    """Refuse, before any solver sees it, an NLP whose KKT matrix overflows ``i32``.
+
+    The bound is an upper bound on the full-space augmented system's triplet
+    count: the Lagrangian Hessian plus a diagonal (``n``), the Jacobian, and at
+    most three diagonals over the rows (slack, inequality identity,
+    regularization). Measured on GDPlib ``stranded_gas`` (n=57828, m=15241):
+    POUNCE's actual count exceeded ``jac + hess`` by 88959 <= ``n + 3m`` = 103551.
+    """
+    kkt = int(hess_nnz) + int(jac_nnz) + int(n) + 3 * int(m)
+    if kkt <= _INT32_MAX:
+        return
+    how = (
+        "the evaluator offers no sparse structure, so the dense fallback "
+        f"(m*n = {int(m) * int(n)} Jacobian and n(n+1)/2 = {int(n) * (int(n) + 1) // 2} "
+        "Hessian entries) was used"
+        if dense
+        else f"sparse Jacobian nnz {int(jac_nnz)}, Hessian nnz {int(hess_nnz)}"
+    )
+    raise NLPIndexOverflowError(
+        f"NLP with n={n}, m={m} has up to {kkt} KKT nonzeros, more than the 32-bit "
+        f"index limit {_INT32_MAX} of the NLP solver; {how}."
+    )
+
+
 class _IpoptCallbacks:
     """Adapter mapping NLPEvaluator methods to cyipopt.Problem callbacks."""
 
@@ -159,6 +195,14 @@ class _IpoptCallbacks:
         self._use_sparse = (
             hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
         )
+        if self._use_sparse:
+            jac_nnz = len(evaluator.jacobian_structure()[0])
+            hess_nnz = len(evaluator.hessian_structure()[0])
+        else:
+            # Counted, not built: the dense structure is what would overflow.
+            jac_nnz = self._m * self._n
+            hess_nnz = self._n * (self._n + 1) // 2
+        _check_kkt_index_capacity(self._n, self._m, jac_nnz, hess_nnz, dense=not self._use_sparse)
         # Resolve once per solve, not once per callback. An evaluator that does
         # not declare its layer gets charged to *nothing* rather than to a
         # guessed bucket: an unknown backend's time then stays with the enclosing

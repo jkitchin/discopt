@@ -26,6 +26,7 @@ from discopt.modeling.core import (
 )
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import optimality_gap
+from discopt.solvers.nlp_ipopt import NLPIndexOverflowError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #1063: type-only. ``_relax/nlp_evaluator`` imports jax at module scope, so a
@@ -207,6 +208,8 @@ def _solve_nlp_relaxation(
 
         if result.status == SolveStatus.OPTIMAL and result.x is not None:
             return np.asarray(result.x, dtype=np.float64)
+    except NLPIndexOverflowError:
+        raise
     except Exception as exc:  # noqa: BLE001 - no relaxation point is handled by the caller
         # Capability-disabling: without this point LOA starts from no relaxation
         # solution at all, so a silent skip looks like "the relaxation is useless".
@@ -277,6 +280,10 @@ def _solve_nlp_subproblem(
                             break
                 if feas:
                     return x_sol
+    except NLPIndexOverflowError:
+        # Not a failed solve: the NLP cannot be posed to the solver at all, and
+        # every configuration would fail the same way. Refuse loudly.
+        raise
     except Exception as exc:  # noqa: BLE001 - no subproblem point is handled by the caller
         # Capability-disabling: a swallowed failure here means LOA silently never
         # gets an upper bound from this configuration.
@@ -385,6 +392,29 @@ class _BoundsProxy:
 
     def evaluate_lagrangian_hessian(self, x, obj_factor, lam):
         return self._eval.evaluate_lagrangian_hessian(x, obj_factor, lam)
+
+    # Sparse structure. Without these ``_IpoptCallbacks`` saw no
+    # ``has_sparse_structure`` and fell back to a DENSE Jacobian and Hessian
+    # triangle: on GDPlib ``stranded_gas`` (n=57828, m=15241, 374k sparse nnz)
+    # that is 2.55e9 triplets, which overflowed POUNCE's i32 index and panicked
+    # (#1917). The bounds this proxy overrides enter no structure and no
+    # derivative value, so forwarding is exact.
+    def has_sparse_structure(self):
+        return bool(
+            hasattr(self._eval, "has_sparse_structure") and self._eval.has_sparse_structure()
+        )
+
+    def jacobian_structure(self):
+        return self._eval.jacobian_structure()
+
+    def hessian_structure(self):
+        return self._eval.hessian_structure()
+
+    def evaluate_jacobian_values(self, x):
+        return self._eval.evaluate_jacobian_values(x)
+
+    def evaluate_hessian_values(self, x, obj_factor, lam):
+        return self._eval.evaluate_hessian_values(x, obj_factor, lam)
 
 
 def _add_oa_cuts(
