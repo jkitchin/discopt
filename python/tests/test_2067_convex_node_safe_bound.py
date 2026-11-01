@@ -268,3 +268,30 @@ def test_qplib_8153_legacy_import_still_crosses(monkeypatch):
     not an instance that never crosses."""
     r, ref = _qplib_8153_root(monkeypatch, safe=False)
     assert r.bound > ref
+
+
+def test_budget_rations_the_exact_rung_and_suspends_a_failing_ladder():
+    """#2070 review: one budget per solve, two deterministic counts and no clock.
+    A node that abstains under the budget proves nothing either way, so suspension
+    can only cost bound strength, never soundness."""
+    from discopt.solvers.convex_node_bound import SafeBoundBudget
+
+    m, lo, hi = _norm_cone_model()
+    ev = make_evaluator(m)
+    cl, cu = (np.asarray(v) for v in _infer_constraint_bounds(ev))
+    budget = SafeBoundBudget()
+    bad = np.array([np.nan, 0.0, 1.0])
+    for _ in range(SafeBoundBudget.SUSPEND_AFTER - 1):
+        assert convex_node_safe_bound(ev, bad, lo, hi, cl, cu, budget=budget)[0] is None
+    assert not budget.suspended
+    # A proved node resets the run of failures.
+    good, why = convex_node_safe_bound(ev, np.zeros(3), lo, hi, cl, cu, budget=budget)
+    assert good is not None, why
+    assert budget.consecutive_failures == 0
+    for _ in range(SafeBoundBudget.SUSPEND_AFTER):
+        convex_node_safe_bound(ev, bad, lo, hi, cl, cu, budget=budget)
+    assert budget.suspended
+    bound, why = convex_node_safe_bound(ev, np.zeros(3), lo, hi, cl, cu, budget=budget)
+    assert bound is None and "suspended" in why
+    # The exact-rung ration never goes negative.
+    assert 0 <= budget.exact_left <= SafeBoundBudget.EXACT_CALLS

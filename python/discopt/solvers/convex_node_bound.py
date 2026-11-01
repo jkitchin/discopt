@@ -31,9 +31,22 @@ NLP's to the NLP's own tolerance, so the bound loses nothing a certificate can a
 
 Validity rests on three facts and nothing about the NLP solve itself: the model is
 certified convex, ``x̂`` lies in the node box (it is clipped into it), and the
-evaluator's values are its exact values up to the floating-point slack charged below.
+evaluator's ``f, ∇f, g, J`` are accurate to the floating-point slack charged below.
 The NLP's multipliers are never read, so their row order and sign convention (which
 differ between the POUNCE native, callback and Ipopt node engines) cannot matter.
+
+What "rigorous" means here, exactly
+-----------------------------------
+The LP's own arithmetic is enclosed (the NS bound is summed at double-double precision,
+and forming ``k = g - J x̂`` is charged). The *evaluator's* values are not intervals: the
+slack also charges ``ROUNDOFF_OPS * eps`` times each value's magnitude and, over the
+finite part of the box, times ``|∇| · width`` -- the error a few-ulp gradient makes
+across the region the linearisation is used on. That covers an evaluator whose result
+is accurate to a few ulps of the magnitudes involved; a row whose AD evaluation cancels
+catastrophically (many large terms summing to a small value) can carry more, and an
+open box side gets no width term. So the bound is rigorous up to the evaluator's
+accuracy at that scale -- ~1e-15 relative, eight orders below the 1.5e-7 crossings this
+module exists to remove -- not an interval-arithmetic proof.
 """
 
 from __future__ import annotations
@@ -43,7 +56,7 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
-from discopt._relax._numeric import roundoff_slack
+from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 
 #: A node box side at or beyond this magnitude is treated as open (the house
 #: ``±9.999e19`` "no bound" box and the ``1e20`` sentinel alike). Opening a side only
@@ -56,6 +69,37 @@ _OPEN_SIDE = 1e15
 #: operation count (``lp_milp_highs.EXACT_MAX_WORK``/``EXACT_MAX_TOTAL_WORK``), not by a
 #: clock of its own: a wall cap here made a node's bound a function of machine speed
 #: (#912). Only the caller's ``deadline`` -- its own ``time_limit`` -- can stop it.
+
+
+class SafeBoundBudget:
+    """Per-solve, deterministic rationing of the node bound's expensive paths.
+
+    Each exact dual correction is capped by an operation count, but nothing capped how
+    many nodes ran one: on a badly scaled convex model where every node's cheap rungs
+    fall short, every node paid it in turn (#2070 review). Two counts, no clock (#912):
+
+    * ``exact_left`` -- exact corrections the solve may still run; past it a node whose
+      cheap rungs do not close keeps the best cheap bound (or abstains).
+    * ``suspend_after`` -- consecutive nodes with no bound at all after which the solve
+      stops trying and every later node abstains at once. Abstaining is the sound
+      answer either way; this only stops paying for a ladder that keeps failing.
+    """
+
+    EXACT_CALLS = 64
+    SUSPEND_AFTER = 32
+
+    def __init__(self) -> None:
+        self.exact_left = self.EXACT_CALLS
+        self.consecutive_failures = 0
+        self.suspended = False
+
+    def record(self, proved: bool) -> None:
+        if proved:
+            self.consecutive_failures = 0
+            return
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.SUSPEND_AFTER:
+            self.suspended = True
 
 
 def _as_csr(J, m: int, n: int) -> sp.csr_matrix:
@@ -209,6 +253,7 @@ def convex_node_safe_bound(
     cu: np.ndarray,
     *,
     deadline: Optional[float] = None,
+    budget: Optional[SafeBoundBudget] = None,
 ) -> tuple[Optional[float], str]:
     """A rigorous lower bound on a **convex** node NLP, from any point of its box.
 
@@ -220,8 +265,19 @@ def convex_node_safe_bound(
 
     The caller asserts that the model is certified convex; on a nonconvex model the
     linearisations are not outer approximations and the returned number means nothing.
+
+    ``budget`` (one per solve) rations the expensive paths; see :class:`SafeBoundBudget`.
     """
-    from discopt.solvers.lp_milp_highs import INF, StdForm, certify_lp_dual
+    if budget is not None and budget.suspended:
+        return None, (f"suspended after {budget.SUSPEND_AFTER} consecutive nodes without a bound")
+    bound, why = _safe_bound(evaluator, x, node_lb, node_ub, cl, cu, deadline, budget)
+    if budget is not None:
+        budget.record(bound is not None)
+    return bound, why
+
+
+def _safe_bound(evaluator, x, node_lb, node_ub, cl, cu, deadline, budget):
+    from discopt.solvers.lp_milp_highs import CERT_ABS, CERT_REL, INF, StdForm, certify_lp_dual
 
     lo = np.asarray(node_lb, dtype=np.float64).ravel()
     hi = np.asarray(node_ub, dtype=np.float64).ravel()
@@ -253,25 +309,28 @@ def convex_node_safe_bound(
         J = sp.csr_matrix((0, n), dtype=np.float64)
 
     # Linearised row r_i(x) = g_i + J_i (x - x̂) = J_i x + (g_i - J_i x̂), written as
-    # J x - s = 0 with s in [cl - k, cu - k], k = g - J x̂. Each side is widened by the
-    # round-off of the arithmetic that built it, which only enlarges the slack's range.
-    Jx = J @ xh
-    absJx = abs(J) @ np.abs(xh)
-    k = g - Jx
-    s_lo = np.full(m, -INF)
-    s_hi = np.full(m, INF)
-    # The slack charges only the operands of the side it widens: an open side is the
-    # 1e20 sentinel, and charging its round-off (8 * eps * 1e20 = 1.8e5) to the other
-    # side measured as a linearised LP that ignored every nonlinear row.
-    for i in range(m):
-        if np.isfinite(cl[i]) and abs(cl[i]) < INF:
-            s_lo[i] = cl[i] - k[i] - roundoff_slack(g[i], absJx[i], cl[i])
-        if np.isfinite(cu[i]) and abs(cu[i]) < INF:
-            s_hi[i] = cu[i] - k[i] + roundoff_slack(g[i], absJx[i], cu[i])
+    # J x - s = 0 with s in [cl - k, cu - k], k = g - J x̂. Each finite side is widened
+    # by a slack (vectorised; a per-row Python loop sat on the per-node hot path): the
+    # round-off of forming ``k``, the evaluator's few-ulp error in ``g_i`` and ``J_i``,
+    # and that gradient error carried across the finite part of the box -- see the
+    # module docstring for what this does and does not cover. Widening only enlarges
+    # the slack's range, so it can only weaken the bound. Only the operands of the side
+    # being widened are charged: an open side is the 1e20 sentinel, and charging its
+    # round-off (8 * eps * 1e20 = 1.8e5) measured as an LP that ignored every row.
     xl = np.where(lo <= -_OPEN_SIDE, -INF, lo)
     xu = np.where(hi >= _OPEN_SIDE, INF, hi)
+    width = np.where((xl > -INF) & (xu < INF), xu - xl, 0.0)
+    Jx = J @ xh
+    absJ = abs(J)
+    k = g - Jx
+    unit = ROUNDOFF_OPS * FLOAT_EPS
+    base = unit * (np.abs(g) + absJ @ np.abs(xh) + absJ @ width)
+    lo_ok = np.isfinite(cl) & (np.abs(cl) < INF)
+    hi_ok = np.isfinite(cu) & (np.abs(cu) < INF)
+    s_lo = np.where(lo_ok, cl - k - (base + unit * np.abs(np.where(lo_ok, cl, 0.0))), -INF)
+    s_hi = np.where(hi_ok, cu - k + (base + unit * np.abs(np.where(hi_ok, cu, 0.0))), INF)
     obj_const = f - float(grad @ xh)
-    obj_const -= roundoff_slack(f, float(np.abs(grad) @ np.abs(xh)))
+    obj_const -= unit * (abs(f) + float(np.abs(grad) @ np.abs(xh)) + float(np.abs(grad) @ width))
 
     A = sp.hstack([J.tocsc(), -sp.identity(m, format="csc")], format="csc")
     sf = StdForm.from_arrays(
@@ -284,7 +343,16 @@ def convex_node_safe_bound(
     if y.shape != (sf.m,) or not np.all(np.isfinite(y)):
         return None, "linearised node LP dual is not finite"
     lp_obj = lp_val + sf.obj_const
-    bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline)
+    bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline, exact=False)
+    closed = bound is not None and lp_obj - bound <= CERT_ABS + CERT_REL * abs(lp_obj)
+    if not closed and (budget is None or budget.exact_left > 0):
+        # The cheap rungs fell short; the exact correction is the expensive one, so it
+        # runs only while this solve's ration lasts.
+        if budget is not None:
+            budget.exact_left -= 1
+        exact_bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline)
+        if exact_bound is not None and (bound is None or exact_bound > bound):
+            bound = exact_bound
     if bound is None or not np.isfinite(bound):
         return None, reason or "no finite Neumaier-Shcherbina bound from the LP dual"
     return float(bound), ""

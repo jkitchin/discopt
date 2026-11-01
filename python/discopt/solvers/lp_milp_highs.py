@@ -716,7 +716,12 @@ _EPS = float(np.finfo(np.float64).eps)
 
 
 def certify_lp_dual(
-    y: np.ndarray, sf: StdForm, obj: float, deadline: Optional[float] = None
+    y: np.ndarray,
+    sf: StdForm,
+    obj: float,
+    deadline: Optional[float] = None,
+    *,
+    exact: bool = True,
 ) -> tuple[Optional[float], str, str]:
     """The NS safe-bound ladder that decides whether an LP point at ``obj`` is
     certified optimal: ``(bound, provenance, why)``.
@@ -731,6 +736,9 @@ def certify_lp_dual(
 
     Shared by the HiGHS LP route and the native LP engines (#1953), so both
     certify a point against the same evidence.
+
+    ``exact=False`` stops before the exact correction, the one rung whose cost is not
+    negligible (#2067: a caller certifying every B&B node rations it per solve).
     """
     thr = CERT_ABS + CERT_REL * abs(obj)
     # Every candidate below is a valid lower bound, so the largest one is too.
@@ -752,7 +760,7 @@ def certify_lp_dual(
                 g = ns_bound(y_s, _sf_try)
                 if g is not None and (ns is None or g > ns):
                     ns, provenance = g, "ns-scaled-dual"
-        if ns is None or obj - ns > thr:
+        if exact and (ns is None or obj - ns > thr):
             g, reason = exact_ns_bound(y, box, deadline=deadline)
             if g is not None and (ns is None or g > ns):
                 ns, provenance = g, "ns-exact-dual-correction"

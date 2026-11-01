@@ -683,8 +683,7 @@ def _convex_node_safe_bound_enabled() -> bool:
     (``=0``) is kept only so the shipped default can be A/B'd (CLAUDE.md §5, "an
     opt-*out* for a shipped default"); it restores the unsound import.
     """
-    raw = os.environ.get("DISCOPT_CONVEX_NODE_SAFE_BOUND", "").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    return _env_flag("DISCOPT_CONVEX_NODE_SAFE_BOUND", default=True)
 
 
 def _apply_convex_node_safe_bounds(
@@ -697,6 +696,7 @@ def _apply_convex_node_safe_bounds(
     cu,
     *,
     deadline: Optional[float],
+    budget=None,
 ) -> tuple[np.ndarray, int, int, int]:
     """Replace each convex node's NLP objective by a proved bound (#2067), in place.
 
@@ -712,6 +712,9 @@ def _apply_convex_node_safe_bounds(
     A node for which no safe bound is proved ABSTAINS: it imports ``-inf``, so the
     tree floors it at its inherited parent bound, never fathoms it and branches it
     (the #598 path). ``-inf`` and sentinel entries are left untouched.
+
+    ``budget`` is the solve's :class:`~discopt.solvers.convex_node_bound.SafeBoundBudget`
+    (one per solve, so the rationing spans every batch).
 
     Returns ``(point_values, n_proved, n_abstained, n_raised)``: ``point_values`` is
     NaN where the bound and the point value coincide; ``n_raised`` counts nodes whose
@@ -738,6 +741,7 @@ def _apply_convex_node_safe_bounds(
             cl_arr,
             cu_arr,
             deadline=deadline,
+            budget=budget,
         )
         if safe is None:
             logger.debug("convex node %d: no safe bound (%s); abstaining (#2067)", i, why)
@@ -18873,6 +18877,9 @@ def solve_model(
     # raised], surfaced in ``solver_stats`` so an arm that never fired is visible.
     _sp_safe_bound_on = _convex_node_safe_bound_enabled()
     _sp_safe_counts = [0, 0, 0]
+    from discopt.solvers.convex_node_bound import SafeBoundBudget as _SpSafeBoundBudget
+
+    _sp_safe_budget = _SpSafeBoundBudget()
 
     # Per-node certificate refresh imported lazily so the main
     # classification import above stays the single-point-of-truth for
@@ -21053,6 +21060,7 @@ def solve_model(
                     _sp_cl,
                     _sp_cu,
                     deadline=_deadline,
+                    budget=_sp_safe_budget,
                 )
                 _sp_safe_counts[0] += _n_p
                 _sp_safe_counts[1] += _n_a
@@ -21479,6 +21487,7 @@ def solve_model(
                             _sp_cl,
                             _sp_cu,
                             deadline=_deadline,
+                            budget=_sp_safe_budget,
                         )
                         _sp_safe_counts[0] += _n_p
                         _sp_safe_counts[1] += _n_a
@@ -27919,6 +27928,9 @@ def _solve_nlp_bb(
     # replaces each convex node's objective by a proved bound before import.
     _safe_bound_on = _convex_node_safe_bound_enabled()
     _safe_proved = _safe_abstained = _safe_raised = 0
+    from discopt.solvers.convex_node_bound import SafeBoundBudget as _SafeBoundBudget
+
+    _safe_budget = _SafeBoundBudget()
     iteration = 0
 
     # Sub-NLP heuristic accounting (#1062). ``solve_model`` keeps these three
@@ -28743,6 +28755,7 @@ def _solve_nlp_bb(
                 cl_list,
                 cu_list,
                 deadline=t_start + time_limit,
+                budget=_safe_budget,
             )
             _safe_proved += _n_p
             _safe_abstained += _n_a
@@ -29023,10 +29036,16 @@ def _solve_nlp_bb(
             _safe_abstained,
             _safe_raised,
         )
-    if (_stall_abstain or _safe_abstained) and bool(stats.get("bound_unresolved", False)):
+    if _stall_abstain and bool(stats.get("bound_unresolved", False)):
         _gap_certified = False
         # An abstained node closed with no branch direction proves nothing, so
         # an exhausted tree with no incumbent is "unknown", not "infeasible".
+        _unconverged_fathom = True
+    elif _safe_abstained and bool(stats.get("bound_unresolved", False)):
+        # #2067 (review of #2070): a safe-bound abstention is not decertified here --
+        # the tree already pins its bound at the valid floor, as on the #598 path, and
+        # ``bound_unresolved`` may come from an unrelated removal -- but an exhausted
+        # tree with no incumbent still proves no infeasibility.
         _unconverged_fathom = True
     # #933: capture the tree-bound taint state NOW, before the exit-status logic
     # below overwrites ``_gap_certified`` on limit exits. "The exit is not
