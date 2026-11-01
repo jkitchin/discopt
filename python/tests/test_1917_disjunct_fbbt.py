@@ -143,3 +143,22 @@ def test_misaligned_fbbt_output_produces_no_cap(monkeypatch):
 
     monkeypatch.setattr(b, "_fbbt", lambda model: None)
     assert disjunct_local_big_m_caps(_plant()) == {}
+
+
+def test_setup_over_the_work_budget_computes_no_cap_and_runs_no_fbbt(monkeypatch):
+    """One model-wide FBBT per disjunct: ``biofuel`` (516 disjuncts x 36,804
+    scalars) took 551 s and ``stranded_gas`` did not finish in 600 s. Over the
+    budget the caps are skipped entirely (today's M stands), before any FBBT."""
+    import discopt.gdp.bounds as gb
+
+    m = _plant()
+    assert disjunct_local_big_m_caps(m)  # within budget: caps exist
+    calls = []
+    real = gb._fbbt
+    monkeypatch.setattr(gb, "_fbbt", lambda mm: calls.append(1) or real(mm))
+    n_disjuncts, n_scalars = 2, sum(int(v.size) for v in m._variables)
+    monkeypatch.setattr(gb, "WORK_BUDGET", n_disjuncts * n_scalars - 1)
+    assert disjunct_local_big_m_caps(m) == {}
+    assert calls == []
+    monkeypatch.setattr(gb, "WORK_BUDGET", n_disjuncts * n_scalars)
+    assert disjunct_local_big_m_caps(m)

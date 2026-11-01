@@ -2,8 +2,11 @@
 """#1917: CLAUDE.md section 5 panels for the default-OFF GDP reformulation flags.
 
 ``DISCOPT_MBIGM_CONDITIONED`` (#1775 G2.3), ``DISCOPT_GDP_BOUND_PRETRANSFORM``
-(G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC`` and ``DISCOPT_HULL_LIFTED_RATIO`` (#1917)
-each change the lowering of a GDP model, so their panel is the ``gdp_parity`` panel
+(G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC``, ``DISCOPT_HULL_LIFTED_RATIO`` and
+``DISCOPT_GDP_DISJUNCT_FBBT`` (G5.1) each change the lowering of a GDP model;
+``DISCOPT_GDP_ENUMERATE_CUTOFF`` (G4.2) acts inside ``gdp_method="enumerate"``,
+so its fire phase marks every instance (there is no lowering to compare). Their
+panel is the ``gdp_parity`` panel
 (24 GDPlib instances,
 :data:`gdplib_runner.GDP_PARITY`) under the route each flag gates. A flag
 graduates only on a run that is BOTH
@@ -69,7 +72,12 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_GDP_BOUND_PRETRANSFORM": ("big-m", "mbigm"),
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
     "DISCOPT_HULL_LIFTED_RATIO": ("hull",),
+    "DISCOPT_GDP_DISJUNCT_FBBT": ("big-m",),
+    "DISCOPT_GDP_ENUMERATE_CUTOFF": ("enumerate",),
 }
+#: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
+#: so the fire phase cannot rule an instance out and every instance is solved.
+_SOLVE_TIME_METHODS = frozenset({"enumerate"})
 _TRANSFORM = {"big-m": "gdp.bigm", "mbigm": "gdp.mbigm", "hull": "gdp.hull"}
 
 FIRE_CHILD = r"""
@@ -120,6 +128,19 @@ def phase_fire(args, names: list[str]) -> int:
     for name in names:
         for method in FLAG_METHODS[args.flag]:
             if (name, method) in done:
+                continue
+            if method in _SOLVE_TIME_METHODS:
+                rec = {
+                    "phase": "fire",
+                    "flag": args.flag,
+                    "instance": name,
+                    "method": method,
+                    "fired": True,
+                    "off": {"note": "solve-time flag: no lowering to compare"},
+                    "on": {"note": "solve-time flag: no lowering to compare"},
+                }
+                _append(args.out, rec)
+                print(f"fire {name:36s} {method:6s} fired=True (solve-time flag)", flush=True)
                 continue
             arms = {}
             for on in (False, True):
@@ -196,7 +217,7 @@ def phase_solve(args, names: list[str]) -> int:
                 arm = "on" if on else "off"
                 if (name, method, arm, rep) in done:
                     continue
-                load = os.getloadavg()[0]
+                load = _wait_for_load(args.max_load)
                 t0 = time.perf_counter()
                 cmd = [
                     sys.executable,
@@ -250,6 +271,22 @@ def phase_solve(args, names: list[str]) -> int:
                     flush=True,
                 )
     return 0
+
+
+def _wait_for_load(max_load: float | None) -> float:
+    """Block until the 1-minute load average is at most ``max_load`` (CLAUDE.md
+    section 9: a solve started under foreign load measures the load, not the flag;
+    at load 55 on 14 cores a 120 s limit is a different experiment). Returns the
+    load the solve started at, which every row records."""
+    load = os.getloadavg()[0]
+    waited = 0
+    while max_load is not None and load > max_load:
+        if waited % 300 == 0:
+            print(f"   load gate: load1 {load:.1f} > {max_load:g}, waiting", flush=True)
+        time.sleep(30)
+        waited += 30
+        load = os.getloadavg()[0]
+    return load
 
 
 _ORACLE: dict | None = None
@@ -374,6 +411,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--time-limit", type=float, default=120.0)
     ap.add_argument("--grace", type=float, default=120.0)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument(
+        "--max-load",
+        type=float,
+        default=None,
+        help="start a solve only when the 1-minute load average is at most this",
+    )
     ap.add_argument("--fire-timeout", type=float, default=900.0)
     ap.add_argument("--all", action="store_true", help="also solve instances it did not fire on")
     ap.add_argument("--report", action="store_true")

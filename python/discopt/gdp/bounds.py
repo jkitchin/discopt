@@ -31,6 +31,15 @@ Soundness, rule by rule:
   name and size, in order. Otherwise no cap is produced at all.
 * **The body bound is outward-rounded** (:func:`evaluate_interval`) and gets
   ``_compute_big_m``'s ``max(|M|, 1e-8) * 1.01``.
+
+Cost. Each candidate disjunct costs one model-wide FBBT, so the setup is about
+``disjuncts x scalar variables``. Measured on the ``gdp_parity`` panel (#1917,
+2026-10-31): 22 of 24 instances are at most 0.75e6 (``kaibel``: 200 x 3733,
+lowering 2.0 -> 10.3 s), but ``biofuel`` (516 x 36804) took 551 s against 4.2 s
+OFF and ``stranded_gas`` (192 x 57810, ~9 s per FBBT) did not finish in 600 s.
+Above :data:`WORK_BUDGET` no caps are computed at all and the lowering keeps
+today's M, the sound default. The budget counts work, not seconds, so the
+outcome does not depend on machine load.
 """
 
 from __future__ import annotations
@@ -103,28 +112,39 @@ def _cap(row: Constraint, box: dict) -> Optional[float]:
     return max(abs(m), 1e-8) * 1.01
 
 
-def disjunct_local_big_m_caps(model: Model) -> dict[int, float]:
-    """``id(row) -> cap`` for the rows of root one-way disjunctions; see the module
-    docstring. Empty when nothing qualifies or the FBBT cannot be aligned."""
-    from discopt.gdp.tree import gdp_tree
+#: Most ``disjuncts x scalar variables`` the caps may cost (see the module docstring).
+WORK_BUDGET = 1_000_000
+
+
+def _eligible(node) -> bool:
     from discopt.modeling.core import SelectorActivation, SelectorCardinality
 
+    activation, cardinality = node.semantics.value
+    return (
+        activation is SelectorActivation.ONE_WAY
+        and cardinality in (SelectorCardinality.EXACTLY_ONE, SelectorCardinality.AT_LEAST_ONE)
+        and len(node.disjuncts) >= 2
+    )
+
+
+def disjunct_local_big_m_caps(model: Model) -> dict[int, float]:
+    """``id(row) -> cap`` for the rows of root one-way disjunctions; see the module
+    docstring. Empty when nothing qualifies, the FBBT cannot be aligned, or the
+    setup would exceed :data:`WORK_BUDGET`."""
+    from discopt.gdp.tree import gdp_tree
+
     tree = gdp_tree(model)
+    nodes = [node for node in tree.disjunctions if _eligible(node)]
+    n_scalars = sum(int(v.size) for v in model._variables)
+    if sum(len(node.disjuncts) for node in nodes) * n_scalars > WORK_BUDGET:
+        return {}
     global_rows = [c for c in model._constraints if type(c) is Constraint]
     base = _fbbt(_with_rows(model, global_rows))
     if base is None:
         return {}
     g_lb, g_ub, _ = base
     caps: dict[int, float] = {}
-    for node in tree.disjunctions:
-        activation, cardinality = node.semantics.value
-        if activation is not SelectorActivation.ONE_WAY or cardinality not in (
-            SelectorCardinality.EXACTLY_ONE,
-            SelectorCardinality.AT_LEAST_ONE,
-        ):
-            continue
-        if len(node.disjuncts) < 2:
-            continue
+    for node in nodes:
         boxes: list[tuple[np.ndarray, np.ndarray]] = []
         for d in node.disjuncts:
             own = [c for c in d.rows if type(c) is Constraint]
