@@ -612,6 +612,32 @@ def _descendants_children_first(root: "Expression", skip: "Optional[dict]" = Non
     return order
 
 
+def _deepcopy_list_polled(x: list, memo: dict) -> list:
+    """``copy.deepcopy(x, memo)`` for a list, polling an abortable setup's deadline.
+
+    The same algorithm as ``copy.deepcopy``'s list path (memo check, the copy
+    registered before its elements, ``_keep_alive``), so the copy is identical;
+    only a :func:`~discopt._relax.deadline.setup_checkpoint` every 256 elements
+    is added. ``Model.__deepcopy__`` uses it inside a native GDP algorithm's
+    abortable setup, where a model's row list took about half of a ~20 s copy
+    (#2079).
+    """
+    from discopt._relax.deadline import setup_checkpoint
+
+    d = id(x)
+    if d in memo:
+        hit: list = memo[d]
+        return hit
+    y: list = []
+    memo[d] = y
+    for j, a in enumerate(x):
+        if not j & 255:
+            setup_checkpoint("the model copy")
+        y.append(_copy.deepcopy(a, memo))
+    _copy._keep_alive(x, memo)  # type: ignore[attr-defined]
+    return y
+
+
 def _copy_node_into_memo(node: "Expression", memo: dict) -> None:
     """Deep-copy one node whose children are already in *memo*, by the default mechanism.
 
@@ -6745,7 +6771,15 @@ class Model:
         for owner in self._foreign_owner_models(nodes):
             if id(owner) not in memo:
                 _copy.deepcopy(owner, memo)
-        for node in nodes:
+        # #2079: a native GDP setup copies the whole model (~20 s on GDPlib
+        # ``stranded_gas``) and may abandon it at its deadline. A no-op outside
+        # an ``abortable_setup`` scope; polled every 2048 nodes.
+        from discopt._relax.deadline import setup_abortable, setup_checkpoint
+
+        _poll = setup_abortable()
+        for i_node, node in enumerate(nodes):
+            if _poll and not i_node & 2047:
+                setup_checkpoint("the model copy")
             if id(node) not in memo:
                 _copy_node_into_memo(node, memo)
         for key, value in self.__dict__.items():
@@ -6770,7 +6804,10 @@ class Model:
                 new.__dict__[key] = value
                 continue
             try:
-                new.__dict__[key] = _copy.deepcopy(value, memo)
+                if _poll and type(value) is list:
+                    new.__dict__[key] = _deepcopy_list_polled(value, memo)
+                else:
+                    new.__dict__[key] = _copy.deepcopy(value, memo)
             except TypeError as exc:
                 raise TypeError(
                     f"Model {self.name!r}: attribute {key!r} ({type(value).__name__}) "

@@ -32,7 +32,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # #1063: type-only. ``_relax/nlp_evaluator`` imports jax at module scope, so a
     # runtime import here put JAX in ``sys.modules`` merely by importing this
     # module — before any evaluator was even built.
+    from discopt._relax.deadline import SetupDeadlineExpired
     from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.gdp.algorithms.base import Deadline
 
 logger = logging.getLogger(__name__)
 
@@ -87,34 +89,76 @@ def solve_gdpopt_loa(
     -------
     SolveResult
     """
+    from discopt._relax.deadline import SetupDeadlineExpired, abortable_setup
+    from discopt.gdp.algorithms.base import Deadline
+
     cls = native_gdp_class(algorithm)
     if algorithm == "enumerate":
         # Every configuration is solved (or the run refuses up front): no master,
         # no NLP, and no iteration limit to truncate the enumeration.
-        result: SolveResult = cls(
-            model, time_limit=time_limit, gap_tolerance=gap_tolerance, **options
-        ).run()
-        return result
-    if algorithm in ("lbb", "ldsda"):
+        kwargs: dict[str, Any] = dict(options)
+    elif algorithm in ("lbb", "ldsda"):
         # Node / point solves are discopt's own: no master and no NLP solver to pass.
-        result = cls(
-            model,
-            time_limit=time_limit,
-            gap_tolerance=gap_tolerance,
+        kwargs = dict(iteration_limit=max_iterations, **options)
+    else:
+        kwargs = dict(
             iteration_limit=max_iterations,
+            nlp_solver=nlp_solver,
+            milp_solver=milp_solver,
             **options,
-        ).run()
-        return result
-    result = cls(
-        model,
-        time_limit=time_limit,
-        gap_tolerance=gap_tolerance,
-        iteration_limit=max_iterations,
-        nlp_solver=nlp_solver,
-        milp_solver=milp_solver,
-        **options,
-    ).run()
+        )
+    # #2079: the clock starts here, and the setup (the GDP lowering -- a model
+    # copy, the bound pretransform, the big-M lowering -- then the evaluator and
+    # the master) is abandoned at its deadline. It produces no point and no bound,
+    # so nothing is lost but time: on GDPlib ``stranded_gas`` it took ~25 s, and
+    # ``time_limit=10`` used to return after ~33 s.
+    deadline = Deadline(time_limit)
+    try:
+        with abortable_setup(deadline.expired):
+            algo = cls(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                deadline=deadline,
+                **kwargs,
+            )
+    except SetupDeadlineExpired as exc:
+        return _setup_abandoned(cls, deadline, exc)
+    result: SolveResult = algo.run()
     return result
+
+
+def _setup_abandoned(cls: Any, deadline: Deadline, exc: SetupDeadlineExpired) -> SolveResult:
+    """The result of a native GDP run whose setup did not finish by its deadline.
+
+    ``time_limit`` with no incumbent and no bound: the setup builds the problem the
+    algorithm would solve, so an unfinished one has proved nothing and found
+    nothing (#2079).
+    """
+    where = exc.where
+    logger.info(
+        "GDP %s: time limit reached during %s (%.2f s); no bound and no incumbent",
+        getattr(cls, "route", "gdp"),
+        where,
+        deadline.elapsed(),
+    )
+    return SolveResult(
+        status="time_limit",
+        objective=None,
+        bound=None,
+        gap=None,
+        x=None,
+        wall_time=deadline.elapsed(),
+        gap_certified=False,
+        bound_valid=False,
+        solver_stats={
+            "route": getattr(cls, "route", "gdp"),
+            "stop_reason": "time_limit",
+            "setup_abandoned": where,
+            "iterations": 0,
+        },
+        algorithm_route=getattr(cls, "route", "gdp"),
+    )
 
 
 def native_gdp_class(algorithm: str) -> Any:

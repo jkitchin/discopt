@@ -141,7 +141,23 @@ class GDPAlgorithm:
         GDP lowering (:meth:`GDPSpace.from_model`), the evaluator and master build
         -- is charged to ``time_limit``. Started after them, the clock missed
         20-25 s of GDPlib ``stranded_gas`` and the run overran its limit (#2079).
+
+        A caller that started the clock itself passes it as ``deadline=`` in
+        ``kw`` (``solve_gdpopt_loa`` does, to abandon the setup at that deadline);
+        it is used as is, and must be a clock for this ``time_limit``.
         """
+        given = kw.pop("deadline", None)
+        if given is not None:
+            if not isinstance(given, Deadline):
+                raise TypeError(f"GDPAlgorithm: deadline must be a Deadline, got {given!r}")
+            if "clock" in kw:
+                raise ValueError("GDPAlgorithm: pass clock or deadline, not both")
+            if given.time_limit != (None if time_limit is None else float(time_limit)):
+                raise ValueError(
+                    f"GDPAlgorithm: deadline is for time_limit={given.time_limit!r}, "
+                    f"not {time_limit!r}"
+                )
+            return given
         return Deadline(time_limit, clock=kw.pop("clock", time.perf_counter))
 
     # ── reporting, for subclasses ─────────────────────────────────────────
@@ -238,7 +254,9 @@ class GDPAlgorithm:
             self.iterations += 1
             self.trace.append((self.iterations, self.lb, self.ub, self.deadline.elapsed()))
             if not more:
-                self.stop_reason = "exhausted"
+                # ``iterate`` may name why it stopped (LOA: a master that ran out
+                # of time, #2079); otherwise the search is exhausted.
+                self.stop_reason = self.stop_reason or "exhausted"
                 break
         return self.result()
 

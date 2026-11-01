@@ -132,25 +132,86 @@ def _build_no_good_augmentation(no_good_configs, int_indices, lb, ub, n_base):
     return rows, rhs, n_aux
 
 
+#: ``id(row) -> (row, nonzero columns, their values, row length)``: a master
+#: row's sparse form, read once (see :func:`_row_nonzeros`).
+_NzCache = dict[int, tuple[Any, np.ndarray, np.ndarray, int]]
+
+
+class _SparseMasterRow:
+    """A master row held by its nonzeros: sorted ``idx``, their ``val``, width ``n``.
+
+    The dense row it stands for is ``zeros(n)`` with ``val`` at ``idx``; reading
+    it through ``np.asarray`` gives exactly that. :func:`build_master` stores the
+    lowered model's rows this way (#2079): dense, a 7909 x 57828 master held
+    3.7 GB of zeros and took most of its setup to write them.
+    """
+
+    __slots__ = ("idx", "val", "n")
+
+    def __init__(self, idx: np.ndarray, val: np.ndarray, n: int) -> None:
+        self.idx = np.asarray(idx, dtype=np.int64)
+        self.val = np.asarray(val, dtype=np.float64)
+        self.n = int(n)
+
+    @property
+    def shape(self) -> tuple[int]:
+        return (self.n,)
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
+        out = np.zeros(self.n, dtype=np.float64)
+        out[self.idx] = self.val
+        return out if dtype is None else out.astype(dtype)
+
+
+def _row_nonzeros(row: Any, cache: Optional[_NzCache]) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(columns, values, length)`` of the nonzeros of a dense master row.
+
+    With ``cache``, a row already read is not scanned again (#2079: the master
+    is rebuilt on every iteration, and rescanning every full-width row of a
+    7909 x 57828 master each time was most of its build). The entry keeps the row
+    object itself and is used only for that same object, so a recycled ``id``
+    cannot alias another row; the master never changes a row once it holds it.
+    """
+    if isinstance(row, _SparseMasterRow):
+        return row.idx, row.val, row.n
+    if cache is not None:
+        hit = cache.get(id(row))
+        if hit is not None and hit[0] is row:
+            return hit[1], hit[2], hit[3]
+    arr = np.asarray(row, dtype=np.float64).ravel()
+    nz = np.flatnonzero(arr)
+    vals = arr[nz]
+    if cache is not None and isinstance(row, np.ndarray):
+        cache[id(row)] = (row, nz, vals, int(arr.shape[0]))
+    return nz, vals, int(arr.shape[0])
+
+
 def _stack_sparse(
-    rows: list[np.ndarray], width: int, signs: Optional[list[float]] = None
+    rows: list[np.ndarray],
+    width: int,
+    signs: Optional[list[float]] = None,
+    cache: Optional[_NzCache] = None,
 ) -> sp.csr_matrix:
     """``rows`` (dense, each at most ``width`` long) as a ``len(rows) x width`` CSR
     matrix, row ``k`` scaled by ``signs[k]``; a short row is zero-padded on the right.
 
     Exactly the nonzeros of the dense stack, in row order and sorted by column
     (#2079): building the dense stack first cost 39 s on a 7909 x 57828 master.
+    ``cache`` (:func:`_row_nonzeros`) skips rescanning rows read on an earlier
+    build; the matrix is the same either way.
     """
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
     cols: list[np.ndarray] = []
     vals: list[np.ndarray] = []
     for k, row in enumerate(rows):
-        row = np.asarray(row, dtype=np.float64).ravel()
-        if row.shape[0] > width:
-            raise ValueError(f"master row {k} has {row.shape[0]} entries; the master has {width}")
-        nz = np.flatnonzero(row)
+        nz, row_vals, length = _row_nonzeros(row, cache)
+        if length > width:
+            raise ValueError(f"master row {k} has {length} entries; the master has {width}")
         cols.append(nz)
-        vals.append(row[nz] if signs is None or signs[k] == 1.0 else signs[k] * row[nz])
+        vals.append(row_vals if signs is None or signs[k] == 1.0 else signs[k] * row_vals)
         indptr[k + 1] = indptr[k] + nz.size
     return sp.csr_matrix(
         (
@@ -180,10 +241,13 @@ def _solve_master_milp(
     milp_solver="auto",
     no_good_configs=None,
     int_indices=None,
+    nz_cache: Optional[_NzCache] = None,
 ):
     """Build and solve the master MILP within ``time_limit`` seconds of this call.
 
     The build is charged to ``time_limit`` (#2079): the MILP gets what is left.
+    ``nz_cache`` is the caller's :func:`_row_nonzeros` cache, kept across the
+    solves of one master so its rows are scanned once.
     """
     t_enter = time.perf_counter()
     try:
@@ -253,9 +317,9 @@ def _solve_master_milp(
         b_ub_vals = list(b_ub_vals) + list(ng_rhs)
 
     width = n_master + n_extra
-    A_ub = _stack_sparse(ub_rows, width, ub_sign) if ub_rows else None
+    A_ub = _stack_sparse(ub_rows, width, ub_sign, nz_cache) if ub_rows else None
     b_ub = np.array(b_ub_vals, dtype=np.float64) if b_ub_vals else None
-    A_eq = _stack_sparse(eq_rows, width) if eq_rows else None
+    A_eq = _stack_sparse(eq_rows, width, cache=nz_cache) if eq_rows else None
     b_eq = np.array(b_eq_vals, dtype=np.float64) if b_eq_vals else None
 
     # Objective
@@ -371,6 +435,8 @@ class MasterMILP:
         self.no_good_configs: list[tuple[int, ...]] = []
         self.all_binary = _discrete_vars_all_binary(self.int_indices, self.lb, self.ub)
         self.n_solves = 0
+        #: Each row's and cut's nonzeros, read once over every solve (#2079).
+        self._nz_cache: _NzCache = {}
 
     @property
     def bound_valid(self) -> bool:
@@ -388,7 +454,30 @@ class MasterMILP:
         row = np.asarray(coeffs, dtype=np.float64)
         if row.shape != (self.n_vars,):
             raise ValueError(f"MasterMILP.add_row: expected {self.n_vars} coefficients")
-        self.rows.append(row)
+        # A copy, as ``add_cut`` takes: the master caches each row's nonzeros
+        # (#2079), so a row must not change after it is added.
+        self.rows.append(row.copy())
+        self.senses.append(sense)
+        self.rhs.append(float(rhs))
+
+    def _add_sparse_row(self, idx: Any, val: Any, sense: str, rhs: float) -> None:
+        """:meth:`add_row` of the row with ``val`` at the sorted columns ``idx``
+        and zeros elsewhere, without writing it out at the master's width (#2079).
+
+        ``idx``/``val`` must already be what ``flatnonzero`` of the dense row
+        gives: sorted, unique, no zero values.
+        """
+        if sense not in ("<=", ">=", "=="):
+            raise ValueError(f"MasterMILP.add_row: unknown sense {sense!r}")
+        idx = np.asarray(idx, dtype=np.int64)
+        val = np.asarray(val, dtype=np.float64)
+        if idx.shape != val.shape or (
+            idx.size and (idx[0] < 0 or idx[-1] >= self.n_vars or np.any(np.diff(idx) <= 0))
+        ):
+            raise ValueError("MasterMILP: a sparse row needs sorted, unique, in-range columns")
+        if np.any(val == 0.0):
+            raise ValueError("MasterMILP: a sparse row stores no zero coefficient")
+        self.rows.append(_SparseMasterRow(idx, val, self.n_vars))
         self.senses.append(sense)
         self.rhs.append(float(rhs))
 
@@ -526,7 +615,13 @@ class MasterMILP:
             milp_solver=self.backend,
             no_good_configs=no_goods,
             int_indices=self.int_indices,
+            nz_cache=self._nz_cache,
         )
+        if override and extra_cuts:
+            # This call's extra cuts are not the master's: do not keep them alive.
+            held = {id(a) for a in self.rows} | {id(a) for a in self.cuts}
+            for key in [k for k in self._nz_cache if k not in held]:
+                del self._nz_cache[key]
         status = "error" if r is None else str(getattr(r.status, "value", r.status))
         if r is None or r.x is None:
             infeasible = r is not None and r.status == SolveStatus.INFEASIBLE
@@ -607,12 +702,23 @@ class RelaxationMaster(MasterMILP):
             )
         A = relaxation._A_ub
         if A is not None:
-            A = A.toarray() if sp.issparse(A) else np.asarray(A, dtype=np.float64)
             b = np.asarray(relaxation._b_ub, dtype=np.float64).reshape(-1)
             if A.shape != (b.shape[0], n_cols):
                 raise ValueError("RelaxationMaster: the relaxation's rows do not match its columns")
-            for row, rhs in zip(A, b):
-                self.add_row(row, "<=", float(rhs))
+            if sp.issparse(A):
+                # #2079: row by row from CSR, never at full width. Canonicalised
+                # first (duplicates summed, columns sorted, explicit zeros dropped),
+                # so each row is exactly ``flatnonzero`` of its dense form.
+                csr = sp.csr_matrix(A, dtype=np.float64, copy=True)
+                csr.sum_duplicates()
+                csr.sort_indices()
+                csr.eliminate_zeros()
+                for i, rhs in enumerate(b):
+                    lo, hi = csr.indptr[i], csr.indptr[i + 1]
+                    self._add_sparse_row(csr.indices[lo:hi], csr.data[lo:hi], "<=", float(rhs))
+            else:
+                for row, rhs in zip(np.asarray(A, dtype=np.float64), b):
+                    self.add_row(row, "<=", float(rhs))
         self.truncated = bool(getattr(relaxation, "_build_truncated", False))
 
     def model_row(self, coeffs: Any, *, epigraph: bool = False) -> np.ndarray:
@@ -696,7 +802,8 @@ def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> Mast
     once it has a convexity certificate). Bounds and integrality are the
     lowered model's own.
     """
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt._relax.deadline import setup_checkpoint
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _extract_body_terms
     from discopt.modeling.core import Constraint, ObjectiveSense, VarType
 
     variables = lowered._variables
@@ -727,13 +834,24 @@ def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> Mast
     master = MasterMILP(
         n, flat("lb"), flat("ub"), integrality, objective=objective, backend=backend
     )
-    for con in lowered._constraints:
+    for i_con, con in enumerate(lowered._constraints):
+        if not i_con & 255:
+            setup_checkpoint("the master build")  # #2079; a no-op outside a GDP setup
         if not isinstance(con, Constraint):
             continue
-        coeffs = _extract_body_coeffs(con.body, lowered, n)
-        if coeffs is None:
+        # #2079: the row's terms, stored by its nonzeros -- exactly ``flatnonzero``
+        # of the dense ``_extract_body_coeffs`` vector (slots past ``n`` dropped,
+        # zero coefficients dropped, columns sorted), without writing it out.
+        terms = _extract_body_terms(con.body, lowered)
+        if terms is None:
             continue
-        c_vec, off = coeffs
+        coeff_map, off = terms
+        cols = sorted(k for k, v in coeff_map.items() if k < n and v != 0.0)
         sense = con.sense if isinstance(con.sense, str) else getattr(con.sense, "value", con.sense)
-        master.add_row(c_vec, str(sense), float(con.rhs) - float(off))
+        master._add_sparse_row(
+            np.asarray(cols, dtype=np.int64),
+            np.asarray([coeff_map[k] for k in cols], dtype=np.float64),
+            str(sense),
+            float(con.rhs) - float(off),
+        )
     return master

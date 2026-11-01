@@ -146,12 +146,14 @@ fn stride_on_fires_the_dive_away_from_the_root_and_stays_capped() {
     let hit = counter(Ctr::DiveHitIntegral);
     let abandoned = counter(Ctr::DiveAbandonedInfeasible);
     let exhausted = counter(Ctr::DiveExhaustedSteps);
+    let deadline = counter(Ctr::DiveDeadline);
     assert!(runs > 0, "DiveRuns is 0 although DiveOffRoot is {dives}");
     assert_eq!(
         runs,
-        hit + abandoned + exhausted,
+        hit + abandoned + exhausted + deadline,
         "dive funnel does not close: {runs} runs vs hit {hit} + abandoned \
-         {abandoned} + exhausted {exhausted} -- an exit arm has no counter"
+         {abandoned} + exhausted {exhausted} + deadline {deadline} -- an exit arm \
+         has no counter"
     );
     checks += 1;
     assert_eq!(

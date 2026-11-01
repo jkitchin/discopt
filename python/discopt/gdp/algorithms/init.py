@@ -77,21 +77,28 @@ class GDPSpace:
 
     @classmethod
     def from_model(cls, model: Model) -> "GDPSpace":
-        from discopt._relax.gdp_reformulate import _extract_body_coeffs
+        from discopt._relax.deadline import setup_checkpoint
+        from discopt._relax.gdp_reformulate import _extract_body_terms
         from discopt.transformations import get
-        from discopt.validation.feasibility import _column_indices
+        from discopt.validation.feasibility import _ColumnIndexer
 
+        # #2079: inside a native GDP algorithm's abortable setup, each step (and
+        # the model copy and lowering loops themselves) gives up at the run's
+        # deadline; elsewhere these checkpoints are no-ops.
+        setup_checkpoint("the GDP lowering")
         work = model.clone()
+        setup_checkpoint("the GDP lowering")
         before = gdp_tree(work)
         _materialize_indicators(work)
         lowered = get("gdp").apply(work, method="big-m")
+        setup_checkpoint("the GDP lowering")
         names = [v.name for v in work._variables]
         if [v.name for v in lowered._variables[: len(names)]] != names:
             raise RuntimeError("GDPSpace: the lowering reordered the model's columns")
         tree = gdp_tree(work)
         columns: dict[DisjunctNode, int] = {}
         nonlinear: set[DisjunctNode] = set()
-        n = sum(int(v.size) for v in work._variables)
+        col = _ColumnIndexer(work)  # #2079: offsets read once, not per disjunct
         for node in tree.walk():
             for d in node.disjuncts:
                 if d.indicator is None:
@@ -99,11 +106,13 @@ class GDPSpace:
                         f"GDPSpace: a disjunct of {node.name or '<anon>'!r} has no indicator "
                         "column (a nested Model.disjunction); nest Disjunct blocks instead"
                     )
-                cols = _column_indices(d.indicator.variable, work)
+                cols = col(d.indicator.variable)
                 if cols.size != 1:
                     raise RuntimeError(f"GDPSpace: indicator of {d!r} is not one column")
                 columns[d] = int(cols[0])
-                if any(_extract_body_coeffs(r.body, work, n) is None for r in d.rows):
+                # Linear or not is all that is read here: the sparse terms say so
+                # without a dense vector of the model's width per row (#2079).
+                if any(_extract_body_terms(r.body, work) is None for r in d.rows):
                     nonlinear.add(d)
         old = [d for node in before.walk() for d in node.disjuncts]
         new = [d for node in tree.walk() for d in node.disjuncts]

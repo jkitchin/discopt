@@ -3488,6 +3488,9 @@ fn solve_node(
             // Node-level cover separation: a fractional node exposes violated
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
+            // #2079: re-read the clock -- the dive above can itself run past the
+            // deadline, and `time_up` was read before it.
+            let time_up = time_up || past_deadline(ctx.deadline);
             if !feasible && ctx.pool_room && !time_up {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
                 out.found_cuts = separate_cover_csc(
@@ -3877,6 +3880,13 @@ fn strong_branch(
     // a finite degradation sample, and feeding it would corrupt the average.
     let mut obs: Vec<SbObservation> = Vec::new();
     for (idx, _f) in cand {
+        // #2079: a probe only sharpens the branching choice, so once the
+        // deadline has passed the remaining probes are skipped and the hint is
+        // the best of those already scored (each would otherwise pay a full LP
+        // setup before its own deadline poll fires).
+        if past_deadline(ctx.deadline) {
+            break;
+        }
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
         let frac = xi - xi.floor();
@@ -5001,6 +5011,12 @@ fn try_dive_repair(
     let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
     crate::profile::incr(crate::profile::Ctr::DiveRuns);
     for _ in 0..max_steps {
+        // #2079: a heuristic; past the deadline every further step's LP would
+        // abort after paying its setup, so stop here (no incumbent).
+        if past_deadline(ctx.deadline) {
+            crate::profile::incr(crate::profile::Ctr::DiveDeadline);
+            return None;
+        }
         // Most-fractional unfixed integer column.
         let mut pick: Option<usize> = None;
         let mut best = INT_TOL;
@@ -5062,6 +5078,11 @@ fn try_dive_repair(
             if tried.contains(&v.to_bits()) {
                 continue;
             }
+            // #2079: a rounding whose LP was cut by the deadline is not evidence
+            // of infeasibility, and the other rounding would be cut too.
+            if !tried.is_empty() && past_deadline(ctx.deadline) {
+                break;
+            }
             tried.push(v.to_bits());
             // Re-solve on the batch's shared (pre-scaled, when ill-conditioned)
             // matrix — the same robust recipe as the node LP solve. Warm-start
@@ -5096,6 +5117,10 @@ fn try_dive_repair(
         // `None` means both roundings were infeasible -> abandon the dive.
         x = match next_x {
             Some(v) => v,
+            None if past_deadline(ctx.deadline) => {
+                crate::profile::incr(crate::profile::Ctr::DiveDeadline);
+                return None;
+            }
             None => {
                 crate::profile::incr(crate::profile::Ctr::DiveAbandonedInfeasible);
                 return None;
@@ -5105,6 +5130,11 @@ fn try_dive_repair(
     }
     crate::profile::incr(crate::profile::Ctr::DiveExhaustedSteps);
     None
+}
+
+/// Whether the solve's wall-clock deadline (if any) has passed.
+fn past_deadline(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
 }
 
 fn frac(v: f64) -> f64 {

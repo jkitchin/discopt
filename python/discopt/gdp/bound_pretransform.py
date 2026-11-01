@@ -105,22 +105,27 @@ def _univariate(con: Constraint, model: Model, n_vars: int):
 
     ``lower``/``upper`` is the bound it implies on that slot (``None`` for no bound on
     that side). Only operator-built rows (``rhs == 0``, scalar) are read."""
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt._relax.gdp_reformulate import _extract_body_terms
 
     if np.size(con.rhs) != 1 or float(np.asarray(con.rhs).ravel()[0]) != 0.0:
         return None
-    coeffs = _extract_body_coeffs(con.body, model, n_vars)
-    if coeffs is None:
+    terms = _extract_body_terms(con.body, model)
+    if terms is None:
         return None
-    c_vec, off = coeffs
-    nz = np.flatnonzero(c_vec)
-    if nz.size != 1:
+    coeffs, off = terms
+    # The support of the dense ``_extract_body_coeffs`` vector, read from its
+    # sparse source (#2079): a dense vector of the model's width per row made the
+    # pretransform quadratic in the model's size. Same slots, same values: the
+    # dense form scatters exactly these entries below ``n_vars`` and
+    # ``flatnonzero`` keeps exactly the nonzero ones.
+    nz = [k for k, v in coeffs.items() if k < n_vars and v != 0.0]
+    if len(nz) != 1:
         return None
     slot = int(nz[0])
     leaf = _leaf_for_slot(con.body, slot, model)
     if leaf is None:
         return None
-    return _bound_of(con.sense, slot, leaf, float(c_vec[slot]), off)
+    return _bound_of(con.sense, slot, leaf, float(coeffs[slot]), off)
 
 
 def _bound_of(sense: str, slot: int, leaf: Expression, a: float, off: float):
@@ -388,6 +393,7 @@ def pretransform_disjunction(
     selectors: list[Variable],
     model: Model,
     out_rows: list[Constraint],
+    box: dict[int, tuple[float, float]] | None = None,
 ) -> list[set[int]]:
     """The pretransformation of one SELECT_ONE disjunction, for a GDP lowering.
 
@@ -396,10 +402,20 @@ def pretransform_disjunction(
     the lowering's own (one per disjunct, exactly one of them 1); ``model`` supplies
     the columns and the global box. Used by ``reformulate_gdp`` under
     ``DISCOPT_GDP_BOUND_PRETRANSFORM`` (BC, default ON).
+
+    ``box`` is ``_slot_box(model)``, passed in by a caller that transforms many
+    disjunctions of one model (#2079: rebuilding it per disjunction was quadratic);
+    it must be the box of ``model`` as it is now.
     """
     n_vars = sum(v.size for v in model._variables)
     return _transform_one(
-        disjuncts, selectors, model, n_vars, _slot_box(model), PretransformReport(), out_rows
+        disjuncts,
+        selectors,
+        model,
+        n_vars,
+        _slot_box(model) if box is None else box,
+        PretransformReport(),
+        out_rows,
     )
 
 

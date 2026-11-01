@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from discopt._relax.deadline import setup_checkpoint
 from discopt.gdp.algorithms.base import GDPAlgorithm
 from discopt.gdp.algorithms.init import INIT_STRATEGIES, GDPSpace, initialize
 from discopt.gdp.algorithms.master import DEFAULT_MASTER_BACKEND, MasterMILP
@@ -119,13 +120,18 @@ class LOA(GDPAlgorithm):
         self.set_cover_iterlim = set_cover_iterlim
         self.subproblem = subproblem
         low = self.space.lowered
+        # #2079: between the setup's steps, give up at the deadline when the
+        # caller made the setup abortable (``solve_gdpopt_loa``); no-ops otherwise.
+        setup_checkpoint("the LOA setup")
         self.evaluator = make_evaluator(low)
         self.n = int(self.evaluator.n_variables)
         self.n_work = sum(int(v.size) for v in self.space.work._variables)
+        setup_checkpoint("the LOA setup")
         convexity = self._oa_convexity(low)
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
         self.objective_certified_convex = bool(convexity.objective_is_convex)
+        setup_checkpoint("the LOA setup")
         self.master = self._make_master(milp_solver)
         self.obj_is_linear = self.master.objective is not None
         if not self.obj_is_linear and convexity.objective_is_convex:
@@ -315,6 +321,12 @@ class LOA(GDPAlgorithm):
         self.n_master += 1
         if r.x is None:
             self._master_empty(r)
+            if not r.proven_infeasible and self.deadline.expired():
+                # #2079: the master ran out of time, it did not run out of
+                # configurations. Say so: "exhausted" reported a time-limited run
+                # as ``unknown``. (A proof is read only from ``proven_infeasible``,
+                # above, exactly as before.)
+                self.stop_reason = "time_limit"
             logger.info(
                 "%s iter %d: master returned no point (%s); bound %s incumbent %s",
                 self._log_name(),

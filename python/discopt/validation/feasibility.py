@@ -1031,6 +1031,49 @@ def _column_indices(expr, model) -> np.ndarray:
     return np.atleast_1d(np.asarray(cols, dtype=np.int64)).ravel()
 
 
+class _ColumnIndexer:
+    """:func:`_column_indices` for one model, called many times.
+
+    Each call of :func:`_column_indices` scans ``model._variables`` for the
+    variable's offset and lays out the variable's whole column grid. Reading every
+    indicator of a model that way is quadratic: on a GDP with 40 200 indicator rows
+    and 400 variables it took ~1 s, paid at every ``verify_point`` -- once before
+    the solve and once per incumbent a native GDP algorithm offers (#2079). This
+    computes each offset once and each variable's grid once, and returns the same
+    columns: ``(offset + grid)[index]`` is ``grid[index] + offset``.
+    """
+
+    def __init__(self, model) -> None:
+        self._model = model
+        self._offsets: Optional[dict[int, int]] = None
+        self._grids: dict[int, np.ndarray] = {}
+
+    def __call__(self, expr) -> np.ndarray:
+        from discopt.modeling.core import IndexExpression, Variable
+
+        base, index = (expr.base, expr.index) if isinstance(expr, IndexExpression) else (expr, None)
+        if not isinstance(base, Variable):
+            raise TypeError(
+                f"expected a variable or an indexed variable, got {type(expr).__name__}"
+            )
+        if self._offsets is None:
+            offsets: dict[int, int] = {}
+            off = 0
+            for v in self._model._variables:
+                offsets.setdefault(id(v), off)  # the first occurrence, as the scan finds
+                off += int(v.size)
+            self._offsets = offsets
+        offset = self._offsets.get(id(base))
+        if offset is None:
+            raise ValueError(f"variable {base.name!r} is not a column of the model")
+        grid = self._grids.get(id(base))
+        if grid is None:
+            grid = np.arange(int(base.size)).reshape(tuple(base.shape) or ())
+            self._grids[id(base)] = grid
+        cols = grid if index is None else grid[index]
+        return np.atleast_1d(np.asarray(cols + offset, dtype=np.int64)).ravel()
+
+
 class _StackedRows:
     """An evaluator whose rows are ``base``'s followed by chosen rows of ``extra``.
 
@@ -1129,6 +1172,9 @@ class DeclaredLogic:
             _SOSConstraint,
         )
 
+        # #2079: one indexer for every indicator read below (see _ColumnIndexer).
+        col = _ColumnIndexer(model)
+        self._col = col
         self._leaves: list = []
         self._nodes: list = []
         self._bool_cols: dict[int, int] = {}
@@ -1154,7 +1200,7 @@ class DeclaredLogic:
             if node.disjuncts and all(d.indicator is not None for d in node.disjuncts):
                 sel = []
                 for d in node.disjuncts:
-                    cols = _column_indices(d.indicator.variable, model)
+                    cols = col(d.indicator.variable)
                     if cols.size != 1:
                         raise ValueError(f"indicator of {node.name!r} is not a scalar")
                     sel.append((int(cols[0]), float(d.active_value), arm(d)))
@@ -1174,20 +1220,20 @@ class DeclaredLogic:
                 if c.parent_indicator is not None:
                     # #1775 G1.2: nested in a Disjunct block -- it must hold only
                     # where that block is selected, exactly like the block's rows.
-                    cols = _column_indices(c.parent_indicator, model)
+                    cols = col(c.parent_indicator)
                     if cols.size != 1:
                         raise ValueError(f"parent indicator of {c.name!r} is not a scalar")
                     node = ("ind", int(cols[0]), 1.0, node, c.name)
                 self._nodes.append(node)
             elif isinstance(c, _IndicatorConstraint):
-                cols = _column_indices(c.indicator, model)
+                cols = col(c.indicator)
                 if cols.size != 1:
                     raise ValueError(f"indicator of {c.name!r} is not a scalar")
                 self._nodes.append(
                     ("ind", int(cols[0]), float(c.active_value), leaf(c.constraint), c.name)
                 )
             elif isinstance(c, _SOSConstraint):
-                cols = np.concatenate([_column_indices(v, model) for v in c.variables])
+                cols = np.concatenate([col(v) for v in c.variables])
                 self._nodes.append(("sos", int(c.sos_type), cols, c.name))
             elif isinstance(c, _LogicalConstraint):
                 self._index_booleans(c.expression, model)
@@ -1234,7 +1280,7 @@ class DeclaredLogic:
         while stack:
             node = stack.pop()
             if isinstance(node, BooleanVar):
-                cols = _column_indices(node.variable, model)
+                cols = self._col(node.variable)
                 if cols.size != 1:
                     raise ValueError("a boolean in a logical constraint is not a scalar")
                 self._bool_cols[id(node)] = int(cols[0])

@@ -367,14 +367,25 @@ def reformulate_gdp(
     # sit in an if_then or another block (#1794 B1), and that row must stay.
     _pt_dropped: set[tuple[str, int, int]] = set()
     if _pt_on:
-        from discopt.gdp.bound_pretransform import pretransform_disjunction
+        from discopt._relax.deadline import setup_checkpoint
+        from discopt.gdp.bound_pretransform import _slot_box, pretransform_disjunction
 
+        # #2079: the global box and column count, read once for every block. The
+        # loop below adds rows, never columns or bounds, so they cannot change
+        # between blocks; rebuilding the box per block was quadratic (200 blocks
+        # x 20k columns: most of the pretransform's time).
+        _pt_box: Optional[dict[int, tuple[float, float]]] = None
         for key, (dc, sels) in _collect_indicator_hull_groups(model).groups.items():
             if getattr(dc, "big_m", None) is not None or any(
                 isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d
             ):
                 continue  # nesting is out of scope; user big-Ms (G2.6) are the user's
-            drop = pretransform_disjunction(dc.disjuncts, sels, new_model, new_model._constraints)
+            setup_checkpoint("the GDP bound pretransform")
+            if _pt_box is None:
+                _pt_box = _slot_box(new_model)
+            drop = pretransform_disjunction(
+                dc.disjuncts, sels, new_model, new_model._constraints, box=_pt_box
+            )
             _pt_dropped.update((key, k, i) for k, ids in enumerate(drop) for i in ids)
 
     # #1775 G2.6: user big-M values (``either_or(..., big_m=...)``), validated
@@ -414,8 +425,14 @@ def reformulate_gdp(
                 stacklevel=3,
             )
 
+    from discopt._relax.deadline import setup_abortable, setup_checkpoint
+
+    _poll_deadline = setup_abortable()
     _hull_emitted: set[str] = set()
     for ci, c in enumerate(model._constraints):
+        # #2079: a no-op outside a native GDP algorithm's abortable setup.
+        if _poll_deadline and not ci & 63:
+            setup_checkpoint("the GDP lowering")
         if _hulled_inside(c):
             continue  # lowered inside its parent's hull (#1775 G2.1)
         if (
@@ -1528,6 +1545,29 @@ def _extract_body_coeffs(
     Returns (c_vec, offset) where body(x) = c_vec @ x + offset,
     or None if the expression is nonlinear or is not a single scalar row
     (an array-valued variable, index or constant leaf; #1825).
+
+    The dense form of :func:`_extract_body_terms`: slots at or past ``n_vars`` are
+    dropped, as they always were.
+    """
+    result = _extract_body_terms(expr, model)
+    if result is None:
+        return None
+    coeffs_dict, offset = result
+    c_vec = np.zeros(n_vars)
+    for idx, val in coeffs_dict.items():
+        if idx < n_vars:
+            c_vec[idx] = val
+    return c_vec, offset
+
+
+def _extract_body_terms(expr: Expression, model: Model) -> tuple[dict[int, float], float] | None:
+    """``({slot: coefficient}, offset)`` of a linear scalar row body, or ``None``.
+
+    What :func:`_extract_body_coeffs` reads, before it is laid out as a dense
+    vector. A caller that only needs the row's support -- or that would read a
+    dense vector of the model's width per row, which is quadratic over a model's
+    rows (#2079) -- uses this directly. A coefficient may be ``0.0`` (a term that
+    cancelled); the dict is exactly what the dense form scatters.
     """
     from discopt._flat_index import resolve_scalar_slot
     from discopt._relax.scalarize import scalar_leaf_value
@@ -1623,16 +1663,7 @@ def _extract_body_coeffs(
             return None
         return None
 
-    result = _extract(expr)
-    if result is None:
-        return None
-
-    coeffs_dict, offset = result
-    c_vec = np.zeros(n_vars)
-    for idx, val in coeffs_dict.items():
-        if idx < n_vars:
-            c_vec[idx] = val
-    return c_vec, offset
+    return _extract(expr)
 
 
 class _LPData(tuple):

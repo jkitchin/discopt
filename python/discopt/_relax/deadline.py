@@ -23,7 +23,9 @@ The deadline is cleared on scope exit; if no deadline is set,
 
 from __future__ import annotations
 
+import contextvars
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -110,3 +112,74 @@ def deadline_exceeded_jax() -> jnp.ndarray:
         ordered=True,
     )
     return result
+
+
+# ── abortable setup (#2079) ──────────────────────────────────────────────────
+#
+# Some setup work cannot return a partial result: a native GDP algorithm has
+# nothing to run until its lowering (``GDPSpace.from_model``: a model copy, the
+# bound pretransform, the big-M lowering) and its evaluator and master exist,
+# and none of that produces a bound or a point. On GDPlib ``stranded_gas`` it
+# took ~25 s, so ``time_limit=10`` returned after ~33 s. Such work runs inside
+# :class:`abortable_setup`; the loops it is made of call :func:`setup_checkpoint`,
+# which raises :class:`SetupDeadlineExpired` once the deadline has passed. The
+# caller turns that into a ``time_limit`` result with no incumbent and no bound,
+# which is the truth: the work was abandoned, not truncated into a weaker answer.
+#
+# Outside such a scope a checkpoint is a no-op, so code shared with other routes
+# (``Model.__deepcopy__``, ``reformulate_gdp``) behaves exactly as before there.
+
+
+class SetupDeadlineExpired(BaseException):
+    """The deadline of an :class:`abortable_setup` scope passed during the setup.
+
+    A ``BaseException``, like ``asyncio.CancelledError``: it is a cancellation,
+    not a failure, and must not be caught by an ``except Exception`` fallback
+    inside the setup (which would read it as "this step failed, degrade") on its
+    way out to the scope's owner.
+    """
+
+    def __init__(self, where: str) -> None:
+        super().__init__(f"time limit reached during {where}")
+        self.where = where
+
+
+_setup_expired: contextvars.ContextVar[Callable[[], bool] | None] = contextvars.ContextVar(
+    "discopt_setup_expired", default=None
+)
+
+
+class abortable_setup:
+    """Make :func:`setup_checkpoint` raise once ``expired()`` is true, inside this scope.
+
+    ``expired`` is the owner's own deadline test (for example
+    ``Deadline.expired`` of a native GDP algorithm), so the checkpoints read the
+    same clock the owner reports against.
+    """
+
+    def __init__(self, expired: Callable[[], bool]) -> None:
+        self._expired = expired
+        self._token: contextvars.Token | None = None
+
+    def __enter__(self) -> "abortable_setup":
+        self._token = _setup_expired.set(self._expired)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._token is not None:
+            _setup_expired.reset(self._token)
+            self._token = None
+
+
+def setup_checkpoint(where: str) -> None:
+    """Raise :class:`SetupDeadlineExpired` if an enclosing :class:`abortable_setup`
+    has run out of time; otherwise (including outside any scope) do nothing."""
+    expired = _setup_expired.get()
+    if expired is not None and expired():
+        raise SetupDeadlineExpired(where)
+
+
+def setup_abortable() -> bool:
+    """Whether an :class:`abortable_setup` scope is active (a cheap gate for callers
+    that would otherwise do extra bookkeeping per checkpoint)."""
+    return _setup_expired.get() is not None
