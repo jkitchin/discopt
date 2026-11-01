@@ -140,6 +140,8 @@ class LOA(GDPAlgorithm):
             raise ValueError(f"subproblem_time_limit must be > 0, got {subproblem_time_limit!r}")
         #: Each global subproblem's wall budget (#1984).
         self.subproblem_time_limit = float(subproblem_time_limit)
+        #: Per-configuration escalated subproblem caps (#1917): config -> seconds.
+        self._sub_caps: dict = {}
         #: What the last iteration's subproblem step did, for its log line.
         self._step_log = ""
         deadline = self.start_deadline(time_limit, kw)
@@ -460,13 +462,14 @@ class LOA(GDPAlgorithm):
         from discopt.gdp.algorithms.subproblem import solve_subproblem
 
         selection = self.space.selection_from_x(x_master)
+        cap = self._sub_caps.get(config, self.subproblem_time_limit)
         res = solve_subproblem(
             self.space.work,
             selection,
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
-            time_cap=self.subproblem_time_limit,
+            time_cap=cap,
         )
         self.n_subproblems += 1
         self._step_log = f"global {res.status}"
@@ -493,6 +496,19 @@ class LOA(GDPAlgorithm):
             global_status = self._step_log
             more = self._nlp_step(x_master, config)
             self._step_log = f"{global_status}, then {self._step_log}"
+            if config in self.unresolved and cap < self.deadline.remaining():
+                # #1917: the cap, not the configuration, stopped this solve. The
+                # master will propose it again (nothing excluded or cut it), and
+                # C-35's stop-on-a-repeat would end the run with budget left
+                # (measured: GDPlib syngas at time_limit=60 stopped at 20 s with
+                # no incumbent -- the 6 s cap is short of the 28 s that proves its
+                # first configuration infeasible). Re-solve it on its next
+                # proposal with four times the cap; the run stops on a repeat
+                # only once the cap already covered what was left. Certificates
+                # still come only from the subproblem, so no bound changes.
+                self._sub_caps[config] = 4.0 * cap
+                self._step_log += f"; cap raised to {4.0 * cap:.3g} s"
+                more = True
             return more
         return True
 
