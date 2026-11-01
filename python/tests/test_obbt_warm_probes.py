@@ -32,6 +32,35 @@ from discopt.modeling.core import Model
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
 
+def record_binding_time_limits(monkeypatch, on_call=None) -> list:
+    """Wrap ``solve_lp_warm_csc_py``; record the ``time_limit_s`` of every call.
+
+    The argument is resolved by binding the call against the binding's own
+    signature (pyo3 exports ``__text_signature__``), so a positional or keyword
+    call, or a change to the binding's parameter list, is read correctly; there
+    is no hardcoded index to go stale (#2068 review). ``on_call(time_limit_s)``,
+    when given, runs at call time and its return value is recorded instead.
+    """
+    import inspect
+
+    import discopt._rust as rust
+
+    orig = rust.solve_lp_warm_csc_py
+    sig = inspect.signature(orig)
+    assert "time_limit_s" in sig.parameters, sig
+    seen: list = []
+
+    def wrapped(*args, **kwargs):
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        tl = bound.arguments["time_limit_s"]
+        seen.append(tl if on_call is None else on_call(tl))
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(rust, "solve_lp_warm_csc_py", wrapped)
+    return seen
+
+
 def _build_relaxation(model: Model):
     from discopt._relax.discretization import initialize_partitions
     from discopt._relax.milp_relaxation import build_milp_relaxation

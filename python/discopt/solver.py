@@ -672,6 +672,91 @@ def _convex_stall_abstain_enabled() -> bool:
     )
 
 
+def _convex_node_safe_bound_enabled() -> bool:
+    """Whether a convex node imports a PROVED bound rather than its NLP objective
+    (#2067; ``DISCOPT_CONVEX_NODE_SAFE_BOUND``, **default ON**).
+
+    A correctness fix, not a graduation candidate: the NLP objective of a convex
+    node is the value of an approximate minimiser, above the relaxation minimum by
+    the solver's terminal residuals, and importing it as the node's bound published
+    a tree bound 1.57e-7 past a point feasible to 2.7e-15 on QPLIB_8153. The opt-out
+    (``=0``) is kept only so the shipped default can be A/B'd (CLAUDE.md §5, "an
+    opt-*out* for a shipped default"); it restores the unsound import.
+    """
+    return _env_flag("DISCOPT_CONVEX_NODE_SAFE_BOUND", default=True)
+
+
+def _apply_convex_node_safe_bounds(
+    evaluator,
+    batch_lb,
+    batch_ub,
+    result_lbs: np.ndarray,
+    result_sols: np.ndarray,
+    cl,
+    cu,
+    *,
+    deadline: Optional[float],
+    budget=None,
+) -> tuple[np.ndarray, int, int, int]:
+    """Replace each convex node's NLP objective by a proved bound (#2067), in place.
+
+    For every node whose ``result_lbs`` entry is a finite NLP objective, the bound
+    becomes ``min(objective, safe)``, ``safe`` from
+    :func:`discopt.solvers.convex_node_bound.convex_node_safe_bound` -- a
+    Neumaier-Shcherbina bound on the node's linearised LP, which is rigorous for a
+    certified-convex model at any point of the box. The objective itself is returned
+    as the node's *point value*, which the tree records as the incumbent value of an
+    integral node (an incumbent's value is its objective, not a bound on it), and the
+    tree keeps the proved bound of such a node as a floor on its dual bound.
+
+    A node for which no safe bound is proved ABSTAINS: it imports ``-inf``, so the
+    tree floors it at its inherited parent bound, never fathoms it and branches it
+    (the #598 path). ``-inf`` and sentinel entries are left untouched.
+
+    ``budget`` is the solve's :class:`~discopt.solvers.convex_node_bound.SafeBoundBudget`
+    (one per solve, so the rationing spans every batch).
+
+    Returns ``(point_values, n_proved, n_abstained, n_raised)``: ``point_values`` is
+    NaN where the bound and the point value coincide; ``n_raised`` counts nodes whose
+    proved bound came out above the NLP objective (the objective is then kept, so the
+    count is a measurement, not a bound change).
+    """
+    from discopt.solvers.convex_node_bound import convex_node_safe_bound
+
+    n_batch = len(result_lbs)
+    points = np.full(n_batch, np.nan)
+    m = 0 if cl is None else len(cl)
+    cl_arr = np.asarray(cl if m else [], dtype=np.float64)
+    cu_arr = np.asarray(cu if m else [], dtype=np.float64)
+    proved = abstained = raised = 0
+    for i in range(n_batch):
+        raw = float(result_lbs[i])
+        if not np.isfinite(raw) or raw >= _SENTINEL_THRESHOLD:
+            continue
+        safe, why = convex_node_safe_bound(
+            evaluator,
+            result_sols[i],
+            np.asarray(batch_lb[i], dtype=np.float64),
+            np.asarray(batch_ub[i], dtype=np.float64),
+            cl_arr,
+            cu_arr,
+            deadline=deadline,
+            budget=budget,
+        )
+        if safe is None:
+            logger.debug("convex node %d: no safe bound (%s); abstaining (#2067)", i, why)
+            result_lbs[i] = -np.inf
+            abstained += 1
+            continue
+        proved += 1
+        if safe >= raw:
+            raised += 1
+            continue
+        result_lbs[i] = safe
+        points[i] = raw
+    return points, proved, abstained, raised
+
+
 def _obbt_topk_enabled() -> bool:
     """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
@@ -18768,7 +18853,7 @@ def solve_model(
         _model_is_convex = _root_is_convex
         _convex_constraint_mask = _root_constraint_mask or []
         if _model_is_convex:
-            logger.info("Model detected as convex — NLP solutions are valid lower bounds")
+            logger.info("Model detected as convex — node bounds are proved at NLP points (#2067)")
         if cutting_planes and any(_convex_constraint_mask):
             _oa_enabled = True
     else:
@@ -18779,12 +18864,22 @@ def solve_model(
             _model_is_convex = _root_is_convex
             _convex_constraint_mask = _root_constraint_mask or []
             if _model_is_convex:
-                logger.info("Model detected as convex — NLP solutions are valid lower bounds")
+                logger.info(
+                    "Model detected as convex — node bounds are proved at NLP points (#2067)"
+                )
             if cutting_planes and any(_convex_constraint_mask):
                 _oa_enabled = True
         else:
             if cutting_planes and model._constraints:
                 _convex_constraint_mask = [False] * len(model._constraints)
+    # #2067: in convex mode a node's NLP objective is imported only through a proved
+    # bound (``_apply_convex_node_safe_bounds``); counts are [proved, abstained,
+    # raised], surfaced in ``solver_stats`` so an arm that never fired is visible.
+    _sp_safe_bound_on = _convex_node_safe_bound_enabled()
+    _sp_safe_counts = [0, 0, 0]
+    from discopt.solvers.convex_node_bound import SafeBoundBudget as _SpSafeBoundBudget
+
+    _sp_safe_budget = _SpSafeBoundBudget()
 
     # Per-node certificate refresh imported lazily so the main
     # classification import above stays the single-point-of-truth for
@@ -20890,6 +20985,12 @@ def solve_model(
             _augmented_evaluator = _AugmentedEvaluator(evaluator, _cut_pool)
             _active_evaluator = _augmented_evaluator
             _active_cb = _augmented_evaluator.get_augmented_constraint_bounds(constraint_bounds)
+        # #2067: per-node objective of the NLP point where a convex node imports a
+        # proved bound below it (see ``_apply_convex_node_safe_bounds``).
+        _sp_points = np.full(len(batch_ids), np.nan)
+        _sp_on = _model_is_convex and _sp_safe_bound_on
+        _sp_cl = [b[0] for b in _active_cb] if _active_cb else []
+        _sp_cu = [b[1] for b in _active_cb] if _active_cb else []
 
         # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97).
         # It uses Python callbacks, so it needs no JAX _obj_fn on the evaluator.
@@ -20945,6 +21046,33 @@ def solve_model(
                                 "constraints, marking infeasible",
                                 int(batch_ids[i]),
                             )
+            # #2067: a convex node's NLP objective is not a bound; replace it by a
+            # proved one BEFORE the relaxation bounds below are max-ed in.
+            if _sp_on:
+                _sp_raw = np.array(result_lbs, dtype=np.float64, copy=True)
+                result_lbs = np.asarray(result_lbs, dtype=np.float64)
+                _sp_points, _n_p, _n_a, _n_r = _apply_convex_node_safe_bounds(
+                    _active_evaluator,
+                    batch_lb,
+                    batch_ub,
+                    result_lbs,
+                    result_sols,
+                    _sp_cl,
+                    _sp_cu,
+                    deadline=_deadline,
+                    budget=_sp_safe_budget,
+                )
+                _sp_safe_counts[0] += _n_p
+                _sp_safe_counts[1] += _n_a
+                _sp_safe_counts[2] += _n_r
+                for _ab in np.flatnonzero(np.isneginf(result_lbs) & np.isfinite(_sp_raw)):
+                    # An abstaining node stays open; its verified point is still
+                    # offered as an incumbent so abstention costs no primal.
+                    _ai = int(_ab)
+                    if _sp_raw[_ai] < _SENTINEL_THRESHOLD and _is_integer_feasible_solution(
+                        result_sols[_ai], int_offsets, int_sizes
+                    ):
+                        _inject_incumbent(np.asarray(result_sols[_ai]).copy(), float(_sp_raw[_ai]))
             # For nonconvex problems, NLP objective is NOT a valid lower
             # bound (local minima can exceed the global optimum).  Reset ALL
             # non-sentinel nodes to -inf so only convex relaxation bounds are
@@ -21341,6 +21469,35 @@ def solve_model(
                         nlp_result.status == SolveStatus.OPTIMAL
                     )
                     nlp_lb = nlp_obj if _serial_nlp_trusted else -np.inf
+                    if (
+                        _sp_on
+                        and _serial_nlp_trusted
+                        and np.isfinite(nlp_lb)
+                        and nlp_lb < _SENTINEL_THRESHOLD
+                    ):
+                        # #2067: the proved bound replaces the NLP objective, which
+                        # becomes the point value (see the batch path above).
+                        _one = np.array([float(nlp_lb)])
+                        _pt, _n_p, _n_a, _n_r = _apply_convex_node_safe_bounds(
+                            _active_evaluator,
+                            [node_lb],
+                            [node_ub],
+                            _one,
+                            np.asarray(nlp_result.x, dtype=np.float64).reshape(1, -1),
+                            _sp_cl,
+                            _sp_cu,
+                            deadline=_deadline,
+                            budget=_sp_safe_budget,
+                        )
+                        _sp_safe_counts[0] += _n_p
+                        _sp_safe_counts[1] += _n_a
+                        _sp_safe_counts[2] += _n_r
+                        if _n_a and _is_integer_feasible_solution(
+                            nlp_result.x, int_offsets, int_sizes
+                        ):
+                            _inject_incumbent(np.asarray(nlp_result.x).copy(), float(nlp_lb))
+                        nlp_lb = float(_one[0])
+                        _sp_points[i] = _pt[0]
                     convex_lb = -np.inf  # accumulate valid convex lower bound
 
                     if _use_alphabb:
@@ -23147,6 +23304,17 @@ def solve_model(
         # here keeps the two flags consistent rather than relying on the order the
         # tree happens to apply them in.
         _exclusion_mask |= node_infeasible_mask
+        # #2067: a point value only where it is still above the node's final bound
+        # (a relaxation bound max-ed in above may have overtaken it).
+        _sp_import = None
+        if _sp_on:
+            _sp_import = np.where(
+                np.isfinite(result_lbs)
+                & (result_lbs < _SENTINEL_THRESHOLD)
+                & (_sp_points > result_lbs),
+                _sp_points,
+                np.nan,
+            )
         t_rust_start = time.perf_counter()
         if _requeue_mask is not None and _requeue_mask.any():
             # A requeued node is OPEN again, so no result may be imported for it
@@ -23160,6 +23328,9 @@ def solve_model(
                 result_feas[_keep],
                 node_infeasible_mask[_keep],
                 _exclusion_mask[_keep],
+                # #2067: passed only when there is something to pass, so a path with
+                # no convex node makes exactly the pre-#2067 call.
+                **({} if _sp_import is None else {"point_values": _sp_import[_keep]}),
             )
             tree.requeue_nodes(np.ascontiguousarray(result_ids[_requeue_mask]))
         else:
@@ -23170,6 +23341,7 @@ def solve_model(
                 result_feas,
                 node_infeasible_mask,
                 _exclusion_mask,
+                **({} if _sp_import is None else {"point_values": _sp_import}),
             )
         if not _spatial_score_registered and _score_on:
             _spatial_score_registered = _register_spatial_score_terms(
@@ -24456,6 +24628,13 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    if _model_is_convex and _sp_safe_bound_on:
+        _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
+        _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
+        _solver_stats["spatial/convex_safe_bound_raised"] = float(_sp_safe_counts[2])
+        _solver_stats["spatial/convex_safe_bound_exact_suspended"] = float(
+            _sp_safe_budget.suspended
+        )
     if _spatial_score_registered:
         _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
@@ -27748,6 +27927,13 @@ def _solve_nlp_bb(
     # per-node problem is large enough to amortize it; smaller nodes stay on the
     # serial path.
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
+    # ...but "reliable" means accurate to the solver's tolerance, not a bound: #2067
+    # replaces each convex node's objective by a proved bound before import.
+    _safe_bound_on = _convex_node_safe_bound_enabled()
+    _safe_proved = _safe_abstained = _safe_raised = 0
+    from discopt.solvers.convex_node_bound import SafeBoundBudget as _SafeBoundBudget
+
+    _safe_budget = _SafeBoundBudget()
     iteration = 0
 
     # Sub-NLP heuristic accounting (#1062). ``solve_model`` keeps these three
@@ -28554,9 +28740,50 @@ def _solve_nlp_bb(
         # infeasible, tree still ran 4000+ nodes to the time limit). The mask is set
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
+        #
+        # #2067: on a convex model the NLP objective is the value of an approximate
+        # minimiser, not a bound on the node -- QPLIB_8153's root objective sat
+        # 1.49e-7 past a point feasible to 2.7e-15. Import a proved bound instead and
+        # hand the objective over as the point value an integral node records.
+        _safe_points = None
+        if _model_is_convex and _safe_bound_on:
+            _raw_lbs = np.array(result_lbs, dtype=np.float64, copy=True)
+            result_lbs = np.asarray(result_lbs, dtype=np.float64)
+            _safe_points, _n_p, _n_a, _n_r = _apply_convex_node_safe_bounds(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                result_lbs,
+                result_sols,
+                cl_list,
+                cu_list,
+                deadline=t_start + time_limit,
+                budget=_safe_budget,
+            )
+            _safe_proved += _n_p
+            _safe_abstained += _n_a
+            _safe_raised += _n_r
+            if _n_a:
+                # An abstaining node keeps its subtree open, but its converged point
+                # is still a verified candidate (it passed the constraint check
+                # above): offer it as an incumbent so abstention costs no primal.
+                for _ab in np.flatnonzero(np.isneginf(result_lbs) & np.isfinite(_raw_lbs)):
+                    _ai = int(_ab)
+                    if _raw_lbs[_ai] < _SENTINEL_THRESHOLD and _is_integer_feasible_solution(
+                        result_sols[_ai], int_offsets, int_sizes
+                    ):
+                        tree.inject_incumbent(
+                            np.asarray(result_sols[_ai]).copy(), float(_raw_lbs[_ai])
+                        )
         t_rust_start = time.perf_counter()
         tree.import_results(
-            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask, result_excl
+            result_ids,
+            result_lbs,
+            result_sols,
+            result_feas,
+            node_infeasible_mask,
+            result_excl,
+            **({} if _safe_points is None else {"point_values": _safe_points}),
         )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
@@ -28803,10 +29030,25 @@ def _solve_nlp_bb(
             _stall_abstained,
             stats.get("bound_unresolved"),
         )
+    if _safe_proved or _safe_abstained:
+        logger.info(
+            "Convex node safe bounds (#2067): %d node(s) imported a proved bound, %d "
+            "abstained to their inherited parent bound, %d proved a bound at or above "
+            "their NLP objective (DISCOPT_CONVEX_NODE_SAFE_BOUND)",
+            _safe_proved,
+            _safe_abstained,
+            _safe_raised,
+        )
     if _stall_abstain and bool(stats.get("bound_unresolved", False)):
         _gap_certified = False
         # An abstained node closed with no branch direction proves nothing, so
         # an exhausted tree with no incumbent is "unknown", not "infeasible".
+        _unconverged_fathom = True
+    elif _safe_abstained and bool(stats.get("bound_unresolved", False)):
+        # #2067 (review of #2070): a safe-bound abstention is not decertified here --
+        # the tree already pins its bound at the valid floor, as on the #598 path, and
+        # ``bound_unresolved`` may come from an unrelated removal -- but an exhausted
+        # tree with no incumbent still proves no infeasibility.
         _unconverged_fathom = True
     # #933: capture the tree-bound taint state NOW, before the exit-status logic
     # below overwrites ``_gap_certified`` on limit exits. "The exit is not
@@ -29501,6 +29743,17 @@ def _solve_nlp_bb(
         if _incumbent_extension_taken > 0.0
         else None
     )
+    # #2067: counted so a run in which the safe-bound arm never fired is visible as
+    # such (CLAUDE.md §6).
+    if _model_is_convex and _safe_bound_on:
+        _ext_stats = dict(_ext_stats or {})
+        _ext_stats["nlpbb/convex_safe_bound_nodes"] = float(_safe_proved)
+        _ext_stats["nlpbb/convex_safe_bound_abstained"] = float(_safe_abstained)
+        _ext_stats["nlpbb/convex_safe_bound_raised"] = float(_safe_raised)
+        _ext_stats["nlpbb/convex_safe_bound_exact_suspended"] = float(_safe_budget.suspended)
+        _ext_stats["nlpbb/convex_safe_fathom_floor"] = float(
+            stats.get("safe_fathom_floor", float("inf"))
+        )
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
