@@ -767,6 +767,28 @@ def _verified_objective(kw: dict, x: Optional[np.ndarray]) -> Optional[float]:
     return float(c_arr @ x)
 
 
+def _default_box_opened(kw: dict) -> Optional[list[tuple[float, float]]]:
+    """``kw``'s column bounds with every default-box side opened, or ``None`` if
+    there is none.
+
+    A side at ``DEFAULT_VARIABLE_BOUND`` magnitude (``constants.py``: the box of a
+    column declared with no bound, *read* as no bound) and still below the ``1e20``
+    sentinel becomes ``+-_INF``; every other side is kept. The result describes a
+    relaxation of the master ``kw`` poses.
+    """
+    from discopt.constants import DEFAULT_VARIABLE_BOUND
+
+    c = np.asarray(kw["c"], dtype=np.float64).ravel()
+    lb, ub = _marshal_col_bounds(kw["bounds"], c.shape[0])
+    lo = (lb <= -DEFAULT_VARIABLE_BOUND) & (lb > -_INF)
+    hi = (ub >= DEFAULT_VARIABLE_BOUND) & (ub < _INF)
+    if not (np.any(lo) or np.any(hi)):
+        return None
+    lb = np.where(lo, -_INF, lb)
+    ub = np.where(hi, _INF, ub)
+    return list(zip(lb.tolist(), ub.tolist()))
+
+
 def _cross_check_presolve(
     primary: MILPResult, kw: dict, time_limit: Optional[float], t0: float
 ) -> MILPResult:
@@ -823,6 +845,32 @@ def _cross_check_presolve(
     diag.update(ran=True, cross_status=cross.status.value, cross_bound=cross.bound)
     primary.node_count += cross.node_count
     primary.iterations += cross.iterations
+    unconfirmed = cross.status != SolveStatus.INFEASIBLE if infeasible else cross.bound is None
+    relaxed_bounds = _default_box_opened(kw) if unconfirmed else None
+    if relaxed_bounds is not None:
+        left = None if time_limit is None else float(time_limit) - (time.time() - t0)
+        if left is None or left > 0.0:
+            # #1917: the presolve-free solve over the declared default box (the
+            # ``+-9.999e19`` sides of columns declared with no bound) is HiGHS
+            # computing at that scale, where it can call a feasible master
+            # infeasible: measured on GDPlib med_term_purchasing's master, presolve
+            # on OPTIMAL at -6797.54 in ~1 s, presolve off INFEASIBLE in 0.00 s,
+            # and every HiGHS master's bound was withdrawn. The same solve with
+            # those sides opened is a RELAXATION of the declared master, so its
+            # bound is a valid bound and its infeasibility proves the declared
+            # master empty; its points are verified against the declared arrays
+            # below, like any other. Nothing weaker than that is taken from it.
+            relaxed = _solve_milp_once(
+                time_limit=left, presolve=False, **{**kw, "bounds": relaxed_bounds}
+            )
+            diag.update(
+                default_box_opened=True,
+                relaxed_status=relaxed.status.value,
+                relaxed_bound=relaxed.bound,
+            )
+            primary.node_count += relaxed.node_count
+            primary.iterations += relaxed.iterations
+            cross = relaxed
     primary.wall_time = time.time() - t0
 
     points = []

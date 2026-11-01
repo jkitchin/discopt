@@ -69,6 +69,43 @@ def default_subproblem_time_limit(time_limit: Optional[float]) -> float:
     return min(SUBPROBLEM_TIME_LIMIT, max(1.0, 0.1 * float(time_limit)))
 
 
+def _oa_cut_rows(evaluator: Any, low: Model, oa_rows: Any) -> Any:
+    """``oa_rows`` with every row the master already carries exactly taken out of
+    its cut mask (#1917).
+
+    :func:`~discopt.gdp.algorithms.master.build_master` puts every scalar
+    ``Constraint`` whose body :func:`_extract_body_coeffs` reads as affine into
+    the master as one exact row. An affine row is convex, so the convexity mask
+    marks it and :func:`_add_oa_cuts` linearized it as well, every iteration:
+    measured on GDPlib med_term_purchasing (all 924 rows affine), 708 such
+    cuts per iteration, 35449 after 50 iterations, against a master whose rows
+    they duplicate. This is the defect ``solvers/oa.py``'s
+    ``_oa_cut_eligible_mask`` fixed for OA, where the floating-point
+    re-derivation of an ``==`` row in both directions made the master infeasible
+    by construction (a false infeasibility certificate on ``bchoco07``). Skipping
+    the cut is bound-neutral in exact arithmetic: the cut *is* the master row.
+    """
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt.modeling.core import Constraint
+    from discopt.solvers.oa import _OARows
+
+    n = sum(int(v.size) for v in low._variables)
+    # Only ``low._constraints`` reach the master; the evaluator's row map also
+    # covers builder rows that list does not hold (#840), which keep their cuts.
+    in_master = {id(c) for c in low._constraints if isinstance(c, Constraint)}
+    mask = list(oa_rows.convex_mask)
+    for start, stop, c in evaluator.constraint_row_map():
+        if (
+            stop - start == 1
+            and id(c) in in_master
+            and _extract_body_coeffs(c.body, low, n) is not None
+        ):
+            mask[start] = False
+    return _OARows(
+        senses=list(oa_rows.senses), convex_mask=mask, has_unclassified=oa_rows.has_unclassified
+    )
+
+
 class LOA(GDPAlgorithm):
     """Logic-based OA; see the module docstring."""
 
@@ -125,6 +162,9 @@ class LOA(GDPAlgorithm):
         convexity = self._oa_convexity(low)
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
+        #: The rows OA cuts may go on: certified convex AND not already one exact
+        #: master row. ``oa_rows`` stays the pure convexity certificate.
+        self.oa_cut_rows = _oa_cut_rows(self.evaluator, low, self.oa_rows)
         self.objective_certified_convex = bool(convexity.objective_is_convex)
         self.master = self._make_master(milp_solver)
         self.obj_is_linear = self.master.objective is not None
@@ -181,7 +221,7 @@ class LOA(GDPAlgorithm):
             self.master.cuts,
             self.master.cut_rhs,
             self.obj_is_linear,
-            self.oa_rows,
+            self.oa_cut_rows,
             self.master.objective_convex,
         )
 
