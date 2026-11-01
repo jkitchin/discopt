@@ -2219,6 +2219,20 @@ def obbt_tighten_root(
     total_lp_time = 0.0
     n_rounds = 0
 
+    # #2081: round the INCOMING integer bounds too, with the same ``eps`` the
+    # sweeps below round their own tightenings with. Rounding only what this
+    # pass tightens let a non-integral input bound (a binary handed in at
+    # ``[0, 1 - 1.6e-13]`` by floating-point FBBT) sit next to a rounded one: the
+    # sweep raised ``lb`` to 1, ``ub`` stayed below it, and the next envelope
+    # build raised ``Interval lo > hi``. Integer columns hold integers, so this
+    # removes no feasible point; a column left with no integer is a proof.
+    if np.any(is_int):
+        with np.errstate(invalid="ignore"):
+            lb[is_int] = np.ceil(lb[is_int] - eps)
+            ub[is_int] = np.floor(ub[is_int] + eps)
+        if np.any(lb[is_int] > ub[is_int]):
+            return RootObbtResult(lb, ub, 0, 0, 0.0, True)
+
     def _finite_box_width() -> float:
         """Total width over finite-width original columns (min-improvement metric)."""
         w = ub[:n_orig] - lb[:n_orig]
