@@ -342,7 +342,9 @@ class _PersistentProbeLP:
         ``time_limit_s`` (seconds, ``None`` = unbounded) is this one LP's wall-clock
         budget, forwarded to the simplex's polled deadline; a solve it cuts short is
         non-optimal and so tightens nothing (#2006: without it a single root-OBBT
-        probe on QPLIB_5875 ran 49.6 s inside a 5 s phase budget).
+        probe on QPLIB_5875 ran 49.6 s inside a 5 s phase budget). The sweep passes
+        its remaining ``deadline`` here, not the caller's ``time_limit_per_lp``
+        (#2065; see :func:`run_obbt_on_relaxation`).
 
         Returns ``(status, objective, dual_values, basis, wall_time)`` — ``status``
         a :class:`SolveStatus`, ``objective``/``dual_values`` ``None`` on any
@@ -1113,7 +1115,22 @@ def run_obbt_on_relaxation(
     candidate_idxs : list[int], optional
         Subset of column indices to tighten.  Defaults to all original columns.
     time_limit_per_lp : float, optional
-        Per-LP time limit in seconds.  ``None`` for no limit.
+        Per-LP time limit in seconds.  ``None`` for no limit.  Honored by the
+        seam-oracle probes and the ``top_k`` scoring LP.  **The default
+        persistent probe path (Rust simplex binding available) deliberately
+        does not apply it**: each persistent probe is bounded only by the
+        remaining ``deadline`` (#2006), or runs to convergence when ``deadline``
+        is ``None``.  Applying the cap there is bound-changing (a probe stopped
+        at the cap tightens nothing).  #2065 measured it on the in-repo corpus and
+        MINLPLib up to 2000 vars/cons, then ran it as a default-OFF flag through
+        the CLAUDE.md section 5 ON/OFF panel: sound, but no certificate gained
+        and no bound or wall-time change beyond run-to-run noise, so the flag was
+        retired.  QPLIB was not measured.  Figures:
+        ``docs/dev/data/issue2065-obbt-probe-cap.txt``; verdict:
+        ``docs/dev/flag-retirement-audit.md``.  What would change this: a class
+        where capping persistent probes gains certificates or wall time in a
+        repeated, interleaved panel.  A single runaway probe is the
+        ``deadline``'s job, not this cap's.
     incumbent_cutoff : float, optional
         Cutoff on ``c_obj^T x + obj_offset`` — the relaxation objective, which
         is in the **internal minimization space** (``-f`` for a maximize model),
@@ -1315,7 +1332,9 @@ def run_obbt_on_relaxation(
         # unbounded past it. Capped by the remaining time only, so a sweep that
         # finishes inside its deadline is unchanged. An exhausted budget skips the
         # probe outright (non-optimal, tightens nothing) rather than handing a backend
-        # a zero limit it might read as "no limit".
+        # a zero limit it might read as "no limit". #2065: the persistent path
+        # deliberately does not also apply ``time_limit_per_lp`` (see this function's
+        # docstring).
         budget = None if deadline is None else deadline - _time.perf_counter()
         if budget is not None and budget <= 0.0:
             return SolveStatus.TIME_LIMIT, None, None
