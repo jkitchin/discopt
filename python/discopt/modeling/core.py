@@ -7209,6 +7209,21 @@ class Model:
                 f"reformulation generated the variable name {var.name!r}, which the "
                 "model already uses (pick it with Model._fresh_name)"
             )
+        if var._index != len(self._variables):
+            # ``Variable.__init__`` takes its column from ``len(_variables)`` at
+            # construction, so a pass that constructs two variables before
+            # registering either gives both the same column, and every expression
+            # over the second one reads the first one's value and box. Measured
+            # (#1917): the origin-free hull row on GDPlib ``hda`` built ``v - y*t``
+            # against another ``t``'s box, and the root LP certified a feasible
+            # model ``infeasible``. Refuse instead of renumbering: the pass may
+            # already have handed the stale column to something else.
+            raise ValueError(
+                f"reformulation generated the variable {var.name!r} with column "
+                f"{var._index}, but it is being registered at column "
+                f"{len(self._variables)} (construct each generated variable right "
+                "before registering it, or set its _index when registering)"
+            )
         self._variables.append(var)
         self._names.add(var.name)
         return var

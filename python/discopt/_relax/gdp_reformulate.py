@@ -3443,6 +3443,10 @@ def _origin_free_hull_row(
             "relaxation as well (#1917)"
         ) from origin_exc
     for vname, v, t in fresh:
+        # Every ``t`` of this row was constructed before any was registered (so a
+        # refusal above leaves the model untouched), which gave them all the same
+        # column; give each its own now (#1917, GDPlib ``hda``).
+        t._index = len(model._variables)
         new_vars.append(t)
         model._register_generated_variable(t)
         new_cons.append(

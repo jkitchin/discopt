@@ -84,3 +84,58 @@ def test_hull_and_big_m_certify_the_same_optimum(build):
     # Neither bound may pass the other's incumbent (a false bound would).
     assert hull.bound <= big.objective + 1e-6
     assert big.bound <= hull.objective + 1e-6
+
+
+def _two_owned_columns_in_one_row():
+    """One origin-free row over two variables whose disjunct boxes are disjoint.
+
+    Optimum in disjunct 0 at ``x = 2, z = 6`` (objective ``-x - z/10 = -2.6``);
+    disjunct 1 only allows ``x <= 0.5``. Before the fix both ``t``s of the row got
+    the same column, so ``v_z - y t_z = 0`` read ``t_x``'s box ``[1, 2]`` against
+    ``z in [5, 6]`` and disjunct 0 became (falsely) infeasible.
+    """
+    m = dm.Model("two_t_one_row")
+    x = m.continuous("x", lb=0, ub=10)
+    z = m.continuous("z", lb=0, ub=10)
+    m.either_or(
+        [[dm.log(x) - dm.log(z) <= 0.0, x >= 1, x <= 2, z >= 5, z <= 6], [x <= 0.5, z <= 1]],
+        name="d",
+    )
+    m.minimize(-x - z / 10)
+    return m
+
+
+def test_every_generated_column_is_its_own():
+    """A variable's ``_index`` is its position: two ``t``s of one row used to share
+    one, so every expression over the second read the first's value and box (GDPlib
+    ``hda``: hull returned a false ``infeasible``)."""
+    low = reformulate_gdp(_two_owned_columns_in_one_row(), "hull")
+    ts, _ = _ratio0(low)
+    assert len(ts) == 2, [t.name for t in ts]
+    n = 0
+    for pos, v in enumerate(low._variables):
+        assert v._index == pos, (v.name, v._index, pos)
+        n += 1
+    assert n == len(low._variables) > 0
+
+
+def test_registering_a_stale_column_is_refused():
+    from discopt.modeling.core import Variable, VarType
+
+    m = dm.Model("stale")
+    m.continuous("x", lb=0, ub=1)
+    a = Variable("a", VarType.CONTINUOUS, (), 0.0, 1.0, m)
+    b = Variable("b", VarType.CONTINUOUS, (), 0.0, 1.0, m)
+    m._register_generated_variable(a)
+    with pytest.raises(ValueError, match="column"):
+        m._register_generated_variable(b)
+
+
+@pytest.mark.correctness
+def test_two_lifted_columns_in_one_row_solve_to_the_big_m_optimum():
+    big = _two_owned_columns_in_one_row().solve(gdp_method="big-m", time_limit=60)
+    hull = _two_owned_columns_in_one_row().solve(gdp_method="hull", time_limit=60)
+    assert big.status == hull.status == "optimal", (big.status, hull.status)
+    assert hull.objective == pytest.approx(-2.6, abs=1e-6)
+    assert big.objective == pytest.approx(-2.6, abs=1e-6)
+    assert hull.bound <= big.objective + 1e-6
