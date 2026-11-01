@@ -617,10 +617,20 @@ def _apply_integrality(
     ub: float,
     var_type: VarType,
 ) -> tuple[float, float]:
+    # #2081: a binary is an integer too. Clipping it to [0, 1] without rounding
+    # kept a rule's floating-point bound -- ``ub = 1 - 1.6e-13`` on one GDP
+    # selector, ``lb = 1.6e-13`` on its complement -- and the next consumer that
+    # rounded one side (root/per-node OBBT) inverted the interval. Both integer
+    # kinds are rounded with the integrality tolerance a solution is accepted at
+    # (``_INTEGER_BOX_TOL``), so a rule's round-off can never cut an accepted
+    # integer value (the #1537 D lesson). INTEGER used ``1e-9`` here before: a
+    # rule's ``ub = 3 - 5e-8`` floored to 2 and cut ``x = 3``, which the
+    # acceptance test takes.
+    tol = _INTEGER_BOX_TOL
     if var_type == VarType.BINARY:
-        return max(lb, 0.0), min(ub, 1.0)
+        return max(float(np.ceil(lb - tol)), 0.0), min(float(np.floor(ub + tol)), 1.0)
     if var_type == VarType.INTEGER:
-        return float(np.ceil(lb - 1e-9)), float(np.floor(ub + 1e-9))
+        return float(np.ceil(lb - tol)), float(np.floor(ub + tol))
     return lb, ub
 
 
@@ -1120,13 +1130,9 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 new_lb = max(float(tightened_lb[flat_idx]), -radius)
                 new_ub = min(float(tightened_ub[flat_idx]), radius)
 
-                var_type = metadata.flat_var_types[flat_idx]
-                if var_type == VarType.BINARY:
-                    new_lb = max(new_lb, 0.0)
-                    new_ub = min(new_ub, 1.0)
-                elif var_type == VarType.INTEGER:
-                    new_lb = float(np.ceil(new_lb - 1e-9))
-                    new_ub = float(np.floor(new_ub + 1e-9))
+                new_lb, new_ub = _apply_integrality(
+                    new_lb, new_ub, metadata.flat_var_types[flat_idx]
+                )
 
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
@@ -1517,13 +1523,9 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                     )
 
                 new_lb, new_ub = interval
-                var_type = metadata.flat_var_types[flat_idx]
-                if var_type == VarType.BINARY:
-                    new_lb = max(new_lb, 0.0)
-                    new_ub = min(new_ub, 1.0)
-                elif var_type == VarType.INTEGER:
-                    new_lb = float(np.ceil(new_lb - 1e-9))
-                    new_ub = float(np.floor(new_ub + 1e-9))
+                new_lb, new_ub = _apply_integrality(
+                    new_lb, new_ub, metadata.flat_var_types[flat_idx]
+                )
 
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb

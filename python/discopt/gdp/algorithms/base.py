@@ -131,6 +131,10 @@ class GDPAlgorithm:
         self.n_subproblems = 0
         self.trace: list[tuple[int, float, float, float]] = []
         self.stop_reason = ""
+        #: Why :meth:`iterate` returned ``False``, when the method can say more
+        #: than ``"exhausted"`` (#2082: LOA's re-proposal of a configuration it
+        #: could not exclude is not an exhausted search space).
+        self.stop_detail = ""
 
     @staticmethod
     def start_deadline(time_limit: Optional[float], kw: dict[str, Any]) -> Deadline:
@@ -238,7 +242,7 @@ class GDPAlgorithm:
             self.iterations += 1
             self.trace.append((self.iterations, self.lb, self.ub, self.deadline.elapsed()))
             if not more:
-                self.stop_reason = "exhausted"
+                self.stop_reason = self.stop_detail or "exhausted"
                 break
         return self.result()
 

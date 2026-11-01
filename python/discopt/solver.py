@@ -5601,7 +5601,66 @@ def _fbbt_linear_row_sweep(J_row, g_j, rhs, mid, lb, ub, is_upper):
     return changed
 
 
+def _integer_column_mask(model: Model, n: int) -> np.ndarray:
+    """Flat mask of the integer and binary columns among the first ``n``."""
+    mask = np.zeros(n, dtype=bool)
+    off = 0
+    for v in model._variables:
+        if off >= n:
+            break
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            mask[off : min(off + v.size, n)] = True
+        off += v.size
+    return mask
+
+
+def _round_integer_bounds(
+    model: Model, lb: np.ndarray, ub: np.ndarray, tol: Optional[float] = None
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Round integer columns' bounds to integers: ``ceil(lb - tol)``, ``floor(ub + tol)``.
+
+    ``(lb, ub, crossed)``; ``crossed`` when some integer column then holds no
+    integer, which is a proof that the box is empty. ``tol`` is the integrality
+    tolerance a solution is accepted at, so no accepted point is cut.
+
+    #2081: node FBBT handed per-node OBBT a binary at ``[0, 1 - 1.6e-13]`` (and
+    its complement at ``[1.6e-13, 1]``); OBBT rounded ``lb`` up to ``1`` while
+    ``ub`` stayed below it, and its envelope build raised ``Interval lo > hi``.
+    That bound came from the nonlinear pass, which clipped binaries without
+    rounding (fixed there), but the linear-row sweep is integrality-blind too
+    (``2 w <= 1`` leaves a binary ``w`` at ``[0, 0.5]``), so the node box is
+    rounded here, once, whatever produced it.
+    """
+    is_int = _integer_column_mask(model, len(lb))
+    if not np.any(is_int):
+        return lb, ub, False
+    if tol is None:
+        tol = _ROUTE_BOX_INT_TOL
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    with np.errstate(invalid="ignore"):
+        lb[is_int] = np.ceil(lb[is_int] - tol)
+        ub[is_int] = np.floor(ub[is_int] + tol)
+    crossed = bool(np.any(lb[is_int] > ub[is_int]))
+    return lb, ub, crossed
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
+    """FBBT for a single B&B node (``_fbbt_node_box``), integer bounds rounded (#2081).
+
+    Same parameters and returns as :func:`_fbbt_node_box`. A box whose integer
+    column holds no integer after rounding is reported infeasible.
+    """
+    lb, ub, infeasible = _fbbt_node_box(
+        evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=max_rounds
+    )
+    if infeasible:
+        return lb, ub, True
+    lb, ub, crossed = _round_integer_bounds(evaluator._model, lb, ub)
+    return lb, ub, crossed
+
+
+def _fbbt_node_box(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
     Uses the constraint Jacobian to propagate implied variable bounds.
