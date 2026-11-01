@@ -306,7 +306,6 @@ def bound_pretransform(model: Model) -> PretransformReport:
     """
     from discopt._relax.gdp_reformulate import (
         _collect_indicator_hull_groups,
-        _precompute_lp_relaxation,
     )
 
     report = PretransformReport()
@@ -323,8 +322,9 @@ def bound_pretransform(model: Model) -> PretransformReport:
                 "is selected; Pyomo's transformation refuses OR the same way."
             )
 
-    lp = _precompute_lp_relaxation(model)
-    n_vars = lp[4] if lp is not None else sum(v.size for v in model._variables)
+    # Only the column count is used; building the LP relaxation for it cost a full
+    # extraction of the model's linear rows (#1917).
+    n_vars = sum(v.size for v in model._variables)
     box = _slot_box(model)
 
     # either_or disjunctions (top level, no nesting).
