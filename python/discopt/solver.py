@@ -9945,6 +9945,74 @@ def _convex_route_gdp_lowered_enabled() -> bool:
     return val in ("1", "true", "on", "yes")
 
 
+def _gdp_inner_rows(constraints: Any) -> list[Constraint]:
+    """The plain rows nested in GDP constraints (indicator and disjunct bodies)."""
+    from discopt.modeling.core import _DisjunctiveConstraint, _IndicatorConstraint
+
+    rows: list[Constraint] = []
+    # Seed from GDP constraints only: a top-level plain row is not a disjunct row
+    # (and the caller's raw mask already judged it).
+    stack: list[Any] = [
+        c for c in constraints if isinstance(c, (_IndicatorConstraint, _DisjunctiveConstraint))
+    ]
+    while stack:
+        c = stack.pop()
+        if isinstance(c, _IndicatorConstraint):
+            stack.append(c.constraint)
+        elif isinstance(c, _DisjunctiveConstraint):
+            for disjunct in c.disjuncts:
+                stack.extend(disjunct)
+        elif isinstance(c, Constraint):
+            rows.append(c)
+        # _SOSConstraint / _LogicalConstraint lower to linear rows only.
+    return rows
+
+
+def _gdp_inner_rows_and_objective_convex(model: Model) -> bool:
+    """Cheap necessary condition for a convex GDP lowering (#1917).
+
+    Classifies the objective and every row nested in a GDP constraint with the
+    same sound classifier (certificate fallback on, root box) the lowered
+    classification uses. ``False`` only ever *declines* the route; ``True``
+    proves nothing, and the caller still classifies the lowering. Abandoned on
+    its own short deadline (below) or the solve deadline, counting as ``False``.
+    """
+    from discopt._relax.convexity.rules import (
+        _LINEAR_CONTEXT_KEY,
+        ConvexityBudgetExceeded,
+        _objective_is_convex,
+        build_linear_context,
+        classify_constraint,
+    )
+
+    # Capped at a quarter of the classification budget (5% of ``time_limit``, at
+    # most 5 s): this check only buys an early *decline*, so it must not eat the
+    # budget the OFF path needs (stranded_gas: ~7 s of certificates before the
+    # first rejected row). Running out declines the route -- sound.
+    budget = float(getattr(model, "_convexity_time_budget", 15.0) or 15.0)
+    deadline = time.perf_counter() + 0.25 * budget
+    solve_deadline = getattr(model, "_solve_deadline", None)
+    if solve_deadline is not None:
+        deadline = min(deadline, float(solve_deadline))
+    cache: dict = {}
+    ctx = build_linear_context(model)
+    if ctx is not None:
+        cache[_LINEAR_CONTEXT_KEY] = ctx
+    try:
+        # Rows first: each is cheap, while the objective certificate can cost
+        # seconds (stranded_gas: 4.5 s).
+        for row in _gdp_inner_rows(model._constraints):
+            if time.perf_counter() > deadline:
+                return False
+            if not classify_constraint(row, model, cache, use_certificate=True):
+                return False
+        return _objective_is_convex(
+            model, cache, use_certificate=True, exact_qp=True, deadline=deadline
+        )
+    except ConvexityBudgetExceeded:
+        return False
+
+
 def _model_has_gdp_constraints(model: Model) -> bool:
     """Whether ``model`` carries a constraint ``reformulate_gdp`` would lower."""
     return _model_has_gdp_constraints_list(model._constraints)
@@ -10116,6 +10184,16 @@ def _convex_minlp_auto_route(
                 for _c, _ok in zip(model._constraints, _raw_mask)
             ):
                 return None, "not routed: a non-GDP row is not convex", {}
+        # A lowering row is ``body (sense) M-term`` / a perspective of an inner
+        # row, convex only when the inner row is. So one inner row or the
+        # objective the classifier rejects settles it without the lowering,
+        # which is the dominant cost (measured, GDPlib biofuel: lower 4.4 s,
+        # classify lowered 1.8 s; the lowering is non-convex there, and the
+        # OFF path got the remaining budget minus ~7 s of 60 s and lost its
+        # dual bound). Necessary, not sufficient: the lowered classification
+        # below stays authoritative.
+        if not _gdp_inner_rows_and_objective_convex(model):
+            return None, "not routed: a disjunct row or the objective is not convex", {}
         # #1917: judge the model the route will solve. ``apply`` returns a new
         # model and leaves the caller's untouched; the route lowers again on its
         # own (box-tightened) copy, and lowering is deterministic in structure,

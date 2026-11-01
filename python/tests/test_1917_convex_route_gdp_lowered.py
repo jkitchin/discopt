@@ -83,3 +83,55 @@ def test_on_solve_matches_off_solve(monkeypatch):
         assert r.status == "optimal", (arm, r.status)
         objs[arm] = r.objective
     assert objs["0"] == pytest.approx(objs["1"], abs=1e-5, rel=1e-6)
+
+
+def _nonconvex_disjunct_gdp():
+    m = dm.Model("nonconvex_disjunct")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    z = m.binary("z")
+    m.minimize((x - 3.0) ** 2 + (y - 4.0) ** 2 + 2.0 * z)
+    m.subject_to(x + y <= 15.0)
+    m.if_then(z, [x * y >= 2.0])  # bilinear, inside a disjunct only
+    return m
+
+
+def test_inner_rows_are_disjunct_rows_only():
+    from discopt.solver import _gdp_inner_rows
+
+    m = _convex_gdp()
+    rows = _gdp_inner_rows(m._constraints)
+    assert len(rows) == 2  # the two if_then bodies; no top-level row
+    m.subject_to(m._variables[0] <= 9.0)
+    assert len(_gdp_inner_rows(m._constraints)) == 2
+
+
+def test_on_declines_a_nonconvex_disjunct_before_lowering(monkeypatch):
+    """The pre-check rejects without paying for the lowering (biofuel, #1917)."""
+    import discopt.transformations as dt
+
+    monkeypatch.setenv(FLAG, "1")
+    calls = []
+    real_get = dt.get
+
+    def spy(name):
+        calls.append(name)
+        return real_get(name)
+
+    monkeypatch.setattr(dt, "get", spy)
+    method, reason, _ = _convex_minlp_auto_route(_nonconvex_disjunct_gdp(), gdp_method="big-m")
+    assert method is None
+    assert reason == "not routed: a disjunct row or the objective is not convex"
+    assert "gdp" not in calls
+
+
+def test_an_expired_precheck_declines(monkeypatch):
+    """Running out of the pre-check's budget declines the route (sound)."""
+    import time
+
+    from discopt.solver import _gdp_inner_rows_and_objective_convex
+
+    m = _convex_gdp()
+    assert _gdp_inner_rows_and_objective_convex(m) is True
+    m._solve_deadline = time.perf_counter() - 1.0
+    assert _gdp_inner_rows_and_objective_convex(m) is False
