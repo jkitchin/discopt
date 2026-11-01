@@ -1016,6 +1016,347 @@ def _cross_check_lazy_master(
     return status, bound, diag
 
 
+#: #2069: a column side this large is handed to the in-house engine as open.
+_OPEN_SIDE = 1e15
+
+
+def _lp_as_arrays(lp, highspy) -> dict[str, Any]:
+    """A HiGHS ``HighsLp`` as :func:`milp_simplex.solve_milp` arrays (#2069).
+
+    The model HiGHS holds: equality rows go to ``A_eq``, every finite row side to
+    ``A_ub`` (a ranged row gives two). Rows are scaled by exact powers of two and
+    near-infinite column sides are opened (both explained inline); the first is the
+    same MILP, the second a relaxation of it, so the engine's bound is a valid bound
+    on the master HiGHS solved.
+    """
+    n, m = int(lp.num_col_), int(lp.num_row_)
+    inf = float(highspy.kHighsInf)
+    a = lp.a_matrix_
+    if a.format_ == highspy.MatrixFormat.kRowwise:
+        A = sp.csr_matrix((a.value_, a.index_, a.start_), shape=(m, n))
+    else:
+        A = sp.csc_matrix((a.value_, a.index_, a.start_), shape=(m, n)).tocsr()
+    rl = np.asarray(lp.row_lower_, dtype=np.float64)
+    ru = np.asarray(lp.row_upper_, dtype=np.float64)
+    # Each row is scaled by a power of two that brings its largest |a_ij| into
+    # [0.5, 1). A power-of-two scale is exact in binary floating point, so this is
+    # the same MILP bit for bit; it only spares the engine's LP a row-norm spread
+    # its safe bound cannot absorb (measured on the #1658 ``tls2`` master with rows
+    # scaled by 10^U(-6,6), |a| in [2e-6, 8e6]: no bound after 444 nodes unscaled,
+    # optimal at 5.3 in 157 nodes scaled).
+    absA = abs(A)
+    rowmax = np.asarray(absA.max(axis=1).todense(), dtype=np.float64).ravel()
+    rowmax[~(rowmax > 0.0)] = 1.0
+    scale = np.ldexp(1.0, -np.frexp(rowmax)[1])
+    A = sp.diags(scale).dot(A).tocsr()
+    with np.errstate(invalid="ignore"):
+        rl = np.where(rl > -inf, rl * scale, rl)
+        ru = np.where(ru < inf, ru * scale, ru)
+    eq = (rl == ru) & np.isfinite(rl) & (np.abs(rl) < inf)
+    up = ~eq & (ru < inf)
+    lo = ~eq & (rl > -inf)
+    A_ub = sp.vstack([A[up], -A[lo]]).tocsr() if (up.any() or lo.any()) else None
+    b_ub = np.concatenate([ru[up], -rl[lo]]) if A_ub is not None else None
+    A_eq = A[eq].tocsr() if eq.any() else None
+    b_eq = rl[eq] if A_eq is not None else None
+    # A column side at or past ``_OPEN_SIDE`` (discopt's default box is
+    # ``+-9.999e19``, just inside the engine's ``1e20`` sentinel) is passed as open.
+    # That only RELAXES the master, so the engine's bound stays a valid bound on it;
+    # read as finite, those sides leave the engine's safe LP bound at ``-inf`` at
+    # every node (measured on the #2069 master: no bound after 38 nodes even when
+    # seeded with the optimum).
+    bounds = [
+        (
+            None if lo_j <= -_OPEN_SIDE else float(lo_j),
+            None if hi_j >= _OPEN_SIDE else float(hi_j),
+        )
+        for lo_j, hi_j in zip(lp.col_lower_, lp.col_upper_)
+    ]
+    integ = np.zeros(n, dtype=np.int64)
+    if len(lp.integrality_):
+        kinds = list(lp.integrality_)
+        for j, kind in enumerate(kinds):
+            if kind == highspy.HighsVarType.kInteger:
+                integ[j] = 1
+            elif kind != highspy.HighsVarType.kContinuous:
+                # Semi-continuous / semi-integer columns are not in the engine's
+                # model class; refuse rather than bound a different MILP.
+                raise ValueError(f"column {j} has HiGHS type {kind}; cannot confirm")
+    return dict(
+        c=np.asarray(lp.col_cost_, dtype=np.float64),
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=integ,
+        offset=float(lp.offset_),
+    )
+
+
+def _engine_gap(rel_gap: float, ref: Optional[float]) -> float:
+    """The in-house engine's ``gap_tolerance`` for a #2069 confirmation.
+
+    The engine closes on ``(incumbent - bound) / max(|incumbent|, 1)``, so below
+    unit scale its relative tolerance is an absolute one: handed the master's
+    ``mip_rel_gap = 0.01`` on an objective of 0.008, it stopped after 3 nodes at a
+    bound of 0.0028 and "lowered" a correct claim. The tolerance passed is half of
+    ``rel_gap`` relative to ``ref`` (the master's incumbent, else the claim), with
+    an absolute floor of 1e-9, expressed in the engine's normalisation. The half
+    leaves the confirmed bound inside the caller's own gap test with room for the
+    two engines stopping at different points.
+    """
+    scale = abs(float(ref)) if ref is not None and np.isfinite(ref) else 1.0
+    return 0.5 * max(float(rel_gap) * scale, 1e-9) / max(scale, 1.0)
+
+
+#: #2069: seconds the in-house engine gets when SCIP is installed to take over
+#: after it (see :func:`_confirm_lazy_master_independently`). Measured over the 92
+#: confirmations of the routed panel (Rust only): median 0.08 s, p90 0.83 s; the
+#: masters it could not confirm (clay0303hfsg, m6) it failed on for 2.9 and 15.5 s
+#: while SCIP confirms them in under 1 s. A fraction of the remaining budget spent
+#: those seconds for nothing on every such master.
+_SIMPLEX_BUDGET_BEFORE_SCIP_S = 1.0
+
+
+def _run_simplex_engine(arrays, budget, gap, seed):
+    """The in-house Rust B&B on *arrays*: ``(status, bound or None, nodes)``."""
+    from discopt.solvers import milp_simplex
+
+    res = milp_simplex.solve_milp(**arrays, time_limit=budget, gap_tolerance=gap, mip_start=seed)
+    ebound = None if res.bound is None or not np.isfinite(res.bound) else float(res.bound)
+    return res.status, ebound, int(res.node_count)
+
+
+def _scip_available() -> bool:
+    try:
+        import pyscipopt  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _run_scip_engine(arrays, budget, gap, seed, feastol=None):
+    """SCIP on *arrays*: ``(status, bound or None, nodes)``.
+
+    SCIP closes on ``|primal - dual| / min(|primal|, |dual|)``; *gap* is passed as
+    that relative limit with no absolute one, so near zero it proves optimality.
+    Its dual bound is valid at every exit, as the in-house engine's is.
+    """
+    import pyscipopt
+
+    s = pyscipopt.Model()
+    s.hideOutput()
+    s.setParam("limits/gap", float(gap))
+    # FAST presolve: measured on the three panel masters only SCIP confirmed
+    # (#2069), SCIP's default spent 8.47 / 0.87 / 1.57 s on clay0303hfsg / m6 /
+    # slay07m and FAST 0.46 / 0.77 / 0.60 s, same bounds. A presolve setting does
+    # not change what SCIP's dual bound means.
+    s.setPresolve(pyscipopt.SCIP_PARAMSETTING.FAST)
+    if feastol is not None:
+        # #2069: judge feasibility AND integrality at the tolerance HiGHS solved the
+        # master at. SCIP's default 1e-6 accepts an integer column at 3.999999; on
+        # the #1561 epsilon witness that point is -8 against an exact master
+        # optimum of -7, so a correct HiGHS claim (-7.00027) was "refuted" by
+        # tolerance slack alone. The in-house engine's 1e-5 is a Rust constant.
+        s.setParam("numerics/feastol", float(feastol))
+    if budget is not None:
+        s.setParam("limits/time", max(0.0, float(budget)))
+    c = arrays["c"]
+    integ = arrays["integrality"]
+    xs = []
+    for j, (lo, hi) in enumerate(arrays["bounds"]):
+        xs.append(
+            s.addVar(
+                name=f"x{j}",
+                vtype="I" if integ[j] else "C",
+                lb=lo,  # ``None`` is SCIP's -infinity / +infinity
+                ub=hi,
+                obj=float(c[j]),
+            )
+        )
+    for key, sense in (("A_ub", "le"), ("A_eq", "eq")):
+        M = arrays[key]
+        if M is None:
+            continue
+        b = arrays["b_ub" if key == "A_ub" else "b_eq"]
+        M = M.tocsr()
+        for i in range(M.shape[0]):
+            lo_i, hi_i = M.indptr[i], M.indptr[i + 1]
+            expr = pyscipopt.quicksum(
+                float(v) * xs[int(j)] for j, v in zip(M.indices[lo_i:hi_i], M.data[lo_i:hi_i])
+            )
+            if sense == "le":
+                s.addCons(expr <= float(b[i]))
+            else:
+                s.addCons(expr == float(b[i]))
+    if seed is not None:
+        sol = s.createSol()
+        for j, v in enumerate(seed):
+            s.setSolVal(sol, xs[j], float(v))
+        # SCIP checks the point and discards it if infeasible, as the engine does.
+        s.addSol(sol)
+    s.optimize()
+    st = s.getStatus()
+    if st == "infeasible":
+        return SolveStatus.INFEASIBLE, None, int(s.getNNodes())
+    if st == "unbounded" or st == "inforunbd":
+        return SolveStatus.UNBOUNDED, None, int(s.getNNodes())
+    raw = float(s.getDualbound())
+    ebound = raw if np.isfinite(raw) and abs(raw) < 1e19 else None
+    # ``gaplimit`` is optimal within ``gap``, as the in-house engine's "optimal" is.
+    status = SolveStatus.OPTIMAL if st in ("optimal", "gaplimit") else SolveStatus.ITERATION_LIMIT
+    return status, ebound, int(s.getNNodes())
+
+
+def _confirm_lazy_master_independently(
+    h,
+    highspy,
+    status: SolveStatus,
+    bound: Optional[float],
+    time_left: Optional[float],
+    objective: Optional[float],
+    x_seed: Optional[np.ndarray],
+    rel_gap: float,
+    engines: Optional[tuple[str, ...]] = None,
+) -> tuple[SolveStatus, Optional[float], dict]:
+    """#2069: hold the lazy master's certifying verdict against another ENGINE.
+
+    The #1634 cross-solve re-runs HiGHS with presolve off, so it confirms a claim
+    only against HiGHS's own search. That is not independent: on the
+    ``constrained_layout_clay0203`` big-M master (#2069,
+    ``python/tests/data/issue2069/clay0203_master.mps.gz``) HiGHS 1.10-1.15 returns
+    ``Optimal`` at 55015-56725 with presolve on and 41907 with it off, every one
+    above SCIP's proven optimum 41420.27, so ``min`` of the two HiGHS bounds is
+    still false. A false master bound inside the gap tolerance of a suboptimal
+    incumbent is a false certificate.
+
+    The final master HiGHS holds (:func:`_lp_as_arrays`) is solved by up to two
+    engines in turn, each seeded with the master's accepted point (both re-check a
+    seed and drop it if infeasible): the in-house Rust simplex B&B
+    (:func:`discopt.solvers.milp_simplex.solve_milp`), always available, then SCIP
+    when ``pyscipopt`` is installed. The in-house engine cannot bound every master
+    HiGHS can (measured on ``m6``: 62.83 after 38 594 nodes and 11 s against a
+    claim of 82.26 that SCIP confirms in 0.3 s), so with SCIP present it gets
+    at most ``_SIMPLEX_BUDGET_BEFORE_SCIP_S`` and SCIP the rest; the chain stops at
+    the first engine that confirms. SCIP runs at HiGHS's own
+    ``primal_feasibility_tolerance`` (see :func:`_run_scip_engine`).
+
+    Every engine's dual bound is valid at every exit, so the best of them is an
+    independent bound; the published bound is ``min`` of it and HiGHS's, i.e. a
+    certificate needs HiGHS and at least one other engine to agree. With no engine
+    reaching a finite bound the claim is withdrawn. An ``infeasible`` claim survives
+    only when another engine proves infeasibility too. ``OPTIMAL`` drops to
+    ``ITERATION_LIMIT`` when the lowered bound no longer closes the gap to
+    ``objective`` at ``rel_gap``, as in :func:`_cross_check_lazy_master`.
+
+    Each engine stops on a gap against its own incumbent, which the seed makes at
+    least as good as the master's, so a true claim is confirmed without driving it
+    to gap zero; :func:`_engine_gap` sets that gap. ``engines`` overrides the chain
+    (tests); the default is ``("simplex", "scip")`` with SCIP dropped when absent.
+    """
+    infeasible = status == SolveStatus.INFEASIBLE
+    diag: dict[str, object] = {"ran": False}
+    if not infeasible and bound is None:
+        return status, bound, diag
+    if engines is None:
+        engines = ("simplex", "scip") if _scip_available() else ("simplex",)
+    diag["engines"] = list(engines)
+    if time_left is not None and time_left <= 0.0:
+        diag["withdrawn"] = "no time budget left for the independent confirmation"
+        if infeasible:
+            return SolveStatus.ERROR, None, diag
+        if status == SolveStatus.OPTIMAL:
+            status = SolveStatus.ITERATION_LIMIT
+        return status, None, diag
+    arrays = _lp_as_arrays(h.getLp(), highspy)
+    offset = arrays.pop("offset")
+    st_tol, feastol = h.getOptionValue("primal_feasibility_tolerance")
+    if st_tol != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"HiGHS would not report primal_feasibility_tolerance ({st_tol})")
+    ref = objective if objective is not None else bound
+    seed = None if infeasible or x_seed is None else x_seed
+    t_c = time.time()
+    runs: list[dict[str, object]] = []
+    best: Optional[float] = None
+    confirmed_by: Optional[str] = None
+    for k, engine in enumerate(engines):
+        remaining = None if time_left is None else float(time_left) - (time.time() - t_c)
+        if remaining is not None and remaining <= 0.0:
+            break
+        budget = remaining
+        if engine == "simplex" and k + 1 < len(engines) and remaining is not None:
+            budget = min(remaining, _SIMPLEX_BUDGET_BEFORE_SCIP_S)
+        if engine == "simplex":
+            run = _run_simplex_engine(arrays, budget, _engine_gap(rel_gap, ref), seed)
+        elif engine == "scip":
+            run = _run_scip_engine(arrays, budget, 0.5 * float(rel_gap), seed, feastol)
+        else:
+            raise ValueError(f"unknown confirmation engine {engine!r}")
+        est, eb, nodes = run
+        eb = None if eb is None else eb + offset
+        runs.append(dict(engine=engine, status=est.value, bound=eb, nodes=nodes))
+        if infeasible:
+            if est == SolveStatus.INFEASIBLE:
+                confirmed_by = engine
+                break
+            continue
+        assert bound is not None
+        if est == SolveStatus.INFEASIBLE or eb is None:
+            # No bound from this engine (an "infeasible" here contradicts a master
+            # HiGHS holds a bound for, so it confirms nothing either).
+            continue
+        best = eb if best is None else max(best, eb)
+        # Confirmed: the engine's bound reaches the claim to within ``rel_gap`` of
+        # the CLAIM. Not of ``objective``: that is the master's accepted point, and
+        # the caller certifies against its own (often better) incumbent, so a test
+        # against ``objective`` sent confirmed claims down the chain for nothing.
+        if _gap_closed(bound, best, float(rel_gap)):
+            confirmed_by = engine
+            break
+    diag.update(
+        ran=bool(runs),
+        runs=runs,
+        confirmed_by=confirmed_by,
+        engine_bound=best,
+        engine_time=time.time() - t_c,
+    )
+    if infeasible:
+        if confirmed_by is not None:
+            return status, bound, diag
+        diag["withdrawn"] = "no engine confirmed infeasible"
+        logger.warning(
+            "HiGHS lazy master: infeasibility claim not confirmed by %s; withdrawn (#2069)",
+            ", ".join(f"{r['engine']} ({r['status']})" for r in runs) or "any engine",
+        )
+        return SolveStatus.ERROR, None, diag
+    assert bound is not None
+    if best is None:
+        diag["withdrawn"] = "no engine reached a bound"
+        logger.warning(
+            "HiGHS lazy master: bound %.12g not confirmed (%s reached no bound); withdrawn (#2069)",
+            bound,
+            ", ".join(f"{r['engine']} ({r['status']})" for r in runs) or "no engine",
+        )
+        if status == SolveStatus.OPTIMAL:
+            status = SolveStatus.ITERATION_LIMIT
+        return status, None, diag
+    if best < bound:
+        diag["bound_lowered"] = bound - best
+        if bound - best > 1e-9 * max(1.0, abs(bound)):
+            logger.warning(
+                "HiGHS lazy master: bound %.12g lowered to %.12g by an independent "
+                "engine (%s; #2069)",
+                bound,
+                best,
+                "; ".join(f"{r['engine']} {r['status']} {r['nodes']} nodes" for r in runs),
+            )
+        bound = best
+        if status == SolveStatus.OPTIMAL and not _gap_closed(objective, bound, float(rel_gap)):
+            status = SolveStatus.ITERATION_LIMIT
+    return status, bound, diag
+
+
 def _gap_closed(objective: Optional[float], bound: float, rel_gap: float) -> bool:
     """Whether ``bound`` still closes the gap to ``objective`` at ``rel_gap`` (#1634)."""
     if objective is None or not np.isfinite(objective):
@@ -1044,6 +1385,7 @@ def solve_milp_with_lazy_cuts(
     node_hook_cut_cap: int = 500,
     highs_options: Optional[dict[str, object]] = None,
     abandon_cross_check_fraction: float = 0.0,
+    confirm_bound_if=None,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
 
@@ -1134,6 +1476,14 @@ def solve_milp_with_lazy_cuts(
     #1634 cross-solve; a rejected option raises ``RuntimeError`` like the built-in
     ones. Pass only options that do not change what a dual bound means (heuristic
     switches, say): the cross-solve's own presolve/gap settings override them.
+
+    ``confirm_bound_if`` (#2069) is a predicate on the final (cross-checked) bound
+    that says whether the caller would *certify* on it. When it returns true, or
+    the master ends ``infeasible``, the claim is held against the in-house engine
+    (:func:`_confirm_lazy_master_independently`) before it is returned, because
+    both HiGHS configurations can be wrong together.
+    ``callback_stats["independent_confirmation"]`` records what ran. ``None`` (the
+    default) skips it.
     """
     highspy = _require_highspy()
     t0 = time.time()
@@ -1528,6 +1878,21 @@ def solve_milp_with_lazy_cuts(
     status, bound, cross_diag = _cross_check_lazy_master(
         h, highspy, status, bound, time_left, objective=obj_out, extra_options=highs_options
     )
+    independent_diag: dict[str, object] = {"ran": False, "requested": False}
+    if confirm_bound_if is not None and (
+        status == SolveStatus.INFEASIBLE or (bound is not None and bool(confirm_bound_if(bound)))
+    ):
+        # #2069: a verdict the caller will certify on is checked by a second engine.
+        time_left = None if time_limit is None else float(time_limit) - (time.time() - t0)
+        if abandoned[0] and time_left is not None:
+            time_left = max(0.0, float(abandon_cross_check_fraction) * time_left)
+        st_gap, rel_gap = h.getOptionValue("mip_rel_gap")
+        if st_gap != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"HiGHS would not report mip_rel_gap (status {st_gap})")
+        status, bound, independent_diag = _confirm_lazy_master_independently(
+            h, highspy, status, bound, time_left, obj_out, x_out, float(rel_gap)
+        )
+        independent_diag["requested"] = True
 
     return MILPResult(
         status=status,
@@ -1543,5 +1908,6 @@ def solve_milp_with_lazy_cuts(
             "terminate_context": terminate_context,
             "abandoned": bool(abandoned[0]),
             "presolve_cross_check": cross_diag,
+            "independent_confirmation": independent_diag,
         },
     )

@@ -1154,12 +1154,17 @@ def solve_milp(
     time_limit: Optional[float] = None,
     gap_tolerance: float = 1e-4,
     max_nodes: int = 1_000_000,
+    mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds, integrality``
     with the Rust warm-started-simplex B&B.
 
     Mirrors :func:`discopt.solvers.milp_pounce.solve_milp`. The returned
     ``objective`` is the engine's dual lower bound (see module docstring).
+
+    ``mip_start`` (#2069) is a structural point offered to the driver as its first
+    incumbent. The driver re-validates it against these rows and drops one it cannot
+    prove feasible, so a seed can only prune, never manufacture a bound.
     """
     try:
         from discopt._rust import solve_milp_csc_py
@@ -1263,12 +1268,17 @@ def solve_milp(
             node_count=int(nodes),
         )
 
+    seed0 = None
+    if mip_start is not None:
+        seed0 = np.asarray(mip_start, dtype=np.float64).ravel()
+        if seed0.shape[0] != n:
+            raise ValueError(f"mip_start has {seed0.shape[0]} entries, expected {n}")
     legacy_kwargs = dict(_LEGACY_CUT_PROFILE)
     if not milp_cut_budget_enabled() or std.int_cols.size == 0:
         # Flag off, or a pure LP whose short-circuit already replaced the cut
         # budget with "no integer machinery at all": one solve, legacy budget,
         # byte-for-byte the pre-#1066 path.
-        return _drive(cut_kwargs=std.lp_kwargs, node_cap=max_nodes, budget=time_limit, seed=None)
+        return _drive(cut_kwargs=std.lp_kwargs, node_cap=max_nodes, budget=time_limit, seed=seed0)
 
     # --- #1066 escalation --------------------------------------------------
     # Measurement (docs/dev/performance-plan.md §23) killed the obvious fix of
@@ -1289,7 +1299,7 @@ def solve_milp(
         cut_kwargs=legacy_kwargs,
         node_cap=min(int(max_nodes), _PROBE_MAX_NODES),
         budget=time_limit,
-        seed=None,
+        seed=seed0,
     )
     if probe.status in _PROBE_FINAL_STATUSES:
         # The cheap budget proved it. This is the tls2 class, and it is the
@@ -1313,7 +1323,7 @@ def solve_milp(
         # pruning power the probe already paid for. The driver re-validates the
         # seed and silently drops one it cannot prove feasible, so this can never
         # manufacture a certificate.
-        seed=probe.x if probe.x is not None else None,
+        seed=probe.x if probe.x is not None else seed0,
     )
     return _merge_escalation(probe, second)
 

@@ -6193,6 +6193,31 @@ def _highs_master_no_submip() -> bool:
 _ABANDON_CROSS_CHECK_FRACTION = 0.10
 
 
+def _lp_nlp_bb_independent_confirm_enabled() -> bool:
+    """#2069: ``DISCOPT_LP_NLP_BB_INDEPENDENT_CONFIRM`` -- hold a certifying HiGHS
+    ``lp_nlp_bb`` master verdict against the in-house MILP engine.
+
+    **Defect.** HiGHS can return a false ``Optimal`` on an OA master: on the
+    ``constrained_layout_clay0203`` big-M master (30 columns, 18 integer, 525 rows)
+    HiGHS 1.10-1.15 report 41907-56725 with presolve on or off and under two random
+    seeds, against SCIP's proven 41420.27. The #1634 presolve-free cross-solve is
+    HiGHS again, so ``min`` of the two is still false, and the driver's only other
+    guard is the bound/incumbent inversion check: a false bound within the gap
+    tolerance of a suboptimal incumbent would certify it.
+
+    **Default ON** (a soundness guard, not a graduation candidate). ``=0`` is the
+    opt-out for an A/B of its cost (CLAUDE.md section 5, "opt-out for a shipped
+    default"); it restores the HiGHS-only certificate, which #2069 shows is not a
+    proof. The in-house engine cannot bound every master HiGHS can (the #1060
+    ``rsyn0840m`` master stays open after 60 s), so the guard costs a certificate
+    wherever the engine cannot reach the claim in the remaining budget; the route
+    then reports ``feasible`` and the solve falls back as on any uncertified exit.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_LP_NLP_BB_INDEPENDENT_CONFIRM", default=True)
+
+
 def _route_abandon_cross_check_fraction() -> float:
     """#2059: ``DISCOPT_ROUTE_ABANDON_CROSS_CHECK`` -- let an abandoned HiGHS
     ``lp_nlp_bb`` master confirm its bound before the #1066 hand-over.
@@ -7688,6 +7713,21 @@ def solve_lp_nlp_bb(
         abandon_share = _route_abandon_cross_check_fraction()
         if abandon_share > 0.0:
             lazy_kwargs["abandon_cross_check_fraction"] = abandon_share
+        if _lp_nlp_bb_independent_confirm_enabled():
+            # #2069: a HiGHS master verdict this driver would certify on -- a bound
+            # that closes the gap to the NLP incumbent, or infeasibility -- is
+            # re-derived by the in-house engine before it is returned; both HiGHS
+            # configurations of the #1634 cross-check can be wrong together. A bound
+            # ABOVE the incumbent is provably wrong somewhere (the inversion guard
+            # below would discard it); it is sent too, because the engine's bound
+            # can replace it with one that certifies.
+            def _would_certify(raw_bound: float) -> bool:
+                lb = _master_bound_internal(raw_bound)
+                if lb is None or incumbent_obj is None:
+                    return False
+                return lb >= incumbent_obj or _compute_gap(lb, incumbent_obj) <= gap_tolerance
+
+            lazy_kwargs["confirm_bound_if"] = _would_certify
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
     elif lazy_backend == "simplex":
@@ -7971,6 +8011,20 @@ def solve_lp_nlp_bb(
             row_epi.remainder_rows + row_epi.term_rows
         )
         route_stats["oa/perspective_row_disagg_separations"] = float(row_epi.separations)
+
+    indep = callback_stats.get("independent_confirmation")
+    if isinstance(indep, dict) and indep.get("requested"):
+        # #2069: the in-house engine re-derived a certifying master verdict.
+        route_stats["oa/independent_confirm_ran"] = 1.0 if indep.get("ran") else 0.0
+        route_stats["oa/independent_confirm_time"] = float(indep.get("engine_time", 0.0) or 0.0)
+        route_stats["oa/independent_confirm_lowered"] = float(
+            indep.get("bound_lowered", 0.0) or 0.0
+        )
+        route_stats["oa/independent_confirm_withdrawn"] = 1.0 if indep.get("withdrawn") else 0.0
+        # Which engine of the chain confirmed it: 0 none, 1 in-house, 2 SCIP.
+        route_stats["oa/independent_confirm_engine"] = {"simplex": 1.0, "scip": 2.0}.get(
+            str(indep.get("confirmed_by")), 0.0
+        )
 
     if soc_outer is not None:
         # #2059: norm-ball rows given the outer approximation, and its size.
