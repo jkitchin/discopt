@@ -1233,8 +1233,17 @@ class SolverTuning:
     Entry measurement (flat three-circle disjunction, 5 objectives x 3 interleaved
     reps, all optimal and equal to big-M): 76.8 s per rep with today's hull ->
     0.54 s smoothed (11.3 s with the unsmoothed cone), certified convex at the
-    root, 1 node; big-M 0.1 s. **State: default OFF, panel
-    owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
+    root, 1 node; big-M 0.1 s.
+
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, the 24-instance
+    ``gdp_parity`` panel under hull, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): fires on 2 lowerings
+    (``constrained_layout_clay0203``, ``syngas``), identical on 21. Cert-clean (0
+    incorrect, 0 bound crossings, 0 solved lost); clay0203 53.4 -> 12.3 s, 301 -> 111
+    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s. **State: default OFF;
+    graduation is the owner's call** (cert-clean and net-positive where it fires,
+    but it helps on one corpus instance); audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_disjunct_fbbt: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_DISJUNCT_FBBT", default=False)
@@ -1256,10 +1265,11 @@ class SolverTuning:
     owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )
     """Bound each enumerated configuration against the incumbent
-    (``DISCOPT_GDP_ENUMERATE_CUTOFF``, default **OFF**; bound-changing on
+    (``DISCOPT_GDP_ENUMERATE_CUTOFF``, default **ON** -- graduated by the §5 panel
+    below; opt out with ``DISCOPT_GDP_ENUMERATE_CUTOFF=0``; bound-changing on
     ``gdp_method="enumerate"``; #1917 G4.2).
 
     Once there is an incumbent ``UB``, each configuration's global subproblem gets
@@ -1277,35 +1287,15 @@ class SolverTuning:
     strip_packing_concrete 74.9 -> 24.1 s (4090 of 4095 configurations closed by
     the cutoff), eight_process 14.3 -> 5.5 s, eight_process_logical 18.6 -> 9.3 s,
     nonconvex_hen 1.2 -> 0.9 s, constrained_layout_clay0203 127.8 -> 131.7 s,
-    ex_633_trespalacios 1.2 -> 2.7 s. **State: default OFF, panel owed**; audit row
-    in ``docs/dev/flag-retirement-audit.md``."""
+    ex_633_trespalacios 1.2 -> 2.7 s.
 
-    hull_lifted_ratio: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_HULL_LIFTED_RATIO", default=False)
-    )
-    """Lift the eps-perspective ratio ``v / yhat`` into a bounded variable
-    (``DISCOPT_HULL_LIFTED_RATIO``, default **OFF**; bound-changing on the
-    ``"hull"`` route; #1917).
-
-    Today a nonlinear disjunct row is ``yhat * g(v / yhat) - eps * g(0) * (1 - y)
-    <= 0`` with ``yhat = (1 - eps) y + eps``, ``eps = 1e-8``. An interior-point
-    iterate keeps the variable bounds but not the linking rows ``dlb y <= v <=
-    dub y`` until it converges, so it can sit at ``v ~ dub``, ``y ~ 0``, where
-    ``v / yhat ~ dub / eps``: ``g`` and its derivatives overflow there and the node
-    NLP stops on ``Invalid_Number_Detected``. With the flag each such ratio is a
-    variable ``t`` with ``v - yhat * t = 0`` and ``t`` in ``v``'s own box
-    ``[min(dlb, 0), max(dub, 0)]``, and ``g`` is evaluated at ``t``. Exact: on the
-    feasible set ``yhat >= y`` and ``dlb y <= v <= dub y`` put ``v / yhat`` inside
-    that box already, so no feasible point is cut, and the integer faces are the
-    unlifted ones (``y = 0``: ``v = 0`` forces ``t = 0``; ``y = 1``: ``t = v``).
-    The relaxation of ``g`` is now taken over ``t``'s box instead of the interval
-    of ``v / yhat`` (``[dlb, dub / eps]``), so the flag changes bounds.
-
-    Entry measurement (``pyomo.ex_633_trespalacios``, hull, main ``4517c7b``): 165
-    of 192 node NLPs end ``Invalid_Number_Detected``, every one at an iterate with
-    ``max v / (yhat dub)`` > 1.01 (median 3.3e5); no successful NLP leaves the box.
-    **State: default OFF, panel owed**; audit row in
-    ``docs/dev/flag-retirement-audit.md``."""
+    §5 panel (#1917; ``issue1917_gdp_flag_panel.py``, all 24 ``gdp_parity``
+    instances under enumerate, 3 interleaved reps, 120 s; data in
+    ``docs/dev/data/1917-flag-panel/``): cert-clean (0 incorrect, 0 bound crossings,
+    0 solved lost; 9 instances certified in both arms); strip_packing 34.7 -> 12.8 s,
+    eight_process 5.5 -> 2.2 s, eight_process_logical 6.5 -> 3.5 s, ex_633 0.6 ->
+    1.0 s, clay0203 45.5 -> 47.7 s; SGM over the 18 cells that ran 30.40 -> 28.02 s.
+    **State: graduated, default ON**."""
 
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)

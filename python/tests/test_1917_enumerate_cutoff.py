@@ -1,9 +1,11 @@
 """#1917 G4.2 ``DISCOPT_GDP_ENUMERATE_CUTOFF``: enumerate bounds each configuration
 against the incumbent (row ``f <= c``, ``c = UB - delta``).
 
-Bound-changing on ``gdp_method="enumerate"``, so default OFF (CLAUDE.md §5). Pinned:
+Bound-changing on ``gdp_method="enumerate"``; default ON since its CLAUDE.md §5 panel
+passed (#1917, ``docs/dev/data/1917-flag-panel/``). Pinned:
 
-* flag OFF: no cutoff row, no configuration closed by it (today's route);
+* the default is ON, and the ``=0`` opt-out is the legacy route: no cutoff row, no
+  configuration closed by it;
 * flag ON: the same certified optimum on every G4.2 model, min and max, with a bound
   that never passes the optimum; on a model built so that most configurations are
   dominated, the cutoff actually closes them (the probe fires);
@@ -45,8 +47,17 @@ def _run(mk, **kw):
     return g42._quiet(Enumerate(mk(), time_limit=60, **kw).run)
 
 
-def test_flag_off_is_todays_route(monkeypatch):
+def test_default_is_on(monkeypatch):
+    from discopt.solver_tuning import SolverTuning
+
     monkeypatch.delenv(FLAG, raising=False)
+    assert SolverTuning().gdp_enumerate_cutoff is True
+    r = _run(_chain)
+    assert r.status == "optimal" and r.solver_stats["n_cutoff_dominated"] > 0
+
+
+def test_opt_out_is_the_legacy_route(monkeypatch):
+    monkeypatch.setenv(FLAG, "0")
     r = _run(_chain)
     assert r.status == "optimal" and r.solver_stats["n_cutoff_dominated"] == 0
 

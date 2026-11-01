@@ -224,7 +224,7 @@ class Enumerate(GDPAlgorithm):
     def _cutoff(self) -> Optional[float]:
         """The incumbent cutoff for the next configuration (minimization convention).
 
-        ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (default OFF, #1917): ``UB - delta`` with
+        ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (default ON, #1917): ``UB - delta`` with
         ``delta`` half the gap the convergence test allows at ``UB``, so a
         configuration bounded by it keeps the final gap within tolerance. ``None``
         with the flag off or no incumbent yet.

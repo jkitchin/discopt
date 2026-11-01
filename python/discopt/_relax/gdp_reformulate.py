@@ -3208,10 +3208,6 @@ def _reformulate_disjunction_hull(
                 )
 
     # --- Constraint reformulation per disjunct ---
-    lifted = _hull_lifted_ratio_enabled()
-    # ratio[k][name] = t, the lifted v/yhat of disjunct k (one per variable, shared
-    # by every nonlinear row of the disjunct).
-    ratio: list[dict[str, Variable]] = [{} for _ in range(n_disjuncts)]
     # origin_ratio[k][name] = t of the eps-free lifted perspective (#1917), used only
     # by rows whose g(0) is not finite.
     origin_ratio: list[dict[str, Variable]] = [{} for _ in range(n_disjuncts)]
@@ -3317,41 +3313,8 @@ def _reformulate_disjunction_hull(
                     origin_free = False
                 if not origin_free:
                     y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
-                    if lifted:
-                        # DISCOPT_HULL_LIFTED_RATIO (#1917): g sees a bounded t = v/yhat
-                        # (see SolverTuning.hull_lifted_ratio for the exactness proof).
-                        in_body = _collect_variables(con.body)
-                        persp_map: dict[str, Expression] = {}
-                        for vname, v in [
-                            *((n, disagg[k][n]) for n in all_vars),
-                            *local[k].items(),
-                        ]:
-                            if vname not in in_body:
-                                continue
-                            if vname not in ratio[k]:
-                                t = Variable(
-                                    model._fresh_name(f"_hull_{prefix}_t_{vname}_{k}"),
-                                    VarType.CONTINUOUS,
-                                    v.shape,
-                                    v.lb,
-                                    v.ub,
-                                    model,
-                                )
-                                new_vars.append(t)
-                                model._register_generated_variable(t)
-                                new_cons.append(
-                                    Constraint(
-                                        body=v - y_clamp * t,
-                                        sense="==",
-                                        rhs=0.0,
-                                        name=f"_hull_ratio_{prefix}_{vname}_{k}",
-                                    )
-                                )
-                                ratio[k][vname] = t
-                            persp_map[vname] = ratio[k][vname]
-                    else:
-                        persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
-                        persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
+                    persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                    persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
                     subst_body = _substitute_vars(con.body, persp_map)
                     hull_body = subst_body * y_clamp
                     if g0_live is not None:
@@ -3492,14 +3455,6 @@ def _origin_free_hull_row(
         )
         cache[vname] = t
     return g_t * y_k, _wrap(con.rhs) * y_k
-
-
-def _hull_lifted_ratio_enabled() -> bool:
-    """Is the eps-perspective ratio ``v / yhat`` lifted into a bounded variable?
-    (``DISCOPT_HULL_LIFTED_RATIO``, default OFF; #1917)."""
-    from discopt.solver_tuning import current as _tuning
-
-    return bool(_tuning().hull_lifted_ratio)
 
 
 def _hull_conic_quadratic_enabled() -> bool:

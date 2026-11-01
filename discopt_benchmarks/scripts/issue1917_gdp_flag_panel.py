@@ -2,8 +2,8 @@
 """#1917: CLAUDE.md section 5 panels for the default-OFF GDP reformulation flags.
 
 ``DISCOPT_MBIGM_CONDITIONED`` (#1775 G2.3), ``DISCOPT_GDP_BOUND_PRETRANSFORM``
-(G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC``, ``DISCOPT_HULL_LIFTED_RATIO`` and
-``DISCOPT_GDP_DISJUNCT_FBBT`` (G5.1) each change the lowering of a GDP model;
+(G2.4), ``DISCOPT_HULL_CONIC_QUADRATIC`` and ``DISCOPT_GDP_DISJUNCT_FBBT``
+(G5.1) each change the lowering of a GDP model;
 ``DISCOPT_GDP_ENUMERATE_CUTOFF`` (G4.2) acts inside ``gdp_method="enumerate"``,
 so its fire phase marks every instance (there is no lowering to compare). Their
 panel is the ``gdp_parity`` panel
@@ -71,7 +71,6 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_MBIGM_CONDITIONED": ("mbigm",),
     "DISCOPT_GDP_BOUND_PRETRANSFORM": ("big-m", "mbigm"),
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
-    "DISCOPT_HULL_LIFTED_RATIO": ("hull",),
     "DISCOPT_GDP_DISJUNCT_FBBT": ("big-m",),
     "DISCOPT_GDP_ENUMERATE_CUTOFF": ("enumerate",),
 }

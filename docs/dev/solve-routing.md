@@ -295,15 +295,17 @@ contract above.
   (`_relax/gdp_reformulate.py` `_origin_free_hull_row`). The refusal stands when
   `g` is unbounded there. Every row whose `g(0)` is finite keeps the
   eps-perspective, byte for byte.
-- **Default-OFF opt-ins**, each a `SolverTuning` field and an environment
-  variable, each with a row in `docs/dev/flag-retirement-audit.md` and its panel
-  owed:
-  - `DISCOPT_HULL_LIFTED_RATIO` (`hull`): the eps-perspective evaluated at a bounded
-    lifted `t = v / yhat`.
-  - `DISCOPT_GDP_DISJUNCT_FBBT` (every big-M lowering): `M` bounded over the
-    sibling disjuncts' FBBT boxes (`gdp/bounds.py`).
+- **Graduated by their §5 panels** (default ON; `=0` restores the legacy route;
+  data in `docs/dev/data/1917-flag-panel/`):
   - `DISCOPT_GDP_ENUMERATE_CUTOFF` (`enumerate`): each configuration bounded
     against the incumbent.
+- **Default-OFF opt-ins**, each a `SolverTuning` field and an environment
+  variable, each with a row in `docs/dev/flag-retirement-audit.md`:
+  - `DISCOPT_GDP_DISJUNCT_FBBT` (every big-M lowering): `M` bounded over the
+    sibling disjuncts' FBBT boxes (`gdp/bounds.py`).
+- **Retired**: `DISCOPT_HULL_LIFTED_RATIO` (the eps-perspective evaluated at a
+  lifted `t = v / yhat`). Its panel failed cert-clean, and on the Python tree it
+  certified a false optimum; the audit row records why.
 - The GDP-algorithms notebook (`docs/notebooks/gdp_algorithms.ipynb`) walks
   through the native methods, `gdp_options` and these flags on one model.
 
