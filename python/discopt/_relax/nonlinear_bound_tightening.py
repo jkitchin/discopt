@@ -620,14 +620,17 @@ def _apply_integrality(
     # #2081: a binary is an integer too. Clipping it to [0, 1] without rounding
     # kept a rule's floating-point bound -- ``ub = 1 - 1.6e-13`` on one GDP
     # selector, ``lb = 1.6e-13`` on its complement -- and the next consumer that
-    # rounded one side (root/per-node OBBT) inverted the interval. Rounded with
-    # the integrality tolerance a solution is accepted at (``_INTEGER_BOX_TOL``),
-    # so a rule's round-off can never cut 0 or 1 (the #1537 D lesson).
+    # rounded one side (root/per-node OBBT) inverted the interval. Both integer
+    # kinds are rounded with the integrality tolerance a solution is accepted at
+    # (``_INTEGER_BOX_TOL``), so a rule's round-off can never cut an accepted
+    # integer value (the #1537 D lesson). INTEGER used ``1e-9`` here before: a
+    # rule's ``ub = 3 - 5e-8`` floored to 2 and cut ``x = 3``, which the
+    # acceptance test takes.
+    tol = _INTEGER_BOX_TOL
     if var_type == VarType.BINARY:
-        tol = _INTEGER_BOX_TOL
         return max(float(np.ceil(lb - tol)), 0.0), min(float(np.floor(ub + tol)), 1.0)
     if var_type == VarType.INTEGER:
-        return float(np.ceil(lb - 1e-9)), float(np.floor(ub + 1e-9))
+        return float(np.ceil(lb - tol)), float(np.floor(ub + tol))
     return lb, ub
 
 

@@ -2219,17 +2219,22 @@ def obbt_tighten_root(
     total_lp_time = 0.0
     n_rounds = 0
 
-    # #2081: round the INCOMING integer bounds too, with the same ``eps`` the
-    # sweeps below round their own tightenings with. Rounding only what this
+    # #2081: round the INCOMING integer bounds too, with the integrality
+    # tolerance a solution is accepted at (``_INTEGER_BOX_TOL``, never tighter
+    # than this pass's ``eps``), so rounding cannot cut an accepted integer
+    # value. Rounding only what this
     # pass tightens let a non-integral input bound (a binary handed in at
     # ``[0, 1 - 1.6e-13]`` by floating-point FBBT) sit next to a rounded one: the
     # sweep raised ``lb`` to 1, ``ub`` stayed below it, and the next envelope
     # build raised ``Interval lo > hi``. Integer columns hold integers, so this
     # removes no feasible point; a column left with no integer is a proof.
     if np.any(is_int):
+        from discopt._relax.nonlinear_bound_tightening import _INTEGER_BOX_TOL
+
+        in_tol = max(float(eps), _INTEGER_BOX_TOL)
         with np.errstate(invalid="ignore"):
-            lb[is_int] = np.ceil(lb[is_int] - eps)
-            ub[is_int] = np.floor(ub[is_int] + eps)
+            lb[is_int] = np.ceil(lb[is_int] - in_tol)
+            ub[is_int] = np.floor(ub[is_int] + in_tol)
         if np.any(lb[is_int] > ub[is_int]):
             return RootObbtResult(lb, ub, 0, 0, 0.0, True)
 

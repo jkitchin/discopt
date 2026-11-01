@@ -48,6 +48,17 @@ def test_apply_integrality_rounds_binaries():
 
 
 @pytest.mark.smoke
+def test_apply_integrality_rounds_integers_with_the_acceptance_tolerance():
+    # A rule's round-off within the acceptance tolerance (1e-5) never cuts an
+    # integer value the acceptance test takes: ``ub = 3 - 5e-8`` used to floor
+    # to 2 with the old ``1e-9`` tolerance and cut ``k = 3``.
+    assert _apply_integrality(0.0, 3 - 5e-8, VarType.INTEGER) == (0.0, 3.0)
+    assert _apply_integrality(2 + 5e-8, 9.0, VarType.INTEGER) == (2.0, 9.0)
+    # A genuine fractional tightening still rounds inward.
+    assert _apply_integrality(0.4, 3.6, VarType.INTEGER) == (1.0, 3.0)
+
+
+@pytest.mark.smoke
 def test_node_fbbt_returns_integral_integer_bounds():
     m = dm.Model("fbbt_round")
     y = m.binary("y")
@@ -103,6 +114,20 @@ def test_obbt_rounds_incoming_integer_bounds(caplog):
     assert not res.infeasible
     assert res.lb[2] == np.round(res.lb[2]) and res.ub[2] == np.round(res.ub[2])
     assert res.lb[2] <= res.ub[2]
+
+
+@pytest.mark.smoke
+def test_obbt_incoming_rounding_uses_the_acceptance_tolerance():
+    # An incoming binary ub of ``1 - 5e-7`` is within the acceptance tolerance
+    # of 1: with the pass's ``eps=1e-7`` it floored to 0 and cut ``b = 1``.
+    m = dm.Model("obbt_in_tol")
+    x = m.continuous("x", lb=0, ub=4)
+    b = m.binary("b")
+    m.subject_to(x * x >= 1)
+    m.minimize(x + b)
+    res = obbt_tighten_root(m, np.array([0.0, 0.0]), np.array([4.0, 1 - 5e-7]), rounds=1)
+    assert not res.infeasible
+    assert res.ub[1] == 1.0
 
 
 @pytest.mark.smoke
