@@ -394,3 +394,23 @@ def test_zero_coefficient_is_judged_against_the_row_scale():
     issue = [Fraction(c) for c in (M, 1.0, -M, -1.0)]
     assert _sum_is_benign(issue, Fraction(0)) is False
     assert _sum_is_benign(issue, Fraction(1)) is False  # bound ~2**55 >> 2**27
+
+
+@pytest.mark.unit
+def test_refusal_locates_an_unnamed_row():
+    """Review nit on #2094: an unnamed row was reported as ``constraint None``."""
+    from discopt.modeling._exact_polynomial import ParameterCancellationError
+
+    m = dm.Model()
+    z = m.continuous("z", lb=0, ub=10)
+    p = m.parameter("p", value=M)
+    q = m.parameter("q", value=M)
+    m.subject_to(z <= 9, name="cap")
+    m.subject_to(p * z + 0.5 * z - q * z <= 3)
+    m.maximize(z)
+    with pytest.raises(ParameterCancellationError) as err:
+        m.validate()
+    msg = str(err.value)
+    assert "constraint None" not in msg
+    assert "unnamed constraint at _constraints[1]" in msg
+    assert "<= 0" in msg

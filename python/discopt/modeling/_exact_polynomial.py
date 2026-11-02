@@ -873,15 +873,29 @@ def _canonical_cached(holder, attr: str, memo: Optional[dict], what: str):
     return new
 
 
-def canonicalize_constraint(constraint, memo: Optional[dict] = None) -> None:
+def _row_label(constraint, where: Optional[str]) -> str:
+    """How an error names a row: its name, else its position and a body excerpt."""
+    name = getattr(constraint, "name", None)
+    if name is not None:
+        return f"constraint {name!r}"
+    body = str(constraint.body)
+    if len(body) > 60:
+        body = body[:57] + "..."
+    place = f" at {where}" if where else ""
+    return f"unnamed constraint{place} ({body} {constraint.sense} 0)"
+
+
+def canonicalize_constraint(
+    constraint, memo: Optional[dict] = None, where: Optional[str] = None
+) -> None:
     """Replace ``constraint.body`` in place by its canonical form when needed.
 
     In place so the caller's object stays the model's row (identity-keyed APIs).
     Cached on the row by body identity and Parameter values (see
     :func:`_canonical_cached`), so a row is walked once per distinct set of values.
+    ``where`` locates an unnamed row in an error message (e.g. ``_constraints[3]``).
     """
-    name = getattr(constraint, "name", None)
-    new = _canonical_cached(constraint, "body", memo, f"constraint {name!r}")
+    new = _canonical_cached(constraint, "body", memo, _row_label(constraint, where))
     if new is not constraint.body:
         constraint.body = new
 
@@ -889,8 +903,8 @@ def canonicalize_constraint(constraint, memo: Optional[dict] = None) -> None:
 def canonicalize_model(model) -> None:
     """:func:`canonicalize_rows_in` over every row of ``model``, and its objective."""
     memo: dict = {}
-    for item in model._constraints:
-        canonicalize_rows_in(item, memo)
+    for i, item in enumerate(model._constraints):
+        canonicalize_rows_in(item, memo, where=f"_constraints[{i}]")
     obj = model._objective
     if obj is not None:
         new = _canonical_cached(obj, "expression", memo, "objective")
@@ -912,7 +926,7 @@ def canonicalize_model(model) -> None:
                 setattr(aux, attr, new)
 
 
-def canonicalize_rows_in(item, memo: Optional[dict] = None) -> None:
+def canonicalize_rows_in(item, memo: Optional[dict] = None, where: Optional[str] = None) -> None:
     """:func:`canonicalize_constraint` on every row nested in ``item``.
 
     Mirrors ``core._reject_unnormalized_rhs_in``: a ``Constraint``, an
@@ -926,11 +940,11 @@ def canonicalize_rows_in(item, memo: Optional[dict] = None) -> None:
     )
 
     if isinstance(item, Constraint):
-        canonicalize_constraint(item, memo)
+        canonicalize_constraint(item, memo, where)
     elif isinstance(item, _IndicatorConstraint):
-        canonicalize_rows_in(item.constraint, memo)
+        canonicalize_rows_in(item.constraint, memo, where)
     elif isinstance(item, _DisjunctiveConstraint):
-        canonicalize_rows_in(item.disjuncts, memo)
+        canonicalize_rows_in(item.disjuncts, memo, where)
     elif isinstance(item, (list, tuple)):
-        for sub in item:
-            canonicalize_rows_in(sub, memo)
+        for k, sub in enumerate(item):
+            canonicalize_rows_in(sub, memo, f"{where}[{k}]" if where else None)
