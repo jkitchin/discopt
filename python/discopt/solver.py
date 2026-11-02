@@ -9980,132 +9980,8 @@ def _objective_syntactically_convex(model: Model) -> bool:
         return False
 
 
-#: The GDP lowerings the MIP-NLP branch accepts (``solve_model``'s ``gdp_methods``).
-_ROUTE_GDP_LOWERINGS = frozenset({"big-m", "hull", "mbigm", "auto"})
-
-
-def _convex_route_gdp_lowered_enabled() -> bool:
-    """Classify a GDP model's convexity on its lowering for the #1059 route (#1917).
-
-    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED``, **default OFF** (it changes the
-    algorithm a GDP model is solved by, which is bound-changing under CLAUDE.md
-    §5). The convex-MINLP auto-route is decided on the model the caller passed,
-    *before* GDP lowering, and the convexity classifier reports every
-    ``_IndicatorConstraint`` as unproven -- a linear one included. So no model
-    with a disjunction is ever routed, even when the lowering the route would
-    solve (``solve_model``'s ``mip-nlp`` branch lowers before solving) is
-    certified convex row for row. Measured on GDPlib ``batch_processing``
-    (#1917): raw model 450 of 700 rows unproven, its big-M lowering 790 of 790
-    convex. With the flag on, a model carrying GDP constraints under a lowering
-    ``gdp_method`` is classified on ``reformulate_gdp(model, gdp_method)``,
-    which is exactly the model the routed solve runs on.
-    """
-    val = os.environ.get("DISCOPT_CONVEX_ROUTE_GDP_LOWERED", "0").strip().lower()
-    return val in ("1", "true", "on", "yes")
-
-
-def _gdp_inner_rows(constraints: Any) -> list[Constraint]:
-    """The plain rows nested in GDP constraints (indicator and disjunct bodies)."""
-    from discopt.modeling.core import _DisjunctiveConstraint, _IndicatorConstraint
-
-    rows: list[Constraint] = []
-    # Seed from GDP constraints only: a top-level plain row is not a disjunct row
-    # (and the caller's raw mask already judged it).
-    stack: list[Any] = [
-        c for c in constraints if isinstance(c, (_IndicatorConstraint, _DisjunctiveConstraint))
-    ]
-    while stack:
-        c = stack.pop()
-        if isinstance(c, _IndicatorConstraint):
-            stack.append(c.constraint)
-        elif isinstance(c, _DisjunctiveConstraint):
-            for disjunct in c.disjuncts:
-                stack.extend(disjunct)
-        elif isinstance(c, Constraint):
-            rows.append(c)
-        # _SOSConstraint / _LogicalConstraint lower to linear rows only.
-    return rows
-
-
-def _gdp_inner_rows_and_objective_convex(model: Model) -> bool:
-    """Cheap necessary condition for a convex GDP lowering (#1917).
-
-    Classifies the objective and every row nested in a GDP constraint with the
-    same sound classifier (certificate fallback on, root box) the lowered
-    classification uses. ``False`` only ever *declines* the route; ``True``
-    proves nothing, and the caller still classifies the lowering. Abandoned on
-    its own short deadline (below) or the solve deadline, counting as ``False``.
-    """
-    from discopt._relax.convexity.rules import (
-        _LINEAR_CONTEXT_KEY,
-        ConvexityBudgetExceeded,
-        _objective_is_convex,
-        build_linear_context,
-        classify_constraint,
-    )
-
-    # Capped at a quarter of the classification budget (5% of ``time_limit``, at
-    # most 5 s): this check only buys an early *decline*, so it must not eat the
-    # budget the OFF path needs (stranded_gas: ~7 s of certificates before the
-    # first rejected row). Running out declines the route -- sound.
-    budget = float(getattr(model, "_convexity_time_budget", 15.0) or 15.0)
-    deadline = time.perf_counter() + 0.25 * budget
-    solve_deadline = getattr(model, "_solve_deadline", None)
-    if solve_deadline is not None:
-        deadline = min(deadline, float(solve_deadline))
-    cache: dict = {}
-    ctx = build_linear_context(model)
-    if ctx is not None:
-        cache[_LINEAR_CONTEXT_KEY] = ctx
-    try:
-        # Rows first: each is cheap, while the objective certificate can cost
-        # seconds (stranded_gas: 4.5 s).
-        for row in _gdp_inner_rows(model._constraints):
-            if time.perf_counter() > deadline:
-                return False
-            if not classify_constraint(row, model, cache, use_certificate=True):
-                return False
-        return _objective_is_convex(
-            model, cache, use_certificate=True, exact_qp=True, deadline=deadline
-        )
-    except ConvexityBudgetExceeded:
-        return False
-
-
-def _model_has_gdp_constraints(model: Model) -> bool:
-    """Whether ``model`` carries a constraint ``reformulate_gdp`` would lower."""
-    return _model_has_gdp_constraints_list(model._constraints)
-
-
-def _model_has_gdp_constraints_list(constraints: Any) -> bool:
-    """Whether any of ``constraints`` is one ``reformulate_gdp`` would lower."""
-    from discopt.modeling.core import (
-        _DisjunctiveConstraint,
-        _IndicatorConstraint,
-        _LogicalConstraint,
-        _SOSConstraint,
-    )
-
-    return any(
-        isinstance(
-            c,
-            (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint, _LogicalConstraint),
-        )
-        for c in constraints
-    )
-
-
-def _convex_minlp_auto_route(
-    model: Model, gdp_method: Optional[str] = None
-) -> tuple[Optional[str], str, dict[str, Any]]:
+def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
-
-    ``gdp_method`` is the caller's GDP lowering. With
-    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED`` on and ``model`` carrying GDP
-    constraints, every gate below is evaluated on that lowering -- the model the
-    routed solve actually runs on -- instead of on the disjunctive model, whose
-    indicator rows the classifier cannot prove (see
-    :func:`_convex_route_gdp_lowered_enabled`).
 
     Returns ``(method, reason, options)`` where ``method`` is the
     ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
@@ -10217,50 +10093,6 @@ def _convex_minlp_auto_route(
     if not _convex_minlp_route_enabled():
         return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
-    _lowered_note = ""
-    if (
-        gdp_method in _ROUTE_GDP_LOWERINGS
-        and _convex_route_gdp_lowered_enabled()
-        and _model_has_gdp_constraints(model)
-    ):
-        from discopt.transformations import get as _get_transformation
-
-        # Lowering rewrites only the GDP rows; every other row is copied as is.
-        # So when the caller's model already has a NON-GDP row the classifier
-        # rejects, the lowering cannot be certified either -- skip it rather
-        # than pay a second lowering and a full classification to learn that.
-        _raw_known, _raw_convex, _raw_mask = _classify_model_convexity(
-            model, failure_label="convex-MINLP route convexity detection failed"
-        )
-        if _raw_known and not _raw_convex and _raw_mask is not None:
-            if len(_raw_mask) != len(model._constraints):
-                raise AssertionError(
-                    f"convexity mask has {len(_raw_mask)} entries for "
-                    f"{len(model._constraints)} constraints"
-                )
-            if any(
-                not _ok and not _model_has_gdp_constraints_list([_c])
-                for _c, _ok in zip(model._constraints, _raw_mask)
-            ):
-                return None, "not routed: a non-GDP row is not convex", {}
-        # A lowering row is ``body (sense) M-term`` / a perspective of an inner
-        # row, convex only when the inner row is. So one inner row or the
-        # objective the classifier rejects settles it without the lowering,
-        # which is the dominant cost (measured, GDPlib biofuel: lower 4.4 s,
-        # classify lowered 1.8 s; the lowering is non-convex there, and the
-        # OFF path got the remaining budget minus ~7 s of 60 s and lost its
-        # dual bound). Necessary, not sufficient: the lowered classification
-        # below stays authoritative.
-        if not _gdp_inner_rows_and_objective_convex(model):
-            return None, "not routed: a disjunct row or the objective is not convex", {}
-        # #1917: judge the model the route will solve. ``apply`` returns a new
-        # model and leaves the caller's untouched; the route lowers again on its
-        # own (box-tightened) copy, and lowering is deterministic in structure,
-        # so every row-convexity verdict made here holds there (a tighter box
-        # changes big-M constants, which enter linearly, never a Hessian).
-        model = _get_transformation("gdp").apply(model, method=gdp_method)
-        _lowered_note = f" (GDP lowered by {gdp_method}; DISCOPT_CONVEX_ROUTE_GDP_LOWERED)"
-
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
@@ -10332,7 +10164,7 @@ def _convex_minlp_auto_route(
         method,
         (
             f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
-            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master}){_lowered_note}"
+            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
         ),
         {"milp_solver": master},
     )
@@ -15497,7 +15329,7 @@ def solve_model(
                 _auto_route_method,
                 _auto_route_reason,
                 _auto_route_options,
-            ) = _convex_minlp_auto_route(model, gdp_method=gdp_method)
+            ) = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
