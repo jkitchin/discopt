@@ -4830,6 +4830,10 @@ _NLPBB_EXIT_ABS_TOL = 1e-6
 #: the one it would replace. Only float noise is forgiven -- a refinement that
 #: genuinely loses objective is refused whenever the incumbent is already feasible.
 _REFINE_DEGRADE_EPS = 1e-12
+#: #1917: how often NLP-BB's incumbent refine hit its flat 5 s cap and was retried
+#: with the remaining budget, and how often the retry returned ``OPTIMAL``. Read by
+#: panels to show when the retry fires; never consulted by the solver.
+NLPBB_REFINE_RETRY_STATS = {"retries": 0, "recovered": 0}
 # Term-magnitude forgiveness, identical to the two arbiters above: a row built
 # from terms of size ~1e5 carries ~1e-6 of pure cancellation noise, so an
 # absolute-only test at 1e-6 rejects genuinely optimal points (the prob07 lesson
@@ -29260,6 +29264,35 @@ def _solve_nlp_bb(
             nlp_refined = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, refine_opts
             )
+            # #1917: the flat 5 s cap keeps a refine from eating the budget, but a
+            # refine that hits it leaves the unrefined incumbent, which the #1561
+            # exit gate below may refuse -- an uncertified ``feasible`` from a
+            # solve that still had most of its time. Measured on the generated
+            # convex GDP ``cgdp.cover_n8k2_s2`` (hull, conic ON): the first refine
+            # takes 1.7 s unloaded; at load1 60-96 it passed 5 s, the unrefined
+            # point violated row 49 by 5.2e-6, and 3/3 panel rows lost the
+            # certificate (3/3 certified at load1 ~8). So a refine that ends on
+            # TIME_LIMIT with more than its cap left is retried ONCE with the
+            # remaining budget; the retry's result goes through the same adoption
+            # rule and exit gate, so it can only restore a certificate the
+            # unloaded solve earns. Nothing else spends extra time.
+            if nlp_refined.status == SolveStatus.TIME_LIMIT:
+                _refine_left = time_limit - (time.perf_counter() - t_start)
+                if _refine_left > float(refine_opts["max_wall_time"]):
+                    NLPBB_REFINE_RETRY_STATS["retries"] += 1
+                    retry_opts = dict(refine_opts)
+                    retry_opts["max_wall_time"] = max(0.1, _refine_left)
+                    logger.info(
+                        "NLP-BB: incumbent refine hit its %.3g s cap; retrying once "
+                        "with the remaining %.3g s (#1917).",
+                        float(refine_opts["max_wall_time"]),
+                        _refine_left,
+                    )
+                    nlp_refined = _solve_node_nlp_kkt(
+                        evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, retry_opts
+                    )
+                    if nlp_refined.status == SolveStatus.OPTIMAL:
+                        NLPBB_REFINE_RETRY_STATS["recovered"] += 1
             if (
                 nlp_refined.status == SolveStatus.OPTIMAL
                 and nlp_refined.x is not None
