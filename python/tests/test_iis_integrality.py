@@ -376,3 +376,77 @@ def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(m
     assert [p for p, _ in log[-2:]] == ["choose", "off"]
     assert all(st == INF for _, st in log[-2:])
     assert compute_iis(m, include_integrality=True).confirm_fallback is False
+
+
+def _artifact_model():
+    """500000 x = 0.25 with x integer: HiGHS (integrality tolerance 1e-6) accepts
+    x = 5e-7; with exact integers it is infeasible."""
+    m = dm.Model("artifact")
+    x = m.integer("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=1)
+    m.subject_to(500000 * x == 0.25, name="scaled")
+    m.subject_to(y <= 1, name="red_herring")
+    m.minimize(0 * x)
+    return m
+
+
+@pytest.mark.smoke
+def test_tolerance_artifact_is_not_a_feasible_witness():
+    """The repair rounds held integers and re-solves the continuous part; an
+    'Optimal' that only holds through integrality slack yields no witness."""
+    import scipy.sparse as sp
+    from discopt._iis_milp import _Engine
+    from discopt.decomposition._linear import extract_linear
+
+    m = _artifact_model()
+    lin = extract_linear(m)
+    lo = np.where([s in (">=", "==") for s in lin.sense], lin.b, -1e20)
+    hi = np.where([s in ("<=", "==") for s in lin.sense], lin.b, 1e20)
+    eng = _Engine(
+        sp.csr_matrix(lin.A),
+        lo,
+        hi,
+        np.array([0.0, 0.0]),
+        np.array([10.0, 1.0]),
+        np.array([True, False]),
+        {0: np.array([0]), 1: np.array([1])},
+        10.0,
+    )
+    eng._configure({0, 1}, {(1, "lower"), (1, "upper")}, {0})
+    # The point HiGHS returns on such models (osun did exactly this): integral
+    # within its 1e-6 tolerance, satisfying the row only through that slack.
+    # (HiGHS's own root propagation catches this 1-row instance, so the point is
+    # handed to the repair directly rather than relied on from a solve.)
+    slack_point = np.array([5e-7, 0.0])
+    assert abs(500000 * slack_point[0] - 0.25) < 1e-9  # "feasible" to tolerance
+    real_point = eng._point
+    eng._point = lambda: slack_point.copy()
+    try:
+        assert eng._witness() is None
+    finally:
+        eng._point = real_point
+    assert eng.n_repairs == 1 and eng.n_artifacts == 1
+    # A well-conditioned feasible configuration does yield an exact-integer witness.
+    eng._configure({1}, {(1, "lower"), (1, "upper")}, {0})
+    assert eng._solve("off") == highspy.HighsModelStatus.kOptimal
+    w = eng._witness()
+    assert w is not None and w[0] == round(w[0])
+
+
+@pytest.mark.smoke
+def test_artifact_model_is_never_declared_feasible():
+    """Whatever HiGHS's presolve does with it, the engine must not call the
+    exactly-infeasible artifact model feasible on the strength of slack."""
+    from discopt._iis_milp import milp_iis
+
+    try:
+        res = milp_iis(_artifact_model())
+    except ValueError as exc:
+        # Undecided base verdict ("could not prove"), never "the model is feasible".
+        assert "feasible —" not in str(exc), exc
+        return
+    assert 0 in res.constraints  # the scaled row is part of any infeasible subsystem
+    for key, x in res.certificates.items():
+        # Certificates are exact-integer points: held integers are integral.
+        if key != ("integrality", 0):
+            assert x[0] == round(x[0])

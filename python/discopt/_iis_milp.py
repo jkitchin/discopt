@@ -55,6 +55,8 @@ _INF = 1e20  # discopt's unbounded-bound sentinel
 
 #: A solve is not started with less wall time than this left in its budget.
 _MIN_SOLVE_S = 0.05
+#: Primal feasibility tolerance of the exact-integer repair LP (HiGHS default 1e-7).
+_REPAIR_TOL = 1e-9
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -82,6 +84,8 @@ class MilpIIS:
     fallback: bool = False  # "final" confirmation failed; the result is a full "each" rerun
     complete: bool = True  # False: the overall budget stopped filtering (anytime result)
     n_interrupted: int = 0  # solves stopped by the wall-clock guard
+    n_repairs: int = 0  # "feasible" verdicts checked for an exact-integer witness
+    n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
 
 
 class _Engine:
@@ -124,6 +128,10 @@ class _Engine:
         self._recent: deque[float] = deque(maxlen=20)  # wall seconds of recent solves
         self._stop = math.inf
         self.n_interrupted = 0
+        self.n_repairs = 0
+        self.n_artifacts = 0
+        # Held-integer columns and their declared box in the current configuration.
+        self._held = np.zeros(0, dtype=np.int64)
         n, m = col_lb.size, row_lo.size
         inf = highspy.kHighsInf
         self._inf = inf
@@ -193,6 +201,7 @@ class _Engine:
                 ub[j] = self.col_ub[j]
         lb = np.where(lb <= -_INF, -inf, lb)
         ub = np.where(ub >= _INF, inf, ub)
+        self._held = held
         idx_m = np.arange(m, dtype=np.int32)
         idx_n = np.arange(n, dtype=np.int32)
         if m:
@@ -242,6 +251,45 @@ class _Engine:
     def _point(self) -> np.ndarray:
         return np.array(self.h.getSolution().col_value, dtype=np.float64)
 
+    def _witness(self, stop_at: Optional[float] = None) -> Optional[np.ndarray]:
+        """An exact-integer feasible point behind the ``Optimal`` status just
+        returned, or ``None`` if the point is a tolerance artifact.
+
+        HiGHS accepts integers within ``mip_feasibility_tolerance``; with large
+        coefficients that slack hides real row violations (``neos-3135526-osun``:
+        |x_j - round(x_j)| ~ 1e-10 times coefficients up to 5e5 satisfied rows
+        that are violated by 1.4e-5 once the integers are rounded). So a
+        "feasible" verdict must survive repair: fix every held integer at its
+        rounded value and re-solve the continuous part as an LP with presolve
+        off and a 1e-9 feasibility tolerance. Its point has exact integers and is
+        what the caller gets (and what becomes a certificate).
+        """
+        x = self._point()
+        held = self._held
+        if held.size == 0:
+            return x
+        self.n_repairs += 1
+        h, vt = self.h, self.hs.HighsVarType
+        xr = np.round(x[held])
+        idx = held.astype(np.int32)
+        h.changeColsBounds(idx.size, idx, xr, xr)
+        h.changeColsIntegrality(idx.size, idx, np.array([vt.kContinuous] * idx.size))
+        h.setOptionValue("primal_feasibility_tolerance", _REPAIR_TOL)
+        try:
+            ok = self._solve("off", stop_at) == self.hs.HighsModelStatus.kOptimal
+            y = self._point() if ok else None
+        finally:
+            h.setOptionValue("primal_feasibility_tolerance", 1e-7)
+            lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
+            hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
+            h.changeColsBounds(idx.size, idx, lo, hi)
+            h.changeColsIntegrality(idx.size, idx, np.array([vt.kInteger] * idx.size))
+        if y is None:
+            self.n_artifacts += 1
+            return None
+        y[held] = xr  # exact integers, not the LP's representation of them
+        return y
+
     def probe(
         self,
         active_cons: set[int],
@@ -260,7 +308,8 @@ class _Engine:
         MS = self.hs.HighsModelStatus
         ms = self._solve("choose")
         if ms == MS.kOptimal:
-            return False, self._point()
+            x = self._witness()
+            return (False, x) if x is not None else (None, None)
         if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
             return None, None
         if ms == MS.kInfeasible and not self.confirm_each:
@@ -276,9 +325,13 @@ class _Engine:
         if ms2 == MS.kInfeasible:
             return True, None
         if ms2 == MS.kOptimal:
-            if ms == MS.kInfeasible:
-                self.n_refuted += 1
-            return False, self._point()
+            x = self._witness()
+            if x is not None:
+                if ms == MS.kInfeasible:
+                    self.n_refuted += 1
+                return False, x
+        # Undecided: presolve-off neither agreed nor produced an exact-integer
+        # witness against the presolve-on claim. Never acted on.
         self.n_cross_inconclusive += 1
         return None, None
 
@@ -290,16 +343,18 @@ class _Engine:
         stop_at: Optional[float] = None,
     ) -> Optional[bool]:
         """``True`` iff presolve-on AND presolve-off both return ``Infeasible``;
-        ``False`` if either finds the set feasible (an earlier verdict was wrong);
-        ``None`` if undecided (time limit / interrupt)."""
+        ``False`` if either finds an exact-integer feasible point (an earlier
+        verdict was wrong); ``None`` if undecided (time limit, interrupt, or a
+        "feasible" status whose point is a tolerance artifact)."""
         self._configure(active_cons, active_bounds, active_int)
         MS = self.hs.HighsModelStatus
-        verdicts = [self._solve(p, stop_at) for p in ("choose", "off")]
-        if all(v == MS.kInfeasible for v in verdicts):
-            return True
-        if any(v == MS.kOptimal for v in verdicts):
-            return False
-        return None
+        all_infeasible = True
+        for p in ("choose", "off"):
+            st = self._solve(p, stop_at)
+            if st == MS.kOptimal and self._witness(stop_at) is not None:
+                return False
+            all_infeasible &= st == MS.kInfeasible
+        return True if all_infeasible else None
 
 
 def _violation(x, eng: _Engine, rows=None, cols_lb=None, cols_ub=None, cols_int=None):
@@ -662,4 +717,6 @@ def milp_iis(
         confirm=confirm,
         complete=complete,
         n_interrupted=eng.n_interrupted,
+        n_repairs=eng.n_repairs,
+        n_artifacts=eng.n_artifacts,
     )

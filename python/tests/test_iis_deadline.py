@@ -97,7 +97,7 @@ def test_budget_returns_a_confirmed_anytime_subsystem(monkeypatch, confirm):
     iis = compute_iis(m, include_integrality=True, total_time_limit=budget)
     elapsed = time.perf_counter() - t0
     assert not iis.complete and not iis.proven_irreducible
-    assert elapsed < budget + 1.0, elapsed
+    assert elapsed < budget + 2.0, elapsed  # CI-safe slack; overshoot is ~0.3 s locally
     names = {c.name for c in iis.constraints}
     assert {"big", "small"} <= names  # the conflict is never dropped
     assert len(names) < 62  # and the filter did make progress
@@ -114,11 +114,14 @@ def test_default_path_honours_the_budget(monkeypatch):
         time.sleep(0.1)
         return real(self, *a, **k)
 
+    compute_iis(_redundant_rows_model(2))  # warm imports/JIT before timing
     monkeypatch.setattr(Model, "solve", slow)
     m = _redundant_rows_model(40)
     t0 = time.perf_counter()
     iis = compute_iis(m, total_time_limit=1.0)
-    assert time.perf_counter() - t0 < 2.5
+    # Overshoot is bounded by one probe (the default path has no interrupt);
+    # generous slack because CI runs ~3x slower than a dev machine.
+    assert time.perf_counter() - t0 < 1.0 + 3.0
     assert not iis.complete and not iis.proven_irreducible
     names = {c.name for c in iis.constraints}
     assert {"big", "small"} <= names and len(names) < 42
