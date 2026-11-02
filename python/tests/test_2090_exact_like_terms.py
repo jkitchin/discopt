@@ -380,3 +380,17 @@ def test_validate_for_export_does_not_edit_rows():
     body = c.body
     m.validate(for_solve=False)
     assert c.body is body
+
+
+@pytest.mark.unit
+def test_zero_coefficient_is_judged_against_the_row_scale():
+    """Matched pairs cancelling to 0 next to O(1) terms are not a defect (test_1846's
+    hull rows); the issue's ``(t + a) - t - a`` alone in its row is."""
+    from discopt.modeling._exact_polynomial import _sum_is_benign
+
+    pairs = [Fraction(c) for c in (1e-8, -1e-8, -4e-8, 4e-8)]
+    assert _sum_is_benign(pairs, Fraction(1)) is True
+    assert _sum_is_benign(pairs, None) is False
+    issue = [Fraction(c) for c in (M, 1.0, -M, -1.0)]
+    assert _sum_is_benign(issue, Fraction(0)) is False
+    assert _sum_is_benign(issue, Fraction(1)) is False  # bound ~2**55 >> 2**27
