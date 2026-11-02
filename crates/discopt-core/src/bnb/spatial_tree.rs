@@ -38,8 +38,16 @@ use std::time::{Duration, Instant};
 /// bound stuck at the root value.
 struct QNode {
     pb: f64,
-    lo: Vec<f64>,
-    hi: Vec<f64>,
+    /// The box this node branched from, shared with its sibling: a child is its
+    /// parent's box with ONE coordinate overridden (`fix`), so two full copies per
+    /// sibling pair held the same data twice. Materialized when the node is popped
+    /// ([`QNode::into_box`]). On 3,600 s runs whose gap never closes nothing on
+    /// the frontier is dominated (measured: 0 of 7,948 open nodes at a time-limit
+    /// exit), so the frontier is the solve's memory and this halves its box part.
+    base: Rc<NodeBox>,
+    /// The coordinate the branch changed: `(column, upper side?, value)`. `None`
+    /// at the root.
+    fix: Option<(usize, bool, f64)>,
     /// #1913: the integer branch that created this node -- `(column, up, distance
     /// the LP value moved)` -- so its LP bound can update that column's pseudocost.
     /// `None` at the root and for spatial children.
@@ -51,7 +59,7 @@ struct QNode {
     /// parent's optimal basis, or, when the parent's LP decided nothing, the one
     /// the parent itself inherited. `None` unless
     /// [`SpatialTreeConfig::warm_start_children`] is on (and at the root).
-    basis: Option<Rc<Basis>>,
+    basis: Option<Rc<FrontierBasis>>,
     /// The `node_count` id of the node that pushed this one (`None` at the root);
     /// read only by a [`NodeObserver`].
     parent: Option<usize>,
@@ -59,6 +67,62 @@ struct QNode {
     /// were binding at its parent's final LP. They are the last rows of the node
     /// LP, in this order, so `basis` (which was taken over the same rows) fits it.
     cuts: Rc<Vec<FixedRow>>,
+}
+
+/// A frontier node's parent box (see [`QNode::base`]).
+struct NodeBox {
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+}
+
+impl QNode {
+    /// The node's own box: its parent's with the branch's coordinate applied. The
+    /// last sibling to be popped takes the shared vectors without copying them.
+    fn into_box(base: Rc<NodeBox>, fix: Option<(usize, bool, f64)>) -> (Vec<f64>, Vec<f64>) {
+        let (mut lo, mut hi) = match Rc::try_unwrap(base) {
+            Ok(b) => (b.lo, b.hi),
+            Err(shared) => (shared.lo.clone(), shared.hi.clone()),
+        };
+        if let Some((col, upper, v)) = fix {
+            if upper {
+                hi[col] = v;
+            } else {
+                lo[col] = v;
+            }
+        }
+        (lo, hi)
+    }
+}
+
+/// A warm-start basis as the frontier stores it: [`Basis`] with its basic column
+/// indices as `u32` rather than `usize`. They are the larger part of a basis
+/// (`8 m` of `n + 9 m` bytes) and a sibling pair holds one for as long as either
+/// child is open. Converted back to the identical [`Basis`] when a node is
+/// popped, so the LP sees exactly the start it saw before.
+struct FrontierBasis {
+    col_status: Vec<i8>,
+    basic_vars: Vec<u32>,
+}
+
+impl FrontierBasis {
+    fn pack(b: &Basis) -> Self {
+        let basic_vars = b
+            .basic_vars
+            .iter()
+            .map(|&j| u32::try_from(j).expect("LP column index exceeds u32"))
+            .collect();
+        Self {
+            col_status: b.col_status.clone(),
+            basic_vars,
+        }
+    }
+
+    fn unpack(&self) -> Basis {
+        Basis {
+            col_status: self.col_status.clone(),
+            basic_vars: self.basic_vars.iter().map(|&j| j as usize).collect(),
+        }
+    }
 }
 
 impl PartialEq for QNode {
@@ -800,8 +864,11 @@ pub fn solve_spatial_tree_observed(
     let mut heap: BinaryHeap<QNode> = BinaryHeap::new();
     heap.push(QNode {
         pb: f64::NEG_INFINITY,
-        lo: spec.global_lo.clone(),
-        hi: spec.global_hi.clone(),
+        base: Rc::new(NodeBox {
+            lo: spec.global_lo.clone(),
+            hi: spec.global_hi.clone(),
+        }),
+        fix: None,
         br: None,
         sbr: None,
         basis: None,
@@ -859,15 +926,17 @@ pub fn solve_spatial_tree_observed(
 
     while let Some(QNode {
         pb: parent_bound,
-        lo,
-        hi,
+        base,
+        fix,
         br,
         sbr,
-        basis: parent_basis,
+        basis: frontier_basis,
         parent: parent_id,
         cuts: inherited_cuts,
     }) = heap.pop()
     {
+        let (lo, hi) = QNode::into_box(base, fix);
+        let parent_basis: Option<Basis> = frontier_basis.as_deref().map(FrontierBasis::unpack);
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
         {
             // #917: reclaim the caller's withheld #844 reserve, once, and only while
@@ -1039,7 +1108,7 @@ pub fn solve_spatial_tree_observed(
             &hi,
             config.run_obbt,
             &node_opts,
-            parent_basis.as_deref(),
+            parent_basis.as_ref(),
             &inherited_cuts,
         );
         // #1962: the separation loop. Every LP solved here is a relaxation of the
@@ -1085,7 +1154,7 @@ pub fn solve_spatial_tree_observed(
                     &phi,
                     config.run_obbt,
                     &node_opts,
-                    parent_basis.as_deref(),
+                    parent_basis.as_ref(),
                     &inherited_cuts,
                 );
                 if verdict_for(retry.status) != NodeVerdict::Undecided {
@@ -1112,7 +1181,7 @@ pub fn solve_spatial_tree_observed(
                 parent: parent_id,
                 lo: &lo,
                 hi: &hi,
-                start: parent_basis.as_deref(),
+                start: parent_basis.as_ref(),
                 result: &node,
             });
         }
@@ -1177,7 +1246,7 @@ pub fn solve_spatial_tree_observed(
                         parent_bound,
                         spec.integrality[j],
                         None,
-                        parent_basis.clone(),
+                        frontier_basis.clone(),
                         Some(node_count),
                         inherited_cuts.clone(),
                         false,
@@ -1613,7 +1682,7 @@ pub fn solve_spatial_tree_observed(
             bound,
             spec.integrality[split_col],
             int_frac,
-            child_basis.map(Rc::new),
+            child_basis.map(|b| Rc::new(FrontierBasis::pack(&b))),
             Some(node_count),
             child_cuts,
             config.spatial_score,
@@ -1757,7 +1826,7 @@ fn push_children(
     pb: f64,
     is_int: bool,
     frac: Option<f64>,
-    basis: Option<Rc<Basis>>,
+    basis: Option<Rc<FrontierBasis>>,
     parent: Option<usize>,
     cuts: Rc<Vec<FixedRow>>,
     record_spatial: bool,
@@ -1765,20 +1834,19 @@ fn push_children(
     // #1913: a fractional-integer branch records its column, side and the distance
     // the LP value moves, for the pseudocost update when each child is solved.
     let br = |up: bool| frac.map(|f| (split_col, up, if up { 1.0 - f } else { f }));
+    // One copy of the parent box, shared by both children (see `QNode::base`).
+    let base = Rc::new(NodeBox {
+        lo: lo.to_vec(),
+        hi: hi.to_vec(),
+    });
     if is_int {
         // integer: child1 x<=floor, child2 x>=ceil
         let f = (split_at - 0.5).floor();
-        let lo1 = lo.to_vec();
-        let mut hi1 = hi.to_vec();
-        hi1[split_col] = f;
-        let mut lo2 = lo.to_vec();
-        let hi2 = hi.to_vec();
-        lo2[split_col] = f + 1.0;
-        if hi1[split_col] >= lo1[split_col] - 1e-12 {
+        if f >= lo[split_col] - 1e-12 {
             heap.push(QNode {
                 pb,
-                lo: lo1,
-                hi: hi1,
+                base: base.clone(),
+                fix: Some((split_col, true, f)),
                 br: br(false),
                 sbr: None,
                 basis: basis.clone(),
@@ -1786,11 +1854,11 @@ fn push_children(
                 cuts: cuts.clone(),
             });
         }
-        if hi2[split_col] >= lo2[split_col] - 1e-12 {
+        if hi[split_col] >= (f + 1.0) - 1e-12 {
             heap.push(QNode {
                 pb,
-                lo: lo2,
-                hi: hi2,
+                base,
+                fix: Some((split_col, false, f + 1.0)),
                 br: br(true),
                 sbr: None,
                 basis: basis.clone(),
@@ -1808,14 +1876,10 @@ fn push_children(
             };
             record_spatial.then_some((split_col, up, cut))
         };
-        let mut hi1 = hi.to_vec();
-        hi1[split_col] = split_at;
-        let mut lo2 = lo.to_vec();
-        lo2[split_col] = split_at;
         heap.push(QNode {
             pb,
-            lo: lo.to_vec(),
-            hi: hi1,
+            base: base.clone(),
+            fix: Some((split_col, true, split_at)),
             br: None,
             sbr: sbr(false),
             basis: basis.clone(),
@@ -1824,8 +1888,8 @@ fn push_children(
         });
         heap.push(QNode {
             pb,
-            lo: lo2,
-            hi: hi.to_vec(),
+            base,
+            fix: Some((split_col, false, split_at)),
             br: None,
             sbr: sbr(true),
             basis: basis.clone(),
@@ -2309,6 +2373,102 @@ fn clamp_interior(p: f64, lo: f64, hi: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::bnb::spatial_kernel::FixedRow;
+
+    fn drain_boxes(heap: &mut BinaryHeap<QNode>) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let mut out = Vec::new();
+        while let Some(q) = heap.pop() {
+            out.push(QNode::into_box(q.base, q.fix));
+        }
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    }
+
+    /// Frontier compaction: siblings share one copy of the parent box and each
+    /// materializes exactly the box the two full copies used to hold.
+    #[test]
+    fn shared_frontier_box_materializes_each_childs_box() {
+        let (lo, hi) = (vec![0.0, -1.0, 2.0], vec![4.0, 1.0, 3.0]);
+        let cuts = Rc::new(Vec::new());
+        let mut heap = BinaryHeap::new();
+        push_children(
+            &mut heap,
+            &lo,
+            &hi,
+            1,
+            0.25,
+            7.0,
+            false,
+            None,
+            None,
+            None,
+            cuts.clone(),
+            false,
+        );
+        assert_eq!(heap.len(), 2);
+        assert!(heap
+            .iter()
+            .all(|q| q.pb == 7.0 && Rc::strong_count(&q.base) == 2));
+        let boxes = drain_boxes(&mut heap);
+        assert_eq!(
+            boxes,
+            vec![
+                (vec![0.0, -1.0, 2.0], vec![4.0, 0.25, 3.0]),
+                (vec![0.0, 0.25, 2.0], vec![4.0, 1.0, 3.0]),
+            ]
+        );
+
+        // Integer branch: <= floor and >= ceil.
+        push_children(
+            &mut heap,
+            &lo,
+            &hi,
+            0,
+            2.5,
+            0.0,
+            true,
+            Some(0.5),
+            None,
+            None,
+            cuts.clone(),
+            false,
+        );
+        let boxes = drain_boxes(&mut heap);
+        assert_eq!(
+            boxes,
+            vec![
+                (vec![0.0, -1.0, 2.0], vec![2.0, 1.0, 3.0]),
+                (vec![3.0, -1.0, 2.0], vec![4.0, 1.0, 3.0]),
+            ]
+        );
+
+        // An empty integer side is still not pushed: x in [0, 4], split at 4.5
+        // gives x <= 4 (kept) and x >= 5 (empty, dropped).
+        push_children(
+            &mut heap, &lo, &hi, 0, 4.5, 0.0, true, None, None, None, cuts, false,
+        );
+        assert_eq!(heap.len(), 1);
+        let q = heap.pop().unwrap();
+        assert_eq!(
+            Rc::strong_count(&q.base),
+            1,
+            "the dropped sibling holds no reference"
+        );
+        assert_eq!(
+            QNode::into_box(q.base, q.fix),
+            (lo.clone(), vec![4.0, 1.0, 3.0])
+        );
+    }
+
+    /// The frontier's packed basis unpacks to the identical `Basis`.
+    #[test]
+    fn frontier_basis_round_trips_exactly() {
+        let b = Basis {
+            col_status: vec![1, 0, 2, 1, 0],
+            basic_vars: vec![3, 0],
+        };
+        let packed = FrontierBasis::pack(&b);
+        assert_eq!(packed.unpack(), b);
+    }
 
     // minimize w = x*y  s.t.  x + y >= 3,  x,y in [0,2].
     // True feasible region on [0,2]^2 with x+y>=3: the min of x*y is 2 (corners
