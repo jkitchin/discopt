@@ -278,3 +278,47 @@ With coef OFF the Rust loop tails off after round 1: 28 cuts, no bound movement.
 prototype c-MIR+VUB passes at −7111.1, and prototype GMI sits on the line at
 −7198.9. No Rust configuration passes today. The best Rust run is −7508.6, and
 the escalation budget gives −8099.1, which is past the kill line.
+
+## Step 2 result: Rust tableau c-MIR in the driver (2026-11-02)
+
+The separator is `crates/discopt-core/src/lp/tableau_cmir.rs`, default OFF behind
+`DISCOPT_RUST_MILP_TABLEAU_CMIR`. It is a port of the prototype's `cmir` mode. It
+detects variable bounds once on the base rows, with one continuous column, the rest
+integer, and a singleton logical. On MTP it finds 522. For each fractional-basic
+integer, it runs c-MIR on the refined tableau row `w = B^-T e_i`, with both signs.
+
+Probe: `scratchpad/loa/g32/grid2x2.py` and `prof2.py`, on the MTP replay input. It
+measures the root bound at `max_nodes=2`, and it asserts both that `root <= -6797.54`
+and that each c-MIR arm separated (12/12 arms ran).
+
+| budget (total cuts / rounds / select) | coef OFF, c-MIR OFF | OFF, ON | ON, OFF | ON, ON |
+|---|---:|---:|---:|---:|
+| 16 / 1 / no (probe) | -8359.0 | -8359.0 | -8322.1 | -8322.1 |
+| 200 / 10 / select (escalation default) | -8359.0 | -8359.0 | -8099.1 | -8119.3 |
+| unbounded / 15 / no | | | -7547.2 | -7395.1 |
+| unbounded / 30 / no | -8359.0 | -8359.0 | -7508.6 | -7291.9 |
+| unbounded / 15 / select | | | -7446.1 | -7481.7 |
+| unbounded / 30 / select | | | -7383.3 | -7308.8 |
+
+The two unbounded/30/no ON/ON figures differ by version. The first build refused
+1791 of 4398 rows on dynamism and gave -7270.8. The current build relaxes small
+coefficients into the rhs (the HiGHS way) instead of refusing, which leaves 197
+dynamism refusals and gives -7291.9. The table shows the current build.
+
+What the grid says:
+
+1. **Coefficient tightening remains the precondition.** With coef OFF, the loop
+   tails off after round 1 for both separators, and neither moves the root. The
+   prototype found the same with VUB substitution: -8358.5.
+2. **c-MIR's gain in the Rust loop is small and budget-dependent.** It ranges from
+   +238 to +75 at 30 rounds, and from +152 to -36 at 15 rounds. That is about the
+   prototype's +88 over GMI, and the sign is not stable.
+3. **At the escalation default, the budget binds, not the separator.** 200 total
+   cuts are spent by round 3 with or without c-MIR.
+4. **The entry gate is not met.** The best root is -7270.8 against a pass mark of
+   -7200, and that figure needs 10x the default budget. No configuration reaches the
+   kill threshold of -7800 at an unbounded budget. At the default budget, both
+   separators sit at about -8100, which is below that threshold.
+5. **The dominant lever is still the loop, not the separator.** The prototype's
+   plain GMI, at 15 rounds × 200 cuts per round, reached -7198.9. Rust's best GMI
+   is -7383.3, at 30 rounds with selection.

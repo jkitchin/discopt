@@ -139,6 +139,7 @@ timed_phases!(
     RootSolve,
     SepCover,
     SepGomory,
+    SepCmir,
     Augment,
     DiveRepair,
     // A12/RINS: wall time inside the sub-MILP improvement heuristic.
@@ -654,6 +655,24 @@ counters!(
     // argument. Both are needed: the ratio is meaningless without its denominator.
     SepGomoryCutsEmitted,
     SepGomoryCutNnz,
+    // #1917 G3.2 step 2: tableau c-MIR (`DISCOPT_RUST_MILP_TABLEAU_CMIR`).
+    // `SepCmirCalls` is the denominator (separator invocations); `SepCmirRows` the
+    // tableau rows aggregated; `SepCmirCutsEmitted` what left the separator;
+    // `SepCmirVbSubst` how many variable-bound substitutions those rows used (zero
+    // on an ON arm with VUB structure means the VUB half never engaged, §6);
+    // `SepCmirVbFound` the variable bounds detected on the base rows. Refusals:
+    // a free column in the row, no delta giving a usable fractionality, and the
+    // numerics gates (coefficient or rhs size, a non-finite value) and, counted
+    // apart, the dynamism gate.
+    SepCmirCalls,
+    SepCmirRows,
+    SepCmirCutsEmitted,
+    SepCmirVbSubst,
+    SepCmirVbFound,
+    SepCmirRefusedFree,
+    SepCmirNoDelta,
+    SepCmirRefusedNumerics,
+    SepCmirRefusedDynamism,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,

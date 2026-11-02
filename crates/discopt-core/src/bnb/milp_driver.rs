@@ -1955,6 +1955,30 @@ fn solve_milp_node_search(
     // usable. See `substitute_slacks_to_structural`.
     let (m_base0, n_base0) = (m_w, n_w);
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
+    // #1917 G3.2 step 2: tableau c-MIR, default OFF behind
+    // `DISCOPT_RUST_MILP_TABLEAU_CMIR`. Variable bounds are read once from the
+    // base rows (after coefficient tightening, when that is on), before any cut
+    // is appended. Root separation only.
+    let cmir_on = opts.root_cuts > 0 && crate::lp::tableau_cmir::tableau_cmir_enabled();
+    let cmir_vbs: Vec<Vec<crate::lp::tableau_cmir::VarBound>> = if cmir_on {
+        let v = crate::lp::tableau_cmir::detect_variable_bounds(
+            &csc_w,
+            m_base0,
+            n_base0,
+            ns,
+            &b_w,
+            &l_w,
+            &u_w,
+            &is_int_full,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::SepCmirVbFound,
+            v.iter().map(|x| x.len() as u64).sum(),
+        );
+        v
+    } else {
+        Vec::new()
+    };
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
     if opts.root_cuts > 0 {
@@ -2112,6 +2136,24 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                     1e7,
                 ));
+            }
+            if cmir_on {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                let (cm, _st) = crate::lp::tableau_cmir::separate_tableau_cmir(
+                    &csc_w,
+                    m_w,
+                    n_w,
+                    &l_w,
+                    &u_w,
+                    &b_w,
+                    &root.basis,
+                    &is_int_full,
+                    &root.x,
+                    &cmir_vbs,
+                    opts.simplex.tol,
+                    1e7,
+                );
+                cuts.extend(cm);
             }
             // Rewrite every separated cut over structural columns only, before
             // anything downstream looks at it. Doing it here (rather than at
