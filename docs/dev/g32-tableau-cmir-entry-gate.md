@@ -211,3 +211,70 @@ and it shows up only on a perturbed LP (the coef-tightened rows of two masters).
 stays recorded above as a known fragility of NS over the default box, not as a G3.2
 lever. It does not explain the mixed step-1 panel either. Neither of the two node
 regressions (disease_model, strip_packing_concrete) is in the affected set.
+
+## Step 2 entry experiment: attribution grid (2026-11-02)
+
+The lead asked that step 2 attribute its gain: does c-MIR need coefficient
+tightening, or is coefficient tightening only riding along? This section answers
+that with a prototype, before any Rust c-MIR is written (§4).
+
+**Instrument.** `g32/tab_cmir_entry2.py` (session scratchpad). Each round it solves
+the LP with HiGHS, takes `λ = B⁻ᵀe_i` for every fractional basic integer, and
+aggregates `λᵀ(Ax − r) = 0` over structural columns and row activities. It then
+generates a cut in one of three modes:
+
+* `gmi`: δ = 1 only, which is GMI on the tableau row;
+* `cmir_novub`: HiGHS-style δ search with complementation;
+* `cmir`: the same plus variable-upper-bound substitution `x ≤ Σ U_v y_v`.
+
+It keeps the 200 most efficacious cuts per round and runs 15 rounds. Every kept
+cut is checked against the HiGHS-proven optimum (−6797.5397), and the run asserts
+that the check count is positive. Inputs:
+
+* `mtp_raw` is the MTP master as captured.
+* `mtp_rcoef8` approximates what the Rust driver sees with
+  `DISCOPT_RUST_MILP_COEF_TIGHTEN=1`: 8 FBBT sweeps (the Rust presolve cap), then
+  the Rust pass through `milp_coef_tighten_csc_py`. It tightens 390 coefficients
+  in 282 rows, the same count the driver reports in step 1.
+
+| model \ separator (prototype, 15 rounds) | `gmi` (δ=1) | `cmir_novub` | `cmir` (+VUB) | validity checks |
+|---|---:|---:|---:|---:|
+| coef OFF (`mtp_raw`)    | −8308.5 | −8235.0 | −8358.5 | 830 / 875 / 871 |
+| coef ON (`mtp_rcoef8`)  | **−7198.9** | −7211.9 | **−7111.1** | 2022 / 2052 / 2006 |
+| FBBT-20 + coef (HiGHS ref. −7166.3) | — | −7159.7 | −7145.4 | 1672 / 1798 |
+
+No cut removed the known optimum in any arm.
+
+The same master through the **Rust driver** (`g32/rustgrid.py`, root bound at
+`max_nodes=2`, its existing GMI + cover loop, `PROBE_DONE 10`):
+
+| Rust root cut budget (cuts/rounds/select) | coef OFF | coef ON |
+|---|---:|---:|
+| 16 / 1 / no (legacy probe profile) | −8359.0 | −8322.1 |
+| 200 / 10 / yes (`_STRONG_CUT_PROFILE`, the escalation) | −8359.0 | −8099.1 |
+| 200 / 15 / yes | −8359.0 | −8099.1 |
+| 2000 / 15 / no | −8359.0 | −7547.2 |
+| 2000 / 30 / no | −8359.0 | −7508.6 (30 rounds, 1678 GMI cuts emitted) |
+
+With coef OFF the Rust loop tails off after round 1: 28 cuts, no bound movement.
+
+**Attribution.**
+
+1. *Coefficient tightening is the lever, not a passenger.* Without it, no
+   separator moves the root by more than 124 (best −8235.0), in the prototype or
+   in Rust. With it, plain tableau GMI in the prototype reaches −7198.9.
+2. *c-MIR needs coefficient tightening.* With coef OFF, c-MIR+VUB is −8358.5,
+   no better than the bare LP. Its increment over GMI exists only with coef ON,
+   and there it is **+87.8** (−7198.9 → −7111.1).
+3. *δ search without VUB substitution is worth nothing here* (−7211.9 against
+   −7198.9 for GMI). The c-MIR increment is VUB substitution.
+4. *The largest gap is in the Rust cut loop, not the separator.* The same
+   separator family (tableau GMI) on the same tightened model reaches −7198.9 in
+   the prototype loop. The Rust loop reaches −7508.6 at a 2000/30 budget and
+   −8099.1 at the budget the solver actually escalates to. That is a 310 gap, or
+   900 at the escalation budget, against c-MIR's 88.
+
+**Against the pre-registered gate** (pass ≥ −7200, kill < −7800). On coef ON,
+prototype c-MIR+VUB passes at −7111.1, and prototype GMI sits on the line at
+−7198.9. No Rust configuration passes today. The best Rust run is −7508.6, and
+the escalation budget gives −8099.1, which is past the kill line.
