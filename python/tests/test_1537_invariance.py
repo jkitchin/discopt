@@ -198,7 +198,7 @@ class KnownFalseCertificate(AssertionError):
     bug by failing for the wrong reason (#1546 review)."""
 
 
-def _run_panel(cases, transforms, time_limit, *, require_certified_base=False):
+def _run_panel(cases, transforms, time_limit, *, require_certified_base=False, base_cache=None):
     """Solve each case and its transforms; return ``(certified, lost, violations)``.
 
     ``certified`` counts comparisons whose transformed solve was CERTIFIED and
@@ -206,10 +206,20 @@ def _run_panel(cases, transforms, time_limit, *, require_certified_base=False):
     not the number of solves (#1546 review: a cell where every certificate is
     lost used to pass while comparing nothing). Every transformed result, certified
     or not, goes through :func:`invariance_violation` (bound and incumbent too).
+
+    ``base_cache`` (label -> base result) lets several transform groups of one
+    instance compare against ONE base solve instead of re-solving it per group
+    (#2089). The transforms were already applied to the solved model within a
+    group, so sharing it across groups changes nothing a cell compares.
     """
     certified, lost, violations = 0, [], []
     for label, model in cases:
-        base = model.solve(time_limit=time_limit)
+        if base_cache is not None and label in base_cache:
+            base = base_cache[label]
+        else:
+            base = model.solve(time_limit=time_limit)
+            if base_cache is not None:
+                base_cache[label] = base
         if not base.gap_certified:
             if require_certified_base:
                 # A known cell exists to exercise its bug, so a base that stops
@@ -299,13 +309,66 @@ KNOWN_CORPUS: dict = {
 }
 
 
+#: Corpus instances whose BASE solve does not certify within the panel's budget,
+#: so every cell of theirs compared nothing and skipped -- after spending the whole
+#: 20 s budget per group to find that out. 36 of the 148 cells, ~750 s of a 4,730 s
+#: lane, measured on the #2089 profile (``main`` a2e3b46, ``-n 3``). Each was then
+#: re-solved alone at 3x the budget (60 s, 3 workers, 4 cores) and none certified;
+#: the status and gap at 60 s are recorded so the next reader can see how far each
+#: one is. ``ex8_5_3`` (rel. gap ~4e-4) and ``nvs05`` (~9e-4) are the closest.
+#:
+#: Skipped at COLLECTION: they cost nothing, and still show up as skips with this
+#: reason. Set ``DISCOPT_INVARIANCE_FULL_CORPUS=1`` to run them anyway; that is how
+#: to re-derive the list after a solver change that may make one certify.
+BASE_UNCERTIFIED: dict[str, str] = {
+    "4stufen.nl": "time_limit, no incumbent",
+    "bchoco06.nl": "time_limit, no incumbent",
+    "bchoco07.nl": "time_limit, no incumbent",
+    "bchoco08.nl": "time_limit, no incumbent",
+    "beuster.nl": "time_limit, no incumbent",
+    "casctanks.nl": "feasible 9.163 / bound 6.041",
+    "contvar.nl": "time_limit, no incumbent",
+    "ex8_5_3.nl": "feasible -0.0041354 / bound -0.0041372",
+    "hda.nl": "time_limit, no incumbent",
+    "heatexch_gen1.nl": "feasible 154896 / bound 38184",
+    "heatexch_gen2.nl": "feasible 635839 / bound 555768",
+    "heatexch_gen3.nl": "time_limit, no incumbent",
+    "nvs05.nl": "feasible 5.4709 / bound 5.4660",
+    "prolog.nl": "feasible, no dual bound",
+    "tspn08.nl": "feasible 290.57 / bound 271.51",
+    "tspn10.nl": "feasible 225.13 / bound 165.25",
+    "tspn12.nl": "feasible 262.65 / bound 201.08",
+    "wallfix.nl": "feasible 1.0000 / bound 0.0",
+}
+
+_FULL_CORPUS = os.environ.get("DISCOPT_INVARIANCE_FULL_CORPUS", "") == "1"
+
+#: One base solve per instance, shared by its transform groups (``_run_panel``).
+_CORPUS_BASES: dict = {}
+
+
 def _corpus_params():
     for path in CORPUS:
         for group in TRANSFORM_GROUPS:
             name = os.path.basename(path)
             known = KNOWN_CORPUS.get((name, group))
             marks = [_xfail(*known)] if known else []
+            if name in BASE_UNCERTIFIED and not known and not _FULL_CORPUS:
+                marks.append(
+                    pytest.mark.skip(
+                        reason=f"base does not certify at 3x the panel budget "
+                        f"({BASE_UNCERTIFIED[name]} at 60 s): nothing to compare "
+                        "(DISCOPT_INVARIANCE_FULL_CORPUS=1 runs it)"
+                    )
+                )
             yield pytest.param(path, group, marks=marks, id=f"{name}-{group}")
+
+
+def test_base_uncertified_list_names_corpus_instances():
+    """A renamed or removed corpus file must not leave a dead entry behind."""
+    names = {os.path.basename(p) for p in CORPUS}
+    assert CORPUS, "the corpus did not load"
+    assert set(BASE_UNCERTIFIED) <= names, sorted(set(BASE_UNCERTIFIED) - names)
 
 
 @pytest.mark.slow
@@ -314,9 +377,20 @@ def _corpus_params():
 def test_corpus_panel(path, group):
     name = os.path.basename(path)
     known = (name, group) in KNOWN_CORPUS
-    cases = [(name, dm.from_nl(path))]
+    if path not in _CORPUS_BASES:
+        _CORPUS_BASES[path] = (dm.from_nl(path), {})
+    model, base_cache = _CORPUS_BASES[path]
+    if group == list(TRANSFORM_GROUPS)[-1]:
+        # Parametrize order runs every group of an instance back to back; the
+        # last one releases the solved model (a cache miss only re-solves).
+        del _CORPUS_BASES[path]
+    cases = [(name, model)]
     certified, lost, violations = _run_panel(
-        cases, TRANSFORM_GROUPS[group], time_limit=20, require_certified_base=known
+        cases,
+        TRANSFORM_GROUPS[group],
+        time_limit=20,
+        require_certified_base=known,
+        base_cache=base_cache,
     )
     for row in lost:
         print("  lost:", row)

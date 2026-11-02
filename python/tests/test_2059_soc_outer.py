@@ -11,7 +11,8 @@ its quadratic support as a ball ``||L x + v|| <= rho`` and gives the HiGHS
   per tower level of the ball;
 * the recogniser's gates (convex, ball-shaped, scalar, at least two terms);
 * the master wiring on a small cardinality portfolio, and the issue's instance
-  (``slow``): portfol_classical050_1 certifies at 120 s.
+  (``slow``): portfol_classical050_1 certifies (#2089: no longer pinned to a
+  120 s clock, which the CI runner could not meet).
 """
 
 from __future__ import annotations
@@ -210,9 +211,23 @@ def test_master_carries_the_block_and_certifies(monkeypatch):
     assert on.bound >= on.objective - 1e-9
 
 
+#: The solve's budget is a BACKSTOP, not the quality bar (#2089). The bar is
+#: "certifies"; how long a runner takes is not what this test measures. 120 s was
+#: the issue's budget and the measured time was 86.8-89.1 s on a dev machine, a
+#: 1.35x margin; the dispatch-only CI runner did not certify within it (run
+#: 41359386341: ``feasible``, the optimum found, bound -0.09488 -- sound, just
+#: unfinished). Re-measured at load < 1: 72.4 s at ``time_limit=120`` and
+#: 72.8 / 75.1 s at 300, with the identical objective and bound, so a larger
+#: budget changes nothing but the stopping time. Below the full solve there is
+#: no partial signal to assert instead: at 15/30/45/60 s the reported bound stays
+#: at the presolve-free cross-solve's -0.09750 until the second master tree and
+#: the independent confirmation have both finished.
+_CERTIFY_BACKSTOP_S = 400.0
+
+
 @pytest.mark.slow
 @pytest.mark.correctness
-def test_issue_2059_portfol_classical050_1_certifies_at_120s(monkeypatch):
+def test_issue_2059_portfol_classical050_1_certifies(monkeypatch):
     """The issue's instance: uncertified at 120 s before #2059 (route bound
     -0.096817 withdrawn, fallback -0.097767; optimum -0.0947601179)."""
     pytest.importorskip("highspy")
@@ -223,13 +238,26 @@ def test_issue_2059_portfol_classical050_1_certifies_at_120s(monkeypatch):
     nl = DATA / "portfol_classical050_1.nl"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = from_nl(str(nl)).solve(time_limit=120)
-    assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
-    assert r.objective == pytest.approx(-0.0947601179, rel=1e-4)
-    assert r.bound <= -0.0947601179 + 1e-6
+        r = from_nl(str(nl)).solve(time_limit=_CERTIFY_BACKSTOP_S)
+    # Soundness first: these hold whether or not it certified.
+    assert r.bound <= -0.0947601179 + 1e-6, f"UNSOUND: bound {r.bound} above the optimum"
     fresh = from_nl(str(nl))
     flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in fresh._variables])
     assert verify_point(fresh, flat).ok
+    assert r.objective == pytest.approx(-0.0947601179, rel=1e-4)
+    clock = r.wall_time is not None and r.wall_time >= 0.95 * _CERTIFY_BACKSTOP_S
+    assert r.status == "optimal" and r.gap_certified, (
+        f"{r.status}, objective {r.objective}, bound {r.bound}, {r.wall_time:.1f} s: "
+        + (
+            f"CLOCK-BOUND -- the {_CERTIFY_BACKSTOP_S:g} s backstop fired (~5x the "
+            "measured 72-89 s); suspect the runner before the solver"
+            if clock
+            else "stopped short of the backstop without certifying -- a regression"
+        )
+    )
+    assert (r.solver_stats or {}).get("oa/soc_outer_rows", 0) >= 1, (
+        "certified without the #2059 block -- this test no longer measures it"
+    )
 
 
 def test_a_covered_row_does_not_also_get_the_split_row_epigraph(monkeypatch):

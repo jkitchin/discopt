@@ -39,8 +39,16 @@ use std::time::{Duration, Instant};
 /// bound stuck at the root value.
 struct QNode {
     pb: f64,
-    lo: Vec<f64>,
-    hi: Vec<f64>,
+    /// The box this node branched from, shared with its sibling: a child is its
+    /// parent's box with ONE coordinate overridden (`fix`), so two full copies per
+    /// sibling pair held the same data twice. Materialized when the node is popped
+    /// ([`QNode::into_box`]). On 3,600 s runs whose gap never closes nothing on
+    /// the frontier is dominated (measured: 0 of 7,948 open nodes at a time-limit
+    /// exit), so the frontier is the solve's memory and this halves its box part.
+    base: Rc<NodeBox>,
+    /// The coordinate the branch changed: `(column, upper side?, value)`. `None`
+    /// at the root.
+    fix: Option<(usize, bool, f64)>,
     /// #1913: the integer branch that created this node -- `(column, up, distance
     /// the LP value moved)` -- so its LP bound can update that column's pseudocost.
     /// `None` at the root and for spatial children.
@@ -52,7 +60,7 @@ struct QNode {
     /// parent's optimal basis, or, when the parent's LP decided nothing, the one
     /// the parent itself inherited. `None` unless
     /// [`SpatialTreeConfig::warm_start_children`] is on (and at the root).
-    basis: Option<Rc<Basis>>,
+    basis: Option<Rc<FrontierBasis>>,
     /// The `node_count` id of the node that pushed this one (`None` at the root);
     /// read only by a [`NodeObserver`].
     parent: Option<usize>,
@@ -60,6 +68,65 @@ struct QNode {
     /// were binding at its parent's final LP. They are the last rows of the node
     /// LP, in this order, so `basis` (which was taken over the same rows) fits it.
     cuts: Rc<Vec<FixedRow>>,
+}
+
+/// A frontier node's parent box (see [`QNode::base`]).
+struct NodeBox {
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+}
+
+impl QNode {
+    /// The node's own box: its parent's with the branch's coordinate applied. The
+    /// last sibling to be popped takes the shared vectors without copying them.
+    fn into_box(base: Rc<NodeBox>, fix: Option<(usize, bool, f64)>) -> (Vec<f64>, Vec<f64>) {
+        let (mut lo, mut hi) = match Rc::try_unwrap(base) {
+            Ok(b) => (b.lo, b.hi),
+            Err(shared) => (shared.lo.clone(), shared.hi.clone()),
+        };
+        if let Some((col, upper, v)) = fix {
+            if upper {
+                hi[col] = v;
+            } else {
+                lo[col] = v;
+            }
+        }
+        (lo, hi)
+    }
+}
+
+/// A warm-start basis as the frontier stores it: [`Basis`] with its basic column
+/// indices as `u32` rather than `usize`. They are the larger part of a basis
+/// (`8 m` of `n + 9 m` bytes) and a sibling pair holds one for as long as either
+/// child is open. Converted back to the identical [`Basis`] when a node is
+/// popped, so the LP sees exactly the start it saw before.
+struct FrontierBasis {
+    col_status: Vec<i8>,
+    basic_vars: Vec<u32>,
+}
+
+impl FrontierBasis {
+    fn pack(b: &Basis) -> Self {
+        let basic_vars = b
+            .basic_vars
+            .iter()
+            // An LP with more than 2^32 columns cannot be held in memory by this
+            // kernel (its dense per-column vectors alone would be > 32 GB), so the
+            // panic is unreachable in practice; it is a loud guard, not a fallback.
+            .map(|&j| u32::try_from(j).expect("LP column index exceeds u32"))
+            .collect();
+        Self {
+            col_status: b.col_status.clone(),
+            basic_vars,
+        }
+    }
+
+    fn unpack(&self) -> Basis {
+        Basis {
+            col_status: self.col_status.clone(),
+            basic_vars: self.basic_vars.iter().map(|&j| j as usize).collect(),
+        }
+    }
 }
 
 impl PartialEq for QNode {
@@ -203,6 +270,12 @@ fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
 pub struct SpatialTreeConfig {
     /// Maximum nodes to process before returning [`TreeStatus::NodeLimit`].
     pub max_nodes: usize,
+    /// Most open (frontier) nodes the search may hold (#2092): a memory budget
+    /// expressed in nodes by the caller. Reaching it ends the search exactly as
+    /// `max_nodes` does -- [`TreeStatus::NodeLimit`], the incumbent, and the
+    /// rigorous frontier bound -- with [`SpatialTreeResult::frontier_capped`]
+    /// set. `usize::MAX` (the default) never binds.
+    pub max_open_nodes: usize,
     /// Absolute monotonic-clock deadline. Checked before every node so an expired
     /// solve returns its best incumbent and rigorous frontier bound without ever
     /// claiming [`TreeStatus::Optimal`]. `None` means no wall-clock limit.
@@ -376,6 +449,7 @@ impl Default for SpatialTreeConfig {
     fn default() -> Self {
         Self {
             max_nodes: 100_000,
+            max_open_nodes: usize::MAX,
             deadline: None,
             gap_tol: 1e-6,
             rel_gap_tol: f64::INFINITY,
@@ -521,6 +595,9 @@ pub struct SpatialTreeResult {
     pub n_prop_retries: usize,
     /// #1995: pre-propagation re-solves that decided (see above).
     pub n_prop_retry_decided: usize,
+    /// #2092: the search stopped because the open frontier reached
+    /// [`SpatialTreeConfig::max_open_nodes`] (status [`TreeStatus::NodeLimit`]).
+    pub frontier_capped: bool,
 }
 
 /// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
@@ -794,6 +871,8 @@ pub fn solve_spatial_tree_observed(
     // #1995: pre-propagation re-solves of undecided node LPs (probe counters).
     let mut n_prop_retries = 0usize;
     let mut n_prop_retry_decided = 0usize;
+    // #2092: set only on the frontier-budget exit below.
+    let mut frontier_capped = false;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -801,8 +880,11 @@ pub fn solve_spatial_tree_observed(
     let mut heap: BinaryHeap<QNode> = BinaryHeap::new();
     heap.push(QNode {
         pb: f64::NEG_INFINITY,
-        lo: spec.global_lo.clone(),
-        hi: spec.global_hi.clone(),
+        base: Rc::new(NodeBox {
+            lo: spec.global_lo.clone(),
+            hi: spec.global_hi.clone(),
+        }),
+        fix: None,
         br: None,
         sbr: None,
         basis: None,
@@ -860,11 +942,11 @@ pub fn solve_spatial_tree_observed(
 
     while let Some(QNode {
         pb: parent_bound,
-        lo,
-        hi,
+        base,
+        fix,
         br,
         sbr,
-        basis: parent_basis,
+        basis: frontier_basis,
         parent: parent_id,
         cuts: inherited_cuts,
     }) = heap.pop()
@@ -947,6 +1029,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -957,7 +1040,12 @@ pub fn solve_spatial_tree_observed(
                 continue;
             }
         }
-        if node_count >= config.max_nodes {
+        // #2092: the frontier memory budget ends the search the same way the node
+        // budget does; `heap` holds every open node but this popped one.
+        if heap.len() >= config.max_open_nodes {
+            frontier_capped = true;
+        }
+        if node_count >= config.max_nodes || frontier_capped {
             // Global bound = min(closed regions, open frontier, this unpopped node).
             // Under best-bound the heap top is the frontier minimum, but take the full
             // min defensively.
@@ -994,6 +1082,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             };
         }
         node_count += 1;
@@ -1004,8 +1093,15 @@ pub fn solve_spatial_tree_observed(
         // LP and the children see; a box proven empty under the cutoff is fathomed
         // with region lower bound `incumbent` (no feasible point beats it there),
         // or `+inf` when no cutoff was active (genuinely empty region).
-        let mut lo = lo;
-        let mut hi = hi;
+        // Materialized only now, past the deadline exit and the parent-bound
+        // fathom above: a node fathomed straight off the heap never copies its
+        // box or its basis, and dropping its `Rc<NodeBox>` frees the sibling's
+        // share early.
+        let (mut lo, mut hi) = QNode::into_box(base, fix);
+        // One `Basis` allocation per evaluated node (the `u32` indices are
+        // widened back), where the LP used to borrow the shared `Rc<Basis>`:
+        // O(n + m), negligible next to the node LP it warm-starts.
+        let parent_basis: Option<Basis> = frontier_basis.as_deref().map(FrontierBasis::unpack);
         // #1995: the box as the node was pushed, kept only under the retry flag.
         let mut pre_propagation = (config.undecided_unpropagated_retry && config.run_propagation)
             .then(|| (lo.clone(), hi.clone()));
@@ -1040,7 +1136,7 @@ pub fn solve_spatial_tree_observed(
             &hi,
             config.run_obbt,
             &node_opts,
-            parent_basis.as_deref(),
+            parent_basis.as_ref(),
             &inherited_cuts,
         );
         // #1962: the separation loop. Every LP solved here is a relaxation of the
@@ -1086,7 +1182,7 @@ pub fn solve_spatial_tree_observed(
                     &phi,
                     config.run_obbt,
                     &node_opts,
-                    parent_basis.as_deref(),
+                    parent_basis.as_ref(),
                     &inherited_cuts,
                 );
                 if verdict_for(retry.status) != NodeVerdict::Undecided {
@@ -1113,7 +1209,7 @@ pub fn solve_spatial_tree_observed(
                 parent: parent_id,
                 lo: &lo,
                 hi: &hi,
-                start: parent_basis.as_deref(),
+                start: parent_basis.as_ref(),
                 result: &node,
             });
         }
@@ -1178,7 +1274,7 @@ pub fn solve_spatial_tree_observed(
                         parent_bound,
                         spec.integrality[j],
                         None,
-                        parent_basis.clone(),
+                        frontier_basis.clone(),
                         Some(node_count),
                         inherited_cuts.clone(),
                         false,
@@ -1407,6 +1503,7 @@ pub fn solve_spatial_tree_observed(
                                     n_int_probe_improvements,
                                     n_prop_retries,
                                     n_prop_retry_decided,
+                                    frontier_capped,
                                 };
                             }
                         }
@@ -1622,7 +1719,7 @@ pub fn solve_spatial_tree_observed(
             bound,
             spec.integrality[split_col],
             int_frac,
-            child_basis.map(Rc::new),
+            child_basis.map(|b| Rc::new(FrontierBasis::pack(&b))),
             Some(node_count),
             child_cuts,
             config.spatial_score,
@@ -1675,6 +1772,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             }
         }
         None => SpatialTreeResult {
@@ -1708,6 +1806,7 @@ pub fn solve_spatial_tree_observed(
             n_int_probe_improvements,
             n_prop_retries,
             n_prop_retry_decided,
+            frontier_capped,
         },
     }
 }
@@ -1766,7 +1865,7 @@ fn push_children(
     pb: f64,
     is_int: bool,
     frac: Option<f64>,
-    basis: Option<Rc<Basis>>,
+    basis: Option<Rc<FrontierBasis>>,
     parent: Option<usize>,
     cuts: Rc<Vec<FixedRow>>,
     record_spatial: bool,
@@ -1774,20 +1873,19 @@ fn push_children(
     // #1913: a fractional-integer branch records its column, side and the distance
     // the LP value moves, for the pseudocost update when each child is solved.
     let br = |up: bool| frac.map(|f| (split_col, up, if up { 1.0 - f } else { f }));
+    // One copy of the parent box, shared by both children (see `QNode::base`).
+    let base = Rc::new(NodeBox {
+        lo: lo.to_vec(),
+        hi: hi.to_vec(),
+    });
     if is_int {
         // integer: child1 x<=floor, child2 x>=ceil
         let f = (split_at - 0.5).floor();
-        let lo1 = lo.to_vec();
-        let mut hi1 = hi.to_vec();
-        hi1[split_col] = f;
-        let mut lo2 = lo.to_vec();
-        let hi2 = hi.to_vec();
-        lo2[split_col] = f + 1.0;
-        if hi1[split_col] >= lo1[split_col] - 1e-12 {
+        if f >= lo[split_col] - 1e-12 {
             heap.push(QNode {
                 pb,
-                lo: lo1,
-                hi: hi1,
+                base: base.clone(),
+                fix: Some((split_col, true, f)),
                 br: br(false),
                 sbr: None,
                 basis: basis.clone(),
@@ -1795,11 +1893,11 @@ fn push_children(
                 cuts: cuts.clone(),
             });
         }
-        if hi2[split_col] >= lo2[split_col] - 1e-12 {
+        if hi[split_col] >= (f + 1.0) - 1e-12 {
             heap.push(QNode {
                 pb,
-                lo: lo2,
-                hi: hi2,
+                base,
+                fix: Some((split_col, false, f + 1.0)),
                 br: br(true),
                 sbr: None,
                 basis: basis.clone(),
@@ -1817,14 +1915,10 @@ fn push_children(
             };
             record_spatial.then_some((split_col, up, cut))
         };
-        let mut hi1 = hi.to_vec();
-        hi1[split_col] = split_at;
-        let mut lo2 = lo.to_vec();
-        lo2[split_col] = split_at;
         heap.push(QNode {
             pb,
-            lo: lo.to_vec(),
-            hi: hi1,
+            base: base.clone(),
+            fix: Some((split_col, true, split_at)),
             br: None,
             sbr: sbr(false),
             basis: basis.clone(),
@@ -1833,8 +1927,8 @@ fn push_children(
         });
         heap.push(QNode {
             pb,
-            lo: lo2,
-            hi: hi.to_vec(),
+            base,
+            fix: Some((split_col, false, split_at)),
             br: None,
             sbr: sbr(true),
             basis: basis.clone(),
@@ -2318,6 +2412,102 @@ fn clamp_interior(p: f64, lo: f64, hi: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::bnb::spatial_kernel::FixedRow;
+
+    fn drain_boxes(heap: &mut BinaryHeap<QNode>) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let mut out = Vec::new();
+        while let Some(q) = heap.pop() {
+            out.push(QNode::into_box(q.base, q.fix));
+        }
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    }
+
+    /// Frontier compaction: siblings share one copy of the parent box and each
+    /// materializes exactly the box the two full copies used to hold.
+    #[test]
+    fn shared_frontier_box_materializes_each_childs_box() {
+        let (lo, hi) = (vec![0.0, -1.0, 2.0], vec![4.0, 1.0, 3.0]);
+        let cuts = Rc::new(Vec::new());
+        let mut heap = BinaryHeap::new();
+        push_children(
+            &mut heap,
+            &lo,
+            &hi,
+            1,
+            0.25,
+            7.0,
+            false,
+            None,
+            None,
+            None,
+            cuts.clone(),
+            false,
+        );
+        assert_eq!(heap.len(), 2);
+        assert!(heap
+            .iter()
+            .all(|q| q.pb == 7.0 && Rc::strong_count(&q.base) == 2));
+        let boxes = drain_boxes(&mut heap);
+        assert_eq!(
+            boxes,
+            vec![
+                (vec![0.0, -1.0, 2.0], vec![4.0, 0.25, 3.0]),
+                (vec![0.0, 0.25, 2.0], vec![4.0, 1.0, 3.0]),
+            ]
+        );
+
+        // Integer branch: <= floor and >= ceil.
+        push_children(
+            &mut heap,
+            &lo,
+            &hi,
+            0,
+            2.5,
+            0.0,
+            true,
+            Some(0.5),
+            None,
+            None,
+            cuts.clone(),
+            false,
+        );
+        let boxes = drain_boxes(&mut heap);
+        assert_eq!(
+            boxes,
+            vec![
+                (vec![0.0, -1.0, 2.0], vec![2.0, 1.0, 3.0]),
+                (vec![3.0, -1.0, 2.0], vec![4.0, 1.0, 3.0]),
+            ]
+        );
+
+        // An empty integer side is still not pushed: x in [0, 4], split at 4.5
+        // gives x <= 4 (kept) and x >= 5 (empty, dropped).
+        push_children(
+            &mut heap, &lo, &hi, 0, 4.5, 0.0, true, None, None, None, cuts, false,
+        );
+        assert_eq!(heap.len(), 1);
+        let q = heap.pop().unwrap();
+        assert_eq!(
+            Rc::strong_count(&q.base),
+            1,
+            "the dropped sibling holds no reference"
+        );
+        assert_eq!(
+            QNode::into_box(q.base, q.fix),
+            (lo.clone(), vec![4.0, 1.0, 3.0])
+        );
+    }
+
+    /// The frontier's packed basis unpacks to the identical `Basis`.
+    #[test]
+    fn frontier_basis_round_trips_exactly() {
+        let b = Basis {
+            col_status: vec![1, 0, 2, 1, 0],
+            basic_vars: vec![3, 0],
+        };
+        let packed = FrontierBasis::pack(&b);
+        assert_eq!(packed.unpack(), b);
+    }
 
     // minimize w = x*y  s.t.  x + y >= 3,  x,y in [0,2].
     // True feasible region on [0,2]^2 with x+y>=3: the min of x*y is 2 (corners
@@ -3514,19 +3704,63 @@ mod gap_criterion_tests {
         assert_eq!(res_w.bound, base.bound);
     }
 
-    /// #1935: `warm_start_children` changes how node LPs START, never what the
-    /// search may conclude. On a nonconvex box-constrained problem with several
-    /// lifted terms (two bilinear products, a square, a linear coupling row), the
-    /// warm and cold searches must both certify, agree on the optimum to the gap,
-    /// keep each bound below the other arm's incumbent, and the warm arm must
-    /// actually have warm-started (the probe-fired check, CLAUDE.md §6). Off, no
-    /// node may warm-start.
+    /// #2092: the frontier memory budget ends the search like the node budget --
+    /// `NodeLimit`, flagged `frontier_capped`, with a bound still valid -- and an
+    /// unbinding budget changes nothing.
     #[test]
-    fn warm_start_children_certifies_the_cold_optimum() {
+    fn frontier_budget_stops_with_a_valid_bound() {
+        let spec = three_term_spec();
+        let opts = SimplexOptions::default();
+        let base = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let free = solve_spatial_tree(&spec, &base, &opts);
+        assert_eq!(free.status, TreeStatus::Optimal);
+        assert!(!free.frontier_capped);
+        assert!(free.node_count > 3, "the probe needs a tree: {free:?}");
+
+        let capped = solve_spatial_tree(
+            &spec,
+            &SpatialTreeConfig {
+                max_open_nodes: 2,
+                ..base
+            },
+            &opts,
+        );
+        assert_eq!(capped.status, TreeStatus::NodeLimit, "{capped:?}");
+        assert!(capped.frontier_capped);
+        assert!(capped.node_count < free.node_count);
+        // Stopping never fabricates a bound: still below the optimum 2.0.
+        assert!(
+            capped.bound <= 2.0 + 1e-6,
+            "bound {} above optimum",
+            capped.bound
+        );
+
+        let roomy = solve_spatial_tree(
+            &spec,
+            &SpatialTreeConfig {
+                max_open_nodes: 1_000_000,
+                ..base
+            },
+            &opts,
+        );
+        assert_eq!(
+            (roomy.status, roomy.node_count, roomy.frontier_capped),
+            (free.status, free.node_count, false)
+        );
+        assert_eq!((roomy.incumbent, roomy.bound), (free.incumbent, free.bound));
+    }
+
+    /// A nonconvex box-constrained problem with several lifted terms that needs a
+    /// real tree to certify (#1935; shared with #2092's frontier-budget test).
+    fn three_term_spec() -> SpatialKernelSpec {
         use crate::bnb::spatial_kernel::FixedRow;
         // min  w01 - 2 w12 + s0 - x2   with w01 = x0*x1, w12 = x1*x2, s0 = x0^2
         // s.t. x0 + x1 + x2 <= 2.5,   x in [-1, 2]^3.
-        let spec = SpatialKernelSpec {
+        SpatialKernelSpec {
             n_cols: 6,
             n_orig: 3,
             c: vec![0.0, 0.0, -1.0, 1.0, -2.0, 1.0],
@@ -3545,7 +3779,19 @@ mod gap_criterion_tests {
             ],
             blf_terms: vec![],
             obbt_candidates: vec![],
-        };
+        }
+    }
+
+    /// #1935: `warm_start_children` changes how node LPs START, never what the
+    /// search may conclude. On a nonconvex box-constrained problem with several
+    /// lifted terms (two bilinear products, a square, a linear coupling row), the
+    /// warm and cold searches must both certify, agree on the optimum to the gap,
+    /// keep each bound below the other arm's incumbent, and the warm arm must
+    /// actually have warm-started (the probe-fired check, CLAUDE.md §6). Off, no
+    /// node may warm-start.
+    #[test]
+    fn warm_start_children_certifies_the_cold_optimum() {
+        let spec = three_term_spec();
         let base = SpatialTreeConfig {
             max_nodes: 20_000,
             gap_tol: 1e-6,
