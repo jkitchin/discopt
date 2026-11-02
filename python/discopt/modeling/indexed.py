@@ -226,12 +226,15 @@ class IndexedConstraint:
 class _Affine:
     """Affine form ``sum(coeffs[pos] * var[pos]) + const`` over a single variable."""
 
-    __slots__ = ("const", "var", "coeffs")
+    __slots__ = ("const", "var", "coeffs", "merged")
 
     def __init__(self):
         self.const: float = 0.0
         self.var = None  # a single core.Variable, or None for a pure constant
         self.coeffs: dict = {}  # position -> coefficient
+        # True once two nonzero contributions were added into one slot (or the
+        # constant) in floating point -- the like-term merge #2090 is about.
+        self.merged: bool = False
 
 
 def _aff_scale(a, s: float):
@@ -241,6 +244,7 @@ def _aff_scale(a, s: float):
     b.const = a.const * s
     b.var = a.var
     b.coeffs = {pos: c * s for pos, c in a.coeffs.items()}
+    b.merged = a.merged
     return b
 
 
@@ -253,8 +257,13 @@ def _aff_add(left, right):
     out.const = left.const + right.const
     out.var = left.var if left.var is not None else right.var
     out.coeffs = dict(left.coeffs)
+    out.merged = left.merged or right.merged or (left.const != 0.0 and right.const != 0.0)
     for pos, c in right.coeffs.items():
-        out.coeffs[pos] = out.coeffs.get(pos, 0.0) + c
+        if pos in out.coeffs:
+            out.merged = True
+            out.coeffs[pos] += c
+        else:
+            out.coeffs[pos] = c
     return out
 
 

@@ -4264,6 +4264,27 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     )
 
 
+def _canonicalize_rows_in(item: Any) -> None:
+    """Exact like-term collection of every row in ``item`` (#2090).
+
+    See :mod:`discopt.modeling._exact_polynomial`: a row whose like terms would be
+    added inexactly in binary64 is replaced, in place, by its exact canonical form;
+    every other row is left untouched. The whole model goes through
+    :meth:`Model._canonicalize_like_terms` at both solve doors; this per-item form
+    is for the few build-time consumers that read a body before then.
+    """
+    from discopt.modeling._exact_polynomial import canonicalize_rows_in
+
+    canonicalize_rows_in(item)
+
+
+def _canonicalize_expression(expr: "Expression") -> "Expression":
+    """:func:`discopt.modeling._exact_polynomial.canonicalize_expression` (#2090)."""
+    from discopt.modeling._exact_polynomial import canonicalize_expression
+
+    return canonicalize_expression(expr)
+
+
 def _reject_unnormalized_rhs_in(item: Any, *, where: str) -> None:
     """Apply :func:`_reject_unnormalized_rhs` to every row nested in ``item`` (#1858).
 
@@ -8165,6 +8186,12 @@ class Model:
         var = None
         for c in constraints:
             aff = affine_form(c.body)
+            if aff is not None and aff.merged:
+                # #2090: these coefficients go into the Rust builder now, so a row
+                # whose like terms were added in floating point is collected
+                # exactly here (validate is too late for it) and re-read.
+                _canonicalize_rows_in(c)
+                aff = affine_form(c.body)
             if aff is None or aff.var is None:
                 return False
             if var is None:
@@ -9126,8 +9153,11 @@ class Model:
             )
         # #1858: the complement below is built from ``body`` alone.
         _reject_unnormalized_rhs(condition, where="if_else condition")
-        then_expr = _wrap(then_value)
-        else_expr = _wrap(else_value)
+        # #2090: the branch values feed ``_branch_bounds`` (w's box) right here, at
+        # build time, so they are collected exactly now rather than at validate.
+        _canonicalize_rows_in(condition)
+        then_expr = _canonicalize_expression(_wrap(then_value))
+        else_expr = _canonicalize_expression(_wrap(else_value))
         # The comparison operators normalize the condition to ``body <= 0``, whose
         # complement is ``-body <= 0``. A raw ``Constraint(body, ">=", 0.0)`` keeps
         # its sense, and its complement is ``-body >= 0``: negating the body under
@@ -12791,6 +12821,20 @@ class Model:
             "certify an optimum for the relaxed problem:\n" + "\n".join(lines)
         )
 
+    def _canonicalize_like_terms(self) -> None:
+        """Exact like-term collection of every row and the objective (#2090).
+
+        A body whose like terms binary64 would add inexactly (``t + x - t`` with
+        ``t = 2**53 * x`` reads as ``0 * x``) is replaced in place by its exact
+        canonical form; every other body is left as the same object. See
+        :mod:`discopt.modeling._exact_polynomial`. Run at both solve doors --
+        :meth:`validate` and ``solve_model`` -- and cached per row, so a re-solve
+        pays one attribute check per row.
+        """
+        from discopt.modeling._exact_polynomial import canonicalize_model
+
+        canonicalize_model(self)
+
     def validate(self, *, for_solve: bool = True):
         """
         Validate model consistency.
@@ -12821,6 +12865,10 @@ class Model:
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
+
+        # #2090: collect every row's and the objective's like terms exactly before
+        # anything reads a body, so no consumer sees a row binary64 rounded.
+        self._canonicalize_like_terms()
 
         # An atan2 rewrite whose sign assumption has since been widened away is
         # a model that differs from the one the user wrote by pi over part of
