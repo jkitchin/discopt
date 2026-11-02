@@ -386,12 +386,15 @@ def milp_iis(
     alternative. It is not the default because on MIPcc27's smallset
     (interleaved A/B, 300 s/instance) ``"final"`` produced 0/32 invalid outputs,
     identical sizes on all 27 instances both modes solved, a median wall ratio
-    of 0.59, 5 more instances solved and 0 lost, with 0 fallbacks. Presolve-on
-    claims ARE sometimes false: on ``neos-3135526-osun`` (timed out in both arms
-    of that A/B, so not counted there) presolve-on returned ``Infeasible`` for a
-    subsystem that presolve-off solved with a point satisfying it to 2e-9, and a
-    per-probe rerun refuted 6 more such claims. The final check caught it and
-    fell back -- the safety net doing its job. What would change the default:
+    of 0.59, 5 more instances solved and 0 lost, with 0 fallbacks. The two
+    configurations DO disagree on ill-conditioned models: on
+    ``neos-3135526-osun`` (timed out in both arms of that A/B, so not counted
+    there; coefficients up to 5e5) presolve-on returned ``Infeasible`` where
+    presolve-off returned a point satisfying the set to 2e-9 -- but only through
+    integrality slack: rounding its near-integer columns leaves a row violated
+    by 1.4e-5. Which verdict is right is tolerance-dependent, not established.
+    The final check saw the disagreement and fell back, which never acts on it
+    either way. What would change the default:
     fallbacks becoming common on some model class (each costs a full ``"each"``
     rerun), which ``MilpIIS.fallback`` / ``IISResult.confirm_fallback`` report.
     Each kept member's necessity rests on its arithmetic certificate where one
