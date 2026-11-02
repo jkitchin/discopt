@@ -15,7 +15,8 @@ Exit codes: 0 graduate, 3 retire, 1 the flag stays OFF on a C violation,
 2 the run is void (V).
 
     python discopt_benchmarks/scripts/issue1917_mbigm_components_verdict.py \\
-        --lower <L>.jsonl --audit <A>.jsonl --solve <S>.jsonl [--tree <worktree>]
+        --lower <L>.jsonl --audit <A>.jsonl --solve <S>.jsonl --guard <V7>.json \\
+        [--tree <worktree>]
     python discopt_benchmarks/scripts/issue1917_mbigm_components_verdict.py --self-test
 """
 
@@ -282,8 +283,29 @@ def decide(v, c, n, rep) -> int:
     return 0
 
 
-def run(lower, audit, solve, tree, oracle, crosses) -> int:
+def guard_failures(guard: dict | None, tree: Path) -> list[str]:
+    """V7: the corpus guard (``issue1917_mbigm_components_corpus_guard.py``)."""
+    if guard is None:
+        return ["V7 corpus guard missing"]
+    v = [f"V7 {f}" for f in guard.get("failures", [])]
+    if not guard.get("executed") or not guard.get("parsed"):
+        v.append("V7 corpus guard executed nothing")
+    if not (guard.get("control") or {}).get("calls"):
+        v.append("V7 positive control recorded no _compute_big_m_lp call")
+    if any(s.get("calls") for s in guard.get("corpus_solves", [])) or not guard.get(
+        "corpus_solves"
+    ):
+        v.append("V7 corpus solves missing or reached _compute_big_m_lp")
+    if guard.get("with_gdp"):
+        v.append(f"V7 corpus files with GDP: {guard['with_gdp']}")
+    if not _in_tree(guard.get("discopt"), tree):
+        v.append(f"V7/V1 guard ran another tree: {guard.get('discopt')}")
+    return v
+
+
+def run(lower, audit, solve, tree, oracle, crosses, guard=None) -> int:
     L, A, S, v, c, checked = collect(lower, audit, solve, tree, oracle, crosses)
+    v = v + guard_failures(guard, tree)
     print(f"== {FLAG}: L {len(L)} instances, A {len(A)} ({checked} sub-LPs re-solved), S {len(S)}")
     if v:
         return decide(v, c, [], {})
@@ -358,10 +380,25 @@ def self_test() -> int:
     never = lambda row, o: False  # noqa: E731
     cases = []
 
-    def case(name, mutate, want):
+    def good_guard():
+        return {
+            "discopt": tree,
+            "failures": [],
+            "parsed": 74,
+            "constraints": 9000,
+            "with_gdp": [],
+            "corpus_solves": [{"instance": "a.nl", "calls": 0}],
+            "control": {"instance": "pyomo.eight_process", "calls": 9},
+            "executed": 76,
+        }
+
+    def case(name, mutate, want, guard_mutate=None):
         lo, au, so = _synthetic(tree)
         mutate(lo, au, so)
-        cases.append((name, run(lo, au, so, T, {}, never), want))
+        g = good_guard()
+        if guard_mutate is not None:
+            g = guard_mutate(g)
+        cases.append((name, run(lo, au, so, T, {}, never, g), want))
 
     case("clean -> graduate", lambda lo, au, so: None, 0)
 
@@ -437,6 +474,23 @@ def self_test() -> int:
 
     case("solve SGM ratio > 1.25 -> retire", k3, 3)
 
+    def nop(lo, au, so):
+        pass
+
+    case("V7 guard missing -> void", nop, 2, lambda g: None)
+    case(
+        "V7 corpus solve reached the LP -> void",
+        nop,
+        2,
+        lambda g: dict(g, corpus_solves=[{"instance": "a.nl", "calls": 3}]),
+    )
+    case(
+        "V7 positive control saw no call -> void",
+        nop,
+        2,
+        lambda g: dict(g, control={"instance": "x", "calls": 0}),
+    )
+
     bad = [(nm, got, want) for nm, got, want in cases if got != want]
     print(f"\nself-test: {len(cases)} cases executed, {len(bad)} wrong")
     for nm, got, want in bad:
@@ -451,13 +505,14 @@ def main(argv=None) -> int:
     ap.add_argument("--lower", type=Path)
     ap.add_argument("--audit", type=Path)
     ap.add_argument("--solve", type=Path)
+    ap.add_argument("--guard", type=Path, help="V7 corpus-guard JSON")
     ap.add_argument("--tree", type=Path, default=REPO, help="worktree the rows must come from")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
-    if not (args.lower and args.audit and args.solve):
-        ap.error("--lower, --audit and --solve are required")
+    if not (args.lower and args.audit and args.solve and args.guard):
+        ap.error("--lower, --audit, --solve and --guard are required")
     gp = _gp()
     return run(
         _rows(args.lower),
@@ -466,6 +521,7 @@ def main(argv=None) -> int:
         args.tree,
         gp.gb_oracle(),
         gp._bound_crosses,
+        json.loads(args.guard.read_text()),
     )
 
 

@@ -28,7 +28,8 @@ an M smaller changes the lowering, and so §5 treats it as bound-changing.
 `reformulate_gdp` (`_relax/gdp_reformulate.py`). `gdp/user_big_m.py` calls
 `_precompute_lp_relaxation` but solves its own LPs. The in-repo `.nl` corpus
 (`python/tests/data/minlplib_nl/`) has no disjunctions, so the flag cannot touch any
-of its solves, and it is **not** a panel here. That is the opposite of
+of its solves, and it is **not** a panel here. V7 below checks that claim
+instead of assuming it. That is the opposite of
 `DISCOPT_SUBNLP_IMPLIED_BOX`, which acts on every route.
 
 ## Arms, panels, reps
@@ -59,8 +60,10 @@ of its solves, and it is **not** a panel here. That is the opposite of
     cannot be interrupted. So a lowering that overruns 120 s ends the solve late
     rather than early, and the 600 s grace lets ON `biofuel` (146 s entry lowering)
     finish. OFF `biofuel` is expected to be `killed` at 720 s.
-* **Machine:** every thread env set to 1, and one process at a time: L, then A,
-  then S, serially. Load gate `--max-load 12` on all three, and each row records
+* **V7 corpus guard** (`issue1917_mbigm_components_corpus_guard.py`, flag ON, a
+  few minutes): runs first in the panel slot. See V7.
+* **Machine:** every thread env set to 1, and one process at a time: V7, then L,
+  then A, then S, serially. Load gate `--max-load 12` on all three, and each row records
   its `load1`. Not to start before team-lead's "machine free".
 
 ## Commands (run from the worktree root, with PYTHONPATH pinned to it)
@@ -72,6 +75,10 @@ python -c "import discopt, os; from discopt._relax import gdp_reformulate as G; 
   assert hasattr(G, '_component_sub_lp') and hasattr(G, '_lp_box_memo')"
 
 D=docs/dev/data/1917-flag-panel
+DISCOPT_MBIGM_LP_COMPONENTS=1 python -u \
+    discopt_benchmarks/scripts/issue1917_mbigm_components_corpus_guard.py \
+    --n-solve 6 --time-limit 30 --control pyomo.eight_process \
+    --out $D/DISCOPT_MBIGM_LP_COMPONENTS.corpus_guard.json
 python -u discopt_benchmarks/scripts/issue1917_mbigm_components_lowering.py \
     --phase lower --reps 2 --timeout 900 --max-load 12 \
     --out $D/DISCOPT_MBIGM_LP_COMPONENTS.lower.jsonl
@@ -86,13 +93,14 @@ python -u discopt_benchmarks/scripts/issue1917_gdp_flag_panel.py \
 python discopt_benchmarks/scripts/issue1917_mbigm_components_verdict.py \
     --lower $D/DISCOPT_MBIGM_LP_COMPONENTS.lower.jsonl \
     --audit $D/DISCOPT_MBIGM_LP_COMPONENTS.audit.jsonl \
-    --solve $D/DISCOPT_MBIGM_LP_COMPONENTS.jsonl
+    --solve $D/DISCOPT_MBIGM_LP_COMPONENTS.jsonl \
+    --guard $D/DISCOPT_MBIGM_LP_COMPONENTS.corpus_guard.json
 ```
 
 The verdict script is committed along with this file, before any data, and it
-applies exactly the bars below. `--self-test` runs it on 12 synthetic panels
-(clean, void, each C and N failure, K3), and each one must reach its expected exit
-code. A "cell" is an instance.
+applies exactly the bars below. `--self-test` runs it on 15 synthetic panels
+(clean, void including three V7 failures, each C and N failure, K3), and each
+one must reach its expected exit code. A "cell" is an instance.
 
 ## Panel validity (V). A failure voids the run; it is not a verdict.
 
@@ -108,6 +116,21 @@ code. A "cell" is an instance.
   instrument is broken.
 * V6. Within each arm, the M's in L are identical between the two reps. A lowering
   that is not deterministic makes the per-row comparison meaningless.
+* V7. **The corpus cannot see the flag.** Added 2026-11-01 at team-lead's request,
+  before any data. With the flag ON, a call counter wraps `_compute_big_m_lp`.
+  * Every `python/tests/data/minlplib_nl/*.nl` parses with `from_nl`, and none
+    carries a constraint `reformulate_gdp` would lower
+    (`solver._model_has_gdp_constraints`). The guard fails if it parsed 0 files or
+    examined 0 constraints.
+  * The 6 smallest files, by size, are solved with `gdp_method="mbigm"` (30 s
+    each), and the counter records 0 calls.
+  * Positive control: `pyomo.eight_process`, solved the same way, records more
+    than 0 calls. Otherwise the counter cannot see a call, and the 0 above proves
+    nothing.
+  * The guard's `discopt` path lies in the worktree (V1).
+  A V7 failure voids the run. If it is not an instrument fault, it means the
+  corpus can see the flag, and the corpus ON/OFF panel of b408a269 has to be added
+  by amendment before the rerun.
 
 ## Cert-clean bar (C). Any violation, in any rep, means the flag does not graduate.
 
