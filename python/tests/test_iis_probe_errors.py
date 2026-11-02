@@ -75,3 +75,24 @@ def test_returned_non_proof_status_is_still_inconclusive(monkeypatch):
     iis = compute_iis(m, include_bounds=False)
     assert not iis.proven_irreducible
     assert {"a", "b"} <= {c.name for c in iis.constraints}
+
+
+@pytest.mark.smoke
+def test_vector_bound_with_some_infinite_elements_is_a_candidate():
+    """A vector variable mixing finite and infinite bounds still has finite-bound members.
+
+    ``_bound_candidates`` used to require EVERY element's bound to be finite, so
+    ``x = [free, x1 >= 5]`` never offered ``x1 >= 5`` as a member: it stayed
+    applied in every probe but was never reported, and the "IIS" {x1 <= 2} was
+    feasible on its own. Found on MIPcc27's ``dell`` (521 continuous columns,
+    some free), where the reported subsystem verified FEASIBLE.
+    """
+    m = dm.Model("v")
+    x = m.continuous("x", shape=(2,), lb=np.array([-np.inf, 5.0]), ub=10)
+    m.subject_to(x[1] <= 2, name="small")
+    m.subject_to(x[0] <= 1, name="red_herring")
+    m.minimize(x[0])
+    iis = compute_iis(m)
+    assert {c.name for c in iis.constraints} == {"small"}
+    assert [(v.name, s, i) for v, s, i in iis.bound_elements] == [("x", "lower", (1,))]
+    assert iis.proven_irreducible

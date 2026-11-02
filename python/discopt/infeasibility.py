@@ -141,14 +141,21 @@ def _bound_candidates(model: "Model") -> list[tuple[int, str]]:
 
     Binary variables are skipped: their ``{0, 1}`` domain is intrinsic, not a
     removable bound. Infinite bounds cannot cause infeasibility and are excluded.
+
+    A vector variable is a candidate when ANY element's bound is finite; the
+    element refinement in :func:`compute_iis` then filters only the finite
+    elements. Requiring EVERY element to be finite (as this once did) left the
+    finite bounds of a partly-free vector applied in every probe yet never
+    reported, so the returned "IIS" could be feasible on its own (MIPcc27
+    ``dell``).
     """
     items: list[tuple[int, str]] = []
     for vi, v in enumerate(model._variables):
         if v.var_type == VarType.BINARY:
             continue
-        if float(np.min(np.asarray(v.lb))) > -_FINITE:
+        if float(np.max(np.asarray(v.lb))) > -_FINITE:
             items.append((vi, "lower"))
-        if float(np.max(np.asarray(v.ub))) < _FINITE:
+        if float(np.min(np.asarray(v.ub))) < _FINITE:
             items.append((vi, "upper"))
     return items
 
