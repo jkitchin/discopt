@@ -292,7 +292,7 @@ class _Collector:
         if isinstance(node, Constant):
             if node.value.ndim != 0:
                 raise _Decline("array constant in scalar position")
-            return self._const(node.value)
+            return self._const(float(node.value))
         if isinstance(node, Variable):
             if node.size != 1 or tuple(node.shape or ()) != ():
                 raise _Decline("non-scalar variable in scalar position")
