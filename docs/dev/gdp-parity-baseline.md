@@ -453,4 +453,5 @@ not committed.
 What remains is a node-efficiency gap of roughly 5x against SCIP at 5000 nodes, and
 it is the next target (branching variable and point, compared against SCIP on the
 same box sequence). The default's 1152–1175 undecided node LPs per 120 s are also
-worth a look: each one closes its region at a weaker bound.
+worth a look. How an undecided node contributes to the global bound has not been
+measured here.
