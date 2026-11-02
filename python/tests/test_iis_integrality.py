@@ -218,3 +218,84 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
         assert i + 1 < len(log) and log[i + 1][0] == "off", (i, log)
     assert res.n_cross_checks == len(claims)
     assert res.n_solves == len(log)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("max_batch", [1, None])
+def test_batch_and_single_filters_both_give_certified_iis(max_batch):
+    """Adaptive batch deletion (and its one-at-a-time limit) stays sound and certified."""
+    from discopt._iis_milp import milp_iis
+
+    rng = np.random.default_rng(2093)
+    n_models = n_checked = 0
+    for _ in range(40):
+        n, mrows = 5, 8
+        A = rng.integers(-3, 4, size=(mrows, n)).astype(float)
+        rhs = rng.integers(-4, 5, size=mrows).astype(float) + rng.choice([0.0, 0.5], mrows)
+        lb, ub = np.zeros(n), np.full(n, 3.0)
+        is_int = rng.random(n) < 0.6
+        rlo, rhi = np.full(mrows, -np.inf), rhs.copy()
+        if not _subsystem_infeasible(
+            A, rlo, rhi, lb, ub, range(mrows), set(range(n)), set(range(n)), np.flatnonzero(is_int)
+        ):
+            continue
+        m = dm.Model("r")
+        xs = [
+            (m.integer(f"x{j}", lb=0, ub=3) if is_int[j] else m.continuous(f"x{j}", lb=0, ub=3))
+            for j in range(n)
+        ]
+        for r in range(mrows):
+            m.subject_to(sum(A[r, j] * xs[j] for j in range(n)) <= rhs[r])
+        m.minimize(0 * xs[0])
+        res = milp_iis(m, time_limit=10, max_batch=max_batch)
+        n_models += 1
+        assert res.proven_irreducible
+        kept_lb = {j for j, s in res.bounds if s == "lower"}
+        kept_ub = {j for j, s in res.bounds if s == "upper"}
+        args = (A, rlo, rhi, lb, ub, res.constraints, kept_lb, kept_ub, res.integrality)
+        assert _subsystem_infeasible(*args)
+        members = (
+            [("constraint", r) for r in res.constraints]
+            + [("bound", j, s) for j, s in res.bounds]
+            + [("integrality", j) for j in res.integrality]
+        )
+        for key in members:
+            x = res.certificates[key]
+            ok = (
+                A,
+                rlo,
+                rhi,
+                lb,
+                ub,
+                is_int,
+                res.constraints,
+                kept_lb,
+                kept_ub,
+                res.integrality,
+                x,
+            )
+            assert _independent_check(*ok, drop=key)
+            assert not _independent_check(*ok)
+            n_checked += 1
+    print(f"[iis-batch max_batch={max_batch}] models={n_models} certificates={n_checked}")
+    assert n_models >= 10 and n_checked >= 30, (n_models, n_checked)
+
+
+@pytest.mark.smoke
+def test_batching_cuts_solves_when_most_rows_are_redundant():
+    from discopt._iis_milp import milp_iis
+
+    def build():
+        m = dm.Model("many")
+        x = m.continuous("x", shape=(60,), lb=0, ub=10)
+        m.subject_to(x[0] >= 5, name="big")
+        for k in range(1, 59):
+            m.subject_to(x[k] + x[k + 1] <= 15, name=f"rh{k}")
+        m.subject_to(x[0] <= 2, name="small")
+        m.minimize(0 * x[0])
+        return m
+
+    one = milp_iis(build(), max_batch=1)
+    many = milp_iis(build())
+    assert one.constraints == many.constraints == [0, 59]
+    assert many.n_solves < one.n_solves / 3, (many.n_solves, one.n_solves)

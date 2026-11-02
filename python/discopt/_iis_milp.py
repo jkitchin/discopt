@@ -244,8 +244,13 @@ def milp_iis(
     include_bounds: bool = True,
     time_limit: float = 30.0,
     cert_tol: float = 1e-6,
+    max_batch: Optional[int] = None,
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
+
+    ``max_batch`` caps the adaptive deletion batch (see :func:`_batch_filter`);
+    ``None`` lets it grow without limit, ``1`` is the classic one-at-a-time
+    deletion filter (kept for A/B measurement and as the reference behaviour).
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, and ``ValueError`` when the full model
@@ -310,17 +315,44 @@ def milp_iis(
             "an IIS is only defined for an infeasible model."
         )
 
-    def filter_one(key, drop, restore):
+    cap = max_batch if max_batch is not None else 1 << 30
+    if cap < 1:
+        raise ValueError(f"max_batch must be >= 1, got {max_batch}")
+
+    def batch_filter(cands: list, active: set, key) -> None:
+        """Adaptive batch deletion (SCIP 10's dynamic batching of the deletion
+        filter; Guieu & Chinneck's one-at-a-time filter is ``cap == 1``).
+
+        Remove ``cands[i : i + size]`` from ``active``. If the rest is proven
+        infeasible the whole batch is redundant: keep it removed and double the
+        size. Otherwise restore it and halve the size; at size 1 the element is
+        kept, with the probe's point as its certificate. An inconclusive probe
+        counts as "not proven", so nothing is ever dropped without a proof, and
+        a kept element decided by an inconclusive single probe clears
+        ``proven_irreducible``. Worst case (every element needed) ~ n + log n
+        probes; when few are needed ~ k log(n / k).
+        """
         nonlocal proven
-        drop()
-        res, x = eng.probe(cons, bounds, ints_active)
-        if res is True:
-            return
-        restore()
-        if res is None:
-            proven = False
-        else:
-            pending[key] = x
+        i, size = 0, 1
+        while i < len(cands):
+            batch = cands[i : i + size]
+            for e in batch:
+                active.discard(e)
+            res, x = eng.probe(cons, bounds, ints_active)
+            if res is True:
+                i += len(batch)
+                size = min(2 * size, cap)
+                continue
+            for e in batch:
+                active.add(e)
+            if len(batch) > 1:
+                size = max(1, len(batch) // 2)
+                continue
+            if res is None:
+                proven = False
+            else:
+                pending[key(batch[0])] = x
+            i += 1
 
     # 1. Integrality. Guieu & Chinneck: if the LP relaxation is infeasible, all
     #    integrality goes in one probe.
@@ -329,26 +361,16 @@ def milp_iis(
         if res is True:
             ints_active.clear()
         else:
-            for j in sorted(ints_active):
-                filter_one(
-                    ("integrality", j),
-                    lambda j=j: ints_active.discard(j),
-                    lambda j=j: ints_active.add(j),
-                )
+            batch_filter(sorted(ints_active), ints_active, lambda j: ("integrality", j))
     # 2. Constraints.
-    for ci in sorted(cons):
-        filter_one(("constraint", ci), lambda ci=ci: cons.discard(ci), lambda ci=ci: cons.add(ci))
-    # 3. Bounds of columns not held integer.
+    batch_filter(sorted(cons), cons, lambda ci: ("constraint", ci))
+    # 3. Bounds of columns not held integer (a held column's box is not an element).
     if include_bounds:
-        for j, side in finite_bounds:
-            if j in ints_active:
-                continue  # held integer: its box is not an element
-            item = (j, side)
-            filter_one(
-                ("bound", j, side),
-                lambda item=item: bounds.discard(item),
-                lambda item=item: bounds.add(item),
-            )
+        batch_filter(
+            [jb for jb in finite_bounds if jb[0] not in ints_active],
+            bounds,
+            lambda jb: ("bound", jb[0], jb[1]),
+        )
 
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
