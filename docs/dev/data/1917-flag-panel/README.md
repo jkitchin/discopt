@@ -95,6 +95,33 @@ silently. After the fix, hda hull is sound: `time_limit` at 300 s, bound 112572 
 The MBIGM_CONDITIONED, DISJUNCT_FBBT and BOUND_PRETRANSFORM panels lower with big-M
 or mbigm only, so this defect does not touch them.
 
+## `batch_processing`: the in-house simplex fails on mbigm's big-M LPs (side finding)
+
+Found while measuring `DISCOPT_MBIGM_LP_COMPONENTS`, but it is about the default
+mbigm path, flag OFF. When `gdp.mbigm` lowers `batch_processing`, the in-house
+simplex (`get_exact_lp_solver`) returns `numerical` (`SolveStatus.ERROR`) on 448 of
+the 450 full big-M LPs. `_compute_big_m_lp` treats a non-OPTIMAL LP as "no LP
+bound", which is sound, and so 449 of the 450 M's are the interval M rather than
+the LP M. That makes mbigm on this instance close to plain big-M.
+
+With the flag ON, 48 component sub-LPs solve OPTIMAL and 402 are still `numerical`,
+for 409 interval M's. Every one of the 48 equals HiGHS's optimum of the full LP
+(worst relative 3e-16), so the full LPs are well posed and the failure is the
+simplex's.
+
+Reproduce (one process, about 30 s):
+
+```bash
+python -u discopt_benchmarks/scripts/issue1917_mbigm_components_lowering.py \
+    --phase lower --reps 1 --include batch_processing --out <f>.jsonl
+python -u discopt_benchmarks/scripts/issue1917_mbigm_components_lowering.py \
+    --phase audit --include batch_processing --out <g>.jsonl
+```
+
+Each `lower` row's `lp_status` and `interval_fallback` hold the counts above. The
+`audit` row's `audit.checked` / `audit.worst` hold the HiGHS comparison. No issue is
+filed yet; the #1917 write-up decides.
+
 ## Verdicts (2026-11-01)
 
 Re-derive each with `--report`; all four panels are cert-clean.

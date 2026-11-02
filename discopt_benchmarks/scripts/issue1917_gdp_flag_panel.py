@@ -79,6 +79,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
     "DISCOPT_GDP_DISJUNCT_FBBT": ("big-m",),
     "DISCOPT_GDP_ENUMERATE_CUTOFF": ("enumerate",),
+    # Acts on the mbigm lowering's LPs; on 23 of 24 instances it leaves every M
+    # bitwise equal and changes only the lowering wall, which a fingerprint cannot
+    # see, so it is solved with ``--all`` (DISCOPT_MBIGM_LP_COMPONENTS.prereg.md).
+    "DISCOPT_MBIGM_LP_COMPONENTS": ("mbigm",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
