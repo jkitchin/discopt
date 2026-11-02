@@ -528,8 +528,10 @@ def _structural_id(root, memo: dict) -> int:
     """
     table = memo.get(_STRUCTURAL_TABLE)
     if table is None:
-        table = memo[_STRUCTURAL_TABLE] = ({}, {})
-    by_node, by_key = table  # id(node) -> (node, sid); key -> sid
+        fresh: tuple[dict[int, tuple[object, int]], dict[tuple, int]] = ({}, {})
+        table = memo[_STRUCTURAL_TABLE] = fresh
+    by_node: dict[int, tuple[object, int]] = table[0]  # id(node) -> (node, sid)
+    by_key: dict[tuple, int] = table[1]  # key -> sid
     hit = by_node.get(id(root))
     if hit is not None:
         sid: int = hit[1]
@@ -559,11 +561,11 @@ def _structural_id(root, memo: dict) -> int:
         else:
             head, children = parts
             key = (head, *(by_node[id(c)][1] for c in children))
-        sid = by_key.get(key)
-        if sid is None:
-            sid = by_key[key] = len(by_key)
+        got = by_key.get(key)
+        if got is None:
+            got = by_key[key] = len(by_key)
         # The node is kept alive in the table, so its id cannot be reused this pass.
-        by_node[nid] = (node, sid)
+        by_node[nid] = (node, got)
     out: int = by_node[id(root)][1]
     return out
 
