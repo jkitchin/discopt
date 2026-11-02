@@ -88,3 +88,93 @@ HiGHS-quality tableau c-MIR comes on top of it. Neither suffices alone. The
 known optimum (−6797.5397) is feasible in both tightened models, with max row
 violation 1.2e-10. Scripts are `g32/coef_entry.py` (with `ABL=` for the
 ablation), `g32/rtight.py` and `g32/feas_chk.py` in the session scratchpad.
+
+## Step 1 (2026-11-01): Rust big-M coefficient tightening, `DISCOPT_RUST_MILP_COEF_TIGHTEN`
+
+The pass lives in `crates/discopt-core/src/bnb/coef_tighten.rs`. It runs in the
+Rust MILP driver after the bound presolve, on "≤" rows only, and changes
+integer/binary coefficients only. The formula is HiGHS `HPresolve::rowPresolve`
+coefficient strengthening and SCIP `consdataTightenCoefs`. The flag is
+default OFF. Measured on `mtp.mps` at 1 thread, load ~12:
+
+| arm | coefs tightened | Rust root | Rust 60 s bound | incumbent |
+|-----|----------------:|----------:|----------------:|----------:|
+| OFF | 0               | −8358.999 | −7763.12 (89,823 nodes) | none |
+| ON  | 390 (282 rows)  | −8304.98  | −7440.46 (97,791 nodes) | −6783.96 |
+
+**Retraction of the step-1 prediction (§11).** I predicted −8219 for the root and
+−7372 for the 60 s bound. Both are missed, and the pass is not the cause. On the
+same fixture with bounds pre-tightened by the Python 20-sweep FBBT
+(`mtp_fbbt_only.mps`), the identical Rust pass gives root −8219.14 (381 coefs),
+which is the prediction exactly. The difference comes from the strength of the
+Rust root bound presolve. `tighten_bounds_csc` (`lp/simplex/presolve.rs`) stops
+at `max_rounds = 8`, where the Python FBBT runs 20 sweeps, so the pass sees
+looser `u_j`, and therefore a looser max activity, on chained big-M rows. Raising
+that cap is a *separate* bound-changing candidate. It is deliberately not part
+of this flag, because it would confound the measurement. Use it only as its own
+measured, flagged candidate if step 2 needs it.
+
+Feasible-point check: 121 points feasible in the original model (the optimum,
+30 random-objective MILP optima and their continuous re-solves at fixed
+integers) are accepted as seeds in both arms (`g32/ct_seed.py`).
+
+### Default-box guard, and why the flag ON can report a weaker root (2026-11-01)
+
+The panel (below) gives a weaker Rust root with the flag ON on three instances:
+clay0203_master, jobshop_small and modprodnet. The first hypothesis was that the
+pass reads the Python default box `±9.999e19` (`constants.DEFAULT_VARIABLE_BOUND`)
+as a finite bound. The pass now refuses such a row anyway:
+
+* a side with `|bound| >= EFFECTIVE_INF` (`crate::numeric::EFFECTIVE_INF = 1e19`,
+  shared with FBBT's `EXTENDED_MUL_INF`) counts as unbounded, in the spirit of
+  HiGHS `impliedRowUpper != kHighsInf` and SCIP `hugeval`;
+* a row whose rounding bound `gamma(k+2)·(Σ|a_j b_j| + |rhs|)` exceeds
+  `COEF_TOL·d` is refused (`rows_skipped_precision`), standing in for HiGHS's
+  `HighsCDouble` activity.
+
+Both have unit tests (`default_box_sides_are_unbounded`,
+`cancelled_huge_activity_is_refused_on_precision`). Each fails with its guard
+reverted and passes with it in place. The hypothesis was **falsified for the
+corpus**, though:
+
+* On all four instances both skip counters are 0, and the guarded roots match the
+  unguarded roots exactly: jobshop −5542.31, clay0203 −1.04007e6, modprodnet
+  −1.07169e6, rsyn0830m −2060.33.
+* None of the rows the pass tightens contains a default-box column
+  (`g32/replay/hugechk.py`, 1,225 rows checked).
+* The HiGHS LP optimum of the tightened rows equals that of the original rows:
+  jobshop 8.0 / 8.0, clay0203 0.0 / 0.0, modprodnet −1246402.4 / −1246402.4. The
+  same containment is now pinned on the in-repo fixtures where the pass fires
+  (`python/tests/test_1917_milp_coef_tighten.py`).
+
+**The cause is a pre-existing defect on main, outside this flag.** The Rust root
+is the Neumaier–Shcherbina safe bound over the node box
+(`DISCOPT_MILP_NS_NODE_BOUND`, default ON). On a column the model leaves at the
+default box, it multiplies the reduced-cost residual by ~1e20. jobshop_small's
+objective column has bounds `±9.999e19`, and clay0203's cost columns 24–29 have
+`lb = −9.999e19`. Any equivalent but perturbed LP, such as one with tightened
+coefficients, moves that noise. Two measurements isolate it (max_nodes = 2,
+deterministic):
+
+| instance | arm | NS bound (default) | `DISCOPT_MILP_NS_NODE_BOUND=0` | default box → 1e20 sentinel |
+|---|---|---:|---:|---:|
+| jobshop_small | OFF | 8.2475 | 8.247524752 | 8.2475 |
+| jobshop_small | ON  | −5542.31 | 8.25 | 8.25 |
+| clay0203_master | OFF | −1e-12 | 0.0 | −1e-12 |
+| clay0203_master | ON  | −1.04007e6 | −1.42e-12 | ~−4e-12 |
+
+With the vertex bound, or with the default box written as the sentinel, ON ≥ OFF
+on both instances. **What OFF does:** on these instances the flag-OFF NS bound
+happens to land near the LP value. It is still the same `residual × 9.999e19`
+product and is only as good as that arm's rounding noise. This doc records the
+defect and does not fix it. A fix belongs in the NS bound, which should treat
+`|bound| >= EFFECTIVE_INF` as infinite, as the pass now does, and it is its own
+bound-changing candidate.
+
+modprodnet is different. Both arms are above the plain LP, and the gap after two
+nodes comes from cuts and branching (OFF emitted 5 Gomory cuts and ON 118, with 0
+kept in each), so it is a search effect.
+
+**rsyn0830m:** the root is better ON (−2318.77 → −2060.33,
+deterministic, max_nodes = 2). Its weaker 30 s bound is therefore a search effect,
+which is acceptable by the stated criterion.

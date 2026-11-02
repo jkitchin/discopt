@@ -58,6 +58,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_csc_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::ns_safe_bound_csc_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::milp_coef_tighten_csc_py, m)?)?;
     // The relative margin `ns_safe_bound*` subtracts (issue #1230). Exported so the
     // Python side asserts against the real constant instead of a copy that can drift.
     m.add(

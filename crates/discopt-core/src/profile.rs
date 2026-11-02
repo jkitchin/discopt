@@ -214,6 +214,19 @@ counters!(
     // flag exists for; a zero here means the lever never engaged and any timing
     // read off that run is measuring nothing (CLAUDE.md §6).
     ObjLatticeSubst,
+    // #1917 G3.2 big-M coefficient tightening (`DISCOPT_RUST_MILP_COEF_TIGHTEN`): solves
+    // that ran the pass, rows it changed, coefficients it replaced. A zero
+    // `MilpCoefTightenCoefs` on an ON arm means the lever never engaged (§6).
+    MilpCoefTightenRuns,
+    MilpCoefTightenRows,
+    MilpCoefTightenCoefs,
+    // Skips: a side at or past EFFECTIVE_INF (default box), and a gap `d` not
+    // known to relative COEF_TOL.
+    MilpCoefTightenSkipUnbounded,
+    MilpCoefTightenSkipPrecision,
+    // Caller-supplied MILP seeds that passed / failed `validate_seed_incumbent`.
+    MilpSeedValidated,
+    MilpSeedRefused,
     // #1953 node NS bound (`DISCOPT_MILP_NS_NODE_BOUND`). `NodeNsBound` counts node
     // LPs whose bound came from the NS safe bound, `NodeNsFbbt` the subset that
     // needed the FBBT-implied box after abstaining on the node box, and

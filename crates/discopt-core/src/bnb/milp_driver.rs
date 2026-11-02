@@ -1637,6 +1637,53 @@ fn solve_milp_node_search(
     );
     tm.initialize();
 
+    // #1917 G3.2: big-M coefficient tightening (HiGHS `HPresolve::rowPresolve`
+    // `strengthenCoefs`; SCIP `consdataTightenCoefs`), default OFF behind
+    // `DISCOPT_RUST_MILP_COEF_TIGHTEN`. It runs on the presolved box, after the
+    // lattice and the tree read the original rows. Every point the tree can
+    // reach lies in that box, where the tightened rows keep the integer
+    // projection exactly and the LP region only shrinks (proof in
+    // `coef_tighten`). Only values change, never the CSC structure, and a
+    // tightened row's slack is never larger than the original's, so the
+    // presolved slack bounds stay valid.
+    let b_tight: Vec<f64>;
+    let b: &[f64] = if crate::bnb::coef_tighten::coef_tighten_enabled() {
+        let mut bt = b.to_vec();
+        let st = crate::bnb::coef_tighten::tighten_big_m_coefficients(
+            &mut csc_w,
+            m,
+            n,
+            ns,
+            &mut bt,
+            &base_l,
+            &base_u,
+            l,
+            u,
+            &is_int_full,
+        );
+        crate::profile::incr(crate::profile::Ctr::MilpCoefTightenRuns);
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenRows,
+            st.rows_tightened.len() as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenCoefs,
+            st.coefs_tightened as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenSkipUnbounded,
+            st.rows_skipped_unbounded as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenSkipPrecision,
+            st.rows_skipped_precision as u64,
+        );
+        b_tight = bt;
+        &b_tight
+    } else {
+        b
+    };
+
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
     // columns; structural columns [0, ns) are untouched, so the tree's
     // structural bounds still apply unchanged.
@@ -1721,15 +1768,23 @@ fn solve_milp_node_search(
     }
 
     // --- Caller-seeded incumbent: validate, then inject before the search ---
-    // Runs on the pre-cut matrix (all rows are original rows here) with the
-    // presolve-tightened bounds (FBBT never cuts a feasible point, so a
-    // genuinely feasible seed survives the tightening). A seed that cannot be
-    // proven feasible is dropped silently — seeding is an optimization and
-    // must never be able to produce a false certificate.
+    // Runs on the pre-cut matrix (original rows, or their coefficient-tightened
+    // form under `DISCOPT_RUST_MILP_COEF_TIGHTEN`, which agrees with the original at
+    // every integral point of the box) with the presolve-tightened bounds (FBBT
+    // never cuts a feasible point, so a genuinely feasible seed survives the
+    // tightening). A seed that cannot be proven feasible is dropped silently —
+    // seeding is an optimization and must never be able to produce a false
+    // certificate. The two counters let a probe tell a refused seed from an
+    // accepted one (CLAUDE.md §6).
     if let Some(seed) = opts.initial_incumbent.as_ref() {
-        if let Some((sx, sobj)) =
-            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
-        {
+        let validated =
+            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w);
+        crate::profile::incr(if validated.is_some() {
+            crate::profile::Ctr::MilpSeedValidated
+        } else {
+            crate::profile::Ctr::MilpSeedRefused
+        });
+        if let Some((sx, sobj)) = validated {
             // A seed is an integer-feasible point like any other, so it goes to
             // the separator first: seeding an incumbent the caller's lazy
             // constraints exclude would prune the tree against a point that is
