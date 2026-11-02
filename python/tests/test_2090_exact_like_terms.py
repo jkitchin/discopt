@@ -249,3 +249,36 @@ def test_disjunct_and_indicator_rows_are_collected():
     m.validate()
     row = d.disjuncts[0][0]
     assert _eval(row.body, {"z": 2.0}) == 0.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "contribs, benign",
+    [
+        ([M, 1, -M], False),  # the #2090 cancellation: kappa ~ 2**54
+        ([0.1, 0.2], True),  # ulp-level rounding, no cancellation
+        ([1.25, 0.8], True),  # ex1222's constants
+        ([12.96, -18.0, -18.0, 25.0], True),  # nvs04's expanded square, kappa ~ 35
+        ([Fraction(1, 3), Fraction(-1, 3)], False),  # inexact terms cancelling to 0
+        ([M, -M], True),  # exact in every order, whatever kappa
+    ],
+)
+def test_benign_sum_criterion(contribs, benign):
+    from discopt.modeling._exact_polynomial import _sum_is_benign
+
+    assert _sum_is_benign([Fraction(c) for c in contribs]) is benign
+
+
+@pytest.mark.unit
+def test_ulp_level_like_terms_are_not_rewritten():
+    """Ordinary decimal data with like terms keeps its structure (smoke regressions)."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=1)
+    for body in [
+        0.1 * x + 0.2 * x + y,
+        -9.53e-05 * x * y - 9.53e-05 * y * x,
+        x + 1.25 + 0.8,
+        (x - 1.8) ** 2 + 0.3 * x,
+    ]:
+        assert canonicalize_expression(body) is body, body

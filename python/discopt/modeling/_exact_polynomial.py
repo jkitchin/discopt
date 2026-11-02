@@ -17,9 +17,11 @@ The fix
 Every scalar row body and objective is collected **exactly** (``fractions.Fraction``)
 into a polynomial and is replaced by its canonical form
 ``sum(round(c_m) * m) + round(c_0)`` -- one term per monomial, so no consumer has
-like terms left to add -- **only** when some monomial's contributions could round
-under *some* order of floating-point summation. Bodies that pass are returned
-unchanged (the same object), so ordinary models are not touched.
+like terms left to add -- **only** when some monomial's contributions cancel
+catastrophically: when, under *some* order of floating-point summation, the
+coefficient could lose more than half its significant digits
+(:func:`_sum_is_benign`). Bodies that pass are returned unchanged (the same object),
+so ordinary models are not touched.
 
 When: at the two solve doors, ``Model.validate`` and the ``solve_model`` preamble
 (:func:`canonicalize_model`), before anything reads a body, and cached per row. Not
@@ -33,7 +35,8 @@ like terms), and ``Model.if_else``'s branch values, which derive a box at once.
 Most bodies have no like terms. :func:`_fast_clean` proves that structurally,
 without exact arithmetic; only the rest pay for the exact pass.
 
-The order-independent exactness test (:func:`_sum_is_order_exact`): the
+A sum that is exact in every order is always benign. The order-independent
+exactness test (:func:`_sum_is_order_exact`): the
 contributions ``q_k`` of one monomial are all dyadic (``n / 2**d``); let ``2**e`` be
 the largest power of two dividing every one of them. Every partial sum, in any
 order, is then an integer multiple of ``2**e`` of magnitude at most ``S = sum|q_k|``,
@@ -196,9 +199,9 @@ class _Collector:
         if any(k != () for k in p):
             return None
         contribs = p.get((), [])
-        if not _sum_is_order_exact(contribs):
-            # A float collector computes this constant inexactly, so whatever it
-            # scales or raises reads differently in floats: the body must be rewritten.
+        if not _sum_is_benign(contribs):
+            # A float collector computes this constant with a cancellation error, so
+            # whatever it scales reads differently in floats: rewrite the body.
             self.dirty = True
         return sum(contribs, Fraction(0))
 
@@ -528,8 +531,41 @@ def _fast_leaf_key(n, memo: dict, scalar_vars: set) -> tuple:
     return _fast_atom_key(n, memo)
 
 
+#: ``kappa * (n - 1)`` above which a sum is rewritten; see :func:`_sum_is_benign`.
+_CANCELLATION_LIMIT = 2**27
+
+
+def _sum_is_benign(contribs: list) -> bool:
+    """True unless float summation of ``contribs`` can lose over half its digits.
+
+    Any-order binary64 summation of ``n`` terms has relative error at most
+    ``(n - 1) * u * kappa`` (``u = 2**-53``, ``kappa = sum|q| / |sum q|``, the
+    condition number of the sum). The #2090 defect is catastrophic cancellation:
+    ``kappa ~ 2**53``, so the coefficient is wrong in its leading digit. Ordinary
+    data rounds at the ulp level instead -- measured on the in-repo corpus before
+    this test existed, the "exact in every order" test alone rewrote rows of
+    ``dispatch``/``ex8_5_3`` (symmetric ``x*y + y*x`` halves, ``kappa = 1``),
+    ``ex1222`` (constants ``1.25 + 0.8``, ``kappa = 1``) and ``nvs04`` (expanded
+    squares, ``kappa = 35``), and the rewrite changed seven smoke results. Those
+    rows' coefficients are already right to ~1e-14; rewriting them is churn, not a
+    fix. So a sum is rewritten only when its error bound exceeds ``2**-26`` (half
+    the significand): ``kappa * (n - 1) > 2**27``, which leaves ~24 binary orders
+    of magnitude between the defect and the corpus on either side. A sum that is
+    exact in every order (:func:`_sum_is_order_exact`) is benign whatever its
+    ``kappa`` -- that covers a full cancellation ``M - M`` to an exact zero.
+    """
+    if _sum_is_order_exact(contribs):
+        return True
+    total = sum(contribs, Fraction(0))
+    if total == 0:
+        return False  # inexact terms cancelling to zero: any float order may not
+    n = sum(1 for q in contribs if q != 0)
+    abs_sum = sum((abs(q) for q in contribs), Fraction(0))
+    return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * abs(total))
+
+
 def _needs_rewrite(poly: _Poly) -> bool:
-    return any(not _sum_is_order_exact(v) for v in poly.values())
+    return any(not _sum_is_benign(v) for v in poly.values())
 
 
 def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
