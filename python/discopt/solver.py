@@ -2701,6 +2701,10 @@ def _try_native_spatial_kernel(
         solve_kwargs["undecided_unpropagated_retry"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
+    # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
+    _max_open = _kernel_max_open_nodes(spec)
+    if _max_open is not None:
+        solve_kwargs["max_open_nodes"] = int(_max_open)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
     # the slice at its own deadline — but only while it already holds an incumbent,
     # the one state in which that fallback has nothing to contribute. The kernel is
@@ -3120,6 +3124,8 @@ def _try_native_spatial_kernel(
     # (``DISCOPT_KERNEL_UNDECIDED_RETRY``) and how many decided; 0 when off.
     _native_stats["tree/prop_retries"] = float(int(res.get("n_prop_retries") or 0))
     _native_stats["tree/prop_retry_decided"] = float(int(res.get("n_prop_retry_decided") or 0))
+    # #2092: the search stopped on the frontier memory budget (status node_limit).
+    _native_stats["tree/frontier_capped"] = float(bool(res.get("frontier_capped")))
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -7574,12 +7580,16 @@ def _search_termination(
     debug_quit: bool = False,
     time_yield: bool = False,
     unproven_removal: bool = False,
+    frontier_capped: bool = False,
 ) -> Optional[str]:
     """Why a Python-tree B&B loop stopped, for ``SolveResult.termination`` (#1585).
 
     ``unproven_removal``: the loop fathomed a node without proof (a non-rigorous
     sentinel, tracked on the Python side), so a drain with the gap open is
     ``"unresolved"``, not ``"exhausted"`` (#1869).
+
+    ``frontier_capped``: the loop stopped on the open-frontier memory budget
+    (#2092), a resource cap reported like the node cap.
 
     Called IMMEDIATELY after the loop exits, before any terminal polish or
     re-certification can move the incumbent, so it reads the tree in the state
@@ -7615,7 +7625,7 @@ def _search_termination(
         return _st.TERMINATION_EXHAUSTED
     if _gap_converged(tree, gap_tolerance, abs_gap_tol):
         return _st.TERMINATION_GAP
-    if int(tree.stats()["total_nodes"]) >= max_nodes:
+    if int(tree.stats()["total_nodes"]) >= max_nodes or frontier_capped:
         return _st.TERMINATION_NODE_LIMIT
     if elapsed >= time_limit:
         return _st.TERMINATION_TIME_LIMIT
@@ -11960,6 +11970,97 @@ def _kernel_int_probe_enabled() -> bool:
         "off",
         "",
     )
+
+
+#: #2092: default memory budget for an open branch-and-bound frontier (the native
+#: spatial kernel and the Python tree), in MiB. Same size as the native MILP
+#: engine's ``_MILP_ENGINE_FRONTIER_BYTES`` (#1874).
+_FRONTIER_MEMORY_MB_DEFAULT = 2048
+
+
+def _frontier_memory_bytes() -> Optional[int]:
+    """The open-frontier memory budget, from ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092).
+
+    Read at call time. Default 2048 MiB; ``0`` means no budget. A tree whose gap
+    never closes keeps every frontier node live (measured on a 3,600 s-class
+    synthetic: 7,948 open nodes at the time limit, none dominated by the
+    incumbent), so without a budget its memory grows for as long as the clock
+    allows: an external benchmark reported 3--8 GiB on 1-hour runs. Reaching the
+    budget ends the search as ``max_nodes`` does -- ``node_limit``, the incumbent,
+    and the rigorous frontier bound. The native kernel then sets
+    ``solver_stats["tree/frontier_capped"]``; a Python-tree loop logs a warning and
+    reports ``termination == "node_limit"``.
+    It never weakens a bound or a certificate: the search stops, it does not prune.
+
+    A memory guard, like ``time_limit``, not solver math: it changes nothing on a
+    run whose frontier stays under the budget, and a run that reaches it would
+    otherwise keep allocating. Raise it on a machine with more memory, or set
+    ``0`` to restore the unbounded behaviour.
+    """
+    raw = os.environ.get("DISCOPT_FRONTIER_MEMORY_MB", "").strip()
+    if not raw:
+        mb = _FRONTIER_MEMORY_MB_DEFAULT
+    else:
+        try:
+            mb = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"DISCOPT_FRONTIER_MEMORY_MB must be a non-negative integer, got {raw!r}"
+            ) from exc
+        if mb < 0:
+            raise ValueError(f"DISCOPT_FRONTIER_MEMORY_MB must be >= 0, got {mb}")
+    return None if mb == 0 else mb << 20
+
+
+def _kernel_max_open_nodes(spec: dict) -> Optional[int]:
+    """Open-node cap for the native spatial kernel under the frontier budget (#2092).
+
+    An open kernel node carries its share of the parent box its sibling also
+    holds (``8 n`` bytes), half of the pair's packed warm-start basis (``(n + 5
+    m) / 2``: one i8 per column and row, one u32 per row) and ~256 bytes of node,
+    heap-entry and allocator overhead; ``m`` is taken as the fixed rows plus four
+    envelope rows per lifted term, which over-counts the 1-D terms. Rounded up to
+    ``9 n + 3 m + 256``. Measured on the n=150 synthetic of #2092 (523 columns):
+    ~7.2 KB per open node against this estimate's ~8.3 KB. An overestimate only
+    stops the search earlier. ``None`` when there is no budget.
+    """
+    budget = _frontier_memory_bytes()
+    if budget is None:
+        return None
+    n = int(spec["n_cols"])
+    m = (len(spec["fixed_row_ptr"]) - 1) + 4 * len(spec["term_kind"])
+    per_node = 9 * n + 3 * max(m, 0) + 256
+    return max(1000, budget // per_node)
+
+
+def _tree_max_open_nodes(n_vars: int) -> Optional[int]:
+    """Open-node cap for a Python-tree loop under the frontier budget (#2092).
+
+    A pending ``TreeManager`` child holds half of the parent box it shares with its
+    sibling (``8 n`` bytes) and half of the shared parent solution (``4 n``),
+    plus ~256 bytes of node, heap-entry and allocator overhead; ``16 n + 256``
+    rounds that up (and covers the warm-start basis the MILP driver attaches).
+    An overestimate only stops the search earlier. ``None`` when there is no
+    budget.
+    """
+    budget = _frontier_memory_bytes()
+    if budget is None:
+        return None
+    return max(1000, budget // (16 * int(n_vars) + 256))
+
+
+def _tree_frontier_capped(stats, cap: Optional[int]) -> bool:
+    """Whether a Python-tree frontier has reached its memory cap (#2092)."""
+    if cap is None or int(stats["open_nodes"]) < cap:
+        return False
+    logger.warning(
+        "branch-and-bound frontier reached its memory budget (%d open nodes, "
+        "DISCOPT_FRONTIER_MEMORY_MB=%d): stopping the search with the incumbent "
+        "and the frontier bound (status node_limit)",
+        int(stats["open_nodes"]),
+        int((_frontier_memory_bytes() or 0) >> 20),
+    )
+    return True
 
 
 def _kernel_undecided_retry_enabled() -> bool:
@@ -18890,6 +18991,9 @@ def solve_model(
         int_sizes,
         strategy,
     )
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
     # #1492: the box the Rust brancher measures relative widths against (its
@@ -23855,6 +23959,9 @@ def solve_model(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
@@ -23869,6 +23976,7 @@ def solve_model(
         debug_quit=_debug_quit,
         time_yield=_rr_reserve_yield,
         unproven_removal=_nonrigorous_fathom,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -24349,7 +24457,7 @@ def solve_model(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -27932,6 +28040,9 @@ def _solve_nlp_bb(
         int_sizes,
         strategy,
     )
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 
@@ -29107,6 +29218,9 @@ def _solve_nlp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
@@ -29119,6 +29233,7 @@ def _solve_nlp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -29709,7 +29824,7 @@ def _solve_nlp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -39010,6 +39125,9 @@ def _solve_milp_bb(
 
     t_rust_start = time.perf_counter()
     tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     # #1535: integer columns and probe count for a caller-chosen branching rule.
     _branch_int_cols = np.array(
@@ -39558,6 +39676,9 @@ def _solve_milp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     wall_time = time.perf_counter() - t_start
     # #1585: why the loop stopped, read before anything below can move the pair.
@@ -39569,6 +39690,7 @@ def _solve_milp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -39822,7 +39944,7 @@ def _solve_milp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -40061,6 +40183,9 @@ def _solve_miqp_bb(
 
     t_rust_start = time.perf_counter()
     tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 
@@ -40513,6 +40638,9 @@ def _solve_miqp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     wall_time = time.perf_counter() - t_start
     # #1585: why the loop stopped, read before anything below can move the pair.
@@ -40524,6 +40652,7 @@ def _solve_miqp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -40780,7 +40909,7 @@ def _solve_miqp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound

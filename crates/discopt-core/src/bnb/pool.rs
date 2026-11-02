@@ -259,6 +259,7 @@ impl NodePool {
         );
         node.lb = Vec::new();
         node.ub = Vec::new();
+        node.pending_box = None;
         node.parent_solution = None;
         node.basis = None;
         self.released[id.0] = true;
@@ -435,7 +436,7 @@ mod tests {
         n0.local_lower_bound = -2.5;
         n0.lb = vec![0.0; 50];
         n0.ub = vec![1.0; 50];
-        n0.parent_solution = Some(vec![0.5; 50]);
+        n0.parent_solution = Some(std::sync::Arc::new(vec![0.5; 50]));
         pool.add(n0);
         assert!(!pool.is_released(NodeId(0)));
         pool.prune(NodeId(0));
