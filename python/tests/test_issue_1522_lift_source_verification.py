@@ -16,6 +16,8 @@ the kernel's incumbent at obj ~0.011 with ``|e1| > 1e-4``.
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 from discopt import solver as S
@@ -120,15 +122,76 @@ def test_node_limit_incumbent_passes_check_feasibility(monkeypatch, max_nodes):
 
 
 def test_time_limited_exit_never_reports_a_source_infeasible_point():
-    """With no budget left to repair, the kernel keeps its bound and drops the point."""
-    m = _prob09()
-    r = m.solve(deterministic=True, time_limit=0.5)
-    assert r.bound is not None
+    """A clock-limited exit is sound whether or not the kernel reached its root.
+
+    This used to assert ``r.bound is not None`` at ``time_limit=0.5``, which holds
+    only if the kernel processes its root inside half a second. Since #2091 made
+    role-2 deadlines absolute, the pre-kernel stages spend that same budget, and the
+    kernel reaches its root or not by machine speed: measured on ``main`` 4a8a57e,
+    one process, 10 solves -- 3 ``optimal`` with bound -1e-12 at 1 node, 7
+    ``time_limit`` with no bound at 0 nodes. Both answers are honest. What must hold
+    on every exit is that nothing reported is false: no source-infeasible point and
+    no bound above the optimum (0). The keep-the-bound rule itself is pinned
+    deterministically by the next test.
+    """
+    r = _prob09().solve(deterministic=True, time_limit=0.5)
+    assert r.status in ("optimal", "feasible", "time_limit"), r.status
+    if r.bound is not None:
+        assert r.bound <= 1e-9, f"bound {r.bound} above the optimum 0"
     if r.x:
         ok, viols = warm_start.check_feasibility(_prob09(), _flat(r))
         assert ok, viols
     else:
         assert r.objective is None
+
+
+def test_unrepairable_incumbent_keeps_the_bound_and_drops_the_point(monkeypatch):
+    """With no budget left to repair, the kernel keeps its bound and drops the point.
+
+    The #1522 branch in ``_try_native_spatial_kernel``: on an UNCERTIFIED exit, an
+    incumbent that verifies on the lift but not on the source is repaired, and if
+    the repair returns nothing (as it does with its budget spent) the kernel's bound
+    is reported with no primal rather than the point being kept or the whole run
+    discarded.
+
+    The clock is not what this pins, so the inputs are injected: the
+    deterministic, node-limited, unseeded kernel exit of
+    :func:`test_node_limit_incumbent_passes_check_feasibility`; its reported
+    incumbent made to fail the source check at that one call site (on ``main``
+    4a8a57e that incumbent verifies, so the branch would not run on its own); and a
+    repair that returns ``None``. Each injection counts its own calls, so a test
+    that never reached the branch fails (CLAUDE.md §6).
+    """
+    monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
+    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "0")
+    monkeypatch.setenv(FLAG, "0")
+    seen = {"verify": 0, "source_only": 0, "repair": 0}
+    real_verify = S._native_kernel_verify_point
+
+    def verify(model, x, source=None):
+        caller = sys._getframe(1).f_code.co_name
+        if source is not None and caller == "_try_native_spatial_kernel" and not seen["verify"]:
+            seen["verify"] += 1
+            return False, None
+        return real_verify(model, x, source=source)
+
+    def source_only(*a, **k):
+        seen["source_only"] += 1
+        return True
+
+    def no_budget_repair(*a, **k):
+        seen["repair"] += 1
+        return None
+
+    monkeypatch.setattr(S, "_native_kernel_verify_point", verify)
+    monkeypatch.setattr(S, "_native_kernel_source_only_failure", source_only)
+    monkeypatch.setattr(S, "_native_kernel_repair_point", no_budget_repair)
+    r = _prob09().solve(deterministic=True, max_nodes=2000)
+
+    assert seen == {"verify": 1, "source_only": 1, "repair": 1}, seen
+    assert r.status == "node_limit"
+    assert r.bound is not None and r.bound <= 1e-9, r.bound
+    assert not r.x and r.objective is None, (r.x, r.objective)
 
 
 # --------------------------------------------------------------------------- #
