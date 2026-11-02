@@ -109,6 +109,9 @@ impl FrontierBasis {
         let basic_vars = b
             .basic_vars
             .iter()
+            // An LP with more than 2^32 columns cannot be held in memory by this
+            // kernel (its dense per-column vectors alone would be > 32 GB), so the
+            // panic is unreachable in practice; it is a loud guard, not a fallback.
             .map(|&j| u32::try_from(j).expect("LP column index exceeds u32"))
             .collect();
         Self {
@@ -935,8 +938,6 @@ pub fn solve_spatial_tree_observed(
         cuts: inherited_cuts,
     }) = heap.pop()
     {
-        let (lo, hi) = QNode::into_box(base, fix);
-        let parent_basis: Option<Basis> = frontier_basis.as_deref().map(FrontierBasis::unpack);
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
         {
             // #917: reclaim the caller's withheld #844 reserve, once, and only while
@@ -1072,8 +1073,15 @@ pub fn solve_spatial_tree_observed(
         // LP and the children see; a box proven empty under the cutoff is fathomed
         // with region lower bound `incumbent` (no feasible point beats it there),
         // or `+inf` when no cutoff was active (genuinely empty region).
-        let mut lo = lo;
-        let mut hi = hi;
+        // Materialized only now, past the deadline exit and the parent-bound
+        // fathom above: a node fathomed straight off the heap never copies its
+        // box or its basis, and dropping its `Rc<NodeBox>` frees the sibling's
+        // share early.
+        let (mut lo, mut hi) = QNode::into_box(base, fix);
+        // One `Basis` allocation per evaluated node (the `u32` indices are
+        // widened back), where the LP used to borrow the shared `Rc<Basis>`:
+        // O(n + m), negligible next to the node LP it warm-starts.
+        let parent_basis: Option<Basis> = frontier_basis.as_deref().map(FrontierBasis::unpack);
         // #1995: the box as the node was pushed, kept only under the retry flag.
         let mut pre_propagation = (config.undecided_unpropagated_retry && config.run_propagation)
             .then(|| (lo.clone(), hi.clone()));
