@@ -101,11 +101,11 @@ reduction over :data:`_MAX_CONTRIBUTIONS` entries, and an index into an expressi
 pass, but its entries are not merged with the row's visible terms -- and two
 *distinct* but structurally equal atoms are not merged here.
 
-A coefficient whose exact value is **zero** has no relative error, so its sum is
-judged against the row's largest exact coefficient instead (:func:`_sum_is_benign`):
-in a row dominated by a much larger coefficient, a zero coefficient may keep a float
-residue below ``2**-26`` of that scale -- below any row-relative feasibility
-tolerance, but weaker than the per-coefficient test every nonzero coefficient gets.
+A coefficient whose exact value is **zero** is rewritten whenever its sum is not
+exact in every order (#2098): there is no relative error to bound it by, and a
+residue next to a large coefficient or constant is a coefficient the written row
+does not have -- small against the row for checking a point, but enough to fix a
+variable the row leaves free and certify a bound that excludes feasible points.
 """
 
 from __future__ import annotations
@@ -1162,7 +1162,7 @@ def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list) -> Optional[tup
 _CANCELLATION_LIMIT = 2**27
 
 
-def _sum_is_benign(contribs: list, scale: Optional[Fraction] = None) -> bool:
+def _sum_is_benign(contribs: list) -> bool:
     """True unless float summation of ``contribs`` can lose over half its digits.
 
     Any-order binary64 summation of ``n`` terms has relative error at most
@@ -1180,30 +1180,30 @@ def _sum_is_benign(contribs: list, scale: Optional[Fraction] = None) -> bool:
     of magnitude between the defect and the corpus on either side. A sum that is
     exact in every order (:func:`_sum_is_order_exact`) is benign whatever its
     ``kappa`` -- that covers a full cancellation ``M - M`` to an exact zero.
+
+    A sum whose exact value is **zero** but which is *not* exact in every order is
+    never benign (#2098): its ``kappa`` is infinite, and any float residue is a
+    coefficient on a variable the written row does not hold. An earlier version
+    measured that residue against the row's largest coefficient and kept it when
+    it was below ``2**-26`` of that scale. That is safe for checking a point and
+    wrong for a bound: in ``((t + x) - t) - x + y == 1e13`` the residue ``-1`` on
+    ``x`` read the row as ``-x + y == 1e13``, which with ``y <= 1e13`` forces
+    ``x == 0``, and the certified bound excluded every feasible ``x > 0``.
+    Rewriting a zero coefficient only *drops* its terms, so it is always sound.
     """
     if _sum_is_order_exact(contribs):
         return True
     total = sum(contribs, Fraction(0))
+    if total == 0:
+        return False
     n = sum(1 for q in contribs if q != 0)
     abs_sum = sum((abs(q) for q in contribs), Fraction(0))
-    if total == 0:
-        # A coefficient that is exactly 0 has no relative error to bound, so the
-        # same error bound is measured against the row's ``scale`` (its largest
-        # exact coefficient) instead. Measured: the hull perspective rows of
-        # ``test_1846`` carry symbolically matched pairs ``[1e-8, -1e-8, -4e-8,
-        # 4e-8]`` -- residue <= ~1e-23 next to O(1) coefficients, not a defect --
-        # while the issue's ``(t + a) - t - a`` (``[M, 1, -M, -1]``, nothing else
-        # in the row) can read as ``-a``: an O(1) error in a row of zeros.
-        if scale is None or scale == 0:
-            return False
-        return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * scale)
     return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * abs(total))
 
 
 def _groups_benign(groups: list) -> list:
-    """The groups of one body that are *not* benign, judged against its scale."""
-    scale = max((abs(sum(g, Fraction(0))) for g in groups), default=Fraction(0))
-    return [g for g in groups if not _sum_is_benign(g, scale)]
+    """The groups of one body that are *not* benign."""
+    return [g for g in groups if not _sum_is_benign(g)]
 
 
 def _by_variable_monomial(poly: _Poly, param_values: dict) -> list:
