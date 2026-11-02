@@ -226,6 +226,16 @@ def test_unseeded_solve_is_unchanged_by_the_flag(monkeypatch):
     ``max_nodes=100``); ``deterministic=True`` removes those budgets (#1116),
     and 6 interleaved solves at load 5-8 were then bit-identical (101 nodes).
     That makes exact equality a real bound-neutrality check (CLAUDE.md §5).
+
+    #2089: the instance is ``flay03m``, not ``tls2``. Nothing here needs tls2 --
+    no stall is injected, and the check only needs convex node NLPs that do not
+    stall on a work-bound run. tls2 cost ~100 s per solve (197 s for the pair on
+    CI); flay03m is ~11 s. Measured in this exact configuration, 3 interleaved
+    repetitions x both arms: bit-identical (101 nodes, objective
+    48.98979479317761, bound 39.99999996180068), 76 convex node NLPs, 0 stalls.
+    The stall canaries above keep tls2: it is the corpus instance where the
+    injected stall costs the legacy arm its certificate (m3, flay03m and
+    cvxnonsep_nsig30 certify through it in both arms, measured).
     """
     import discopt.solver as solver_mod
     from discopt.solvers import SolveStatus
@@ -241,7 +251,8 @@ def test_unseeded_solve_is_unchanged_by_the_flag(monkeypatch):
         return r
 
     monkeypatch.setattr(solver_mod, "_solve_node_nlp", spy)
-    path = NL_DIR / "tls2.nl"
+    path = NL_DIR / "flay03m.nl"
+    assert path.exists(), f"missing corpus instance {path}"
     results = {}
     for arm in ("0", "1"):
         monkeypatch.setenv(ABSTAIN_ENV, arm)

@@ -103,11 +103,16 @@ exact multiplicity over the DAG and always rewritten, to ``2**d * x``. Downstrea
 walkers then never see the sharing. When that coefficient has no binary64
 (``d >= 1024``), :class:`SharedSumOverflowError` refuses the row.
 
+Atoms are keyed **structurally** (:func:`_structural_id`), so two distinct but
+identical subtrees -- two separate ``dm.exp(z)`` objects -- are one monomial. Before
+#2101 they were keyed by object identity and summed in floats, which certified wrong
+optima. A node is merged only when its fields fully determine its value; tagged nodes,
+``CustomCall`` and unusual index forms keep identity keys and are simply never merged.
+
 Residual exposure (not handled; recorded so it is not mistaken for covered): a
 reduction over :data:`_MAX_CONTRIBUTIONS` entries, and an index into an expression
 (``(A @ x)[i]``) are atoms -- their inner array is collected exactly once per model
-pass, but its entries are not merged with the row's visible terms -- and two
-*distinct* but structurally equal atoms are not merged here.
+pass, but its entries are not merged with the row's visible terms.
 
 A coefficient whose exact value is **zero** is rewritten whenever its sum is not
 exact in every order (#2098): there is no relative error to bound it by, and a
@@ -755,7 +760,8 @@ class _Collector:
         return out
 
     def _array_atom(self, node, shape: tuple) -> np.ndarray:
-        """An opaque array node: element ``j`` is the factor ``("e", id, j)``."""
+        """An opaque array node: element ``j`` is the factor ``("e", sid, j)``, with
+        the node keyed structurally (#2101) like a scalar atom."""
         new = canonicalize_expression(
             node, memo=self.memo, _atom_children_only=True, _params=self.params
         )
@@ -766,7 +772,7 @@ class _Collector:
         out = np.empty(shape, dtype=object)
         dst = out.reshape(-1)
         for j in range(size):
-            fkey = ("e", id(new), j)
+            fkey = ("e", _structural_id(new, self.memo), j)
             self.factor_nodes.setdefault(fkey, (new, j))
             dst[j] = {(fkey,): [_ONE]}
         return out
@@ -839,7 +845,7 @@ class _Collector:
         )
         if new is not node:
             self.dirty = True
-        return self._factor(("a", id(new)), new)
+        return self._factor(("a", _structural_id(new, self.memo)), new)
 
     def _linear_array(self, var: Variable, coefs: np.ndarray) -> _Poly:
         shape = tuple(var.shape)
@@ -880,6 +886,125 @@ def _floats_sum_order_exact(values: list) -> bool:
     return bool(scaled < 2**53)
 
 
+#: The instance attributes each node class carries when it is exactly what its
+#: fields say. A node with any *other* attribute -- ``register_function``'s
+#: ``_discopt_atom`` tag on an ordinary ``BinaryOp``, or anything added later -- is
+#: keyed by identity instead, so it is never merged with an untagged twin.
+_STRUCTURAL_ATTRS: dict = {
+    Constant: frozenset({"value"}),
+    BinaryOp: frozenset({"_shape", "left", "op", "right"}),
+    UnaryOp: frozenset({"_shape", "op", "operand"}),
+    FunctionCall: frozenset({"_shape", "args", "func_name"}),
+    IndexExpression: frozenset({"_shape", "base", "index"}),
+    SumOverExpression: frozenset({"terms"}),
+    SumExpression: frozenset({"axis", "operand"}),
+    MatMulExpression: frozenset({"left", "right"}),
+}
+
+_STRUCTURAL_TABLE = "__structural_ids__"
+
+
+def _plain_index(index) -> Optional[tuple]:
+    """``index`` as a tuple of Python ints, or ``None`` for any other index form."""
+    idx = index if isinstance(index, tuple) else (index,)
+    out = []
+    for i in idx:
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            return None
+        out.append(int(i))
+    return tuple(out)
+
+
+def _structural_parts(node) -> Optional[tuple]:
+    """``(head, children)`` of a node whose value its fields fully determine.
+
+    ``None`` means "key by identity": a Variable or Parameter (a distinct object
+    *is* a distinct quantity), a ``CustomCall`` (an arbitrary callable), a node
+    carrying any attribute beyond :data:`_STRUCTURAL_ATTRS`, an unusual index,
+    and every node type not listed.
+    """
+    t = type(node)
+    allowed = _STRUCTURAL_ATTRS.get(t)
+    # ``keys() <=`` compares the instance dict's key view without building a set.
+    if allowed is None or not node.__dict__.keys() <= allowed:
+        return None
+    if t is Constant:
+        v = node.value
+        return ("c", v.shape, v.dtype.str, v.tobytes()), ()
+    if t is BinaryOp:
+        return ("b", node.op), (node.left, node.right)
+    if t is UnaryOp:
+        return ("u", node.op), (node.operand,)
+    if t is FunctionCall:
+        return ("f", node.func_name, len(node.args)), tuple(node.args)
+    if t is IndexExpression:
+        idx = _plain_index(node.index)
+        if idx is None:
+            return None
+        return ("i", idx), (node.base,)
+    if t is SumOverExpression:
+        return ("so", len(node.terms)), tuple(node.terms)
+    if t is SumExpression:
+        return ("s", node.axis), (node.operand,)
+    return ("mm",), (node.left, node.right)  # MatMulExpression
+
+
+def _structural_id(root, memo: dict) -> int:
+    """An integer equal for two nodes iff they are the same expression tree (#2101).
+
+    Hash-consing: each node's key is its head plus its children's ids, so keys stay
+    flat however deep the tree, and the walk is iterative. Two *distinct* but
+    identical ``dm.exp(z)`` objects get one id, so their like terms are collected
+    instead of being summed in floats with a catastrophic cancellation. Equal ids
+    imply equal values: only pure nodes whose fields say everything get a
+    structural key (:func:`_structural_parts`); the rest are keyed by identity,
+    which can only fail to merge, never merge wrongly. Constants compare by their
+    exact bytes, so ``0.0`` and ``-0.0`` stay apart.
+    """
+    table = memo.get(_STRUCTURAL_TABLE)
+    if table is None:
+        fresh: tuple[dict[int, tuple[object, int]], dict[tuple, int]] = ({}, {})
+        table = memo[_STRUCTURAL_TABLE] = fresh
+    by_node: dict[int, tuple[object, int]] = table[0]  # id(node) -> (node, sid)
+    by_key: dict[tuple, int] = table[1]  # key -> sid
+    hit = by_node.get(id(root))
+    if hit is not None:
+        sid: int = hit[1]
+        return sid
+    stack: list = [(root, False)]
+    pop, push = stack.pop, stack.append
+    while stack:
+        node, expanded = pop()
+        nid = id(node)
+        if nid in by_node:
+            continue
+        t = type(node)
+        if t is Variable or t is Parameter:  # a distinct object is a distinct quantity
+            key0 = ("id", nid)
+            sid0 = by_key.get(key0)
+            if sid0 is None:
+                sid0 = by_key[key0] = len(by_key)
+            by_node[nid] = (node, sid0)
+            continue
+        parts = _structural_parts(node)
+        if parts is not None and parts[1] and not expanded:
+            push((node, True))
+            stack.extend([(c, False) for c in parts[1] if id(c) not in by_node])
+            continue
+        if parts is None:
+            key: tuple = ("id", nid)
+        else:
+            head, children = parts
+            key = (head, *(by_node[id(c)][1] for c in children))
+        got = by_key.get(key)
+        if got is None:
+            got = by_key[key] = len(by_key)
+        # The node is kept alive in the table, so its id cannot be reused this pass.
+        by_node[nid] = (node, got)
+    out: int = by_node[id(root)][1]
+    return out
+
+
 class _NotClean(Exception):
     """The fast pre-pass cannot prove the body needs no rewrite."""
 
@@ -910,6 +1035,7 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
     block_vars: set = set()
     consts: list = []
     sums: set = set()  # additive nodes already walked (#2100)
+    atoms: list = []
     try:
         stack: list = [(root, False)]  # (node, under a scale)
         pop, push = stack.pop, stack.append
@@ -958,7 +1084,7 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
                 if var is not None:
                     bases = {id(var)}
                 elif t is SumExpression and _opaque_head(node.operand):
-                    key: tuple = (_fast_atom_key(node, memo, found),)
+                    key: tuple = (_fast_atom_key(node, memo, found, atoms),)
                     if key in seen:
                         raise _NotClean
                     seen.add(key)
@@ -975,10 +1101,10 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
                 continue
             # A term: a product of leaves (Parameter factors dropped, as scales).
             if t is IndexExpression or t is Variable:
-                leaf = _fast_leaf_key(node, memo, scalar_vars, found)
+                leaf = _fast_leaf_key(node, memo, scalar_vars, found, atoms)
                 mono: tuple = () if leaf is None else (leaf,)
             else:
-                mono = tuple(sorted(_fast_monomial(node, memo, scalar_vars, found)))
+                mono = tuple(sorted(_fast_monomial(node, memo, scalar_vars, found, atoms)))
             if mono in seen:
                 raise _NotClean
             seen.add(mono)
@@ -987,6 +1113,8 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
         if consts and () in seen:  # a Parameter-only term next to a constant term
             raise _NotClean
     except _NotClean:
+        return False
+    if not _fast_atoms_distinct(atoms, memo):
         return False
     return len(consts) <= 1 or _floats_sum_order_exact(consts)
 
@@ -1063,6 +1191,7 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
     coarse: set = set()  # Variable keys a reduction / matmul expands
     sums: set = set()  # additive nodes already walked (#2100, as in _fast_clean)
     one_var_products: set = set()  # Variables with a product-of-leaves term over them alone
+    atoms: list = []  # every atom, for the #2101 structural comparison
     n_const = 0
     try:
         stack: list = [(root, False)]
@@ -1110,7 +1239,7 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
                         raise _NotClean
                     keys: set = {("V", id(var))}
                 elif _opaque_head(node.operand):
-                    keys = {_fast_atom_key(node, memo, found)}
+                    keys = {_fast_atom_key(node, memo, found, atoms)}
                 else:
                     keys = {("V", b) for b in _fast_product_block_any_axis(node, memo, found)}
                 if not coarse.isdisjoint(keys) or not multi.isdisjoint(keys):
@@ -1119,7 +1248,7 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
                     raise _NotClean
                 coarse |= keys
                 continue
-            keys, one = _fast_array_term_keys(node, memo, found)
+            keys, one = _fast_array_term_keys(node, memo, found, atoms)
             if not keys:
                 n_const += 1  # a Parameter-only term: a constant once substituted
                 if n_const > 1:
@@ -1154,7 +1283,9 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
             single.setdefault(skey, []).append(flat)
     except _NotClean:
         return False
-    return True
+    # Atoms are keyed by identity above; two separate but identical ones (#2101)
+    # would read as two monomials, so they are compared structurally here.
+    return _fast_atoms_distinct(atoms, memo)
 
 
 #: Powers a single-leaf term may carry (``x``, ``x**2``, ... ``x**_MAX_POWER``).
@@ -1180,13 +1311,13 @@ def _matmul_linear_var(node) -> Optional[Variable]:
     return None
 
 
-def _fast_array_term_keys(node, memo: dict, found: list) -> tuple:
+def _fast_array_term_keys(node, memo: dict, found: list, atoms: list) -> tuple:
     """``(leaf keys, single)`` of one elementwise product term, or raise
     :class:`_NotClean`. ``single`` is ``((var id, power), flat slots)`` when the term
     reads exactly one Variable leaf once (possibly raised to a power), else None."""
     keys: set = set()
     leaves: list = []  # (Variable, index or None, power)
-    atoms = False
+    has_atom = False
     stack = [(node, 1)]
     while stack:
         n, power = stack.pop()
@@ -1233,9 +1364,9 @@ def _fast_array_term_keys(node, memo: dict, found: list) -> tuple:
             raise _NotClean
         elif t is SumOverExpression or t is MatMulExpression or t is SumExpression:
             raise _NotClean
-        keys.add(_fast_atom_key(n, memo, found))
-        atoms = True
-    if atoms or len(leaves) != 1 or leaves[0][2] == 0:
+        keys.add(_fast_atom_key(n, memo, found, atoms))
+        has_atom = True
+    if has_atom or len(leaves) != 1 or leaves[0][2] == 0:
         return keys, None
     var, index, power = leaves[0]
     shape = tuple(var.shape or ())
@@ -1264,14 +1395,50 @@ def _array_linear_var(node) -> Optional[Variable]:
     return var
 
 
-def _fast_atom_key(node, memo: dict, found: list) -> tuple:
+def _fast_atom_key(node, memo: dict, found: list, atoms: list) -> tuple:
+    """Identity key of an atom whose arguments need no rewrite; the atom is recorded
+    in ``atoms`` so :func:`_fast_atoms_distinct` can compare it structurally."""
     new = canonicalize_expression(node, memo=memo, _atom_children_only=True, _params=found)
     if new is not node:
         raise _NotClean
+    atoms.append(node)
     return ("a", id(node))
 
 
-def _fast_monomial(node, memo: dict, scalar_vars: set, found: list) -> list:
+def _atom_head(node) -> tuple:
+    """The top of an atom: two structurally equal atoms always have equal heads."""
+    return (type(node), getattr(node, "op", None), getattr(node, "func_name", None))
+
+
+def _fast_atoms_distinct(atoms: list, memo: dict) -> bool:
+    """False if two of a row's atoms may be the same expression (#2101).
+
+    The fast pass keys atoms by identity, so two separate but identical
+    ``dm.exp(z)`` objects would look like two monomials. Structural ids
+    (:func:`_structural_id`) decide, but they cost a walk of each atom's subtree, so
+    they are computed only among atoms that share a head -- equal trees always do.
+    A row with one atom, or with atoms of different functions/ops, pays nothing.
+    Any structural match (even across different monomials) sends the row to the
+    exact pass, which keys every atom structurally: conservative, never wrong.
+    """
+    if len(atoms) < 2:
+        return True
+    groups: dict = {}
+    for a in atoms:
+        groups.setdefault(_atom_head(a), []).append(a)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        seen: set = set()
+        for a in group:
+            sid = _structural_id(a, memo)
+            if sid in seen:
+                return False
+            seen.add(sid)
+    return True
+
+
+def _fast_monomial(node, memo: dict, scalar_vars: set, found: list, atoms: list) -> list:
     """Variable factor keys of a product-of-leaves term, or raise :class:`_NotClean`."""
     factors: list = []
     stack = [node]
@@ -1294,7 +1461,7 @@ def _fast_monomial(node, memo: dict, scalar_vars: set, found: list) -> list:
                     tb = type(base)
                     if tb is not Variable and tb is not IndexExpression and tb is not Parameter:
                         raise _NotClean
-                    leaf = _fast_leaf_key(base, memo, scalar_vars, found)
+                    leaf = _fast_leaf_key(base, memo, scalar_vars, found, atoms)
                     if leaf is not None:
                         factors.extend([leaf] * k)
                     continue
@@ -1308,13 +1475,13 @@ def _fast_monomial(node, memo: dict, scalar_vars: set, found: list) -> list:
             raise _NotClean
         elif t is UnaryOp and n.op == "neg":
             raise _NotClean
-        leaf = _fast_leaf_key(n, memo, scalar_vars, found)
+        leaf = _fast_leaf_key(n, memo, scalar_vars, found, atoms)
         if leaf is not None:
             factors.append(leaf)
     return factors
 
 
-def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list) -> Optional[tuple]:
+def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list, atoms: list) -> Optional[tuple]:
     """Factor key of a leaf; ``None`` for a scalar Parameter (a scale, not a factor)."""
     t = type(n)
     if t is IndexExpression:
@@ -1346,7 +1513,7 @@ def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list) -> Optional[tup
             raise _NotClean
         found.append(n)
         return None
-    return _fast_atom_key(n, memo, found)
+    return _fast_atom_key(n, memo, found, atoms)
 
 
 #: ``kappa * (n - 1)`` above which a sum is rewritten; see :func:`_sum_is_benign`.

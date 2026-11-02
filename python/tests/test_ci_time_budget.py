@@ -1,4 +1,4 @@
-"""The fast lane's per-test time budget (python/tests/_time_budget.py).
+"""The per-test time budget of the fast and slow lanes (python/tests/_time_budget.py).
 
 A budget that silently passed everything would read as a lane under control while
 the tests it exists to catch kept landing. These pin that it fails an over-budget
@@ -104,6 +104,27 @@ def test_verdicts_cross_the_xdist_boundary(suite, monkeypatch):
     )
 
 
+def test_slow_lane_uses_its_own_list_and_advice(suite):
+    """#2089: the slow lane has no lane below it, so "mark it slow" is the wrong
+    advice there, and it must read its own allowlist by default."""
+    pytester, allow = suite
+    result = _run(pytester, allow, "--time-budget-lane", "slow")
+    result.assert_outcomes(passed=3, failed=2)
+    result.stdout.fnmatch_lines(
+        [
+            "*test_mod.py::test_slow took 0.* s, over the slow-lane budget of 0.2 s*",
+            "*slow-lane time budget: 0.2 s per test*",
+        ]
+    )
+    assert "mark it @pytest.mark.slow" not in result.stdout.str()
+
+    from _time_budget import LANES, SLOW_ALLOWLIST_PATH, TimeBudgetPlugin
+
+    assert LANES["slow"][0] == SLOW_ALLOWLIST_PATH
+    with pytest.raises(ValueError, match="--time-budget-lane"):
+        TimeBudgetPlugin(1.0, {}, lane="nightly")
+
+
 def test_rejects_a_nonpositive_budget(suite):
     pytester, allow = suite
     result = _run(pytester, allow)  # sanity: the fixture suite runs
@@ -151,11 +172,14 @@ def test_every_allowlist_entry_names_a_test_that_exists():
     honest. (The renamed test itself fails the budget on its first CI run.)"""
     import re
 
-    from _time_budget import load_allowlist
+    from _time_budget import ALLOWLIST_PATH, SLOW_ALLOWLIST_PATH, load_allowlist
 
     root = Path(__file__).resolve().parents[2]
-    entries = load_allowlist()
-    assert entries, "the allowlist did not load"
+    entries = {}
+    for path in (ALLOWLIST_PATH, SLOW_ALLOWLIST_PATH):
+        loaded = load_allowlist(path)
+        assert loaded, f"the allowlist {path.name} did not load"
+        entries.update(loaded)
     dead = []
     for nid in entries:
         path, _, name = nid.partition("::")
