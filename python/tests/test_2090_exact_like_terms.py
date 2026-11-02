@@ -282,3 +282,14 @@ def test_ulp_level_like_terms_are_not_rewritten():
         (x - 1.8) ** 2 + 0.3 * x,
     ]:
         assert canonicalize_expression(body) is body, body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("a, b", [(0.50001, -0.50001), (0.20000000004654214, -0.2), (0.3, -0.1)])
+def test_two_term_sums_use_the_exact_answer(a, b):
+    """Two float terms have one order: exact iff ``fl(a + b) == a + b`` (Sterbenz etc.)."""
+    from discopt.modeling._exact_polynomial import _floats_sum_order_exact
+
+    expect = Fraction(a + b) == Fraction(a) + Fraction(b)
+    assert _sum_is_order_exact([Fraction(a), Fraction(b)]) is expect
+    assert _floats_sum_order_exact([a, b]) is expect

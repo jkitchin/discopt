@@ -123,9 +123,16 @@ def _flat_slot(var: Variable, index) -> Optional[int]:
 
 
 def _sum_is_order_exact(contribs: list) -> bool:
-    """True iff every order of float summation of ``contribs`` is exact (module doc)."""
+    """True if every order of float summation of ``contribs`` is provably exact.
+
+    Sufficient, not necessary: the power-of-two bound in the module docstring,
+    plus the exact answer for two float terms (:func:`_two_floats_add_exactly`).
+    """
     if len(contribs) <= 1:
         return True
+    nonzero = [q for q in contribs if q != 0]
+    if len(nonzero) == 2 and all(_is_binary64(q) for q in nonzero):
+        return _two_floats_add_exactly(float(nonzero[0]), float(nonzero[1]))
     e_min = None
     total = Fraction(0)
     for q in contribs:
@@ -143,6 +150,26 @@ def _sum_is_order_exact(contribs: list) -> bool:
     # total / 2**e_min < 2**53, in exact integer arithmetic.
     scaled = total / Fraction(2) ** e_min
     return bool(scaled < 2**53)
+
+
+def _is_binary64(q: Fraction) -> bool:
+    try:
+        return Fraction(float(q)) == q
+    except OverflowError:
+        return False
+
+
+def _two_floats_add_exactly(a: float, b: float) -> bool:
+    """Whether ``a + b`` is exact in binary64. Two terms have one order, so this
+    is exact rather than a bound: it holds for ``a - a`` and, by Sterbenz, for any
+    difference of floats within a factor of two -- both measured as false
+    rewrites under the bound alone (``0.50001 - 0.50001`` in
+    ``test_nn_equivalence``, ``0.20000000004654214 - 0.2`` in ``test_mo_nbi_fast``).
+    """
+    s = a + b
+    if s in (float("inf"), float("-inf")) or s != s:
+        return False
+    return Fraction(s) == Fraction(a) + Fraction(b)
 
 
 class _Collector:
@@ -356,6 +383,9 @@ def _floats_sum_order_exact(values: list) -> bool:
         parts.append((n, d.bit_length() - 1, ((n & -n).bit_length() - 1) - (d.bit_length() - 1)))
     if not parts:
         return True
+    if len(parts) == 2:
+        a, b = (v for v in values if v != 0.0)
+        return _two_floats_add_exactly(a, b)
     e_min = min(p[2] for p in parts)
     # sum(n / 2**k) / 2**e_min, every term an integer since k + e_min <= v2(n).
     scaled = sum(n >> (k + e_min) if k + e_min >= 0 else n << -(k + e_min) for n, k, _ in parts)
