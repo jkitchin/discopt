@@ -54,8 +54,26 @@ product ``c @ x`` of a 1-D constant and a 1-D variable, and the full reduction
 ``dm.sum(x)`` / ``dm.sum(C * x)``. Anything else is an opaque *atom* -- keyed by
 object identity, rebuilt unchanged except that the arguments of a ``FunctionCall``,
 a non-``neg`` ``UnaryOp`` or a non-polynomial ``BinaryOp`` are canonicalised
-recursively (``exp(t + x - t)`` has the same defect inside the argument). A
-``Parameter`` is an atom, so its value stays symbolic.
+recursively (``exp(t + x - t)`` has the same defect inside the argument).
+
+Parameters. A scalar ``Parameter`` (or a scalar entry of one) is a symbolic factor
+of its monomial, so a rewrite keeps it symbolic and ``p*z - p*z`` cancels exactly
+for every value. But every downstream collector substitutes the value, so the
+*decision* groups terms by their variable monomial with the current values
+substituted -- ``p*z + 0.5*z - p*z`` at ``p = 2**53`` is the #2090 defect even
+though no two of its monomials are equal symbolically (review of #2094). When even
+the symbolic canonical form still cancels at the current values (``p*z - q*z`` with
+``p == q``), no body that keeps the Parameters symbolic is exact, so
+:class:`ParameterCancellationError` is raised rather than freezing the values.
+Because the decision depends on values, the per-row cache also snapshots them, and
+a changed value re-runs the check at the next solve.
+
+A rewritten body is the **fully expanded** sum of monomials: once one monomial
+triggers a rewrite, ``(x - 1)**2`` elsewhere in the same body becomes
+``x**2 - 2*x + 1`` and ``x / 3`` becomes ``0.333... * x``. That is equal in exact
+arithmetic and sound, but a relaxation built from the expanded form can be weaker
+than one built from the factored form. It only happens to rewritten bodies (none in
+the in-repo corpus).
 
 Declining is always sound here: the expression is then left exactly as written,
 which is the behaviour before this module existed. It declines for a body whose
@@ -83,6 +101,7 @@ from discopt.modeling.core import (
     FunctionCall,
     IndexExpression,
     MatMulExpression,
+    Parameter,
     SumExpression,
     SumOverExpression,
     UnaryOp,
@@ -172,16 +191,40 @@ def _two_floats_add_exactly(a: float, b: float) -> bool:
     return Fraction(s) == Fraction(a) + Fraction(b)
 
 
-class _Collector:
-    """One exact collection of a scalar expression (see module docstring)."""
+class ParameterCancellationError(ValueError):
+    """A row's coefficient cancels catastrophically at the current Parameter values.
 
-    def __init__(self, memo: dict):
+    Raised when even the exact symbolic canonical form (like terms collected per
+    monomial *including* its Parameter factors, so ``p*z - p*z`` is gone) still
+    leaves terms that downstream collectors add in binary64 with a catastrophic
+    cancellation once the Parameters' values are substituted -- e.g. ``p*z - q*z``
+    with ``p == q == 2**53``. No body that keeps the Parameters symbolic is exact
+    for those values, and substituting the values would silently freeze them
+    (breaking re-solves and sensitivities), so this refuses (CLAUDE.md §3).
+    """
+
+
+class _Collector:
+    """One exact collection of a scalar expression (see module docstring).
+
+    Additive chains (``+``, ``-``, ``neg``, ``SumOverExpression``, and scaling by a
+    constant) are flattened into signed terms and merged **once** into a single
+    accumulator, so a row costs time linear in its size. (The first version
+    combined child polynomials pairwise and copied the accumulator at every ``+``:
+    measured 0.70 / 2.5 / 11.0 / 44.1 s for a 1k / 2k / 4k / 8k-term row with one
+    repeated variable -- review of #2094.)
+    """
+
+    def __init__(self, memo: dict, params: list):
         # ``memo`` maps id(node) -> canonicalised node for atom-argument rewrites,
         # shared across a model-level pass so a shared subexpression is done once.
         self.memo = memo
+        self.params = params  # every Parameter read, for the caller's value cache
         self.factor_nodes: dict = {}  # factor key -> node used when rebuilding
+        self.param_values: dict = {}  # ("p", ...) factor key -> exact current value
+        self.terms: dict = {}  # id(node) -> poly of a non-additive term (DAG reuse)
         self.n_contribs = 0
-        self.dirty = False  # an atom changed, or a divisor/exponent was rounded
+        self.dirty = False  # an atom's arguments were rewritten
 
     # -- polynomial algebra over exact contributions --------------------------
 
@@ -190,27 +233,16 @@ class _Collector:
         if self.n_contribs > _MAX_CONTRIBUTIONS:
             raise _Decline("expansion budget exceeded")
 
-    def _const(self, value: float) -> _Poly:
-        v = float(value)
+    @staticmethod
+    def _frac(node) -> Fraction:
+        v = float(node.value)
         if not np.isfinite(v):
             raise _Decline("non-finite constant")
-        self._count(1)
-        return {(): [Fraction(v)]}
+        return Fraction(v)
 
     def _factor(self, fkey, node) -> _Poly:
         self.factor_nodes.setdefault(fkey, node)
-        self._count(1)
         return {(fkey,): [_ONE]}
-
-    @staticmethod
-    def _add(p: _Poly, q: _Poly) -> _Poly:
-        out = {k: list(v) for k, v in p.items()}
-        for k, v in q.items():
-            out.setdefault(k, []).extend(v)
-        return out
-
-    def _scale(self, p: _Poly, s: Fraction) -> _Poly:
-        return {k: [c * s for c in v] for k, v in p.items()}
 
     def _mul(self, p: _Poly, q: _Poly) -> _Poly:
         self._count(sum(map(len, p.values())) * sum(map(len, q.values())))
@@ -221,111 +253,157 @@ class _Collector:
                 out.setdefault(key, []).extend(a * b for a in v1 for b in v2)
         return out
 
-    def _exact_constant(self, p: _Poly) -> Optional[Fraction]:
-        """Exact value of a constant polynomial, or ``None`` if it has a variable."""
-        if any(k != () for k in p):
-            return None
-        contribs = p.get((), [])
-        if not _sum_is_benign(contribs):
-            # A float collector computes this constant with a cancellation error, so
-            # whatever it scales reads differently in floats: rewrite the body.
-            self.dirty = True
-        return sum(contribs, Fraction(0))
-
-    # -- the walk --------------------------------------------------------------
-
-    def _atom(self, node: Expression) -> _Poly:
-        new = canonicalize_expression(node, memo=self.memo, _atom_children_only=True)
-        if new is not node:
-            self.dirty = True
-        return self._factor(("a", id(new)), new)
-
-    def collect(self, root: Expression) -> _Poly:
-        """Exact polynomial of ``root``. Iterative post-order (deep ``+`` chains)."""
-        results: dict = {}
-        stack: list = [(root, False)]
-        while stack:
-            node, expanded = stack.pop()
-            nid = id(node)
-            if nid in results and not expanded:
-                continue
-            children = self._children(node)
-            if children is None:  # leaf of the skeleton
-                results[nid] = self._leaf(node)
-                continue
-            if not expanded:
-                stack.append((node, True))
-                for ch in reversed(children):
-                    if id(ch) not in results:
-                        stack.append((ch, False))
-                continue
-            results[nid] = self._combine(node, [results[id(ch)] for ch in children])
-        out: _Poly = results[id(root)]
-        return out
-
-    def _children(self, node) -> Optional[list]:
-        """Skeleton children of ``node``, or ``None`` if it is collected as a leaf."""
-        if isinstance(node, BinaryOp):
-            if node.op in ("+", "-", "*"):
-                return [node.left, node.right]
-            if node.op == "/" and isinstance(node.right, Constant):
-                return [node.left, node.right]
-            if node.op == "**" and self._small_power(node.right) is not None:
-                return [node.left]
-            return None
-        if isinstance(node, UnaryOp) and node.op == "neg":
-            return [node.operand]
-        if isinstance(node, SumOverExpression):
-            return list(node.terms)
-        return None
-
     @staticmethod
     def _small_power(expo) -> Optional[int]:
-        if not isinstance(expo, Constant) or expo.value.ndim != 0:
+        if type(expo) is not Constant or expo.value.ndim != 0:
             return None
         v = float(expo.value)
         if v.is_integer() and 0 <= v <= _MAX_POWER:
             return int(v)
         return None
 
-    def _leaf(self, node) -> _Poly:
-        if isinstance(node, Constant):
-            if node.value.ndim != 0:
-                raise _Decline("array constant in scalar position")
-            return self._const(float(node.value))
-        if isinstance(node, Variable):
+    # -- the walk --------------------------------------------------------------
+
+    def collect(self, root: Expression) -> _Poly:
+        return self._sum_poly(root)
+
+    def _sum_poly(self, root) -> _Poly:
+        """Exact polynomial of ``root``: flatten its additive chain, merge once."""
+        acc: _Poly = {}
+        stack: list = [(root, _ONE)]
+        pop, push = stack.pop, stack.append
+        while stack:
+            node, s = pop()
+            t = type(node)
+            if t is BinaryOp:
+                op = node.op
+                if op == "+":
+                    push((node.right, s))
+                    push((node.left, s))
+                    continue
+                if op == "-":
+                    push((node.right, -s))
+                    push((node.left, s))
+                    continue
+                if op == "*":
+                    if type(node.left) is Constant and node.left.value.ndim == 0:
+                        push((node.right, s * self._frac(node.left)))
+                        continue
+                    if type(node.right) is Constant and node.right.value.ndim == 0:
+                        push((node.left, s * self._frac(node.right)))
+                        continue
+                elif op == "/" and type(node.right) is Constant and node.right.value.ndim == 0:
+                    d = self._frac(node.right)
+                    if d == 0:
+                        raise _Decline("division by zero")
+                    push((node.left, s / d))
+                    continue
+            elif t is UnaryOp and node.op == "neg":
+                push((node.operand, -s))
+                continue
+            elif t is SumOverExpression:
+                stack.extend([(term, s) for term in reversed(node.terms)])
+                continue
+            elif t is Constant:
+                if node.value.ndim != 0:
+                    raise _Decline("array constant in scalar position")
+                self._count(1)
+                acc.setdefault((), []).append(s * self._frac(node))
+                continue
+            term = self.terms.get(id(node))
+            if term is None:
+                term = self._term(node)
+                self.terms[id(node)] = term
+            for k, v in term.items():
+                self._count(len(v))
+                lst = acc.get(k)
+                if lst is None:
+                    acc[k] = lst = []
+                lst.extend(v if s == 1 else [q * s for q in v])
+        return acc
+
+    def _term(self, node) -> _Poly:
+        """Polynomial of a non-additive node: a product, a small power or a leaf."""
+        t = type(node)
+        if t is BinaryOp:
+            op = node.op
+            if op == "*":
+                factors: list = []
+                scale = _ONE
+                stack = [node]
+                while stack:
+                    n = stack.pop()
+                    if type(n) is BinaryOp and n.op == "*":
+                        stack.append(n.right)
+                        stack.append(n.left)
+                    elif type(n) is Constant and n.value.ndim == 0:
+                        scale *= self._frac(n)
+                    else:
+                        factors.append(n)
+                out: _Poly = {(): [scale]}
+                for f in factors:
+                    out = self._mul(out, self._sum_poly(f))
+                return out
+            if op == "**":
+                k = self._small_power(node.right)
+                if k is not None:
+                    base = self._sum_poly(node.left)
+                    out = {(): [_ONE]}
+                    for _ in range(k):
+                        out = self._mul(out, base)
+                    return out
+            return self._atom(node)
+        if t is Variable:
             if node.size != 1 or tuple(node.shape or ()) != ():
                 raise _Decline("non-scalar variable in scalar position")
             return self._factor(("v", id(node), 0), node)
-        if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-            flat = _flat_slot(node.base, node.index)
-            if flat is None:
+        if t is Parameter:
+            if tuple(node.shape or ()) != ():
+                raise _Decline("non-scalar parameter in scalar position")
+            return self._param(node, node, 0)
+        if t is IndexExpression:
+            base = node.base
+            if type(base) is Variable:
+                flat = _flat_slot(base, node.index)
+                if flat is not None:
+                    return self._factor(("v", id(base), flat), node)
+            elif type(base) is Parameter:
+                flat = _flat_slot(base, node.index)
+                if flat is not None:
+                    return self._param(base, node, flat)
+            return self._atom(node)
+        if t is MatMulExpression:
+            var = _array_linear_var(node)
+            if var is None:
                 return self._atom(node)
-            return self._factor(("v", id(node.base), flat), node)
-        if isinstance(node, MatMulExpression):
-            return self._matmul(node)
-        if isinstance(node, SumExpression):
+            mat = node.left.value if type(node.left) is Constant else node.right.value
+            return self._linear_array(var, np.asarray(mat, dtype=np.float64))
+        if t is SumExpression:
             aff = affine_array_sum(node)
             if aff is not None:
-                var, coefs = aff
-                return self._linear_array(var, coefs)
+                return self._linear_array(*aff)
             return self._atom(node)
         return self._atom(node)
 
-    def _matmul(self, node) -> _Poly:
-        if isinstance(node.left, Constant) and isinstance(node.right, Variable):
-            mat, var = node.left.value, node.right
-        elif isinstance(node.right, Constant) and isinstance(node.left, Variable):
-            mat, var = node.right.value, node.left
-        else:
-            return self._atom(node)
-        if mat.ndim != 1 or len(var.shape) != 1 or mat.shape[0] != var.size:
-            return self._atom(node)
-        return self._linear_array(var, np.asarray(mat, dtype=np.float64))
+    def _param(self, base, node, flat: int) -> _Poly:
+        v = float(np.asarray(base.value, dtype=np.float64).reshape(-1)[flat])
+        if not np.isfinite(v):
+            raise _Decline("non-finite parameter value")
+        fkey = ("p", id(base), flat)
+        self.param_values[fkey] = Fraction(v)
+        self.params.append(base)
+        return self._factor(fkey, node)
+
+    def _atom(self, node: Expression) -> _Poly:
+        new = canonicalize_expression(
+            node, memo=self.memo, _atom_children_only=True, _params=self.params
+        )
+        if new is not node:
+            self.dirty = True
+        return self._factor(("a", id(new)), new)
 
     def _linear_array(self, var: Variable, coefs: np.ndarray) -> _Poly:
         shape = tuple(var.shape)
-        self._count(int(coefs.size))
         if not np.all(np.isfinite(coefs)):
             raise _Decline("non-finite coefficient")
         out: _Poly = {}
@@ -339,35 +417,6 @@ class _Collector:
                 self.factor_nodes[fkey] = var[idx]
             out.setdefault((fkey,), []).append(Fraction(c))
         return out
-
-    def _combine(self, node, parts: list) -> _Poly:
-        if isinstance(node, SumOverExpression):
-            acc: _Poly = {}
-            for p in parts:
-                acc = self._add(acc, p)
-            return acc
-        if isinstance(node, UnaryOp):  # neg
-            return self._scale(parts[0], Fraction(-1))
-        op = node.op
-        if op == "+":
-            return self._add(parts[0], parts[1])
-        if op == "-":
-            return self._add(parts[0], self._scale(parts[1], Fraction(-1)))
-        if op == "*":
-            return self._mul(parts[0], parts[1])
-        if op == "/":
-            d = self._exact_constant(parts[1])
-            if d is None or d == 0:
-                raise _Decline("division by zero or by a non-constant")
-            return self._scale(parts[0], 1 / d)
-        if op == "**":
-            k = self._small_power(node.right)
-            assert k is not None
-            out: _Poly = {(): [_ONE]}
-            for _ in range(k):
-                out = self._mul(out, parts[0])
-            return out
-        raise AssertionError(f"unexpected skeleton op {op!r}")  # pragma: no cover
 
 
 def _floats_sum_order_exact(values: list) -> bool:
@@ -396,19 +445,26 @@ class _NotClean(Exception):
     """The fast pre-pass cannot prove the body needs no rewrite."""
 
 
-def _fast_clean(root: Expression, memo: dict) -> bool:
+def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
     """True when ``root`` provably needs no rewrite, decided without exact arithmetic.
 
     The common row has no like terms at all. This walks the additive skeleton once,
     reading each term as a product of leaves (a constant factor is a scale, not a
-    term) and checks that every monomial occurs once, that the additive constants
-    sit under no scale and sum exactly in every order, and that no atom's arguments
-    change. Anything else -- a repeated monomial, a product of sums, a power of a
-    non-leaf, ``c @ x`` / ``dm.sum`` sharing a variable with another term -- returns
-    ``False`` and the exact pass decides. ``False`` is never wrong, only slower.
+    term; so is a Parameter, since every downstream collector substitutes its
+    value) and checks that every variable monomial occurs once, that the additive
+    constants sit under no scale and sum exactly in every order, and that no atom's
+    arguments change. Anything else -- a repeated monomial, a product of sums, a
+    power of a non-leaf, ``c @ x`` / ``dm.sum`` sharing a variable with another
+    term -- returns ``False`` and the exact pass decides. ``False`` is never wrong,
+    only slower. A ``True`` holds for *every* Parameter value: each variable
+    monomial then has one contribution, so there is no sum to cancel.
+
+    The constants are tested with their signs dropped (``x + 0.3 - 0.1`` is tested
+    as ``0.3, 0.1``). That is deliberate and safe: with two terms the result is
+    the same rounding either way, and with more the test uses only magnitudes.
 
     Dispatch is on exact ``type`` (none of these node classes is subclassed); this
-    runs once per row at build time, so it is kept to a few microseconds (#1215).
+    runs once per row, so it is kept to a few microseconds (#1215).
     """
     seen: set = set()
     scalar_vars: set = set()
@@ -451,7 +507,7 @@ def _fast_clean(root: Expression, memo: dict) -> bool:
             elif t is MatMulExpression or t is SumExpression:
                 var = _array_linear_var(node)
                 if var is None:
-                    key: tuple = (_fast_atom_key(node, memo),)
+                    key: tuple = (_fast_atom_key(node, memo, found),)
                     if key in seen:
                         raise _NotClean
                     seen.add(key)
@@ -460,15 +516,18 @@ def _fast_clean(root: Expression, memo: dict) -> bool:
                     raise _NotClean
                 block_vars.add(id(var))
                 continue
-            # A term: a product of leaves.
+            # A term: a product of leaves (Parameter factors dropped, as scales).
             if t is IndexExpression or t is Variable:
-                mono: tuple = (_fast_leaf_key(node, memo, scalar_vars),)
+                leaf = _fast_leaf_key(node, memo, scalar_vars, found)
+                mono: tuple = () if leaf is None else (leaf,)
             else:
-                mono = tuple(sorted(_fast_monomial(node, memo, scalar_vars)))
+                mono = tuple(sorted(_fast_monomial(node, memo, scalar_vars, found)))
             if mono in seen:
                 raise _NotClean
             seen.add(mono)
         if block_vars and not scalar_vars.isdisjoint(block_vars):
+            raise _NotClean
+        if consts and () in seen:  # a Parameter-only term next to a constant term
             raise _NotClean
     except _NotClean:
         return False
@@ -491,15 +550,15 @@ def _array_linear_var(node) -> Optional[Variable]:
     return var
 
 
-def _fast_atom_key(node, memo: dict) -> tuple:
-    new = canonicalize_expression(node, memo=memo, _atom_children_only=True)
+def _fast_atom_key(node, memo: dict, found: list) -> tuple:
+    new = canonicalize_expression(node, memo=memo, _atom_children_only=True, _params=found)
     if new is not node:
         raise _NotClean
     return ("a", id(node))
 
 
-def _fast_monomial(node, memo: dict, scalar_vars: set) -> list:
-    """Factor keys of a product-of-leaves term, or raise :class:`_NotClean`."""
+def _fast_monomial(node, memo: dict, scalar_vars: set, found: list) -> list:
+    """Variable factor keys of a product-of-leaves term, or raise :class:`_NotClean`."""
     factors: list = []
     stack = [node]
     while stack:
@@ -518,9 +577,12 @@ def _fast_monomial(node, memo: dict, scalar_vars: set) -> list:
                 k = _Collector._small_power(n.right)
                 if k is not None:
                     base = n.left
-                    if type(base) is not Variable and type(base) is not IndexExpression:
+                    tb = type(base)
+                    if tb is not Variable and tb is not IndexExpression and tb is not Parameter:
                         raise _NotClean
-                    factors.extend([_fast_leaf_key(base, memo, scalar_vars)] * k)
+                    leaf = _fast_leaf_key(base, memo, scalar_vars, found)
+                    if leaf is not None:
+                        factors.extend([leaf] * k)
                     continue
             elif op == "+" or op == "-":
                 raise _NotClean  # a product of sums: the exact pass expands it
@@ -532,15 +594,19 @@ def _fast_monomial(node, memo: dict, scalar_vars: set) -> list:
             raise _NotClean
         elif t is UnaryOp and n.op == "neg":
             raise _NotClean
-        factors.append(_fast_leaf_key(n, memo, scalar_vars))
+        leaf = _fast_leaf_key(n, memo, scalar_vars, found)
+        if leaf is not None:
+            factors.append(leaf)
     return factors
 
 
-def _fast_leaf_key(n, memo: dict, scalar_vars: set) -> tuple:
+def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list) -> Optional[tuple]:
+    """Factor key of a leaf; ``None`` for a scalar Parameter (a scale, not a factor)."""
     t = type(n)
     if t is IndexExpression:
         base = n.base
-        if type(base) is Variable:
+        tb = type(base)
+        if tb is Variable:
             idx = n.index
             shape = base._shape  # a Variable always caches its declared shape tuple
             flat: Optional[int]
@@ -553,12 +619,20 @@ def _fast_leaf_key(n, memo: dict, scalar_vars: set) -> tuple:
             if flat is not None:
                 scalar_vars.add(id(base))
                 return ("v", id(base), flat)
+        elif tb is Parameter and _flat_slot(base, n.index) is not None:
+            found.append(base)
+            return None
     elif t is Variable:
         if n.size != 1 or tuple(n.shape or ()) != ():
             raise _NotClean
         scalar_vars.add(id(n))
         return ("v", id(n), 0)
-    return _fast_atom_key(n, memo)
+    elif t is Parameter:
+        if tuple(n.shape or ()) != ():
+            raise _NotClean
+        found.append(n)
+        return None
+    return _fast_atom_key(n, memo, found)
 
 
 #: ``kappa * (n - 1)`` above which a sum is rewritten; see :func:`_sum_is_benign`.
@@ -594,8 +668,50 @@ def _sum_is_benign(contribs: list) -> bool:
     return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * abs(total))
 
 
-def _needs_rewrite(poly: _Poly) -> bool:
-    return any(not _sum_is_benign(v) for v in poly.values())
+def _by_variable_monomial(poly: _Poly, param_values: dict) -> list:
+    """The sums downstream collectors form: Parameter values substituted, so terms
+    are grouped by their *variable* monomial alone."""
+    if not param_values:
+        return list(poly.values())
+    groups: dict = {}
+    for key, contribs in poly.items():
+        pv = _ONE
+        vkey = []
+        for f in key:
+            if f[0] == "p":
+                pv *= param_values[f]
+            else:
+                vkey.append(f)
+        lst = groups.setdefault(tuple(vkey), [])
+        lst.extend(contribs if pv == 1 else [q * pv for q in contribs])
+    return list(groups.values())
+
+
+def _needs_rewrite(poly: _Poly, param_values: dict) -> bool:
+    return any(not _sum_is_benign(v) for v in _by_variable_monomial(poly, param_values))
+
+
+def _check_rewrite_is_exact(poly: _Poly, param_values: dict) -> None:
+    """Refuse when the symbolic canonical form still cancels at these values."""
+    if not param_values:
+        return  # one term per variable monomial: nothing is left to add
+    rounded: _Poly = {}
+    for key, contribs in poly.items():
+        c = Fraction(float(sum(contribs, Fraction(0))))
+        if c != 0:
+            rounded[key] = [c]
+    for group in _by_variable_monomial(rounded, param_values):
+        if not _sum_is_benign(group):
+            raise ParameterCancellationError(
+                "terms of one variable monomial, with Parameter coefficients, cancel "
+                f"catastrophically at the current Parameter values (contributions "
+                f"{[float(q) for q in group][:6]}, exact sum "
+                f"{float(sum(group, Fraction(0)))!r}); binary64 collection would read a "
+                "different coefficient, and no body that keeps the Parameters symbolic "
+                "is exact for these values. Combine those Parameters into one before "
+                "multiplying the variable (e.g. write (p - q) * z, not p*z - q*z), or "
+                "use a constant (#2090)."
+            )
 
 
 def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
@@ -634,19 +750,19 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
     return SumOverExpression(terms)
 
 
-def _rebuild_atom_children(node: Expression, memo: dict) -> Expression:
+def _rebuild_atom_children(node: Expression, memo: dict, found: list) -> Expression:
     """``node`` with its arguments canonicalised, or ``node`` itself if none changed."""
     if isinstance(node, FunctionCall):
-        new_args = tuple(canonicalize_expression(a, memo=memo) for a in node.args)
+        new_args = tuple(canonicalize_expression(a, memo=memo, _params=found) for a in node.args)
         if all(a is b for a, b in zip(new_args, node.args)):
             return node
         return FunctionCall(node.func_name, *new_args)
     if isinstance(node, UnaryOp) and node.op != "neg":
-        new = canonicalize_expression(node.operand, memo=memo)
+        new = canonicalize_expression(node.operand, memo=memo, _params=found)
         return node if new is node.operand else UnaryOp(node.op, new)
     if isinstance(node, BinaryOp):
-        left = canonicalize_expression(node.left, memo=memo)
-        right = canonicalize_expression(node.right, memo=memo)
+        left = canonicalize_expression(node.left, memo=memo, _params=found)
+        right = canonicalize_expression(node.right, memo=memo, _params=found)
         if left is node.left and right is node.right:
             return node
         return BinaryOp(node.op, left, right)
@@ -654,55 +770,100 @@ def _rebuild_atom_children(node: Expression, memo: dict) -> Expression:
 
 
 def canonicalize_expression(
-    expr: Expression, *, memo: Optional[dict] = None, _atom_children_only: bool = False
+    expr: Expression,
+    *,
+    memo: Optional[dict] = None,
+    _atom_children_only: bool = False,
+    _params: Optional[list] = None,
 ) -> Expression:
     """Return ``expr``, or its exact canonical form if float collection could round.
 
     The returned object *is* ``expr`` whenever no rewrite is needed. See the module
-    docstring for what is collected and when a rewrite happens.
+    docstring for what is collected and when a rewrite happens. ``_params``, when
+    given, receives every Parameter the decision read (for a value-keyed cache).
+
+    Raises :class:`ParameterCancellationError` for a body no symbolic rewrite can
+    make exact at the current Parameter values.
     """
     if memo is None:
         memo = {}
     key = (id(expr), _atom_children_only)
     hit = memo.get(key)
     if hit is not None:
+        if _params is not None:
+            _params.extend(hit[2])
         cached: Expression = hit[1]
         return cached
+    found: list = []
     if _atom_children_only:
-        out = _rebuild_atom_children(expr, memo)
+        out = _rebuild_atom_children(expr, memo, found)
     elif not isinstance(expr, Expression) or _known_shape(expr) != ():
         out = expr
-    elif _fast_clean(expr, memo):
+    elif _fast_clean(expr, memo, found):
         out = expr
     else:
-        coll = _Collector(memo)
+        found.clear()
+        coll = _Collector(memo, found)
         try:
             poly = coll.collect(expr)
-            out = (
-                _rebuild(poly, coll.factor_nodes) if (coll.dirty or _needs_rewrite(poly)) else expr
-            )
+            if coll.dirty or _needs_rewrite(poly, coll.param_values):
+                out = _rebuild(poly, coll.factor_nodes)
+                _check_rewrite_is_exact(poly, coll.param_values)
+            else:
+                out = expr
         except _Decline:
             out = expr
     # Keep ``expr`` alive in the memo so its id cannot be reused within this pass.
-    memo[key] = (expr, out)
+    memo[key] = (expr, out, tuple(found))
+    if _params is not None:
+        _params.extend(found)
     return out
+
+
+def _snapshot(params: list) -> tuple:
+    seen: dict = {}
+    for p in params:
+        seen.setdefault(id(p), p)
+    return tuple((p, np.array(p.value, dtype=np.float64, copy=True)) for p in seen.values())
+
+
+def _snapshot_current(snap) -> bool:
+    return snap is not None and all(np.array_equal(p.value, v) for p, v in snap)
+
+
+def _canonical_cached(holder, attr: str, memo: Optional[dict], what: str):
+    """Canonical form of ``getattr(holder, attr)``, cached on ``holder``.
+
+    The cache is the checked expression (by identity) *and* a snapshot of every
+    Parameter value the check read: the decision depends on those values, so a
+    changed value re-runs it at the next solve.
+    """
+    expr = getattr(holder, attr)
+    if getattr(holder, "_exact_body", None) is expr and _snapshot_current(
+        getattr(holder, "_exact_params", None)
+    ):
+        return expr
+    found: list = []
+    try:
+        new = canonicalize_expression(expr, memo=memo, _params=found)
+    except ParameterCancellationError as e:
+        raise ParameterCancellationError(f"{what}: {e}") from None
+    holder._exact_body = new
+    holder._exact_params = _snapshot(found)
+    return new
 
 
 def canonicalize_constraint(constraint, memo: Optional[dict] = None) -> None:
     """Replace ``constraint.body`` in place by its canonical form when needed.
 
     In place so the caller's object stays the model's row (identity-keyed APIs).
-    The checked body is remembered on the row (``_exact_body``), so a row is
-    walked once however many solves it goes through; assigning a new ``body``
-    invalidates that, since the check is by identity.
+    Cached on the row by body identity and Parameter values (see
+    :func:`_canonical_cached`), so a row is walked once per distinct set of values.
     """
-    body = constraint.body
-    if getattr(constraint, "_exact_body", None) is body:
-        return
-    new = canonicalize_expression(body, memo=memo)
-    if new is not body:
+    name = getattr(constraint, "name", None)
+    new = _canonical_cached(constraint, "body", memo, f"constraint {name!r}")
+    if new is not constraint.body:
         constraint.body = new
-    constraint._exact_body = new
 
 
 def canonicalize_model(model) -> None:
@@ -711,11 +872,22 @@ def canonicalize_model(model) -> None:
     for item in model._constraints:
         canonicalize_rows_in(item, memo)
     obj = model._objective
-    if obj is not None and getattr(obj, "_exact_expression", None) is not obj.expression:
-        new = canonicalize_expression(obj.expression, memo=memo)
+    if obj is not None:
+        new = _canonical_cached(obj, "expression", memo, "objective")
         if new is not obj.expression:
             obj.expression = new
-        obj._exact_expression = new
+    # ``if_else`` branch values derive the auxiliary's box at every solve
+    # (``Model._refresh_if_else_bounds``, which runs after this). ``_IfElseAux`` has
+    # ``__slots__``, so they are not cached; there are a handful per model.
+    for aux in model._if_else_auxes:
+        for attr in ("then_expr", "else_expr"):
+            expr = getattr(aux, attr)
+            try:
+                new = canonicalize_expression(expr, memo=memo)
+            except ParameterCancellationError as e:
+                raise ParameterCancellationError(f"if_else {attr}: {e}") from None
+            if new is not expr:
+                setattr(aux, attr, new)
 
 
 def canonicalize_rows_in(item, memo: Optional[dict] = None) -> None:

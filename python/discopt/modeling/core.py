@@ -12867,8 +12867,10 @@ class Model:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
 
         # #2090: collect every row's and the objective's like terms exactly before
-        # anything reads a body, so no consumer sees a row binary64 rounded.
-        self._canonicalize_like_terms()
+        # anything reads a body, so no consumer sees a row binary64 rounded. Solve
+        # path only: a ``for_solve=False`` call is a check, and must not edit rows.
+        if for_solve:
+            self._canonicalize_like_terms()
 
         # An atan2 rewrite whose sign assumption has since been widened away is
         # a model that differs from the one the user wrote by pi over part of

@@ -293,3 +293,90 @@ def test_two_term_sums_use_the_exact_answer(a, b):
     expect = Fraction(a + b) == Fraction(a) + Fraction(b)
     assert _sum_is_order_exact([Fraction(a), Fraction(b)]) is expect
     assert _floats_sum_order_exact([a, b]) is expect
+
+
+# ── review of #2094 ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_parameter_coefficient_certifies_true_optimum():
+    """The issue's "coef" row with the large coefficient in a Parameter."""
+    m = dm.Model()
+    z = m.continuous("z", lb=0, ub=10)
+    p = m.parameter("p", value=M)
+    m.subject_to(p * z + 0.5 * z - p * z + z <= 3)
+    m.maximize(z)
+    r = m.solve(time_limit=60, threads=1)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(2.0, abs=1e-6)
+    # The rewrite cancels p*z - p*z symbolically, so it holds for any value.
+    p.value = 7.0
+    r = m.solve(time_limit=60, threads=1)
+    assert r.objective == pytest.approx(2.0, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_parameter_value_change_reruns_the_check():
+    """The per-row cache is keyed on Parameter values, not only on the body."""
+    from discopt.modeling._exact_polynomial import ParameterCancellationError
+
+    m = dm.Model()
+    z = m.continuous("z", lb=0, ub=10)
+    p = m.parameter("p", value=1.0)
+    q = m.parameter("q", value=1.0)
+    m.subject_to(p * z + 0.5 * z - q * z <= 3)  # 0.5 z <= 3 at these values
+    m.maximize(z)
+    m.validate()  # benign at p = q = 1: cached, unchanged
+    p.value = M
+    q.value = M  # same symbolic row, now M + 0.5 - M: catastrophic
+    with pytest.raises(ParameterCancellationError, match="cancel catastrophically"):
+        m.validate()
+
+
+@pytest.mark.unit
+def test_parameter_only_cancellation_is_caught_by_the_fast_pass():
+    m = dm.Model()
+    z = m.continuous("z", lb=0, ub=10)
+    p = m.parameter("p", value=M)
+    body = p * z + 0.5 * z - p * z
+    out = canonicalize_expression(body)
+    assert out is not body
+    assert _eval(out, {"z": 2.0}) == 1.0
+
+
+@pytest.mark.unit
+def test_exact_pass_is_linear_in_row_length():
+    """A long row with one repeated variable (fails the fast pass, never rewritten).
+
+    Measured before the fix: 0.70 / 2.5 / 11.0 / 44.1 s for 1k-8k terms (quadratic);
+    after: 0.03 s at 8k. 20k terms would take minutes if it regressed.
+    """
+    import time
+
+    from discopt.modeling._exact_polynomial import _fast_clean
+
+    n = 20_000
+    m = dm.Model()
+    x = m.continuous("x", shape=(n,), lb=0, ub=1)
+    body = x[0]
+    for i in range(1, n):
+        body = body + x[i]
+    body = body + x[0]
+    assert not _fast_clean(body, {}, [])
+    t0 = time.perf_counter()
+    out = canonicalize_expression(body)
+    elapsed = time.perf_counter() - t0
+    assert out is body
+    assert elapsed < 3.0, f"exact pass took {elapsed:.2f} s on a {n}-term row"
+
+
+@pytest.mark.unit
+def test_validate_for_export_does_not_edit_rows():
+    m = dm.Model()
+    z = m.continuous("z", lb=0, ub=10)
+    c = M * z + 0.5 * z - M * z + z <= 3
+    m.subject_to(c)
+    m.maximize(z)
+    body = c.body
+    m.validate(for_solve=False)
+    assert c.body is body
