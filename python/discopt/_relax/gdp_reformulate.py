@@ -3372,7 +3372,7 @@ def _origin_free_hull_row(
 
 def _hull_conic_quadratic_enabled() -> bool:
     """Is the cone hull of separable convex quadratic rows on?
-    (``DISCOPT_HULL_CONIC_QUADRATIC``, default OFF)."""
+    (``DISCOPT_HULL_CONIC_QUADRATIC``, default ON since the #1917 panel; ``=0`` opts out)."""
     from discopt.solver_tuning import current as _tuning
 
     return bool(_tuning().hull_conic_quadratic)

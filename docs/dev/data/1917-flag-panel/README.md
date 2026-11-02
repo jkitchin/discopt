@@ -110,6 +110,28 @@ Re-derive each with `--report`; all four panels are cert-clean.
 The retired flags' code is deleted, so re-running their fire phase now finds every
 lowering identical; the `.jsonl` files are the record.
 
+## `DISCOPT_HULL_CONIC_QUADRATIC` convex-GDP panel (2026-11-01): graduated
+
+Written by `discopt_benchmarks/scripts/issue1917_conic_panel.py`, which states its
+method and its pre-registered rule in the header. Re-derive the verdict with
+`--report --out <file>`.
+
+* `DISCOPT_HULL_CONIC_QUADRATIC.wide-lowload.jsonl` is the **panel of record**,
+  load-gated at `--max-load 8` (load1 4.5-8.0). Its fire and reference rows are
+  copied from the ungated file.
+* `DISCOPT_HULL_CONIC_QUADRATIC.wide.jsonl` is the same panel run ungated while
+  the machine was at load1 9-141. It is kept as recorded. Its walls measure the
+  load, and its two "certification lost" rows were starvation: both instances
+  certify 3/3 ON in the gated run.
+* Corpus: every Pyomo `examples/gdp` model, every GDPlib builder, and the 18
+  seeded `benchmarks/convex_gdp_generator.py` instances (`cgdp.<family>_<size>_s<seed>`).
+  The flag fires on 29: 11 Pyomo and 18 generated.
+* References: SCIP (executable) on Pyomo `gdp.bigm`, 300 s, optimal on all 29.
+* Gated result, ON arm: 0 incorrect, 0 crossings, 0 lost, incumbents verified.
+  Certified 19 -> 25. SGM wall 39.22 -> 17.36 s (0.443). SGM nodes 68.4 -> 36.7.
+  The only incorrect rows belong to OFF: Pyomo clay0303 certified at 28351.42
+  against an optimum of 26669.11 (#2088).
+
 ## Hull follow-ups outside any panel (2026-11-01, `fix/1917-hull-remaining`)
 
 These are single-run measurements, taken on 6d3e2f79 plus this branch, at load

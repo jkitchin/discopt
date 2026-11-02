@@ -1209,13 +1209,14 @@ class SolverTuning:
     safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     hull_conic_quadratic: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=True)
     )
     """Hull a separable convex quadratic row as a second-order cone
-    (``DISCOPT_HULL_CONIC_QUADRATIC``, default **OFF**; bound-changing on the
+    (``DISCOPT_HULL_CONIC_QUADRATIC``, default **ON** -- graduated by the §5 panel
+    below; ``=0`` restores the eps-perspective for every row; bound-changing on the
     ``"hull"`` route).
 
-    Today every nonlinear disjunct row gets the eps-perspective
+    Without it every nonlinear disjunct row gets the eps-perspective
     ``yhat * g(v / yhat) - eps * g(0) * (1 - y) <= 0``. For ``g = sum_i q_i (x_i -
     a_i)^2 - R`` (``q_i > 0``, ``R >= 0``: a ball or axis-aligned ellipsoid) the
     flag emits the smoothed cone ``sqrt(S + delta^2) <= sqrt(R + delta^2) y +
@@ -1236,10 +1237,18 @@ class SolverTuning:
     ``docs/dev/data/1917-flag-panel/``): fires on 2 lowerings
     (``constrained_layout_clay0203``, ``syngas``), identical on 21. Cert-clean (0
     incorrect, 0 bound crossings, 0 solved lost); clay0203 53.4 -> 12.3 s, 301 -> 111
-    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s. **State: default OFF;
-    graduation is the owner's call** (cert-clean and net-positive where it fires,
-    but it helps on one corpus instance); audit row in
-    ``docs/dev/flag-retirement-audit.md``."""
+    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s.
+
+    Graduation panel (2026-11-01, ``issue1917_conic_panel.py``, rule pre-registered
+    in its header; data ``DISCOPT_HULL_CONIC_QUADRATIC.wide-lowload.jsonl``): 29
+    fired instances (18 seeded ``convex_gdp_generator`` clay/cover/route GDPs and
+    11 Pyomo ``examples/gdp`` models), hull, 3 interleaved reps at 120 s,
+    load-gated (load1 4.5-8.0), references from SCIP on Pyomo ``gdp.bigm``. ON
+    arm: 0 incorrect, 0 bound crossings, 0 certifications lost, every incumbent
+    verified in the Pyomo GDP. Certified 19 -> 25 of 29; SGM wall 39.22 -> 17.36 s
+    (ratio 0.443); SGM nodes 68.4 -> 36.7. The only incorrect rows are the OFF
+    arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
+    ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
