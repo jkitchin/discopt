@@ -83,6 +83,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # so its fire phase reports nothing: solve with ``--all --include`` over the
     # instances whose route the flag changes (``_convex_minlp_auto_route``).
     "DISCOPT_CONVEX_ROUTE_GDP_LOWERED": ("big-m",),
+    # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
+    # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
+    "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
