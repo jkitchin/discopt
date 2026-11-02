@@ -77,10 +77,19 @@ def _ns_select(
 
     ``None`` means "do not tighten". Strict: ``min(raw, g)``, and ``None`` without
     ``g``. Legacy: ``g`` only when ``raw`` exceeds it by the ``_OBBT_NS_GUARD``
-    margin, else ``raw``; without ``g`` the raw vertex unless ``require_ns``."""
+    margin, else ``raw``; without ``g`` the raw vertex unless ``require_ns``.
+
+    ``require_ns`` (the relaxation is past ``_OBBT_COND_LIMIT``) also takes
+    ``min(raw, g)`` with the flag OFF (#2088). That LP is only allowed to tighten
+    because ``g`` is rigorous; its vertex is exactly the value the conditioning
+    guard says not to trust, so the 1e-6 guard's tolerance cannot apply to it.
+    Measured on the eps-perspective hull of GDPlib clay0303 (``_cond`` ~1e16 from
+    the ``1/eps`` lift): a min probe returned raw 1.25e-7 against g = -6.9e-7, the
+    guard accepted the vertex, the column's lb left the feasible value 0, and the
+    solve certified 28351.42 for an optimum of 26669.11."""
     if g is None:
         return None if (strict or require_ns) else raw
-    if strict:
+    if strict or require_ns:
         return min(float(raw), float(g))
     if raw > g + _OBBT_NS_GUARD * (1.0 + abs(raw)):
         return float(g)
