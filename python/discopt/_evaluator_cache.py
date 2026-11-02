@@ -86,9 +86,10 @@ class Fingerprint:
 def evaluator_fingerprint(model: "Model") -> Fingerprint:
     """Structural fingerprint of a model for evaluator-cache validity.
 
-    Captures the object identity of the objective, constraints, variables, and
-    parameters — as a :class:`Fingerprint`, which pins those objects so an
-    ``id()`` in it can never be recycled onto a different object (#1329) —
+    Captures the object identity of the objective, constraints, their bodies (and
+    the objective's expression), variables, and parameters — as a
+    :class:`Fingerprint`, which pins those objects so an ``id()`` in it can never
+    be recycled onto a different object (#1329) —
     plus the Gauss-Newton flag — but NOT mutable variable bounds or
     ``Parameter.value``. Two models with the same fingerprint can therefore share
     one compiled evaluator across bound changes (every B&B node) and parameter
@@ -109,9 +110,20 @@ def evaluator_fingerprint(model: "Model") -> Fingerprint:
     block_arrays = tuple(A for A, _x, _sense, _b, _name in _blocks)
     variables = tuple(model._variables)
     parameters = tuple(model._parameters)
+    # #2099: the *bodies*, not only the row and objective objects. A body can be
+    # replaced in place -- the solve door's exact like-term pass (#2090) does it to
+    # a row whose like terms binary64 would add inexactly -- and an evaluator built
+    # before that (``verify_point`` before ``solve``) then kept evaluating the old,
+    # rounded objective: the solve reported an objective no feasible point has.
+    # Read from ``__dict__`` so a lazy builder row's unbuilt body is not forced
+    # here; its materialization changes the key once, which is a correct rebuild.
+    bodies = tuple(getattr(c, "__dict__", {}).get("body") for c in constraints)
+    objective_expr = None if objective is None else objective.expression
     key = (
         id(objective),
+        id(objective_expr),
         tuple(id(c) for c in constraints),
+        tuple(id(b) for b in bodies),
         # #840: the fast-path builder rows are part of the evaluator's constraint
         # set, so they must be in the fingerprint — else a model that gains a fast
         # family (or has its builder rows materialized into ``_constraints``)
@@ -123,7 +135,10 @@ def evaluator_fingerprint(model: "Model") -> Fingerprint:
     )
     # Every object whose id() is in `key` is pinned, so no id in it can be
     # recycled onto a different object while this fingerprint lives (#1329).
-    return Fingerprint(key, (objective, constraints, block_arrays, variables, parameters))
+    return Fingerprint(
+        key,
+        (objective, objective_expr, constraints, bodies, block_arrays, variables, parameters),
+    )
 
 
 def solution_state_fingerprint(model: "Model") -> tuple:

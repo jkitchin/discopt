@@ -87,7 +87,9 @@ def test_a_row_the_rule_rejects_is_cached_as_a_rejection():
     most rows are non-matches -- caching only the matches would leave the cost."""
     m = _model()
     _tighten(m)
-    values = m._nl_struct_cache["rowstruct"].values()
+    # Each entry is ``(body, decomposition)``: the body is pinned so its id cannot
+    # be recycled onto another row (#2099).
+    values = [v for _body, v in m._nl_struct_cache["rowstruct"].values()]
     assert any(v is None for v in values), "a rejected row was not cached as a rejection"
     assert any(v is not None for v in values), "no row was accepted; the model is wrong"
 

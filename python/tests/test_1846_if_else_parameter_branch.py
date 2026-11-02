@@ -197,5 +197,13 @@ def test_lowered_model_matches_a_fresh_hull_solve(value):
     q.value = value
     r, r_fresh = _solve(lowered), _solve(fresh, gdp_method="hull")
     assert r.status == r_fresh.status == "optimal"
-    assert r.objective == pytest.approx(-5.0, abs=1e-4)
-    assert r.objective == pytest.approx(r_fresh.objective, abs=1e-6)
+    # Both must certify the truth. They are no longer the same rows, so they are not
+    # compared to 1e-6 (#2098): the lowered model's perspective row passes the solve
+    # door, whose exact pass rewrites its exactly-zero matched pairs ``q*eps ...
+    # -eps*q`` (zero, but not exact in every summation order); the fresh model's
+    # row is built inside the solve, after the door, and keeps them. Measured at
+    # q = 1000: -4.99999999 vs -4.9999944, both within the solver's gap of -5. The
+    # #1862 defect this guards was -0.9964.
+    assert r.objective == pytest.approx(-5.0, abs=1e-5)
+    assert r_fresh.objective == pytest.approx(-5.0, abs=1e-5)
+    assert r.objective == pytest.approx(r_fresh.objective, abs=1e-5)

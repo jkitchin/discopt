@@ -46,7 +46,28 @@ def _expanded(c: float, sense: str = "min"):
 
 
 @pytest.mark.parametrize("sense", ["min", "max"])
-def test_unresolvable_objective_is_not_certified(sense):
+def test_unresolvable_objective_is_not_certified_when_recentred(sense):
+    """Default path (recentring ON). The recentred objective is collected exactly
+    at the solve door (#2097: its shape is unknown to the cheap inference, and it
+    used to be left as written), so the inner solve no longer certifies the noisy
+    -5.9375; it returns a bound computed from exact coefficients. What #1551
+    requires still holds: no certificate, and any bound published is valid
+    against the exact optimum (-5.93832; the false one was -5.9375, above it)."""
+    m, _, opt = _expanded(BAD_C, sense)
+    r = m.solve(time_limit=30)
+    assert r.x is not None and r.objective is not None
+    assert not r.gap_certified
+    assert r.status != "optimal"
+    if r.bound is not None:
+        # ``max(-f)`` reports an upper bound on -f.
+        assert F(r.bound) <= opt if sense == "min" else F(r.bound) >= -opt
+
+
+@pytest.mark.parametrize("sense", ["min", "max"])
+def test_unresolvable_objective_is_not_certified(sense, monkeypatch):
+    # Recentring OFF: the solve sees the objective as written and the guard is what
+    # withholds the certificate -- the mechanism this test pins.
+    monkeypatch.setenv("DISCOPT_RECENTRE", "0")
     m, _, opt = _expanded(BAD_C, sense)
     r = m.solve(time_limit=30)
     assert r.x is not None and r.objective is not None
