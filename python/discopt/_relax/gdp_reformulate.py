@@ -19,7 +19,7 @@ from __future__ import annotations
 import functools
 import warnings
 from collections.abc import Callable
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, cast
 
 import numpy as np
 
@@ -1342,7 +1342,7 @@ def _compute_big_m_lp(
     # always appended *after* the originals, so the first ``n_vars`` scalar
     # columns are exactly the original variables that ``c_vec`` indexes — take
     # only those.
-    bounds_list = _lp_box(model, n_vars)
+    bounds_list, box_bytes = _lp_box_memo(lp_data, model, n_vars)
 
     _INF_THRESH = _BIGM_SENTINEL  # shared "unbounded" magnitude; see _compute_big_m
 
@@ -1350,11 +1350,16 @@ def _compute_big_m_lp(
         """Solve LP to get bound. Returns None if LP fails."""
         obj = -c_vec if maximize else c_vec
         optima: dict | None = getattr(lp_data, "optima", None)
+        # #1917: DISCOPT_MBIGM_LP_COMPONENTS (default OFF) solves over the
+        # components the body touches; see _component_sub_lp. It is part of the
+        # memo key so the two arms never share an answer.
+        by_component = isinstance(lp_data, _LPData) and _mbigm_lp_components_enabled()
         key = None
         if optima is not None:
             key = (
                 np.ascontiguousarray(obj, dtype=np.float64).tobytes(),
-                np.asarray(bounds_list, dtype=np.float64).tobytes(),
+                box_bytes,
+                by_component,
             )
         if optima is not None and key is not None and key in optima:
             status, objective = optima[key]
@@ -1363,13 +1368,17 @@ def _compute_big_m_lp(
             # by status, handled here; a raise is a defect -- e.g. the
             # ``copy_from_slice`` length mismatch described above, which this handler
             # used to turn into "use the default big-M" instead of a bug report.
+            if by_component:
+                lp = _component_sub_lp(cast(_LPData, lp_data), obj, bounds_list)
+            else:
+                lp = (obj, A_ub, b_ub, A_eq, b_eq, bounds_list)
             result = solve_lp(
-                c=obj,
-                A_ub=A_ub,
-                b_ub=b_ub,
-                A_eq=A_eq,
-                b_eq=b_eq,
-                bounds=bounds_list,
+                c=lp[0],
+                A_ub=lp[1],
+                b_ub=lp[2],
+                A_eq=lp[3],
+                b_eq=lp[4],
+                bounds=lp[5],
             )
             status, objective = result.status, result.objective
             if optima is not None and key is not None:
@@ -1416,6 +1425,40 @@ def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
             ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
             bounds_list.append((lb_i, ub_i))
     return bounds_list
+
+
+def _lp_box_memo(lp_data: tuple, model: Model, n_vars: int) -> tuple[list, bytes]:
+    """:func:`_lp_box` and its memo-key bytes, rebuilt only when the box can differ.
+
+    #1917: rebuilding the box per row was 78 % of biofuel's mbigm lowering (7404
+    calls over 36804 columns, 535 of 698 profiled seconds). The box is a function
+    of the first variables of ``model._variables`` and of their ``_lb``/``_ub``
+    arrays. Those arrays are read-only, so a bound changes only by rebinding the
+    attribute (``Variable.lb``'s setter). The cached box is therefore returned
+    only when the same variable objects still hold the same bound objects, which
+    makes it the list :func:`_lp_box` would build, value for value. Anything else
+    rebuilds it.
+    """
+    snap = getattr(lp_data, "box_memo", None)
+    if snap is not None:
+        held, box, key = snap
+        mv = model._variables
+        if len(mv) >= len(held) and all(
+            a is v and v._lb is lb and v._ub is ub for a, (v, lb, ub) in zip(mv, held)
+        ):
+            return box, key
+    box = _lp_box(model, n_vars)
+    key = np.asarray(box, dtype=np.float64).tobytes()
+    held = []
+    cols = 0
+    for v in model._variables:
+        if cols >= n_vars:
+            break
+        held.append((v, v._lb, v._ub))
+        cols += v.size
+    if isinstance(lp_data, _LPData):
+        lp_data.box_memo = (held, box, key)
+    return box, key
 
 
 def _bound_pretransform_enabled() -> bool:
@@ -1660,6 +1703,94 @@ class _LPData(tuple):
     """
 
     optima: dict
+    #: Built on first use by :func:`_component_sub_lp`.
+    components: "Optional[_LPComponents]"
+    #: ``(held, box, key)`` from :func:`_lp_box_memo`.
+    box_memo: "Optional[tuple]"
+
+
+def _mbigm_lp_components_enabled() -> bool:
+    """Is #1917's per-component mbigm LP on? (``DISCOPT_MBIGM_LP_COMPONENTS``,
+    default OFF; see ``SolverTuning.mbigm_lp_components``)."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().mbigm_lp_components)
+
+
+class _LPComponents:
+    """Connected components of the LP relaxation's column-row graph (#1917).
+
+    Two columns share a component when some linear row holds both, and a row
+    belongs to the component of its columns. A row with no nonzero entry is in a
+    component of its own that holds no column, so no sub-LP ever includes it.
+    """
+
+    __slots__ = ("col", "ub", "eq")
+
+    def __init__(self, A_ub, A_eq, n_vars: int):
+        import scipy.sparse as sp
+        from scipy.sparse.csgraph import connected_components
+
+        blocks = [sp.csr_matrix(A) for A in (A_ub, A_eq) if A is not None]
+        m_ub = 0 if A_ub is None else int(A_ub.shape[0])
+        rows = sp.vstack(blocks, format="coo") if blocks else sp.coo_matrix((0, n_vars))
+        r = int(rows.shape[0])
+        keep = rows.data != 0.0  # a stored zero links nothing
+        graph = sp.coo_matrix(
+            (np.ones(int(keep.sum())), (rows.col[keep], n_vars + rows.row[keep])),
+            shape=(n_vars + r, n_vars + r),
+        )
+        _, label = connected_components(graph, directed=False)
+        self.col = label[:n_vars]
+        self.ub = label[n_vars : n_vars + m_ub]
+        self.eq = label[n_vars + m_ub :]
+
+
+def _component_sub_lp(lp_data: "_LPData", obj: np.ndarray, bounds_list: list) -> tuple:
+    """The mbigm LP restricted to the components that ``obj`` touches (#1917).
+
+    Returns ``(c, A_ub, b_ub, A_eq, b_eq, bounds)`` over the columns of those
+    components and the rows among them, in the original order.
+
+    Sound: the sub-LP drops rows and columns that ``obj`` does not weigh. Any
+    point of the full LP restricts to a point of the sub-LP with the same
+    objective, so the sub-LP optimum bounds the full one, and the M built from it
+    is no smaller. When the dropped components are feasible the two optima are
+    equal; when one is infeasible the full LP is infeasible, the model has no
+    feasible point, and any M is valid.
+    """
+    comp = lp_data.components
+    if comp is None:
+        comp = lp_data.components = _LPComponents(lp_data[0], lp_data[2], lp_data[4])
+    A_ub, b_ub, A_eq, b_eq, _n = lp_data
+    support = np.flatnonzero(obj)
+    if support.size == 0:
+        # A constant body: nothing to restrict to, so solve the full LP as before.
+        return (obj, A_ub, b_ub, A_eq, b_eq, bounds_list)
+    touched = np.unique(comp.col[support])
+    cols = np.flatnonzero(np.isin(comp.col, touched))
+    if cols.size == comp.col.size:
+        # Every column is touched (stranded_gas: one component holds 99.6 %), so
+        # restricting would only copy the LP; solve exactly the full one.
+        return (obj, A_ub, b_ub, A_eq, b_eq, bounds_list)
+    sub_ub = sub_eq = None
+    sb_ub = sb_eq = None
+    if A_ub is not None:
+        r = np.flatnonzero(np.isin(comp.ub, touched))
+        sub_ub = A_ub[r][:, cols]
+        sb_ub = np.asarray(b_ub, dtype=np.float64).ravel()[r]
+    if A_eq is not None:
+        r = np.flatnonzero(np.isin(comp.eq, touched))
+        sub_eq = A_eq[r][:, cols]
+        sb_eq = np.asarray(b_eq, dtype=np.float64).ravel()[r]
+    return (
+        np.asarray(obj, dtype=np.float64)[cols],
+        sub_ub,
+        sb_ub,
+        sub_eq,
+        sb_eq,
+        [bounds_list[i] for i in cols],
+    )
 
 
 def _precompute_lp_relaxation(model: Model) -> tuple:
@@ -1676,6 +1807,8 @@ def _precompute_lp_relaxation(model: Model) -> tuple:
 
     data = _LPData(_extract_linear_constraints(model, sparse=True))
     data.optima = {}
+    data.components = None
+    data.box_memo = None
     return data
 
 

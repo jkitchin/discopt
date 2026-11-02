@@ -1188,6 +1188,35 @@ class SolverTuning:
     med_term_purchasing under mbigm (57 -> 95), at a lower wall in each. Audit row
     in ``docs/dev/flag-retirement-audit.md``."""
 
+    mbigm_lp_components: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_MBIGM_LP_COMPONENTS", default=False)
+    )
+    """Solve each mbigm LP big-M over only the connected components of the LP
+    relaxation that the row's body touches (``DISCOPT_MBIGM_LP_COMPONENTS``, default
+    **OFF**; #1917, bound-changing on the ``"mbigm"`` route).
+
+    Two columns are connected when a linear row of the model holds both. Dropping
+    the rows of components the body does not touch is a relaxation, so the sub-LP
+    optimum is never tighter than the full one and the M stays sound. On a
+    separable polytope the two optima are equal in exact arithmetic, but the
+    simplex takes a different path, so the float M can differ in its last bits.
+    It can also be smaller than OFF's M where the full LP fails and OFF falls
+    back to the interval M (below). That is why this is a flag. When the touched
+    components hold every column, the full LP is solved unchanged.
+
+    Measured (#1917, GDPlib, ``gdp.mbigm`` lowering wall, load 11-21): ``biofuel``
+    has 5927 components (largest 144 columns / 34 rows, against 36804 / 5576) and
+    lowers in 147 s ON against more than 600 s OFF; ``kaibel`` 40.8 -> 6.3 s with
+    every M bitwise equal; ``stranded_gas`` is one component (99.6 % of columns),
+    116 s OFF, 119 s ON. Per-row M differential over the 23 other ``gdp_parity``
+    instances: no M is larger ON, and every M is bitwise equal on 22 of them (3
+    lower no LP row). On ``batch_processing``
+    36 of 450 M's are smaller ON. There the in-house simplex returns ``numerical``
+    on 448 of 450 full LPs, so OFF uses the interval M; each of the 48 OPTIMAL
+    sub-LPs equals the HiGHS full-LP optimum (worst relative 3e-16). Not
+    graduated: the §5 solve panel is owed. Audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
+
     obbt_ns_strict: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBBT_NS_STRICT", default=False)
     )
