@@ -418,7 +418,7 @@ class MultiStartNLP:
 
         for i in range(self._n_starts):
             x0 = starts[i]
-            nlp_result = backend(evaluator, x0, options=opts)
+            nlp_result = _solve_sub_nlp(backend, evaluator, x0, opts)
             if not _is_nlp_feasible(nlp_result):
                 continue
 
@@ -551,7 +551,7 @@ def feasibility_pump(
                 # explicit caller ``max_wall_time`` still wins (setdefault).
                 solve_opts.setdefault("max_wall_time", _wall_cap)
             try:
-                nlp_result = backend(evaluator, x0, options=solve_opts)
+                nlp_result = _solve_sub_nlp(backend, evaluator, x0, solve_opts)
             except BaseException as exc:
                 # Some NLP backends (pounce via PyO3) raise PanicException, which
                 # is not a subclass of Exception; treat any failure as this round
@@ -687,6 +687,62 @@ def _pump_repair_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _subnlp_implied_box_enabled() -> bool:
+    """Whether a heuristic sub-NLP is solved on its FBBT-implied box (#1917). Default OFF.
+
+    A heuristic fixes integer columns by writing their bounds and then solves the
+    NLP on the variables' declared box, so a continuous column that the fixing
+    forces to a point keeps its whole box. Measured on ``pyomo.ex_633_trespalacios``
+    under ``gdp_method="hull"`` (base ``6d3e2f79``): 164 of 189 NLP solves end
+    ``Invalid_Number_Detected``, 158 of them heuristic. A disjunct whose indicator is
+    fixed to 0 leaves its disaggregated copy ``v`` on ``[0, 5]``; the interior-point
+    bound push starts it at ``0.01``, and the hull row evaluates
+    ``exp(0.67 v / yhat)`` at ``yhat = eps = 1e-8``, which overflows at the first
+    iterate. ``v <= 5 y`` with ``y = 0`` already says ``v = 0``; the B&B node NLPs
+    get that from :func:`discopt.solver._tighten_node_bounds_with_status`, and the
+    heuristics did not. With this ON the same solve has 6 of 231 (75 nodes and the
+    certified 4.46037 either way).
+
+    It changes only which box a primal sub-NLP is solved on, never a relaxation or
+    a bound: the tightening is the node FBBT (exact on linear rows, outward-safe on
+    nonlinear ones), so the sub-NLP's feasible set is unchanged, and every point a
+    heuristic returns is still verified against the model before it is used. It is
+    OFF because it changes which incumbents are found and when, so node counts
+    move, and that has not been measured across the corpus: a panel (flag ON vs
+    OFF over the corpus and the GDP parity panel) decides graduation.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_IMPLIED_BOX", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _solve_sub_nlp(backend: Callable, evaluator, x0: np.ndarray, options: dict):
+    """``backend(evaluator, x0, options=options)``, on the FBBT-implied box when enabled.
+
+    See :func:`_subnlp_implied_box_enabled`. When the tightening moves no bound, or
+    proves the box empty, the backend is called exactly as before: an empty box is
+    left for the NLP to report, so this never decides a heuristic step itself.
+    """
+    if not _subnlp_implied_box_enabled() or evaluator.n_constraints == 0:
+        return backend(evaluator, x0, options=options)
+    from discopt.solver import _BoundOverrideEvaluator, _tighten_node_bounds_with_status
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    lb, ub = evaluator.variable_bounds
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    cl, cu = _infer_constraint_bounds(evaluator)
+    t_lb, t_ub, infeasible = _tighten_node_bounds_with_status(evaluator, lb, ub, list(cl), list(cu))
+    if infeasible or not (np.any(t_lb > lb) or np.any(t_ub < ub)):
+        return backend(evaluator, x0, options=options)
+    proxy = _BoundOverrideEvaluator(evaluator, t_lb, t_ub)
+    x_start = np.clip(np.asarray(x0, dtype=np.float64), t_lb, t_ub)
+    return backend(proxy, x_start, options=options)
 
 
 def _repair_to_feasible(
@@ -1169,7 +1225,7 @@ def subnlp(
             opts.setdefault("max_wall_time", float(time_budget))
 
         try:
-            nlp_result = backend(evaluator, x0, options=opts)
+            nlp_result = _solve_sub_nlp(backend, evaluator, x0, opts)
         except BaseException:
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
@@ -1310,7 +1366,7 @@ def continuous_multistart(
             # while still letting a typical (sub-second) local solve converge.
             solve_opts.setdefault("max_wall_time", float(min(3.0, remaining)))
         try:
-            res = backend(evaluator, starts[i], options=solve_opts)
+            res = _solve_sub_nlp(backend, evaluator, starts[i], solve_opts)
         except BaseException as exc:
             # PyO3 backends can raise PanicException (not an Exception subclass).
             logger.debug("multistart NLP start %d failed: %s: %s", i, type(exc).__name__, exc)
@@ -1600,7 +1656,7 @@ def integer_local_search(
         if _relax_cap is not None:
             relax_opts.setdefault("max_wall_time", _relax_cap)
         budget.charge(NLP_SOLVE)
-        relax_res = backend(evaluator, mid, options=relax_opts)
+        relax_res = _solve_sub_nlp(backend, evaluator, mid, relax_opts)
         if relax_res is not None and relax_res.x is not None:
             seeds.append(_round_clip(np.asarray(relax_res.x)))
     except BaseException as exc:
@@ -2759,7 +2815,7 @@ def one_hot_config_dive(
             step_opts.setdefault("max_wall_time", cap)
         level_solves += 1
         try:
-            res = backend(evaluator, np.clip(x_start, lb_cur, ub_cur), options=step_opts)
+            res = _solve_sub_nlp(backend, evaluator, np.clip(x_start, lb_cur, ub_cur), step_opts)
         except BaseException:
             # Backends can raise PanicException (PyO3), which is not an Exception.
             # A failed step is a refusal like any other; it only redirects the dive.
@@ -3055,7 +3111,7 @@ def diving(
                 # comment describes survived the poll (#966). Cap the step too.
                 dive_opts.setdefault("max_wall_time", _dive_cap)
             try:
-                res = backend(evaluator, x_cur, options=dive_opts)
+                res = _solve_sub_nlp(backend, evaluator, x_cur, dive_opts)
             except BaseException:
                 return None
             # A capped step that hits TIME_LIMIT ends the dive, exactly as the
