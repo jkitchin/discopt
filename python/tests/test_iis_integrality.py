@@ -450,3 +450,31 @@ def test_artifact_model_is_never_declared_feasible():
         # Certificates are exact-integer points: held integers are integral.
         if key != ("integrality", 0):
             assert x[0] == round(x[0])
+
+
+@pytest.mark.smoke
+def test_repair_only_makes_integrality_exact(monkeypatch):
+    """The repair must not tighten the continuous feasibility tolerance: at 1e-9 it
+    rejected ordinary 1e-7-feasible points (all 203 of dell's repairs)."""
+    from discopt._iis_milp import milp_iis
+
+    seen = []
+    real_set = highspy.Highs.setOptionValue
+
+    def spy(self, name, value):
+        if name == "primal_feasibility_tolerance":
+            seen.append(value)
+        return real_set(self, name, value)
+
+    monkeypatch.setattr(highspy.Highs, "setOptionValue", spy)
+    # LP-feasible, MIP-infeasible: feasible probes hold integers, so repairs run.
+    m = dm.Model("p")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.subject_to(2 * x == 1, name="half")
+    m.subject_to(y <= 3, name="red_herring")
+    m.minimize(0 * x)
+    res = milp_iis(m)
+    assert res.n_repairs > 0, "no repair ran: the check did not fire"
+    assert res.n_artifacts == 0
+    assert seen == [], seen

@@ -55,8 +55,6 @@ _INF = 1e20  # discopt's unbounded-bound sentinel
 
 #: A solve is not started with less wall time than this left in its budget.
 _MIN_SOLVE_S = 0.05
-#: Primal feasibility tolerance of the exact-integer repair LP (HiGHS default 1e-7).
-_REPAIR_TOL = 1e-9
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -266,8 +264,12 @@ class _Engine:
         that are violated by 1.4e-5 once the integers are rounded). So a
         "feasible" verdict must survive repair: fix every held integer at its
         rounded value and re-solve the continuous part as an LP with presolve
-        off and a 1e-9 feasibility tolerance. Its point has exact integers and is
-        what the caller gets (and what becomes a certificate).
+        off, at HiGHS's standard feasibility tolerance. Its point has exact
+        integers and is what the caller gets (and what becomes a certificate).
+        Only integrality is made exact: tightening the continuous tolerance too
+        (it was 1e-9) rejected ordinary points -- every one of ``dell``'s 203
+        repairs, whose rounded points met their rows to 9.4e-8 -- while osun's
+        artifacts fail the repair at 1e-9, 1e-7 and 1e-6 alike.
         """
         x = self._point()
         held = self._held
@@ -279,12 +281,10 @@ class _Engine:
         idx = held.astype(np.int32)
         h.changeColsBounds(idx.size, idx, xr, xr)
         h.changeColsIntegrality(idx.size, idx, np.array([vt.kContinuous] * idx.size))
-        h.setOptionValue("primal_feasibility_tolerance", _REPAIR_TOL)
         try:
             ok = self._solve("off", stop_at) == self.hs.HighsModelStatus.kOptimal
             y = self._point() if ok else None
         finally:
-            h.setOptionValue("primal_feasibility_tolerance", 1e-7)
             lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
             hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
             h.changeColsBounds(idx.size, idx, lo, hi)
