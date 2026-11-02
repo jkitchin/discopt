@@ -178,3 +178,36 @@ kept in each), so it is a search effect.
 **rsyn0830m:** the root is better ON (−2318.77 → −2060.33,
 deterministic, max_nodes = 2). Its weaker 30 s bound is therefore a search effect,
 which is acceptable by the stated criterion.
+
+### NS default-box fix: entry experiment KILLED (2026-11-02)
+
+**Hypothesis.** The Rust MILP root bound, the NS safe bound (`DISCOPT_MILP_NS_NODE_BOUND`,
+default ON), loses to the vertex bound on enough big-M masters, through the `±9.999e19`
+default box, to mask the G3.2 levers. A fix would take the width from a valid finite
+source (FBBT implied bounds, or a dual projection that zeroes the residual).
+
+**Pre-registered kill.** Fewer than 3 instances where the NS root differs from the
+vertex root by more than 1e-6 relative.
+
+**Measurement.** `g32/replay/nsentry.py` covered all 36 captured Rust-MILP inputs of
+the step-1 panel (7 in-repo, 23 LOA masters, 6 big-M). The bound was taken at
+`max_nodes=2`, once with NS default and once with `DISCOPT_MILP_NS_NODE_BOUND=0`, each
+in its own process (the flag is read once). Each run covered both coef-tighten arms:
+72 comparisons per run, `PROBE_DONE 72` twice.
+
+| coef tighten | instances with NS ≠ vertex (> 1e-6 rel) |
+|---|---|
+| OFF (default) | **0** of 36 |
+| ON | **2** of 36: clay0203_master (−1.04e6 vs −1.4e-12), jobshop_small (−5542.31 vs 8.25) |
+
+Every other row agrees to ≤ 1.4e-8 relative. That includes the 7 instances that
+carry default-box columns but never show the effect: med_term_purchasing (78),
+batch_processing (10), spectralog (8), constrained_layout_clay0203 (6) and
+strip_packing_concrete (1). hda is `−inf` in both arms. spectralog's `−7.9992e20`
+is its own optimum (HiGHS agrees), so it is a modelling artifact, not a bound gap.
+
+**Verdict: killed.** At default settings the defect affects no instance in this set,
+and it shows up only on a perturbed LP (the coef-tightened rows of two masters). It
+stays recorded above as a known fragility of NS over the default box, not as a G3.2
+lever. It does not explain the mixed step-1 panel either. Neither of the two node
+regressions (disease_model, strip_packing_concrete) is in the affected set.
