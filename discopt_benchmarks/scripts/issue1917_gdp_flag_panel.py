@@ -83,6 +83,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # so its fire phase reports nothing: solve with ``--all --include`` over the
     # instances whose route the flag changes (``_convex_minlp_auto_route``).
     "DISCOPT_CONVEX_ROUTE_GDP_LOWERED": ("big-m",),
+    # Acts on the mbigm lowering's LPs; on 23 of 24 instances it leaves every M
+    # bitwise equal and changes only the lowering wall, which a fingerprint cannot
+    # see, so it is solved with ``--all`` (DISCOPT_MBIGM_LP_COMPONENTS.prereg.md).
+    "DISCOPT_MBIGM_LP_COMPONENTS": ("mbigm",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

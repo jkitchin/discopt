@@ -1214,8 +1214,9 @@ class SolverTuning:
     36 of 450 M's are smaller ON. There the in-house simplex returns ``numerical``
     on 448 of 450 full LPs, so OFF uses the interval M; each of the 48 OPTIMAL
     sub-LPs equals the HiGHS full-LP optimum (worst relative 3e-16). Not
-    graduated: the §5 solve panel is owed. Audit row in
-    ``docs/dev/flag-retirement-audit.md``."""
+    graduated: the §5 panel is owed, and its rule is pre-registered in
+    ``docs/dev/data/1917-flag-panel/DISCOPT_MBIGM_LP_COMPONENTS.prereg.md``.
+    Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     obbt_ns_strict: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBBT_NS_STRICT", default=False)

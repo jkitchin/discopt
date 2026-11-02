@@ -10,6 +10,13 @@ Measured on GDPlib ``biofuel`` at 6d3e2f79: mbigm lowering ran past 600 s
   over the connected components of the column-row graph that the body touches.
   Dropping rows relaxes the LP, so an M can only grow; on a separable polytope
   it is unchanged.
+
+Measured 2026-11-01 (``gdp.mbigm`` on the 24 ``gdp_parity`` instances, each
+``_compute_big_m_lp`` return compared in call order): biofuel lowers in 146 s ON
+against 3814 s OFF, with all 7416 M's bitwise equal; no M is larger ON anywhere.
+The one place an M is smaller ON is ``batch_processing`` (36 of 450), where the
+in-house simplex reports ``numerical`` on 448 of the 450 full LPs, so OFF uses the
+interval M. The ON sub-LP optima there equal HiGHS's full-LP optima.
 """
 
 from __future__ import annotations
