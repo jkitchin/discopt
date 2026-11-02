@@ -13,9 +13,11 @@
 //!
 //! Scope of this MVP: the loop and the tighten-only bound update, built on the
 //! existing warm primal simplex (`solve_lp_cols_warm`), threading the optimal basis
-//! probe-to-probe. It is **bound-neutral by construction** — every probe is the same
-//! LP the Python path solves, via the same trusted solver — so it can only change
-//! *who computes the bound and how fast*, never the bound itself (the C1 invariant).
+//! probe-to-probe. Every probe is the same LP the Python path solves, via the same
+//! trusted solver. Since #1917 each tightened side is that probe's Neumaier--
+//! Shcherbina *safe* bound rather than its vertex objective, which can drift past the
+//! true optimum and cut feasible points off (see [`probe_safe_bound`]); the safe
+//! bound is never tighter than the exact LP optimum, so the sweep stays sound.
 //!
 //! A later optimization (`PreparedPrimal`, item-3 tail) reuses one scaled
 //! matrix + LU factorization across all probes to push below the 1.28 ms stateless
@@ -23,15 +25,46 @@
 //! profiled node LP) but already captures the dominant marshaling win.
 
 use crate::lp::basis::Basis;
+use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
-use crate::lp::simplex::{primal::solve_lp_cols_warm, LpStatus, SimplexOptions};
+use crate::lp::simplex::{primal::solve_lp_cols_warm, LpSolve, LpStatus, SimplexOptions};
+
+/// A rigorous lower bound on `min cᵀz` from one probe's row duals, or `None` when
+/// the probe did not solve or its duals do not certify a finite bound (#1917).
+///
+/// The probe's vertex objective `sol.obj` is **not** a bound: on an ill-conditioned
+/// basis it drifts past the true optimum, and as a tightened box edge that drift cuts
+/// feasible points off -- measured on GDPlib `cstr` big-M, a binary whose LP maximum
+/// is exactly 1 came back as `0.9999999999999996`, crossed the node's `lo = 1`, and
+/// panicked the tree in `f64::clamp`. The Neumaier--Shcherbina evaluation of the
+/// same duals is the bound the node LP itself certifies with.
+#[allow(clippy::too_many_arguments)]
+fn probe_safe_bound(
+    sol: &LpSolve,
+    sp: &SparseCols,
+    c: &[f64],
+    m: usize,
+    n_total: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> Option<f64> {
+    if sol.status != LpStatus::Optimal {
+        return None;
+    }
+    let (col_ptr, row_idx, vals) = sp.raw();
+    ns_safe_bound_csc(&sol.dual, c, col_ptr, row_idx, vals, m, n_total, b, l, u)
+        .filter(|v| v.is_finite())
+}
 
 /// Outcome of an OBBT probe sweep.
 #[derive(Clone, Debug)]
 pub struct ObbtSweepResult {
     /// Tightened `(lo, hi)` per candidate, aligned with the `candidates` input.
-    /// Each entry is tighten-only: `lo >= l[k]`, `hi <= u[k]`. A probe that does
-    /// not solve to optimality leaves that side at the incoming bound.
+    /// Each entry is tighten-only: `lo >= l[k]`, `hi <= u[k]`. Each side is the
+    /// probe's *safe* (Neumaier--Shcherbina) bound, never its vertex objective; a
+    /// probe that does not solve to optimality, or whose duals do not certify a
+    /// finite bound, leaves that side at the incoming bound.
     pub bounds: Vec<(f64, f64)>,
     /// Total LP solves performed (`<= 2 * candidates.len()`).
     pub n_solves: usize,
@@ -78,13 +111,12 @@ pub fn obbt_probe_sweep(
         let lo = {
             let sol = solve_lp_cols_warm(sp.clone(), m, n_total, &c, l, u, b, &warm, opts);
             n_solves += 1;
+            let safe = probe_safe_bound(&sol, sp, &c, m, n_total, b, l, u);
             if sol.status == LpStatus::Optimal {
                 warm = sol.basis;
-                // tighten-only: never loosen below the incoming bound.
-                lo_in.max(sol.obj)
-            } else {
-                lo_in
             }
+            // tighten-only: never loosen below the incoming bound.
+            safe.map_or(lo_in, |v| lo_in.max(v))
         };
 
         // max xₖ : minimize -eₖᵀz -> max value is -obj.
@@ -92,12 +124,12 @@ pub fn obbt_probe_sweep(
         let hi = {
             let sol = solve_lp_cols_warm(sp.clone(), m, n_total, &c, l, u, b, &warm, opts);
             n_solves += 1;
+            // `min -xₖ >= safe`, so `xₖ <= -safe`.
+            let safe = probe_safe_bound(&sol, sp, &c, m, n_total, b, l, u);
             if sol.status == LpStatus::Optimal {
                 warm = sol.basis;
-                hi_in.min(-sol.obj)
-            } else {
-                hi_in
             }
+            safe.map_or(hi_in, |v| hi_in.min(-v))
         };
         c[k] = 0.0; // reset for the next candidate
 
@@ -193,5 +225,28 @@ mod tests {
             "upper loosened: {}",
             res.bounds[0].1
         );
+    }
+
+    /// #1917: every side is a *safe* bound, so it contains the exact LP range
+    /// (x0 in [0, 2], x1 in [0, 3]) -- never tighter, even by an ulp. The vertex
+    /// objective it replaced could land inside it and cut a feasible point off.
+    #[test]
+    fn sweep_sides_contain_the_exact_lp_range_1917() {
+        let (sp, m, n, b, l, u) = small_lp();
+        let opts = SimplexOptions::default();
+        let start = Basis::from_basic(n, vec![2, 3]);
+        let res = obbt_probe_sweep(&sp, m, n, &b, &l, &u, &[0usize, 1], &start, &opts);
+        let exact = [(0.0, 2.0), (0.0, 3.0)];
+        for (k, &(lo, hi)) in res.bounds.iter().enumerate() {
+            assert!(
+                lo <= exact[k].0 && hi >= exact[k].1,
+                "{k}: ({lo},{hi}) cuts {:?}",
+                exact[k]
+            );
+            assert!(
+                hi <= exact[k].1 + 1e-7,
+                "{k}: hi {hi} not tightened from the box"
+            );
+        }
     }
 }

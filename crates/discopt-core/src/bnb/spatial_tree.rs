@@ -22,9 +22,10 @@ use crate::bnb::convex_quad_cuts::{detect_convex_quad_forms, separate_round, Con
 use crate::bnb::spatial_kernel::{
     solve_spatial_node_with_cuts, EnvTerm, FixedRow, SpatialKernelSpec, SpatialNodeResult,
 };
-use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
+use crate::bnb::spatial_propagate::{order_crossed_box, propagate_spec_fixpoint};
 use crate::lp::basis::Basis;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
+use crate::numeric::clamp_ordered;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::rc::Rc;
@@ -1237,6 +1238,14 @@ pub fn solve_spatial_tree_observed(
                     hi[cand] = hi[cand].min(ghi);
                 }
             }
+            // #1917: an OBBT edge is a safe LP bound, so over a non-empty node LP it
+            // can cross the node edge only by round-off; widen that outward. A
+            // crossing beyond the tolerance proves the node LP empty: fathom it, with
+            // the node's own safe LP bound as its region bound (never above +inf).
+            if !order_crossed_box(&mut lo, &mut hi) {
+                global_lb_closed = global_lb_closed.min(node.bound.max(parent_bound));
+                continue;
+            }
         }
 
         let x = &node.x;
@@ -1437,7 +1446,7 @@ pub fn solve_spatial_tree_observed(
                 let mut h2 = hi.clone();
                 for j in 0..spec.n_orig {
                     if spec.integrality[j] {
-                        let v = x[j].round().clamp(lo[j], hi[j]);
+                        let v = clamp_ordered(x[j].round(), lo[j], hi[j]);
                         l2[j] = v;
                         h2[j] = v;
                     }

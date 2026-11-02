@@ -209,7 +209,7 @@ pub fn eliminate_variables_until(
 
             victim_ci = Some(ci);
             victim_vblock = Some(*vblock);
-            victim_value = value.clamp(lb, ub);
+            victim_value = crate::numeric::clamp_ordered(value, lb, ub);
             break;
         }
 
