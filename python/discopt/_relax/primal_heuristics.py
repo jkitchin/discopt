@@ -15,7 +15,7 @@ import os
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
 
@@ -418,7 +418,7 @@ class MultiStartNLP:
 
         for i in range(self._n_starts):
             x0 = starts[i]
-            nlp_result = backend(evaluator, x0, options=opts)
+            nlp_result = _solve_sub_nlp(backend, evaluator, x0, opts)
             if not _is_nlp_feasible(nlp_result):
                 continue
 
@@ -551,7 +551,7 @@ def feasibility_pump(
                 # explicit caller ``max_wall_time`` still wins (setdefault).
                 solve_opts.setdefault("max_wall_time", _wall_cap)
             try:
-                nlp_result = backend(evaluator, x0, options=solve_opts)
+                nlp_result = _solve_sub_nlp(backend, evaluator, x0, solve_opts)
             except BaseException as exc:
                 # Some NLP backends (pounce via PyO3) raise PanicException, which
                 # is not a subclass of Exception; treat any failure as this round
@@ -689,6 +689,119 @@ def _pump_repair_enabled() -> bool:
     )
 
 
+def _subnlp_implied_box_enabled() -> bool:
+    """Whether a heuristic sub-NLP is solved on its FBBT-implied box (#1917). Default OFF.
+
+    A heuristic fixes integer columns by writing their bounds and then solves the
+    NLP on the variables' declared box, so a continuous column that the fixing
+    forces to a point keeps its whole box. Measured on ``pyomo.ex_633_trespalacios``
+    under ``gdp_method="hull"`` (base ``6d3e2f79``): 164 of 189 NLP solves end
+    ``Invalid_Number_Detected``, 158 of them heuristic. A disjunct whose indicator is
+    fixed to 0 leaves its disaggregated copy ``v`` on ``[0, 5]``; the interior-point
+    bound push starts it at ``0.01``, and the hull row evaluates
+    ``exp(0.67 v / yhat)`` at ``yhat = eps = 1e-8``, which overflows at the first
+    iterate. ``v <= 5 y`` with ``y = 0`` already says ``v = 0``; the B&B node NLPs
+    get that from :func:`discopt.solver._tighten_node_bounds_with_status`, and the
+    heuristics did not. With this ON the same solve has 6 of 231 (75 nodes and the
+    certified 4.46037 either way).
+
+    It changes only which box a primal sub-NLP is solved on, never a relaxation or
+    a bound: the tightening is the node FBBT (exact on linear rows, outward-safe on
+    nonlinear ones), so the sub-NLP's feasible set is unchanged, and every point a
+    heuristic returns is still verified against the model before it is used. It is
+    OFF because it changes which incumbents are found and when, so node counts
+    move, and that has not been measured across the corpus: a panel (flag ON vs
+    OFF over the corpus and the GDP parity panel) decides graduation.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_IMPLIED_BOX", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _implied_box(evaluator) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+    """``(lb, ub, t_lb, t_ub, infeasible)``: the evaluator's box and its node-FBBT box.
+
+    The tightening is :func:`discopt.solver._tighten_node_bounds_with_status`, the
+    pass every B&B node box goes through, and ``infeasible`` is the proof B&B
+    prunes a node on.
+    """
+    from discopt.solver import _tighten_node_bounds_with_status
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    lb, ub = evaluator.variable_bounds
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    cl, cu = _infer_constraint_bounds(evaluator)
+    t_lb, t_ub, infeasible = _tighten_node_bounds_with_status(evaluator, lb, ub, list(cl), list(cu))
+    return lb, ub, t_lb, t_ub, bool(infeasible)
+
+
+def _solve_sub_nlp(
+    backend: Callable,
+    evaluator,
+    x0: np.ndarray,
+    options: dict,
+    implied: Optional[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]] = None,
+):
+    """``backend(evaluator, x0, options=options)``, on the FBBT-implied box when enabled.
+
+    See :func:`_subnlp_implied_box_enabled`. When the tightening moves no bound, or
+    proves the box empty, the backend is called exactly as before: an empty box is
+    left for the NLP to report, so this never decides a heuristic step itself.
+    ``implied`` is :func:`_implied_box` already computed on this evaluator's
+    current box (``subnlp`` computes it for its own refusal test), so it is not
+    computed twice.
+    """
+    if not _subnlp_implied_box_enabled() or evaluator.n_constraints == 0:
+        return backend(evaluator, x0, options=options)
+    from discopt.solver import _BoundOverrideEvaluator
+
+    lb, ub, t_lb, t_ub, infeasible = implied if implied is not None else _implied_box(evaluator)
+    if infeasible or not (np.any(t_lb > lb) or np.any(t_ub < ub)):
+        return backend(evaluator, x0, options=options)
+    proxy = _BoundOverrideEvaluator(evaluator, t_lb, t_ub)
+    x_start = np.clip(np.asarray(x0, dtype=np.float64), t_lb, t_ub)
+    return backend(proxy, x_start, options=options)
+
+
+class _RepairDeadline(Exception):
+    """Raised by :class:`_DeadlineCallbacks` once the caller's deadline has passed."""
+
+
+class _DeadlineCallbacks:
+    """Callbacks for ``pounce.project_to_feasible`` that stop it at ``deadline``.
+
+    ``project_to_feasible`` reads no clock and takes no time limit, and each of its
+    up to ``max_iter`` outer steps is a sparse QP. It calls back into Python for
+    ``constraints``/``jacobian`` between those QPs, so checking the deadline there
+    stops the repair after at most one more QP. #1917: on GDPlib ``gdp_col`` under
+    hull each QP took ~27 s and the repair ran 10 of them, so a 120 s solve
+    returned after 359 s, 270 s of it in this repair.
+    """
+
+    def __init__(self, inner, deadline: float):
+        self._inner = inner
+        self._deadline = float(deadline)
+
+    def _check(self) -> None:
+        if _now() >= self._deadline:
+            raise _RepairDeadline()
+
+    def constraints(self, x):
+        self._check()
+        return self._inner.constraints(x)
+
+    def jacobian(self, x):
+        self._check()
+        return self._inner.jacobian(x)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def _repair_to_feasible(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -719,7 +832,8 @@ def _repair_to_feasible(
 
     Returns ``None`` — leaving the round to fail exactly as it does today —
     when ``DISCOPT_PUMP_REPAIR=0``, when pounce is not installed, when the
-    repair raises, or when the caller's deadline has already passed. Soundness
+    repair raises, or when the caller's deadline has passed, before the repair or
+    during it (:class:`_DeadlineCallbacks`, checked between its QPs). Soundness
     is unaffected either way:
     the returned point is verified by :func:`_verified_pump_point` like any
     other candidate, and ``inject_incumbent`` enforces strict improvement on top.
@@ -742,9 +856,12 @@ def _repair_to_feasible(
     else:
         cl = np.empty(0, dtype=float)
         cu = np.empty(0, dtype=float)
+    callbacks: Any = _IpoptCallbacks(evaluator)
+    if deadline is not None:
+        callbacks = _DeadlineCallbacks(callbacks, deadline)
     try:
         x_rep, report = pounce.project_to_feasible(
-            _IpoptCallbacks(evaluator),
+            callbacks,
             np.asarray(x0, dtype=float),
             lb=np.asarray(lb, dtype=float),
             ub=np.asarray(ub, dtype=float),
@@ -754,6 +871,9 @@ def _repair_to_feasible(
             max_iter=_PUMP_REPAIR_OUTER_ITERS,
             return_report=True,
         )
+    except _RepairDeadline:
+        logger.debug("feasibility repair stopped at the caller's deadline")
+        return None
     except BaseException as exc:
         # Same contract as the fix-and-solve round above: pounce reaches Python
         # through PyO3 and can raise PanicException, which is not an Exception.
@@ -1164,12 +1284,27 @@ def subnlp(
                     v.ub = fixed.copy()
                 offset += sz
 
+        # #1917: with the integers fixed, node FBBT can prove the box empty
+        # through rows that also hold continuous columns, which the integer-only
+        # row test above cannot see. That proof is the one B&B prunes a node on
+        # (``_tighten_node_bounds_with_status``), so no point this function could
+        # return lives in a box it refutes. Measured on GDPlib ``modprodnet`` under
+        # hull at 6d3e2f79: all 101 objective-descent sub-NLPs of the root integer
+        # local search were refuted (0.05 s of FBBT each) and every one returned
+        # ERROR after ~1 s of NLP, which consumed the whole 120 s before B&B left
+        # the root.
+        implied = None
+        if np.any(int_mask) and evaluator.n_constraints > 0:
+            implied = _implied_box(evaluator)
+            if implied[4]:
+                return None
+
         opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
 
         try:
-            nlp_result = backend(evaluator, x0, options=opts)
+            nlp_result = _solve_sub_nlp(backend, evaluator, x0, opts, implied)
         except BaseException:
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
@@ -1310,7 +1445,7 @@ def continuous_multistart(
             # while still letting a typical (sub-second) local solve converge.
             solve_opts.setdefault("max_wall_time", float(min(3.0, remaining)))
         try:
-            res = backend(evaluator, starts[i], options=solve_opts)
+            res = _solve_sub_nlp(backend, evaluator, starts[i], solve_opts)
         except BaseException as exc:
             # PyO3 backends can raise PanicException (not an Exception subclass).
             logger.debug("multistart NLP start %d failed: %s: %s", i, type(exc).__name__, exc)
@@ -1600,7 +1735,7 @@ def integer_local_search(
         if _relax_cap is not None:
             relax_opts.setdefault("max_wall_time", _relax_cap)
         budget.charge(NLP_SOLVE)
-        relax_res = backend(evaluator, mid, options=relax_opts)
+        relax_res = _solve_sub_nlp(backend, evaluator, mid, relax_opts)
         if relax_res is not None and relax_res.x is not None:
             seeds.append(_round_clip(np.asarray(relax_res.x)))
     except BaseException as exc:
@@ -2759,7 +2894,7 @@ def one_hot_config_dive(
             step_opts.setdefault("max_wall_time", cap)
         level_solves += 1
         try:
-            res = backend(evaluator, np.clip(x_start, lb_cur, ub_cur), options=step_opts)
+            res = _solve_sub_nlp(backend, evaluator, np.clip(x_start, lb_cur, ub_cur), step_opts)
         except BaseException:
             # Backends can raise PanicException (PyO3), which is not an Exception.
             # A failed step is a refusal like any other; it only redirects the dive.
@@ -3055,7 +3190,7 @@ def diving(
                 # comment describes survived the poll (#966). Cap the step too.
                 dive_opts.setdefault("max_wall_time", _dive_cap)
             try:
-                res = backend(evaluator, x_cur, options=dive_opts)
+                res = _solve_sub_nlp(backend, evaluator, x_cur, dive_opts)
             except BaseException:
                 return None
             # A capped step that hits TIME_LIMIT ends the dive, exactly as the
