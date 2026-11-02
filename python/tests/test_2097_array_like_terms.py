@@ -175,3 +175,27 @@ def test_misaligned_array_row_is_refused_loudly():
     m.maximize(dm.sum(x))
     with pytest.raises(ArrayRowCancellationError):
         m.solve(time_limit=10, threads=1)
+
+
+def test_array_fast_pass_is_linear_in_scalar_terms():
+    """A body of unknown static shape takes the array pre-pass; with n scalar
+    single-leaf terms over one Variable it compared every pair (O(n^2) numpy
+    broadcasts): test_1619's 3000-term QP objective spent 43 s there and timed
+    out its CI shard. The 0-d slots now go through a set."""
+    import time
+
+    from discopt.modeling._exact_polynomial import _fast_clean_array
+
+    n = 6000
+    m = dm.Model()
+    x = m.continuous("x", shape=(n,), lb=0, ub=1)
+    from discopt.modeling.core import SumOverExpression
+
+    # An explicit list: ``dm.sum`` of ``2 * x[j]`` would collapse into the affine
+    # ``dm.sum(C * x)`` block, which this pass keys coarsely.
+    body = SumOverExpression([x[j] ** 2 for j in range(n)] + [2 * x[j] for j in range(n)])
+    t = time.perf_counter()
+    assert _fast_clean_array(body, {}, []) is True  # x_j**2 and x_j never collide
+    assert time.perf_counter() - t < 5.0
+    dup = SumOverExpression([x[j] for j in range(n)] + [x[n - 1]])
+    assert _fast_clean_array(dup, {}, []) is False  # x[n-1] twice: like terms

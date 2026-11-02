@@ -1186,7 +1186,11 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
     matmul) is keyed by the leaves it reads, and any overlap with another term's
     leaves sends the body to the exact pass. ``False`` is never wrong.
     """
-    single: dict = {}  # (var id, power) -> list of flat-slot arrays
+    # (var id, power) -> (set of 0-d slots, list of array slots). A 0-d slot is one
+    # entry broadcast to every element, so two of them meet iff they are equal -- a
+    # set lookup, which keeps a row of n scalar terms linear (a pairwise numpy
+    # comparison made a 3000-term objective take 43 s, test_1619).
+    single: dict = {}
     multi: set = set()  # leaf keys of products of several leaves, and of atoms
     coarse: set = set()  # Variable keys a reduction / matmul expands
     sums: set = set()  # additive nodes already walked (#2100, as in _fast_clean)
@@ -1273,14 +1277,23 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
             skey, flat = one
             if skey[0] in one_var_products:
                 raise _NotClean
-            for other in single.get(skey, ()):
+            scalars, arrays = single.setdefault(skey, (set(), []))
+            if flat.ndim == 0:
+                j = int(flat)
+                if j in scalars or any(np.any(arr == j) for arr in arrays):
+                    raise _NotClean
+                scalars.add(j)
+                continue
+            if scalars and np.isin(flat, list(scalars)).any():
+                raise _NotClean
+            for other in arrays:
                 try:
                     a, b = np.broadcast_arrays(flat, other)
                 except ValueError:
                     raise _NotClean from None
                 if np.any(a == b):
                     raise _NotClean
-            single.setdefault(skey, []).append(flat)
+            arrays.append(flat)
     except _NotClean:
         return False
     # Atoms are keyed by identity above; two separate but identical ones (#2101)
