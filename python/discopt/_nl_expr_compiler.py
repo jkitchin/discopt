@@ -499,7 +499,12 @@ def _lower_uncached(
     if isinstance(expr, Variable):
         offset = _compute_var_offset(expr, model)
         if expr.size == 1:
-            return _wrap_scalar(E.var(offset))
+            # Keep the DECLARED shape: a ``shape=(1,)`` variable is a 1-vector,
+            # not a scalar. Collapsing it to 0-d broke ``x[np.array([0])]`` and
+            # ``A @ x`` (UnsupportedForTape -> the JAX fallback, MissingJaxError
+            # without the extra), while the JAX path keeps the axes
+            # (``x_flat[off:off+1].reshape(shape)``).
+            return _wrap_scalar(E.var(offset)).reshape(tuple(expr.shape or ()))
         # The flat-layout identity: `dag_compiler` materializes this variable as
         # `x_flat[offset : offset + size].reshape(shape)` in C order, so element
         # k of the C-order flattening is slot `offset + k`.
