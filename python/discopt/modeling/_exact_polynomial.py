@@ -899,7 +899,9 @@ def canonicalize_model(model) -> None:
     # ``if_else`` branch values derive the auxiliary's box at every solve
     # (``Model._refresh_if_else_bounds``, which runs after this). ``_IfElseAux`` has
     # ``__slots__``, so they are not cached; there are a handful per model.
-    for aux in model._if_else_auxes:
+    # ``getattr``, as ``Model._refresh_if_else_bounds`` does: a model unpickled from
+    # before the attribute existed has no ``if_else`` auxiliaries at all.
+    for aux in getattr(model, "_if_else_auxes", ()):
         for attr in ("then_expr", "else_expr"):
             expr = getattr(aux, attr)
             try:
