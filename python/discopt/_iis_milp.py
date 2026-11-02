@@ -386,11 +386,14 @@ def milp_iis(
     alternative. It is not the default because on MIPcc27's smallset
     (interleaved A/B, 300 s/instance) ``"final"`` produced 0/32 invalid outputs,
     identical sizes on all 27 instances both modes solved, a median wall ratio
-    of 0.59, 5 more instances solved and 0 lost, with 0 fallbacks; and across
-    2,863 per-probe cross-checks in the ``"each"`` runs the presolve-on claim was
-    refuted 0 times. What would change that: fallbacks becoming common on some
-    model class (each costs a full ``"each"`` rerun, so ``"final"`` is then
-    slower), which ``MilpIIS.fallback`` / ``IISResult.confirm_fallback`` report.
+    of 0.59, 5 more instances solved and 0 lost, with 0 fallbacks. Presolve-on
+    claims ARE sometimes false: on ``neos-3135526-osun`` (timed out in both arms
+    of that A/B, so not counted there) presolve-on returned ``Infeasible`` for a
+    subsystem that presolve-off solved with a point satisfying it to 2e-9, and a
+    per-probe rerun refuted 6 more such claims. The final check caught it and
+    fell back -- the safety net doing its job. What would change the default:
+    fallbacks becoming common on some model class (each costs a full ``"each"``
+    rerun), which ``MilpIIS.fallback`` / ``IISResult.confirm_fallback`` report.
     Each kept member's necessity rests on its arithmetic certificate where one
     exists; a member whose probe point fails the arithmetic re-check has none,
     and its necessity rests on HiGHS's feasible verdict for that probe (see
@@ -476,12 +479,16 @@ def milp_iis(
     proven = True
     pending: dict[tuple, np.ndarray] = {}
 
+    # The base proof is mandatory, so under an overall budget it may use all of
+    # it rather than one probe's ``time_limit`` (no-ip-65059 needs > 30 s).
+    eng.probe_tl = math.inf if deadline is not None else time_limit
     try:
         base, _ = eng.probe(cons, bounds, ints_active)
     except _OutOfTime:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
         ) from None
+    eng.probe_tl = time_limit
     if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
