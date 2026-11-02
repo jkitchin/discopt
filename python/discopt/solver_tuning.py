@@ -1206,10 +1206,10 @@ class SolverTuning:
 
     Measured (#1917, GDPlib, ``gdp.mbigm`` lowering wall, load 11-21): ``biofuel``
     has 5927 components (largest 144 columns / 34 rows, against 36804 / 5576) and
-    lowers in 147 s ON against more than 600 s OFF; ``kaibel`` 40.8 -> 6.3 s with
+    lowers in 146 s ON against 3814 s OFF, all 7416 M's bitwise equal; ``kaibel`` 40.8 -> 6.3 s with
     every M bitwise equal; ``stranded_gas`` is one component (99.6 % of columns),
-    116 s OFF, 119 s ON. Per-row M differential over the 23 other ``gdp_parity``
-    instances: no M is larger ON, and every M is bitwise equal on 22 of them (3
+    116 s OFF, 119 s ON. Per-row M differential over all 24 ``gdp_parity``
+    instances: no M is larger ON, and every M is bitwise equal on 23 of them (3
     lower no LP row). On ``batch_processing``
     36 of 450 M's are smaller ON. There the in-house simplex returns ``numerical``
     on 448 of 450 full LPs, so OFF uses the interval M; each of the 48 OPTIMAL
