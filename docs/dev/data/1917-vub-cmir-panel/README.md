@@ -80,3 +80,49 @@ that appears ON and not OFF is a cert-clean failure.
   measurement in `docs/dev/flag-retirement-audit.md`.
 * Or, only if a specific non-default use is named, **keep it as a documented
   opt-out** whose docstring says why it is not the default and what would change that.
+
+## Result (run 2026-11-01 19:35 to 22:21, verdict applied 2026-11-02)
+
+Data: `corpus.jsonl` (148 rows = 74 × 2 reps) and `gdp.jsonl` (96 rows = 24 × 2
+arms × 2 reps). The rule above was applied unchanged, by the verdict script with
+exit 1.
+
+* **Coverage:** 196 (instance, rep) pairs and 0 errors. Rows were installed on 21
+  instances: 13 corpus, and 8 GDP (gdp_col, methanol, mod_hens, modprodnet,
+  eight_process, eight_process_logical, nonconvex_hen, syngas).
+* **Load:** every solve started at load1 ≤ 12.
+
+| bar | result | |
+|---|---|---|
+| 1 cert-clean | 0 pairs with a problem; 267 corpus incumbent feasibility checks; certified 116 → 116 corpus rows | PASS |
+| 2 no certification regression | 0 lost; 1 gained (syngas rep 0) | PASS |
+| 3 node SGM ON/OFF ≤ 0.95 (fired, both finished) | **1.0132**, sd 0.0250 (rep 0: 1.0309, n=10; rep 1: 0.9955, n=11) | **FAIL** |
+| 4 wall SGM ON/OFF ≤ 1.05 (all pairs) | 1.0061, sd 0.0091 (corpus 0.9967 / 1.0105; GDP 1.0065 / 1.0191) | PASS |
+
+Secondary, not a bar: the node ratio including time-limited runs is 0.8380, sd
+0.0369. At a time limit that ratio measures node throughput, which is why the rule
+excludes those runs.
+
+Per instance (rep 0 / rep 1), where the rows changed something:
+* **Helped:**
+  * syngas: certified in both reps ON; OFF certified only in rep 1.
+    Nodes 153 → 91 and 139 → 113.
+  * heatexch_gen3: an incumbent where OFF had none, bound 43888 → 45304 / 45313.
+  * beuster: bound 6352 → 6358.
+  * ex1225 and nonconvex_hen: 5 → 3 nodes.
+  * methanol: bound −4611.8 / −4612.3 → −4611.3.
+* **Hurt:**
+  * nvs05: 89 → 107 nodes in both reps.
+  * eight_process: 27 → 39 nodes in both reps.
+  * gdp_col: 57 → 63 and 63 → 89 nodes.
+  * mod_hens: bound 48297 / 47623 → 46181 / 45319 at the time limit.
+  * 4stufen rep 1: bound 21177 → 19713.
+  * heatexch_gen1 rep 1: bound 95491 → 60599 at the time limit, though rep 0 went
+    43877 → 60599.
+
+**Verdict: NOT GRADUATE → RETIRE.**
+* The cuts are sound everywhere they ran, but not net-positive.
+* The only certification gained is syngas. A gain confined to one instance is
+  CLAUDE.md §2's named-instance case, the same reading that retired
+  `DISCOPT_GDP_DISJUNCT_FBBT`.
+* No non-default use was named, so no opt-out is kept.
