@@ -11,8 +11,15 @@ the optimum was fathomed, and the solve certified 28351.42 for 26669.11.
 No small model makes the simplex return a vertex above its LP minimum, so the NS
 bound is replaced by ``g_true - 5e-7`` (inside the legacy guard), as in
 ``test_1917_obbt_ns_strict.py``. With the flag OFF, a well-conditioned LP still
-keeps ``raw`` (that file pins it); an ill-conditioned one must take ``g``. Both
-tests below fail before the fix.
+keeps ``raw`` (that file pins it); an ill-conditioned one must take ``g``. All
+three tests below fail before the fix.
+
+The end-to-end trigger is platform-dependent: which simplex vertex lands inside
+the guard depends on floating-point and BLAS details. The clay0303 false
+certificate reproduced on macOS (about 3 of 7 OFF runs), but a Linux cloud tracer
+saw 0 events over 849 nodes and six seeds on the unfixed code. That is why these
+tests pin ``_ns_select`` and force ``require_ns`` directly rather than solving
+clay0303.
 """
 
 from __future__ import annotations
