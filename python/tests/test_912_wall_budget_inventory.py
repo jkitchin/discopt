@@ -497,7 +497,9 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))",
+        # #2091: was ``_role2_horizon(...)``, which returns a duration under
+        # ``deterministic`` and so made this absolute deadline already past.
+        "deadline = _role2_deadline_inf(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))",
         "residual",
     ),
     (

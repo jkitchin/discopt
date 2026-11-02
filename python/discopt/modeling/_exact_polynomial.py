@@ -132,7 +132,7 @@ class _Decline(Exception):
     """The body is outside what this module collects; leave it as written."""
 
 
-def _flat_slot(var: Variable, index) -> Optional[int]:
+def _flat_slot(var: Variable | Parameter, index) -> Optional[int]:
     from discopt._flat_index import flat_index_in_shape
 
     shape = tuple(var.shape or ())

@@ -2117,9 +2117,7 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None, s
     unverifiable candidate is simply dropped and the full solve runs unseeded."""
     # Absolute perf_counter() deadline, so the absolute form (_role2_deadline), not
     # _role2_horizon, whose deterministic value is a *duration* (#2091).
-    deadline = _role2_deadline(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
-    if deadline is None:
-        deadline = math.inf
+    deadline = _role2_deadline_inf(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
     if outer_deadline is not None:
         deadline = min(deadline, float(outer_deadline))
     if time.perf_counter() >= deadline:
@@ -12795,6 +12793,18 @@ def _role2_deadline(deadline):
     return _role1_deadline()
 
 
+def _role2_deadline_inf(deadline):
+    """:func:`_role2_deadline` for a callee that compares an absolute deadline with
+    ``time.perf_counter()``: ``math.inf`` is the no-clock value, not ``None``.
+
+    The counterpart of :func:`_role2_horizon` for *absolute* times. Passing an
+    absolute time to ``_role2_horizon`` returned a duration under
+    ``deterministic`` and so a deadline already in the past (#2091).
+    """
+    out = _role2_deadline(deadline)
+    return math.inf if out is None else out
+
+
 def _role2_horizon(seconds):
     """:func:`_role2_budget` for a callee whose budget parameter is a plain
     ``float`` rather than ``Optional[float]`` — ``math.inf`` is the no-clock value
@@ -22570,15 +22580,19 @@ def solve_model(
                         else None
                     )
                     _t_cms = time.perf_counter()
-                    # Absolute deadline: _role2_deadline, not the duration-valued
-                    # _role2_horizon (#2091). None = no role-1 clock.
-                    _cms_dl = _role2_deadline(_t_cms + max(2.0, min(15.0, 0.2 * float(time_limit))))
                     _cms = continuous_multistart(
                         model,
                         n_starts=int(min(64, max(32, 2 * int(np.size(lb))))),
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=min(_deadline, math.inf if _cms_dl is None else _cms_dl),
+                        # Absolute deadline: not the duration-valued
+                        # _role2_horizon (#2091).
+                        deadline=min(
+                            _deadline,
+                            _role2_deadline_inf(
+                                time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit)))
+                            ),
+                        ),
                         incumbent_obj=_cms_inc_obj,
                     )
                     _observe_heur_nlp(time.perf_counter() - _t_cms)
