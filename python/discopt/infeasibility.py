@@ -392,12 +392,14 @@ def _compute_iis_with_integrality(
         idx = tuple(int(i) for i in np.unravel_index(k, v.shape)) if v.shape else ()
         return v, idx
 
-    bound_elements = [(*elem(j), side) for j, side in res.bounds]
-    bound_elements = [(v, side, idx) for v, idx, side in bound_elements]
+    bound_elements: list[tuple["Variable", str, tuple]] = []
+    for j, side in res.bounds:
+        bv, bidx = elem(j)
+        bound_elements.append((bv, side, bidx))
     per_var: list[tuple["Variable", str]] = []
-    for v, side, _ in bound_elements:
-        if not any(pv is v and ps == side for pv, ps in per_var):
-            per_var.append((v, side))
+    for pv_, side, _ in bound_elements:
+        if not any(pv is pv_ and ps == side for pv, ps in per_var):
+            per_var.append((pv_, side))
     all_constraints = list(model._constraints)
     return IISResult(
         constraints=[all_constraints[i] for i in res.constraints],

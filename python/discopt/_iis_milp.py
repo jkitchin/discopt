@@ -235,7 +235,7 @@ def _check_certificate(x, key, eng, cons, bounds, ints, tol) -> bool:
         e = _violation(
             x, eng, cols_lb=[j] if s == "lower" else None, cols_ub=[j] if s == "upper" else None
         )
-    return e > tol
+    return bool(e > tol)
 
 
 def milp_iis(
