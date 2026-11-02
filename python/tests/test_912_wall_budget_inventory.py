@@ -358,6 +358,18 @@ def _scan_carved_slice() -> set[tuple[str, str]]:
 # time that gates nothing. (The gate it feeds, when there is one, is recorded
 # separately in ``KNOWN`` under its own category.)
 KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
+    # ``compute_iis(total_time_limit=...)`` (#2093): each feasibility probe's
+    # ``time_limit`` is the caller's own per-probe limit, cut to what is left of
+    # the caller's own overall budget. Both numbers are the caller's; nothing is
+    # carved as a fraction for a stage to decide how much work it does -- the
+    # clock answers "when do we stop?". An IIS computed under a wall budget is
+    # machine-speed dependent by the caller's choice, and says so
+    # (``IISResult.complete``).
+    (
+        "infeasibility.py",
+        "min(tl, deadline - time.perf_counter())",
+        "contract",
+    ),
     # Caps one piece LP of the integer-ratio dive by what is left of the dive's
     # own deadline. That deadline is already ``_role2``-suppressed at its origin
     # (``mccormick_lp``, recorded in KNOWN), so under the flag it is ``None`` and
@@ -478,6 +490,14 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     (
         "convexity_report.py",
         "deadline = None if time_limit is None else time.perf_counter() + float(time_limit)",
+        "contract",
+    ),
+    # #2093: ``compute_iis(total_time_limit=...)`` filters under the caller's own
+    # overall budget and, when it is spent, returns the subsystem it has with
+    # ``complete=False`` (still proven infeasible) -- ``contract``, like #1616.
+    (
+        "infeasibility.py",
+        "deadline = None if total_time_limit is None else time.perf_counter() + total_time_limit",
         "contract",
     ),
     (
