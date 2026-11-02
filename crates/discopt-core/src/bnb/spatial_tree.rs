@@ -269,6 +269,12 @@ fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
 pub struct SpatialTreeConfig {
     /// Maximum nodes to process before returning [`TreeStatus::NodeLimit`].
     pub max_nodes: usize,
+    /// Most open (frontier) nodes the search may hold (#2092): a memory budget
+    /// expressed in nodes by the caller. Reaching it ends the search exactly as
+    /// `max_nodes` does -- [`TreeStatus::NodeLimit`], the incumbent, and the
+    /// rigorous frontier bound -- with [`SpatialTreeResult::frontier_capped`]
+    /// set. `usize::MAX` (the default) never binds.
+    pub max_open_nodes: usize,
     /// Absolute monotonic-clock deadline. Checked before every node so an expired
     /// solve returns its best incumbent and rigorous frontier bound without ever
     /// claiming [`TreeStatus::Optimal`]. `None` means no wall-clock limit.
@@ -442,6 +448,7 @@ impl Default for SpatialTreeConfig {
     fn default() -> Self {
         Self {
             max_nodes: 100_000,
+            max_open_nodes: usize::MAX,
             deadline: None,
             gap_tol: 1e-6,
             rel_gap_tol: f64::INFINITY,
@@ -587,6 +594,9 @@ pub struct SpatialTreeResult {
     pub n_prop_retries: usize,
     /// #1995: pre-propagation re-solves that decided (see above).
     pub n_prop_retry_decided: usize,
+    /// #2092: the search stopped because the open frontier reached
+    /// [`SpatialTreeConfig::max_open_nodes`] (status [`TreeStatus::NodeLimit`]).
+    pub frontier_capped: bool,
 }
 
 /// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
@@ -860,6 +870,8 @@ pub fn solve_spatial_tree_observed(
     // #1995: pre-propagation re-solves of undecided node LPs (probe counters).
     let mut n_prop_retries = 0usize;
     let mut n_prop_retry_decided = 0usize;
+    // #2092: set only on the frontier-budget exit below.
+    let mut frontier_capped = false;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -1016,6 +1028,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -1026,7 +1039,12 @@ pub fn solve_spatial_tree_observed(
                 continue;
             }
         }
-        if node_count >= config.max_nodes {
+        // #2092: the frontier memory budget ends the search the same way the node
+        // budget does; `heap` holds every open node but this popped one.
+        if heap.len() >= config.max_open_nodes {
+            frontier_capped = true;
+        }
+        if node_count >= config.max_nodes || frontier_capped {
             // Global bound = min(closed regions, open frontier, this unpopped node).
             // Under best-bound the heap top is the frontier minimum, but take the full
             // min defensively.
@@ -1063,6 +1081,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             };
         }
         node_count += 1;
@@ -1475,6 +1494,7 @@ pub fn solve_spatial_tree_observed(
                                     n_int_probe_improvements,
                                     n_prop_retries,
                                     n_prop_retry_decided,
+                                    frontier_capped,
                                 };
                             }
                         }
@@ -1743,6 +1763,7 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                frontier_capped,
             }
         }
         None => SpatialTreeResult {
@@ -1776,6 +1797,7 @@ pub fn solve_spatial_tree_observed(
             n_int_probe_improvements,
             n_prop_retries,
             n_prop_retry_decided,
+            frontier_capped,
         },
     }
 }
@@ -3673,19 +3695,63 @@ mod gap_criterion_tests {
         assert_eq!(res_w.bound, base.bound);
     }
 
-    /// #1935: `warm_start_children` changes how node LPs START, never what the
-    /// search may conclude. On a nonconvex box-constrained problem with several
-    /// lifted terms (two bilinear products, a square, a linear coupling row), the
-    /// warm and cold searches must both certify, agree on the optimum to the gap,
-    /// keep each bound below the other arm's incumbent, and the warm arm must
-    /// actually have warm-started (the probe-fired check, CLAUDE.md §6). Off, no
-    /// node may warm-start.
+    /// #2092: the frontier memory budget ends the search like the node budget --
+    /// `NodeLimit`, flagged `frontier_capped`, with a bound still valid -- and an
+    /// unbinding budget changes nothing.
     #[test]
-    fn warm_start_children_certifies_the_cold_optimum() {
+    fn frontier_budget_stops_with_a_valid_bound() {
+        let spec = three_term_spec();
+        let opts = SimplexOptions::default();
+        let base = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let free = solve_spatial_tree(&spec, &base, &opts);
+        assert_eq!(free.status, TreeStatus::Optimal);
+        assert!(!free.frontier_capped);
+        assert!(free.node_count > 3, "the probe needs a tree: {free:?}");
+
+        let capped = solve_spatial_tree(
+            &spec,
+            &SpatialTreeConfig {
+                max_open_nodes: 2,
+                ..base
+            },
+            &opts,
+        );
+        assert_eq!(capped.status, TreeStatus::NodeLimit, "{capped:?}");
+        assert!(capped.frontier_capped);
+        assert!(capped.node_count < free.node_count);
+        // Stopping never fabricates a bound: still below the optimum 2.0.
+        assert!(
+            capped.bound <= 2.0 + 1e-6,
+            "bound {} above optimum",
+            capped.bound
+        );
+
+        let roomy = solve_spatial_tree(
+            &spec,
+            &SpatialTreeConfig {
+                max_open_nodes: 1_000_000,
+                ..base
+            },
+            &opts,
+        );
+        assert_eq!(
+            (roomy.status, roomy.node_count, roomy.frontier_capped),
+            (free.status, free.node_count, false)
+        );
+        assert_eq!((roomy.incumbent, roomy.bound), (free.incumbent, free.bound));
+    }
+
+    /// A nonconvex box-constrained problem with several lifted terms that needs a
+    /// real tree to certify (#1935; shared with #2092's frontier-budget test).
+    fn three_term_spec() -> SpatialKernelSpec {
         use crate::bnb::spatial_kernel::FixedRow;
         // min  w01 - 2 w12 + s0 - x2   with w01 = x0*x1, w12 = x1*x2, s0 = x0^2
         // s.t. x0 + x1 + x2 <= 2.5,   x in [-1, 2]^3.
-        let spec = SpatialKernelSpec {
+        SpatialKernelSpec {
             n_cols: 6,
             n_orig: 3,
             c: vec![0.0, 0.0, -1.0, 1.0, -2.0, 1.0],
@@ -3704,7 +3770,19 @@ mod gap_criterion_tests {
             ],
             blf_terms: vec![],
             obbt_candidates: vec![],
-        };
+        }
+    }
+
+    /// #1935: `warm_start_children` changes how node LPs START, never what the
+    /// search may conclude. On a nonconvex box-constrained problem with several
+    /// lifted terms (two bilinear products, a square, a linear coupling row), the
+    /// warm and cold searches must both certify, agree on the optimum to the gap,
+    /// keep each bound below the other arm's incumbent, and the warm arm must
+    /// actually have warm-started (the probe-fired check, CLAUDE.md §6). Off, no
+    /// node may warm-start.
+    #[test]
+    fn warm_start_children_certifies_the_cold_optimum() {
+        let spec = three_term_spec();
         let base = SpatialTreeConfig {
             max_nodes: 20_000,
             gap_tol: 1e-6,
