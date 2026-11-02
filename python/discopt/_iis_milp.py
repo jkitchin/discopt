@@ -351,6 +351,8 @@ def milp_iis(
             if res is None:
                 proven = False
             else:
+                # ``probe`` returns a point with every feasible verdict.
+                assert x is not None
                 pending[key(batch[0])] = x
             i += 1
 
