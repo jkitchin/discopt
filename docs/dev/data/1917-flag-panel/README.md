@@ -158,3 +158,60 @@ method and its pre-registered rule in the header. Re-derive the verdict with
   Certified 19 -> 25. SGM wall 39.22 -> 17.36 s (0.443). SGM nodes 68.4 -> 36.7.
   The only incorrect rows belong to OFF: Pyomo clay0303 certified at 28351.42
   against an optimum of 26669.11 (#2088).
+
+## Hull follow-ups outside any panel (2026-11-01, `fix/1917-hull-remaining`)
+
+These are single-run measurements, taken on 6d3e2f79 plus this branch, at load
+9–12 with every thread env set to 1. Wall times are secondary evidence.
+
+### Objective sense of the two origin instances (checked from the model)
+
+The sense is read from the Pyomo model's active `Objective` and from the converted
+discopt model's `_objective.sense`, with no solve.
+
+| instance | sense | hull, 120 s, `DISCOPT_SUBNLP_IMPLIED_BOX=1`: incumbent / bound | OFF | Pyomo hull + SCIP, 300 s (`gdp_baseline_g06.jsonl`) |
+|---|---|---|---|---|
+| `hda` | **maximize** | 4824.32 / 121140.98 | no incumbent / 121140.98 | 5353.84 / 14308.1 |
+| `gdp_col` | **minimize** | 19565.86 / 1000 (25 nodes) | no incumbent / 1000 (3 nodes) | 22355.24 / 17833.2 |
+
+Both bounds are valid but weak; neither one crosses its incumbent. `panel_oracle`
+lists both instances as unproven. BARON's open gap on `gdp_col` (9802.14 ..
+19548.72) lies above our bound of 1000. On `hda` the ON incumbent is *worse* than
+SCIP's, because the objective is maximized. An earlier report said "better"; that
+claim is retracted.
+
+### `gdp_col`: pump repair deadline (fixed in c5f98e36) and the residual overrun
+
+Before the fix, a 120 s hull solve returned after 359.0 s (cProfile). Of that,
+270.5 s was `_repair_to_feasible` → `pounce.project_to_feasible` (pounce 0.14 takes
+no time limit), which ran 10 `solve_qp` calls at 27.05 s each. The repair's callbacks
+now raise at the deadline, and pounce calls them between QPs. After the fix the same
+solve returned at **132.3 s** (`time_limit`, 3 nodes, bound 1000).
+
+The remaining ~12 s past the limit is **not fixed here**, by decision. The deadline
+is checked only between non-interruptible Rust calls, so a call that is already
+running finishes first. The candidates are one in-flight `solve_qp` (27 s each on
+this model) and the other long Rust calls on the root path: `presolve` took 29.98 s
+here, and `fbbt` is another. The post-fix overrun was not attributed to one of these
+call by call. A fix would need a deadline argument on the Rust side (pounce's QP,
+discopt's presolve and FBBT), not more checks in Python.
+
+### `kaibel`: root setup cost (out of scope for #1917)
+
+hull, 120 s: 3733 vars and 5835 cons after conversion; `time_limit` with 0 nodes, no
+bound and no incumbent. The cProfile cumulative times are all root setup, before
+B&B:
+
+| call | cumulative |
+|---|---|
+| `_root_presolve.tighten_root_bounds_with_fbbt` (Rust `fbbt`) | 45.97 s |
+| `presolve_pipeline.run_root_presolve` (Rust `presolve`) | 29.85 s |
+| `convexity.rules.classify_model` (2 calls) | 20.11 s |
+| … of which `certificate.certify_convex` → `interval_ad.interval_hessian` (2153 calls) | 12.58 s |
+| `transformations.apply` (2 calls) | 8.07 s |
+| `integer_product_reform.reformulate_integer_bilinear` | 5.44 s |
+
+Neither arm of any #1917 flag solves `kaibel`, and Pyomo hull + SCIP reaches only
+bound 36000 with no incumbent at 300 s. The cost is in how root FBBT, presolve and
+convexity classification scale, not in the hull lowering. It belongs to separate
+root-scaling work.
