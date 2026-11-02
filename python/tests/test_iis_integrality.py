@@ -478,9 +478,43 @@ def test_repair_only_makes_integrality_exact(monkeypatch):
     res = milp_iis(m)
     assert res.n_repairs > 0, "no repair ran: the check did not fire"
     assert res.n_artifacts == 0
+    assert len(seen) % 2 == 0 and len(seen) <= 2 * res.n_repairs
     h = highspy.Highs()
     mip_tol = h.getOptionValue("mip_feasibility_tolerance")
     lp_tol = h.getOptionValue("primal_feasibility_tolerance")
     mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
     lp_tol = lp_tol[1] if isinstance(lp_tol, tuple) else lp_tol
-    assert seen == [mip_tol, lp_tol] * res.n_repairs, seen
+    assert seen == [mip_tol, lp_tol] * (len(seen) // 2), seen
+
+
+@pytest.mark.smoke
+def test_integral_point_within_tolerance_is_its_own_witness():
+    """An exactly integral point meeting its rows within the MIP tolerance is
+    accepted by arithmetic, with no repair LP (which misjudged such a point on
+    dell: Infeasible even at 1e-5)."""
+    import scipy.sparse as sp
+    from discopt._iis_milp import _Engine
+
+    # x0 + y = 1.0000005 with x0 integer: (1, 0) misses the row by 5e-7 < 1e-6.
+    A = sp.csr_matrix(np.array([[1.0, 1.0]]))
+    eng = _Engine(
+        A,
+        np.array([1.0000005]),
+        np.array([1.0000005]),
+        np.array([0.0, 0.0]),
+        np.array([5.0, 0.0]),
+        np.array([True, False]),
+        {0: np.array([0])},
+        10.0,
+    )
+    eng._configure({0}, {(1, "lower"), (1, "upper")}, {0})
+    solves = eng.n_solves
+    real_point = eng._point
+    eng._point = lambda: np.array([1.0 + 1e-9, 0.0])
+    try:
+        w = eng._witness()
+    finally:
+        eng._point = real_point
+    assert w is not None and w[0] == 1.0
+    assert eng.n_solves == solves, "a repair LP ran for a point that needed none"
+    assert eng.n_artifacts == 0

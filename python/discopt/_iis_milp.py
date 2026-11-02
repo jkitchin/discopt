@@ -130,6 +130,7 @@ class _Engine:
         self.n_artifacts = 0
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
+        self._cfg: tuple[np.ndarray, ...] = ()
         n, m = col_lb.size, row_lo.size
         inf = highspy.kHighsInf
         self._inf = inf
@@ -200,6 +201,7 @@ class _Engine:
         lb = np.where(lb <= -_INF, -inf, lb)
         ub = np.where(ub >= _INF, inf, ub)
         self._held = held
+        self._cfg = (rlo, rhi, lb, ub)  # what this probe imposes, for witness checks
         idx_m = np.arange(m, dtype=np.int32)
         idx_n = np.arange(n, dtype=np.int32)
         if m:
@@ -280,14 +282,32 @@ class _Engine:
         self.n_repairs += 1
         h, vt = self.h, self.hs.HighsVarType
         xr = np.round(x[held])
+        mip_tol = h.getOptionValue("mip_feasibility_tolerance")
+        mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
+        # Rounding often breaks nothing: then the rounded point itself is the
+        # exact-integer witness, checked here by arithmetic. (The repair LP can
+        # misjudge exactly this case: on dell an integral point meeting its rows
+        # to 1.7e-7 had its integers-fixed LP declared Infeasible even at 1e-5,
+        # presumably through HiGHS's internal scaling.)
+        y0 = x.copy()
+        y0[held] = xr
+        rlo, rhi, lb, ub = self._cfg
+        act = self.A @ y0
+        with np.errstate(invalid="ignore"):
+            viol = max(
+                float(np.max(np.where(np.isfinite(rlo), rlo - act, 0.0), initial=0.0)),
+                float(np.max(np.where(np.isfinite(rhi), act - rhi, 0.0), initial=0.0)),
+                float(np.max(np.where(np.isfinite(lb), lb - y0, 0.0), initial=0.0)),
+                float(np.max(np.where(np.isfinite(ub), y0 - ub, 0.0), initial=0.0)),
+            )
+        if viol <= mip_tol:
+            return y0
         idx = held.astype(np.int32)
         h.changeColsBounds(idx.size, idx, xr, xr)
         h.changeColsIntegrality(idx.size, idx, np.array([vt.kContinuous] * idx.size))
         lp_tol = h.getOptionValue("primal_feasibility_tolerance")
-        mip_tol = h.getOptionValue("mip_feasibility_tolerance")
         # (status, value) tuples in some highspy versions
         lp_tol = lp_tol[1] if isinstance(lp_tol, tuple) else lp_tol
-        mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
         h.setOptionValue("primal_feasibility_tolerance", mip_tol)
         try:
             ok = self._solve("off", stop_at) == self.hs.HighsModelStatus.kOptimal
