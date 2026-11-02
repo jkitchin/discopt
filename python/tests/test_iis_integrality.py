@@ -37,6 +37,10 @@ def test_solution_format_example():
     assert iis.proven_irreducible
     assert set(iis.certificates) == {("constraint", 0), ("constraint", 1)}
     assert len(iis) == 2
+    assert iis.fully_certified
+    assert "certified 2/2" in iis.summary()
+    # Without integrality filtering no certificates are computed.
+    assert not compute_iis(m).fully_certified
 
 
 @pytest.mark.smoke

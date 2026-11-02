@@ -299,8 +299,11 @@ def milp_iis(
     presolve-on verdict and then requires the FINISHED subsystem to be
     ``Infeasible`` under both presolve-on and presolve-off; if it is not, the
     whole computation is redone with ``"each"`` (``fallback=True``). Either way
-    the returned subsystem's infeasibility is agreed by both configurations and
-    each kept member's necessity rests on its arithmetic certificate.
+    the returned subsystem's infeasibility is agreed by both configurations.
+    Each kept member's necessity rests on its arithmetic certificate where one
+    exists; a member whose probe point fails the arithmetic re-check has none,
+    and its necessity rests on HiGHS's feasible verdict for that probe (see
+    ``IISResult.fully_certified``). ``compute_iis`` always uses ``"each"``.
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, and ``ValueError`` when the full model

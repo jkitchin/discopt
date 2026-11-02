@@ -77,7 +77,9 @@ class IISResult:
         ``("integrality", col)``, where ``col`` is the flat column (the
         concatenated C-order layout of ``model._variables``); values are flat
         points in that layout. A member with a certificate is proven
-        irreducible by arithmetic alone.
+        necessary by arithmetic alone; one without (its probe point failed the
+        re-check) rests on the solver's feasible verdict. See
+        :attr:`fully_certified`.
     n_solves : int
         Number of feasibility solves performed (deletion-filter cost).
     proven_irreducible : bool
@@ -102,11 +104,19 @@ class IISResult:
     def __bool__(self) -> bool:
         return len(self) > 0
 
+    @property
+    def fully_certified(self) -> bool:
+        """Every member carries a certificate, so irreducibility is proven by
+        arithmetic alone, independent of any solver verdict. Always ``False``
+        when certificates were not computed (``include_integrality=False``)."""
+        return len(self) > 0 and len(self.certificates) == len(self)
+
     def summary(self) -> str:
         """A human-readable multi-line explanation of the infeasibility."""
         lines = [
             f"Irreducible Infeasible Subsystem ({len(self)} members"
             + ("" if self.proven_irreducible else ", not proven minimal")
+            + (f", certified {len(self.certificates)}/{len(self)}" if self.certificates else "")
             + "):"
         ]
         if self.constraints:
@@ -247,8 +257,11 @@ def compute_iis(
         removable member (Guieu & Chinneck 1999), so the IIS says which
         integrality restrictions the conflict actually needs -- often far fewer
         than all of them. Linear (LP/MILP) models only; runs the matrix-form
-        engine in :mod:`discopt._iis_milp`, which also returns a feasibility
-        certificate per kept member (``IISResult.certificates``). The default
+        engine in :mod:`discopt._iis_milp`, which confirms every infeasibility
+        verdict with a presolve-free re-solve (#1634) and returns a feasibility
+        certificate for each kept member whose probe point passes an arithmetic
+        re-check (``IISResult.certificates``; ``IISResult.fully_certified`` says
+        whether every member has one). The default
         keeps today's semantics (and Gurobi/CPLEX's): every integrality is part
         of the subsystem and only constraints and bounds are filtered.
     time_limit : float, default 30.0
