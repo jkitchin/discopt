@@ -40,6 +40,9 @@ never "repaired".
 
 from __future__ import annotations
 
+import math
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -49,6 +52,17 @@ if TYPE_CHECKING:
     from discopt.modeling.core import Model
 
 _INF = 1e20  # discopt's unbounded-bound sentinel
+
+#: A solve is not started with less wall time than this left in its budget.
+_MIN_SOLVE_S = 0.05
+#: Wall-clock grace past a run's own budget before the interrupt callback stops
+#: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
+#: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
+_GRACE_S = 0.5
+
+
+class _OutOfTime(Exception):
+    """The overall budget leaves no time for another solve."""
 
 
 @dataclass
@@ -66,13 +80,26 @@ class MilpIIS:
     n_cross_inconclusive: int = 0  # ... that the presolve-free solve could not decide
     confirm: str = "final"  # where the #1634 confirmation ran: "each" probe or the "final" set
     fallback: bool = False  # "final" confirmation failed; the result is a full "each" rerun
+    complete: bool = True  # False: the overall budget stopped filtering (anytime result)
+    n_interrupted: int = 0  # solves stopped by the wall-clock guard
 
 
 class _Engine:
     """One HiGHS model; elements are toggled by changing bounds/integrality."""
 
     def __init__(
-        self, A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, probe_tl, confirm_each=True
+        self,
+        A,
+        row_lo,
+        row_hi,
+        col_lb,
+        col_ub,
+        is_int,
+        row_groups,
+        probe_tl,
+        confirm_each=True,
+        deadline: Optional[float] = None,
+        reserve_confirm: bool = False,
     ):
         import highspy
 
@@ -88,6 +115,15 @@ class _Engine:
         self.n_refuted = 0  # ... of which the presolve-free solve found feasible
         self.n_cross_inconclusive = 0  # ... of which the presolve-free solve was undecided
         self.confirm_each = confirm_each
+        # ``time.perf_counter()`` instant after which no solve may run (None: no
+        # overall budget), and the wall instant the current run must stop by.
+        self.deadline = deadline
+        # "final" mode: hold back time for confirming the current subsystem
+        # (two solves), sized from recently observed solve times.
+        self.reserve_confirm = reserve_confirm
+        self._recent: deque[float] = deque(maxlen=20)  # wall seconds of recent solves
+        self._stop = math.inf
+        self.n_interrupted = 0
         n, m = col_lb.size, row_lo.size
         inf = highspy.kHighsInf
         self._inf = inf
@@ -112,6 +148,17 @@ class _Engine:
         ]
         h.passModel(lp)
         self.h = h
+
+        # Wall-clock guard on every run: HiGHS's own ``time_limit`` was measured
+        # overrunning 7-10x on presolve-free re-solves, so a budget is enforced
+        # here too. An interrupted run is a non-proof status (inconclusive).
+        def _guard(event) -> None:
+            if time.perf_counter() > self._stop:
+                event.interrupt()
+
+        h.cbMipInterrupt.subscribe(_guard)
+        h.cbSimplexInterrupt.subscribe(_guard)
+        h.cbIpmInterrupt.subscribe(_guard)
 
     def _configure(
         self,
@@ -157,15 +204,40 @@ class _Engine:
                 n, idx_n, np.array([vt.kInteger if b else vt.kContinuous for b in integ])
             )
 
-    def _solve(self, presolve: str):
-        """Solve the configured probe from scratch; returns the HiGHS model status."""
+    def _solve(self, presolve: str, stop_at: Optional[float] = None):
+        """Solve the configured probe from scratch; returns the HiGHS model status.
+
+        The run's budget is the per-probe limit, cut to ``self.deadline`` and
+        ``stop_at``; raises :class:`_OutOfTime` when that leaves nothing.
+        """
         h = self.h
+        now = time.perf_counter()
+        stop = now + float(self.probe_tl)
+        hard = self.deadline
+        if hard is not None and self.reserve_confirm:
+            # Two confirmation solves, each about as long as recent ones, with a
+            # 25% margin. (Each may still overrun its own budget by up to
+            # ``_GRACE_S`` before the guard stops it.)
+            hard -= 2.5 * max(self._recent, default=0.0)
+        for lim in (hard, stop_at):
+            if lim is not None:
+                stop = min(stop, lim)
+        if stop - now < _MIN_SOLVE_S:
+            raise _OutOfTime
         h.clearSolver()
-        h.setOptionValue("time_limit", float(self.probe_tl))
+        h.setOptionValue("time_limit", stop - now)
         h.setOptionValue("presolve", presolve)
         self.n_solves += 1
-        h.run()
-        return h.getModelStatus()
+        self._stop = stop + _GRACE_S
+        try:
+            h.run()
+        finally:
+            self._stop = math.inf
+            self._recent.append(time.perf_counter() - now)
+        status = h.getModelStatus()
+        if status == self.hs.HighsModelStatus.kInterrupt:
+            self.n_interrupted += 1
+        return status
 
     def _point(self) -> np.ndarray:
         return np.array(self.h.getSolution().col_value, dtype=np.float64)
@@ -215,13 +287,19 @@ class _Engine:
         active_cons: set[int],
         active_bounds: set[tuple[int, str]],
         active_int: set[int],
-    ) -> bool:
-        """True iff presolve-on AND presolve-off both return ``Infeasible``."""
+        stop_at: Optional[float] = None,
+    ) -> Optional[bool]:
+        """``True`` iff presolve-on AND presolve-off both return ``Infeasible``;
+        ``False`` if either finds the set feasible (an earlier verdict was wrong);
+        ``None`` if undecided (time limit / interrupt)."""
         self._configure(active_cons, active_bounds, active_int)
         MS = self.hs.HighsModelStatus
-        return bool(
-            self._solve("choose") == MS.kInfeasible and self._solve("off") == MS.kInfeasible
-        )
+        verdicts = [self._solve(p, stop_at) for p in ("choose", "off")]
+        if all(v == MS.kInfeasible for v in verdicts):
+            return True
+        if any(v == MS.kOptimal for v in verdicts):
+            return False
+        return None
 
 
 def _violation(x, eng: _Engine, rows=None, cols_lb=None, cols_ub=None, cols_int=None):
@@ -287,6 +365,7 @@ def milp_iis(
     cert_tol: float = 1e-6,
     max_batch: Optional[int] = None,
     confirm: str = "final",
+    total_time_limit: Optional[float] = None,
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
@@ -317,10 +396,22 @@ def milp_iis(
     and its necessity rests on HiGHS's feasible verdict for that probe (see
     ``IISResult.fully_certified``).
 
+    ``total_time_limit`` (seconds) bounds the whole computation. Every solve is
+    cut to the time left and stopped by a wall-clock interrupt if HiGHS overruns
+    it. When the budget runs out filtering stops and an *anytime* result is
+    returned (``complete=False``, ``proven_irreducible=False``): a subsystem that
+    is still proven infeasible under both configurations but may contain
+    undecided members. With ``"final"`` the filter stops early enough
+    (two recent solve durations) to confirm it, and the subsystem confirmed at
+    the end of each completed phase is kept as a fallback. If no subsystem can be confirmed in time,
+    :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
+
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
-    nonlinear or non-algebraic constraint, and ``ValueError`` when the full model
-    is not proven infeasible.
+    nonlinear or non-algebraic constraint, ``ValueError`` when the full model is
+    not proven infeasible, and ``TimeoutError`` as above.
     """
+    t_start = time.perf_counter()
+    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
     import scipy.sparse as sp
 
     from discopt.decomposition._linear import extract_linear
@@ -355,8 +446,20 @@ def milp_iis(
 
     if confirm not in ("each", "final"):
         raise ValueError(f"confirm must be 'each' or 'final', got {confirm!r}")
+    # Under "final" the filter must stop early enough to confirm what it has: the
+    # engine holds back two recent-solve durations (``reserve_confirm``).
     eng = _Engine(
-        A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, time_limit, confirm == "each"
+        A,
+        row_lo,
+        row_hi,
+        col_lb,
+        col_ub,
+        is_int,
+        row_groups,
+        time_limit,
+        confirm == "each",
+        deadline=deadline,
+        reserve_confirm=confirm == "final",
     )
     cons = set(row_groups)
     ints_active = set(int(j) for j in np.flatnonzero(is_int))
@@ -373,7 +476,16 @@ def milp_iis(
     proven = True
     pending: dict[tuple, np.ndarray] = {}
 
-    base, _ = eng.probe(cons, bounds, ints_active)
+    try:
+        base, _ = eng.probe(cons, bounds, ints_active)
+    except _OutOfTime:
+        raise TimeoutError(
+            "compute_iis: total_time_limit ran out before the model was proven infeasible"
+        ) from None
+    if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
+        raise TimeoutError(
+            "compute_iis: total_time_limit ran out before the model was proven infeasible"
+        )
     if base is not True:
         if base is False:
             raise ValueError(
@@ -407,7 +519,12 @@ def milp_iis(
             batch = cands[i : i + size]
             for e in batch:
                 active.discard(e)
-            res, x = eng.probe(cons, bounds, ints_active)
+            try:
+                res, x = eng.probe(cons, bounds, ints_active)
+            except _OutOfTime:
+                for e in batch:  # undecided: back into the subsystem
+                    active.add(e)
+                raise
             if res is True:
                 i += len(batch)
                 size = min(2 * size, cap)
@@ -425,23 +542,92 @@ def milp_iis(
                 pending[key(batch[0])] = x
             i += 1
 
-    # 1. Integrality. Guieu & Chinneck: if the LP relaxation is infeasible, all
-    #    integrality goes in one probe.
-    if ints_active:
+    def phase_integrality() -> None:
+        # Guieu & Chinneck: if the LP relaxation is infeasible, all integrality
+        # goes in one probe.
+        if not ints_active:
+            return
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
         else:
             batch_filter(sorted(ints_active), ints_active, lambda j: ("integrality", j))
-    # 2. Constraints.
-    batch_filter(sorted(cons), cons, lambda ci: ("constraint", ci))
-    # 3. Bounds of columns not held integer (a held column's box is not an element).
-    if include_bounds:
-        batch_filter(
-            [jb for jb in finite_bounds if jb[0] not in ints_active],
-            bounds,
-            lambda jb: ("bound", jb[0], jb[1]),
+
+    def phase_constraints() -> None:
+        batch_filter(sorted(cons), cons, lambda ci: ("constraint", ci))
+
+    def phase_bounds() -> None:
+        # Bounds of columns not held integer (a held column's box is not an element).
+        if include_bounds:
+            batch_filter(
+                [jb for jb in finite_bounds if jb[0] not in ints_active],
+                bounds,
+                lambda jb: ("bound", jb[0], jb[1]),
+            )
+
+    def redo_each() -> MilpIIS:
+        # A presolve-on verdict the filter acted on did not survive: the set is
+        # not infeasible under both configurations. Redo everything with
+        # per-probe confirmation rather than patch a set built on a bad verdict.
+        left = None if deadline is None else deadline - time.perf_counter()
+        if left is not None and left < _MIN_SOLVE_S:
+            raise TimeoutError(
+                "compute_iis: a presolve-on verdict was refuted and total_time_limit "
+                "leaves no time to redo the filter with per-probe confirmation"
+            )
+        redo = milp_iis(
+            model,
+            include_bounds=include_bounds,
+            time_limit=time_limit,
+            cert_tol=cert_tol,
+            max_batch=max_batch,
+            confirm="each",
+            total_time_limit=left,
         )
+        redo.n_solves += eng.n_solves
+        redo.n_interrupted += eng.n_interrupted
+        redo.confirm = "final"
+        redo.fallback = True
+        return redo
+
+    complete = True
+    # "final": the latest subsystem confirmed infeasible under both
+    # configurations, kept as the anytime fallback. ("each" confirms every
+    # verdict, so its current subsystem is always confirmed.)
+    checkpoint: Optional[tuple[set, set, set]] = None
+    try:
+        for phase in (phase_integrality, phase_constraints, phase_bounds):
+            phase()
+            if confirm == "final" and phase is not phase_bounds:
+                verdict = eng.confirm_infeasible(cons, bounds, ints_active)
+                if verdict is False:
+                    return redo_each()
+                if verdict is True:
+                    checkpoint = (set(cons), set(bounds), set(ints_active))
+    except _OutOfTime:
+        complete = False
+        proven = False
+
+    if confirm == "final":
+        eng.reserve_confirm = False  # the reserve is for this confirmation
+        try:
+            verdict = eng.confirm_infeasible(cons, bounds, ints_active)
+        except _OutOfTime:
+            verdict = None
+        if verdict is False and complete:
+            return redo_each()
+        if verdict is not True:
+            # The current set is not confirmed: fall back to the last confirmed one.
+            if checkpoint is None:
+                if verdict is None and deadline is None:
+                    return redo_each()  # no budget pressure: just confirm per probe
+                raise TimeoutError(
+                    "compute_iis: no subsystem could be confirmed infeasible under "
+                    "both presolve configurations within total_time_limit"
+                )
+            cons, bounds, ints_active = (set(c) for c in checkpoint)
+            complete = False
+            proven = False
 
     # Bounds the final subsystem APPLIES (beyond held-integer boxes). With
     # include_bounds=False that is every finite bound, but none is an element.
@@ -453,22 +639,6 @@ def milp_iis(
             x, key, eng, sorted(cons), applied_bounds, sorted(ints_active), cert_tol
         ):
             certs[key] = x
-    if confirm == "final" and not eng.confirm_infeasible(cons, bounds, ints_active):
-        # A presolve-on verdict the filter acted on did not survive: the finished
-        # set is not infeasible under both configurations. Redo everything with
-        # per-probe confirmation rather than patch a set built on a bad verdict.
-        redo = milp_iis(
-            model,
-            include_bounds=include_bounds,
-            time_limit=time_limit,
-            cert_tol=cert_tol,
-            max_batch=max_batch,
-            confirm="each",
-        )
-        redo.n_solves += eng.n_solves
-        redo.confirm = "final"
-        redo.fallback = True
-        return redo
     return MilpIIS(
         constraints=sorted(cons),
         bounds=kept_bounds,
@@ -480,4 +650,6 @@ def milp_iis(
         n_refuted=eng.n_refuted,
         n_cross_inconclusive=eng.n_cross_inconclusive,
         confirm=confirm,
+        complete=complete,
+        n_interrupted=eng.n_interrupted,
     )

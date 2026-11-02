@@ -12487,6 +12487,7 @@ class Model:
         include_bounds: bool = True,
         include_integrality: bool = False,
         time_limit: float = 30.0,
+        total_time_limit: float | None = None,
     ):
         """Compute an Irreducible Infeasible Subsystem explaining infeasibility.
 
@@ -12495,7 +12496,8 @@ class Model:
         becomes feasible if any single member is removed. Use it to debug *why*
         ``solve()`` returned ``"infeasible"``. Raises ``ValueError`` if the model
         is not provably infeasible. ``include_integrality=True`` (linear models)
-        also filters each integer element's integrality; see
+        also filters each integer element's integrality, and ``total_time_limit``
+        bounds the whole computation (anytime result); see
         :func:`~discopt.infeasibility.compute_iis`.
 
         >>> res = m.solve()
@@ -12509,6 +12511,7 @@ class Model:
             include_bounds=include_bounds,
             include_integrality=include_integrality,
             time_limit=time_limit,
+            total_time_limit=total_time_limit,
         )
 
     def convexity(self, *, time_limit: float | None = 15.0):

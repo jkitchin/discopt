@@ -23,6 +23,7 @@ solve was conclusive (always the case for LP/MILP/convex models). See
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -88,8 +89,12 @@ class IISResult:
         Number of feasibility solves performed (deletion-filter cost).
     proven_irreducible : bool
         ``True`` when every filtering solve was conclusive, so the result is a
-        true (minimal) IIS. ``False`` means some solves were inconclusive and the
-        set is a valid — but possibly non-minimal — infeasible subsystem.
+        true (minimal) IIS. ``False`` means some solves were inconclusive (or the
+        budget ran out) and the set is a valid — but possibly non-minimal —
+        infeasible subsystem.
+    complete : bool
+        ``False`` when ``total_time_limit`` stopped filtering early: an anytime
+        result whose undecided members are still in the subsystem.
     """
 
     constraints: list[Constraint] = field(default_factory=list)
@@ -100,6 +105,7 @@ class IISResult:
     confirm_fallback: bool = False
     n_solves: int = 0
     proven_irreducible: bool = True
+    complete: bool = True
 
     def __len__(self) -> int:
         # Members are counted at element granularity when it is known.
@@ -245,6 +251,7 @@ def compute_iis(
     include_bounds: bool = True,
     include_integrality: bool = False,
     time_limit: float = 30.0,
+    total_time_limit: float | None = None,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -273,6 +280,16 @@ def compute_iis(
         of the subsystem and only constraints and bounds are filtered.
     time_limit : float, default 30.0
         Per-solve wall-clock limit for each feasibility probe.
+    total_time_limit : float, optional
+        Wall-clock budget for the whole computation. Each probe's limit is cut
+        to the time left; when the budget runs out filtering stops and the
+        current subsystem is returned with ``complete=False`` and
+        ``proven_irreducible=False`` -- still proven infeasible, possibly with
+        undecided members. With ``include_integrality=True`` every HiGHS run is
+        also stopped by a wall-clock interrupt (HiGHS's own limit was measured
+        overrunning 7-10x), and :class:`TimeoutError` is raised if no subsystem
+        can be confirmed infeasible in time. On the default path the bound is
+        as good as ``Model.solve``'s ``time_limit``.
 
     Returns
     -------
@@ -287,11 +304,18 @@ def compute_iis(
     NotImplementedError
         ``include_integrality=True`` on a model with a nonlinear or
         non-algebraic constraint.
+    TimeoutError
+        ``total_time_limit`` ran out before any subsystem was proven infeasible.
     """
     if include_integrality:
         return _compute_iis_with_integrality(
-            model, include_bounds=include_bounds, time_limit=time_limit
+            model,
+            include_bounds=include_bounds,
+            time_limit=time_limit,
+            total_time_limit=total_time_limit,
         )
+    deadline = None if total_time_limit is None else time.perf_counter() + total_time_limit
+
     all_constraints = list(model._constraints)
     bound_items: list[tuple] = _bound_candidates(model) if include_bounds else []
 
@@ -304,15 +328,33 @@ def compute_iis(
     n_solves = 0
     proven = True
 
+    complete = True
+
+    def out_of_time() -> bool:
+        """Budget exhausted: stop filtering. Every drop so far was proven, so the
+        current subsystem is still infeasible; it is just not reduced further."""
+        nonlocal complete, proven
+        if deadline is not None and time.perf_counter() >= deadline:
+            complete = False
+            proven = False
+        return not complete
+
     def probe() -> tuple[bool, bool]:
         nonlocal n_solves
         n_solves += 1
         cons = [all_constraints[i] for i in sorted(active_con_idx)]
         relaxed = set(bound_items) - active_bounds
-        return _solve_is_infeasible(model, cons, relaxed, saved_bounds, time_limit)
+        tl = time_limit
+        if deadline is not None:
+            tl = max(0.0, min(tl, deadline - time.perf_counter()))
+        return _solve_is_infeasible(model, cons, relaxed, saved_bounds, tl)
 
     # Baseline: the full system must be provably infeasible.
     base_infeasible, base_conclusive = probe()
+    if not base_infeasible and deadline is not None and time.perf_counter() >= deadline:
+        raise TimeoutError(
+            "compute_iis: total_time_limit ran out before the model was proven infeasible"
+        )
     if not base_infeasible:
         if base_conclusive:
             raise ValueError(
@@ -327,6 +369,8 @@ def compute_iis(
     # remainder is *proven* infeasible; an inconclusive probe keeps the member
     # (and flags the result as not-proven-minimal).
     for i in list(active_con_idx):
+        if out_of_time():
+            break
         active_con_idx.discard(i)
         infeasible, conclusive = probe()
         if infeasible:
@@ -336,6 +380,8 @@ def compute_iis(
             proven = False
 
     for item in list(active_bounds):
+        if out_of_time():
+            break
         active_bounds.discard(item)
         infeasible, conclusive = probe()
         if infeasible:
@@ -349,6 +395,8 @@ def compute_iis(
     # the whole ``z <= 1``. Only surviving variables are refined, so an IIS that
     # involves no vector bound costs no extra probes.
     for vi, side in sorted(i for i in active_bounds if len(i) == 2):
+        if out_of_time():
+            break
         v = model._variables[vi]
         if v.size <= 1:
             continue
@@ -365,6 +413,8 @@ def compute_iis(
         bound_items.extend(elems)
         active_bounds.update(elems)
         for e in elems:
+            if out_of_time():
+                break
             active_bounds.discard(e)
             infeasible, conclusive = probe()
             if infeasible:
@@ -391,16 +441,22 @@ def compute_iis(
         bound_elements=elements,
         n_solves=n_solves,
         proven_irreducible=proven,
+        complete=complete,
     )
 
 
 def _compute_iis_with_integrality(
-    model: "Model", *, include_bounds: bool, time_limit: float
+    model: "Model", *, include_bounds: bool, time_limit: float, total_time_limit: float | None
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
     from discopt._iis_milp import milp_iis
 
-    res = milp_iis(model, include_bounds=include_bounds, time_limit=time_limit)
+    res = milp_iis(
+        model,
+        include_bounds=include_bounds,
+        time_limit=time_limit,
+        total_time_limit=total_time_limit,
+    )
 
     # Flat column -> (variable, multi-index).
     owners: list[tuple["Variable", int]] = []
@@ -430,4 +486,5 @@ def _compute_iis_with_integrality(
         confirm_fallback=res.fallback,
         n_solves=res.n_solves,
         proven_irreducible=res.proven_irreducible,
+        complete=res.complete,
     )

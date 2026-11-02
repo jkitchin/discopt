@@ -319,8 +319,8 @@ def test_final_confirmation_catches_a_false_infeasible_verdict(monkeypatch):
     real_solve = _iis_milp._Engine._solve
     lies = {"n": 0}
 
-    def lying_solve(self, presolve):
-        st = real_solve(self, presolve)
+    def lying_solve(self, presolve, stop_at=None):
+        st = real_solve(self, presolve, stop_at)
         # Once, in the final-mode engine only, report a FEASIBLE probe as infeasible.
         if not self.confirm_each and presolve == "choose" and st == MS.kOptimal and not lies["n"]:
             lies["n"] += 1
