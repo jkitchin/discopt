@@ -83,6 +83,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # so its fire phase reports nothing: solve with ``--all --include`` over the
     # instances whose route the flag changes (``_convex_minlp_auto_route``).
     "DISCOPT_CONVEX_ROUTE_GDP_LOWERED": ("big-m",),
+    # Root VUB c-MIR rows on the spatial McCormick route (#1917 F1): acts in the
+    # solver, not the lowering, so solve with ``--all``; whether it fired is the
+    # ``stats["vub_cmir/rows"]`` each row records.
+    "DISCOPT_VUB_CMIR_ROOT": ("big-m",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
