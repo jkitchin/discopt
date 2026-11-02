@@ -413,4 +413,16 @@ def test_refusal_locates_an_unnamed_row():
     msg = str(err.value)
     assert "constraint None" not in msg
     assert "unnamed constraint at _constraints[1]" in msg
-    assert "<= 0" in msg
+
+
+@pytest.mark.unit
+def test_row_label_does_not_repr_a_deep_body():
+    """The label is built for every unnamed row; ``repr`` of a deep chain recurses."""
+    m = dm.Model()
+    x = m.continuous("x", shape=(5000,), lb=0, ub=1)
+    body = x[0]
+    for i in range(1, 5000):
+        body = body + x[i]
+    m.subject_to(body + x[0] <= 3)  # repeated x[0]: takes the exact pass
+    m.maximize(x[1])
+    m.validate()

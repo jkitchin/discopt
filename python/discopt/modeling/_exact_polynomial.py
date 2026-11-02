@@ -874,15 +874,17 @@ def _canonical_cached(holder, attr: str, memo: Optional[dict], what: str):
 
 
 def _row_label(constraint, where: Optional[str]) -> str:
-    """How an error names a row: its name, else its position and a body excerpt."""
+    """How an error names a row: its name, else its position in the model.
+
+    No body excerpt: ``repr`` of an expression recurses, so on a deep ``+`` chain it
+    raises ``RecursionError`` -- measured on #2094 (``test_sweep_rust_presolve_
+    fbbt_rounding``), where an eager excerpt broke every solve of such a row.
+    """
     name = getattr(constraint, "name", None)
     if name is not None:
         return f"constraint {name!r}"
-    body = str(constraint.body)
-    if len(body) > 60:
-        body = body[:57] + "..."
     place = f" at {where}" if where else ""
-    return f"unnamed constraint{place} ({body} {constraint.sense} 0)"
+    return f"unnamed constraint{place} ('{constraint.sense} 0' row)"
 
 
 def canonicalize_constraint(
