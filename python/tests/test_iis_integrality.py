@@ -213,7 +213,7 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
     m.subject_to(x[0] - x[1] <= 0, name="c3")
     m.subject_to(2 * x[0] == 1, name="half")
     m.minimize(0 * x[0])
-    res = milp_iis(m)
+    res = milp_iis(m, confirm="each")
 
     INF = highspy.HighsModelStatus.kInfeasible
     claims = [i for i, (pre, st) in enumerate(log) if pre != "off" and st == INF]
@@ -346,3 +346,33 @@ def test_final_confirmation_catches_a_false_infeasible_verdict(monkeypatch):
         clean.integrality,
     )
     assert set(res.certificates) == set(clean.certificates)
+
+
+@pytest.mark.smoke
+def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(monkeypatch):
+    """Default ``confirm="final"``: the LAST two solves are the finished set under
+    presolve on and presolve off, both ``Infeasible``."""
+    from discopt._iis_milp import milp_iis
+
+    log = []
+    real_run = highspy.Highs.run
+
+    def run(self):
+        out = real_run(self)
+        pre = self.getOptionValue("presolve")
+        log.append((pre[1] if isinstance(pre, tuple) else pre, self.getModelStatus()))
+        return out
+
+    monkeypatch.setattr(highspy.Highs, "run", run)
+    m = dm.Model("ex")
+    x = m.integer("x", shape=(2,), lb=0, ub=10)
+    m.subject_to(x[0] + x[1] <= 1.5, name="c1")
+    m.subject_to(x[0] + x[1] >= 2.5, name="c2")
+    m.subject_to(x[0] - x[1] <= 0, name="c3")
+    m.minimize(0 * x[0])
+    res = milp_iis(m)
+    assert res.confirm == "final" and not res.fallback
+    INF = highspy.HighsModelStatus.kInfeasible
+    assert [p for p, _ in log[-2:]] == ["choose", "off"]
+    assert all(st == INF for _, st in log[-2:])
+    assert compute_iis(m, include_integrality=True).confirm_fallback is False

@@ -80,6 +80,10 @@ class IISResult:
         necessary by arithmetic alone; one without (its probe point failed the
         re-check) rests on the solver's feasible verdict. See
         :attr:`fully_certified`.
+    confirm_fallback : bool
+        Only with ``include_integrality=True``: the finished subsystem failed its
+        two-configuration infeasibility check, so the result comes from a full
+        rerun that confirms every verdict (see :mod:`discopt._iis_milp`).
     n_solves : int
         Number of feasibility solves performed (deletion-filter cost).
     proven_irreducible : bool
@@ -93,6 +97,7 @@ class IISResult:
     bound_elements: list[tuple["Variable", str, tuple]] = field(default_factory=list)
     integrality_elements: list[tuple["Variable", tuple]] = field(default_factory=list)
     certificates: dict[tuple, np.ndarray] = field(default_factory=dict)
+    confirm_fallback: bool = False
     n_solves: int = 0
     proven_irreducible: bool = True
 
@@ -257,8 +262,10 @@ def compute_iis(
         removable member (Guieu & Chinneck 1999), so the IIS says which
         integrality restrictions the conflict actually needs -- often far fewer
         than all of them. Linear (LP/MILP) models only; runs the matrix-form
-        engine in :mod:`discopt._iis_milp`, which confirms every infeasibility
-        verdict with a presolve-free re-solve (#1634) and returns a feasibility
+        engine in :mod:`discopt._iis_milp`, whose returned subsystem is proven
+        infeasible with presolve on AND off (the #1634 rule; intermediate
+        verdicts are confirmed once, on the finished set, with a full per-probe
+        rerun if that check fails -- see ``confirm`` there) and returns a feasibility
         certificate for each kept member whose probe point passes an arithmetic
         re-check (``IISResult.certificates``; ``IISResult.fully_certified`` says
         whether every member has one). The default
@@ -420,6 +427,7 @@ def _compute_iis_with_integrality(
         bound_elements=bound_elements,
         integrality_elements=[elem(j) for j in res.integrality],
         certificates=dict(res.certificates),
+        confirm_fallback=res.fallback,
         n_solves=res.n_solves,
         proven_irreducible=res.proven_irreducible,
     )

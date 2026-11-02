@@ -64,7 +64,7 @@ class MilpIIS:
     n_cross_checks: int = 0  # infeasibility claims re-solved with presolve off (#1634)
     n_refuted: int = 0  # ... that the presolve-free solve found feasible
     n_cross_inconclusive: int = 0  # ... that the presolve-free solve could not decide
-    confirm: str = "each"  # where the #1634 confirmation ran: "each" probe or the "final" set
+    confirm: str = "final"  # where the #1634 confirmation ran: "each" probe or the "final" set
     fallback: bool = False  # "final" confirmation failed; the result is a full "each" rerun
 
 
@@ -286,7 +286,7 @@ def milp_iis(
     time_limit: float = 30.0,
     cert_tol: float = 1e-6,
     max_batch: Optional[int] = None,
-    confirm: str = "each",
+    confirm: str = "final",
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
@@ -294,16 +294,28 @@ def milp_iis(
     ``None`` lets it grow without limit, ``1`` is the classic one-at-a-time
     deletion filter (kept for A/B measurement and as the reference behaviour).
 
-    ``confirm`` places the #1634 presolve-free confirmation. ``"each"`` re-solves
-    every infeasibility verdict before acting on it. ``"final"`` acts on the
-    presolve-on verdict and then requires the FINISHED subsystem to be
-    ``Infeasible`` under both presolve-on and presolve-off; if it is not, the
-    whole computation is redone with ``"each"`` (``fallback=True``). Either way
-    the returned subsystem's infeasibility is agreed by both configurations.
+    ``confirm`` places the #1634 presolve-free confirmation. ``"final"`` (the
+    default) acts on the presolve-on verdict and then requires the FINISHED
+    subsystem to be ``Infeasible`` under both presolve-on and presolve-off; if
+    it is not, the whole computation is redone with ``"each"``
+    (``fallback=True``). ``"each"`` re-solves every infeasibility verdict before
+    acting on it. Either way the returned subsystem's infeasibility is agreed by
+    both configurations -- the claim #1634 protects -- so the two modes differ
+    only in when a wrong intermediate verdict is caught.
+
+    ``"each"`` is kept as a documented strict opt-out, not a stalled
+    alternative. It is not the default because on MIPcc27's smallset
+    (interleaved A/B, 300 s/instance) ``"final"`` produced 0/32 invalid outputs,
+    identical sizes on all 27 instances both modes solved, a median wall ratio
+    of 0.59, 5 more instances solved and 0 lost, with 0 fallbacks; and across
+    2,863 per-probe cross-checks in the ``"each"`` runs the presolve-on claim was
+    refuted 0 times. What would change that: fallbacks becoming common on some
+    model class (each costs a full ``"each"`` rerun, so ``"final"`` is then
+    slower), which ``MilpIIS.fallback`` / ``IISResult.confirm_fallback`` report.
     Each kept member's necessity rests on its arithmetic certificate where one
     exists; a member whose probe point fails the arithmetic re-check has none,
     and its necessity rests on HiGHS's feasible verdict for that probe (see
-    ``IISResult.fully_certified``). ``compute_iis`` always uses ``"each"``.
+    ``IISResult.fully_certified``).
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, and ``ValueError`` when the full model
