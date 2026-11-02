@@ -218,11 +218,17 @@ def _cached_flat_terms(model: Model, expr) -> list[tuple[float, object]]:
     cache = _get_struct_cache(model)
     flatten = cache["flatten"]
     key = id(expr)
-    terms: Optional[list[tuple[float, object]]] = flatten.get(key)
-    if terms is None:
-        terms = []
-        _flatten_sum(expr, 1.0, terms)
-        flatten[key] = terms
+    # The entry holds ``expr`` itself (#2099): the key is an ``id``, and a body the
+    # solve door's exact pass replaced in place (#2090) can be freed and its
+    # address handed to a new expression -- a false hit on a different row's
+    # terms. While the entry pins ``expr``, nothing else can take its id.
+    hit = flatten.get(key)
+    if hit is not None and hit[0] is expr:
+        terms: list[tuple[float, object]] = hit[1]
+        return terms
+    terms = []
+    _flatten_sum(expr, 1.0, terms)
+    flatten[key] = (expr, terms)
     return terms
 
 
@@ -275,10 +281,12 @@ def _cached_row_structure(model: Model, rule_name: str, constraint, metadata, bu
         return build()
     rowstruct = cache["rowstruct"]
     key = (rule_name, id(body))
-    value = rowstruct.get(key, _ROWSTRUCT_MISS)
-    if value is _ROWSTRUCT_MISS:
-        value = build()
-        rowstruct[key] = value
+    hit = rowstruct.get(key, _ROWSTRUCT_MISS)
+    # Pins ``body`` for the same reason as ``_cached_flat_terms`` (#2099).
+    if hit is not _ROWSTRUCT_MISS and hit[0] is body:
+        return hit[1]
+    value = build()
+    rowstruct[key] = (body, value)
     return value
 
 
