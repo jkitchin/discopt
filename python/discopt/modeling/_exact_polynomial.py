@@ -95,6 +95,14 @@ expansion over :data:`_MAX_CONTRIBUTIONS` contributions, a non-finite constant,
 or an array node of unknown shape; a reduction that declines stays an opaque atom
 (its budget is refunded so the rest of its row is still collected).
 
+Shared sums (#2100). Every walk here follows a DAG, not a tree: the fast passes
+stop at the first sum they reach twice (a shared sum repeats its monomials), and
+an additive chain whose tree expansion is over the budget but whose DAG is not
+(``r = r + r`` repeated: ``d + 1`` nodes, ``2**d`` occurrences) is collected by
+exact multiplicity over the DAG and always rewritten, to ``2**d * x``. Downstream
+walkers then never see the sharing. When that coefficient has no binary64
+(``d >= 1024``), :class:`SharedSumOverflowError` refuses the row.
+
 Residual exposure (not handled; recorded so it is not mistaken for covered): a
 reduction over :data:`_MAX_CONTRIBUTIONS` entries, and an index into an expression
 (``(A @ x)[i]``) are atoms -- their inner array is collected exactly once per model
@@ -151,6 +159,10 @@ _Poly = dict
 
 class _Decline(Exception):
     """The body is outside what this module collects; leave it as written."""
+
+
+class _Overflow(_Decline):
+    """A collected coefficient is outside the binary64 range."""
 
 
 def _size(shape: tuple) -> int:
@@ -255,6 +267,8 @@ class _Collector:
         self.param_values: dict = {}  # ("p", ...) factor key -> exact current value
         self.terms: dict = {}  # id(node) -> poly of a non-additive term (DAG reuse)
         self.arrays: dict = {}  # id(node) -> object array of polys (#2097, DAG reuse)
+        self.tree_sizes: dict = {}  # id(node) -> leaf occurrences of its additive tree
+        self.shared = False  # a shared sum was collected through its DAG (#2100)
         self.n_contribs = 0
         self.dirty = False  # an atom's arguments were rewritten
 
@@ -299,8 +313,162 @@ class _Collector:
     def collect(self, root: Expression) -> _Poly:
         return self._sum_poly(root)
 
+    def _additive_children(self, node) -> Optional[list]:
+        """``[(child, exact factor)]`` of an additive node, ``None`` for a term.
+
+        The same edges :meth:`_sum_poly` follows: ``+``, ``-``, ``neg``,
+        ``SumOverExpression``, and ``*`` / ``/`` by a scalar constant.
+        """
+        t = type(node)
+        if t is BinaryOp:
+            op = node.op
+            if op == "+":
+                return [(node.left, _ONE), (node.right, _ONE)]
+            if op == "-":
+                return [(node.left, _ONE), (node.right, -_ONE)]
+            if op == "*":
+                if type(node.left) is Constant and node.left.value.ndim == 0:
+                    return [(node.right, self._frac(node.left))]
+                if type(node.right) is Constant and node.right.value.ndim == 0:
+                    return [(node.left, self._frac(node.right))]
+            elif op == "/" and type(node.right) is Constant and node.right.value.ndim == 0:
+                d = self._frac(node.right)
+                if d == 0:
+                    raise _Decline("division by zero")
+                return [(node.left, _ONE / d)]
+            return None
+        if t is UnaryOp and node.op == "neg":
+            return [(node.operand, -_ONE)]
+        if t is SumOverExpression:
+            return [(term, _ONE) for term in node.terms]
+        return None
+
+    def _tree_terms(self, root) -> int:
+        """Leaf occurrences of ``root``'s additive chain *as a tree* (#2100).
+
+        Linear in the DAG (memoised by node). A shared sum ``r = r + r`` nested
+        ``d`` deep is ``d + 1`` nodes and ``2**d`` occurrences -- what the walk in
+        :meth:`_sum_poly` would visit.
+        """
+        memo = self.tree_sizes
+        if id(root) in memo:
+            size: int = memo[id(root)]
+            return size
+        stack: list = [(root, None)]
+        while stack:
+            node, kids = stack.pop()
+            if id(node) in memo:
+                continue
+            if kids is None:
+                kids = self._additive_children(node)
+                if kids is None:
+                    memo[id(node)] = 1
+                    continue
+                stack.append((node, kids))
+                stack.extend((k, None) for k, _ in kids if id(k) not in memo)
+                continue
+            memo[id(node)] = sum(memo[id(k)] for k, _ in kids)
+        size = memo[id(root)]
+        return size
+
+    def _dag_leaf_edges(self, root) -> int:
+        """Term references in ``root``'s additive chain counted once per distinct
+        sum node -- what :meth:`_sum_poly_dag` reads; linear in the DAG."""
+        seen: set = set()
+        edges = 0
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            kids = self._additive_children(node)
+            if kids is None:
+                continue
+            for k, _ in kids:
+                if self._additive_children(k) is None:
+                    edges += 1
+                elif id(k) not in seen:
+                    stack.append(k)
+        return edges
+
+    def _sum_poly_dag(self, root) -> _Poly:
+        """Exact polynomial of a *shared* additive DAG, linear in its size (#2100).
+
+        Each node's coefficient is the exact sum, over every path from ``root``, of
+        the product of the factors on that path (parents before children, in
+        reverse post-order), so ``r = r + r`` ``d`` deep gives ``x`` the single
+        coefficient ``2**d``. These aggregated contributions are not the per-path
+        sums a downstream collector would form, so they cannot decide whether the
+        row needs a rewrite: the row is always rewritten (``dirty``), which is
+        sound and leaves every downstream walk a row with no sharing to expand.
+        """
+        self.dirty = True
+        self.shared = True
+        order: list = []
+        seen: set = set()
+        kids_of: dict = {}
+        stack: list = [(root, False)]
+        while stack:
+            node, done = stack.pop()
+            if done:
+                order.append(node)
+                continue
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            kids = self._additive_children(node)
+            if kids is None:
+                continue
+            kids_of[id(node)] = kids
+            stack.append((node, True))
+            stack.extend((k, False) for k, _ in reversed(kids) if id(k) not in seen)
+        coef: dict = {id(root): _ONE}
+        leaves: dict = {}  # id(leaf) -> [leaf, exact coefficient]
+        for node in reversed(order):  # reverse post-order: every parent first
+            c = coef.pop(id(node), None)
+            if c is None:
+                continue
+            for k, f in kids_of[id(node)]:
+                if id(k) in kids_of:
+                    coef[id(k)] = coef.get(id(k), Fraction(0)) + c * f
+                else:
+                    hit = leaves.get(id(k))
+                    if hit is None:
+                        leaves[id(k)] = [k, c * f]
+                    else:
+                        hit[1] += c * f
+        if not kids_of:  # ``root`` is itself a term
+            leaves[id(root)] = [root, _ONE]
+        acc: _Poly = {}
+        for leaf, c in leaves.values():
+            if c == 0:
+                continue
+            if type(leaf) is Constant:
+                if leaf.value.ndim != 0:
+                    raise _Decline("array constant in scalar position")
+                self._count(1)
+                acc.setdefault((), []).append(c * self._frac(leaf))
+                continue
+            term = self.terms.get(id(leaf))
+            if term is None:
+                term = self._term(leaf)
+                self.terms[id(leaf)] = term
+            for k, v in term.items():
+                self._count(len(v))
+                acc.setdefault(k, []).extend(q * c for q in v)
+        return acc
+
     def _sum_poly(self, root) -> _Poly:
         """Exact polynomial of ``root``: flatten its additive chain, merge once."""
+        if (
+            self._tree_terms(root) > _MAX_CONTRIBUTIONS
+            and self._dag_leaf_edges(root) <= _MAX_CONTRIBUTIONS
+        ):
+            # Over budget as a tree, within it through its sharing (#2100). A chain
+            # that is long without shared sums still declines, on the budget,
+            # exactly as before.
+            return self._sum_poly_dag(root)
         acc: _Poly = {}
         stack: list = [(root, _ONE)]
         pop, push = stack.pop, stack.append
@@ -741,6 +909,7 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
     scalar_vars: set = set()
     block_vars: set = set()
     consts: list = []
+    sums: set = set()  # additive nodes already walked (#2100)
     try:
         stack: list = [(root, False)]  # (node, under a scale)
         pop, push = stack.pop, stack.append
@@ -750,6 +919,12 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
             if t is BinaryOp:
                 op = node.op
                 if op == "+" or op == "-":
+                    # A sum reached twice repeats every monomial under it, so it
+                    # is not clean -- and stopping here keeps this walk linear in
+                    # the DAG instead of exponential in its sharing depth (#2100).
+                    if id(node) in sums:
+                        raise _NotClean
+                    sums.add(id(node))
                     push((node.left, scaled))
                     push((node.right, scaled))
                     continue
@@ -768,6 +943,9 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
                     push((node.operand, scaled))
                     continue
             elif t is SumOverExpression:
+                if id(node) in sums:
+                    raise _NotClean
+                sums.add(id(node))
                 stack.extend([(term, scaled) for term in node.terms])
                 continue
             elif t is Constant:
@@ -883,6 +1061,8 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
     single: dict = {}  # (var id, power) -> list of flat-slot arrays
     multi: set = set()  # leaf keys of products of several leaves, and of atoms
     coarse: set = set()  # Variable keys a reduction / matmul expands
+    sums: set = set()  # additive nodes already walked (#2100, as in _fast_clean)
+    one_var_products: set = set()  # Variables with a product-of-leaves term over them alone
     n_const = 0
     try:
         stack: list = [(root, False)]
@@ -893,6 +1073,9 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
             if t is BinaryOp:
                 op = node.op
                 if op == "+" or op == "-":
+                    if id(node) in sums:
+                        raise _NotClean
+                    sums.add(id(node))
                     push((node.left, scaled))
                     push((node.right, scaled))
                     continue
@@ -910,6 +1093,9 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
                 push((node.operand, scaled))
                 continue
             elif t is SumOverExpression:
+                if id(node) in sums:
+                    raise _NotClean
+                sums.add(id(node))
                 stack.extend([(term, scaled) for term in node.terms])
                 continue
             elif t is Constant:
@@ -942,16 +1128,21 @@ def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
             if not coarse.isdisjoint(keys):
                 raise _NotClean
             if one is None:
-                # A product of several leaves can equal a single-leaf power
-                # (``x*x`` vs ``x**2``), so any shared Variable is a collision.
-                if not multi.isdisjoint(keys) or any(
-                    k[0] == "V" and (k[1], p) in single for k in keys for p in _POWERS
-                ):
+                if not multi.isdisjoint(keys):
                     raise _NotClean
                 multi |= keys
+                # A product of leaves of ONE Variable (``x*x``, ``x[1:]*x[:-1]``)
+                # can hold a single-leaf power's monomial (``x**2``); a product
+                # over two Variables or an atom never can.
+                if len(keys) == 1:
+                    (only,) = keys
+                    if only[0] == "V":
+                        if any((only[1], p) in single for p in _POWERS):
+                            raise _NotClean
+                        one_var_products.add(only[1])
                 continue
             skey, flat = one
-            if ("V", skey[0]) in multi:
+            if skey[0] in one_var_products:
                 raise _NotClean
             for other in single.get(skey, ()):
                 try:
@@ -1278,7 +1469,7 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
         try:
             c = float(exact)  # correctly rounded
         except OverflowError:
-            raise _Decline("coefficient outside the binary64 range") from None
+            raise _Overflow("coefficient outside the binary64 range") from None
         if c == 0.0:
             continue
         if key == ():
@@ -1304,6 +1495,16 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
         only: Expression = terms[0]
         return only
     return SumOverExpression(terms)
+
+
+class SharedSumOverflowError(ValueError):
+    """A shared sum's collected coefficient is outside the binary64 range (#2100).
+
+    ``r = r + r`` nested ``d`` deep is ``2**d * x``; for ``d >= 1024`` no float holds
+    that coefficient. The row cannot be rewritten, and left as written its DAG is
+    expanded as a tree, in time ``2**d``, by every consumer that walks it -- the
+    solve would never return, whatever its time limit. So it is refused.
+    """
 
 
 class ArrayRowCancellationError(ValueError):
@@ -1391,7 +1592,7 @@ def _rebuild_array(arr: np.ndarray, factor_nodes: dict) -> Expression:
             try:
                 c = float(exact)
             except OverflowError:
-                raise _Decline("coefficient outside the binary64 range") from None
+                raise _Overflow("coefficient outside the binary64 range") from None
             if key == ():
                 const[j] = c
                 continue
@@ -1524,6 +1725,14 @@ def canonicalize_expression(
     return out
 
 
+def _shared_overflow() -> SharedSumOverflowError:
+    return SharedSumOverflowError(
+        "a sum shared through its own terms (e.g. r = r + r, repeated) collects to a "
+        "coefficient outside the binary64 range; no float row can hold it, and the "
+        "shared form costs time exponential in its sharing depth to read (#2100)."
+    )
+
+
 def _exact_scalar(expr: Expression, memo: dict, found: list) -> Expression:
     found.clear()
     coll = _Collector(memo, found)
@@ -1533,6 +1742,9 @@ def _exact_scalar(expr: Expression, memo: dict, found: list) -> Expression:
             out = _rebuild(poly, coll.factor_nodes)
             _check_rewrite_is_exact(poly, coll.param_values)
             return out
+    except _Overflow:
+        if coll.shared:
+            raise _shared_overflow() from None
     except _Decline:
         pass
     return expr
@@ -1561,6 +1773,9 @@ def _exact_array(expr: Expression, memo: dict, found: list) -> Expression:
             for p in polys:
                 _check_rewrite_is_exact(p, coll.param_values)
             return out
+    except _Overflow:
+        if coll.shared:
+            raise _shared_overflow() from None
     except _Decline:
         pass
     return expr
@@ -1592,7 +1807,11 @@ def _canonical_cached(holder, attr: str, memo: Optional[dict], what: str):
     found: list = []
     try:
         new = canonicalize_expression(expr, memo=memo, _params=found)
-    except (ParameterCancellationError, ArrayRowCancellationError) as e:
+    except (
+        ParameterCancellationError,
+        ArrayRowCancellationError,
+        SharedSumOverflowError,
+    ) as e:
         raise type(e)(f"{what}: {e}") from None
     holder._exact_body = new
     holder._exact_params = _snapshot(found)
@@ -1648,7 +1867,11 @@ def canonicalize_model(model) -> None:
             expr = getattr(aux, attr)
             try:
                 new = canonicalize_expression(expr, memo=memo)
-            except (ParameterCancellationError, ArrayRowCancellationError) as e:
+            except (
+                ParameterCancellationError,
+                ArrayRowCancellationError,
+                SharedSumOverflowError,
+            ) as e:
                 raise type(e)(f"if_else {attr}: {e}") from None
             if new is not expr:
                 setattr(aux, attr, new)

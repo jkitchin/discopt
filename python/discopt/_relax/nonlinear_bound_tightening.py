@@ -711,12 +711,25 @@ def _tighten_affine_argument_interval(
     )
 
 
+#: Nodes :func:`_linearize_affine_expr` may visit for one call (#2100). It walks a
+#: term as a tree, so a shared sum under it (``c * r`` with ``r = r + r``) costs
+#: ``2**depth`` visits; past the budget it answers "not affine", which only makes
+#: the calling rule decline, so the budget can never cost soundness.
+_LINEARIZE_NODE_BUDGET = 100_000
+
+
 def _linearize_affine_expr(
     expr,
     scale: float,
     metadata: FlatVariableMetadata,
     n_vars: int,
+    _budget: Optional[list] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
+    if _budget is None:
+        _budget = [_LINEARIZE_NODE_BUDGET]
+    _budget[0] -= 1
+    if _budget[0] < 0:
+        return None
     const_val = _constant_value(expr)
     if const_val is not None:
         return np.zeros(n_vars, dtype=np.float64), scale * const_val
@@ -728,38 +741,44 @@ def _linearize_affine_expr(
         return coeff, 0.0
 
     if isinstance(expr, UnaryOp) and expr.op == "neg":
-        return _linearize_affine_expr(expr.operand, -scale, metadata, n_vars)
+        return _linearize_affine_expr(expr.operand, -scale, metadata, n_vars, _budget)
 
     if isinstance(expr, BinaryOp):
         if expr.op == "+":
-            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars)
-            right = _linearize_affine_expr(expr.right, scale, metadata, n_vars)
+            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars, _budget)
+            right = _linearize_affine_expr(expr.right, scale, metadata, n_vars, _budget)
             if left is None or right is None:
                 return None
             return left[0] + right[0], left[1] + right[1]
         if expr.op == "-":
-            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars)
-            right = _linearize_affine_expr(expr.right, -scale, metadata, n_vars)
+            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars, _budget)
+            right = _linearize_affine_expr(expr.right, -scale, metadata, n_vars, _budget)
             if left is None or right is None:
                 return None
             return left[0] + right[0], left[1] + right[1]
         if expr.op == "*":
             left_const = _constant_value(expr.left)
             if left_const is not None:
-                return _linearize_affine_expr(expr.right, scale * left_const, metadata, n_vars)
+                return _linearize_affine_expr(
+                    expr.right, scale * left_const, metadata, n_vars, _budget
+                )
             right_const = _constant_value(expr.right)
             if right_const is not None:
-                return _linearize_affine_expr(expr.left, scale * right_const, metadata, n_vars)
+                return _linearize_affine_expr(
+                    expr.left, scale * right_const, metadata, n_vars, _budget
+                )
             return None
         if expr.op == "/":
             right_const = _constant_value(expr.right)
             if right_const is not None and abs(right_const) > 1e-12:
-                return _linearize_affine_expr(expr.left, scale / right_const, metadata, n_vars)
+                return _linearize_affine_expr(
+                    expr.left, scale / right_const, metadata, n_vars, _budget
+                )
             return None
         if expr.op == "**":
             exponent = _constant_value(expr.right)
             if exponent == 1.0:
-                return _linearize_affine_expr(expr.left, scale, metadata, n_vars)
+                return _linearize_affine_expr(expr.left, scale, metadata, n_vars, _budget)
             if exponent == 0.0:
                 return np.zeros(n_vars, dtype=np.float64), scale
             return None
@@ -768,7 +787,7 @@ def _linearize_affine_expr(
         coeff = np.zeros(n_vars, dtype=np.float64)
         const = 0.0
         for term in expr.terms:
-            piece = _linearize_affine_expr(term, scale, metadata, n_vars)
+            piece = _linearize_affine_expr(term, scale, metadata, n_vars, _budget)
             if piece is None:
                 return None
             coeff += piece[0]
@@ -852,6 +871,109 @@ def _tighten_affine_upper_bound(
         )
 
 
+#: Leaf occurrences above which :func:`_flatten_sum` stops walking a sum as a tree
+#: (#2100). A row this long without sharing is flattened the DAG way too, with the
+#: same terms; the limit only bounds how much a *shared* sum may cost.
+_FLATTEN_TREE_LIMIT = 100_000
+
+
+def _additive_children(node) -> Optional[list]:
+    """``[(child, sign)]`` of a node :func:`_flatten_sum` descends, else ``None``."""
+    if isinstance(node, SumOverExpression):
+        return [(t, 1) for t in node.terms]
+    if isinstance(node, BinaryOp):
+        if node.op == "+":
+            return [(node.left, 1), (node.right, 1)]
+        if node.op == "-":
+            return [(node.left, 1), (node.right, -1)]
+        return None
+    if isinstance(node, UnaryOp) and node.op == "neg":
+        return [(node.operand, -1)]
+    return None
+
+
+def _additive_tree_size(expr) -> int:
+    """Leaf occurrences of ``expr``'s additive chain walked as a tree; linear in
+    the DAG (memoised by node, every node kept alive by ``expr``)."""
+    memo: dict[int, int] = {}
+    stack: list = [(expr, None)]
+    while stack:
+        node, kids = stack.pop()
+        if id(node) in memo:
+            continue
+        if kids is None:
+            kids = _additive_children(node)
+            if kids is None:
+                memo[id(node)] = 1
+                continue
+            stack.append((node, kids))
+            stack.extend((k, None) for k, _ in kids if id(k) not in memo)
+            continue
+        memo[id(node)] = sum(memo[id(k)] for k, _ in kids)
+    return memo[id(expr)]
+
+
+def _flatten_sum_dag(expr, scale: float, out: list[tuple[float, object]]) -> None:
+    """:func:`_flatten_sum` for a shared additive DAG, linear in its size (#2100).
+
+    Each leaf's scale is the sum over every path to it of the signs on the path,
+    times ``scale``, accumulated *exactly* (``Fraction``) and rounded once. Summing
+    the path scales in floats instead would be the #2090 defect -- a coefficient
+    whose float sum is not its value -- inside the tightening that relies on it.
+    Leaves are emitted parents-first (reverse post-order). A scale outside the
+    binary64 range (a sharing depth past ~1023) has no float to carry it, so the
+    whole sum is then emitted as one opaque term, which every rule declines.
+    """
+    from fractions import Fraction
+
+    order: list = []
+    seen: set[int] = set()
+    kids_of: dict[int, list] = {}
+    stack: list = [(expr, False)]
+    while stack:
+        node, done = stack.pop()
+        if done:
+            order.append(node)
+            continue
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        kids = _additive_children(node)
+        if kids is None:
+            continue
+        kids_of[id(node)] = kids
+        stack.append((node, True))
+        stack.extend((k, False) for k, _ in reversed(kids) if id(k) not in seen)
+    if not kids_of:
+        out.append((scale, expr))
+        return
+    coef: dict[int, Fraction] = {id(expr): Fraction(scale)}
+    leaves: dict[int, list] = {}  # id(leaf) -> [leaf, exact scale], first-visit order
+    for node in reversed(order):  # reverse post-order: every parent before a child
+        c = coef.pop(id(node), None)
+        if c is None:
+            continue
+        for k, sign in kids_of[id(node)]:
+            if id(k) in kids_of:
+                coef[id(k)] = coef.get(id(k), Fraction(0)) + c * sign
+            else:
+                hit = leaves.get(id(k))
+                if hit is None:
+                    leaves[id(k)] = [k, c * sign]
+                else:
+                    hit[1] += c * sign
+    terms: list[tuple[float, object]] = []
+    for leaf, c in leaves.values():
+        if c == 0:
+            continue
+        try:
+            terms.append((float(c), leaf))
+        except OverflowError:
+            out.append((scale, expr))
+            return
+    out.extend(terms)
+
+
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
     """Flatten an additive expression into ``(scale, leaf)`` terms.
 
@@ -866,7 +988,17 @@ def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
     emitted term order identical to the recursive walk's; the scale carried on a
     stack entry is the same value the recursion passed down (sign flips are
     exact), so the term list is bit-for-bit unchanged.
+
+    A *shared* sum is a DAG, and this walk expands it as a tree: ``r = r + r``
+    nested 64 deep is 65 nodes and ``2**64`` leaf occurrences, and a solve spent
+    its whole time limit here and never returned (#2100). When the tree would
+    exceed :data:`_FLATTEN_TREE_LIMIT` occurrences, :func:`_flatten_sum_dag`
+    emits one term per distinct leaf instead; below it the output is the tree
+    walk's, unchanged.
     """
+    if _additive_tree_size(expr) > _FLATTEN_TREE_LIMIT:
+        _flatten_sum_dag(expr, scale, out)
+        return
     stack: list[tuple[object, float]] = [(expr, scale)]
     while stack:
         node, node_scale = stack.pop()
