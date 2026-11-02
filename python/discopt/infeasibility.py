@@ -23,7 +23,6 @@ solve was conclusive (always the case for LP/MILP/convex models). See
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -40,7 +39,6 @@ from discopt.modeling.core import (
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
 
-logger = logging.getLogger(__name__)
 
 # discopt treats |bound| >= this as unbounded; relaxing a bound sets it here.
 _INF = 1e20
@@ -64,6 +62,22 @@ class IISResult:
         vector variable only the elements whose bound is essential are listed,
         so ``z[0] <= 1`` and ``z[1] <= 1`` rather than the whole ``z <= 1``
         (#1618 C-17).
+    integrality_elements : list[tuple[Variable, tuple]]
+        Only with ``include_integrality=True``: the integer/binary elements whose
+        **integrality** is in the IIS, as ``(variable, index)``. Every other
+        integrality is relaxed. The bounds of an element listed here always
+        apply and are not listed in ``bound_elements``; a relaxed element's
+        bounds are ordinary members. Empty when integrality was not filtered
+        (then every integrality is implicitly part of the subsystem).
+    certificates : dict[tuple, numpy.ndarray]
+        Only with ``include_integrality=True``: for a kept member, a point
+        proving it is necessary -- it satisfies every *other* member (within
+        ``1e-6``) and violates this one. Keys are ``("constraint", i)`` with
+        ``i`` an index into ``model._constraints``, ``("bound", col, side)`` and
+        ``("integrality", col)``, where ``col`` is the flat column (the
+        concatenated C-order layout of ``model._variables``); values are flat
+        points in that layout. A member with a certificate is proven
+        irreducible by arithmetic alone.
     n_solves : int
         Number of feasibility solves performed (deletion-filter cost).
     proven_irreducible : bool
@@ -75,13 +89,15 @@ class IISResult:
     constraints: list[Constraint] = field(default_factory=list)
     variable_bounds: list[tuple["Variable", str]] = field(default_factory=list)
     bound_elements: list[tuple["Variable", str, tuple]] = field(default_factory=list)
+    integrality_elements: list[tuple["Variable", tuple]] = field(default_factory=list)
+    certificates: dict[tuple, np.ndarray] = field(default_factory=dict)
     n_solves: int = 0
     proven_irreducible: bool = True
 
     def __len__(self) -> int:
         # Members are counted at element granularity when it is known.
         n_bounds = len(self.bound_elements) if self.bound_elements else len(self.variable_bounds)
-        return len(self.constraints) + n_bounds
+        return len(self.constraints) + n_bounds + len(self.integrality_elements)
 
     def __bool__(self) -> bool:
         return len(self) > 0
@@ -107,6 +123,11 @@ class IISResult:
                 val = float(np.broadcast_to(bound, var.shape)[idx]) if idx else float(bound.flat[0])
                 label = var.name + (f"[{', '.join(str(i) for i in idx)}]" if idx else "")
                 lines.append(f"    - {label} {op} {val:g}")
+        if self.integrality_elements:
+            lines.append("  Integrality:")
+            for var, idx in self.integrality_elements:
+                label = var.name + (f"[{', '.join(str(i) for i in idx)}]" if idx else "")
+                lines.append(f"    - {label} integer")
         if not self:
             lines.append("  (empty)")
         return "\n".join(lines)
@@ -178,9 +199,10 @@ def _solve_is_infeasible(
         # non-streaming call returns a SolveResult with ``.status``.
         with probe_relaxed_bounds(model, marked):
             status = getattr(model.solve(time_limit=time_limit), "status", "error")
-    except Exception as exc:  # noqa: BLE001 - a crashed feasibility probe is inconclusive
-        logger.debug("IIS feasibility probe raised: %s", exc)
-        status = "error"
+    # No ``except``: a probe that RAISES is a defect, not an inconclusive solve.
+    # Swallowing it turned a tape-lowering bug (MissingJaxError) into "could not
+    # prove the model infeasible" and would silently keep every element a broken
+    # probe touched. A *returned* non-proof status stays inconclusive (below).
     finally:
         model._constraints = saved_cons
         model._objective = saved_obj
@@ -199,6 +221,7 @@ def compute_iis(
     model: "Model",
     *,
     include_bounds: bool = True,
+    include_integrality: bool = False,
     time_limit: float = 30.0,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
@@ -212,6 +235,15 @@ def compute_iis(
         Also consider finite variable bounds as removable members of the IIS.
         Required to explain infeasibilities driven by bounds (e.g. ``x >= 5`` and
         ``x <= 2`` declared as bounds rather than constraints).
+    include_integrality : bool, default False
+        Also treat the **integrality of each integer/binary element** as a
+        removable member (Guieu & Chinneck 1999), so the IIS says which
+        integrality restrictions the conflict actually needs -- often far fewer
+        than all of them. Linear (LP/MILP) models only; runs the matrix-form
+        engine in :mod:`discopt._iis_milp`, which also returns a feasibility
+        certificate per kept member (``IISResult.certificates``). The default
+        keeps today's semantics (and Gurobi/CPLEX's): every integrality is part
+        of the subsystem and only constraints and bounds are filtered.
     time_limit : float, default 30.0
         Per-solve wall-clock limit for each feasibility probe.
 
@@ -225,7 +257,14 @@ def compute_iis(
     ValueError
         If ``model`` is not (provably) infeasible to begin with — there is no
         infeasibility to explain.
+    NotImplementedError
+        ``include_integrality=True`` on a model with a nonlinear or
+        non-algebraic constraint.
     """
+    if include_integrality:
+        return _compute_iis_with_integrality(
+            model, include_bounds=include_bounds, time_limit=time_limit
+        )
     all_constraints = list(model._constraints)
     bound_items: list[tuple] = _bound_candidates(model) if include_bounds else []
 
@@ -325,4 +364,40 @@ def compute_iis(
         bound_elements=elements,
         n_solves=n_solves,
         proven_irreducible=proven,
+    )
+
+
+def _compute_iis_with_integrality(
+    model: "Model", *, include_bounds: bool, time_limit: float
+) -> IISResult:
+    """:func:`compute_iis` with integrality elements, via the matrix engine."""
+    from discopt._iis_milp import milp_iis
+
+    res = milp_iis(model, include_bounds=include_bounds, time_limit=time_limit)
+
+    # Flat column -> (variable, multi-index).
+    owners: list[tuple["Variable", int]] = []
+    for v in model._variables:
+        owners.extend((v, k) for k in range(v.size))
+
+    def elem(col: int) -> tuple["Variable", tuple]:
+        v, k = owners[col]
+        idx = tuple(int(i) for i in np.unravel_index(k, v.shape)) if v.shape else ()
+        return v, idx
+
+    bound_elements = [(*elem(j), side) for j, side in res.bounds]
+    bound_elements = [(v, side, idx) for v, idx, side in bound_elements]
+    per_var: list[tuple["Variable", str]] = []
+    for v, side, _ in bound_elements:
+        if not any(pv is v and ps == side for pv, ps in per_var):
+            per_var.append((v, side))
+    all_constraints = list(model._constraints)
+    return IISResult(
+        constraints=[all_constraints[i] for i in res.constraints],
+        variable_bounds=per_var,
+        bound_elements=bound_elements,
+        integrality_elements=[elem(j) for j in res.integrality],
+        certificates=dict(res.certificates),
+        n_solves=res.n_solves,
+        proven_irreducible=res.proven_irreducible,
     )

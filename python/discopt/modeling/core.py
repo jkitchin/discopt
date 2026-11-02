@@ -12481,14 +12481,22 @@ class Model:
 
     # ── Infeasibility analysis ──
 
-    def compute_iis(self, *, include_bounds: bool = True, time_limit: float = 30.0):
+    def compute_iis(
+        self,
+        *,
+        include_bounds: bool = True,
+        include_integrality: bool = False,
+        time_limit: float = 30.0,
+    ):
         """Compute an Irreducible Infeasible Subsystem explaining infeasibility.
 
         Returns an :class:`~discopt.infeasibility.IISResult` — a minimal set of
         constraints (and, by default, variable bounds) that is infeasible but
         becomes feasible if any single member is removed. Use it to debug *why*
         ``solve()`` returned ``"infeasible"``. Raises ``ValueError`` if the model
-        is not provably infeasible.
+        is not provably infeasible. ``include_integrality=True`` (linear models)
+        also filters each integer element's integrality; see
+        :func:`~discopt.infeasibility.compute_iis`.
 
         >>> res = m.solve()
         >>> if res.status == "infeasible":
@@ -12496,7 +12504,12 @@ class Model:
         """
         from discopt.infeasibility import compute_iis
 
-        return compute_iis(self, include_bounds=include_bounds, time_limit=time_limit)
+        return compute_iis(
+            self,
+            include_bounds=include_bounds,
+            include_integrality=include_integrality,
+            time_limit=time_limit,
+        )
 
     def convexity(self, *, time_limit: float | None = 15.0):
         """Report whether the solver can prove this model convex.

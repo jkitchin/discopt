@@ -266,14 +266,20 @@ def extract_linear(model: Model, *, algebraic_only: bool = False) -> LinearModel
         vec, off = _coeffs(c.body, "constraint", src)
         # Constraint is ``body <sense> 0`` with ``body = vec·x + off``, i.e.
         # ``vec·x <sense> -off``. Keep one row with the original sense.
-        rows.append(np.asarray(vec, dtype=np.float64))
+        vec = np.asarray(vec, dtype=np.float64)
+        # Sparsify per row: stacking dense rows first held an O(m*n) array at
+        # peak (gigabytes on a 10k x 10k MPS instance) for a matrix that is
+        # typically < 1% dense. The CSR result is identical.
+        rows.append(_sp.csr_matrix(vec.reshape(1, -1)) if _HAVE_SCIPY else vec)
         b_vals.append(-float(off))
         senses.append(c.sense)
         row_source.append(src)
 
     if rows:
-        dense = np.array(rows, dtype=np.float64)
-        A: object = _sp.csr_matrix(dense) if _HAVE_SCIPY else dense
+        if _HAVE_SCIPY:
+            A: object = _sp.vstack(rows, format="csr")
+        else:
+            A = np.array(rows, dtype=np.float64)
     else:
         A = _sp.csr_matrix((0, n)) if _HAVE_SCIPY else np.zeros((0, n))
     b = np.array(b_vals, dtype=np.float64) if b_vals else np.zeros(0)
