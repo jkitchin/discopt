@@ -11,11 +11,10 @@ and claims no certificate.
 
 import logging
 
-import numpy as np
-import pytest
-
 import discopt.modeling as dm
 import discopt.solver as solver
+import numpy as np
+import pytest
 
 pytestmark = pytest.mark.smoke
 
@@ -27,8 +26,8 @@ def _bilinear_model(n=20, seed=1):
     x = [m.continuous(f"x{i}", lb=0.0, ub=10.0) for i in range(n)]
     y = [m.binary(f"y{i}") for i in range(n)]
     for k in range(n // 2):
-        i, j, l = rng.choice(n, 3, replace=False)
-        m.subject_to(x[i] * x[j] - 3.0 * x[l] <= float(rng.uniform(5, 20)), name=f"bil{k}")
+        i, j, k3 = rng.choice(n, 3, replace=False)
+        m.subject_to(x[i] * x[j] - 3.0 * x[k3] <= float(rng.uniform(5, 20)), name=f"bil{k}")
     for i in range(n):
         m.subject_to(x[i] <= 10.0 * y[i], name=f"bigm{i}")
     m.subject_to(sum(x) >= 0.4 * 10 * n, name="demand")
