@@ -221,8 +221,9 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("confirm", ["each", "final"])
 @pytest.mark.parametrize("max_batch", [1, None])
-def test_batch_and_single_filters_both_give_certified_iis(max_batch):
+def test_batch_and_single_filters_both_give_certified_iis(max_batch, confirm):
     """Adaptive batch deletion (and its one-at-a-time limit) stays sound and certified."""
     from discopt._iis_milp import milp_iis
 
@@ -247,7 +248,7 @@ def test_batch_and_single_filters_both_give_certified_iis(max_batch):
         for r in range(mrows):
             m.subject_to(sum(A[r, j] * xs[j] for j in range(n)) <= rhs[r])
         m.minimize(0 * xs[0])
-        res = milp_iis(m, time_limit=10, max_batch=max_batch)
+        res = milp_iis(m, time_limit=10, max_batch=max_batch, confirm=confirm)
         n_models += 1
         assert res.proven_irreducible
         kept_lb = {j for j, s in res.bounds if s == "lower"}
@@ -277,7 +278,9 @@ def test_batch_and_single_filters_both_give_certified_iis(max_batch):
             assert _independent_check(*ok, drop=key)
             assert not _independent_check(*ok)
             n_checked += 1
-    print(f"[iis-batch max_batch={max_batch}] models={n_models} certificates={n_checked}")
+    print(
+        f"[iis-batch max_batch={max_batch} confirm={confirm}] models={n_models} certs={n_checked}"
+    )
     assert n_models >= 10 and n_checked >= 30, (n_models, n_checked)
 
 
@@ -299,3 +302,43 @@ def test_batching_cuts_solves_when_most_rows_are_redundant():
     many = milp_iis(build())
     assert one.constraints == many.constraints == [0, 59]
     assert many.n_solves < one.n_solves / 3, (many.n_solves, one.n_solves)
+
+
+@pytest.mark.smoke
+def test_final_confirmation_catches_a_false_infeasible_verdict(monkeypatch):
+    """confirm="final" acts on unconfirmed presolve-on verdicts, so a false one must be
+    caught by the final two-configuration check and answered with a full "each" rerun."""
+    from discopt import _iis_milp
+    from discopt._iis_milp import milp_iis
+
+    MS = highspy.HighsModelStatus
+    real_solve = _iis_milp._Engine._solve
+    lies = {"n": 0}
+
+    def lying_solve(self, presolve):
+        st = real_solve(self, presolve)
+        # Once, in the final-mode engine only, report a FEASIBLE probe as infeasible.
+        if not self.confirm_each and presolve == "choose" and st == MS.kOptimal and not lies["n"]:
+            lies["n"] += 1
+            return MS.kInfeasible
+        return st
+
+    monkeypatch.setattr(_iis_milp._Engine, "_solve", lying_solve)
+    m = dm.Model("ex")
+    x = m.integer("x", shape=(2,), lb=0, ub=10)
+    m.subject_to(x[0] + x[1] <= 1.5, name="c1")
+    m.subject_to(x[0] + x[1] >= 2.5, name="c2")
+    m.subject_to(x[0] - x[1] <= 0, name="c3")
+    m.subject_to(2 * x[0] == 1, name="half")
+    m.minimize(0 * x[0])
+    res = milp_iis(m, confirm="final")
+    assert lies["n"] == 1, "the false verdict was never injected"
+    assert res.fallback and res.confirm == "final"
+    # The fallback result is the honest per-probe one: compare with a clean run.
+    clean = milp_iis(m, confirm="each")
+    assert (res.constraints, res.bounds, res.integrality) == (
+        clean.constraints,
+        clean.bounds,
+        clean.integrality,
+    )
+    assert set(res.certificates) == set(clean.certificates)

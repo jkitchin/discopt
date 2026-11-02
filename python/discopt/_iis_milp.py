@@ -63,12 +63,17 @@ class MilpIIS:
     proven_irreducible: bool = True
     n_cross_checks: int = 0  # infeasibility claims re-solved with presolve off (#1634)
     n_refuted: int = 0  # ... that the presolve-free solve found feasible
+    n_cross_inconclusive: int = 0  # ... that the presolve-free solve could not decide
+    confirm: str = "each"  # where the #1634 confirmation ran: "each" probe or the "final" set
+    fallback: bool = False  # "final" confirmation failed; the result is a full "each" rerun
 
 
 class _Engine:
     """One HiGHS model; elements are toggled by changing bounds/integrality."""
 
-    def __init__(self, A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, probe_tl):
+    def __init__(
+        self, A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, probe_tl, confirm_each=True
+    ):
         import highspy
 
         self.hs = highspy
@@ -81,6 +86,8 @@ class _Engine:
         self.n_solves = 0
         self.n_cross_checks = 0  # infeasibility claims re-solved with presolve off
         self.n_refuted = 0  # ... of which the presolve-free solve found feasible
+        self.n_cross_inconclusive = 0  # ... of which the presolve-free solve was undecided
+        self.confirm_each = confirm_each
         n, m = col_lb.size, row_lo.size
         inf = highspy.kHighsInf
         self._inf = inf
@@ -106,14 +113,13 @@ class _Engine:
         h.passModel(lp)
         self.h = h
 
-    def probe(
+    def _configure(
         self,
         active_cons: set[int],
         active_bounds: set[tuple[int, str]],
         active_int: set[int],
-    ) -> tuple[Optional[bool], Optional[np.ndarray]]:
-        """``(True, None)`` proven infeasible; ``(False, x)`` feasible at ``x``;
-        ``(None, None)`` inconclusive (time limit or another non-proof status)."""
+    ) -> None:
+        """Load one probe's rows, bounds and integrality into the HiGHS model."""
         h, inf = self.h, self._inf
         n, m = self.col_lb.size, self.row_lo.size
         rlo = np.full(m, -inf)
@@ -142,7 +148,6 @@ class _Engine:
         ub = np.where(ub >= _INF, inf, ub)
         idx_m = np.arange(m, dtype=np.int32)
         idx_n = np.arange(n, dtype=np.int32)
-        h.clearSolver()
         if m:
             h.changeRowsBounds(m, idx_m, rlo, rhi)
         if n:
@@ -151,36 +156,72 @@ class _Engine:
             h.changeColsIntegrality(
                 n, idx_n, np.array([vt.kInteger if b else vt.kContinuous for b in integ])
             )
+
+    def _solve(self, presolve: str):
+        """Solve the configured probe from scratch; returns the HiGHS model status."""
+        h = self.h
+        h.clearSolver()
         h.setOptionValue("time_limit", float(self.probe_tl))
-        h.setOptionValue("presolve", "choose")
+        h.setOptionValue("presolve", presolve)
         self.n_solves += 1
         h.run()
-        ms = h.getModelStatus()
+        return h.getModelStatus()
+
+    def _point(self) -> np.ndarray:
+        return np.array(self.h.getSolution().col_value, dtype=np.float64)
+
+    def probe(
+        self,
+        active_cons: set[int],
+        active_bounds: set[tuple[int, str]],
+        active_int: set[int],
+    ) -> tuple[Optional[bool], Optional[np.ndarray]]:
+        """``(True, None)`` infeasible; ``(False, x)`` feasible at ``x``;
+        ``(None, None)`` inconclusive (time limit or another non-proof status).
+
+        With ``confirm_each`` (the #1634 policy, applied per probe) an
+        ``Infeasible`` verdict stands only when a presolve-free re-solve agrees.
+        Without it a presolve-on ``Infeasible`` is acted on directly and the
+        caller MUST confirm the final subsystem with :meth:`confirm_infeasible`.
+        """
+        self._configure(active_cons, active_bounds, active_int)
         MS = self.hs.HighsModelStatus
+        ms = self._solve("choose")
         if ms == MS.kOptimal:
-            return False, np.array(h.getSolution().col_value, dtype=np.float64)
+            return False, self._point()
         if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
             return None, None
+        if ms == MS.kInfeasible and not self.confirm_each:
+            return True, None
         # An infeasibility claim is what lets the filter DROP an element, so it
         # stands only when a presolve-free solve agrees -- the #1634 policy of
         # discopt's own HiGHS MILP route, where presolve-on and presolve-off each
         # produced false claims on a 1200-instance panel but never on the same
         # instance. (``kUnboundedOrInfeasible`` cannot be "unbounded" under a zero
-        # objective; the presolve-free solve decides it the same way.)
+        # objective; the presolve-free solve decides it, in either mode.)
         self.n_cross_checks += 1
-        h.setOptionValue("presolve", "off")
-        h.clearSolver()
-        self.n_solves += 1
-        h.run()
-        ms2 = h.getModelStatus()
-        h.setOptionValue("presolve", "choose")
+        ms2 = self._solve("off")
         if ms2 == MS.kInfeasible:
             return True, None
         if ms2 == MS.kOptimal:
             if ms == MS.kInfeasible:
                 self.n_refuted += 1
-            return False, np.array(h.getSolution().col_value, dtype=np.float64)
+            return False, self._point()
+        self.n_cross_inconclusive += 1
         return None, None
+
+    def confirm_infeasible(
+        self,
+        active_cons: set[int],
+        active_bounds: set[tuple[int, str]],
+        active_int: set[int],
+    ) -> bool:
+        """True iff presolve-on AND presolve-off both return ``Infeasible``."""
+        self._configure(active_cons, active_bounds, active_int)
+        MS = self.hs.HighsModelStatus
+        return bool(
+            self._solve("choose") == MS.kInfeasible and self._solve("off") == MS.kInfeasible
+        )
 
 
 def _violation(x, eng: _Engine, rows=None, cols_lb=None, cols_ub=None, cols_int=None):
@@ -245,12 +286,21 @@ def milp_iis(
     time_limit: float = 30.0,
     cert_tol: float = 1e-6,
     max_batch: Optional[int] = None,
+    confirm: str = "each",
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
     ``max_batch`` caps the adaptive deletion batch (see :func:`_batch_filter`);
     ``None`` lets it grow without limit, ``1`` is the classic one-at-a-time
     deletion filter (kept for A/B measurement and as the reference behaviour).
+
+    ``confirm`` places the #1634 presolve-free confirmation. ``"each"`` re-solves
+    every infeasibility verdict before acting on it. ``"final"`` acts on the
+    presolve-on verdict and then requires the FINISHED subsystem to be
+    ``Infeasible`` under both presolve-on and presolve-off; if it is not, the
+    whole computation is redone with ``"each"`` (``fallback=True``). Either way
+    the returned subsystem's infeasibility is agreed by both configurations and
+    each kept member's necessity rests on its arithmetic certificate.
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, and ``ValueError`` when the full model
@@ -288,7 +338,11 @@ def milp_iis(
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
 
-    eng = _Engine(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, time_limit)
+    if confirm not in ("each", "final"):
+        raise ValueError(f"confirm must be 'each' or 'final', got {confirm!r}")
+    eng = _Engine(
+        A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, time_limit, confirm == "each"
+    )
     cons = set(row_groups)
     ints_active = set(int(j) for j in np.flatnonzero(is_int))
     # Finite bounds, all applied at the start. They are elements (filtered in
@@ -384,6 +438,22 @@ def milp_iis(
             x, key, eng, sorted(cons), applied_bounds, sorted(ints_active), cert_tol
         ):
             certs[key] = x
+    if confirm == "final" and not eng.confirm_infeasible(cons, bounds, ints_active):
+        # A presolve-on verdict the filter acted on did not survive: the finished
+        # set is not infeasible under both configurations. Redo everything with
+        # per-probe confirmation rather than patch a set built on a bad verdict.
+        redo = milp_iis(
+            model,
+            include_bounds=include_bounds,
+            time_limit=time_limit,
+            cert_tol=cert_tol,
+            max_batch=max_batch,
+            confirm="each",
+        )
+        redo.n_solves += eng.n_solves
+        redo.confirm = "final"
+        redo.fallback = True
+        return redo
     return MilpIIS(
         constraints=sorted(cons),
         bounds=kept_bounds,
@@ -393,4 +463,6 @@ def milp_iis(
         proven_irreducible=proven,
         n_cross_checks=eng.n_cross_checks,
         n_refuted=eng.n_refuted,
+        n_cross_inconclusive=eng.n_cross_inconclusive,
+        confirm=confirm,
     )
