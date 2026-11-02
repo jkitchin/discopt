@@ -49,8 +49,20 @@ def main(argv: list[str] | None = None) -> int:
     assert os.environ.get("DISCOPT_MBIGM_LP_COMPONENTS") == "1", "run with the flag ON"
     import discopt
     import discopt._relax.gdp_reformulate as G  # noqa: N812
-    from discopt.modeling.core import from_nl
-    from discopt.solver import _model_has_gdp_constraints
+    from discopt.modeling.core import (
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _LogicalConstraint,
+        _SOSConstraint,
+        from_nl,
+    )
+
+    # The constraint kinds reformulate_gdp lowers. Inlined: the solver helper of
+    # this name went with DISCOPT_CONVEX_ROUTE_GDP_LOWERED's retirement (38f702db).
+    _gdp_kinds = (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint, _LogicalConstraint)
+
+    def _model_has_gdp_constraints(model) -> bool:
+        return any(isinstance(c, _gdp_kinds) for c in model._constraints)
 
     assert hasattr(G, "_component_sub_lp"), "flag code absent"
     assert discopt.__file__.startswith(str(REPO)), discopt.__file__
