@@ -1926,7 +1926,7 @@ def _exact_array(expr: Expression, memo: dict, found: list) -> Expression:
     try:
         arr = coll._array(expr)
         if arr.shape == ():
-            poly = arr[()]
+            poly: _Poly = arr.item()  # the 0-d object array's polynomial
             if any(f[0] == "e" for key in poly for f in key):
                 return expr  # an element of an opaque array: no scalar form to emit
             if coll.dirty or _needs_rewrite(poly, coll.param_values):
