@@ -1206,7 +1206,11 @@ class SolverTuning:
     ``min(raw, g)`` and never tightens when ``g`` is ``None``; DBBT sizes the gap
     from the NS-safe ``z_lp`` and reduced costs recomputed from the same dual ``y``
     (the ``node_reduce._dbbt_from_reduced_costs`` contract), and abstains when no
-    safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``."""
+    safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``.
+
+    OFF still takes ``min(raw, g)`` on a relaxation past ``_OBBT_COND_LIMIT``
+    (``require_ns``, #2088): OBBT runs there only because ``g`` is rigorous, so the
+    1e-6 guard does not apply. The flag governs well-conditioned LPs only."""
 
     hull_conic_quadratic: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=True)
