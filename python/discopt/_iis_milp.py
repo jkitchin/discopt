@@ -264,12 +264,14 @@ class _Engine:
         that are violated by 1.4e-5 once the integers are rounded). So a
         "feasible" verdict must survive repair: fix every held integer at its
         rounded value and re-solve the continuous part as an LP with presolve
-        off, at HiGHS's standard feasibility tolerance. Its point has exact
-        integers and is what the caller gets (and what becomes a certificate).
-        Only integrality is made exact: tightening the continuous tolerance too
-        (it was 1e-9) rejected ordinary points -- every one of ``dell``'s 203
-        repairs, whose rounded points met their rows to 9.4e-8 -- while osun's
-        artifacts fail the repair at 1e-9, 1e-7 and 1e-6 alike.
+        off. Its point has exact integers and is what the caller gets (and what
+        becomes a certificate). Only integrality is made exact: rows are judged
+        by the MIP verdict's own standard (``mip_feasibility_tolerance``), so the
+        repair removes integrality slack and nothing else. A stricter row
+        tolerance rejected ordinary points: at 1e-9 all 203 of ``dell``'s repairs
+        (rows met to 9.4e-8), at the LP's 1e-7 seven more (rows met to 1.7e-7, a
+        point HiGHS's MIP accepted). osun's artifacts fail at 1e-9, 1e-7 and 1e-6
+        alike.
         """
         x = self._point()
         held = self._held
@@ -281,10 +283,17 @@ class _Engine:
         idx = held.astype(np.int32)
         h.changeColsBounds(idx.size, idx, xr, xr)
         h.changeColsIntegrality(idx.size, idx, np.array([vt.kContinuous] * idx.size))
+        lp_tol = h.getOptionValue("primal_feasibility_tolerance")
+        mip_tol = h.getOptionValue("mip_feasibility_tolerance")
+        # (status, value) tuples in some highspy versions
+        lp_tol = lp_tol[1] if isinstance(lp_tol, tuple) else lp_tol
+        mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
+        h.setOptionValue("primal_feasibility_tolerance", mip_tol)
         try:
             ok = self._solve("off", stop_at) == self.hs.HighsModelStatus.kOptimal
             y = self._point() if ok else None
         finally:
+            h.setOptionValue("primal_feasibility_tolerance", lp_tol)
             lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
             hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
             h.changeColsBounds(idx.size, idx, lo, hi)

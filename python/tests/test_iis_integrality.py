@@ -454,8 +454,9 @@ def test_artifact_model_is_never_declared_feasible():
 
 @pytest.mark.smoke
 def test_repair_only_makes_integrality_exact(monkeypatch):
-    """The repair must not tighten the continuous feasibility tolerance: at 1e-9 it
-    rejected ordinary 1e-7-feasible points (all 203 of dell's repairs)."""
+    """The repair judges rows by the MIP verdict's own tolerance and restores the
+    LP one: stricter row tolerances rejected ordinary points (dell: all 203
+    repairs at 1e-9, seven more at the LP's 1e-7)."""
     from discopt._iis_milp import milp_iis
 
     seen = []
@@ -477,4 +478,9 @@ def test_repair_only_makes_integrality_exact(monkeypatch):
     res = milp_iis(m)
     assert res.n_repairs > 0, "no repair ran: the check did not fire"
     assert res.n_artifacts == 0
-    assert seen == [], seen
+    h = highspy.Highs()
+    mip_tol = h.getOptionValue("mip_feasibility_tolerance")
+    lp_tol = h.getOptionValue("primal_feasibility_tolerance")
+    mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
+    lp_tol = lp_tol[1] if isinstance(lp_tol, tuple) else lp_tol
+    assert seen == [mip_tol, lp_tol] * res.n_repairs, seen
