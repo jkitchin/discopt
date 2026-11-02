@@ -267,11 +267,10 @@ def milp_iis(
             row_hi[r] = b[r]
         if s in (">=", "=="):
             row_lo[r] = b[r]
-    row_groups: dict[int, np.ndarray] = {}
+    rows_of: dict[int, list[int]] = {}
     for r, src in enumerate(lin.row_source):
-        row_groups.setdefault(src, [])  # type: ignore[arg-type]
-        row_groups[src].append(r)  # type: ignore[union-attr]
-    row_groups = {k: np.asarray(v, dtype=np.int64) for k, v in row_groups.items()}
+        rows_of.setdefault(src, []).append(r)
+    row_groups = {k: np.asarray(v, dtype=np.int64) for k, v in rows_of.items()}
 
     lbs, ubs, ints = [], [], []
     for v in model._variables:
