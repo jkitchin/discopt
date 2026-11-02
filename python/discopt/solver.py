@@ -2115,7 +2115,9 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None, s
     A verified feasible objective is only ever an *upper bound*: seeding it can prune and
     cutoff-propagate but can never loosen a bound or invent an incumbent, so an
     unverifiable candidate is simply dropped and the full solve runs unseeded."""
-    deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
+    # Absolute perf_counter() deadline, so the absolute form (_role2_deadline), not
+    # _role2_horizon, whose deterministic value is a *duration* (#2091).
+    deadline = _role2_deadline_inf(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
     if outer_deadline is not None:
         deadline = min(deadline, float(outer_deadline))
     if time.perf_counter() >= deadline:
@@ -12791,6 +12793,18 @@ def _role2_deadline(deadline):
     return _role1_deadline()
 
 
+def _role2_deadline_inf(deadline):
+    """:func:`_role2_deadline` for a callee that compares an absolute deadline with
+    ``time.perf_counter()``: ``math.inf`` is the no-clock value, not ``None``.
+
+    The counterpart of :func:`_role2_horizon` for *absolute* times. Passing an
+    absolute time to ``_role2_horizon`` returned a duration under
+    ``deterministic`` and so a deadline already in the past (#2091).
+    """
+    out = _role2_deadline(deadline)
+    return math.inf if out is None else out
+
+
 def _role2_horizon(seconds):
     """:func:`_role2_budget` for a callee whose budget parameter is a plain
     ``float`` rather than ``Optional[float]`` — ``math.inf`` is the no-clock value
@@ -14514,6 +14528,9 @@ def solve_model(
     require_all_relations_lowered(model, context="solve_model")
     # Auxiliary bounds a lowering derived from the box at lowering time are
     # re-derived for the box being solved (#2061 review).
+    # #2090: exact like-term collection, before anything below reads a body.
+    # ``Model.solve`` already did this in ``validate``; this is for direct callers.
+    model._canonicalize_like_terms()
     model._refresh_if_else_bounds(context="solve_model")
     refresh_lowering_bounds(model, context="solve_model")
 
@@ -22568,9 +22585,11 @@ def solve_model(
                         n_starts=int(min(64, max(32, 2 * int(np.size(lb))))),
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
+                        # Absolute deadline: not the duration-valued
+                        # _role2_horizon (#2091).
                         deadline=min(
                             _deadline,
-                            _role2_horizon(
+                            _role2_deadline_inf(
                                 time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit)))
                             ),
                         ),
