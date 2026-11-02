@@ -161,8 +161,8 @@ class _Engine:
         # overrunning 7-10x on presolve-free re-solves, so a budget is enforced
         # here too. An interrupted run is a non-proof status (inconclusive).
         def _guard(event) -> None:
-            if time.perf_counter() > self._stop:
-                event.interrupt()
+            # Set the flag both ways: HiGHS keeps a raised interrupt across runs.
+            event.interrupt(time.perf_counter() > self._stop)
 
         h.cbMipInterrupt.subscribe(_guard)
         h.cbSimplexInterrupt.subscribe(_guard)
@@ -234,7 +234,12 @@ class _Engine:
         if stop - now < _MIN_SOLVE_S:
             raise _OutOfTime
         h.clearSolver()
-        h.setOptionValue("time_limit", stop - now)
+        # HiGHS's run clock is cumulative over this object's lifetime and LP
+        # solves compare it with ``time_limit``, so a relative budget made every
+        # LP solve return "Time limit reached" (0 iterations) once the engine had
+        # run longer than one budget. Offset by the clock; the wall guard below
+        # enforces the real budget whichever clock HiGHS consults.
+        h.setOptionValue("time_limit", h.getRunTime() + (stop - now))
         h.setOptionValue("presolve", presolve)
         self.n_solves += 1
         self._stop = stop + _GRACE_S

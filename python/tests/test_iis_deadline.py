@@ -175,3 +175,83 @@ def test_wall_guard_stops_highs_when_its_own_limit_is_ignored(monkeypatch):
     elapsed = time.perf_counter() - t0
     assert highspy.HighsModelStatus.kInterrupt in statuses, statuses  # the guard fired
     assert elapsed < budget + 2.0, elapsed
+
+
+@pytest.mark.smoke
+def test_lp_solves_still_run_after_the_engine_accumulates_runtime():
+    """HiGHS's run clock is cumulative over a Highs object's lifetime and LP solves
+    compare it with ``time_limit``: once the engine had run longer than one probe's
+    budget, every LP solve (LP probes, exact-integer repairs) returned "Time limit
+    reached" after 0 iterations -- 2,337 false "artifacts" on smallset, and
+    spurious inconclusive LP probes before that. Every solve must still run."""
+    import scipy.sparse as sp
+    from discopt._iis_milp import _Engine
+    from discopt.decomposition._linear import extract_linear
+
+    m = _market_split()
+    lin = extract_linear(m)
+    lo = np.where([s in (">=", "==") for s in lin.sense], lin.b, -1e20)
+    hi = np.where([s in ("<=", "==") for s in lin.sense], lin.b, 1e20)
+    n = lin.n
+    eng = _Engine(
+        sp.csr_matrix(lin.A),
+        lo,
+        hi,
+        np.zeros(n),
+        np.ones(n),
+        np.ones(n, dtype=bool),
+        {i: np.array([i]) for i in range(lin.m)},
+        0.5,
+    )
+    cons = set(range(lin.m))
+    bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}
+    while eng.h.getRunTime() < 1.5:  # accumulate > 3x the 0.5 s per-solve budget
+        eng._configure(cons, bounds, set(range(n)))
+        eng._solve("choose")
+    eng._configure(cons, bounds, set())  # the LP relaxation: feasible, trivial
+    st = eng._solve("off")
+    assert st == highspy.HighsModelStatus.kOptimal, (st, eng.h.getRunTime())
+
+
+@pytest.mark.smoke
+def test_runs_after_an_interrupt_are_not_left_interrupted():
+    """HiGHS keeps a raised user interrupt across runs: after the guard stopped one
+    solve, the next one (even a trivial LP) returned "Interrupted" after 0
+    iterations. Every later solve, including an all-fixed repair-style LP, must run."""
+    import scipy.sparse as sp
+    from discopt._iis_milp import _Engine
+    from discopt.decomposition._linear import extract_linear
+
+    m = _market_split()
+    lin = extract_linear(m)
+    lo = np.where([s in (">=", "==") for s in lin.sense], lin.b, -1e20)
+    hi = np.where([s in ("<=", "==") for s in lin.sense], lin.b, 1e20)
+    n = lin.n
+    eng = _Engine(
+        sp.csr_matrix(lin.A),
+        lo,
+        hi,
+        np.zeros(n),
+        np.ones(n),
+        np.ones(n, dtype=bool),
+        {i: np.array([i]) for i in range(lin.m)},
+        0.3,
+    )
+    cons = set(range(lin.m))
+    bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}
+    real_set = highspy.Highs.setOptionValue
+    MS = highspy.HighsModelStatus
+    # Force a guard interrupt: HiGHS gets no usable time_limit of its own.
+    eng.h.setOptionValue = lambda name, value: real_set(
+        eng.h, name, highspy.kHighsInf if name == "time_limit" else value
+    )
+    eng._configure(cons, bounds, set(range(n)))
+    assert eng._solve("choose") == MS.kInterrupt
+    del eng.h.setOptionValue
+    # A trivial LP with every column fixed (what the exact-integer repair solves).
+    eng._configure(set(), bounds, set())
+    eng.h.changeColsBounds(n, np.arange(n, dtype=np.int32), np.zeros(n), np.zeros(n))
+    assert eng._solve("off") == MS.kOptimal
+    # And an ordinary LP relaxation.
+    eng._configure(cons, bounds, set())
+    assert eng._solve("off") == MS.kOptimal
