@@ -107,3 +107,35 @@ def test_encoding_over_the_size_cap_gets_no_candidate(monkeypatch):
     monkeypatch.setattr(_iis_milp, "_SAT_MAX_CLAUSES", 2)
     res = milp_iis(_pigeons_card(4, 3))
     assert res.sat_rows is None and res.complete
+
+
+def test_candidate_stage_stays_inside_its_budget_on_pb_rows():
+    """Large-coefficient equality rows (Cornuejols-Dawande market split) make
+    every CDCL conflict expensive: the stage must still stop near its budget,
+    not one coarse conflict slice later (it overran 0.2 s by 0.6 s)."""
+    import time
+
+    rng = np.random.default_rng(7)
+    A = rng.integers(0, 100, size=(4, 36))
+    rhs = A.sum(axis=1) // 2
+    m = dm.Model("ms")
+    x = m.binary("x", shape=(36,))
+    for i in range(4):
+        m.subject_to(sum(float(A[i, j]) * x[j] for j in range(36)) == float(rhs[i]))
+    m.minimize(0 * x[0])
+    over = []
+    real = _iis_milp._binary_core
+
+    def timed(*a, **k):
+        out = real(*a, **k)
+        over.append(time.perf_counter() - a[-1])
+        return out
+
+    _iis_milp._binary_core = timed
+    try:
+        with pytest.raises((TimeoutError, ValueError)):
+            milp_iis(m, total_time_limit=2.0)
+    finally:
+        _iis_milp._binary_core = real
+    assert len(over) == 1
+    assert over[0] < 0.25, over
