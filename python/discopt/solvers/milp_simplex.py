@@ -1006,6 +1006,38 @@ def _marshal_col_bounds(
     return lb, ub
 
 
+def _open_default_box(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Open every default-box side for the Rust MILP driver.
+
+    ``DEFAULT_VARIABLE_BOUND = 9.999e19`` (``constants.py``) is the box of a column
+    declared with no bound and means "no bound", but it sits just *below* the Rust
+    LP layer's ``1e20`` infinity sentinel, so the driver read it as a FINITE bound.
+    Bound-derived machinery (presolve, propagation, GMI/c-MIR cuts built from
+    complemented bounds) then worked with ~1e20-magnitude coefficients, and the
+    resulting invalid cuts produced a **false OPTIMAL**: on the clay0203 GDP master
+    (6 structural columns at the default box) ``solve_milp`` returned OPTIMAL
+    41907.46 with bound -752904 against a true optimum of 41420.272 (HiGHS with the
+    box opened, and SCIP, agree). With these sides mapped to ``+-_INF`` every
+    driver configuration probed returns 41420.272 with a matching bound.
+
+    Opening a side only relaxes the problem, so it cannot cut off a feasible point.
+    An explicit ``+-inf`` and every bound below the default box are untouched (see
+    :func:`_marshal_col_bounds` on why ``inf`` itself is not clamped here). Scoped to
+    the MILP std form only: the HiGHS wrappers share :func:`_marshal_col_bounds` and
+    handle the default box themselves (``milp_highs._default_box_opened``). Same
+    defect class as the simplex's large-finite-bound failure (#2125) and the GDP
+    LP-box fix (#2126).
+    """
+    from discopt.constants import DEFAULT_VARIABLE_BOUND
+
+    lo = (lb <= -DEFAULT_VARIABLE_BOUND) & np.isfinite(lb)
+    hi = (ub >= DEFAULT_VARIABLE_BOUND) & np.isfinite(ub)
+    if np.any(lo) or np.any(hi):
+        lb = np.where(lo, -_INF, lb)
+        ub = np.where(hi, _INF, ub)
+    return lb, ub
+
+
 def _marshal_std_form(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
@@ -1099,7 +1131,7 @@ def _marshal_std_form(
     csc_row_idx = np.ascontiguousarray(a_std_sp.indices, dtype=np.int64)
     csc_vals = np.ascontiguousarray(a_std_sp.data, dtype=np.float64)
 
-    lb, ub = _marshal_col_bounds(bounds, n)
+    lb, ub = _open_default_box(*_marshal_col_bounds(bounds, n))
     lb_std = np.concatenate([lb, block.lb])
     ub_std = np.concatenate([ub, block.ub])
     c_std = np.concatenate([c_arr, np.zeros(block.n_logical)])

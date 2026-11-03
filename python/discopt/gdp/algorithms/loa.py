@@ -397,6 +397,26 @@ class LOA(GDPAlgorithm):
             incumbent=self.ub if self.incumbent is not None else None,
         )
         self.n_master += 1
+        if r.x is None and r.status == "unbounded":
+            # The OA master runs off along a column with no bound (the default box
+            # is read as "no bound" since the MILP std form opened it). That proves
+            # nothing about the GDP: its cuts just do not bound that direction yet.
+            # Re-solve as a feasibility master (zero objective) so the iteration
+            # still proposes a configuration whose subproblem adds the missing cuts.
+            # The re-solve's bound is ``None`` (``objective_override``), so no
+            # bound is published from it.
+            logger.info(
+                "%s iter %d: master unbounded; proposing a configuration from the "
+                "feasibility master instead",
+                self._log_name(),
+                k,
+            )
+            r = self.master.solve(
+                self.deadline.sub_limit(),
+                self.gap_tolerance,
+                objective_override=np.zeros(self.master.n_vars),
+            )
+            self.n_master += 1
         if r.x is None:
             self._master_empty(r)
             logger.info(
