@@ -2,7 +2,8 @@
 
 `web/` is a single page that runs discopt entirely client-side: [Pyodide] supplies
 CPython compiled to WebAssembly, discopt is installed into it as an emscripten wheel,
-and a dropdown offers one model of each problem class — LP, MILP, QP, MIQP, NLP, MINLP.
+and a dropdown offers one model of each problem class — LP, MILP, QP, MIQP, NLP, MINLP —
+plus one infeasible model, whose IIS the page draws as a table and a graph.
 Nothing is uploaded and there is no server component; the solve happens in the tab.
 
 This mirrors POUNCE's `crates/pounce-wasm/web-python/` page, deliberately: same Pyodide
@@ -23,10 +24,12 @@ export. The Python layer has to come along, which means CPython has to come alon
 
 | Path | What it is |
 | --- | --- |
-| `web/index.html` | The page: masthead, dropdown, editor, console. |
+| `web/index.html` | The page: masthead, dropdown, editor, console, IIS view. |
 | `web/app.js` | Page logic — dropdown, Run/Cancel, theme, console. |
 | `web/worker.js` | Pyodide bootstrap, the wheel install, and running a script. |
-| `web/examples.js` | The six example models, one per problem class. |
+| `web/examples.js` | The six example models, one per problem class, and the infeasible one. |
+| `web/iis_view.py` | Turns an `IISResult` into the dict the IIS view draws (runs in Pyodide). |
+| `web/iis_render.js` | Draws that dict: summary, table, constraint–variable graph. |
 | `web/vendor/` | CodeMirror 6, bundled and committed (see below). |
 | `web/wheels/` | The two emscripten wheels and their manifests, **committed**. |
 
@@ -49,14 +52,63 @@ http://localhost:8000/?discopt=<url>&pounce=<url>&pyodide=<url>
 
 ## The examples are executed, not just shipped
 
-`web/examples.js` holds the six models as strings, and `python/tests/test_wasm_examples.py`
+`web/examples.js` holds the seven models as strings, and `python/tests/test_wasm_examples.py`
 parses that file and **runs every one of them** against the local discopt. An example
 that raises is worse than no example, and the failure would otherwise only ever appear
 in somebody's browser. The test lives under `python/tests/` rather than next to the page
 because that is the only tree `pyproject.toml` lists in `testpaths`.
 
-The six models are the same six as `docs/notebooks/problem_classes.ipynb`, so the page
-and the notebook cannot drift into disagreeing about what discopt does with each class.
+The six problem-class models are the same six as `docs/notebooks/problem_classes.ipynb`,
+so the page and the notebook cannot drift into disagreeing about what discopt does with
+each class. The seventh, `IIS`, is infeasible on purpose and is expected to print
+`infeasible`.
+
+## The IIS view
+
+When a script leaves an `IISResult` in a top-level variable (`iis = m.compute_iis()`),
+the page shows it below the output, under "Why is it infeasible?":
+
+- a **summary**: how many members (constraints and bounds) over how many variables, the
+  model's size, and whether the IIS is *proven* minimal — `compute_iis` keeps a member
+  when a feasibility solve is inconclusive, and the page says so instead of implying
+  minimality;
+- a **table**: each member, its kind, the variable *elements* it touches (`a[1]`, not
+  `a`), and a button that selects the line declaring it in the editor. Constraints are
+  found by their literal `name="..."`, bounds by the `m.continuous("x", ...)` call; a
+  name built at run time (an f-string) is reported as such rather than guessed;
+- a **constraint–variable graph**: members on the left, variables on the right, an edge
+  for each variable a member touches. Constraints outside the IIS that share a variable
+  with it are drawn dashed and muted below a "not in the IIS" heading (at most 12, the
+  rest counted), to show where the conflict sits in the model. They are not part of it.
+
+The table is the primary view and holds everything the graph shows; the graph is an
+image to assistive technology, labelled to point at the table. Focusing a row's line
+button, or pointing at a row or node, highlights that member and its links. Membership
+is never shown by colour alone (solid heavy border vs. dashed, plus separate headings).
+
+The script stays plain discopt: nothing page-specific is imported, so it runs unchanged
+outside the browser. After the script finishes, `worker.js` calls
+`discopt_iis_view.collect_json` on the script's namespace. Each run gets a **fresh
+namespace**, as `python script.py` would, so an IIS from an earlier run is never redrawn.
+`iis_view.py` is served beside the page and written into Pyodide's file system rather
+than shipped in the wheel, so the view works with the committed wheel. It depends on
+`discopt.infeasibility.IISResult`, `discopt.modeling.core` and
+`discopt.serialize._children`, a private helper, which is why
+`python/tests/test_wasm_iis_view.py` imports it from its path and checks its output
+against the `IISResult` it describes.
+
+### Testing it
+
+| Check | What it covers |
+| --- | --- |
+| `pytest python/tests/test_wasm_iis_view.py` | The dict, against the `IISResult`: members, element-level variables, whole-vector uses, context and its cap, model matching. |
+| `node examples_in_pyodide.mjs` | The same helper under real Pyodide on the IIS example, and that no feasible example yields one. |
+| `npm run test:render` | `iis_render.js`'s pure functions (line lookup, summary) under `node --test`. |
+| `npm run test:page` | The page in headless Chromium: the run, table and graph agreeing, highlighting, the editor link, axe (WCAG 2.2 AA) in both themes, no sideways scroll at 320 px, a later run clearing the view. |
+
+`test:page` serves the page and the npm copy of Pyodide itself, so it needs no server.
+The pytest module is marked `smoke` and runs in the ordinary Python lanes; the other three
+run in the `Browser page` workflow (`.github/workflows/wasm.yml`).
 
 ## CodeMirror is vendored, not fetched
 

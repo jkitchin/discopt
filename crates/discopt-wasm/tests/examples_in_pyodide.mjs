@@ -6,9 +6,11 @@
 // would get them. What it does not cover is the DOM: CodeMirror, the worker
 // plumbing and the theme are still unverified by this.
 //
-// Every example is run and counted; the script exits non-zero if fewer than six
-// ran or if any failed, so a harness that silently did nothing cannot report a
-// pass.
+// Every example is run and counted; the script exits non-zero if fewer than
+// seven ran or if any failed, so a harness that silently did nothing cannot
+// report a pass. The IIS example's result is also put through the page's
+// iis_view.py, loaded the way worker.js loads it, so the IIS view's data is
+// checked under real Pyodide and not only under desktop CPython.
 import { loadPyodide } from 'pyodide';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +36,10 @@ const start = js.indexOf('[', js.indexOf('export const EXAMPLES'));
 let body = js.slice(start, js.lastIndexOf(']') + 1);
 body = body.replace(/^(\s*)(id|label|title|code):/gm, '$1"$2":').replace(/,(\s*[}\]])/g, '$1');
 const examples = JSON.parse(body);
-if (examples.length !== 6) fail(`parsed ${examples.length} examples, expected 6`);
+const EXPECTED = 7;
+if (examples.length !== EXPECTED) fail(`parsed ${examples.length} examples, expected ${EXPECTED}`);
+// Every example prints "optimal" except the infeasible one.
+const STATUS = { IIS: 'infeasible' };
 
 // The worker resolves wheels through a manifest; do the same, including its
 // Pyodide-version check, so a mismatched manifest fails here too.
@@ -97,6 +102,20 @@ if _leaked:
 print("discopt imported; no jax/jaxlib/highspy in sys.modules")
 `);
 
+// The IIS view's helper, the way worker.js installs it: fetched over HTTP from
+// the page's own directory, written into the file system, imported.
+{
+  const res = await fetch(`${BASE}/iis_view.py`);
+  if (!res.ok) fail(`no iis_view.py: HTTP ${res.status}`);
+  pyodide.FS.mkdirTree('/discopt_page');
+  pyodide.FS.writeFile('/discopt_page/discopt_iis_view.py', await res.text());
+  await pyodide.runPythonAsync(
+    'import sys\nsys.path.insert(0, "/discopt_page")\nimport discopt_iis_view\n',
+  );
+}
+const collect = pyodide.runPython('discopt_iis_view.collect_json');
+let iisChecked = 0;
+
 let ran = 0;
 const failures = [];
 for (const ex of examples) {
@@ -109,17 +128,36 @@ _buf = io.StringIO()
 _stdout = sys.stdout
 sys.stdout = _buf
 `);
-    await pyodide.runPythonAsync(ex.code);
+    // A fresh namespace per example, as worker.js gives each run.
+    const ns = pyodide.globals.get('dict')();
+    ns.set('__name__', '__main__');
+    await pyodide.runPythonAsync(ex.code, { globals: ns });
     const printed = pyodide.runPython(`
 sys.stdout = _stdout
 _buf.getvalue()
 `);
     const ms = Date.now() - started;
-    if (!printed.toLowerCase().includes('optimal')) {
-      failures.push([ex.id, 'no optimal status']);
-      console.log(`  ${ex.id.padEnd(6)} FAIL  printed no optimal status`);
+    const status = STATUS[ex.id] || 'optimal';
+    const items = JSON.parse(collect(ns));
+    ns.destroy();
+    let iisNote = '';
+    if (!printed.toLowerCase().includes(status)) {
+      failures.push([ex.id, `no ${status} status`]);
+      console.log(`  ${ex.id.padEnd(6)} FAIL  printed no ${status} status`);
+    } else if (ex.id === 'IIS' && !(items.length === 1 && items[0].members.length > 0)) {
+      failures.push([ex.id, `collected ${items.length} IIS payloads`]);
+      console.log(`  ${ex.id.padEnd(6)} FAIL  collected ${JSON.stringify(items).slice(0, 200)}`);
+    } else if (ex.id !== 'IIS' && items.length) {
+      failures.push([ex.id, 'drew an IIS for a feasible model']);
+      console.log(`  ${ex.id.padEnd(6)} FAIL  drew an IIS for a feasible model`);
     } else {
-      console.log(`  ${ex.id.padEnd(6)} ok    ${ms} ms`);
+      if (ex.id === 'IIS') {
+        iisChecked += 1;
+        const p = items[0];
+        iisNote = `  IIS: ${p.members.map((m) => m.name).join(', ')} | ` +
+          `${p.variables.length} vars, ${p.context.length} context`;
+      }
+      console.log(`  ${ex.id.padEnd(6)} ok    ${ms} ms${iisNote}`);
     }
   } catch (err) {
     pyodide.runPython('import sys; sys.stdout = _stdout');
@@ -129,6 +167,7 @@ _buf.getvalue()
   }
 }
 
-console.log(`\nEXAMPLES_RUN=${ran} FAILURES=${failures.length}`);
-if (ran !== 6) fail('probe did not run six examples');
+console.log(`\nEXAMPLES_RUN=${ran} IIS_CHECKED=${iisChecked} FAILURES=${failures.length}`);
+if (ran !== EXPECTED) fail(`probe ran ${ran} examples, expected ${EXPECTED}`);
+if (!failures.length && iisChecked !== 1) fail('the IIS payload was never checked');
 process.exit(failures.length ? 1 : 0);

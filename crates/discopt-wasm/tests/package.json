@@ -1,12 +1,18 @@
 {
   "name": "discopt-wasm-tests",
   "private": true,
-  "description": "End-to-end check that the staged emscripten wheels actually solve under Pyodide.",
+  "description": "End-to-end checks of the browser page: the staged emscripten wheels under Pyodide, and the page itself in Chromium.",
   "type": "module",
   "scripts": {
-    "test": "node examples_in_pyodide.mjs"
+    "test": "node examples_in_pyodide.mjs",
+    "test:render": "node --test iis_render.test.mjs",
+    "test:page": "node iis_page.mjs"
   },
   "dependencies": {
     "pyodide": "0.28.3"
+  },
+  "devDependencies": {
+    "axe-core": "4.10.3",
+    "playwright": "1.63.0"
   }
 }
