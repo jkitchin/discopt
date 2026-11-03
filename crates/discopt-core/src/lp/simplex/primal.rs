@@ -542,10 +542,20 @@ fn audit_feasibility(
     let mut ax = vec![0.0f64; m];
     let mut comp = vec![0.0f64; m];
     let mut grain = vec![f64::INFINITY; m];
+    // #2125: per row, the coarsest-grained SINGLETON column (one nonzero, so it is
+    // in this row only) — `(j, A_ij, |A_ij|·ulp(x_j))`. See `singleton_absorbs`.
+    let mut single: Vec<Option<(usize, f64, f64)>> = vec![None; m];
     for j in 0..n {
         let xj = x[j];
         let gj = 2.0 * f64::EPSILON * xj.abs();
         let (rows, vals) = cols.col(j);
+        if rows.len() == 1 && vals[0] != 0.0 {
+            let sg = vals[0].abs() * gj;
+            let i = rows[0];
+            if single[i].is_none_or(|(_, _, g)| sg > g) {
+                single[i] = Some((j, vals[0], sg));
+            }
+        }
         for (k, &i) in rows.iter().enumerate() {
             let aij = vals[k];
             let g = aij.abs() * gj;
@@ -569,11 +579,57 @@ fn audit_feasibility(
     }
     for i in 0..m {
         let activity = ax[i] + comp[i];
-        if (activity - b[i]).abs() > FEAS * (1.0 + b[i].abs()) + row_residual_floor(grain[i]) {
+        let resid = activity - b[i];
+        if resid.abs() > FEAS * (1.0 + b[i].abs()) + row_residual_floor(grain[i]) {
+            if single[i].is_some_and(|(j, a, sg)| singleton_absorbs(resid, a, sg, x[j], l[j], u[j]))
+            {
+                crate::profile::incr(crate::profile::Ctr::AuditRowsSingletonAbsorbed);
+                continue;
+            }
             return Feasibility::Rows;
         }
     }
     Feasibility::Ok
+}
+
+/// Whether a row's residual `resid` is absorbed by one of its **singleton**
+/// columns `j` (`A_ij = a`, at `x_j`, box `[l_j, u_j]`, grain `sg = |a|·ulp(x_j)`):
+/// the residual is within that column's own representability, and moving the
+/// column by `−resid / a` to zero it keeps it inside its box (#2125).
+///
+/// **Why the row's minimum grain is not enough.** [`row_residual_floor`] asks
+/// whether *some* column in the row can resolve the residual on the `f64` grid,
+/// and takes the finest. That is right for a column that lives in this row alone,
+/// and wrong for one that does not: moving a column shared with other rows breaks
+/// those rows. The case it misses is the commonest one in the standard form. A
+/// `≤` row `a·x_k + Σ (moderate) + s = b` whose structural `x_k` sits at a large
+/// bound (`1e11` and up, measured) puts its slack `s` basic at `~|a·x_k|`, and the
+/// exact vertex value of `s` is not an `f64`: its nearest neighbour leaves a
+/// residual of up to `ulp(s)/2`, which passes `1e-6·(1 + |b|)` once
+/// `|s| > ~1e10`. The moderate columns set the row's minimum grain to `~1e-15`, so
+/// the floor forgave nothing and a sound optimum came back `Numerical` (#2125:
+/// ERROR from `~1e11` on a multi-row LP, where the 2-column #937 fixture had every
+/// column huge and so a large minimum grain).
+///
+/// **Why this is sound.** The slack absorbs the residual exactly in real
+/// arithmetic, touches no other row (it has no other nonzero), and stays in its
+/// box (checked, under the audit's own bound tolerance). So the reported point is
+/// within `|resid / a| ≤ 4ε·|x_j|` — a few ulps, in ONE coordinate — of a point
+/// satisfying every row the audit checks. That is the representability argument
+/// #937's floor already makes, applied to the column that can actually move.
+///
+/// **What it still refuses.** It never forgives more than two ulps of the
+/// absorbing column, so drift (a relative error far above `ε`) is rejected as
+/// before. And #1335's infeasible witness is untouched: its slacks sit at `0`,
+/// whose grain is `0`, so nothing is forgiven there.
+#[inline]
+fn singleton_absorbs(resid: f64, a: f64, sg: f64, xj: f64, lj: f64, uj: f64) -> bool {
+    if resid.abs() > row_residual_floor(sg) {
+        return false;
+    }
+    let moved = xj - resid / a;
+    (lj <= -INF || moved >= lj - AUDIT_FEAS * (1.0 + lj.abs().min(INF)))
+        && (uj >= INF || moved <= uj + AUDIT_FEAS * (1.0 + uj.abs().min(INF)))
 }
 
 /// Floor on a row residual that no representable `x` can beat: the finest step
@@ -4940,6 +4996,63 @@ mod tests {
         checked += 1;
 
         assert_eq!(checked, 6, "floor probe must have run every property");
+    }
+
+    /// #2125: a row slack basic at `~2u` absorbs the residual its own rounding
+    /// leaves, even when the row also holds moderate columns.
+    ///
+    /// Row 0 `−2·x₀ + x₁ + s = 0.5` with `x₀ = u` (a structural at its huge bound),
+    /// `x₁ = 0.3` (moderate, shared with row 1 `x₁ + t = 1`, so it may not move)
+    /// and the slack `s = fl(2u + 0.2)`. The vertex is exact in the reals; in
+    /// `f64` row 0's residual is `s`'s rounding, up to `ulp(2u)/2`, which exceeds
+    /// `1e-6·1.5` from `u ≈ 1e11` on. The #1335 minimum grain is set by `x₁`
+    /// (`~1e-16`), so pre-fix the audit returned `Rows` — `Numerical` on a sound
+    /// optimum. Pinned across `[1e10, 1e19]`: the rounded vertex certifies, and the
+    /// same point with `s` a thousand ulps off (drift, not representability) is
+    /// still refused.
+    #[test]
+    fn slack_absorbs_its_own_rounding_on_a_mixed_row_2125() {
+        // Columns: x0, x1, s, t. Rows: 0 = {x0:-2, x1:1, s:1}, 1 = {x1:1, t:1}.
+        let cols = SparseCols::from_csc(
+            vec![0, 1, 3, 4, 5],
+            vec![0, 0, 1, 0, 1],
+            vec![-2.0, 1.0, 1.0, 1.0, 1.0],
+        );
+        let b = [0.5, 1.0];
+        let l = [-5.0, -5.0, 0.0, 0.0];
+        let mut unforgiven_pre_fix = 0usize;
+        let mut checked = 0usize;
+        for u in [1e10, 1e11, 1e13, 1e15, 1e16, 1e17, 1e19] {
+            let s = 2.0 * u + 0.2; // rounded to the nearest f64
+            let x = [u, 0.3, s, 0.7];
+            let ub = [u, 5.0, INF, INF];
+            // Exact (Sterbenz): the residual the fixture really leaves. Count the
+            // magnitudes where it beats both the absolute term and the row's
+            // minimum-grain floor, i.e. where the pre-fix audit refused the vertex.
+            let resid = (s - 2.0 * u) - 0.2;
+            if resid.abs() > 1e-6 * 1.5 + row_residual_floor(2.0 * f64::EPSILON * 0.3) {
+                unforgiven_pre_fix += 1;
+            }
+            assert_eq!(
+                audit_feasibility(&cols, 2, 4, &b, &l, &ub, &x),
+                Feasibility::Ok,
+                "u={u:e}: the rounded vertex must certify (residual {resid:e})"
+            );
+            checked += 1;
+            let drifted = [u, 0.3, s + 1000.0 * 2.0 * f64::EPSILON * s, 0.7];
+            assert_eq!(
+                audit_feasibility(&cols, 2, 4, &b, &l, &ub, &drifted),
+                Feasibility::Rows,
+                "u={u:e}: a thousand ulps of drift must still be refused"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 14, "probe must have run every point");
+        // The fixture exercises the defect, not just the happy path.
+        assert!(
+            unforgiven_pre_fix >= 5,
+            "only {unforgiven_pre_fix} points needed the fix"
+        );
     }
 
     /// #1953: an exact sub-noise reduced cost on a wide box is a real descent.

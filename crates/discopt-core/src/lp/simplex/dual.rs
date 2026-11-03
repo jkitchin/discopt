@@ -367,6 +367,213 @@ pub fn solve_lp_warm_csc(
     start: Option<&Basis>,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    if start.is_none() {
+        if let Some(sol) = solve_huge_box_relaxed(&sp, m, n, c, l, u, b, opts) {
+            return sol;
+        }
+    }
+    solve_lp_warm_csc_hardened(sp, m, n, c, l, u, b, start, opts)
+}
+
+/// A finite bound at or past this magnitude is a **huge** bound (#2125).
+///
+/// Derived, not tuned: the simplex parks a nonbasic column at its bound `v`, so the
+/// residual `b − Σ A_j x_j` it solves against carries `A_ij·v` terms whose own
+/// rounding is `~ε·|v|`. Once that passes the final audit's absolute `1e-6`
+/// ([`AUDIT_FEAS`](super::primal::AUDIT_FEAS)), a single cancellation of such a term
+/// can fail the audit by itself: `1e-6 / ε ≈ 4.5e9`, rounded up to a decade.
+const HUGE_BOUND: f64 = 1e10;
+
+/// Most relax-and-verify rounds [`solve_huge_box_relaxed`] runs before handing the
+/// LP to the ordinary solve. Each round restores at least one huge side, so the
+/// loop terminates anyway; this caps the cost of an LP whose huge bounds are active
+/// one at a time.
+const HUGE_BOX_ROUNDS: usize = 4;
+
+/// Cold-solve an LP with **huge-but-finite** bounds as a relaxation that drops
+/// them, keeping only an answer that provably holds for the original box (#2125).
+///
+/// **The defect.** A cold solve starts every column nonbasic at a bound — at
+/// `l_j = −1e17` for a column boxed `[−1e17, 5]`. Phase 1 then works on residuals
+/// and basic values of magnitude `~1e17`, and the column's eventual move to a
+/// moderate value cancels them, leaving absolute error `~ε·1e17 ≈ 10` in every
+/// basic it touched. The basis handed to phase 2 is off its box by that much, and
+/// the audit (correctly) refuses: `Numerical`, on bounded feasible LPs HiGHS
+/// solves, from `~1e16` on a 200×260 GDP M-value LP and on seeded random LPs alike.
+/// The bound was never active; the same LP with that side open (`±inf`) solves.
+///
+/// **The fix, and why it is sound.** Drop every huge side to the `INF` sentinel and
+/// solve that relaxation `R`. The original feasible set is a subset of `R`'s, so:
+///
+/// * `R` **infeasible** ⇒ the original is infeasible, and `R`'s Farkas ray proves
+///   it for the original too (its box-maximum of `(Aᵀy)ᵀz` over the *smaller*
+///   original box can only be lower).
+/// * `R` **optimal at a point inside the original box** ⇒ that point is optimal for
+///   the original: feasible for it, and no feasible point of it beats `R`'s
+///   optimum. The duals carry over (a dropped side contributes no reduced-cost
+///   sign condition that the original's box would not also satisfy). Inside the
+///   box is tested EXACTLY (`l_j ≤ x_j ≤ u_j`, no tolerance) on every relaxed
+///   side, and every column whose BOTH sides were dropped must be basic: a free
+///   nonbasic sits at `0`, which is not a vertex of the original and would be
+///   exported as "at lower bound" in the basis.
+///
+/// Anything else (the point leaves the box on a relaxed side, `R` is unbounded
+/// along one, `R` breaks down) restores the offending sides — those the point
+/// violates, or along which the unbounded ray moves — and re-solves. When no
+/// relaxed side remains the LP being solved IS the original, and its answer is
+/// returned as is. When a round restores nothing, or the round cap is hit, the
+/// original LP is solved unchanged (with the same dual cleanup). So this can change how
+/// an LP with a huge bound is solved, never what is certified: every returned
+/// verdict is either the original LP's own or one that implies it.
+///
+/// Every solve here goes through [`cold_with_dual_cleanup`]. LPs with no finite
+/// side at or past [`HUGE_BOUND`] return `None` at once, without a clone. That is
+/// most, not all, of the in-repo corpus: measured on the 74 `minlplib_nl`
+/// instances at a 20 s budget, 6 reach this path (`4stufen`, `beuster`,
+/// `ex14_1_7`, `nvs05`, `nvs06`, `nvs21`; 76 armed solves, 46 decided here, 30
+/// handed to the original), all through relaxation-lifted columns — none of them
+/// declares a bound that large itself.
+#[allow(clippy::too_many_arguments)]
+fn solve_huge_box_relaxed(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    let huge = |v: f64| v.abs() >= HUGE_BOUND && v.abs() < INF;
+    // Sides currently dropped.
+    let mut lo_open: Vec<bool> = l.iter().map(|&v| huge(v)).collect();
+    let mut hi_open: Vec<bool> = u.iter().map(|&v| huge(v)).collect();
+    if !lo_open.iter().chain(hi_open.iter()).any(|&o| o) {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxArmed);
+    for _ in 0..HUGE_BOX_ROUNDS {
+        let lr: Vec<f64> = (0..n)
+            .map(|j| if lo_open[j] { -INF } else { l[j] })
+            .collect();
+        let ur: Vec<f64> = (0..n)
+            .map(|j| if hi_open[j] { INF } else { u[j] })
+            .collect();
+        let sol = cold_with_dual_cleanup(sp, m, n, c, &lr, &ur, b, opts);
+        let mut restored = false;
+        match sol.status {
+            LpStatus::Infeasible => {
+                crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxDecided);
+                return Some(sol);
+            }
+            LpStatus::Optimal if sol.x.len() == n => {
+                for j in 0..n {
+                    let xj = sol.x[j];
+                    if lo_open[j] && (xj.is_nan() || xj < l[j]) {
+                        lo_open[j] = false;
+                        restored = true;
+                    }
+                    if hi_open[j] && (xj.is_nan() || xj > u[j]) {
+                        hi_open[j] = false;
+                        restored = true;
+                    }
+                    // A column the relaxation made FREE (a dropped side, the other
+                    // dropped or already open) that ends nonbasic sits at 0: not a
+                    // vertex of the original box. Restore the nearer finite side.
+                    let made_free = (lo_open[j] || hi_open[j]) && lr[j] <= -INF && ur[j] >= INF;
+                    if made_free && sol.basis.col_status.get(j) != Some(&BASIC) {
+                        if lo_open[j] && (!hi_open[j] || l[j].abs() <= u[j].abs()) {
+                            lo_open[j] = false;
+                        } else {
+                            hi_open[j] = false;
+                        }
+                        restored = true;
+                    }
+                }
+                if !restored {
+                    crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxDecided);
+                    return Some(sol);
+                }
+            }
+            LpStatus::Unbounded if sol.ray.len() == n => {
+                for j in 0..n {
+                    if hi_open[j] && sol.ray[j] > 0.0 {
+                        hi_open[j] = false;
+                        restored = true;
+                    }
+                    if lo_open[j] && sol.ray[j] < 0.0 {
+                        lo_open[j] = false;
+                        restored = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !restored {
+            break;
+        }
+        if !lo_open.iter().chain(hi_open.iter()).any(|&o| o) {
+            // Every huge side is back: the next solve is the original LP.
+            break;
+        }
+    }
+    crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxFellBack);
+    Some(cold_with_dual_cleanup(sp, m, n, c, l, u, b, opts))
+}
+
+/// Cold-solve, and when that ends `Numerical` with a full basis, re-optimize that
+/// basis with the warm DUAL simplex (#2125). Used only on LPs carrying a huge side.
+///
+/// A primal phase 2 that pivots on `x_B` drifted by `~ε·|huge|` can stop at a basis
+/// whose reduced costs are optimal but whose *fresh* `x_B` is off its box — the
+/// final audit rightly refuses it (measured on the #2125 fixture at `u = 1e17`: a
+/// `[−5, 5]` basic at `6.07`, the same after a refined re-solve, so the basis, not
+/// the last solve, is infeasible). Such a basis is dual feasible, which is exactly
+/// the dual simplex's starting condition, and the warm start re-derives `x_B` from
+/// scratch instead of inheriting the drift. The warm solve runs its own audit, so
+/// it can only decide the LP or leave the `Numerical` standing; it never certifies
+/// a point the cold solve's audit refused.
+#[allow(clippy::too_many_arguments)]
+fn cold_with_dual_cleanup(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    let sol = solve_lp_warm_csc_hardened(sp.clone(), m, n, c, l, u, b, None, opts);
+    if sol.status != LpStatus::Numerical || sol.basis.basic_vars.len() != m {
+        return sol;
+    }
+    crate::profile::incr(crate::profile::Ctr::HugeBoxDualCleanupAttempts);
+    let warm = solve_lp_warm_csc_hardened(sp.clone(), m, n, c, l, u, b, Some(&sol.basis), opts);
+    if matches!(
+        warm.status,
+        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+    ) {
+        crate::profile::incr(crate::profile::Ctr::HugeBoxDualCleanupRescues);
+        return warm;
+    }
+    sol
+}
+
+/// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the #671
+/// hardened retry around [`solve_lp_warm_csc_inner`].
+#[allow(clippy::too_many_arguments)]
+fn solve_lp_warm_csc_hardened(
+    sp: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
     // #671 factorization hardening (default OFF): if the solve breaks down
     // numerically — a near-singular basis feral's strict LU cannot factorize (the
     // hda-class ill-conditioned relaxations) — retry once with `PerturbToEps` +

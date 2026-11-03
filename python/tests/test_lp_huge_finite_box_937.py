@@ -10,7 +10,14 @@ the *default* ``Model.continuous`` upper bound, so this was the default path.
 
 Three things are pinned here:
 
-1. The simplex certifies the whole band (not one point), at the exact corner.
+1. The simplex certifies the whole band (not one point), at the exact corner,
+   **on this 2-column fixture**, where every column sits at the huge bound. That
+   claim does not extend to multi-row LPs by itself: #2125 measured ERROR from
+   ~1e11 on a 72-row LP, and its fixes (a singleton-absorption row audit and a
+   relax-and-verify cold solve) are pinned in
+   ``test_2125_huge_bound_multirow_band.py``. There, a huge bound that is
+   *inactive* at the optimum certifies across the band; one that is *active* at
+   ``u >= 1e16`` still returns ERROR on some instances (never a wrong answer).
 2. The #850 deferral is a preference, not a destruction: when no engine that
    honors the declared box can certify, the deferred ``unbounded`` is returned
    rather than ``error``; and the *simplex's own* ``UNBOUNDED`` — a verdict

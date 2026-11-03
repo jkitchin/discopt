@@ -601,6 +601,19 @@ counters!(
     // let through is exactly what the first counter counts (CLAUDE.md §6).
     ScaledOptimalOriginalAuditFail,
     ScaledOptimalUnscaledRetryDecided,
+    // #2125: cold CSC solves carrying a finite bound >= 1e10 that took the
+    // huge-box relaxation, how many it decided, and how many fell back to the
+    // ordinary solve of the original LP. Armed = Decided + FellBack (CLAUDE.md §6).
+    HugeBoxRelaxArmed,
+    HugeBoxRelaxDecided,
+    HugeBoxRelaxFellBack,
+    // #2125: on those LPs, cold `Numerical` exits re-optimized warm by the dual
+    // simplex from their own (dual-feasible) basis, and how many that decided.
+    HugeBoxDualCleanupAttempts,
+    HugeBoxDualCleanupRescues,
+    // #2125: `Rows` audit residuals forgiven because a singleton column (a row
+    // slack) absorbs them within its own representability (`singleton_absorbs`).
+    AuditRowsSingletonAbsorbed,
     // #1945: integral MILP-driver vertices (node LP or dive) whose original rows
     // verify but whose original columns miss their bounds, refused as incumbents
     // by `incumbent_verified` (defense in depth behind `ScaledProblem::verify`).
