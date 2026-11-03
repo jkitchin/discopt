@@ -3244,7 +3244,24 @@ def _reformulate_disjunction_hull(
                     origin_free = True
                 else:
                     origin_free = False
-                if not origin_free:
+                # DISCOPT_HULL_PLAIN_EQUALITY (#1917): a nonlinear equality is never
+                # convex, so the perspective is not its hull. With g(0) = 0 the plain
+                # disaggregated row g(v_k) = 0 is exact at y_k = 1 (v_k = x) and at
+                # y_k = 0 (copies pinned to 0, locals 0, g(0) = 0) and has no 1/yhat.
+                plain = (
+                    not origin_free
+                    and g0_live is None
+                    and _hull_plain_equality_enabled()
+                    and con.sense == "=="
+                    and np.size(con.rhs) == 1
+                    and g0 == 0.0
+                )
+                if plain:
+                    hull_body = _substitute_vars(
+                        con.body, {vname: disagg[k][vname] for vname in all_vars}
+                    )
+                    rhs_expr = _wrap(con.rhs)
+                elif not origin_free:
                     y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
                     persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
                     persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
@@ -3518,6 +3535,15 @@ def _origin_free_hull_row(
         )
         cache[vname] = t
     return g_t * y_k, _wrap(con.rhs) * y_k
+
+
+def _hull_plain_equality_enabled() -> bool:
+    """Is the plain disaggregated hull of a nonlinear ``g(0) = 0`` equality on?
+    (``DISCOPT_HULL_PLAIN_EQUALITY``, default OFF, #1917; see
+    ``SolverTuning.hull_plain_equality`` for the exactness argument.)"""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().hull_plain_equality)
 
 
 def _hull_conic_quadratic_enabled() -> bool:
