@@ -149,3 +149,9 @@ def test_unguarded_script_runs_once(tmp_path):
     assert p.returncode == 0, p.stderr
     assert "SIZE 2" in p.stdout
     assert marker.read_text() == "x"
+
+
+def test_all_members_timing_out_reports_each_members_reason(monkeypatch):
+    m = _two_iis_model()
+    with pytest.raises(TimeoutError, match=r"\(ICB: .+; CIB: .+\)"):
+        compute_iis(m, include_integrality=True, portfolio=("ICB", "CIB"), total_time_limit=1e-3)
