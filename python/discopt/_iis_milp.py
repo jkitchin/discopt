@@ -146,6 +146,11 @@ class _Engine:
         # (two solves), sized from recently observed solve times.
         self.reserve_confirm = reserve_confirm
         self._recent: deque[float] = deque(maxlen=20)  # wall seconds of recent solves
+        # The last set a presolve-on solve proved infeasible (cons, bounds, ints).
+        # The filter's current set is that set whenever the last batch it could
+        # not drop was put back, so its final confirmation needs only the
+        # presolve-free route (:meth:`proven_on`).
+        self._proven_on: Optional[tuple[frozenset, frozenset, frozenset]] = None
         self._stop = math.inf
         self.n_interrupted = 0
         self.n_repairs = 0
@@ -244,12 +249,21 @@ class _Engine:
     def _solve(self, presolve: str, stop_at: Optional[float] = None):
         """Solve the configured probe from scratch; returns the HiGHS model status.
 
-        The run's budget is the per-probe limit, cut to ``self.deadline`` and
-        ``stop_at``; raises :class:`_OutOfTime` when that leaves nothing.
+        The run's budget is the per-probe limit, cut to ``self.deadline``; a
+        caller-given ``stop_at`` is its own budget and replaces the per-probe
+        limit (still cut to the deadline). Raises :class:`_OutOfTime` when that
+        leaves nothing.
+
+        Why ``stop_at`` replaces rather than cuts: only confirmations pass it
+        (checkpoint 0, the ladder's set, and the exact-witness repairs inside
+        them), each with a budget sized for that solve. Cut to the 30 s probe
+        limit, checkpoint 0 gave up on MIPcc27's dives and neos-1461051, whose
+        full models need 63 s and 90 s presolve-off: nothing was ever
+        confirmed, and both runs ended in TimeoutError with no answer.
         """
         h = self.h
         now = time.perf_counter()
-        stop = now + float(self.probe_tl)
+        stop = now + float(self.probe_tl) if stop_at is None else math.inf
         hard = self.deadline
         if hard is not None and self.reserve_confirm:
             # Two confirmation solves, each about as long as recent ones, with a
@@ -374,6 +388,12 @@ class _Engine:
             return (False, x) if x is not None else (None, None)
         if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
             return None, None
+        if ms == MS.kInfeasible:
+            self._proven_on = (
+                frozenset(active_cons),
+                frozenset(active_bounds),
+                frozenset(active_int),
+            )
         if ms == MS.kInfeasible and not self.confirm_each:
             return True, None
         # An infeasibility claim is what lets the filter DROP an element, so it
@@ -429,6 +449,14 @@ class _Engine:
         finally:
             h.setOptionValue("mip_max_nodes", self._default_max_nodes)
         return bool(st == self.hs.HighsModelStatus.kInfeasible)
+
+    def proven_on(self, active_cons, active_bounds, active_int) -> bool:
+        """Whether this exact set's presolve-on ``Infeasible`` is on record."""
+        return self._proven_on == (
+            frozenset(active_cons),
+            frozenset(active_bounds),
+            frozenset(active_int),
+        )
 
     def confirm_infeasible(
         self,
@@ -1465,8 +1493,23 @@ def _milp_iis_arrays(
 
     if confirm == "final":
         eng.reserve_confirm = False  # the reserve is for this confirmation
+        # The set's presolve-on proof is usually on record already (the last
+        # batch the filter could not drop was put back), so only the
+        # presolve-free route runs; and it may use the reserve up to the
+        # deadline instead of one probe's limit. Capped at 30 s and re-proving
+        # presolve-on first, this confirmation failed on MIPcc27's dijle and
+        # dingo at 600 s and the run fell back to the untouched base set
+        # (6282 / 4960 elements) after filtering away half the integralities.
         try:
-            verdict = eng.confirm_infeasible(cons, bounds, ints_active)
+            verdict = eng.confirm_infeasible(
+                cons,
+                bounds,
+                ints_active,
+                stop_at=deadline,
+                presolve=("off",)
+                if eng.proven_on(cons, bounds, ints_active)
+                else ("choose", "off"),
+            )
         except _OutOfTime:
             verdict = None
         if verdict is False and complete:

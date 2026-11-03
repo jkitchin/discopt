@@ -259,10 +259,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Safety net: the empty document keeps every element (the whole model).
     write_atomic(solution, {})
 
+    finished = threading.Event()
+
     def watchdog() -> None:
-        left = hard_stop - (time.perf_counter() - _T_LAUNCH)
-        if left > 0:
-            time.sleep(left)
+        # Stands down once main() has returned: an in-process caller (the
+        # tests) must not be killed later by a watchdog left behind.
+        if finished.wait(max(hard_stop - (time.perf_counter() - _T_LAUNCH), 0.0)):
+            return
         print("mipcc: hard stop reached; exiting with the last written solution", flush=True)
         sys.stdout.flush()
         os._exit(0)
@@ -279,6 +282,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         traceback.print_exc()
         print("mipcc: engine failed; answer is the full model", flush=True)
         return 0
+    finally:
+        finished.set()
 
 
 def _run(instance: str, solution: str, threads: int, engine_budget: float) -> int:

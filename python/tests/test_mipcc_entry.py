@@ -194,3 +194,28 @@ def test_budget_leaves_a_margin():
         engine, hard = mipcc.budget(limit)
         assert engine < hard < limit
     assert mipcc.budget(3600.0)[0] >= 3480.0  # a margin, not a large share of the hour
+
+
+def test_watchdog_stands_down_after_an_in_process_main(tmp_path):
+    """A watchdog left behind by an in-process main() killed the pytest worker
+    that ran it, mid-way through an unrelated test, when the hard stop came."""
+    inst = _readme_example(tmp_path)
+    out = tmp_path / "sol.json"
+    script = tmp_path / "inproc.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import time
+            from discopt import mipcc
+            assert mipcc.main([{inst!r}, {str(out)!r}]) == 0
+            time.sleep(10)  # past the hard stop (limit 12 s, launch to here)
+            print("ALIVE")
+            """
+        )
+    )
+    env = dict(os.environ, MIPCC_TIME_LIMIT="12")
+    p = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=90, env=env
+    )
+    assert p.returncode == 0, p.stderr
+    assert "ALIVE" in p.stdout and "hard stop" not in p.stdout
