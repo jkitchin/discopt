@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -95,6 +95,10 @@ class IISResult:
     complete : bool
         ``False`` when ``total_time_limit`` stopped filtering early: an anytime
         result whose undecided members are still in the subsystem.
+    portfolio_members : list[dict] or None
+        Only for a ``portfolio`` run: one entry per order, with ``order``,
+        ``outcome`` (``"ok"``, ``"timeout"``, ``"abandoned"``, ``"not started"``),
+        ``size``, ``complete`` and ``wall`` (seconds).
     """
 
     constraints: list[Constraint] = field(default_factory=list)
@@ -106,6 +110,7 @@ class IISResult:
     n_solves: int = 0
     proven_irreducible: bool = True
     complete: bool = True
+    portfolio_members: list[dict] | None = None
 
     def __len__(self) -> int:
         # Members are counted at element granularity when it is known.
@@ -252,6 +257,8 @@ def compute_iis(
     include_integrality: bool = False,
     time_limit: float = 30.0,
     total_time_limit: float | None = None,
+    portfolio: Sequence[str] | None = None,
+    workers: int | None = None,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -290,6 +297,21 @@ def compute_iis(
         overrunning 7-10x), and :class:`TimeoutError` is raised if no subsystem
         can be confirmed infeasible in time. On the default path the bound is
         as good as ``Model.solve``'s ``time_limit``.
+    portfolio : sequence of str, optional
+        Only with ``include_integrality=True``. Run one deletion filter per
+        listed order, each in its own process, against one shared
+        ``total_time_limit``, and return the smallest complete result (else the
+        smallest anytime one). An order is a permutation of ``"ICB"`` --
+        integrality, constraints, bounds phases -- with an optional ``"-r"`` to
+        visit elements in reverse; :data:`discopt._iis_milp.DEFAULT_PORTFOLIO` is
+        a measured default. Which IIS a filter finds depends on its order, so a
+        portfolio buys size (and, when orders differ in speed, time) with cores.
+        Each member's result is sound on its own; ``IISResult.portfolio_members``
+        reports all of them. ``None`` (default) runs the single ``"ICB"`` order
+        in-process.
+    workers : int, optional
+        Processes for ``portfolio`` (default: one per order, at most the CPU
+        count). Orders beyond ``workers`` start as earlier members finish.
 
     Returns
     -------
@@ -313,7 +335,11 @@ def compute_iis(
             include_bounds=include_bounds,
             time_limit=time_limit,
             total_time_limit=total_time_limit,
+            portfolio=portfolio,
+            workers=workers,
         )
+    if portfolio is not None or workers is not None:
+        raise ValueError("portfolio/workers require include_integrality=True")
     deadline = None if total_time_limit is None else time.perf_counter() + total_time_limit
 
     all_constraints = list(model._constraints)
@@ -446,7 +472,13 @@ def compute_iis(
 
 
 def _compute_iis_with_integrality(
-    model: "Model", *, include_bounds: bool, time_limit: float, total_time_limit: float | None
+    model: "Model",
+    *,
+    include_bounds: bool,
+    time_limit: float,
+    total_time_limit: float | None,
+    portfolio: Sequence[str] | None = None,
+    workers: int | None = None,
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
     from discopt._iis_milp import milp_iis
@@ -456,6 +488,8 @@ def _compute_iis_with_integrality(
         include_bounds=include_bounds,
         time_limit=time_limit,
         total_time_limit=total_time_limit,
+        portfolio=portfolio,
+        workers=workers,
     )
 
     # Flat column -> (variable, multi-index).
@@ -487,4 +521,5 @@ def _compute_iis_with_integrality(
         n_solves=res.n_solves,
         proven_irreducible=res.proven_irreducible,
         complete=res.complete,
+        portfolio_members=res.members,
     )
