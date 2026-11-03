@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Graduation panel -- ``DISCOPT_NS_PROJECT`` (#2115: exact dual projection as the
-last rung of the MILP driver's node NS bound).
+"""Graduation panel for the #2115 flags (``--flag``):
+
+* ``DISCOPT_NS_PROJECT`` -- exact dual projection as the last rung of the MILP
+  driver's node NS bound (default; graduated 2026-11-03);
+* ``DISCOPT_SUBTOL_NOISE_GLOBAL`` -- the #1595 sub-``tol`` noise test measured
+  against ``‖a_j‖₁·‖y‖∞`` (the scale of ``y``'s error), not only a column's own
+  terms.
 
 The CLAUDE.md §5 differential panel for a bound-changing gate: flag ON vs OFF,
 requiring BOTH
@@ -14,11 +19,12 @@ requiring BOTH
      node count / wall, reported per instance and in total.
 
 **Proving the mechanism fired (CLAUDE.md §6).** Each solve runs under
-``DISCOPT_PROFILE=1`` bracketed by ``profile_reset_py``/``profile_counters_py``;
-``NodeNsProjectRescue`` on the ON arm is the number of node bounds the projection
-produced where every other rung of the NS ladder abstained, and
-``NodeNsAbstain`` is reported for both arms. The panel exits 2 (inconclusive) if
-the projection never rescued a node over the whole panel.
+``DISCOPT_PROFILE=1`` bracketed by ``profile_reset_py``/``profile_counters_py``.
+For ``DISCOPT_NS_PROJECT``, ``NodeNsProjectRescue`` on the ON arm counts node bounds
+the projection produced where every other rung abstained; for
+``DISCOPT_SUBTOL_NOISE_GLOBAL``, ``SubtolPivots`` OFF minus ON counts noise-driven
+pivots no longer taken. The panel exits 2 (inconclusive) if the mechanism never
+fired over the whole panel.
 
 Arms run in separate processes (the flag is a Rust ``OnceLock``, read once per
 process), interleaved per instance with the order alternating by index (rule 9).
@@ -35,7 +41,7 @@ confirmation goes to SCIP and the in-house driver barely runs).
 
 Usage::
 
-    python -u discopt_benchmarks/scripts/issue2115_ns_project_graduation_panel.py \\
+    python -u discopt_benchmarks/scripts/issue2115_graduation_panel.py [--flag F] \\
         --time-limit 45 --solu minlplib.solu --extra-dir <dir> --jobs 2
 
 Exit codes: 0 = PASS (cert-clean and the projection fired), 2 = cert-clean but
@@ -59,8 +65,42 @@ _OPTIMA = _REPO / "docs" / "dev" / "data" / "cert-optima.json"
 
 _TOL_REL = 1e-4
 _TOL_ABS = 1e-6
-_FLAG = "DISCOPT_NS_PROJECT"
-_CTRS = ("NodeNsProjectTry", "NodeNsProjectRescue", "NodeNsProjectSingular", "NodeNsAbstain")
+#: Per-flag panel configuration. ``fired(off, on)`` counts what the flag's mechanism
+#: did on one instance (summed for the anti-vacuity check, §6), ``ran(off, on)``
+#: says whether the ON arm executed a different code path at all (a bound change
+#: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
+#: (the OFF arm honoured the flag).
+_FLAGS = {
+    "DISCOPT_NS_PROJECT": {
+        "fired": lambda off, on: on["NodeNsProjectRescue"],
+        "ran": lambda off, on: on["NodeNsProjectTry"] > 0,
+        "leak": lambda off: off["NodeNsProjectTry"],
+        "show": ("NodeNsAbstain", "NodeNsProjectRescue"),
+    },
+    # #2115 follow-up: the sub-`tol` noise test measured against `‖a_j‖₁·‖y‖∞`.
+    # Its effect is a noise-driven sub-`tol` pivot (and the `Numerical` verdict
+    # it ends in) NOT taken, so it fires where the OFF arm's count exceeds ON's.
+    "DISCOPT_SUBTOL_NOISE_GLOBAL": {
+        "fired": lambda off, on: max(0, off["SubtolPivots"] - on["SubtolPivots"]),
+        "ran": lambda off, on: (
+            off["SubtolPivots"] != on["SubtolPivots"]
+            or off["LpVerdictNumerical"] != on["LpVerdictNumerical"]
+        ),
+        "leak": lambda off: 0,
+        "show": ("SubtolPivots", "LpVerdictNumerical"),
+    },
+}
+_CTRS = (
+    "NodeNsProjectTry",
+    "NodeNsProjectRescue",
+    "NodeNsProjectSingular",
+    "NodeNsAbstain",
+    "SubtolPivots",
+    "LpVerdictNumerical",
+    "WarmSubtolRepairFailed",
+    "UnboundedRejectObjective",
+)
+_FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
 _RUNNER = """
 import json, sys, time
@@ -117,7 +157,7 @@ print("PANELJSON " + json.dumps(out), flush=True)
 def _solve_once(
     path: Path, flag: str, time_limit: float, deterministic: bool, block_scip: bool
 ) -> dict:
-    """One solve with ``DISCOPT_NS_PROJECT=flag`` in its own process. Never swallows
+    """One solve with ``<--flag>=flag`` in its own process. Never swallows
     a failure (rule 7): a missing PANELJSON line raises."""
     env = {**os.environ, _FLAG: flag, "DISCOPT_PROFILE": "1"}
     proc = subprocess.run(
@@ -159,6 +199,7 @@ def _load_optima(solu: str | None) -> dict[str, float]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--flag", choices=sorted(_FLAGS), default="DISCOPT_NS_PROJECT")
     ap.add_argument("--time-limit", type=float, default=30.0)
     ap.add_argument("--solu", default=None)
     ap.add_argument("--extra-dir", default=None)
@@ -179,8 +220,11 @@ def main() -> int:
         "route never reaches the MILP driver (measured: m6 spends 30 s in 861 spatial "
         "nodes), so it cannot exercise the flag.",
     )
-    ap.add_argument("--out", default=str(_REPO / "reports" / "issue2115_ns_project_panel.json"))
+    ap.add_argument("--out", default=str(_REPO / "reports" / "issue2115_panel.json"))
     args = ap.parse_args()
+    global _FLAG
+    _FLAG = args.flag
+    cfg = _FLAGS[args.flag]
 
     optima = _load_optima(args.solu)
     paths = sorted(_NL_DIR.glob("*.nl"))
@@ -198,10 +242,11 @@ def main() -> int:
             for f in order
         }
         off, on = arms["0"], arms["1"]
+        a, b = cfg["show"]
         print(
             f"{path.stem:22s} OFF {off['status']:22s} b={off['bound']} n={off['nodes']} "
-            f"abst={off['NodeNsAbstain']} | ON {on['status']:22s} b={on['bound']} "
-            f"n={on['nodes']} abst={on['NodeNsAbstain']} resc={on['NodeNsProjectRescue']}",
+            f"{a}={off[a]} {b}={off[b]} | ON {on['status']:22s} b={on['bound']} "
+            f"n={on['nodes']} {a}={on[a]} {b}={on[b]} fired={cfg['fired'](off, on)}",
             flush=True,
         )
         return {"instance": path.stem, "off": off, "on": on}
@@ -247,11 +292,11 @@ def main() -> int:
             if abs(o1 - o0) > _TOL_REL * max(1.0, abs(o0)) + _TOL_ABS:
                 violations.append(f"{name}: certified objectives differ {o0} vs {o1}")
 
-    rescued = sum(r["on"]["NodeNsProjectRescue"] for r in rows)
-    off_leak = sum(r["off"]["NodeNsProjectTry"] for r in rows)
+    rescued = sum(cfg["fired"](r["off"], r["on"]) for r in rows)
+    off_leak = sum(cfg["leak"](r["off"]) for r in rows)
     if off_leak:
-        violations.append(f"OFF arm ran the projection {off_leak} times (flag not honoured)")
-    fired_on = [r["instance"] for r in rows if r["on"]["NodeNsProjectRescue"] > 0]
+        violations.append(f"OFF arm ran the mechanism {off_leak} times (flag not honoured)")
+    fired_on = [r["instance"] for r in rows if cfg["fired"](r["off"], r["on"]) > 0]
     cert_off = sum(r["off"]["gap_certified"] for r in rows)
     cert_on = sum(r["on"]["gap_certified"] for r in rows)
     gained = [
@@ -268,9 +313,10 @@ def main() -> int:
             tighter.append(r["instance"])
         elif sgn * (bo - bn) > tol:
             looser.append(r["instance"])
-    diff_rows = [r for r in rows if r["on"]["NodeNsProjectTry"] > 0]
-    # A bound/certification difference on an instance where the ON arm never ran
-    # the projection cannot be the flag's doing (time-limit noise); reported apart.
+    diff_rows = [r for r in rows if cfg["ran"](r["off"], r["on"])]
+    # A bound/certification difference on an instance where the ON arm never ran a
+    # different code path cannot be the flag's doing (time-limit noise); reported
+    # apart.
     ran = {r["instance"] for r in diff_rows}
     tighter_ran = [i for i in tighter if i in ran]
     looser_ran = [i for i in looser if i in ran]
@@ -284,6 +330,7 @@ def main() -> int:
     out.write_text(
         json.dumps(
             {
+                "flag": args.flag,
                 "time_limit": args.time_limit,
                 "deterministic": args.deterministic,
                 "scip_blocked": not args.allow_scip,
@@ -313,7 +360,7 @@ def main() -> int:
     print(f"violations          : {len(violations)}")
     for v in violations:
         print("  !", v)
-    print(f"projection rescues  : {rescued} on {len(fired_on)} instance(s) {fired_on}")
+    print(f"mechanism fired     : {rescued} on {len(fired_on)} instance(s) {fired_on}")
     print(f"certified           : OFF {cert_off} -> ON {cert_on}  gained {gained}")
     print(f"bounds tighter      : {len(tighter)} {tighter}  (where it ran: {tighter_ran})")
     print(f"bounds looser       : {len(looser)} {looser}  (where it ran: {looser_ran})")
@@ -334,9 +381,9 @@ def main() -> int:
         print("\nVERDICT: FAIL - cert-clean violated.")
         return 1
     if rescued == 0:
-        print("\nVERDICT: INCONCLUSIVE - the projection never rescued a node.")
+        print("\nVERDICT: INCONCLUSIVE - the mechanism never fired.")
         return 2
-    print("\nVERDICT: cert-clean, projection fired; read the benefit columns above.")
+    print("\nVERDICT: cert-clean, mechanism fired; read the benefit columns above.")
     return 0
 
 

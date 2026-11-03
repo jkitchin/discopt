@@ -39,6 +39,15 @@ The release procedure that produces these entries is documented in
   it. `m6` now certifies in 14.8 s and `m7` in 44 s with SCIP blocked; panel of 91
   instances cert-clean, certified 63 -> 64. Opt-out for A/B only:
   `DISCOPT_NS_PROJECT=0`.
+- **Rounding residue of `y` no longer passes as a real sub-`tol` reduced cost
+  (#2115 follow-up).** The #1595 re-pricing judged `d_j` only against its own
+  terms, so a single-entry open slack (`d_j = -a y_i`) always looked real however
+  small `y_i` was; the simplex entered it, refused the resulting `c^T d = 0` ray,
+  and returned `Numerical` for an LP its dual had solved (13 LPs on `m6`'s
+  master, 6 on `m7`'s). The noise test now also uses `||a_j||_1 ||y||_inf`, and
+  such columns go through the #1953 suspect verification. Panel cert-clean and
+  outcome-neutral; shipped as a verdict fix. Opt-out:
+  `DISCOPT_SUBTOL_NOISE_GLOBAL=0`.
 - **A convex node's NLP objective is no longer imported as its lower bound
   (#2067).** NLP-B&B (and the spatial loop's convex mode) used the objective of
   the node NLP's approximate minimiser as the node bound; it sits above the

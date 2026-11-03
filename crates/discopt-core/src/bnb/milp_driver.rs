@@ -709,7 +709,7 @@ fn ns_node_bound_enabled() -> bool {
 /// [`node_ns_bound_projected`].
 ///
 /// Graduated on the CLAUDE.md §5 panel
-/// (`discopt_benchmarks/scripts/issue2115_ns_project_graduation_panel.py`: the
+/// (`discopt_benchmarks/scripts/issue2115_graduation_panel.py`: the
 /// 74-instance in-repo corpus plus 17 MINLPLib layout / OA-master instances, 60 s,
 /// default route, `pyscipopt` blocked as in the default install, arms interleaved;
 /// data `docs/dev/data/2115-ns-project/`). *Cert-clean*: 952 executed checks, no
