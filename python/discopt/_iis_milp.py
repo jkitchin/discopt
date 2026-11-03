@@ -398,59 +398,69 @@ class _Engine:
         return True if all_infeasible else None
 
 
-def _violation(x, eng: _Engine, rows=None, cols_lb=None, cols_ub=None, cols_int=None):
-    """Max violation of the given rows / bounds / integralities at ``x``."""
-    v = 0.0
-    if rows is not None and len(rows):
-        act = eng.A[rows] @ x
-        lo, hi = eng.row_lo[rows], eng.row_hi[rows]
-        v = max(v, float(np.max(np.where(lo > -_INF, lo - act, 0.0), initial=0.0)))
-        v = max(v, float(np.max(np.where(hi < _INF, act - hi, 0.0), initial=0.0)))
-    if cols_lb is not None and len(cols_lb):
-        v = max(v, float(np.max(eng.col_lb[cols_lb] - x[cols_lb], initial=0.0)))
-    if cols_ub is not None and len(cols_ub):
-        v = max(v, float(np.max(x[cols_ub] - eng.col_ub[cols_ub], initial=0.0)))
-    if cols_int is not None and len(cols_int):
-        xi = x[cols_int]
-        v = max(v, float(np.max(np.abs(xi - np.round(xi)), initial=0.0)))
-    return v
+def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
+    """The points in ``pending`` that certify their element: ``x`` satisfies the
+    final subsystem minus ``key`` (every other row, applied bound and integrality
+    within ``tol``) and violates ``key`` by more than ``tol``.
 
-
-def _check_certificate(x, key, eng, cons, bounds, ints, tol) -> bool:
-    """``x`` satisfies the final subsystem minus ``key`` and violates ``key``."""
-    kind = key[0]
-    cons_o = [c for c in cons if not (kind == "constraint" and c == key[1])]
-    ints_o = [j for j in ints if not (kind == "integrality" and j == key[1])]
-    held = set(ints_o)
-    # Bounds of a column held integer apply; for the integrality element itself
-    # its own bounds still apply too (relaxing integrality keeps the box).
-    lb_cols = sorted(held | {j for j, s in bounds if s == "lower"})
-    ub_cols = sorted(held | {j for j, s in bounds if s == "upper"})
-    if kind == "integrality":
-        lb_cols = sorted(set(lb_cols) | {key[1]})
-        ub_cols = sorted(set(ub_cols) | {key[1]})
-    if kind == "bound":
-        j, s = key[1], key[2]
-        if s == "lower":
-            lb_cols = [c for c in lb_cols if c != j]
-        else:
-            ub_cols = [c for c in ub_cols if c != j]
-    rows = np.concatenate([eng.row_groups[c] for c in cons_o]) if cons_o else np.zeros(0, int)
-    lb_cols = [c for c in lb_cols if eng.col_lb[c] > -_INF]
-    ub_cols = [c for c in ub_cols if eng.col_ub[c] < _INF]
-    if _violation(x, eng, rows, lb_cols, ub_cols, ints_o) > tol:
-        return False
-    # ``key`` itself must be violated by more than tol.
-    if kind == "constraint":
-        e = _violation(x, eng, rows=eng.row_groups[key[1]])
-    elif kind == "integrality":
-        e = _violation(x, eng, cols_int=[key[1]])
-    else:
-        j, s = key[1], key[2]
-        e = _violation(
-            x, eng, cols_lb=[j] if s == "lower" else None, cols_ub=[j] if s == "upper" else None
+    The final set's masks are built once and each point is checked with one
+    sparse product and vector operations. Rebuilding the set per point cost
+    O(|IIS|) Python work per certificate: on dijle's 6,282-element anytime set
+    that ran past the deadline and a portfolio member's result was discarded.
+    """
+    m, n = eng.row_lo.size, eng.col_lb.size
+    row_kept = np.zeros(m, dtype=bool)
+    for c in cons:
+        row_kept[eng.row_groups[c]] = True
+    held = np.zeros(n, dtype=bool)
+    held[list(ints)] = True
+    # A held column's box applies; so do the kept bounds of the other columns.
+    lbm = held.copy()
+    ubm = held.copy()
+    for j, side in bounds:
+        (lbm if side == "lower" else ubm)[j] = True
+    lbm &= eng.col_lb > -_INF
+    ubm &= eng.col_ub < _INF
+    lo_f = eng.row_lo > -_INF
+    hi_f = eng.row_hi < _INF
+    out = {}
+    for key, x in pending.items():
+        act = eng.A @ x
+        rv = np.maximum(
+            np.where(lo_f, eng.row_lo - act, 0.0), np.where(hi_f, act - eng.row_hi, 0.0)
         )
-    return bool(e > tol)
+        rv = np.maximum(rv, 0.0)
+        lbv = np.where(lbm, eng.col_lb - x, 0.0)
+        ubv = np.where(ubm, x - eng.col_ub, 0.0)
+        iv = np.where(held, np.abs(x - np.round(x)), 0.0)
+        kind = key[0]
+        rows_ok = row_kept
+        if kind == "constraint":
+            own = eng.row_groups[key[1]]
+            rows_ok = row_kept.copy()
+            rows_ok[own] = False
+            e = float(np.max(rv[own], initial=0.0))
+        elif kind == "integrality":
+            j = key[1]
+            iv[j] = 0.0  # its box still applies (held -> lbm/ubm), as when relaxed
+            e = abs(float(x[j] - np.round(x[j])))
+        else:
+            j, side = key[1], key[2]
+            if side == "lower":
+                lbv[j] = 0.0
+                e = float(eng.col_lb[j] - x[j])
+            else:
+                ubv[j] = 0.0
+                e = float(x[j] - eng.col_ub[j])
+        rest = max(
+            float(np.max(np.where(rows_ok, rv, 0.0), initial=0.0)),
+            float(np.max(lbv, initial=0.0)),
+            float(np.max(ubv, initial=0.0)),
+            float(np.max(iv, initial=0.0)),
+        )
+        if rest <= tol and e > tol:
+            out[key] = x
+    return out
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -924,12 +934,7 @@ def _milp_iis_arrays(
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
     kept_bounds = applied_bounds if include_bounds else []
-    certs = {}
-    for key, x in pending.items():
-        if _check_certificate(
-            x, key, eng, sorted(cons), applied_bounds, sorted(ints_active), cert_tol
-        ):
-            certs[key] = x
+    certs = _check_certificates(pending, eng, cons, applied_bounds, ints_active, cert_tol)
     return MilpIIS(
         constraints=sorted(cons),
         bounds=kept_bounds,
