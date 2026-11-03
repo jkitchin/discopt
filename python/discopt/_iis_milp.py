@@ -559,13 +559,33 @@ def _pb_rows(cols, vals, lo, hi) -> Optional[list[tuple[list[int], list[int], in
     return out
 
 
-def _encode_geq(w: list[int], lits: list[int], K: int, guard: int, nv: int, clauses: list):
+class _EncodeAbort(Exception):
+    """A row's encoding would pass the clause cap ("size") or the stage's stop
+    time ("time"); raised before any variable or clause of that row exists."""
+
+
+def _encode_geq(
+    w: list[int],
+    lits: list[int],
+    K: int,
+    guard: int,
+    nv: int,
+    clauses: list,
+    stop_at: Optional[float] = None,
+    max_clauses: Optional[int] = None,
+):
     """Clauses for ``guard -> sum w_i l_i >= K`` as a reduced BDD (Een & Sorensson
     2006): node ``(i, k)`` means "the suffix from ``i`` reaches ``k``", with
     ``node -> ite(l_i, (i+1, k - w_i), (i+1, k))``; the constraint is monotone, so
     also ``node -> (i+1, k - w_i)``. ``k <= 0`` is true, ``k`` above the suffix's
     total is false. Built layer by layer, without recursion. Returns the new
     variable count.
+
+    The BDD can have up to n*K nodes: one 32-column knapsack row with weights up
+    to 1e6 ran a 2 s stage budget to 46 s. So the layers are sized first, the
+    clock and ``max_clauses`` (at most two clauses per node, plus one) are
+    checked per layer, and :class:`_EncodeAbort` is raised before anything of
+    the row is created.
     """
     order = sorted(range(len(w)), key=lambda i: -w[i])  # large weights first
     w = [w[i] for i in order]
@@ -580,6 +600,7 @@ def _encode_geq(w: list[int], lits: list[int], K: int, guard: int, nv: int, clau
         clauses.append([-guard])
         return nv
     layers: list[set[int]] = [{K}]
+    nodes = 1
     for i in range(m):
         nxt = set()
         for k in layers[i]:
@@ -587,6 +608,11 @@ def _encode_geq(w: list[int], lits: list[int], K: int, guard: int, nv: int, clau
                 if 0 < k2 <= suf[i + 1]:
                     nxt.add(k2)
         layers.append(nxt)
+        nodes += len(nxt)
+        if max_clauses is not None and len(clauses) + 2 * nodes + 1 > max_clauses:
+            raise _EncodeAbort("size")
+        if stop_at is not None and time.perf_counter() >= stop_at:
+            raise _EncodeAbort("time")
     var: dict[tuple[int, int], int] = {}
     for i in range(m - 1, -1, -1):
         for k in layers[i]:
@@ -643,9 +669,15 @@ def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
             if rows is None:
                 return None, 0
             for w, lits, K in rows:
-                nv = _encode_geq(w, lits, K, n + 1 + gi, nv, clauses)
-                if len(clauses) > _SAT_MAX_CLAUSES:
-                    return None, 0
+                try:
+                    nv = _encode_geq(w, lits, K, n + 1 + gi, nv, clauses, stop_at, _SAT_MAX_CLAUSES)
+                except _EncodeAbort as why:
+                    if why.args[0] == "time":
+                        return None, 0
+                    # Too large to encode: leave this row out. The encoded rows
+                    # are exact, so a core over them is still an infeasible
+                    # subset (a group with a row left out is relaxed, not lost).
+                    continue
     from discopt._rust import PySatSolver
 
     sat = PySatSolver(nv)
