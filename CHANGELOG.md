@@ -51,6 +51,27 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The in-house MILP driver bounds nodes of translation-invariant masters
+  (#2115).** Its node bound (Neumaier-Shcherbina from the node dual) was `-inf`
+  whenever an open column -- a free variable arrives split `x+ - x-` -- had a
+  reduced cost zero only up to rounding. On MINLPLib `m6`'s final OA master (42 of
+  86 columns free) it abstained on 3194 of ~29k nodes, so without `pyscipopt` the
+  #2069 confirmation could not close the master and `m6` ended `feasible` at 60 s
+  (bound 62.83, optimum 82.2569). A new last rung of the ladder
+  (`lp/simplex/project.rs`) builds an enclosure of a nearby dual whose reduced
+  costs on those columns are exactly zero and evaluates the bound rigorously over
+  it. `m6` now certifies in 14.8 s and `m7` in 44 s with SCIP blocked; panel of 91
+  instances cert-clean, certified 63 -> 64. Opt-out for A/B only:
+  `DISCOPT_NS_PROJECT=0`.
+- **Rounding residue of `y` no longer passes as a real sub-`tol` reduced cost
+  (#2115 follow-up).** The #1595 re-pricing judged `d_j` only against its own
+  terms, so a single-entry open slack (`d_j = -a y_i`) always looked real however
+  small `y_i` was; the simplex entered it, refused the resulting `c^T d = 0` ray,
+  and returned `Numerical` for an LP its dual had solved (13 LPs on `m6`'s
+  master, 6 on `m7`'s). The noise test now also uses `||a_j||_1 ||y||_inf`, and
+  such columns go through the #1953 suspect verification. Panel cert-clean and
+  outcome-neutral; shipped as a verdict fix. Opt-out:
+  `DISCOPT_SUBTOL_NOISE_GLOBAL=0`.
 - **A convex node's NLP objective is no longer imported as its lower bound
   (#2067).** NLP-B&B (and the spatial loop's convex mode) used the objective of
   the node NLP's approximate minimiser as the node bound; it sits above the
