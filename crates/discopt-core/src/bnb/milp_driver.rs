@@ -704,7 +704,20 @@ fn ns_node_bound_enabled() -> bool {
 }
 
 /// Whether the node NS bound may fall back to the #2115 exact dual projection
-/// (`DISCOPT_NS_PROJECT`, read once). See [`node_ns_bound_projected`].
+/// (`DISCOPT_NS_PROJECT`, read once). **Default ON** since the #2115 graduation
+/// panel; `=0` opts out and restores the pre-#2115 ladder exactly. See
+/// [`node_ns_bound_projected`].
+///
+/// Graduated on the CLAUDE.md §5 panel
+/// (`discopt_benchmarks/scripts/issue2115_ns_project_graduation_panel.py`: the
+/// 74-instance in-repo corpus plus 17 MINLPLib layout / OA-master instances, 60 s,
+/// default route, `pyscipopt` blocked as in the default install, arms interleaved;
+/// data `docs/dev/data/2115-ns-project/`). *Cert-clean*: 952 executed checks, no
+/// bound past a reference optimum or its incumbent, no certification lost, every
+/// incumbent through the false-primal screen. *Net-positive*: certified 63 -> 64
+/// (`m6`: `feasible` at 60 s, bound 62.83, -> `optimal` in 14.8 s), wall on the 7
+/// instances where it ran 223.6 s -> 161.6 s (`m7` 55.6 -> 44.3 s, `slay07m`
+/// 28.8 -> 25.2 s), node abstentions there 11 143 -> 7; corpus nodes -1.9 %.
 fn ns_project_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
@@ -713,7 +726,7 @@ fn ns_project_enabled() -> bool {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -758,8 +771,11 @@ fn node_ns_bound_projected(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Op
 
 /// #1953: the NS safe bound for a node from its unscaled dual `y`, or `None`.
 ///
-/// Each stage tries `y` and then its open-column repair
-/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step).
+/// Each stage tries `y`, then its open-column repair
+/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step), then the
+/// #2115 exact dual projection ([`node_ns_bound_projected`]), which handles the
+/// open columns the repair cannot (a free pair, or a `c_j = 0` column whose
+/// reduced cost is noise of the wrong sign).
 ///
 /// First over the node box. NS abstains when an open column's reduced-cost
 /// enclosure straddles zero (#1956) -- a basic surplus or cut slack, whose

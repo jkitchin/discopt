@@ -14135,3 +14135,111 @@ tree):
 | ball_mk2_10, ball_mk2_30, nvs10/11/12 | 30 s | identical in both arms |
 | portfol_robust050_34 | 120 s | optimal, 16.9 -> 8.8 s |
 | portfol_robust100_09 | 120 s | unchanged |
+
+
+## 104. #2115: the in-house MILP driver on translation-invariant masters (2026-11-03)
+
+**The symptom.** With `pyscipopt` absent (the default install), `m6` ended
+`feasible` at 60 s, bound 62.83 against an optimum of 82.2569. The #2069 independent
+confirmation of the HiGHS master's claim has only the in-house Rust driver, and that
+driver could not close `m6`'s final master (258 rows x 86 columns, 30 binary,
+**42 columns free on both sides**: layout positions, so the master is
+translation-invariant and has no bound on them).
+
+**The issue's diagnosis is falsified.** #2115 attributed the floor to rejected
+Farkas rays (`FarkasRejectOpen` 6.6k-9.9k per run). Measured on the captured master
+(`python/tests/data/oa_masters/m6_final_master_2115.npz`):
+
+- Almost all of those rejections are per-sign or pre-cleanup. They are rescued by the
+  other sign or by the #1355 cleanup (`FarkasCleanupRescue` 2783). Only **9** rays
+  reach a final rejection.
+- An exact projection of those 9 rays (below, with `c = 0`) certified **all 9**, and
+  changed **neither the node count (38 594) nor the bound (62.83)**. It was not kept.
+- The tree does not stop on time. It drains at 33.5k nodes of the second #1066
+  attempt with ~45 s of budget left, against an `unresolved_floor`.
+- The 8 `LpVerdictNumerical` nodes are the #1595 sub-`tol` re-pricing entering a
+  column with reduced cost -4e-16..-8e-15. Its room is infinite, the resulting ray
+  has `c^T d = 0` exactly and is refused, and the dual's correct `Optimal` comes back
+  `Numerical` (`WarmSubtolRepairFailed`). Fixing that (measuring the noise test
+  against `||a_j||_1 ||y||_inf` instead of only the local terms) took them 8 -> 0 and
+  moved **nothing** either: the floor then came from 6 other nodes. Not kept; it is a
+  real defect, recorded here, but it is not on this issue's critical path.
+- The floor's actual source: **`NodeNsAbstain` 3194** of ~29k nodes. The node bound
+  is the Neumaier-Shcherbina bound from the node dual. It is `-inf` as soon as an
+  open column has a reduced cost that can take its open side's sign. A free variable
+  reaches the LP as `x+ - x-`, two `[0, inf)` columns. A reduced cost that is zero
+  in exact arithmetic is known only up to rounding, so these columns defeat the
+  bound even under a perfect dual. The #1729 repair (zero a logical's `y_i`, then
+  scale `y`) cannot fix a `c_j = 0` structural column with the wrong noise sign, nor
+  a free pair, which needs `r_j = 0` exactly. Abstaining nodes with nothing left to
+  branch fold their parent bound into `unresolved_floor`.
+
+So the issue named the right *class* (open columns whose dual quantity is zero only
+up to rounding) through the wrong instrument (the Farkas verifier instead of the
+node NS bound).
+
+**The fix** (`lp/simplex/project.rs`, the last rung of `node_ns_bound`'s ladder). It
+builds an *enclosure* `y* in yhat +/- rad` of a dual with `c_j - a_j^T y* = 0`
+**exactly** on the offending columns, then evaluates NS rigorously over the whole
+enclosure:
+
+1. **Exact zeroing.** Each single-entry `c = 0` column gets `y_i = 0`.
+2. **Frozen columns.** A `c = 0` column whose `y` is already exactly zero on its
+   support is left alone, and its rows take no correction.
+3. **Verified block solve.** The rest get a correction from a block solve on rows
+   chosen by row-pivoted elimination. It is verified by
+   `||I - RK||_inf <= alpha < 1/2` and `||z* - z~|| <= || |R| rho || / (1 - alpha)`,
+   with every sum bounded by `gamma_k`.
+4. **Closure.** The candidate set is closed under the projection: a correction can
+   push a previously safe open column onto its open side. On `m6` that happened to
+   every projected bound until the closure was added.
+
+Sound for any input: an enclosure that does not verify reports nothing.
+
+**Entry experiment** (captured master, `DISCOPT_PROFILE=1`):
+
+| | OFF | ON |
+|---|---|---|
+| status | `iteration_limit` | **`optimal`** |
+| bound | 62.83 | 82.2568769 |
+| nodes | 38 594 | 25 406 |
+| `NodeNsAbstain` | 3194 | 0 |
+| `NodeNsProjectRescue` | 0 | 665 |
+
+The issue's own warning was that a benefit which does not survive a 5e-16
+perturbation is not a mechanism (§103.17 in the #2107 PR). So the master was
+re-solved after perturbing every coefficient and right-hand side by
+`{-1, 0, +1} x 5e-16` relative, 3 seeds plus the unperturbed one. ON certified
+**4/4**, OFF **0/4**.
+
+**Graduation panel** (`discopt_benchmarks/scripts/issue2115_ns_project_graduation_panel.py`,
+data `docs/dev/data/2115-ns-project/`). The setup:
+
+- 91 instances: the in-repo corpus plus 17 MINLPLib layout / OA-master instances.
+- 60 s per arm, default route, `pyscipopt` blocked.
+- Arms in separate processes, interleaved.
+
+Result:
+
+- **cert-clean:** 952 checks, 0 violations.
+- **net-positive:** certified 63 -> 64 (`m6` 60.4 s `feasible` -> 14.8 s `optimal`).
+  Wall where the rung ran went 223.6 -> 161.6 s (`m7` 55.6 -> 44.3, `slay07m`
+  28.8 -> 25.2). Abstentions there went 11 143 -> 7.
+- **Bounds:** no bound is looser on any instance where it ran. The 4 looser bounds
+  in the table all have `NodeNsProjectTry = 0` in the ON arm, which makes them
+  time-limit noise.
+- **Graduated**, default ON, `DISCOPT_NS_PROJECT=0` opts out.
+
+Two earlier runs are recorded as superseded, and the reasons are worth keeping:
+
+- **`deterministic=True`:** that route sends `m6` to 861 spatial nodes and never
+  reaches the MILP driver.
+- **`pyscipopt` importable:** the dev extras install it, and SCIP then does the
+  #2069 confirmation, so the in-house driver barely runs.
+
+Both are cert-clean and outcome-neutral. A panel for a flag in the MILP driver has to
+put the driver on the critical path. Check that the counters fired (§6) *and* that
+the configuration is the one the issue describes.
+
+`m7` at 20 s: bound 58.93 with c-MIR on and off alike (OFF: ~0 in both), so the
+c-MIR loss #2115 reported is gone. At 60 s `m7` certifies in 42-44 s.

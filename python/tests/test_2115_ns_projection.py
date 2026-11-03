@@ -15,10 +15,11 @@ to branch are removed unbounded and floor the tree at 62.83 against an optimum o
 82.2568769; the tree drains in ~38.6k nodes and the engine reports
 ``iteration_limit``, so ``m6`` cannot be certified without SCIP.
 
-``DISCOPT_NS_PROJECT`` adds an exact dual projection as the last rung of the NS
-ladder (``crates/discopt-core/src/lp/simplex/project.rs``): the open columns'
-reduced costs are made exactly zero on an enclosure of a nearby dual, and the bound
-is evaluated rigorously over the enclosure. Measured here: abstentions 3194 -> 0,
+``DISCOPT_NS_PROJECT`` (default ON since its #2115 graduation panel; ``=0`` opts
+out) adds an exact dual projection as the last rung of the NS ladder
+(``crates/discopt-core/src/lp/simplex/project.rs``): the open columns' reduced
+costs are made exactly zero on an enclosure of a nearby dual, and the bound is
+evaluated rigorously over the enclosure. Measured here: abstentions 3194 -> 0,
 master certified optimal. The Rust unit tests in ``project.rs`` pin the mechanism
 on a 2x4 LP (including a 2000-dual soundness sweep); this pins the real master.
 
@@ -67,8 +68,12 @@ print("RESULT " + json.dumps({
 """
 
 
-def _solve(flag: str, time_limit: float) -> dict:
-    env = {**os.environ, "DISCOPT_NS_PROJECT": flag, "DISCOPT_PROFILE": "1"}
+def _solve(flag: str | None, time_limit: float) -> dict:
+    """``flag=None`` leaves ``DISCOPT_NS_PROJECT`` unset: the shipped default."""
+    env = {**os.environ, "DISCOPT_PROFILE": "1"}
+    env.pop("DISCOPT_NS_PROJECT", None)
+    if flag is not None:
+        env["DISCOPT_NS_PROJECT"] = flag
     proc = subprocess.run(
         [sys.executable, "-c", _RUNNER, MASTER, str(time_limit)],
         capture_output=True,
@@ -85,13 +90,14 @@ def _solve(flag: str, time_limit: float) -> dict:
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_m6_master_certifies_with_ns_projection():
-    """ON: optimal, the bound within the master's gap of the optimum and never above
-    it, and the projection is what supplied the bounds (anti-vacuity, §6).
+    """The shipped default (flag unset, graduated ON in #2115): optimal, the bound
+    within the master's gap of the optimum and never above it, and the projection
+    is what supplied the bounds (anti-vacuity, §6).
 
     Measured: 25 406 nodes, 9.1 s (dev machine, unloaded); the 120 s limit is a
     backstop, not the bar.
     """
-    r = _solve("1", 120.0)
+    r = _solve(None, 120.0)
     # The NS ladder ran, and its last rung is what fired.
     assert r["ns_bound"] > 0, r
     assert r["rescue"] > 0, r
@@ -106,9 +112,10 @@ def test_m6_master_certifies_with_ns_projection():
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_m6_master_premise_without_ns_projection():
-    """OFF (premise): the plain NS ladder abstains on thousands of nodes and the
-    master is not certified. If this starts passing certified, the defect moved
-    and the ON test above no longer exercises the projection.
+    """OFF (``DISCOPT_NS_PROJECT=0``, premise): the plain NS ladder abstains on
+    thousands of nodes and the master is not certified. If this starts passing
+    certified, the defect moved and the ON test above no longer exercises the
+    projection.
 
     Measured: 38 594 nodes, ``iteration_limit`` at bound 62.83 after 14 s
     (the tree drains; the time limit is not what stops it).
