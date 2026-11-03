@@ -56,8 +56,12 @@ _INF = 1e20  # discopt's unbounded-bound sentinel
 #: A solve is not started with less wall time than this left in its budget.
 _MIN_SOLVE_S = 0.05
 #: Share of ``total_time_limit`` the presolve-free confirmation of the base set
-#: (checkpoint 0) may use.
+#: (checkpoint 0) may use ...
 _BASE_CONFIRM_FRACTION = 0.25
+#: ... saturating at this ceiling (#1153): a bigger budget must buy filtering. The
+#: slowest presolve-free base proof measured on MIPcc27's smallset is 107 s
+#: (neos-1461051; dives 65 s, every other instance <= 12 s).
+_BASE_CONFIRM_CAP_S = 300.0
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -614,8 +618,8 @@ def milp_iis(
     (two recent solve durations) to confirm it, and the latest confirmed
     subsystem is kept as a fallback: the base set, confirmed presolve-free right
     after the base proof (one extra solve, capped at ``_BASE_CONFIRM_FRACTION``
-    of the budget), then the set at the end of each completed phase. If no
-    subsystem can be confirmed in time,
+    of the budget, at most ``_BASE_CONFIRM_CAP_S``), then the set at the end of
+    each completed phase. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
     ``sat_candidate``: on a pure-binary clause model, start from a small
@@ -896,9 +900,10 @@ def _milp_iis_arrays(
         # phase ends has nothing confirmed to return (TimeoutError), although
         # the base set is a valid -- if large -- infeasible subsystem. Capped so
         # a slow presolve-free solve cannot eat the filter's budget.
-        base_stop = min(
-            deadline, time.perf_counter() + _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0)
+        base_budget = min(
+            _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S
         )
+        base_stop = min(deadline, time.perf_counter() + base_budget)
         try:
             verdict0 = eng.confirm_infeasible(
                 cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
