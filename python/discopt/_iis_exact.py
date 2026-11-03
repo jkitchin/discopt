@@ -33,6 +33,7 @@ exactly.
 
 from __future__ import annotations
 
+import math
 import time
 from fractions import Fraction
 from typing import Optional
@@ -55,39 +56,89 @@ class _Undecided(Exception):
     pass
 
 
-def _fm_feasible(ineqs: list[tuple[dict[int, Fraction], Fraction]]) -> bool:
-    """``sum a_j x_j <= b`` for every ``(a, b)``: is there a real ``x``? Exact."""
-    Ineq = tuple[dict[int, Fraction], Fraction]
-    cols = sorted({j for a, _ in ineqs for j in a})
-    for j in cols:
-        pos: list[Ineq] = []
-        neg: list[Ineq] = []
-        rest: list[Ineq] = []
-        for a0, b0 in ineqs:
-            c = a0.get(j, 0)
-            (pos if c > 0 else neg if c < 0 else rest).append((a0, b0))
-        new = rest
-        for ap, bp in pos:
+def _to_int_ineq(a: dict[int, Fraction], b: Fraction) -> tuple[dict[int, int], int]:
+    """``a.x <= b`` multiplied by the least common denominator (a positive
+    multiple, so the same half-space) and divided by the gcd of all its integers.
+    No rounding: the columns need not be integer."""
+    den = 1
+    for q in list(a.values()) + [b]:
+        den = den * q.denominator // math.gcd(den, q.denominator)
+    ai = {k: int(v * den) for k, v in a.items()}
+    bi = int(b * den)
+    g = 0
+    for v in ai.values():
+        g = math.gcd(g, abs(v))
+    g = math.gcd(g, abs(bi)) if g else abs(bi)
+    if g > 1:
+        ai = {k: v // g for k, v in ai.items()}
+        bi //= g
+    return ai, bi
+
+
+def _fm_project(
+    ineqs: list[tuple[dict[int, int], int]], elim: list[int]
+) -> Optional[list[tuple[dict[int, int], int]]]:
+    """Eliminate the columns ``elim`` from ``a.x <= b`` (integer data) by
+    Fourier--Motzkin: the result holds for the other columns iff some real values
+    of ``elim`` satisfy the input. ``None``: a constant row ``0 <= b < 0`` (the
+    input is infeasible for every value of the other columns). Raises
+    ``_Undecided`` past ``EXACT_MAX_INEQS``.
+
+    Kohler's rule (Chernikov 1960, Kohler 1967) keeps the growth in check: after
+    ``k`` eliminations a derived inequality combining more than ``k + 1`` input
+    rows is implied by the others, so dropping it is exact. Without it 13 rows
+    over 4 eliminated columns passed 20,000.
+    """
+    # key -> the smallest set of input rows it was derived from
+    cur: dict[tuple, frozenset] = {}
+    for idx, (a0, b0) in enumerate(ineqs):
+        cur.setdefault((tuple(sorted(a0.items())), b0), frozenset({idx}))
+    for k, j in enumerate(elim, start=1):
+        pos, neg = [], []
+        rest: dict[tuple, frozenset] = {}
+        for key, orig in cur.items():
+            row = dict(key[0])
+            c = row.get(j, 0)
+            if c > 0:
+                pos.append((row, key[1], orig))
+            elif c < 0:
+                neg.append((row, key[1], orig))
+            else:
+                rest[key] = orig
+        for ap, bp, op in pos:
             cp = ap[j]
-            for an, bn in neg:
+            for an, bn, on in neg:
+                orig = op | on
+                if len(orig) > k + 1:
+                    continue  # Kohler: implied by the others
                 cn = -an[j]
-                a: dict[int, Fraction] = {}
-                for k, v in ap.items():
-                    if k != j:
-                        a[k] = a.get(k, 0) + v * cn
-                for k, v in an.items():
-                    if k != j:
-                        a[k] = a.get(k, 0) + v * cp
-                a = {k: v for k, v in a.items() if v != 0}
+                a: dict[int, int] = {}
+                for c2, v in ap.items():
+                    if c2 != j:
+                        a[c2] = a.get(c2, 0) + v * cn
+                for c2, v in an.items():
+                    if c2 != j:
+                        a[c2] = a.get(c2, 0) + v * cp
+                a = {c2: v for c2, v in a.items() if v != 0}
+                b = bp * cn + bn * cp
                 if not a:
-                    if bp * cn + bn * cp < 0:
-                        return False
+                    if b < 0:
+                        return None
                     continue
-                new.append((a, bp * cn + bn * cp))
-        if len(new) > EXACT_MAX_INEQS:
+                g = 0
+                for v in a.values():
+                    g = math.gcd(g, abs(v))
+                g = math.gcd(g, abs(b)) if b else g
+                if g > 1:
+                    a = {c2: v // g for c2, v in a.items()}
+                    b //= g
+                key = (tuple(sorted(a.items())), b)
+                if key not in rest or len(orig) < len(rest[key]):
+                    rest[key] = orig
+        if len(rest) > EXACT_MAX_INEQS:
             raise _Undecided
-        ineqs = new
-    return all(b >= 0 for a, b in ineqs if not a)
+        cur = rest
+    return [(dict(key[0]), key[1]) for key in cur]
 
 
 def exact_feasible(
@@ -102,6 +153,14 @@ def exact_feasible(
     """Exact decision of ``rlo <= A x <= rhi``, ``lb <= x <= ub``, ``x_j`` integer
     for ``j`` in ``held``. Non-finite bounds are absent. Returns True if the set
     is infeasible, False if it is feasible, None if undecided (caps or ``stop_at``).
+
+    The continuous columns are projected out once, up front (Fourier--Motzkin
+    over integer-scaled rows: ``Fraction(float)`` is exact and every double is
+    dyadic, so each row scales to integers exactly). What remains is an
+    equivalent system over the held integer columns alone, whose rows have finite
+    activity ranges, so the search can prune: fixing a column updates only the
+    rows that contain it. (Deciding the continuous part per leaf instead visited
+    all 65,536 assignments of MIPcc27 otra's 16 binaries, ~19 s per set.)
     """
     A = A.tocsr()
     rows = [r for r in range(A.shape[0]) if np.isfinite(rlo[r]) or np.isfinite(rhi[r])]
@@ -118,17 +177,16 @@ def exact_feasible(
             if np.ceil(lo) > np.floor(hi):
                 return True
     F = Fraction
-    row_terms: list[list[tuple[int, Fraction]]] = []
-    row_lo: list[Optional[Fraction]] = []
-    row_hi: list[Optional[Fraction]] = []
+    ineqs: list[tuple[dict[int, int], int]] = []
     used: set[int] = set()
     for r in rows:
         s, e = A.indptr[r], A.indptr[r + 1]
-        terms = [(int(j), F(float(v))) for j, v in zip(A.indices[s:e], A.data[s:e]) if v != 0]
-        row_terms.append(terms)
-        row_lo.append(F(float(rlo[r])) if np.isfinite(rlo[r]) else None)
-        row_hi.append(F(float(rhi[r])) if np.isfinite(rhi[r]) else None)
-        used.update(j for j, _ in terms)
+        terms = {int(j): F(float(v)) for j, v in zip(A.indices[s:e], A.data[s:e]) if v != 0}
+        used.update(terms)
+        if np.isfinite(rhi[r]):
+            ineqs.append(_to_int_ineq(terms, F(float(rhi[r]))))
+        if np.isfinite(rlo[r]):
+            ineqs.append(_to_int_ineq({k: -v for k, v in terms.items()}, -F(float(rlo[r]))))
     ints = sorted(j for j in used if is_held[j])
     cont = sorted(j for j in used if not is_held[j])
     if len(cont) > EXACT_MAX_CONT or len(ints) > EXACT_MAX_INTS:
@@ -136,101 +194,81 @@ def exact_feasible(
     for j in ints:
         if not (np.isfinite(lb[j]) and np.isfinite(ub[j])):
             return None  # unbounded integer: no finite enumeration
-    blo = {j: (F(float(lb[j])) if np.isfinite(lb[j]) else None) for j in used}
-    bhi = {j: (F(float(ub[j])) if np.isfinite(ub[j]) else None) for j in used}
-    dom = {j: range(int(np.ceil(lb[j])), int(np.floor(ub[j])) + 1) for j in ints}
-    # Branch first on the columns in the most rows (they prune soonest).
-    deg = {j: 0 for j in ints}
-    for terms in row_terms:
-        for j, _ in terms:
-            if j in deg:
-                deg[j] += 1
-    order = sorted(ints, key=lambda j: (-deg[j], j))
-    fixed: dict[int, Fraction] = {}
+    for j in cont:
+        if np.isfinite(lb[j]):
+            ineqs.append(_to_int_ineq({j: F(-1)}, -F(float(lb[j]))))
+        if np.isfinite(ub[j]):
+            ineqs.append(_to_int_ineq({j: F(1)}, F(float(ub[j]))))
+    # Constant rows (no columns) decide themselves.
+    if any(not a and b < 0 for a, b in ineqs):
+        return True
+    ineqs = [(a, b) for a, b in ineqs if a]
+    try:
+        proj = _fm_project(ineqs, cont)
+    except _Undecided:
+        return None
+    if proj is None:
+        return True
+    # Search the integer columns. Each projected row: sum a_j x_j <= b.
+    dom = {j: (int(np.ceil(lb[j])), int(np.floor(ub[j]))) for j in ints}
+    n_rows = len(proj)
+    rows_of: dict[int, list[tuple[int, int]]] = {j: [] for j in ints}
+    lo_act = [0] * n_rows  # minimum activity over the current boxes
+    for i, (a, b) in enumerate(proj):
+        for j, c in a.items():
+            rows_of[j].append((i, c))
+            lo_j, hi_j = dom[j]
+            lo_act[i] += c * (lo_j if c > 0 else hi_j)
+    rhs = [b for _, b in proj]
+    if any(lo_act[i] > rhs[i] for i in range(n_rows)):
+        return True
+    order = sorted(ints, key=lambda j: (-len(rows_of[j]), j))
+    if not order:
+        return False  # projected rows hold with no integer column left
     nodes = [0]
 
-    def pruned() -> bool:
-        """Some row's exact activity range misses its bounds."""
-        for terms, lo, hi in zip(row_terms, row_lo, row_hi):
-            mn: Optional[Fraction] = F(0)
-            mx: Optional[Fraction] = F(0)
-            for j, a in terms:
-                if j in fixed:
-                    v = a * fixed[j]
-                    mn = None if mn is None else mn + v
-                    mx = None if mx is None else mx + v
-                    continue
-                lo_j, hi_j = blo[j], bhi[j]
-                # a * x over [lo_j, hi_j]; None stands for -inf (mn) / +inf (mx)
-                small, big = (lo_j, hi_j) if a > 0 else (hi_j, lo_j)
-                mn = None if (mn is None or small is None) else mn + a * small
-                mx = None if (mx is None or big is None) else mx + a * big
-            if hi is not None and mn is not None and mn > hi:
-                return True
-            if lo is not None and mx is not None and mx < lo:
-                return True
-        return False
+    def fix(j: int, v: int) -> bool:
+        """Fix x_j = v (from its box); False if some row's minimum now exceeds it."""
+        ok = True
+        lo_j, hi_j = dom[j]
+        for i, c in rows_of[j]:
+            lo_act[i] += c * v - c * (lo_j if c > 0 else hi_j)
+            if lo_act[i] > rhs[i]:
+                ok = False
+        return ok
 
-    def leaf_feasible() -> bool:
-        ineqs: list[tuple[dict[int, Fraction], Fraction]] = []
-        for terms, lo, hi in zip(row_terms, row_lo, row_hi):
-            a: dict[int, Fraction] = {}
-            const = F(0)
-            for j, c in terms:
-                if j in fixed:
-                    const += c * fixed[j]
-                else:
-                    a[j] = a.get(j, 0) + c
-            if hi is not None:
-                ineqs.append((dict(a), hi - const))
-            if lo is not None:
-                ineqs.append(({k: -v for k, v in a.items()}, const - lo))
-        for j in cont:
-            lo_j, hi_j = blo[j], bhi[j]
-            if lo_j is not None:
-                ineqs.append(({j: F(-1)}, -lo_j))
-            if hi_j is not None:
-                ineqs.append(({j: F(1)}, hi_j))
-        for a, b in ineqs:
-            if not a and b < 0:
-                return False
-        return _fm_feasible([(a, b) for a, b in ineqs if a])
+    def unfix(j: int, v: int) -> None:
+        lo_j, hi_j = dom[j]
+        for i, c in rows_of[j]:
+            lo_act[i] -= c * v - c * (lo_j if c > 0 else hi_j)
 
-    def visit() -> bool:
-        """Count a node; True when ``fixed`` is pruned (no completion is feasible)."""
+    def tick() -> None:
         nodes[0] += 1
         if nodes[0] > EXACT_MAX_NODES or (stop_at is not None and time.perf_counter() >= stop_at):
             raise _Undecided
-        return pruned()
 
-    def search() -> bool:
-        """True if some completion of ``fixed`` is feasible. Iterative: one stack
-        frame per integer column overflowed Python's recursion limit on a set
-        with few continuous but thousands of integer columns (MIPcc27 dives)."""
-        if visit():
-            return False
-        if not order:
-            return leaf_feasible()
-        stack = [iter(dom[order[0]])]  # stack[k]: values left for column order[k]
-        while stack:
-            k = len(stack) - 1
-            j = order[k]
-            v = next(stack[-1], None)
-            if v is None:
-                stack.pop()
-                fixed.pop(j, None)
-                continue
-            fixed[j] = F(v)
-            if visit():
-                continue
-            if k + 1 == len(order):
-                if leaf_feasible():
-                    return True
-                continue
-            stack.append(iter(dom[order[k + 1]]))
-        return False
-
+    # Iterative DFS: stack[k] is the next value to try for column order[k].
     try:
-        return not search()
+        k = 0
+        val = [dom[order[0]][0]]
+        while k >= 0:
+            j = order[k]
+            if val[k] > dom[j][1]:
+                val.pop()
+                k -= 1
+                if k >= 0:
+                    unfix(order[k], val[k])
+                    val[k] += 1
+                continue
+            tick()
+            if fix(j, val[k]):
+                if k + 1 == len(order):
+                    return False  # every projected row holds: feasible
+                k += 1
+                val.append(dom[order[k]][0])
+                continue
+            unfix(j, val[k])
+            val[k] += 1
     except _Undecided:
         return None
+    return True
