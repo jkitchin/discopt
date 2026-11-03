@@ -94,6 +94,8 @@ class MilpIIS:
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
+    ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
+    ladder_calls: int = 0  # oracle calls the ladder made
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -145,6 +147,7 @@ class _Engine:
         self.n_interrupted = 0
         self.n_repairs = 0
         self.n_exact = 0  # exact (rational) decisions attempted as the second route
+        self.n_presolve = 0  # presolve-only solves (ladder rung 0)
         self.n_exact_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
@@ -389,6 +392,34 @@ class _Engine:
         self.n_cross_inconclusive += 1
         return None, None
 
+    def presolve_proves(self, active_cons, active_bounds, active_int, stop_at=None) -> bool:
+        """Does HiGHS presolve ALONE prove the set infeasible? (The ladder's first
+        rung: cheap, incomplete, and a presolve-on claim like any other.)"""
+        self._configure(active_cons, active_bounds, active_int)
+        h = self.h
+        now = time.perf_counter()
+        stop = now + float(self.probe_tl)
+        for lim in (self.deadline, stop_at):
+            if lim is not None:
+                stop = min(stop, lim)
+        if stop - now < _MIN_SOLVE_S:
+            raise _OutOfTime
+        h.clearSolver()
+        h.setOptionValue("time_limit", h.getRunTime() + (stop - now))
+        h.setOptionValue("presolve", "choose")
+        self.n_presolve += 1
+        h.presolve()
+        return bool(h.getModelPresolveStatus() == self.hs.HighsPresolveStatus.kInfeasible)
+
+    def capped_proves(self, active_cons, active_bounds, active_int, cap, stop_at=None) -> bool:
+        """Does a presolve-on MIP solve capped at ``cap`` seconds (wall-guarded)
+        prove the set infeasible? (A ladder rung.)"""
+        self._configure(active_cons, active_bounds, active_int)
+        stop = time.perf_counter() + float(cap)
+        if stop_at is not None:
+            stop = min(stop, stop_at)
+        return bool(self._solve("choose", stop) == self.hs.HighsModelStatus.kInfeasible)
+
     def confirm_infeasible(
         self,
         active_cons: set[int],
@@ -521,6 +552,14 @@ _SAT_SLICE_CONFLICTS = 1_000
 #: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
 _SAT_STAGE_FRACTION = 0.10
+#: Staged-oracle ladder (order flag ``l``): its share of ``total_time_limit``,
+#: saturating at a constant (#1153), and its capped-MIP rung,
+#: ``max(_LADDER_Q_MIN_S, _LADDER_Q_FACTOR * base proof time)``: a fixed 0.5 s rung
+#: could not even prove the full neos859080 (3.8 s) or neos-1461051 (7.3 s).
+_LADDER_FRACTION = 0.5
+_LADDER_CAP_S = 1800.0
+_LADDER_Q_MIN_S = 0.5
+_LADDER_Q_FACTOR = 10.0
 #: Encoding-size ceiling: past it the stage proposes nothing. The largest
 #: measured on the smallset is ~103k clauses (jjliu_clique).
 _SAT_MAX_CLAUSES = 2_000_000
@@ -802,25 +841,26 @@ def milp_iis(
     )
 
 
-def _parse_order(order: str) -> tuple[str, bool, bool]:
-    """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True).
+def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
+    """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True, ladder=False).
 
     A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
-    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate. E.g.
-    ``"CIB-r"``, ``"ICB-n"``, ``"ICB-rn"``.
+    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate, ``l``
+    runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering.
+    E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
     """
     phases, _, flags = order.partition("-")
     if (
         sorted(phases) != ["B", "C", "I"]
-        or not set(flags) <= {"r", "n"}
+        or not set(flags) <= {"r", "n", "l"}
         or len(set(flags)) != len(flags)
         or ("-" in order and not flags)
     ):
         raise ValueError(
             "order must be a permutation of 'ICB' with optional '-' flags "
-            f"('r' reverse, 'n' no SAT candidate), got {order!r}"
+            f"('r' reverse, 'n' no SAT candidate, 'l' oracle ladder), got {order!r}"
         )
-    return phases, "r" in flags, "n" not in flags
+    return phases, "r" in flags, "n" not in flags, "l" in flags
 
 
 def _milp_iis_arrays(
@@ -840,7 +880,7 @@ def _milp_iis_arrays(
     if t_start is None:
         t_start = time.perf_counter()
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
-    phase_order, reverse, order_sat = _parse_order(order)
+    phase_order, reverse, order_sat, use_ladder = _parse_order(order)
     sat_candidate = sat_candidate and order_sat
     A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
 
@@ -901,6 +941,7 @@ def _milp_iis_arrays(
     # The base proof is mandatory, so under an overall budget it may use all of
     # it rather than one probe's ``time_limit`` (no-ip-65059 needs > 30 s).
     eng.probe_tl = math.inf if deadline is not None else time_limit
+    t_base0 = time.perf_counter()
     try:
         base, _ = eng.probe(cons, bounds, ints_active)
         if base is not True and sat_rows is not None:
@@ -914,6 +955,7 @@ def _milp_iis_arrays(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
         ) from None
     eng.probe_tl = time_limit
+    t_base = time.perf_counter() - t_base0
     if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
@@ -1049,6 +1091,92 @@ def _milp_iis_arrays(
         elif verdict0 is False:
             return redo_each()
 
+    ladder_calls = 0
+    ladder_size: Optional[int] = None
+    if use_ladder:
+        # Staged-oracle ladder: the deletion filter run first with oracles that
+        # are cheap but incomplete -- HiGHS presolve alone, then a MIP capped at
+        # a multiple of the measured base proof -- dropping an element only on a
+        # proven Infeasible and keeping it otherwise. The filter below then runs
+        # on what is left, so the result is decided, confirmed and certified
+        # exactly as without the ladder. On big-M models the engine's ordinary
+        # probes stall after integralities are relaxed, while presolve proves
+        # the subsystems that matter in milliseconds (MIPcc27's kedron: the
+        # presolve rung alone gives Gurobi's 12-element IIS in 3.4 s).
+        stop_l = None
+        if deadline is not None:
+            budget_l = min(_LADDER_FRACTION * float(total_time_limit or 0.0), _LADDER_CAP_S)
+            stop_l = min(deadline, time.perf_counter() + budget_l)
+        q1 = max(_LADDER_Q_MIN_S, _LADDER_Q_FACTOR * t_base)
+
+        def oracle(rung: Optional[float]) -> bool:
+            nonlocal ladder_calls
+            ladder_calls += 1
+            if rung is None:
+                return eng.presolve_proves(cons, bounds, ints_active, stop_l)
+            return eng.capped_proves(cons, bounds, ints_active, rung, stop_l)
+
+        def ladder_filter(cands: list, active: set, rung: Optional[float]) -> None:
+            i, size = 0, 1
+            while i < len(cands):
+                batch = cands[i : i + size]
+                for e in batch:
+                    active.discard(e)
+                try:
+                    ok = oracle(rung)
+                except _OutOfTime:
+                    for e in batch:
+                        active.add(e)
+                    raise
+                if ok:
+                    i += len(batch)
+                    size *= 2
+                    continue
+                for e in batch:
+                    active.add(e)
+                if len(batch) > 1:
+                    size = max(1, len(batch) // 2)
+                else:
+                    i += 1
+
+        def ladder_phase(ph: str, rung: Optional[float]) -> None:
+            if ph == "C":
+                ladder_filter(_ord(sorted(cons)), cons, rung)
+            elif ph == "I":
+                ladder_filter(_ord(sorted(ints_active)), ints_active, rung)
+            elif include_bounds:
+                ladder_filter(
+                    _ord(sorted(jb for jb in finite_bounds if jb[0] not in ints_active)),
+                    bounds,
+                    rung,
+                )
+
+        n_before = len(cons) + len(bounds) + len(ints_active)
+        try:
+            for rung in (None, q1):
+                for ph in phase_order:
+                    ladder_phase(ph, rung)
+        except _OutOfTime:
+            pass  # every drop so far was proven: the current set is a candidate
+        ladder_size = len(cons) + len(bounds) + len(ints_active)
+        if confirm == "final" and ladder_size < n_before and deadline is not None:
+            # A smaller confirmed fallback than checkpoint 0.
+            stop_c = min(
+                deadline,
+                time.perf_counter()
+                + min(_BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S),
+            )
+            try:
+                verdict_l = eng.confirm_infeasible(
+                    cons, bounds, ints_active, stop_at=stop_c, presolve=("off",)
+                )
+            except _OutOfTime:
+                verdict_l = None
+            if verdict_l is True:
+                checkpoint = (set(cons), set(bounds), set(ints_active))
+            elif verdict_l is False:
+                return redo_each()
+
     complete = True
     try:
         by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
@@ -1110,6 +1238,8 @@ def _milp_iis_arrays(
         sat_conflicts=sat_conflicts,
         order=order,
         n_exact=eng.n_exact,
+        ladder_size=ladder_size,
+        ladder_calls=ladder_calls,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )
