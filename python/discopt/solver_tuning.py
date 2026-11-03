@@ -1188,6 +1188,43 @@ class SolverTuning:
     med_term_purchasing under mbigm (57 -> 95), at a lower wall in each. Audit row
     in ``docs/dev/flag-retirement-audit.md``."""
 
+    mbigm_lp_components: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_MBIGM_LP_COMPONENTS", default=True)
+    )
+    """Solve each mbigm LP big-M over only the connected components of the LP
+    relaxation that the row's body touches (``DISCOPT_MBIGM_LP_COMPONENTS``, default
+    **ON** since its #1917 §5 panel; ``=0`` restores the full-LP path; bound-changing
+    on the ``"mbigm"`` route).
+
+    Two columns are connected when a linear row of the model holds both. Dropping
+    the rows of components the body does not touch is a relaxation, so the sub-LP
+    optimum is never tighter than the full one and the M stays sound. On a
+    separable polytope the two optima are equal in exact arithmetic, but the
+    simplex takes a different path, so the float M can differ in its last bits.
+    It can also be smaller than OFF's M where the full LP fails and OFF falls
+    back to the interval M (below). That is why this is a flag. When the touched
+    components hold every column, the full LP is solved unchanged.
+
+    Measured (#1917, GDPlib, ``gdp.mbigm`` lowering wall, load 11-21): ``biofuel``
+    has 5927 components (largest 144 columns / 34 rows, against 36804 / 5576) and
+    lowers in 146 s ON against 3814 s OFF, all 7416 M's bitwise equal; ``kaibel`` 40.8 -> 6.3 s with
+    every M bitwise equal; ``stranded_gas`` is one component (99.6 % of columns),
+    116 s OFF, 119 s ON. Per-row M differential over all 24 ``gdp_parity``
+    instances: no M is larger ON, and every M is bitwise equal on 23 of them (3
+    lower no LP row). On ``batch_processing``
+    36 of 450 M's are smaller ON. There the in-house simplex returns ``numerical``
+    on 448 of 450 full LPs, so OFF uses the interval M; each of the 48 OPTIMAL
+    sub-LPs equals the HiGHS full-LP optimum (worst relative 3e-16).
+
+    Graduated (2026-11-03) by the §5 panel pre-registered in
+    ``docs/dev/data/1917-flag-panel/DISCOPT_MBIGM_LP_COMPONENTS.prereg.md``: 24
+    instances, 6796 sub-LPs re-solved by the soundness audit with 0 violations;
+    M's ON vs OFF 7481 equal, 40 smaller, 0 larger; solved 15/15 both arms in both
+    reps, 0 incumbents lost; node geomean ON/OFF 1.00; SGM solve wall ON/OFF 0.918
+    and 0.911 in the two reps; lowering faster on ``biofuel`` and ``kaibel`` in
+    both reps, slower on none.
+    Audit row in ``docs/dev/flag-retirement-audit.md``."""
+
     obbt_ns_strict: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBBT_NS_STRICT", default=False)
     )
@@ -1206,16 +1243,21 @@ class SolverTuning:
     ``min(raw, g)`` and never tightens when ``g`` is ``None``; DBBT sizes the gap
     from the NS-safe ``z_lp`` and reduced costs recomputed from the same dual ``y``
     (the ``node_reduce._dbbt_from_reduced_costs`` contract), and abstains when no
-    safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``."""
+    safe ``z`` exists. Audit row in ``docs/dev/flag-retirement-audit.md``.
+
+    OFF still takes ``min(raw, g)`` on a relaxation past ``_OBBT_COND_LIMIT``
+    (``require_ns``, #2088): OBBT runs there only because ``g`` is rigorous, so the
+    1e-6 guard does not apply. The flag governs well-conditioned LPs only."""
 
     hull_conic_quadratic: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=True)
     )
     """Hull a separable convex quadratic row as a second-order cone
-    (``DISCOPT_HULL_CONIC_QUADRATIC``, default **OFF**; bound-changing on the
+    (``DISCOPT_HULL_CONIC_QUADRATIC``, default **ON** -- graduated by the §5 panel
+    below; ``=0`` restores the eps-perspective for every row; bound-changing on the
     ``"hull"`` route).
 
-    Today every nonlinear disjunct row gets the eps-perspective
+    Without it every nonlinear disjunct row gets the eps-perspective
     ``yhat * g(v / yhat) - eps * g(0) * (1 - y) <= 0``. For ``g = sum_i q_i (x_i -
     a_i)^2 - R`` (``q_i > 0``, ``R >= 0``: a ball or axis-aligned ellipsoid) the
     flag emits the smoothed cone ``sqrt(S + delta^2) <= sqrt(R + delta^2) y +
@@ -1236,10 +1278,18 @@ class SolverTuning:
     ``docs/dev/data/1917-flag-panel/``): fires on 2 lowerings
     (``constrained_layout_clay0203``, ``syngas``), identical on 21. Cert-clean (0
     incorrect, 0 bound crossings, 0 solved lost); clay0203 53.4 -> 12.3 s, 301 -> 111
-    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s. **State: default OFF;
-    graduation is the owner's call** (cert-clean and net-positive where it fires,
-    but it helps on one corpus instance); audit row in
-    ``docs/dev/flag-retirement-audit.md``."""
+    nodes, syngas unsolved in both; SGM 80.8 -> 43.8 s.
+
+    Graduation panel (2026-11-01, ``issue1917_conic_panel.py``, rule pre-registered
+    in its header; data ``DISCOPT_HULL_CONIC_QUADRATIC.wide-lowload.jsonl``): 29
+    fired instances (18 seeded ``convex_gdp_generator`` clay/cover/route GDPs and
+    11 Pyomo ``examples/gdp`` models), hull, 3 interleaved reps at 120 s,
+    load-gated (load1 4.5-8.0), references from SCIP on Pyomo ``gdp.bigm``. ON
+    arm: 0 incorrect, 0 bound crossings, 0 certifications lost, every incumbent
+    verified in the Pyomo GDP. Certified 19 -> 25 of 29; SGM wall 39.22 -> 17.36 s
+    (ratio 0.443); SGM nodes 68.4 -> 36.7. The only incorrect rows are the OFF
+    arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
+    ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
