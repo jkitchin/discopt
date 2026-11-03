@@ -484,8 +484,10 @@ _SAT_REFINE_CONFLICTS = 2_000
 #: does not bound time: PHP(10,9) ran > 280 s inside 200k conflicts, and on
 #: smallset's hole9/hole10 the candidate stage overran a 60 s total_time_limit
 #: until the process was killed. Learnt clauses persist across calls, so slicing
-#: loses no search progress.
-_SAT_SLICE_CONFLICTS = 1_000
+#: loses no search progress. 1000 was too coarse once PB rows are encoded: on a
+#: 4x36 market-split model one slice outlasted a 0.2 s stage budget by 0.6 s
+#: and took the base proof's time; at 100 the overshoot is ~35 ms (50: no better).
+_SAT_SLICE_CONFLICTS = 100
 #: Wall-clock ceiling of the candidate stage; with an overall budget it gets
 #: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
