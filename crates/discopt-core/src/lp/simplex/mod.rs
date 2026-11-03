@@ -21,6 +21,7 @@ pub mod dual;
 pub mod linsolve;
 pub mod presolve;
 pub mod primal;
+pub mod project;
 pub mod refine;
 pub mod regularized_lu;
 pub mod scaled_problem;

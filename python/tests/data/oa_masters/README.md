@@ -58,3 +58,23 @@ comparison, a detection margin of ~800x rather than 24x.
 If you add a check here, state the number in objective units and say what
 measurement it came from. "1e-6" of anything is not a tolerance on a 3.3e8
 objective, it is a scale factor wearing one.
+
+
+## `m6_final_master_2115.npz` (#2115)
+
+The final `lp_nlp_bb` master of a default `Model.solve()` on MINLPLib `m6` with
+`pyscipopt` absent, captured where `milp_highs._run_simplex_engine` receives it for
+the #2069 independent confirmation (the HiGHS claim is 82.2568769; MINLPLib's
+optimum is 82.2568769100).
+
+| file | rows x cols | integers | free on both sides |
+|---|---|---|---|
+| `m6_final_master_2115.npz` | 258 x 86 | 30 | 42 |
+
+The 42 free columns are layout positions: the master is translation-invariant and
+no bound on them exists. The in-house driver's node NS bound abstained on 3194 of
+~29k nodes for it (`NodeNsAbstain`), the abstaining nodes floored the tree at 62.83,
+and the engine stopped at `iteration_limit` after 38 594 nodes. With
+`DISCOPT_NS_PROJECT=1` it certifies the master in 25 406 nodes. Carries
+`gap_tolerance` and `mip_start` (the seed the confirmation hands the engine) as
+well as the arrays of the format above. Used by `test_2115_ns_projection.py`.
