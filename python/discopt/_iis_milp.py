@@ -1117,10 +1117,19 @@ def _milp_iis_arrays(
     )
 
 
-#: Deletion orders run by default when a portfolio is requested. Each won on part
-#: of MIPcc27's smallset in the ordering sweep (``ICB`` sorted / ``CIB`` sorted /
-#: ``ICB`` reversed; no order dominated, sizes differed by up to 40%).
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "CIB-r")
+#: The recommended portfolio (``compute_iis(portfolio=DEFAULT_PORTFOLIO)``).
+#: Chosen on MIPcc27's smallset (50 instances x 4 orders, 60 s, every output
+#: verified): as a portfolio waiting for all members, ICB+CIB+ICB-r completes 31
+#: instances, 29 of them at or below Gurobi's reference size, against 29 / 23 for
+#: ICB alone; adding CIB-r changed nothing, and stopping members 2x after the
+#: first completion lost size on 2 instances.
+#: With the SAT core extended to PB rows, ``ICB-n`` (no core) joins: the core
+#: steers some pure-binary models to a larger many-integralities IIS while an
+#: almost-LP one is smaller (domset-hexgrid 446* -> 176). Re-measured on the
+#: final stack (50 x 6 orders incl. ICB-n and the oracle ladder CIB-l, 60 s):
+#: ICB+CIB+ICB-r+ICB-n completes 35, 33 of them at or below Gurobi (ICB alone:
+#: 31 / 26); adding CIB-r or CIB-l completes nothing more.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
