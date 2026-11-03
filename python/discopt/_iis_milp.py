@@ -1083,10 +1083,13 @@ def _milp_iis_arrays(
     )
 
 
-#: Deletion orders run by default when a portfolio is requested. Each won on part
-#: of MIPcc27's smallset in the ordering sweep (``ICB`` sorted / ``CIB`` sorted /
-#: ``ICB`` reversed; no order dominated, sizes differed by up to 40%).
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "CIB-r")
+#: The recommended portfolio (``compute_iis(portfolio=DEFAULT_PORTFOLIO)``).
+#: Chosen on MIPcc27's smallset (50 instances x 4 orders, 60 s, every output
+#: verified): as a portfolio waiting for all members, ICB+CIB+ICB-r completes 31
+#: instances, 29 of them at or below Gurobi's reference size, against 29 / 23 for
+#: ICB alone; adding CIB-r changed nothing, and stopping members 2x after the
+#: first completion lost size on 2 instances.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
