@@ -41,6 +41,7 @@ never "repaired".
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -995,6 +996,8 @@ def milp_iis(
         confirm=confirm,
         sat_candidate=sat_candidate,
     )
+    if workers is not None and portfolio is None:
+        raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
         return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
     return _milp_iis_arrays(
@@ -1207,14 +1210,25 @@ def _milp_iis_arrays(
     def phase_constraints() -> None:
         batch_filter(_ord(sorted(cons)), cons, lambda ci: ("constraint", ci))
 
+    # Bounds already put through the deletion filter. A bound of a column held
+    # integer is not an element while it is held; if a later I phase releases the
+    # column (orders with B before I), its bounds become elements of the result and
+    # must be filtered too, or a removable bound is reported as proven irreducible.
+    tested_bounds: set[tuple[int, str]] = set()
+
+    def untested_bounds() -> list[tuple[int, str]]:
+        return [
+            jb
+            for jb in finite_bounds
+            if jb in bounds and jb[0] not in ints_active and jb not in tested_bounds
+        ]
+
     def phase_bounds() -> None:
         # Bounds of columns not held integer (a held column's box is not an element).
         if include_bounds:
-            batch_filter(
-                _ord([jb for jb in finite_bounds if jb[0] not in ints_active]),
-                bounds,
-                lambda jb: ("bound", jb[0], jb[1]),
-            )
+            todo = untested_bounds()
+            batch_filter(_ord(todo), bounds, lambda jb: ("bound", jb[0], jb[1]))
+            tested_bounds.update(todo)
 
     def redo_each() -> MilpIIS:
         # A presolve-on verdict the filter acted on did not survive: the set is
@@ -1251,18 +1265,26 @@ def _milp_iis_arrays(
     # a share of the caller's budget, saturating at a constant (#1153).
     base_budget = min(_BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S)
     if confirm == "final" and deadline is not None:
-        # Checkpoint 0: the base set, proven presolve-on just above, confirmed
-        # presolve-off too. Without it a budget that runs out before the first
-        # phase ends has nothing confirmed to return (TimeoutError), although
-        # the base set is a valid -- if large -- infeasible subsystem. Capped so
-        # a slow presolve-free solve cannot eat the filter's budget.
+        # Checkpoint 0: the base set, proven just above (presolve-on; or, when
+        # presolve-on answered kUnboundedOrInfeasible, by the presolve-free
+        # re-solve the probe ran), confirmed presolve-off too. Without it a
+        # budget that runs out before the first phase ends has nothing confirmed
+        # to return (TimeoutError), although the base set is a valid -- if large
+        # -- infeasible subsystem. Capped so a slow presolve-free solve cannot
+        # eat the filter's budget.
         base_stop = min(deadline, time.perf_counter() + base_budget)
+        n_recent = len(eng._recent)
         try:
             verdict0 = eng.confirm_infeasible(
                 cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
             )
         except _OutOfTime:
             verdict0 = None
+        # Not a filtering probe: keep its duration out of the confirmation
+        # reserve (2.5x the slowest recent solve), or a checkpoint solve that
+        # used its whole cap would hold back ~62% of the budget from the filter.
+        while len(eng._recent) > n_recent:
+            eng._recent.pop()
         if verdict0 is True:
             checkpoint = (set(cons), set(bounds), set(ints_active))
         elif verdict0 is False:
@@ -1368,9 +1390,12 @@ def _milp_iis_arrays(
     try:
         by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
         phases = [by_name[c] for c in phase_order]
-        for phase in phases:
+        if include_bounds and phase_order.index("B") < phase_order.index("I"):
+            # B runs before I: bounds of columns I releases are filtered at the end.
+            phases.append(phase_bounds)
+        for k, phase in enumerate(phases):
             phase()
-            if confirm == "final" and phase is not phases[-1]:
+            if confirm == "final" and k < len(phases) - 1:
                 verdict = eng.confirm_infeasible(cons, bounds, ints_active)
                 if verdict is False:
                     return redo_each()
@@ -1463,6 +1488,10 @@ def _iis_size(res: MilpIIS) -> int:
     return len(res.constraints) + len(res.bounds) + len(res.integrality)
 
 
+#: The parent's discopt package directory, which every portfolio member must load.
+_DISCOPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def _portfolio_child() -> None:
     """Entry point of one portfolio member process.
 
@@ -1478,6 +1507,15 @@ def _portfolio_child() -> None:
     import threading
 
     job = pickle.load(sys.stdin.buffer)
+    # The member must run the parent's discopt, not one that happens to come
+    # first on a rebuilt sys.path (CLAUDE.md s8).
+    import discopt
+
+    here = os.path.dirname(os.path.abspath(discopt.__file__))
+    if here != job["discopt_dir"]:
+        raise RuntimeError(
+            f"portfolio member imported discopt from {here}, parent uses {job['discopt_dir']}"
+        )
 
     def _orphan_watch() -> None:
         # The parent keeps our stdin open until it is done with us; EOF means it
@@ -1596,6 +1634,7 @@ def _portfolio_iis(
                         order=orders[i],
                         deadline_wall=member_deadline,
                         result_path=result_path,
+                        discopt_dir=_DISCOPT_DIR,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.

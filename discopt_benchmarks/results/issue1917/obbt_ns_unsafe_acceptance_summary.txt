@@ -1,0 +1,11 @@
+instances=151 errors=0 ref_points_verified=147
+totals {'probes': 28108, 'probes_with_g': 27913, 'dbbt_calls': 281, 'ref_checks': 28128, 'oracle_none': 0} unsafe events by kind {'a': 27771, 'dbbt': 389} max excess (|bound| < 1e15)=0.0495
+ref excluded >0: 177 (max 4.12e-07); >1e-6: 0; >1e-6 and applied: 0; >1e-6 with safe bound NOT excluding: 0
+   pyomo.constrained_layout_clay0203:hull {'kind': 'a', 'col': 67, 'orig': True, 'side': 'lb', 'raw': 4.1224566160735776e-07, 'g': -2.320041783090294e-07, 'excess': 6.442498399163871e-07, 'applied': True, 'cur': 0.0, 'xref': 0.0, 'ref_viol': 4.1224566160735776e-07, 'ref_viol_safe': -2.320041783090294e-07}
+   pyomo.constrained_layout_clay0203:hull {'kind': 'a', 'col': 67, 'orig': True, 'side': 'lb', 'raw': 4.1224566160735776e-07, 'g': 4.121456615661332e-07, 'excess': 1.0000004122457166e-10, 'applied': False, 'cur': 4.1224566160735776e-07, 'xref': 0.0, 'ref_viol': 4.1224566160735776e-07, 'ref_viol_safe': 4.121456615661332e-07}
+   pyomo.constrained_layout_clay0203:hull {'kind': 'a', 'col': 67, 'orig': True, 'side': 'lb', 'raw': 4.1224566160735776e-07, 'g': 4.121456615661332e-07, 'excess': 1.0000004122457166e-10, 'applied': False, 'cur': 4.1224566160735776e-07, 'xref': 0.0, 'ref_viol': 4.1224566160735776e-07, 'ref_viol_safe': 4.121456615661332e-07}
+   pyomo.constrained_layout_clay0203:hull {'kind': 'a', 'col': 66, 'orig': True, 'side': 'lb', 'raw': 9.631907981480322e-08, 'g': 9.621907941659325e-08, 'excess': 1.0000039820996894e-10, 'applied': False, 'cur': 0.0, 'xref': 0.0, 'ref_viol': 9.631907981480322e-08, 'ref_viol_safe': 9.621907941659325e-08}
+   pyomo.constrained_layout_clay0203:hull {'kind': 'a', 'col': 69, 'orig': True, 'side': 'lb', 'raw': 8.09080445191911e-08, 'g': -6.569301508874243e-07, 'excess': 7.378381954066153e-07, 'applied': False, 'cur': 0.0, 'xref': 0.0, 'ref_viol': 8.09080445191911e-08, 'ref_viol_safe': -6.569301508874243e-07}
+final-box excludes ref by >1e-6 (name, OFF, ON): []
+executed check count 56517
+DECISION (OBBT/DBBT half of the rule; the certified-result half is the OFF/ON solve panel): keep OFF

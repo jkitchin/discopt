@@ -115,6 +115,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         root_cuts: 16,
         cut_rounds: 2,
         gmi_cuts: true,
+        cmir_cuts: false,
         cut_select: true,
         node_cuts: true,
         max_pool_cuts: 256,

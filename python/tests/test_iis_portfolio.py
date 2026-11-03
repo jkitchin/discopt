@@ -122,6 +122,8 @@ def test_portfolio_argument_validation():
         compute_iis(m, include_integrality=True, portfolio=("ICB", "ICB"))
     with pytest.raises(ValueError, match="workers"):
         compute_iis(m, include_integrality=True, portfolio=("ICB",), workers=0)
+    with pytest.raises(ValueError, match="workers"):
+        compute_iis(m, include_integrality=True, workers=2)  # no portfolio
     with pytest.raises(ValueError, match="at least one"):
         compute_iis(m, include_integrality=True, portfolio=())
 
@@ -213,3 +215,67 @@ def test_members_do_not_outlive_a_killed_caller(tmp_path):
     while members() and time.time() < deadline:
         time.sleep(0.1)
     assert not members()
+
+
+# Every order the parser accepts: the 6 permutations, forward and reversed.
+_ALL_ORDERS = [p + s for p in ("ICB", "IBC", "CIB", "CBI", "BIC", "BCI") for s in ("", "-r")]
+
+
+def _bounds_released_by_integrality():
+    """LP-infeasible, so the I phase releases x and y; the IIS needs only the uppers.
+
+    A held-integer column's box is not an element, so a bounds phase that runs
+    *before* I skips x's and y's bounds. Before the fix (PR #2110 review), orders
+    with B before I returned all four bounds as ``proven_irreducible=True`` although
+    ``x >= 0`` and ``y >= 0`` are removable.
+    """
+    m = dm.Model("bci")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.subject_to(x + y >= 20, name="c0")
+    m.minimize(0 * x)
+    return m
+
+
+def _integrality_needed():
+    """LP-feasible, integer-infeasible: the IIS is {c0, integrality of x}."""
+    m = dm.Model("int_needed")
+    x = m.integer("x", lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=10)
+    m.subject_to(2 * x == 1, name="c0")
+    m.subject_to(y <= 3, name="c1")
+    m.minimize(y)
+    return m
+
+
+@pytest.mark.parametrize("confirm", ["each", "final"])
+@pytest.mark.parametrize("order", _ALL_ORDERS)
+@pytest.mark.parametrize("build", [_bounds_released_by_integrality, _integrality_needed])
+def test_every_order_returns_an_irreducible_set(build, order, confirm):
+    from discopt._iis_milp import milp_iis
+
+    ref = milp_iis(build(), order="ICB", confirm="each")
+    r = milp_iis(build(), order=order, confirm=confirm)
+    assert ref.complete and ref.proven_irreducible
+    assert r.complete
+    # A proven result must be the same irreducible set the reference finds: on these
+    # models the IIS is unique, so any extra element is a removable one.
+    assert (r.constraints, r.bounds, r.integrality) == (
+        ref.constraints,
+        ref.bounds,
+        ref.integrality,
+    )
+    assert r.proven_irreducible
+    # Every reported bound carries a certificate (it was put through the filter).
+    for j, s in r.bounds:
+        assert ("bound", j, s) in r.certificates
+
+
+def test_member_refuses_a_different_discopt(monkeypatch):
+    """A member checks it imported the parent's discopt (CLAUDE.md s8): a
+    rebuilt sys.path must not silently load another copy."""
+    from discopt import _iis_milp
+
+    monkeypatch.setattr(_iis_milp, "_DISCOPT_DIR", "/nonexistent/discopt")
+    with pytest.raises(RuntimeError, match="imported discopt from"):
+        compute_iis(_two_iis_model(), include_integrality=True, portfolio=("ICB",))
