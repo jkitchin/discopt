@@ -324,7 +324,7 @@ impl ConvexQuadForm {
         // The tangent point: the LP values, clamped into the global box (any point
         // gives a valid tangent; the clamp keeps the rounding bound below honest).
         let xh: Vec<f64> = (0..d)
-            .map(|k| x[self.vars[k]].clamp(self.vlo[k], self.vhi[k]))
+            .map(|k| crate::numeric::clamp_ordered(x[self.vars[k]], self.vlo[k], self.vhi[k]))
             .collect();
         let qx: Vec<f64> = (0..d)
             .map(|i| (0..d).map(|j| self.q[i * d + j] * xh[j]).sum::<f64>())
