@@ -140,7 +140,16 @@ if [[ "${1:-}" == "--check" ]]; then
     return $bad
   }
 
-  want="$(expected_wheel_version)" || exit 1
+  # A wheel built at the project version itself is always current (#2109
+  # restaged one at 0.11.2.dev0 for the IIS bindings); otherwise a dev version
+  # takes the newest release below it, per expected_wheel_version.
+  staged=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wheel"])' \
+    "$wheels/discopt-wheel.json" 2>/dev/null || true)
+  if [[ "$staged" == "discopt-$(project_version)-"* ]]; then
+    want="$(project_version)"
+  else
+    want="$(expected_wheel_version)" || exit 1
+  fi
   check_manifest discopt "discopt-${want}-" || fail=1
   # `pounce-solver` is not built here -- it is copied from the POUNCE repo,
   # which builds and commits it. Only its presence and Pyodide version are ours
