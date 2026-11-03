@@ -1265,7 +1265,13 @@ def _milp_iis_arrays(
 #: final stack (50 x 6 orders incl. ICB-n and the oracle ladder CIB-l, 60 s):
 #: ICB+CIB+ICB-r+ICB-n completes 35, 33 of them at or below Gurobi (ICB alone:
 #: 31 / 26); adding CIB-r or CIB-l completes nothing more.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n")
+#: ``CIB-l`` (the oracle ladder) joins for the big-M class, where the plain
+#: filter's probes stall and presolve proves the small subsystem: at a 120 s
+#: budget neos-3135947-otra goes from 884 (incomplete, CIB) to 23 = Gurobi's size,
+#: complete; kedron 12 in 10 s vs 14.5 s. In the 60 s sweep it changed no
+#: completion (its exact confirmations need ~20 s each on otra), so it costs a
+#: core there and nothing else.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
