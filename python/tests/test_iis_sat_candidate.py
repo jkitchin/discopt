@@ -137,3 +137,36 @@ def test_sat_solver_binding_cores():
     assert s.core() == [-3]
     with pytest.raises(ValueError):
         s.add_clause([4])
+
+
+def _pigeonhole_model(p, h):
+    """PHP(p, h) as a clause model: every pigeon in a hole, no hole shared."""
+    mod = dm.Model("php")
+    x = mod.binary("x", shape=(p, h))
+    for i in range(p):
+        mod.subject_to(sum(x[i, j] for j in range(h)) >= 1)
+    for j in range(h):
+        for a in range(p):
+            for b in range(a + 1, p):
+                mod.subject_to(-x[a, j] - x[b, j] >= -1)  # not both: clause form
+    mod.minimize(0 * x[0, 0])
+    return mod
+
+
+@pytest.mark.smoke
+def test_candidate_stage_respects_the_time_budget():
+    """Pigeonhole is hard for CDCL: PHP(10,9) ran > 280 s inside the 200k-conflict
+    budget, and on smallset's hole9/hole10 the candidate stage overran a 60 s
+    total_time_limit until the process was killed. The stage is now sliced and
+    bounded by a conflict budget and a share of the time budget; the engine then
+    proceeds without it."""
+    import time
+
+    mod = _pigeonhole_model(10, 9)
+    budget = 6.0
+    t0 = time.perf_counter()
+    res = milp_iis(mod, time_limit=10, total_time_limit=budget)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < budget + 4.0, elapsed  # CI-safe slack; ~budget locally
+    assert res.sat_rows is None  # no candidate in time: engine ran without one
+    assert res.sat_conflicts > 0  # the SAT stage did run (and was cut off)

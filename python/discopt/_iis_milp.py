@@ -448,11 +448,24 @@ def _check_certificate(x, key, eng, cons, bounds, ints, tol) -> bool:
     return bool(e > tol)
 
 
-#: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof
-#: (measured 18-50 conflicts on smallset's bf*/ssa/jnh models, ~70k on pigeonhole
-#: hole10) and each core-refinement call.
-_SAT_FIRST_CONFLICTS = 200_000
-_SAT_REFINE_CONFLICTS = 20_000
+#: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
+#: each core-refinement call. Where the candidate pays off (smallset's bf*, ssa,
+#: jnh, aim) the first proof took 18-50 conflicts and a whole refinement ~200;
+#: pigeonhole (hole9/hole10), where it cannot pay off (the core is every row),
+#: needs ~70k. 10k is 200x the largest measured need and gives up on pigeonhole
+#: in ~2 s instead of spending the stage's whole time share.
+_SAT_FIRST_CONFLICTS = 10_000
+_SAT_REFINE_CONFLICTS = 2_000
+#: Conflicts per solver call between wall-clock checks. A conflict budget alone
+#: does not bound time: PHP(10,9) ran > 280 s inside 200k conflicts, and on
+#: smallset's hole9/hole10 the candidate stage overran a 60 s total_time_limit
+#: until the process was killed. Learnt clauses persist across calls, so slicing
+#: loses no search progress.
+_SAT_SLICE_CONFLICTS = 1_000
+#: Wall-clock cap of the candidate stage without an overall budget; with one it
+#: gets ``_SAT_STAGE_FRACTION`` of it.
+_SAT_STAGE_CAP_S = 30.0
+_SAT_STAGE_FRACTION = 0.10
 
 
 def _clause_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
@@ -503,8 +516,18 @@ def _clause_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
     def out_of_time() -> bool:
         return stop_at is not None and time.perf_counter() >= stop_at
 
-    if sat.solve(sel, _SAT_FIRST_CONFLICTS) is not False:
-        return None, sat.stats()[0]  # SAT, or no proof within budget: no candidate
+    def solve_sliced(assumptions: list[int], conflicts: int) -> Optional[bool]:
+        """``sat.solve`` in slices, stopping at ``stop_at``: None when undecided."""
+        spent0 = sat.stats()[0]
+        while True:
+            verdict: Optional[bool] = sat.solve(assumptions, _SAT_SLICE_CONFLICTS)
+            if verdict is not None:
+                return verdict
+            if out_of_time() or sat.stats()[0] - spent0 >= conflicts:
+                return None
+
+    if solve_sliced(sel, _SAT_FIRST_CONFLICTS) is not False:
+        return None, sat.stats()[0]  # SAT, or no proof in budget/time: no candidate
     rem = {abs(lit) - (n + 1) for lit in sat.core()}
     kept: set[int] = set()
     for gi in sorted(rem):
@@ -513,7 +536,7 @@ def _clause_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
         if gi not in rem:
             continue
         trial = rem - {gi}
-        verdict = sat.solve([sel[j] for j in trial | kept], _SAT_REFINE_CONFLICTS)
+        verdict = solve_sliced([sel[j] for j in trial | kept], _SAT_REFINE_CONFLICTS)
         if verdict is False:
             core = {abs(lit) - (n + 1) for lit in sat.core()}
             kept &= core
@@ -659,8 +682,13 @@ def milp_iis(
     sat_rows: Optional[int] = None
     sat_conflicts = 0
     if sat_candidate:
-        # The clause-core stage gets at most a quarter of an overall budget.
-        sat_stop = None if deadline is None else t_start + 0.25 * float(total_time_limit or 0.0)
+        # The clause-core stage gets a fixed share of an overall budget, and a
+        # fixed cap without one.
+        sat_stop = t_start + (
+            _SAT_STAGE_CAP_S
+            if deadline is None
+            else _SAT_STAGE_FRACTION * float(total_time_limit or 0.0)
+        )
         cand, sat_conflicts = _clause_core(
             A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
         )
