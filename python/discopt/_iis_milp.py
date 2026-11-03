@@ -1046,21 +1046,29 @@ def _milp_iis_arrays(
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
     if confirm == "final" and deadline is not None:
-        # Checkpoint 0: the base set, proven presolve-on just above, confirmed
-        # presolve-off too. Without it a budget that runs out before the first
-        # phase ends has nothing confirmed to return (TimeoutError), although
-        # the base set is a valid -- if large -- infeasible subsystem. Capped so
-        # a slow presolve-free solve cannot eat the filter's budget.
+        # Checkpoint 0: the base set, proven just above (presolve-on; or, when
+        # presolve-on answered kUnboundedOrInfeasible, by the presolve-free
+        # re-solve the probe ran), confirmed presolve-off too. Without it a
+        # budget that runs out before the first phase ends has nothing confirmed
+        # to return (TimeoutError), although the base set is a valid -- if large
+        # -- infeasible subsystem. Capped so a slow presolve-free solve cannot
+        # eat the filter's budget.
         base_budget = min(
             _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S
         )
         base_stop = min(deadline, time.perf_counter() + base_budget)
+        n_recent = len(eng._recent)
         try:
             verdict0 = eng.confirm_infeasible(
                 cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
             )
         except _OutOfTime:
             verdict0 = None
+        # Not a filtering probe: keep its duration out of the confirmation
+        # reserve (2.5x the slowest recent solve), or a checkpoint solve that
+        # used its whole cap would hold back ~62% of the budget from the filter.
+        while len(eng._recent) > n_recent:
+            eng._recent.pop()
         if verdict0 is True:
             checkpoint = (set(cons), set(bounds), set(ints_active))
         elif verdict0 is False:
