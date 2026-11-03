@@ -15,6 +15,7 @@ mod decomp_bindings;
 mod expr_bindings;
 mod lp_bindings;
 mod nl_bindings;
+mod sat_bindings;
 mod spatial_bindings;
 
 /// Returns the discopt version.
@@ -28,6 +29,7 @@ fn version() -> &'static str {
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<batch::PyBatchDispatcher>()?;
+    m.add_class::<sat_bindings::PySatSolver>()?;
     m.add_class::<bnb_bindings::PyTreeManager>()?;
     m.add_class::<expr_bindings::PyModelRepr>()?;
     m.add_class::<expr_bindings::PySubstitutionChain>()?;

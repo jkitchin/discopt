@@ -84,6 +84,8 @@ class MilpIIS:
     n_interrupted: int = 0  # solves stopped by the wall-clock guard
     n_repairs: int = 0  # "feasible" verdicts checked for an exact-integer witness
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
+    sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
+    sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
 
 
 class _Engine:
@@ -446,6 +448,82 @@ def _check_certificate(x, key, eng, cons, bounds, ints, tol) -> bool:
     return bool(e > tol)
 
 
+#: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof
+#: (measured 18-50 conflicts on smallset's bf*/ssa/jnh models, ~70k on pigeonhole
+#: hole10) and each core-refinement call.
+_SAT_FIRST_CONFLICTS = 200_000
+_SAT_REFINE_CONFLICTS = 20_000
+
+
+def _clause_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
+    """A small unsatisfiable set of constraints of a pure-binary CLAUSE model.
+
+    Applies only when every column is binary on [0, 1] and every row is a +-1
+    clause row (``a.x >= 1 - #neg`` or ``a.x <= #pos - 1``); otherwise ``None``.
+    Each constraint gets a selector literal; one CDCL solve under all selectors
+    gives a core, which is shrunk by deletion with core refinement (each UNSAT
+    trial replaces the remaining set by its own core). A budget-limited call keeps
+    its element, so the result is always an unsatisfiable set; it is a *proposal*
+    -- the caller still proves it infeasible with HiGHS before using it.
+
+    Returns ``(constraint indices or None, conflicts spent)``. Measured with an
+    external solver as the instrument before building this (smallset): the first
+    core is 148-343 rows of up to 6,778 and the engine, run on the refined
+    candidate, returns IISs at or below Gurobi's reference size in 4-21 s
+    (bf2670-001: 399 elements / 1,913 s -> 145 / 5.7 s).
+    """
+    n = col_lb.size
+    if n == 0 or not bool(np.all(is_int & (col_lb == 0.0) & (col_ub == 1.0))):
+        return None, 0
+    groups = sorted(row_groups)
+    clauses: list[tuple[int, list[int]]] = []
+    for gi, ci in enumerate(groups):
+        for r in row_groups[ci]:
+            s0, e0 = A.indptr[r], A.indptr[r + 1]
+            cols, vals = A.indices[s0:e0], A.data[s0:e0]
+            if not bool(np.all(np.abs(vals) == 1.0)):
+                return None, 0
+            npos = int(np.sum(vals > 0))
+            nneg = int(np.sum(vals < 0))
+            lo, hi = row_lo[r], row_hi[r]
+            if lo > -_INF and hi >= _INF and lo == 1 - nneg:
+                lits = [int(c) + 1 if v > 0 else -(int(c) + 1) for c, v in zip(cols, vals)]
+            elif hi < _INF and lo <= -_INF and hi == npos - 1:
+                lits = [-(int(c) + 1) if v > 0 else int(c) + 1 for c, v in zip(cols, vals)]
+            else:
+                return None, 0
+            clauses.append((gi, lits))
+    from discopt._rust import PySatSolver
+
+    sat = PySatSolver(n + len(groups))
+    sel = [n + 1 + gi for gi in range(len(groups))]
+    for gi, lits in clauses:
+        sat.add_clause(lits + [-sel[gi]])
+
+    def out_of_time() -> bool:
+        return stop_at is not None and time.perf_counter() >= stop_at
+
+    if sat.solve(sel, _SAT_FIRST_CONFLICTS) is not False:
+        return None, sat.stats()[0]  # SAT, or no proof within budget: no candidate
+    rem = {abs(lit) - (n + 1) for lit in sat.core()}
+    kept: set[int] = set()
+    for gi in sorted(rem):
+        if out_of_time():
+            break
+        if gi not in rem:
+            continue
+        trial = rem - {gi}
+        verdict = sat.solve([sel[j] for j in trial | kept], _SAT_REFINE_CONFLICTS)
+        if verdict is False:
+            core = {abs(lit) - (n + 1) for lit in sat.core()}
+            kept &= core
+            rem = core - kept
+        else:  # needed (SAT) or undecided within budget: keep it
+            kept.add(gi)
+            rem.discard(gi)
+    return {groups[gi] for gi in rem | kept}, sat.stats()[0]
+
+
 def milp_iis(
     model: "Model",
     *,
@@ -455,6 +533,7 @@ def milp_iis(
     max_batch: Optional[int] = None,
     confirm: str = "final",
     total_time_limit: Optional[float] = None,
+    sat_candidate: bool = True,
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
@@ -500,6 +579,12 @@ def milp_iis(
     (two recent solve durations) to confirm it, and the subsystem confirmed at
     the end of each completed phase is kept as a fallback. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
+
+    ``sat_candidate``: on a pure-binary clause model, start from a small
+    unsatisfiable constraint set found by discopt's CDCL solver
+    (:func:`_clause_core`). It is only a proposal: it is used if HiGHS proves it
+    infeasible (the base probe), otherwise the full model is used, and the
+    returned subsystem is confirmed and certified exactly as without it.
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, ``ValueError`` when the full model is
@@ -571,11 +656,29 @@ def milp_iis(
     proven = True
     pending: dict[tuple, np.ndarray] = {}
 
+    sat_rows: Optional[int] = None
+    sat_conflicts = 0
+    if sat_candidate:
+        # The clause-core stage gets at most a quarter of an overall budget.
+        sat_stop = None if deadline is None else t_start + 0.25 * float(total_time_limit or 0.0)
+        cand, sat_conflicts = _clause_core(
+            A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
+        )
+        if cand is not None and len(cand) < len(cons):
+            cons = set(cand)
+            sat_rows = len(cand)
+
     # The base proof is mandatory, so under an overall budget it may use all of
     # it rather than one probe's ``time_limit`` (no-ip-65059 needs > 30 s).
     eng.probe_tl = math.inf if deadline is not None else time_limit
     try:
         base, _ = eng.probe(cons, bounds, ints_active)
+        if base is not True and sat_rows is not None:
+            # HiGHS did not prove the SAT candidate infeasible: discard it and
+            # take the base proof on the full model, exactly as without it.
+            cons = set(row_groups)
+            sat_rows = None
+            base, _ = eng.probe(cons, bounds, ints_active)
     except _OutOfTime:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
@@ -682,6 +785,7 @@ def milp_iis(
             max_batch=max_batch,
             confirm="each",
             total_time_limit=left,
+            sat_candidate=sat_candidate,
         )
         redo.n_solves += eng.n_solves
         redo.n_interrupted += eng.n_interrupted
@@ -753,4 +857,6 @@ def milp_iis(
         n_interrupted=eng.n_interrupted,
         n_repairs=eng.n_repairs,
         n_artifacts=eng.n_artifacts,
+        sat_rows=sat_rows,
+        sat_conflicts=sat_conflicts,
     )
