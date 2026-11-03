@@ -25,10 +25,20 @@ agreed with HiGHS; the rest were ERROR. Three mechanisms, each with its own fix:
   bound, removes the rows it makes slack, and certifies the result for the original
   LP from duals.
 
-With all three, that 192-case sweep certifies 192/192, and a wider run (3200 cases, a second
-generator with random shapes, densities and box widths) certified 3199/3200 with every
-returned point independently feasible and at HiGHS's objective. The one refusal is
-pinned below: its exact optimal vertex is not representable in ``f64``.
+With all three, that 192-case sweep certifies 192/192. A wider run (3200 cases, a second
+generator with random shapes, densities and box widths), with every returned point
+checked in EXACT rational arithmetic: 3191 certified at an exactly feasible point at
+HiGHS's objective; 1 certified at a point whose binding row is off by 3.6e-5 absolute
+(4e-17 relative to its ~1e12 terms: product rounding, which the audit's compensated sum
+does not see); 8 refused, all one instance (``both``, seed 15, from ``u = 1e15``),
+whose vertex has a huge INTERIOR value fixed by a binding row. HiGHS's own point
+violates that row in 5 of the 8; in 3 its rounding happens to land on an exactly
+feasible point that this engine does not find. That refusal is pinned below.
+
+(An earlier version of this docstring said "3199/3200, every point independently
+feasible". The check behind it allowed ``4*eps*sum|a_ij x_j|`` per row, ~1e4 absolute
+at 1e19, and passed points an unaudited warm path had returned. Retracted, CLAUDE.md
+section 11.)
 """
 
 from __future__ import annotations
@@ -102,26 +112,37 @@ def _highs(lp):
 
 
 def _independently_feasible(lp, x) -> bool:
-    """Box and row feasibility of ``x``, checked here rather than by the engine.
+    """Box and row feasibility of ``x`` in EXACT rational arithmetic, not the engine's.
 
-    Rows get the engine's ``1e-6 * (1 + |b|)`` plus four ulps of the row's own
-    magnitude ``sum |a_ij x_j|`` (the float evaluation of a row holding ``1e19``
-    terms cannot be trusted below that).
+    A ``<=`` row must hold to ``1e-6 * (1 + |b|)`` exactly (its slack is implicit, so
+    rounding is no excuse). An equality row gets the same plus the engine's floor,
+    twice the finest grain ``|a_ij| * 2 eps |x_j|`` among its columns. An earlier
+    version allowed ``4 eps * sum |a_ij x_j|`` per row, about ``1e4`` absolute at
+    ``1e19``, and passed points that violated their rows.
     """
     x = np.asarray(x, dtype=np.float64)
     box = np.asarray(lp["bounds"], dtype=np.float64)
-    tol = 1e-6 * (1.0 + np.abs(box).max(axis=1))
-    if np.any(x < box[:, 0] - tol) or np.any(x > box[:, 1] + tol):
+    if np.any(x < box[:, 0] - 1e-6 * (1.0 + np.abs(box[:, 0]))) or np.any(
+        x > box[:, 1] + 1e-6 * (1.0 + np.abs(box[:, 1]))
+    ):
         return False
-    eps4 = 4.0 * np.finfo(float).eps
-    r_ub = lp["A_ub"] @ x - lp["b_ub"]
-    m_ub = abs(lp["A_ub"]) @ np.abs(x)
-    r_eq = lp["A_eq"] @ x - lp["b_eq"]
-    m_eq = abs(lp["A_eq"]) @ np.abs(x)
-    return bool(
-        np.all(r_ub <= 1e-6 * (1 + np.abs(lp["b_ub"])) + eps4 * m_ub)
-        and np.all(np.abs(r_eq) <= 1e-6 * (1 + np.abs(lp["b_eq"])) + eps4 * m_eq)
-    )
+    xf = [Fraction(float(v)) for v in x]
+    eps2 = 2.0 * np.finfo(float).eps
+    for key_a, key_b, equality in (("A_ub", "b_ub", False), ("A_eq", "b_eq", True)):
+        A = lp[key_a].tocsr()
+        for i in range(A.shape[0]):
+            cols = A.indices[A.indptr[i] : A.indptr[i + 1]]
+            vals = A.data[A.indptr[i] : A.indptr[i + 1]]
+            bi = Fraction(float(lp[key_b][i]))
+            r = sum((Fraction(float(a)) * xf[j] for j, a in zip(cols, vals)), Fraction(0)) - bi
+            tol = Fraction(1, 10**6) * (1 + abs(bi))
+            if equality:
+                grain = min((abs(a) * eps2 * abs(x[j]) for j, a in zip(cols, vals)), default=0.0)
+                if abs(r) > tol + Fraction(2.0 * grain):
+                    return False
+            elif r > tol:
+                return False
+    return True
 
 
 @pytest.mark.smoke
