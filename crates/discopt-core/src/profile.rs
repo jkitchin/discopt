@@ -227,6 +227,14 @@ counters!(
     NodeNsFbbt,
     NodeNsCutoff,
     NodeNsAbstain,
+    // #2115 (`DISCOPT_NS_PROJECT`): the node NS ladder's last rung, the exact dual
+    // projection. `Try` counts attempts (open columns rode an open side by noise
+    // after every other rung abstained), `Rescue` those that produced a finite
+    // bound, `Singular` those refused because the projected block was
+    // rank-deficient or its enclosure did not verify.
+    NodeNsProjectTry,
+    NodeNsProjectRescue,
+    NodeNsProjectSingular,
     // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
     // >= run >= improved -- so an implausible ordering is an arithmetic error
     // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`

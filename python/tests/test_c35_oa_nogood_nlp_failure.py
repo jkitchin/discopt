@@ -134,7 +134,26 @@ def _feasible_binary_loa_model():
 
 
 def test_loa_no_false_infeasible_on_nonrigorous_nlp_failure(monkeypatch):
-    """LOA path: same class — a non-rigorous NLP failure must not certify infeasible."""
+    """LOA path: same class — a non-rigorous NLP failure must not certify infeasible.
+
+    ``solve_gdpopt_loa`` runs :mod:`discopt.gdp.algorithms.loa`, whose subproblems
+    go through ``subproblem.solve_subproblem``; the module-level
+    ``_solve_nlp_subproblem`` / ``_solve_nlp_relaxation`` are never called on this
+    path, so stubbing them injected nothing. This test used to pass only because the
+    first OA master came back unbounded and LOA stopped. Since that master is
+    re-solved as a feasibility master, the failure is injected where LOA actually
+    solves (``"unresolved"`` = a non-rigorous failure, C-35), and the test asserts
+    that it fired.
+    """
+    from discopt.gdp.algorithms import subproblem as sub_mod
+
+    calls = {"n": 0}
+
+    def unresolved(*a, **k):
+        calls["n"] += 1
+        return sub_mod.SubproblemResult("unresolved", reason="injected non-rigorous failure")
+
+    monkeypatch.setattr(sub_mod, "solve_subproblem", unresolved)
     monkeypatch.setattr(loa_mod, "_solve_nlp_relaxation", lambda *a, **k: None)
     monkeypatch.setattr(loa_mod, "_solve_nlp_subproblem", lambda *a, **k: None)
 
@@ -142,6 +161,7 @@ def test_loa_no_false_infeasible_on_nonrigorous_nlp_failure(monkeypatch):
         _feasible_binary_loa_model(), time_limit=30, max_iterations=50
     )
 
+    assert calls["n"] > 0, "the injected subproblem failure never fired"
     assert result.status != "infeasible", (
         "LOA reported a false 'infeasible' on a feasible model whose NLPs merely "
         "failed non-rigorously"

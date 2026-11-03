@@ -1284,8 +1284,10 @@ def _confirm_lazy_master_independently(
     seed and drop it if infeasible): the in-house Rust simplex B&B
     (:func:`discopt.solvers.milp_simplex.solve_milp`), always available, then SCIP
     when ``pyscipopt`` is installed. The in-house engine cannot bound every master
-    HiGHS can (measured on ``m6``: 62.83 after 38 594 nodes and 11 s against a
-    claim of 82.26 that SCIP confirms in 0.3 s), so with SCIP present it gets
+    HiGHS can (measured on ``m6`` before #2115: 62.83 after 38 594 nodes and 11 s
+    against a claim of 82.26 that SCIP confirms in 0.3 s; since #2115's exact dual
+    projection for the node NS bound it certifies that master in 25 406 nodes, but
+    SCIP remains far faster), so with SCIP present it gets
     at most ``_SIMPLEX_BUDGET_BEFORE_SCIP_S`` and SCIP the rest; the chain stops at
     the first engine that confirms. SCIP runs at HiGHS's own
     ``primal_feasibility_tolerance`` (see :func:`_run_scip_engine`).

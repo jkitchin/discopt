@@ -55,6 +55,7 @@ SOLVESTAT_RESOURCE = 3  # time / resource interrupt
 SOLVESTAT_TERMINATED = 4
 SOLVESTAT_CAPABILITY = 6  # the model uses something the solver does not support
 SOLVESTAT_USER_INTERRUPT = 8
+SOLVESTAT_SETUP_FAILURE = 9  # e.g. an option file the solver refuses
 SOLVESTAT_SOLVER_ERROR = 10
 SOLVESTAT_SYSTEM_ERROR = 13
 
@@ -255,12 +256,107 @@ def _unhonored_gams_options(gev, gev_h, gmo, gmo_h) -> list[str]:
         notes.append(f"cutoff={cutoff:g} is ignored: discopt does not take an objective cutoff")
     if int(gev.gevGetIntOpt(gev_h, gev.gevUseCheat)):
         notes.append("cheat is ignored: discopt does not take an improvement requirement")
-    if int(gmo.gmoOptFile(gmo_h)) > 0:
-        notes.append(
-            "optfile is ignored: the discopt GAMS link reads no solver option file; "
-            "only reslim, optcr, optca, nodlim and threads are forwarded"
-        )
     return [f"*** discopt: {n}" for n in notes]
+
+
+class GamsOptionFileError(ValueError):
+    """A ``discopt.opt`` line the link refuses: unknown key, bad value, or a
+    repeated key. Reported to GAMS as a setup failure, never skipped."""
+
+
+def _positive_float(key: str, raw: str) -> float:
+    try:
+        v = float(raw)
+    except ValueError:
+        raise GamsOptionFileError(f"{key} must be a number, got {raw!r}") from None
+    if not (math.isfinite(v) and v > 0.0):
+        raise GamsOptionFileError(f"{key} must be a finite number > 0, got {raw!r}")
+    return v
+
+
+def _nonnegative_int(key: str, raw: str) -> int:
+    try:
+        v = int(raw)
+    except ValueError:
+        raise GamsOptionFileError(f"{key} must be an integer, got {raw!r}") from None
+    if v < 0:
+        raise GamsOptionFileError(f"{key} must be >= 0, got {raw!r}")
+    return v
+
+
+#: Keys ``discopt.opt`` accepts, with their parsers. ``tol`` and
+#: ``constr_viol_tol`` are POUNCE NLP options, forwarded as
+#: ``Model.solve(pounce_options=...)`` to every NLP the solve runs (node NLPs,
+#: incumbent polishing): the NLP convergence tolerance and the absolute
+#: constraint-violation tolerance its convergence test applies (discopt's own
+#: seeded default for the latter is ``1e-8``). ``frontier_memory_mb`` is the open
+#: B&B frontier budget, as ``DISCOPT_FRONTIER_MEMORY_MB`` (``0`` = no budget),
+#: for this solve only.
+OPTION_FILE_KEYS = {
+    "tol": _positive_float,
+    "constr_viol_tol": _positive_float,
+    "frontier_memory_mb": _nonnegative_int,
+}
+_POUNCE_OPTION_KEYS = ("tol", "constr_viol_tol")
+
+
+def read_option_file(path: str) -> dict:
+    """Parse a discopt GAMS option file into :func:`solve_view` keyword arguments.
+
+    GAMS option-file syntax: one ``key value`` (or ``key = value``) per line, keys
+    case-insensitive, ``*`` in column 1 starts a comment line, blank lines are
+    skipped. Only :data:`OPTION_FILE_KEYS` are accepted. An unknown key, a bad
+    value, a repeated key, a line with no value, or an unreadable file raises
+    :class:`GamsOptionFileError` naming the line: a misspelled option ignored would
+    leave the solve at its default while the user believes it was set, the same
+    hazard ``Model.solve`` refuses unknown keywords for.
+
+    Returns ``{"pounce_options": {...}}`` and/or ``{"frontier_memory_mb": n}``
+    for the keys present, ``{}`` for a file that sets nothing.
+    """
+    try:
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        raise GamsOptionFileError(f"cannot read option file {path!r}: {exc}") from None
+    seen: dict[str, object] = {}
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip() or line.startswith("*"):
+            continue
+        body = line.strip()
+        if "=" in body:
+            key, _, raw = body.partition("=")
+        else:
+            key, raw = (body.split(None, 1) + [""])[:2]
+        key, raw = key.strip().lower(), raw.strip()
+        where = f"{os.path.basename(path)} line {lineno}"
+        if key not in OPTION_FILE_KEYS:
+            known = ", ".join(sorted(OPTION_FILE_KEYS))
+            raise GamsOptionFileError(f"{where}: unknown option {key!r} (accepted: {known})")
+        if not raw or len(raw.split()) != 1:
+            raise GamsOptionFileError(f"{where}: {key} needs exactly one value, got {raw!r}")
+        if key in seen:
+            raise GamsOptionFileError(f"{where}: {key} is set twice")
+        try:
+            seen[key] = OPTION_FILE_KEYS[key](key, raw)
+        except GamsOptionFileError as exc:
+            raise GamsOptionFileError(f"{where}: {exc}") from None
+    out: dict = {}
+    pounce = {k: seen[k] for k in _POUNCE_OPTION_KEYS if k in seen}
+    if pounce:
+        out["pounce_options"] = pounce
+    if "frontier_memory_mb" in seen:
+        out["frontier_memory_mb"] = seen["frontier_memory_mb"]
+    return out
+
+
+def _describe_option_file(path: str, opts: dict) -> str:
+    """The log line naming what an option file set (``*** discopt: ...``)."""
+    parts = [f"{k}={v:g}" for k, v in opts.get("pounce_options", {}).items()]
+    if "frontier_memory_mb" in opts:
+        parts.append(f"frontier_memory_mb={opts['frontier_memory_mb']}")
+    applied = ", ".join(parts) if parts else "nothing"
+    return f"*** discopt: option file {path}: {applied}"
 
 
 def solve_view(
@@ -271,21 +367,31 @@ def solve_view(
     abs_gap: float | None = None,
     threads: int = 1,
     max_nodes: int = NODLIM_INFINITY,
+    pounce_options: dict | None = None,
+    frontier_memory_mb: int | None = None,
 ):
     """Translate a GMO view, solve with discopt, and return ``(model, result)``.
 
     This is the GAMS-library-free core of the link: given anything implementing
     :class:`~discopt.gams.gmo_translate.GmoView` it produces a solved discopt
     model, so it can be exercised in tests with an in-memory fake.
+
+    ``pounce_options`` and ``frontier_memory_mb`` come from the job's option file
+    (:func:`read_option_file`); ``None`` leaves discopt's defaults.
     """
+    from discopt.solver import frontier_memory_override
+
     model = model_from_gmo(view)
-    result = model.solve(
-        time_limit=time_limit,
-        gap_tolerance=gap,
-        abs_gap_tolerance=abs_gap,
-        threads=threads,
-        max_nodes=max_nodes,
-    )
+    extra = {"pounce_options": dict(pounce_options)} if pounce_options else {}
+    with frontier_memory_override(frontier_memory_mb):
+        result = model.solve(
+            time_limit=time_limit,
+            gap_tolerance=gap,
+            abs_gap_tolerance=abs_gap,
+            threads=threads,
+            max_nodes=max_nodes,
+            **extra,
+        )
     return model, result
 
 
@@ -370,8 +476,25 @@ def solve_from_control_file(
         view = _GmoAdapter(gmo_h, gmo)
         t0 = time.perf_counter()
         notes = _unhonored_gams_options(gev, gev_h, gmo, gmo_h)
+        solve_opts = _read_gams_options(gev, gev_h)
+        if int(gmo.gmoOptFile(gmo_h)) > 0:
+            opt_path = str(gmo.gmoNameOptFile(gmo_h))
+            try:
+                file_opts = read_option_file(opt_path)
+            except GamsOptionFileError as exc:
+                # Refused, not skipped: a solve at defaults the job did not ask for
+                # would be reported as if the options had been applied.
+                gev.gevStatCon(gev_h)
+                _log_stat(gev, gev_h, f"*** discopt: {exc}")
+                gmo.gmoModelStatSet(gmo_h, MODELSTAT_NO_SOLUTION_RETURNED)
+                gmo.gmoSolveStatSet(gmo_h, SOLVESTAT_SETUP_FAILURE)
+                gmo.gmoUnloadSolutionLegacy(gmo_h)
+                gev.gevStatEOF(gev_h)
+                return 0
+            solve_opts.update(file_opts)
+            notes.append(_describe_option_file(opt_path, file_opts))
         try:
-            model, result = solve_view(view, **_read_gams_options(gev, gev_h))
+            model, result = solve_view(view, **solve_opts)
         except GamsTranslationError as exc:
             # A model the link refuses (an unsupported function, row or variable
             # type) is GAMS's "capability problem": report it with the reason in
