@@ -13,6 +13,7 @@ certified IIS, and that the stage declines what it cannot encode.
 
 import itertools
 import random
+from types import SimpleNamespace
 
 import discopt.modeling as dm
 import numpy as np
@@ -115,10 +116,8 @@ def test_candidate_stage_stays_inside_its_budget_on_pb_rows(monkeypatch):
     solver call is capped at ``_SAT_SLICE_CONFLICTS`` conflicts, and once the
     stage's stop time has passed it makes no further call. (At 1000 conflicts
     per slice one slice overran a 0.2 s stage budget by 0.6 s and took the base
-    proof's time.) Asserted on the calls, not on wall time, so load cannot flip it.
+    proof's time.) Asserted on the calls against a fake clock, so load cannot flip it.
     """
-    import time
-
     import discopt._rust as rust
 
     rng = np.random.default_rng(7)
@@ -145,7 +144,15 @@ def test_candidate_stage_stays_inside_its_budget_on_pb_rows(monkeypatch):
     assert len(captured) == 1
     args = captured[0][:-1]
 
-    calls: list[tuple[float, int]] = []  # (time of call, conflict limit)
+    # The stage reads a fake clock that moves only when the solver is called, so
+    # the run is the same on any machine. (With the real clock, the per-layer
+    # check of the encoding gave up before the first solver call whenever load
+    # stretched the encoding past the stop time: CI's coverage shard on main.)
+    clock = {"now": 0}
+    tick = 1  # fake seconds per solver call (integers: no rounding)
+    monkeypatch.setattr(_iis_milp, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
+
+    calls: list[tuple[float, int]] = []  # (fake time of call, conflict limit)
     real_solver = rust.PySatSolver
 
     class Recording:
@@ -153,21 +160,24 @@ def test_candidate_stage_stays_inside_its_budget_on_pb_rows(monkeypatch):
             self._s = real_solver(n)
 
         def solve(self, assumptions, conflict_limit=None):
-            calls.append((time.perf_counter(), conflict_limit))
-            return self._s.solve(assumptions, conflict_limit)
+            calls.append((clock["now"], conflict_limit))
+            verdict = self._s.solve(assumptions, conflict_limit)
+            clock["now"] += tick
+            return verdict
 
         def __getattr__(self, name):
             return getattr(self._s, name)
 
     monkeypatch.setattr(rust, "PySatSolver", Recording)
-    # A stop time the encoding (~0.15 s) fits in even under load; the search
-    # cannot finish market split in it, so the stage must stop on the clock.
-    stop = time.perf_counter() + 1.0
-    _iis_milp._binary_core(*args, stop)
-    assert len(calls) >= 1
+    # Market split is not decided in 10 slices (1000 conflicts, below the
+    # stage's 10k-conflict first budget), so the stage must stop on the clock.
+    stop = 10
+    cand, _ = _iis_milp._binary_core(*args, stop)
+    assert cand is None
+    assert len(calls) == stop // tick  # every slice until the stop, then none
     assert all(lim is not None and lim <= _iis_milp._SAT_SLICE_CONFLICTS for _, lim in calls)
     assert _iis_milp._SAT_SLICE_CONFLICTS <= 100
-    assert sum(t >= stop for t, _ in calls) <= 1
+    assert all(t < stop for t, _ in calls)  # no call once the stop has passed
 
 
 def _knapsack_and_none(n=32, seed=3):
