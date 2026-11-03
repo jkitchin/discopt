@@ -420,6 +420,22 @@ pub(super) fn optimal_fails_original_audit(
     sol.status == LpStatus::Optimal && point_fails_original_audit(&sol.x, cols, m, n, b, l, u)
 }
 
+/// #2125: whether `x` (length `n`, original space) passes [`audit_feasibility`]
+/// against the ORIGINAL LP. Unlike [`point_fails_original_audit`] it does not count
+/// toward the #1935 `ScaledOptimalOriginalAuditFail` counter, which measures the
+/// scaled path alone.
+pub(super) fn point_passes_original_audit(
+    x: &[f64],
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    x.len() == n && audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
+}
+
 /// #1945: [`optimal_fails_original_audit`] on a bare point `x` already mapped to the
 /// ORIGINAL space, for a caller that keeps its solution in solve coordinates
 /// ([`super::scaled_problem::ScaledProblem::verify`]) and unscales only a copy.

@@ -494,6 +494,14 @@ fn solve_huge_box_relaxed(
                     }
                 }
                 if !restored {
+                    // Audit the accepted point against the ORIGINAL LP here rather
+                    // than trusting the route that produced it: a warm path that
+                    // skips the audit is how #1287's infeasible model came back
+                    // `feasible` (see `cold_with_dual_cleanup`). A refused point
+                    // decides nothing; the original LP is solved below.
+                    if !super::primal::point_passes_original_audit(&sol.x, sp, m, n, b, l, u) {
+                        break;
+                    }
                     crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxDecided);
                     return Some(sol);
                 }
@@ -752,7 +760,7 @@ fn solve_huge_active_fixed(
         let rest = compensated_sum(std::iter::once(b[i]).chain(row_terms[i].iter().copied()));
         x[s] = rest / a_s;
     }
-    if super::primal::point_fails_original_audit(&x, sp, m, n, b, l, u) {
+    if !super::primal::point_passes_original_audit(&x, sp, m, n, b, l, u) {
         return None;
     }
     // Duals: the reduced LP's on kept rows, 0 on removed ones. The fixed columns'
@@ -817,9 +825,20 @@ fn solve_huge_active_fixed(
 /// `[−5, 5]` basic at `6.07`, the same after a refined re-solve, so the basis, not
 /// the last solve, is infeasible). Such a basis is dual feasible, which is exactly
 /// the dual simplex's starting condition, and the warm start re-derives `x_B` from
-/// scratch instead of inheriting the drift. The warm solve runs its own audit, so
-/// it can only decide the LP or leave the `Numerical` standing; it never certifies
-/// a point the cold solve's audit refused.
+/// scratch instead of inheriting the drift.
+///
+/// **Only an `Optimal` that passes the ORIGINAL-LP audit here is accepted.** This
+/// used to say "the warm solve runs its own audit" and accept any decided warm
+/// verdict. That was false (retracted, CLAUDE.md §11): the warm dual re-optimize
+/// never runs `audit_feasibility`, and on an LP that `Scaling::from_sparse`
+/// declines (unit coefficients) nothing in the warm path audits its point at all.
+/// Measured on #1287's infeasible default-box model (`x ≥ 3.5`,
+/// `x + y + w − z ≤ 1`, `y + w ≥ −1`): the warm solve from the cold `Numerical`
+/// basis returned `Optimal` at `y = 9.999e19, w = −9.999e19`, a point whose row 0 is
+/// off by `2.5`, and this cleanup handed it to the MILP layer as an incumbent
+/// (`feasible` on an infeasible model). A warm `Infeasible` / `Unbounded` carries
+/// no certificate this function can check, so it is not accepted either: the cold
+/// `Numerical` stands.
 #[allow(clippy::too_many_arguments)]
 fn cold_with_dual_cleanup(
     sp: &SparseCols,
@@ -837,10 +856,9 @@ fn cold_with_dual_cleanup(
     }
     crate::profile::incr(crate::profile::Ctr::HugeBoxDualCleanupAttempts);
     let warm = solve_lp_warm_csc_hardened(sp.clone(), m, n, c, l, u, b, Some(&sol.basis), opts);
-    if matches!(
-        warm.status,
-        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
-    ) {
+    if warm.status == LpStatus::Optimal
+        && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u)
+    {
         crate::profile::incr(crate::profile::Ctr::HugeBoxDualCleanupRescues);
         return warm;
     }
@@ -3391,6 +3409,41 @@ mod tests {
             (armed, decided),
             (1, 1),
             "the huge-box route must have decided it"
+        );
+    }
+
+    /// #1287's infeasible default-box model, as the LP the MILP layer solves:
+    /// `x + y + w − z + s₁ = 1`, `−y − w + s₂ = 1`, `x ≥ 3.5`, `y, w ∈ ±9.999e19`,
+    /// `z ∈ [0, 1]`. Infeasible (`x ≤ 1 + z − (y + w) ≤ 3`). The #2125 dual cleanup
+    /// used to accept the warm re-solve's `Optimal` at `y = 9.999e19, w = −9.999e19`
+    /// — row 0 off by `2.5`, because the warm path never audits its point — and the
+    /// MILP layer reported the model `feasible`. FAILS before the fix (`Optimal`).
+    #[test]
+    fn warm_cleanup_never_returns_an_unaudited_optimal_1287_2125() {
+        let big = 9.999e19;
+        // Columns x, y, w, z, s1, s2.
+        let sp = SparseCols::from_csc(
+            vec![0, 1, 3, 5, 6, 7, 8],
+            vec![0, 0, 1, 0, 1, 0, 0, 1],
+            vec![1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0],
+        );
+        let c = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let l = [3.5, -big, -big, 0.0, 0.0, 0.0];
+        let u = [big, big, big, 1.0, INF, INF];
+        let b = [1.0, 1.0];
+        let sol = solve_lp_warm_csc(sp.clone(), 2, 6, &c, &l, &u, &b, None, &opts());
+        assert_ne!(
+            sol.status,
+            LpStatus::Optimal,
+            "an infeasible LP was certified optimal at x = {:?}",
+            sol.x
+        );
+        let cleaned = cold_with_dual_cleanup(&sp, 2, 6, &c, &l, &u, &b, &opts());
+        assert_ne!(
+            cleaned.status,
+            LpStatus::Optimal,
+            "cleanup at x = {:?}",
+            cleaned.x
         );
     }
 
