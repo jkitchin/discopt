@@ -30,7 +30,9 @@ use crate::lp::simplex::{
     solve_lp, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds_csc,
     tighten_bounds_csc_with_row, LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
 };
-use crate::presolve::directed::{sub_down, sub_up};
+use crate::presolve::directed::{
+    add_down, add_up, div_down, div_up, mul_down, mul_up, sub_down, sub_up,
+};
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
@@ -1408,15 +1410,80 @@ pub fn solve_milp_node_hooked(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
-    // #1296: decided on the caller's data, before presolve or any cut changes it.
-    let unscalable = has_unscalable_tiny_entry(&csc_w, m, n, l, u, b);
+    // #1296: decided on the caller's rows, before any cut changes them, over the
+    // box those rows imply (#2107; see `tiny_entry_gate_box`).
+    let (mut gate_l, mut gate_u) = if noise_relax_enabled() {
+        tiny_entry_gate_box(&csc_w, m, n, l, u, b, opts)
+    } else {
+        (l.to_vec(), u.to_vec())
+    };
+    // #2107: a noise entry whose effect is negligible on its row's own scale is
+    // relaxed into the row's slack rather than left to withdraw the certificate.
+    let mut csc_w = csc_w;
+    let mut l_relaxed: Option<Vec<f64>> = None;
+    let mut u_relaxed: Option<Vec<f64>> = None;
+    let mut n_relaxed = 0u64;
+    if noise_relax_enabled() {
+        if let Some(r) = relax_noise_entries(&csc_w, m, n, c, l, u, b, &gate_l, &gate_u, opts) {
+            n_relaxed = r.relaxed as u64;
+            csc_w = r.csc;
+            (gate_l, gate_u) = tiny_entry_gate_box(&csc_w, m, n, &r.l, &r.u, b, opts);
+            l_relaxed = Some(r.l);
+            u_relaxed = Some(r.u);
+        }
+    }
+    let l = l_relaxed.as_deref().unwrap_or(l);
+    let u = u_relaxed.as_deref().unwrap_or(u);
+    let unscalable = has_unscalable_tiny_entry(&csc_w, m, n, &gate_l, &gate_u, b);
     let mut res =
         solve_milp_node_search(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, node);
+    // After the search: its `begin_solve` resets the counters.
+    crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
     if unscalable {
         crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
         withdraw_certificate(&mut res);
     }
     res
+}
+
+/// The box the #1296 gate measures an entry's reach over (#2107): the caller's
+/// bounds contracted by FBBT on the caller's own rows.
+///
+/// The gate asks whether an entry the LP ignores can move its row past the
+/// feasibility tolerance at some *feasible* point. FBBT is a sound contraction (it
+/// removes only points that violate a row, with outward-rounded arithmetic), so
+/// every feasible point lies in this box and the reach it gives is still an upper
+/// bound on the term's effect -- the question is unchanged, only answered over a
+/// smaller superset of the feasible set. Measured on the `clay0204hfsg` OA master
+/// (#2107): gradient noise of 2e-14 to 1e-11 on columns declared `[0, inf)` whose
+/// rows bound them by 12.4-87 withdrew every certificate, so the in-house engine
+/// could never confirm a HiGHS master claim there. The #1296 witnesses keep their
+/// verdict: `y - 1e11 t <= 0`, `t <= 1` bounds `y` only by `1e11`, and an `eps*y`
+/// noise entry still moves its row by O(1) over it.
+///
+/// This runs whether or not `opts.presolve` is set: it decides only the gate, not
+/// the box the search uses. A box FBBT proves empty falls back to the caller's
+/// bounds; the search itself then reports the infeasibility.
+fn tiny_entry_gate_box(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut is_int = vec![false; n];
+    for &j in &opts.integer_cols {
+        if j < opts.n_struct.min(n) {
+            is_int[j] = true;
+        }
+    }
+    let pr = tighten_bounds_csc(csc, m, n, l, u, b, &is_int, opts.simplex.tol);
+    if pr.infeasible {
+        return (l.to_vec(), u.to_vec());
+    }
+    (pr.l, pr.u)
 }
 
 /// Whether the constraint matrix holds an entry the LP layer cannot represent
@@ -1471,6 +1538,165 @@ fn has_unscalable_tiny_entry(
 /// Row movement a noise-floor entry may cause before it withdraws a certificate:
 /// the node LP's own primal feasibility scale.
 const TINY_ENTRY_ROW_TOL: f64 = 1e-9;
+
+/// Largest effect, relative to its row's own scale `max(|b_i|, max_j |a_ij|)`, a
+/// noise entry may have and still be relaxed into the row's slack (#2107).
+///
+/// Soundness does not depend on this value -- any relaxation is a superset of the
+/// feasible set -- it caps the bound strength given up. It is relative with no
+/// unit floor on purpose: on the #1537 row-scaled witness (`1e-6 (x - y) <= 1e-6`)
+/// an absolute 1e-6 would be the whole row, and the entry must keep withdrawing.
+const NOISE_RELAX_ROW_TOL: f64 = 1e-6;
+
+/// `DISCOPT_MILP_NOISE_RELAX` (#2107): relax negligible noise-floor entries into
+/// their row's slack instead of withdrawing the certificate, and measure the #1296
+/// gate over the FBBT-implied box ([`tiny_entry_gate_box`]). Default ON; `=0`
+/// restores the #1296 behaviour exactly (the gate on the caller's box, every
+/// flagged entry withdraws).
+///
+/// Kept as an opt-out for a shipped default (CLAUDE.md section 5): a master with
+/// no noise entry is untouched bit-for-bit, and one with only noise entries the
+/// gate already tolerated is too; only a solve that would otherwise report
+/// `bound = -inf` changes.
+fn noise_relax_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("DISCOPT_MILP_NOISE_RELAX")
+            .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
+    })
+}
+
+/// The relaxed problem [`relax_noise_entries`] builds.
+struct NoiseRelaxation {
+    csc: SparseCols,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    relaxed: usize,
+}
+
+/// Remove every noise-floor entry the #1296 gate would withdraw on, when its
+/// effect can be absorbed into its row's slack (#2107).
+///
+/// **Mechanism.** Row `i` is `sum_j a_ij z_j + s z_k = b_i` with `z_k` its slack: a
+/// continuous, zero-cost column with no other entry. For a noise entry `a_id` on a
+/// column whose implied box (`gate_l`/`gate_u`, see [`tiny_entry_gate_box`]) is
+/// finite, substitute `z_k' = z_k + a_id z_d / s`. Row `i` becomes the same row
+/// without the entry, and `z_k'` ranges over `[l_k, u_k] + a_id [gl_d, gu_d] / s`
+/// (outward-rounded). Column `k` appears nowhere else and costs nothing, so every
+/// feasible point of the original maps to a feasible point of the relaxed problem
+/// with the same objective: its optimum, and so every dual bound the search
+/// derives on it, is a valid lower bound on the original. Integrality is untouched.
+///
+/// Only an entry whose worst-case effect `|a_id| * reach_d` is at most
+/// [`NOISE_RELAX_ROW_TOL`] of the row's scale is relaxed; the rest are left for the
+/// gate. Measured on the `clay0204hfsg` OA master (#2107): 9 gradient-noise entries
+/// (2e-14 to 6.5e-11) on columns declared `[0, inf)` with implied reach <= 58.5,
+/// worst effect 3.7e-9 against a row scale near 1. Returns `None` when nothing was
+/// relaxed, so a model with no such entry runs on the caller's data unchanged.
+#[allow(clippy::too_many_arguments)]
+fn relax_noise_entries(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    gate_l: &[f64],
+    gate_u: &[f64],
+    opts: &MilpOptions,
+) -> Option<NoiseRelaxation> {
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let ns = opts.n_struct.min(n);
+    let mut is_int = vec![false; n];
+    for &j in &opts.integer_cols {
+        if j < ns {
+            is_int[j] = true;
+        }
+    }
+    let mut row_max = vec![0.0f64; m];
+    let mut col_max = vec![0.0f64; n];
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let a = vals[idx].abs();
+            row_max[row_idx[idx]] = row_max[row_idx[idx]].max(a);
+            col_max[j] = col_max[j].max(a);
+        }
+    }
+    // A row's slack: a non-structural, continuous, zero-cost singleton column.
+    let mut slack: Vec<Option<(usize, f64)>> = vec![None; m];
+    for k in ns..n {
+        if col_ptr[k + 1] - col_ptr[k] == 1 && c[k] == 0.0 && !is_int[k] {
+            let idx = col_ptr[k];
+            if vals[idx] != 0.0 && slack[row_idx[idx]].is_none() {
+                slack[row_idx[idx]] = Some((k, vals[idx]));
+            }
+        }
+    }
+    let mut keep = vec![true; vals.len()];
+    let mut l_new = l.to_vec();
+    let mut u_new = u.to_vec();
+    let mut relaxed = 0usize;
+    for j in 0..n {
+        let (gl, gu) = (gate_l[j], gate_u[j]);
+        if gl <= -INF || gu >= INF {
+            continue;
+        }
+        let reach = gl.abs().max(gu.abs());
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let a = vals[idx];
+            let i = row_idx[idx];
+            if a == 0.0
+                || (a.abs() >= MAX_LINE_RANGE * row_max[i]
+                    && a.abs() >= MAX_LINE_RANGE * col_max[j])
+            {
+                continue;
+            }
+            let Some((k, s)) = slack[i] else { continue };
+            if k == j || a.abs() * reach > NOISE_RELAX_ROW_TOL * b[i].abs().max(row_max[i]) {
+                continue;
+            }
+            // a * z_j over [gl, gu], rounded outward, then divided by the slack's s.
+            let tmin = mul_down(a, gl).min(mul_down(a, gu));
+            let tmax = mul_up(a, gl).max(mul_up(a, gu));
+            let (dlo, dhi) = if s > 0.0 {
+                (div_down(tmin, s), div_up(tmax, s))
+            } else {
+                (div_down(tmax, s), div_up(tmin, s))
+            };
+            if l_new[k] > -INF {
+                l_new[k] = add_down(l_new[k], dlo);
+            }
+            if u_new[k] < INF {
+                u_new[k] = add_up(u_new[k], dhi);
+            }
+            keep[idx] = false;
+            relaxed += 1;
+        }
+    }
+    if relaxed == 0 {
+        return None;
+    }
+    let mut cp = Vec::with_capacity(n + 1);
+    let mut ri = Vec::with_capacity(vals.len() - relaxed);
+    let mut vv = Vec::with_capacity(vals.len() - relaxed);
+    cp.push(0usize);
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            if keep[idx] {
+                ri.push(row_idx[idx]);
+                vv.push(vals[idx]);
+            }
+        }
+        cp.push(ri.len());
+    }
+    Some(NoiseRelaxation {
+        csc: SparseCols::from_csc(cp, ri, vv),
+        l: l_new,
+        u: u_new,
+        relaxed,
+    })
+}
 
 /// Downgrade a result whose search ran on an LP that could not be trusted
 /// (#1296). The incumbent, if any, was re-verified on the original rows and is
@@ -9221,5 +9447,109 @@ mod tiny_entry_tests {
         assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
         assert!((r.obj + 0.95).abs() < 1e-7, "{r:?}");
         assert!(r.bound <= r.obj + 1e-9 && r.bound >= r.obj - 1e-6, "{r:?}");
+    }
+
+    /// #2107: `min -x + cy*y` s.t. `x + 1e-11 y <= 1`, `y <= 1e3` (as a row),
+    /// x in {0,1}, y declared `[0, inf)`. The 1e-11 is noise to its row and column
+    /// and moves its row by 1e-8 over the box the rows imply, so the #1296 gate
+    /// used to withdraw the certificate (bound `-inf`). The true optimum is `-1`
+    /// (x = 1, y = 0) whenever `cy >= -1e-11`, and `x = 1, y = 0` is optimal
+    /// for `cy = 0`.
+    fn noise_row(cy: f64) -> MilpResult {
+        // Columns: x, y, s0, s1.
+        let (m, n, ns) = (2, 4, 2);
+        #[rustfmt::skip]
+        let dense = vec![
+            1.0, 1e-11, 1.0, 0.0,
+            0.0, 1.0,   0.0, 1.0,
+        ];
+        let c = [-1.0, cy, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [1.0, INF, INF, INF];
+        let b = [1.0, 1e3];
+        solve_milp_hooked(
+            SparseCols::from_dense(&dense, m, n),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &opts(ns, vec![0]),
+            None,
+        )
+    }
+
+    #[test]
+    fn negligible_noise_entry_is_relaxed_not_decertified_2107() {
+        std::env::set_var("DISCOPT_PROFILE", "1");
+        let r = noise_row(0.0);
+        // Anti-vacuity (CLAUDE.md section 6): the relaxation actually ran.
+        assert!(
+            crate::profile::counter(crate::profile::Ctr::MilpNoiseEntriesRelaxed) > 0,
+            "the noise entry was not relaxed"
+        );
+        assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
+        assert!((r.obj + 1.0).abs() < 1e-7, "{r:?}");
+        assert!(
+            r.bound <= -1.0 + 1e-9,
+            "bound {} above the optimum -1",
+            r.bound
+        );
+        assert!(r.bound >= -1.0 - 1e-6, "{r:?}");
+    }
+
+    #[test]
+    fn relaxed_bound_never_exceeds_the_true_optimum_2107() {
+        // A positive y cost makes the relaxation's slack worth using: relaxed, the
+        // LP may take y = 1e3 at x = 1 for -1.1. The bound may be weak; it must
+        // never sit above the true optimum -1.
+        for cy in [-1e-4, -1e-9, 0.0, 1e-4] {
+            let r = noise_row(cy);
+            assert!(
+                r.bound <= -1.0 + 1e-9,
+                "cy={cy}: bound {} > -1 ({r:?})",
+                r.bound
+            );
+            if r.status == MilpStatus::Optimal {
+                // An incumbent is a point of the ORIGINAL rows (within tolerance).
+                assert!(r.x[0] + 1e-11 * r.x[1] <= 1.0 + 1e-6, "{r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn clean_matrix_is_left_untouched_2107() {
+        // Bit-identity for every model without a noise entry: nothing to relax.
+        let dense = [1.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+        let csc = SparseCols::from_dense(&dense, 2, 4);
+        let l = [0.0; 4];
+        let u = [1.0, INF, INF, INF];
+        let b = [1.0, 1e3];
+        let o = opts(2, vec![0]);
+        let (gl, gu) = tiny_entry_gate_box(&csc, 2, 4, &l, &u, &b, &o);
+        assert!(relax_noise_entries(&csc, 2, 4, &[0.0; 4], &l, &u, &b, &gl, &gu, &o).is_none());
+    }
+
+    #[test]
+    fn witnesses_are_not_relaxed_2107() {
+        // big_m(1e-11): `y` reaches 1e11, so the entry is worth O(1) on its row --
+        // far above NOISE_RELAX_ROW_TOL -- and must still withdraw (asserted by
+        // `noise_floor_big_m_is_never_certified`). Pin the relaxation's verdict too.
+        let eps = 1e-11;
+        #[rustfmt::skip]
+        let dense = vec![
+            1.0, -eps, 0.0,       1.0, 0.0,
+            0.0, 1.0,  -1.0 / eps, 0.0, 1.0,
+        ];
+        let csc = SparseCols::from_dense(&dense, 2, 5);
+        let l = [0.0; 5];
+        let u = [1.0, INF, 1.0, INF, INF];
+        let b = [0.5, 0.0];
+        let o = opts(3, vec![0]);
+        let (gl, gu) = tiny_entry_gate_box(&csc, 2, 5, &l, &u, &b, &o);
+        let c = [-1.0, 0.0, 0.1, 0.0, 0.0];
+        assert!(relax_noise_entries(&csc, 2, 5, &c, &l, &u, &b, &gl, &gu, &o).is_none());
     }
 }

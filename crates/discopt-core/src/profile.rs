@@ -531,6 +531,9 @@ counters!(
     // contradicted an ancestor's bound.
     MilpTinyEntryDecert,
     MilpBoundContradictedDecert,
+    // #2107: noise-floor entries relaxed into their row's slack instead of
+    // withdrawing the certificate.
+    MilpNoiseEntriesRelaxed,
     Phase1ViolLe1Expand,
     Phase1ViolLe100Expand,
     Phase1ViolGt100Expand,
