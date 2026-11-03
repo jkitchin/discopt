@@ -369,3 +369,89 @@ Side findings from the panels:
   all hold; enumerate now certifies 167427.657 (`test_1917_nlp_constant_rows.py`).
 - The mbigm lowering exceeds 600 s on `biofuel` and `stranded_gas`, and the big-M
   setup on `stranded_gas` takes about 120 s. Both are open performance gaps.
+
+## cstr big-M: per-node propagation and OBBT entry experiments, both killed (2026-11-02, #1917)
+
+The question was why the native spatial kernel's dual bound on cstr big-M (optimum
+3.0620145717261655) climbs so slowly when SCIP certifies the same model in under a
+minute. The two candidates were per-node reductions (propagation and OBBT). Both
+were measured on the kernel spec that `Model.solve` captures (lifted big-M, replayed
+through `_rust.solve_spatial_tree_py`, single thread). Both are rejected.
+
+### Propagation premise: falsified
+
+Pre-registered hypothesis: the kernel misses a box reduction that SCIP's propagation
+finds, and that is what keeps the bound low.
+
+* **Not the formulation.** SCIP solved on a pyscipopt model built to equal the
+  kernel spec exactly reaches 1.159 at 5000 nodes, and 1.183 on Pyomo's own model.
+  With nonlinear propagation off it reaches 0.111. The kernel default reaches
+  0.2152 at 5000 nodes.
+* **Not propagation.** I captured 94 post-propagation kernel boxes and ran SCIP's
+  propagation from the pre-propagation box. SCIP tightened further on only 3 boxes
+  (nodes 900, 920, 1460). It cut off 2 boxes, both of which the kernel LP already
+  proves infeasible. It never loosened a bound.
+* **Not the LP.** On the 81 equal boxes, SCIP's LP bound minus the kernel's has
+  median -4e-9 and max 0.018.
+
+So the node-indexed gap is in tree search (branching variable, branching point and
+node selection), not in per-node reductions. The per-node nonlinear FBBT item (F3)
+was killed by the same measurement.
+
+### OBBT at the gate's wall-clock limit: killed
+
+Pre-registration, copied verbatim from the file written before any run:
+
+```
+Pre-registered 2026-11-01 before any run (bigm-gap, #1917 cstr big-M OBBT entry experiment).
+Instance: cstr big-M lifted kernel spec (spec_cstr.pkl, the one in replay.py), replayed through
+_rust.solve_spatial_tree_py with time_limit_s=120, max_nodes=10**9, bound_time_extension_s=None.
+Arms: (a) default; (b) run_obbt=True, every node; (c) run_obbt=True, obbt_every=10
+  (THROTTLE RULE, fixed now: sweep at root and at every node whose id % 10 == 0; children inherit
+  the tightened box). Chosen over depth<=10 because the kernel tracks no depth; not tuned.
+Order: interleaved a,b,c,a,b,c (2 reps), one process at a time; uptime recorded before each run.
+Report: bound, status/certified, nodes, LPs at 120 s.
+PASS: (b) or (c) reaches bound >= 0.59 (or certifies) in BOTH reps, with bound <= 3.062 (cert-clean).
+KILL: no arm beats (a)'s 120 s bound by >= 2x (in both reps).
+Caveat fixed now: kernel-only wall; the Model.solve spec build / presolve time is excluded.
+```
+
+Setup:
+
+* Build: .so sha `e9d1f536`, which is a8a4be0e plus an experiment-only `obbt_every`
+  knob.
+* Probe check at 30 nodes: the LP counts were a 83, b 4643, c 700, which shows the
+  throttle fired.
+* Load average during the runs: 6.8–10.2, from another panel on the machine.
+
+Results at 120 s (none of the six runs certified, all are cert-clean, and every run
+found the incumbent 3.0620145717261655):
+
+| arm | rep | bound | nodes | LPs | undecided |
+|---|---|---|---|---|---|
+| a default | 1 | 1.7756 | 31031 | 30833 | 1152 |
+| b OBBT every node | 1 | 0.3698 | 336 | 40331 | 1 |
+| c OBBT every 10th | 1 | 0.9724 | 3520 | 37547 | 0 |
+| a default | 2 | 1.7801 | 31531 | 31325 | 1175 |
+| b OBBT every node | 2 | 0.3698 | 335 | 40178 | 1 |
+| c OBBT every 10th | 2 | 0.9579 | 3430 | 36709 | 0 |
+
+**Verdict: KILL.** No OBBT arm comes close to 2x the default. Both are worse than the
+default at the same wall clock: full OBBT reaches 0.21x and the throttle 0.54x.
+
+The PASS line was not crossed by either OBBT arm. (The default's own 1.78 is above
+0.59, but that is because the 0.59 threshold was written against a node-indexed
+baseline, not a 120 s one.)
+
+The node-indexed advantage OBBT showed earlier (1.675 at 5000 nodes, against 0.215
+for the default) is real. It costs about 120x more LPs per node, so at a fixed wall
+clock the default's raw node throughput wins.
+
+No flag is added. The `obbt_every` knob lived only in the experiment build and is
+not committed.
+
+What remains is a node-efficiency gap of roughly 5x against SCIP at 5000 nodes, and
+it is the next target (branching variable and point, compared against SCIP on the
+same box sequence). The default's 1152–1175 undecided node LPs per 120 s are also
+worth a look. How an undecided node contributes to the global bound has not been
+measured here.
