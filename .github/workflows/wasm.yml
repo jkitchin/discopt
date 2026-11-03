@@ -36,7 +36,11 @@ jobs:
       # build, and a mismatch here fails as "package does not exist" further
       # down, which reads like anything but a stale wheel.
       - name: Check the staged wheels
-        run: crates/discopt-wasm/build-wheel.sh --check
+        # Tags only (no history): on a dev version the check compares the wheel
+        # against the newest release tag; see expected_wheel_version.
+        run: |
+          git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
+          crates/discopt-wasm/build-wheel.sh --check
       # Solving the examples is the only check that sees a browser-only failure.
       # Two shipped in this page and neither was visible to pytest or to lint:
       # LP and MILP dying on a highspy that has no wasm build, and MIQP dying on
@@ -53,3 +57,12 @@ jobs:
             sleep 1
           done
           node crates/discopt-wasm/tests/examples_in_pyodide.mjs http://localhost:8731
+      # The IIS view: its pure functions under node --test, then the page itself
+      # in Chromium (worker, table, graph, editor links, axe in both themes,
+      # reflow at 320 px). The examples above never touch the DOM.
+      - name: Test the IIS view
+        run: |
+          set -euo pipefail
+          npm --prefix crates/discopt-wasm/tests run test:render
+          npx --prefix crates/discopt-wasm/tests playwright install --with-deps chromium
+          npm --prefix crates/discopt-wasm/tests run test:page

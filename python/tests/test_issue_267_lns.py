@@ -258,10 +258,12 @@ def test_local_branching_enumeration_honors_deadline(monkeypatch):
     assert unbudgeted_k5 == 1586  # the arithmetic the profile measured
 
     calls = {"n": 0}
+    starts: list[float] = []
     real_subnlp = ph.subnlp
 
     def counting_slow_subnlp(*a, **k):
         calls["n"] += 1
+        starts.append(time.perf_counter())
         time.sleep(0.003)  # ~3 ms: 1586 of these would be ~4.8 s (> 1 s deadline)
         return real_subnlp(*a, **k)
 
@@ -282,8 +284,17 @@ def test_local_branching_enumeration_honors_deadline(monkeypatch):
     )
     elapsed = time.perf_counter() - t0
 
-    # Budget honoured: returned within the deadline envelope (§0.7 style: +~20 %).
-    assert elapsed <= 1.2, f"local_branching overran its 1 s deadline: {elapsed:.2f} s"
+    # Budget honoured: the loop polls the deadline before every sub-NLP, so none
+    # STARTS after it. That is the contract, and it is machine-independent. The
+    # old check, ``elapsed <= 1.2``, also charged the duration of the last
+    # sub-NLP that started in time, which a loaded CI runner stretches past the
+    # 0.2 s margin (1.25 s on two PR runs, 2026-10-25/27), failing a correct
+    # implementation.
+    assert starts, "no sub-NLP ran: the probe measured nothing"
+    late = [s - deadline for s in starts if s > deadline]
+    assert not late, f"{len(late)} sub-NLP(s) started after the deadline: {late[:3]}"
+    # Backstop against an unbudgeted run (~4.8 s here), not the quality bar.
+    assert elapsed < 4.0, f"local_branching ran {elapsed:.2f} s against a 1 s deadline"
     # And it issued strictly fewer sub-NLPs than the unbudgeted enumeration.
     assert calls["n"] < unbudgeted_k5, (
         f"enumeration was not truncated: {calls['n']} sub-NLPs "

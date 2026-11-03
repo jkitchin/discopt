@@ -14136,6 +14136,89 @@ tree):
 | portfol_robust050_34 | 120 s | optimal, 16.9 -> 8.8 s |
 | portfol_robust100_09 | 120 s | unchanged |
 
+### 103.17 #2107: the in-house engine confirms lazy-master claims without SCIP; noise relaxation and c-MIR graduate (2026-11-03)
+
+**Problem.** Since #2072 a HiGHS `lp_nlp_bb` master claim the driver would certify
+on is re-derived by an independent engine: the in-house Rust MILP driver, then SCIP
+only if `pyscipopt` happens to be installed. On the default install the in-house
+engine was the only check, and it could not reach the claim on `m6`, `syn20m03m`,
+`clay0204hfsg` or `rsyn0820m` (#2107: optimal in 3.6-14.1 s before #2072, `feasible`
+at the 60 s limit after). POUNCE is no substitute: it is an NLP solver, and
+`milp_pounce` is the same in-house tree. So the engine itself had to get stronger.
+
+**Diagnosis, per final master (dumped from the live solve, SCIP 6.3 for reference).**
+
+| master | SCIP | in-house | cause |
+|---|---|---|---|
+| `clay0204hfsg` | 766 nodes, 0.6 s with presolve, cuts and propagation all off | tree drains, `bound = -inf` | 9 OA gradient-noise entries (2e-14 .. 6.5e-11) on columns declared `[0, inf)`; the #1296 gate withdraws the certificate |
+| `syn20m03m`, `rsyn0820m` | 36 / 161 nodes; 87k / 63k with separation off | stalls at 30 s under every cut profile | variable-bound rows `x <= M y` bound most continuous columns; GMI at any budget stops where SCIP's GMI-only root does (-4096 vs -4045, claim -2647) |
+| `m6` | 115 nodes | default cut profile proves it (9009 nodes, 3.4 s); the #1066 escalation cuts it off at 5000 | 42 columns free on both sides (layout positions); thousands of rejected Farkas proofs |
+
+**Fix 1 -- noise relaxation (`DISCOPT_MILP_NOISE_RELAX`, `milp_driver::relax_noise_entries`).**
+The #1296 gate is measured over the FBBT-implied box of the caller's rows, and a noise
+entry whose effect is at most 1e-6 of its row's scale is removed with its interval
+absorbed into the row's slack bounds (a superset of the feasible set). A per-row
+absolute cap of 1e-7 on the total relaxed effect was added after the full Rust suite
+caught a defect in the first version: on the #1537 fixture `x - 1e12 z <= 0`,
+`x in [0, 10]`, the relative-only cap relaxed `x` away and the driver returned
+`x = 10, z = 0`, infeasible by 10, because the incumbent check runs on the rows the
+search used. *Retracted:* the first commit's message claimed incumbents were
+re-verified on the original rows; they are verified on the rows the search ran on.
+
+**Fix 2 -- aggregated c-MIR (`DISCOPT_MILP_CMIR`, `crates/discopt-core/src/lp/cmir.rs`).**
+Marchand-Wolsey aggregation (<= 2 steps over original standard-form rows), closest-bound
+substitution over {l, u, VLB, VUB} with variable bounds read from 2-3 nonzero rows,
+integer complementation under the C-4 integral-bound premise, MIR at
+delta in {1, 1/|a_k|} x {1, 2, 4, 8}. Entry experiment (Python prototype, kill criterion
+stated first: >= 70 % root closure on both and an in-house confirm <= 10 s): root
+86 % / 60 % (`rsyn` misses the root bar), confirm 159 / 1171 nodes (passes). Native
+separator, in-house engine alone on the dumped masters, seeded, 30 s:
+
+| master | c-MIR on | c-MIR off |
+|---|---|---|
+| `syn20m03m` | optimal, -2646.9509, 14454 nodes, 10.0 s | stalled at -2847.3, 56050 nodes |
+| `rsyn0820m` | optimal, -1150.30054, 11540 nodes, 5.1 s | stalled at -1203.5, 54496 nodes |
+
+Soundness tests: feasible-point sampling on 40 random big-M fixed-charge models
+(3622 cuts, 116522 checks, 0 violations), a 30-model differential solve (same certified
+optimum on and off).
+
+**Falsified on the way: escalation resume for `m6`.** Hypothesis: give the time a failed
+#1066 strong attempt leaves to the legacy profile, uncapped. It proved the dumped `m6`
+master (19.2 s) -- and the same master after a lossless MPS round trip, coefficients
+equal to 5e-16, did not (bound 77.03, 58959 nodes, tree drained early). A benefit that
+does not survive a 5e-16 perturbation is not a mechanism; the change was withdrawn. The
+stable signal is `FarkasRejectOpen` (6.6k-9.9k per run): with columns free on both sides
+a floating-point Farkas ray certifies only when `a^T y` is exactly zero on every one of
+them. `m6` stays open.
+
+**Panels** (CLAUDE.md section 5; 150 instances = the 66-file in-repo corpus, every 3rd by
+name of the 234 MINLPLib instances with `convex = True`, integers, `nvars <= 250`,
+`ncons <= 500`, and the four #2107 instances; 20 s; arms interleaved per instance;
+`pyscipopt` blocked; bounds against `minlplib.solu`; incumbents verified with
+`check_feasibility` at 1e-5):
+
+| flag | checks | violations | certified OFF -> ON | gained | lost | wall OFF -> ON |
+|---|---|---|---|---|---|---|
+| noise relaxation (final cap, c-MIR off) | 755 | 0 | 98 -> 101 | `clay0203hfsg`, `clay0303hfsg`, `rsyn0815m`, `smallinvDAXr5b150-165` | `syn20m02m` | 1367.6 -> 1331.6 s |
+| c-MIR (noise relaxation on) | 757 | 0 | 99 -> 102 | `launch`, `rsyn0820m`, `syn20m02m` | none | 1343.4 -> 1315.5 s |
+
+Attribution with the cumulative profile counters: the relaxation fires on the two `clay`
+gains (5 and 7 entries) and on **none** of the noise panel's other gains
+(`rsyn0815m`, `smallinvDAXr5b150-165`), its lost instance or its looser bounds, in
+either arm, so those are timing noise (an earlier run with the first cap had
+`smallinvDAXr5b150-165` as its one loss; it certifies in 11.8 s in both arms alone).
+Of the c-MIR panel's gains, `rsyn0820m` and `syn20m02m` separate c-MIR cuts (382 /
+366; `syn20m02m` certifies in 7.5 s) and `launch` separates none (noise). c-MIR
+separates no cut on 5 of the panel's 7 looser bounds; `syn20m03m` is tighter in
+3/3 interleaved reps (2806-2838 vs 3402-3432, maximize). The one reproducible loss is
+`m7` (28.75 vs 61.8-63.1, 3/3, uncertified both ways; on its master alone 38.7 vs 103.9
+at 20 s): the extra rows raise the node LPs' rejected unbounded verdicts 5 -> 27 against
+its free layout columns -- the `m6` defect, which c-MIR exposes more often rather than
+causes. Both flags graduate default-ON with `=0` opt-outs.
+
+**End to end, no `pyscipopt`, 60 s:** `syn20m03m` optimal 20.3 s, `rsyn0820m` optimal
+20.3 s, `clay0204hfsg` optimal 26.9 s, `m6` still `feasible` at the limit.
 
 ## 104. #2115: the in-house MILP driver on translation-invariant masters (2026-11-03)
 
@@ -14207,7 +14290,7 @@ Sound for any input: an enclosure that does not verify reports nothing.
 | `NodeNsProjectRescue` | 0 | 665 |
 
 The issue's own warning was that a benefit which does not survive a 5e-16
-perturbation is not a mechanism (§103.17 in the #2107 PR). So the master was
+perturbation is not a mechanism (§103.17). So the master was
 re-solved after perturbing every coefficient and right-hand side by
 `{-1, 0, +1} x 5e-16` relative, 3 seeds plus the unperturbed one. ON certified
 **4/4**, OFF **0/4**.

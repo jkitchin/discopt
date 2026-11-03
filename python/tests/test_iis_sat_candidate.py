@@ -1,4 +1,4 @@
-"""The CDCL clause-core candidate for the MILP IIS engine (``_iis_milp._clause_core``).
+"""The CDCL core candidate for the MILP IIS engine (``_iis_milp._binary_core``) on clause models.
 
 On a pure-binary clause model the engine starts from a small unsatisfiable row set
 found by discopt's own CDCL solver (``discopt._rust.PySatSolver``) instead of
@@ -91,7 +91,9 @@ def test_non_clause_model_is_computed_exactly_as_without_the_candidate():
     m = dm.Model("p")
     x = m.integer("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
-    m.subject_to(2 * x == 1, name="half")
+    # 3x = 1: integer-infeasible, but not by parity (2x = 1 would be a mod-2
+    # certificate, which the parity candidate legitimately takes).
+    m.subject_to(3 * x == 1, name="half")
     m.subject_to(y <= 3, name="red_herring")
     m.minimize(0 * x)
     a = milp_iis(m)
@@ -115,7 +117,7 @@ def test_a_wrong_candidate_is_rejected_by_the_highs_base_proof(monkeypatch):
         if _is_unsat(8, cls):
             break
     # Propose a single row: certainly satisfiable, so HiGHS must refute it.
-    monkeypatch.setattr(_iis_milp, "_clause_core", lambda *a, **k: ({0}, 0))
+    monkeypatch.setattr(_iis_milp, "_binary_core", lambda *a, **k: ({0}, 0))
     res = milp_iis(mod, time_limit=10)
     assert res.sat_rows is None  # candidate discarded
     assert res.proven_irreducible

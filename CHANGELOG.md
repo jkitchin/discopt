@@ -12,6 +12,21 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **The browser page explains infeasibility.** A new seventh example, an infeasible
+  two-mill blending LP, calls `compute_iis()`. Any `IISResult` a script leaves in a
+  top-level variable is now drawn below the output: a summary (member counts, model
+  size, whether the IIS is *proven* minimal), a table of members with the variable
+  elements each touches and a button that selects its declaring line in the editor, and
+  a constraint–variable graph that also shows, dashed, the constraints outside the IIS
+  that share its variables. The table holds everything the graph shows; membership is
+  never shown by colour alone. Each run now gets a fresh namespace, so an earlier run's
+  IIS is never redrawn. Data: `crates/discopt-wasm/web/iis_view.py` (served with the
+  page, not in the wheel); drawing: `web/iis_render.js`. Checked by
+  `python/tests/test_wasm_iis_view.py`, the Pyodide harness, `node --test`, and a new
+  Chromium harness (`crates/discopt-wasm/tests/iis_page.mjs`, axe in both themes,
+  320 px reflow) in the `Browser page` workflow. The example dropdown no longer scrolls
+  the page sideways on a 320 px screen.
+
 - **Exact lowering of box-constrained MCP relations (#2058).** `F(x) ⊥ z ∈ [l, u]`
   (`Model.mcp`, `mpec.box_mcp`) used to be represented but refused at solve time.
   Every exact lowering (`mpec.gdp`, `mpec.sos1`) and Scholtes now reduce it to the

@@ -138,6 +138,8 @@ timed_phases!(
     RootCutLoop,
     RootSolve,
     SepCover,
+    // #2107: the aggregated c-MIR separator in the root cut loop.
+    SepCmir,
     SepGomory,
     Augment,
     DiveRepair,
@@ -539,6 +541,11 @@ counters!(
     // contradicted an ancestor's bound.
     MilpTinyEntryDecert,
     MilpBoundContradictedDecert,
+    // #2107: noise-floor entries relaxed into their row's slack instead of
+    // withdrawing the certificate.
+    MilpNoiseEntriesRelaxed,
+    // #2107: c-MIR candidates the root separator returned (before selection).
+    SepCmirCuts,
     Phase1ViolLe1Expand,
     Phase1ViolLe100Expand,
     Phase1ViolGt100Expand,
