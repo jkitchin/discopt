@@ -1077,6 +1077,7 @@ def milp_iis_arrays(
     workers: Optional[int] = None,
     t_start: Optional[float] = None,
     grace: float = math.inf,
+    grace_window: Optional[tuple[float, float]] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -1088,8 +1089,8 @@ def milp_iis_arrays(
     Element ids in the result are the ``row_groups`` keys and column indices.
     ``t_start`` (``time.perf_counter()``) is when the budget began, so time the
     caller spent before the call counts against ``total_time_limit``.
-    ``grace`` (portfolio only): see :func:`_portfolio_iis`; the default waits
-    for every member.
+    ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
+    the default waits for every member.
     """
     if t_start is None:
         t_start = time.perf_counter()
@@ -1105,10 +1106,17 @@ def milp_iis_arrays(
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
         return _portfolio_iis(
-            arrays, kwargs, portfolio, workers, t_start, total_time_limit, grace=grace
+            arrays,
+            kwargs,
+            portfolio,
+            workers,
+            t_start,
+            total_time_limit,
+            grace=grace,
+            grace_window=grace_window,
         )
-    if grace != math.inf:
-        raise ValueError("grace= needs portfolio=")
+    if grace != math.inf or grace_window is not None:
+        raise ValueError("grace= / grace_window= need portfolio=")
     return _milp_iis_arrays(
         arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
     )
@@ -1746,6 +1754,18 @@ def _portfolio_child() -> None:
         pickle.dump(out, f)
 
 
+def _grace_extra(
+    t_done: float, grace: float, window: Optional[tuple[float, float]] = None
+) -> float:
+    """Seconds the other portfolio members may keep running after the first one
+    completes at elapsed time ``t_done``: ``(grace - 1) * t_done``, clamped to
+    ``window`` when given (see :func:`_portfolio_iis`)."""
+    extra = (grace - 1.0) * t_done
+    if window is not None:
+        extra = min(max(extra, float(window[0])), float(window[1]))
+    return extra
+
+
 def _portfolio_iis(
     arrays: tuple,
     kwargs: dict,
@@ -1754,6 +1774,7 @@ def _portfolio_iis(
     t_start: float,
     total_time_limit: Optional[float],
     grace: float = math.inf,
+    grace_window: Optional[tuple[float, float]] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
@@ -1772,6 +1793,12 @@ def _portfolio_iis(
     ``grace``: once the first member completes at elapsed time ``t``, the others
     may run until ``grace * t`` (and never past the budget); then they are
     terminated and recorded as ``"abandoned"``. ``inf`` waits for every member.
+    ``grace_window=(lo, hi)`` clamps the extra wait ``(grace - 1) * t`` to
+    ``[lo, hi]`` seconds: on MIPcc27's 6-order sweep every later member that beat
+    the first finisher did so within 31 s of it, whatever ``t`` was, so a
+    proportional wait cut off improvements on fast instances (bell3ainf: first
+    at 4 s, Gurobi's size at 17 s) and idled for minutes on slow ones
+    (neos859080: complete at ~285 s, waited to ~570 s).
     """
     import os
     import pickle
@@ -1793,6 +1820,10 @@ def _portfolio_iis(
         raise ValueError(f"workers must be >= 1, got {workers}")
     if not grace >= 1.0:
         raise ValueError(f"grace must be >= 1, got {grace}")
+    if grace_window is not None:
+        lo_w, hi_w = (float(v) for v in grace_window)
+        if not (0.0 <= lo_w <= hi_w) or not math.isfinite(grace):
+            raise ValueError(f"grace_window needs 0 <= lo <= hi and a finite grace: {grace_window}")
 
     # perf_counter is per-process; members get an absolute wall-clock deadline.
     wall0 = time.time() - (time.perf_counter() - t_start)
@@ -1876,7 +1907,8 @@ def _portfolio_iis(
                         outcome="ok", size=_iis_size(payload), complete=payload.complete
                     )
                     if payload.complete and math.isfinite(grace):
-                        grace_end = wall0 + grace * (time.time() - wall0)
+                        t_done = time.time() - wall0
+                        grace_end = wall0 + t_done + _grace_extra(t_done, grace, grace_window)
                         cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
         finally:
             for i, (proc, t0, _, err) in running.items():
