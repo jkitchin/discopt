@@ -54,6 +54,12 @@ GRACE = 2.0
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
 CHECK_TOL = 1e-5
+# Our own acceptance is stricter on both sides, so a certificate at the edge of
+# the checker's tolerance -- where its arithmetic (summation order) and ours may
+# disagree -- is dropped rather than risked: one rejected certificate rejects
+# the whole file, a dropped one costs only that element's credit.
+_OTHERS_MAX = 0.5 * CHECK_TOL  # every other kept element satisfied within this
+_OWN_MIN = 2.0 * CHECK_TOL  # the certified element violated by more than this
 _INF = 1e20  # the engine's unbounded sentinel
 
 
@@ -130,11 +136,12 @@ def read_mps(path: str) -> dict:
 def certificate_ok(
     data: dict, rows: np.ndarray, lbk: np.ndarray, ubk: np.ndarray, held: np.ndarray, key, x
 ) -> bool:
-    """The checker's rule for one certificate, on the original data: ``x``
-    satisfies every kept element except ``key`` within :data:`CHECK_TOL` (the box
-    of every column that stays integer applies too) and violates ``key`` by more
-    than :data:`CHECK_TOL`. ``rows``/``lbk``/``ubk``/``held`` are the kept rows,
-    kept lower/upper bounds and kept integralities, as boolean masks."""
+    """The checker's rule for one certificate, on the original data, with a
+    safety margin: ``x`` satisfies every kept element except ``key`` within
+    ``_OTHERS_MAX`` (the box of every column that stays integer applies too) and
+    violates ``key`` by more than ``_OWN_MIN`` (the checker: both 1e-5).
+    ``rows``/``lbk``/``ubk``/``held`` are the kept rows, kept lower/upper bounds
+    and kept integralities, as boolean masks."""
     A, rlo, rhi = data["A"], data["row_lo"], data["row_hi"]
     clb, cub = data["col_lb"], data["col_ub"]
     act = A @ x
@@ -166,7 +173,7 @@ def certificate_ok(
         float(np.max(ub_v[ubk], initial=0.0)),
         float(np.max(int_v[held], initial=0.0)),
     )
-    return others <= CHECK_TOL and float(own) > CHECK_TOL
+    return others <= _OTHERS_MAX and float(own) > _OWN_MIN
 
 
 def solution_json(data: dict, res=None) -> dict:

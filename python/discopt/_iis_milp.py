@@ -1581,10 +1581,12 @@ def _milp_iis_arrays(
         # The set's presolve-on proof is usually on record already (the last
         # batch the filter could not drop was put back), so only the
         # presolve-free route runs; and it may use the reserve up to the
-        # deadline instead of one probe's limit. Capped at 30 s and re-proving
-        # presolve-on first, this confirmation failed on MIPcc27's dijle and
-        # dingo at 600 s and the run fell back to the untouched base set
-        # (6282 / 4960 elements) after filtering away half the integralities.
+        # deadline instead of one probe's limit. Measured (MIPcc27, 600 s): this
+        # did NOT rescue dijle / dingo / dives -- with 80-92 s instead of 30 s
+        # their final sets still did not confirm presolve-free (the hypothesis
+        # that the 30 s cap was the cause was falsified). It removes a solve
+        # that repeated a proof on record and gives the reserve its purpose;
+        # anytime progress on that class comes from rolling checkpoints (``roll``).
         try:
             verdict = eng.confirm_infeasible(
                 cons,

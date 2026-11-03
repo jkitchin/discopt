@@ -144,6 +144,14 @@ def test_certificate_rule_matches_the_checker():
     assert not ok(data, rows, none, none, none, ("constraint", 0), np.array([1.5 + 5e-6, 0.0]))
     # Violates the other kept row (c2) by more than the tolerance.
     assert not ok(data, rows, none, none, none, ("constraint", 0), np.array([2.0, 0.0]))
+    # Inside the checker's tolerance but at its edge: dropped, not risked. c1
+    # violated by 1.5e-5 (> 1e-5, but not > 2e-5), and c2 satisfied but with
+    # another row violated by 0.8e-5 (<= 1e-5, but not <= 0.5e-5).
+    only_c1 = np.array([True, False])
+    assert not ok(data, only_c1, none, none, none, ("constraint", 0), np.array([1.5 + 1.5e-5, 0.0]))
+    assert ok(data, only_c1, none, none, none, ("constraint", 0), np.array([1.5 + 3e-5, 0.0]))
+    data3 = dict(data, row_lo=np.array([-1e20, 2.5 + 0.8e-5]))
+    assert not ok(data3, rows, none, none, none, ("constraint", 0), np.array([3.0, -0.5]))
 
 
 @pytest.mark.parametrize("exc", [TimeoutError("budget"), RuntimeError("engine bug")])
