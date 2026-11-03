@@ -1,0 +1,105 @@
+alan                   OFF optimal                b=2.9249999996590272 n=13 abst=0 | ON optimal                b=2.9249999996590272 n=13 abst=0 resc=0
+4stufen                OFF time_limit             b=19713.02734719666 n=3 abst=0 | ON time_limit             b=19713.02734719666 n=3 abst=0 resc=0
+bchoco06               OFF time_limit             b=0.9999887833681252 n=3 abst=0 | ON time_limit             b=0.9999887833681252 n=3 abst=0 resc=0
+bchoco07               OFF time_limit             b=0.9999909424951968 n=3 abst=0 | ON time_limit             b=0.9999909424951968 n=3 abst=0 resc=0
+bchoco08               OFF time_limit             b=0.9999923302831512 n=3 abst=0 | ON time_limit             b=0.9999923302831512 n=3 abst=0 resc=0
+casctanks              OFF feasible               b=6.040896844275686 n=3 abst=0 | ON feasible               b=6.040896844275686 n=3 abst=0 resc=0
+chance                 OFF optimal                b=29.89437815425806 n=0 abst=0 | ON optimal                b=29.89437815425806 n=0 abst=0 resc=0
+beuster                OFF time_limit             b=6352.061289120947 n=3 abst=0 | ON time_limit             b=6352.061289120947 n=3 abst=0 resc=0
+clay0303hfsg           OFF optimal                b=26669.10955160332 n=447 abst=0 | ON optimal                b=26669.109551603287 n=459 abst=0 resc=0
+contvar                OFF time_limit             b=183651.37248613962 n=3 abst=0 | ON time_limit             b=183651.06145413662 n=3 abst=0 resc=0
+cvxnonsep_nsig30       OFF optimal                b=130.61841392487696 n=3680 abst=0 | ON optimal                b=130.61841392487696 n=3553 abst=0 resc=0
+cvxnonsep_psig40r      OFF optimal                b=86.53657911270008 n=8 abst=0 | ON optimal                b=86.53657911270008 n=8 abst=0 resc=624
+dispatch               OFF optimal                b=3155.2873921555433 n=1 abst=0 | ON optimal                b=3155.2873921555433 n=1 abst=0 resc=0
+ex1221                 OFF optimal                b=7.667180068812996 n=3 abst=0 | ON optimal                b=7.667180068812996 n=3 abst=0 resc=0
+ex1222                 OFF optimal                b=1.0765430833322536 n=3 abst=0 | ON optimal                b=1.0765430833322536 n=3 abst=0 resc=0
+ex1224                 OFF optimal                b=-0.9434705000000072 n=5 abst=0 | ON optimal                b=-0.9434705000000072 n=5 abst=0 resc=0
+ex1225                 OFF optimal                b=30.999999999999687 n=5 abst=0 | ON optimal                b=30.999999999999687 n=5 abst=0 resc=0
+cvxnonsep_psig30       OFF optimal                b=78.99179856949351 n=3220 abst=0 | ON optimal                b=78.99179856949351 n=3220 abst=0 resc=0
+ex1226                 OFF optimal                b=-17.000000000000416 n=5 abst=0 | ON optimal                b=-17.000000000000416 n=5 abst=0 resc=0
+ex14_1_9               OFF optimal                b=-1.9775220375077173e-16 n=5 abst=0 | ON optimal                b=-1.9775220375077173e-16 n=5 abst=0 resc=0
+ex14_1_7               OFF optimal                b=-1e-12 n=3 abst=0 | ON optimal                b=-1e-12 n=3 abst=0 resc=0
+ex4_1_5                OFF optimal                b=-1.0003715904744824e-09 n=159 abst=0 | ON optimal                b=-1.0003715904744824e-09 n=159 abst=0 resc=0
+ex7_3_1                OFF optimal                b=0.34173955312361126 n=5 abst=0 | ON optimal                b=0.34173955312361126 n=5 abst=0 resc=0
+fac2                   OFF optimal                b=331837498.17643344 n=7 abst=0 | ON optimal                b=331837498.17643344 n=7 abst=0 resc=0
+flay02m                OFF optimal                b=37.947331916928526 n=3 abst=0 | ON optimal                b=37.947331916928526 n=3 abst=0 resc=0
+flay03m                OFF optimal                b=48.98844775290874 n=280 abst=0 | ON optimal                b=48.98844775290874 n=280 abst=0 resc=0
+gbd                    OFF optimal                b=2.1999999999968 n=0 abst=0 | ON optimal                b=2.1999999999968 n=0 abst=0 resc=0
+gkocis                 OFF optimal                b=-1.923098742584029 n=5 abst=0 | ON optimal                b=-1.923098742584029 n=5 abst=0 resc=0
+haverly                OFF optimal                b=-400.00000015489013 n=69 abst=0 | ON optimal                b=-400.00000015489013 n=69 abst=0 resc=0
+ex8_5_3                OFF feasible               b=-0.004137189143159636 n=261 abst=0 | ON feasible               b=-0.004137189143159636 n=247 abst=0 resc=0
+hda                    OFF time_limit             b=-6995.660302789643 n=3 abst=0 | ON time_limit             b=-6995.660302789643 n=3 abst=0 resc=0
+heatexch_gen1          OFF feasible               b=38183.53174601837 n=3 abst=0 | ON feasible               b=38183.53174601837 n=5 abst=0 resc=0
+heatexch_gen2          OFF feasible               b=555767.7902857299 n=3 abst=0 | ON feasible               b=555767.7902857299 n=3 abst=0 resc=0
+launch                 OFF optimal                b=2257.7975532668443 n=5 abst=3 | ON optimal                b=2257.7975532668443 n=5 abst=0 resc=3
+m3                     OFF optimal                b=37.7999999998928 n=12 abst=0 | ON optimal                b=37.7999999998928 n=12 abst=0 resc=0
+nvs01                  OFF optimal                b=12.469668821568018 n=5 abst=0 | ON optimal                b=12.469668821568018 n=5 abst=0 resc=0
+nvs02                  OFF optimal                b=5.964184523068852 n=219 abst=0 | ON optimal                b=5.964184523068852 n=219 abst=0 resc=0
+nvs03                  OFF optimal                b=15.999999999982915 n=3 abst=0 | ON optimal                b=15.999999999982915 n=3 abst=0 resc=0
+nvs04                  OFF optimal                b=0.7199999999999773 n=5 abst=0 | ON optimal                b=0.7199999999999773 n=5 abst=0 resc=0
+heatexch_gen3          OFF feasible               b=43887.57992562059 n=3 abst=0 | ON time_limit             b=43887.57992562059 n=3 abst=0 resc=0
+nvs06                  OFF optimal                b=1.7703124999999629 n=5 abst=0 | ON optimal                b=1.7703124999999629 n=5 abst=0 resc=0
+nvs07                  OFF optimal                b=3.9999999999949987 n=3 abst=0 | ON optimal                b=3.9999999999949987 n=3 abst=0 resc=0
+nvs08                  OFF optimal                b=23.449727347181057 n=5 abst=0 | ON optimal                b=23.449727347181057 n=5 abst=0 resc=0
+nvs09                  OFF optimal                b=-43.13433691804334 n=31 abst=0 | ON optimal                b=-43.13433691804334 n=31 abst=0 resc=0
+nvs10                  OFF optimal                b=-310.8000000003177 n=8 abst=0 | ON optimal                b=-310.8000000003177 n=8 abst=0 resc=0
+nvs11                  OFF optimal                b=-431.0092378508183 n=42 abst=0 | ON optimal                b=-431.0092378508183 n=42 abst=0 resc=0
+nvs12                  OFF optimal                b=-481.2000000004844 n=62 abst=0 | ON optimal                b=-481.2000000004844 n=62 abst=0 resc=0
+nvs13                  OFF optimal                b=-585.2000000006469 n=23 abst=0 | ON optimal                b=-585.2000000006469 n=23 abst=0 resc=0
+nvs14                  OFF optimal                b=-40358.15476930149 n=269 abst=0 | ON optimal                b=-40358.15476930149 n=269 abst=0 resc=0
+nvs15                  OFF optimal                b=0.9999999999961277 n=8 abst=0 | ON optimal                b=0.9999999999961277 n=8 abst=0 resc=0
+nvs21                  OFF optimal                b=-5.684782500007601 n=5 abst=0 | ON optimal                b=-5.684782500007601 n=5 abst=0 resc=0
+oaer                   OFF optimal                b=-1.9230985229118471 n=3 abst=0 | ON optimal                b=-1.9230985229118471 n=3 abst=0 resc=0
+nvs05                  OFF feasible               b=5.088996460198769 n=61 abst=0 | ON feasible               b=5.454340334998311 n=79 abst=0 resc=0
+st_e11                 OFF optimal                b=189.3116296865995 n=5 abst=0 | ON optimal                b=189.3116296865995 n=5 abst=0 resc=0
+st_e13                 OFF optimal                b=1.999999999997 n=1 abst=0 | ON optimal                b=1.999999999997 n=1 abst=0 resc=0
+st_e29                 OFF optimal                b=-0.9434705000000072 n=5 abst=0 | ON optimal                b=-0.9434705000000072 n=5 abst=0 resc=0
+st_e36                 OFF optimal                b=-246.00000000045293 n=109 abst=0 | ON optimal                b=-246.00000000045293 n=109 abst=0 resc=0
+st_e38                 OFF optimal                b=7197.727148009189 n=3 abst=0 | ON optimal                b=7197.727148009189 n=3 abst=0 resc=0
+st_miqp1               OFF optimal                b=280.9999999997175 n=3 abst=0 | ON optimal                b=280.9999999997175 n=3 abst=0 resc=0
+st_miqp2               OFF optimal                b=1.9999999999469644 n=2 abst=0 | ON optimal                b=1.9999999999469644 n=2 abst=0 resc=0
+st_miqp3               OFF optimal                b=-6.000000000008493 n=1 abst=0 | ON optimal                b=-6.000000000008493 n=1 abst=0 resc=0
+st_miqp4               OFF optimal                b=-4574.0000000045775 n=1 abst=0 | ON optimal                b=-4574.0000000045775 n=1 abst=0 resc=0
+st_miqp5               OFF optimal                b=-333.88888890070234 n=1 abst=0 | ON optimal                b=-333.88888890070234 n=1 abst=0 resc=0
+st_test1               OFF optimal                b=-3.4689037408334897e-11 n=17 abst=0 | ON optimal                b=-3.4689037408334897e-11 n=17 abst=0 resc=0
+st_testgr3             OFF optimal                b=-20.59000000002205 n=23 abst=0 | ON optimal                b=-20.59000000002205 n=23 abst=0 resc=0
+syn05hfsg              OFF optimal                b=837.7420768788216 n=2 abst=0 | ON optimal                b=837.7420768788216 n=2 abst=0 resc=0
+tanksize               OFF optimal                b=1.2685350436919938 n=519 abst=0 | ON optimal                b=1.2685350436919938 n=519 abst=0 resc=0
+tls2                   OFF optimal                b=5.299999999999999 n=23 abst=0 | ON optimal                b=5.299999999999999 n=23 abst=0 resc=0
+prolog                 OFF feasible               b=None n=221 abst=1 | ON feasible               b=None n=221 abst=1 resc=0
+tspn05                 OFF optimal                b=191.25513611344041 n=21 abst=0 | ON optimal                b=191.25513611344041 n=21 abst=0 resc=0
+tspn08                 OFF feasible               b=262.01893070587346 n=63 abst=0 | ON feasible               b=262.01893070587346 n=63 abst=0 resc=0
+tspn10                 OFF feasible               b=165.2475561034619 n=49 abst=0 | ON feasible               b=165.2475561034619 n=49 abst=0 resc=0
+tspn12                 OFF feasible               b=201.08038046451128 n=67 abst=0 | ON feasible               b=201.08038046451128 n=67 abst=0 resc=0
+wallfix                OFF feasible               b=0.0 n=1283 abst=0 | ON feasible               b=0.0 n=1391 abst=0 resc=0
+clay0203h              OFF feasible               b=1359.9999999998304 n=139 abst=0 | ON feasible               b=1359.9999999998304 n=159 abst=0 resc=0
+flay03m                OFF optimal                b=48.98844775290874 n=280 abst=0 | ON optimal                b=48.98844775290874 n=280 abst=0 resc=0
+clay0204hfsg           OFF feasible               b=1679.9999736455243 n=7094 abst=0 | ON feasible               b=1679.9999736455243 n=7086 abst=0 resc=0
+flay04m                OFF optimal                b=54.40046392927867 n=25092 abst=0 | ON optimal                b=54.40046392927867 n=25092 abst=0 resc=0
+fo7                    OFF feasible               b=11.282087278454744 n=33198 abst=0 | ON feasible               b=11.282087278454744 n=32537 abst=0 resc=0
+fo7_2                  OFF feasible               b=7.878827396435078 n=32989 abst=0 | ON feasible               b=6.960548460161817 n=32267 abst=0 resc=0
+m3                     OFF optimal                b=37.7999999998928 n=12 abst=0 | ON optimal                b=37.7999999998928 n=12 abst=0 resc=0
+fo8                    OFF time_limit             b=9.268738897335554 n=28188 abst=0 | ON time_limit             b=8.29422848343261 n=23965 abst=0 resc=0
+m6                     OFF feasible               b=62.826227192142426 n=2098 abst=3194 | ON optimal                b=82.25687691293082 n=949 abst=0 resc=665
+m7                     OFF optimal                b=106.75664378988986 n=562 abst=7945 | ON optimal                b=106.75664378988986 n=562 abst=6 resc=1825
+netmod_dol1            OFF feasible               b=-0.8333333333333343 n=33 abst=0 | ON feasible               b=-0.8333333333333343 n=34 abst=0 resc=0
+o7                     OFF time_limit             b=20.11387722873122 n=27470 abst=0 | ON time_limit             b=18.812821115407676 n=28765 abst=0 resc=0
+o7_2                   OFF feasible               b=37.2799074522029 n=25038 abst=0 | ON feasible               b=37.2799074522029 n=26652 abst=0 resc=0
+slay04m                OFF optimal                b=9859.659706980769 n=49 abst=0 | ON optimal                b=9859.659706956041 n=49 abst=0 resc=79
+slay07m                OFF optimal                b=64748.82528298869 n=1100 abst=0 | ON optimal                b=64748.825289411914 n=1100 abst=0 resc=689
+sssd08-04              OFF optimal                b=182022.57029699502 n=1337 abst=0 | ON optimal                b=182022.57029699502 n=1337 abst=0 resc=0
+rsyn0820m              OFF feasible               b=1226.6879308746563 n=1866 abst=0 | ON feasible               b=1233.1306779875824 n=1872 abst=0 resc=0
+
+instances           : 91
+executed checks     : 952
+violations          : 0
+projection rescues  : 3885 on 6 instance(s) ['cvxnonsep_psig40r', 'launch', 'm6', 'm7', 'slay04m', 'slay07m']
+certified           : OFF 63 -> ON 64  gained ['m6']
+bounds tighter      : 2 ['nvs05', 'm6']  (where it ran: ['m6'])
+bounds looser       : 4 ['fo7_2', 'fo8', 'o7', 'rsyn0820m']  (where it ran: [])
+nodes (all)         : OFF 197958 -> ON 194130
+wall  (all)         : OFF 2116.2s -> ON 2045.9s
+wall  (fired)       : OFF 223.6s -> ON 161.6s over 7 instance(s)
+report              : <scratch>/panel3.json
+
+VERDICT: cert-clean, projection fired; read the benefit columns above.

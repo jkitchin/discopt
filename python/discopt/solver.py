@@ -75,6 +75,7 @@ from discopt.modeling.core import (
     objective_sense_sign,
 )
 from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
+from discopt.solver_tuning import ROLE1_DEADLINE as _ROLE1_DEADLINE_VAR
 from discopt.solver_tuning import _env_flag
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
@@ -82,6 +83,7 @@ from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_shar
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import saturate_role2 as _role2_saturate
 from discopt.solver_tuning import set_current as _set_tuning
+from discopt.solver_tuning import subsolve_wall_seconds as _subsolve_wall_seconds
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
     PounceOptionError,
@@ -11251,9 +11253,10 @@ _IPX_CHEAP_FIRST_IN_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar
 #: a ``monotonic`` epoch and every deadline in this module is ``perf_counter``.
 #: Mixing the two compares timestamps from different clocks, which would be a
 #: second bug wearing the first one's clothes.
-_ROLE1_DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
-    "_ROLE1_DEADLINE", default=None
-)
+#:
+#: The object itself lives in :mod:`discopt.solver_tuning` (#2120) so the NLP
+#: backends can bound one sub-solve by it without importing this module.
+_ROLE1_DEADLINE: contextvars.ContextVar[Optional[float]] = _ROLE1_DEADLINE_VAR
 
 
 def _role1_deadline() -> Optional[float]:
@@ -11982,6 +11985,31 @@ def _kernel_int_probe_enabled() -> bool:
 _FRONTIER_MEMORY_MB_DEFAULT = 2048
 
 
+#: A per-solve override of ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092), set by
+#: :func:`frontier_memory_override`. A context variable, not ``os.environ``: the
+#: GAMS link's warm daemon serves many solves from one process, so an environment
+#: write for one job would leak into every later one.
+_FRONTIER_MEMORY_MB_OVERRIDE: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "discopt_frontier_memory_mb", default=None
+)
+
+
+@contextlib.contextmanager
+def frontier_memory_override(mb: Optional[int]):
+    """Use ``mb`` MiB (``0`` = no budget) as the frontier memory budget inside the
+    block, in place of ``DISCOPT_FRONTIER_MEMORY_MB``; ``None`` changes nothing."""
+    if mb is None:
+        yield
+        return
+    if isinstance(mb, bool) or not isinstance(mb, int) or mb < 0:
+        raise ValueError(f"frontier memory budget must be an integer >= 0 (MiB), got {mb!r}")
+    token = _FRONTIER_MEMORY_MB_OVERRIDE.set(mb)
+    try:
+        yield
+    finally:
+        _FRONTIER_MEMORY_MB_OVERRIDE.reset(token)
+
+
 def _frontier_memory_bytes() -> Optional[int]:
     """The open-frontier memory budget, from ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092).
 
@@ -11999,8 +12027,12 @@ def _frontier_memory_bytes() -> Optional[int]:
     A memory guard, like ``time_limit``, not solver math: it changes nothing on a
     run whose frontier stays under the budget, and a run that reaches it would
     otherwise keep allocating. Raise it on a machine with more memory, or set
-    ``0`` to restore the unbounded behaviour.
+    ``0`` to restore the unbounded behaviour. Inside :func:`frontier_memory_override`
+    (the GAMS option file's ``frontier_memory_mb``) the override wins.
     """
+    override = _FRONTIER_MEMORY_MB_OVERRIDE.get()
+    if override is not None:
+        return None if override == 0 else override << 20
     raw = os.environ.get("DISCOPT_FRONTIER_MEMORY_MB", "").strip()
     if not raw:
         mb = _FRONTIER_MEMORY_MB_DEFAULT
@@ -30280,7 +30312,10 @@ def _solve_node_nlp_pounce(
     # first-attempt result, and a node whose NLP failed stays OPEN at its inherited
     # parent bound — a valid global lower bound — so the dual bound is untouched.
     _t_node_entry = time.perf_counter()
-    _retry_deadline = _t_node_entry + max(_DEADLINE_NODE_FLOOR_S, float(caller_limit))
+    # #2120: ``caller_limit`` is capped at a fixed 30 s, a role-2 budget; under
+    # ``deterministic`` whether the alternative starts run may not depend on it.
+    _retry_wall = _subsolve_wall_seconds(max(_DEADLINE_NODE_FLOOR_S, float(caller_limit)))
+    _retry_deadline = _t_node_entry + (math.inf if _retry_wall is None else _retry_wall)
 
     def _known_failure(start: np.ndarray):
         if failed_starts is None:
@@ -35450,7 +35485,10 @@ def _solve_nlp_batch_by_deadline(
     starts once nothing is; an unstarted problem returns ``(x0, {"status": -4})``,
     the time-out status. Same idea as :func:`_solve_qp_batch_by_deadline`.
     """
-    cap = float(options.get("max_wall_time", 30.0))
+    # #2120: the per-instance cap is role-2; under ``deterministic`` only ``deadline``
+    # (role-1) bounds an instance.
+    _cap = _subsolve_wall_seconds(float(options.get("max_wall_time", 30.0)))
+    cap = math.inf if _cap is None else float(_cap)
     out: list = []
     width = _qp_batch_pool_width()
     for lo in range(0, len(problems), width):

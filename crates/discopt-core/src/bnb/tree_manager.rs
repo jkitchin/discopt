@@ -653,10 +653,23 @@ impl TreeManager {
     pub fn import_results(&mut self, results: &[NodeResult]) {
         for result in results {
             let node = self.pool.get_mut(result.node_id);
-            debug_assert_eq!(
+            // Hard asserts, not `debug_assert!` (#2092 review): `process_evaluated`
+            // reads this node's `lb`/`ub` directly (SOS1 selection, the pseudocost
+            // direction, the spatial and unbounded branch picks), and a pending
+            // child's are EMPTY until `export_batch` materializes them. A result
+            // for a node that was never exported would therefore not crash in a
+            // release build: it would silently skip SOS1 branching and misattribute
+            // pseudocosts. Only `export_batch` moves a node to `Evaluated`, after
+            // materializing its box, so both checks hold for every legal import.
+            assert_eq!(
                 node.status,
                 NodeStatus::Evaluated,
-                "import_results: node {:?} not in Evaluated status",
+                "import_results: node {:?} not in Evaluated status (was it exported?)",
+                result.node_id
+            );
+            assert!(
+                node.pending_box.is_none(),
+                "import_results: node {:?} has an unmaterialized box",
                 result.node_id
             );
             // Floor the imported bound at the node's inherited (parent) lower
@@ -1917,6 +1930,42 @@ mod tests {
             size: 2,
             is_integer: true,
         }]
+    }
+
+    /// #2092 review: importing a result for a node that never went through
+    /// `export_batch` must fail loudly in every build, not branch on an empty box.
+    #[test]
+    #[should_panic(expected = "not in Evaluated status")]
+    fn import_of_an_unexported_node_panics() {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0; 2],
+            vec![1.0; 2],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        let root = batch.node_ids[0];
+        tm.import_results(&[NodeResult {
+            node_id: root,
+            lower_bound: 0.0,
+            solution: vec![0.5, 0.5],
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
+        tm.process_evaluated();
+        // The root's children are pending: their boxes are still shared.
+        let child = NodeId(tm.last_created().start);
+        tm.import_results(&[NodeResult {
+            node_id: child,
+            lower_bound: 0.0,
+            solution: vec![0.5, 0.5],
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
     }
 
     #[test]

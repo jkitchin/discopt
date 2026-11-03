@@ -1,0 +1,105 @@
+alan                   OFF optimal                b=2.9249999996590272 n=13 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=2.9249999996590272 n=13 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+4stufen                OFF time_limit             b=19713.02734719666 n=3 SubtolPivots=6 LpVerdictNumerical=345 | ON time_limit             b=19713.02734719666 n=3 SubtolPivots=6 LpVerdictNumerical=389 fired=0
+bchoco06               OFF time_limit             b=0.9999887833681252 n=3 SubtolPivots=0 LpVerdictNumerical=148 | ON time_limit             b=0.9999887833681252 n=3 SubtolPivots=0 LpVerdictNumerical=166 fired=0
+bchoco07               OFF time_limit             b=0.9999909424951968 n=3 SubtolPivots=0 LpVerdictNumerical=41 | ON time_limit             b=0.9999909424951968 n=3 SubtolPivots=0 LpVerdictNumerical=44 fired=0
+bchoco08               OFF time_limit             b=0.9999923302831512 n=3 SubtolPivots=0 LpVerdictNumerical=30 | ON time_limit             b=0.9999923302831512 n=3 SubtolPivots=0 LpVerdictNumerical=28 fired=0
+casctanks              OFF feasible               b=6.040896844275686 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=6.040896844275686 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+chance                 OFF optimal                b=29.89437815425806 n=0 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=29.89437815425806 n=0 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+beuster                OFF time_limit             b=6352.061289120947 n=3 SubtolPivots=12 LpVerdictNumerical=133 | ON time_limit             b=6352.061289120947 n=3 SubtolPivots=12 LpVerdictNumerical=148 fired=0
+clay0303hfsg           OFF optimal                b=26669.10955160332 n=447 SubtolPivots=0 LpVerdictNumerical=54 | ON optimal                b=26669.109551603287 n=459 SubtolPivots=0 LpVerdictNumerical=62 fired=0
+contvar                OFF time_limit             b=183651.06145413662 n=3 SubtolPivots=0 LpVerdictNumerical=73 | ON time_limit             b=183651.37248613962 n=3 SubtolPivots=0 LpVerdictNumerical=80 fired=0
+cvxnonsep_nsig30       OFF optimal                b=130.61841392487696 n=3645 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=130.61841392487696 n=3553 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+cvxnonsep_psig40r      OFF optimal                b=86.53657911270008 n=8 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=86.53657911270008 n=8 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+dispatch               OFF optimal                b=3155.2873921555433 n=1 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=3155.2873921555433 n=1 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex1221                 OFF optimal                b=7.667180068812996 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=7.667180068812996 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex1222                 OFF optimal                b=1.0765430833322536 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=1.0765430833322536 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex1224                 OFF optimal                b=-0.9434705000000072 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-0.9434705000000072 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+cvxnonsep_psig30       OFF optimal                b=78.99179856949351 n=3104 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=78.99179856949351 n=3104 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex1225                 OFF optimal                b=30.999999999999687 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=30.999999999999687 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex1226                 OFF optimal                b=-17.000000000000416 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-17.000000000000416 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+ex14_1_9               OFF optimal                b=-1.9775220375077173e-16 n=5 SubtolPivots=0 LpVerdictNumerical=8 | ON optimal                b=-1.9775220375077173e-16 n=5 SubtolPivots=0 LpVerdictNumerical=8 fired=0
+ex14_1_7               OFF optimal                b=-1e-12 n=3 SubtolPivots=1 LpVerdictNumerical=43 | ON optimal                b=-1e-12 n=3 SubtolPivots=0 LpVerdictNumerical=99 fired=1
+ex7_3_1                OFF optimal                b=0.34173955312361126 n=5 SubtolPivots=0 LpVerdictNumerical=17 | ON optimal                b=0.34173955312361126 n=5 SubtolPivots=0 LpVerdictNumerical=17 fired=0
+ex4_1_5                OFF optimal                b=-1.0003715904744824e-09 n=159 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-1.0003715904744824e-09 n=159 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+fac2                   OFF optimal                b=331837498.17643344 n=7 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=331837498.17643344 n=7 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+flay02m                OFF optimal                b=37.947331916928526 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=37.947331916928526 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+flay03m                OFF optimal                b=48.98844775290874 n=280 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=48.98844775290874 n=280 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+gbd                    OFF optimal                b=2.1999999999968 n=0 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=2.1999999999968 n=0 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+gkocis                 OFF optimal                b=-1.923098742584029 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-1.923098742584029 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+haverly                OFF optimal                b=-400.00000015489013 n=69 SubtolPivots=0 LpVerdictNumerical=56 | ON optimal                b=-400.00000015489013 n=69 SubtolPivots=0 LpVerdictNumerical=56 fired=0
+ex8_5_3                OFF feasible               b=-0.004137189143159636 n=289 SubtolPivots=0 LpVerdictNumerical=1810 | ON feasible               b=-0.00413754232005592 n=249 SubtolPivots=0 LpVerdictNumerical=1587 fired=0
+hda                    OFF time_limit             b=-6995.660302789643 n=3 SubtolPivots=2 LpVerdictNumerical=21 | ON time_limit             b=-6995.660302789643 n=3 SubtolPivots=2 LpVerdictNumerical=21 fired=0
+heatexch_gen1          OFF feasible               b=38183.53174601837 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=38183.53174601837 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+heatexch_gen2          OFF feasible               b=555767.7902857299 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=555767.7902857299 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+launch                 OFF optimal                b=2257.7975532668443 n=5 SubtolPivots=0 LpVerdictNumerical=21 | ON optimal                b=2257.7975532668443 n=5 SubtolPivots=0 LpVerdictNumerical=21 fired=0
+m3                     OFF optimal                b=37.7999999998928 n=12 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=37.7999999998928 n=12 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs01                  OFF optimal                b=12.469668821568018 n=5 SubtolPivots=17 LpVerdictNumerical=24 | ON optimal                b=12.469668821568018 n=5 SubtolPivots=17 LpVerdictNumerical=24 fired=0
+nvs02                  OFF optimal                b=5.964184523068852 n=219 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=5.964184523068852 n=219 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs03                  OFF optimal                b=15.999999999982915 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=15.999999999982915 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs04                  OFF optimal                b=0.7199999999999773 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=0.7199999999999773 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+heatexch_gen3          OFF time_limit             b=43887.57992562059 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON time_limit             b=43887.57992562059 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs06                  OFF optimal                b=1.7703124999999629 n=5 SubtolPivots=0 LpVerdictNumerical=8 | ON optimal                b=1.7703124999999629 n=5 SubtolPivots=0 LpVerdictNumerical=8 fired=0
+nvs07                  OFF optimal                b=3.9999999999949987 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=3.9999999999949987 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs08                  OFF optimal                b=23.449727347181057 n=5 SubtolPivots=2 LpVerdictNumerical=5 | ON optimal                b=23.449727347181057 n=5 SubtolPivots=2 LpVerdictNumerical=5 fired=0
+nvs09                  OFF optimal                b=-43.13433691804334 n=31 SubtolPivots=4 LpVerdictNumerical=102 | ON optimal                b=-43.13433691804334 n=31 SubtolPivots=4 LpVerdictNumerical=102 fired=0
+nvs10                  OFF optimal                b=-310.8000000003177 n=8 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-310.8000000003177 n=8 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs11                  OFF optimal                b=-431.0092378508183 n=42 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-431.0092378508183 n=42 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs12                  OFF optimal                b=-481.2000000004844 n=62 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-481.2000000004844 n=62 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs13                  OFF optimal                b=-585.2000000006469 n=23 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-585.2000000006469 n=23 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs14                  OFF optimal                b=-40358.15476930149 n=269 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-40358.15476930149 n=269 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs15                  OFF optimal                b=0.9999999999961277 n=8 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=0.9999999999961277 n=8 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs21                  OFF optimal                b=-5.684782500007601 n=5 SubtolPivots=0 LpVerdictNumerical=1 | ON optimal                b=-5.684782500007601 n=5 SubtolPivots=0 LpVerdictNumerical=1 fired=0
+oaer                   OFF optimal                b=-1.9230985229118471 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-1.9230985229118471 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+nvs05                  OFF feasible               b=5.123214351182631 n=71 SubtolPivots=70 LpVerdictNumerical=943 | ON feasible               b=5.382037605483659 n=71 SubtolPivots=70 LpVerdictNumerical=951 fired=0
+st_e11                 OFF optimal                b=189.3116296865995 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=189.3116296865995 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_e13                 OFF optimal                b=1.999999999997 n=1 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=1.999999999997 n=1 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_e29                 OFF optimal                b=-0.9434705000000072 n=5 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-0.9434705000000072 n=5 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_e36                 OFF optimal                b=-246.00000000045293 n=109 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-246.00000000045293 n=109 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_e38                 OFF optimal                b=7197.727148009189 n=3 SubtolPivots=0 LpVerdictNumerical=2 | ON optimal                b=7197.727148009189 n=3 SubtolPivots=0 LpVerdictNumerical=2 fired=0
+st_miqp1               OFF optimal                b=280.9999999997175 n=3 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=280.9999999997175 n=3 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_miqp2               OFF optimal                b=1.9999999999469644 n=2 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=1.9999999999469644 n=2 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_miqp3               OFF optimal                b=-6.000000000008493 n=1 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-6.000000000008493 n=1 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_miqp4               OFF optimal                b=-4574.0000000045775 n=1 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-4574.0000000045775 n=1 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_miqp5               OFF optimal                b=-333.88888890070234 n=1 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-333.88888890070234 n=1 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_test1               OFF optimal                b=-3.4689037408334897e-11 n=17 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-3.4689037408334897e-11 n=17 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+st_testgr3             OFF optimal                b=-20.59000000002205 n=23 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=-20.59000000002205 n=23 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+syn05hfsg              OFF optimal                b=837.7420768788216 n=2 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=837.7420768788216 n=2 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+tanksize               OFF optimal                b=1.2685350436919938 n=519 SubtolPivots=0 LpVerdictNumerical=1 | ON optimal                b=1.2685350436919938 n=519 SubtolPivots=0 LpVerdictNumerical=1 fired=0
+prolog                 OFF feasible               b=None n=221 SubtolPivots=2 LpVerdictNumerical=18 | ON feasible               b=None n=221 SubtolPivots=0 LpVerdictNumerical=16 fired=2
+tls2                   OFF optimal                b=5.299999999999999 n=23 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=5.299999999999999 n=23 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+tspn05                 OFF optimal                b=191.25513611344041 n=21 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=191.25513611344041 n=21 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+tspn08                 OFF feasible               b=260.8583094389902 n=63 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=262.01893070587346 n=63 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+tspn10                 OFF feasible               b=165.2475561034619 n=49 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=165.2475561034619 n=49 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+tspn12                 OFF feasible               b=201.08038046451128 n=67 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=201.08038046451128 n=43 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+wallfix                OFF feasible               b=0.0 n=1223 SubtolPivots=21 LpVerdictNumerical=455 | ON feasible               b=0.0 n=1395 SubtolPivots=21 LpVerdictNumerical=455 fired=0
+clay0203h              OFF feasible               b=1359.9999999998304 n=169 SubtolPivots=66 LpVerdictNumerical=784 | ON feasible               b=1359.9999999998304 n=169 SubtolPivots=90 LpVerdictNumerical=938 fired=0
+flay03m                OFF optimal                b=48.98844775290874 n=280 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=48.98844775290874 n=280 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+clay0204hfsg           OFF feasible               b=1679.9999736455243 n=7015 SubtolPivots=0 LpVerdictNumerical=24 | ON feasible               b=1679.9999736455243 n=6984 SubtolPivots=0 LpVerdictNumerical=24 fired=0
+flay04m                OFF optimal                b=54.40046392927867 n=25092 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=54.40046392927867 n=25092 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+fo7                    OFF feasible               b=11.282087278454744 n=32249 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=11.282087278454744 n=31758 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+fo7_2                  OFF feasible               b=0.7553141917250903 n=32957 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=0.7553141917250903 n=33973 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+m3                     OFF optimal                b=37.7999999998928 n=12 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=37.7999999998928 n=12 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+m6                     OFF optimal                b=82.25687691293082 n=949 SubtolPivots=13 LpVerdictNumerical=13 | ON optimal                b=82.25687691293082 n=949 SubtolPivots=0 LpVerdictNumerical=0 fired=13
+fo8                    OFF time_limit             b=9.268738897335554 n=28452 SubtolPivots=0 LpVerdictNumerical=0 | ON time_limit             b=9.268738897335554 n=29093 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+m7                     OFF optimal                b=106.75664378988986 n=562 SubtolPivots=6 LpVerdictNumerical=6 | ON optimal                b=106.75664378988986 n=562 SubtolPivots=0 LpVerdictNumerical=0 fired=6
+netmod_dol1            OFF feasible               b=-0.8333333333333343 n=33 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=-0.8333333333333343 n=33 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+o7                     OFF time_limit             b=26.1809858697612 n=34088 SubtolPivots=0 LpVerdictNumerical=0 | ON time_limit             b=26.1809858697612 n=33909 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+o7_2                   OFF feasible               b=37.2799074522029 n=30454 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=37.2799074522029 n=26793 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+slay04m                OFF optimal                b=9859.659706956041 n=49 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=9859.659706956041 n=49 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+rsyn0820m              OFF feasible               b=1208.2005618041605 n=1868 SubtolPivots=0 LpVerdictNumerical=0 | ON feasible               b=1206.2091585808819 n=1866 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+slay07m                OFF optimal                b=64748.825289411914 n=1100 SubtolPivots=0 LpVerdictNumerical=2 | ON optimal                b=64748.825289411914 n=1100 SubtolPivots=0 LpVerdictNumerical=2 fired=0
+sssd08-04              OFF optimal                b=182022.57029699502 n=1337 SubtolPivots=0 LpVerdictNumerical=0 | ON optimal                b=182022.57029699502 n=1337 SubtolPivots=0 LpVerdictNumerical=0 fired=0
+
+instances           : 91
+executed checks     : 951
+violations          : 0
+mechanism fired     : 22 on 4 instance(s) ['ex14_1_7', 'prolog', 'm6', 'm7']
+certified           : OFF 64 -> ON 64  gained []
+bounds tighter      : 3 ['nvs05', 'tspn08', 'rsyn0820m']  (where it ran: ['nvs05'])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 207908 -> ON 205229
+wall  (all)         : OFF 2045.9s -> ON 2047.5s
+wall  (fired)       : OFF 733.5s -> ON 736.5s over 14 instance(s)
+report              : <scratch>/panel_sub.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.
