@@ -995,6 +995,53 @@ def milp_iis(
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
     arrays = (A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)
+    return milp_iis_arrays(
+        arrays,
+        include_bounds=include_bounds,
+        time_limit=time_limit,
+        cert_tol=cert_tol,
+        max_batch=max_batch,
+        confirm=confirm,
+        total_time_limit=total_time_limit,
+        sat_candidate=sat_candidate,
+        order=order,
+        portfolio=portfolio,
+        workers=workers,
+        t_start=t_start,
+    )
+
+
+def milp_iis_arrays(
+    arrays: tuple,
+    *,
+    include_bounds: bool = True,
+    time_limit: float = 30.0,
+    cert_tol: float = 1e-6,
+    max_batch: Optional[int] = None,
+    confirm: str = "final",
+    total_time_limit: Optional[float] = None,
+    sat_candidate: bool = True,
+    order: str = "ICB",
+    portfolio: Optional[Sequence[str]] = None,
+    workers: Optional[int] = None,
+    t_start: Optional[float] = None,
+    grace: float = math.inf,
+) -> MilpIIS:
+    """:func:`milp_iis` on a model already in matrix form, for callers that have
+    no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
+
+    ``arrays`` is ``(A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)``:
+    a CSR matrix; row bounds with ``±_INF`` (1e20) for "none"; ``row_groups``
+    mapping each constraint element's id to the rows it owns (one IIS element
+    per key); column bounds with the same sentinel; and the integrality mask.
+    Element ids in the result are the ``row_groups`` keys and column indices.
+    ``t_start`` (``time.perf_counter()``) is when the budget began, so time the
+    caller spent before the call counts against ``total_time_limit``.
+    ``grace`` (portfolio only): see :func:`_portfolio_iis`; the default waits
+    for every member.
+    """
+    if t_start is None:
+        t_start = time.perf_counter()
     kwargs: dict[str, Any] = dict(
         include_bounds=include_bounds,
         time_limit=time_limit,
@@ -1006,7 +1053,11 @@ def milp_iis(
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
-        return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
+        return _portfolio_iis(
+            arrays, kwargs, portfolio, workers, t_start, total_time_limit, grace=grace
+        )
+    if grace != math.inf:
+        raise ValueError("grace= needs portfolio=")
     return _milp_iis_arrays(
         arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
     )
