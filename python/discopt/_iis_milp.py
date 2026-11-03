@@ -41,6 +41,7 @@ never "repaired".
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -877,6 +878,8 @@ def milp_iis(
         confirm=confirm,
         sat_candidate=sat_candidate,
     )
+    if workers is not None and portfolio is None:
+        raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
         return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
     return _milp_iis_arrays(
@@ -1350,6 +1353,10 @@ def _iis_size(res: MilpIIS) -> int:
     return len(res.constraints) + len(res.bounds) + len(res.integrality)
 
 
+#: The parent's discopt package directory, which every portfolio member must load.
+_DISCOPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def _portfolio_child() -> None:
     """Entry point of one portfolio member process.
 
@@ -1365,6 +1372,15 @@ def _portfolio_child() -> None:
     import threading
 
     job = pickle.load(sys.stdin.buffer)
+    # The member must run the parent's discopt, not one that happens to come
+    # first on a rebuilt sys.path (CLAUDE.md s8).
+    import discopt
+
+    here = os.path.dirname(os.path.abspath(discopt.__file__))
+    if here != job["discopt_dir"]:
+        raise RuntimeError(
+            f"portfolio member imported discopt from {here}, parent uses {job['discopt_dir']}"
+        )
 
     def _orphan_watch() -> None:
         # The parent keeps our stdin open until it is done with us; EOF means it
@@ -1483,6 +1499,7 @@ def _portfolio_iis(
                         order=orders[i],
                         deadline_wall=member_deadline,
                         result_path=result_path,
+                        discopt_dir=_DISCOPT_DIR,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.

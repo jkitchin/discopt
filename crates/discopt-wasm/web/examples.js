@@ -1,4 +1,5 @@
-// The examples offered by the dropdown: one model per problem class.
+// The examples offered by the dropdown: one model per problem class, then one
+// infeasible model whose IIS the page draws (see iis_view.py).
 //
 // Every block here was executed against discopt before it shipped
 // (`python/tests/test_wasm_examples.py` keeps doing so in CI -- it lives under
@@ -8,7 +9,8 @@
 //
 // The taxonomy is the one in `docs/notebooks/problem_classes.ipynb` on purpose:
 // the same six models appear in both, so the page and the notebook cannot drift
-// into disagreeing about what discopt does with each class.
+// into disagreeing about what discopt does with each class. The seventh, "IIS",
+// is not a problem class: it is the page's demonstration of `compute_iis()`.
 
 export const EXAMPLES = [
   {
@@ -46,5 +48,11 @@ export const EXAMPLES = [
     label: "MINLP \u2014 reactor network",
     title: "Mixed-integer nonlinear \u2014 reactor network",
     code: "# MIXED-INTEGER NONLINEAR PROGRAM -- the class discopt is built for.\n# A small process network: pick which reactors to build (binary) and how\n# hard to run them (continuous), where conversion is nonlinear in load.\n#\n# discopt solves this to GLOBAL optimality with spatial branch and bound,\n# and reports a certified bound -- not just a local solution.\nimport discopt.modeling as dm\n\nm = dm.Model(\"reactor network\")\n\nbuild = m.binary(\"build\", shape=(3,))\nload = m.continuous(\"load\", shape=(3,), lb=0.0, ub=1.0)\n\nfixed = [55.0, 38.0, 72.0]       # $k capital to build\nrate = [90.0, 65.0, 120.0]       # t/yr at full load\n# Operating cost grows faster than throughput: running one unit hard is\n# more expensive than sharing the load, which is what makes this nonconvex.\nopcost = [40.0, 33.0, 46.0]\n\nm.minimize(\n    dm.sum([fixed[i] * build[i] for i in range(3)])\n    + dm.sum([opcost[i] * load[i] * load[i] for i in range(3)])\n)\n\n# Conversion falls off as a unit is pushed: rate * load * (1 - 0.25*load).\nproduction = dm.sum([rate[i] * load[i] * (1 - 0.25 * load[i]) for i in range(3)])\nm.subject_to(production >= 150.0, name=\"demand\")\n\nfor i in range(3):\n    m.subject_to(load[i] <= build[i], name=f\"link{i}\")\n\nres = m.solve()\n\nprint(res.status, f\"in {res.node_count} nodes\")\nprint(f\"cost  = ${res.objective:,.2f}k\")\nprint(f\"bound = ${res.bound:,.2f}k     gap = {res.gap:.2e}\"\n      f\"   certified: {res.gap_certified}\")\nprint()\nbuilt, loads = res.value(build), res.value(load)\nfor i in range(3):\n    if built[i] > 0.5:\n        ld = loads[i]\n        print(f\"  BUILD unit {i}  load {ld:5.1%}  ->  {rate[i] * ld * (1 - 0.25 * ld):6.2f} t/yr\")\n    else:\n        print(f\"  --    unit {i}\")\n",
+  },
+  {
+    id: "IIS",
+    label: "Infeasible LP \u2014 why? (IIS)",
+    title: "Infeasible linear program \u2014 explaining it with an IIS",
+    code: "# INFEASIBLE MODEL -- two feed mills share one soy and one bran supplier.\n# The model has no feasible point. compute_iis() finds an Irreducible\n# Infeasible Subsystem: a smallest set of constraints and bounds that\n# cannot all hold at once, and that becomes feasible if any one is dropped.\n# The page draws it below the output, as a table and as a graph.\nimport discopt.modeling as dm\n\nfeeds = [\"corn\", \"soy\", \"bran\"]\nprotein = [0.09, 0.44, 0.15]   # t protein per t of feed\nfibre = [0.02, 0.06, 0.11]\ncost = [210, 340, 155]         # $/t\n\nm = dm.Model(\"two mills\")\n\na = m.continuous(\"a\", shape=(3,), lb=0, ub=40)   # mill A purchases, t\nb = m.continuous(\"b\", shape=(3,), lb=0, ub=40)   # mill B purchases, t\n\nm.minimize(dm.sum([cost[k] * (a[k] + b[k]) for k in range(3)]))\n\nm.subject_to(dm.sum([a[k] for k in range(3)]) == 50, name=\"A_tonnage\")\nm.subject_to(dm.sum([protein[k] * a[k] for k in range(3)]) >= 10, name=\"A_protein\")\nm.subject_to(dm.sum([fibre[k] * a[k] for k in range(3)]) >= 2.5, name=\"A_fibre\")\n\nm.subject_to(dm.sum([b[k] for k in range(3)]) == 40, name=\"B_tonnage\")\nm.subject_to(dm.sum([protein[k] * b[k] for k in range(3)]) >= 12, name=\"B_protein\")\nm.subject_to(dm.sum([fibre[k] * b[k] for k in range(3)]) >= 2.0, name=\"B_fibre\")\n\n# The two mills buy from the same suppliers.\nm.subject_to(a[1] + b[1] <= 25, name=\"soy_supply\")\nm.subject_to(a[2] + b[2] <= 30, name=\"bran_supply\")\n\nres = m.solve()\nprint(res.status)\n\niis = m.compute_iis()   # drawn below because it is left in a variable\nprint()\nprint(iis.summary())\nprint(f\"\\n{iis.n_solves} feasibility solves; proven minimal: {iis.proven_irreducible}\")\nprint()\nprint(\"How to read it: both mills need protein, and soy is the rich source.\")\nprint(\"With corn and bran capped (a[0], a[2] <= 40 and the shared bran supply),\")\nprint(\"these members force the two mills to buy more soy between them than the\")\nprint(\"supplier's 25 t. A_tonnage and both fibre constraints are not in the IIS:\")\nprint(\"the conflict does not need them. An IIS need not be unique -- relaxing one\")\nprint(\"member removes this conflict, but another one may remain.\")\n",
   },
 ];
