@@ -44,20 +44,9 @@ import numpy as np
 
 _T_LAUNCH = time.perf_counter()  # earliest point this process can see
 
-# Portfolio grace: once one member completes at elapsed time t, the others may
-# run until GRACE * t. Time is a ranking criterion; size is too. Simulated on the
-# 6-order smallset sweep (35 instances some member completes, 60 s): waiting for
-# every member gives total size 3503 and 33 at-or-below Gurobi, GRACE = 2 gives
-# 3507 and 31, GRACE = 1 gives 3526 and 30 -- while waiting for every member
-# keeps the run alive to the full budget whenever one member never completes.
-GRACE = 2.0
-# ... with the extra wait (GRACE - 1) * t clamped to [10, 30] s. Every later
-# member that beat the first finisher on the sweep did so within 31 s of it; a
-# proportional wait idled ~285 s on neos859080 after its answer was complete.
-# Simulated on the sweep: the same sizes as the proportional wait (3507 total,
-# 31 at or below Gurobi), 9% more total time there (the 10 s floor on very fast
-# instances), at most 30 s of waiting on slow ones.
-GRACE_WINDOW = (10.0, 30.0)
+# Portfolio wait: the library default, "fast" (see _iis_milp.PORTFOLIO_WAITS:
+# the other members stop clamp(t, 10, 30) s after the first completes at t).
+PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
 CHECK_TOL = 1e-5
@@ -302,7 +291,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _run(instance: str, solution: str, threads: int, engine_budget: float) -> int:
     data = read_mps(instance)
-    from discopt._iis_milp import DEFAULT_PORTFOLIO, milp_iis_arrays
+    from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
 
     m = data["row_lo"].size
     arrays = (
@@ -322,8 +311,8 @@ def _run(instance: str, solution: str, threads: int, engine_budget: float) -> in
             workers=max(1, min(threads, len(DEFAULT_PORTFOLIO))),
             total_time_limit=max(engine_budget - elapsed, 0.5),
             t_start=time.perf_counter(),
-            grace=GRACE,
-            grace_window=GRACE_WINDOW,
+            grace=PORTFOLIO_WAITS[PORTFOLIO_WAIT][0],
+            grace_window=PORTFOLIO_WAITS[PORTFOLIO_WAIT][1],
         )
     except TimeoutError as exc:
         # No subsystem was confirmed in the budget: the whole model (already

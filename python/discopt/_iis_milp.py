@@ -80,6 +80,20 @@ _ROLL_SHARE = 0.10
 #: set counts 8001 against the base set's 6282) -- hence the size gate in
 #: ``roll``.
 _ROLL_MIN_S = 2.0
+#: How long a portfolio keeps its other members running once one completes at
+#: elapsed time t: ``(grace, (lo, hi))`` gives ``clamp((grace - 1) * t, lo, hi)``
+#: extra seconds, ``(inf, None)`` waits for every member.
+#:
+#: ``"fast"`` (the default) trades a few elements for minutes. On MIPcc27 every
+#: later member that beat the first finisher did so within 31 s of it on the
+#: 6-order sweep; at 600 s the clamped wait exited 100-200 s earlier on
+#: neos859080 / mod008inf / hole10 / jjliu_clique with the same sizes, except
+#: jjliu_clique 277 vs 266 (its ICB member completed ~90 s after ICB-r).
+#: ``"all"`` is for the smallest set regardless of time.
+PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
+    "fast": (2.0, (10.0, 30.0)),
+    "all": (math.inf, None),
+}
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -951,8 +965,13 @@ def milp_iis(
     order: str = "ICB",
     portfolio: Optional[Sequence[str]] = None,
     workers: Optional[int] = None,
+    portfolio_wait: str = "fast",
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
+
+    ``portfolio_wait`` (portfolio runs only): ``"fast"`` stops the other members
+    shortly after one completes, ``"all"`` waits for every member (the smallest
+    set, at up to the whole budget); see :data:`PORTFOLIO_WAITS`.
 
     ``max_batch`` caps the adaptive deletion batch (see :func:`_batch_filter`);
     ``None`` lets it grow without limit, ``1`` is the classic one-at-a-time
@@ -1046,6 +1065,11 @@ def milp_iis(
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
     arrays = (A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)
+    if portfolio_wait not in PORTFOLIO_WAITS:
+        raise ValueError(
+            f"portfolio_wait must be one of {sorted(PORTFOLIO_WAITS)}, got {portfolio_wait!r}"
+        )
+    grace, grace_window = PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None)
     return milp_iis_arrays(
         arrays,
         include_bounds=include_bounds,
@@ -1059,6 +1083,8 @@ def milp_iis(
         portfolio=portfolio,
         workers=workers,
         t_start=t_start,
+        grace=grace,
+        grace_window=grace_window,
     )
 
 

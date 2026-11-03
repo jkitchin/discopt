@@ -259,6 +259,7 @@ def compute_iis(
     total_time_limit: float | None = None,
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
+    portfolio_wait: str = "fast",
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -315,6 +316,13 @@ def compute_iis(
     workers : int, optional
         Processes for ``portfolio`` (default: one per order, at most the CPU
         count). Orders beyond ``workers`` start as earlier members finish.
+    portfolio_wait : {"fast", "all"}
+        Only with ``portfolio``. ``"fast"`` (default): once one member
+        completes, the others get a short window (the elapsed time, clamped to
+        10-30 s) to find a smaller set, then stop. ``"all"``: wait for every
+        member -- the smallest set, at up to the whole ``total_time_limit``.
+        Measured on MIPcc27 at 600 s, ``"fast"`` returned 100-200 s earlier on
+        the slow instances, with one set 4% larger (jjliu_clique 277 vs 266).
 
     Returns
     -------
@@ -340,6 +348,7 @@ def compute_iis(
             total_time_limit=total_time_limit,
             portfolio=portfolio,
             workers=workers,
+            portfolio_wait=portfolio_wait,
         )
     if portfolio is not None or workers is not None:
         raise ValueError("portfolio/workers require include_integrality=True")
@@ -482,6 +491,7 @@ def _compute_iis_with_integrality(
     total_time_limit: float | None,
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
+    portfolio_wait: str = "fast",
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
     from discopt._iis_milp import milp_iis
@@ -493,6 +503,7 @@ def _compute_iis_with_integrality(
         total_time_limit=total_time_limit,
         portfolio=portfolio,
         workers=workers,
+        portfolio_wait=portfolio_wait,
     )
 
     # Flat column -> (variable, multi-index).
