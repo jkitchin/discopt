@@ -1,4 +1,4 @@
-"""The CDCL clause-core candidate for the MILP IIS engine (``_iis_milp._clause_core``).
+"""The CDCL core candidate for the MILP IIS engine (``_iis_milp._binary_core``) on clause models.
 
 On a pure-binary clause model the engine starts from a small unsatisfiable row set
 found by discopt's own CDCL solver (``discopt._rust.PySatSolver``) instead of
@@ -115,7 +115,7 @@ def test_a_wrong_candidate_is_rejected_by_the_highs_base_proof(monkeypatch):
         if _is_unsat(8, cls):
             break
     # Propose a single row: certainly satisfiable, so HiGHS must refute it.
-    monkeypatch.setattr(_iis_milp, "_clause_core", lambda *a, **k: ({0}, 0))
+    monkeypatch.setattr(_iis_milp, "_binary_core", lambda *a, **k: ({0}, 0))
     res = milp_iis(mod, time_limit=10)
     assert res.sat_rows is None  # candidate discarded
     assert res.proven_irreducible
