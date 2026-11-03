@@ -1113,15 +1113,15 @@ def _milp_iis_arrays(
     # configurations, kept as the anytime fallback. ("each" confirms every
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
+    # Budget of a candidate set's confirmation (checkpoint 0, the ladder's set):
+    # a share of the caller's budget, saturating at a constant (#1153).
+    base_budget = min(_BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S)
     if confirm == "final" and deadline is not None:
         # Checkpoint 0: the base set, proven presolve-on just above, confirmed
         # presolve-off too. Without it a budget that runs out before the first
         # phase ends has nothing confirmed to return (TimeoutError), although
         # the base set is a valid -- if large -- infeasible subsystem. Capped so
         # a slow presolve-free solve cannot eat the filter's budget.
-        base_budget = min(
-            _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S
-        )
         base_stop = min(deadline, time.perf_counter() + base_budget)
         try:
             verdict0 = eng.confirm_infeasible(
@@ -1217,14 +1217,7 @@ def _milp_iis_arrays(
             # would rerun the same ladder (PR #2114 review).
             stop_l = None
             if deadline is not None:
-                stop_l = min(
-                    deadline,
-                    time.perf_counter()
-                    + min(
-                        _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0),
-                        _BASE_CONFIRM_CAP_S,
-                    ),
-                )
+                stop_l = min(deadline, time.perf_counter() + base_budget)
             try:
                 verdict_l = eng.confirm_infeasible(cons, bounds, ints_active, stop_at=stop_l)
             except _OutOfTime:
