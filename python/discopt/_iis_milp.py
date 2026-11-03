@@ -96,6 +96,7 @@ class MilpIIS:
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
+    ladder_rejected: bool = False  # ladder's set not confirmed: its drops were discarded
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -1103,6 +1104,7 @@ def _milp_iis_arrays(
 
     ladder_calls = 0
     ladder_size: Optional[int] = None
+    ladder_rejected = False
     if use_ladder:
         # Staged-oracle ladder: the deletion filter run first with oracles that
         # are cheap but incomplete -- HiGHS presolve alone, then a MIP capped at
@@ -1160,6 +1162,7 @@ def _milp_iis_arrays(
                 )
 
         n_before = len(cons) + len(bounds) + len(ints_active)
+        pre_ladder = (set(cons), set(bounds), set(ints_active))
         try:
             for rung in (None, n1):
                 # A rung that cannot prove the current set would fail on every
@@ -1171,19 +1174,36 @@ def _milp_iis_arrays(
         except _OutOfTime:
             pass  # every drop so far was proven: the current set is a candidate
         ladder_size = len(cons) + len(bounds) + len(ints_active)
-        if confirm == "final" and ladder_size < n_before and deadline is not None:
-            # A smaller confirmed fallback than checkpoint 0.
-            stop_c = min(deadline, time.perf_counter() + base_budget)
-            try:
-                verdict_l = eng.confirm_infeasible(
-                    cons, bounds, ints_active, stop_at=stop_c, presolve=("off",)
+        if ladder_size < n_before:
+            # Every ladder drop rests on ONE presolve-on claim (presolve alone or a
+            # node-capped presolve-on MIP), never cross-checked -- the #1634 failure
+            # mode. Like the SAT candidate, the ladder's set is only a candidate:
+            # it is used only once confirmed infeasible under both presolve
+            # configurations, in every confirm mode. Otherwise (refuted, or not
+            # decided in time) its drops are discarded and the filter starts from
+            # the pre-ladder set, which is already confirmed. Not redo_each(): that
+            # would rerun the same ladder (PR #2114 review).
+            stop_l = None
+            if deadline is not None:
+                stop_l = min(
+                    deadline,
+                    time.perf_counter()
+                    + min(
+                        _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0),
+                        _BASE_CONFIRM_CAP_S,
+                    ),
                 )
+            try:
+                verdict_l = eng.confirm_infeasible(cons, bounds, ints_active, stop_at=stop_l)
             except _OutOfTime:
                 verdict_l = None
             if verdict_l is True:
-                checkpoint = (set(cons), set(bounds), set(ints_active))
-            elif verdict_l is False:
-                return redo_each()
+                if confirm == "final":
+                    # A smaller confirmed fallback than checkpoint 0.
+                    checkpoint = (set(cons), set(bounds), set(ints_active))
+            else:
+                cons, bounds, ints_active = (set(c) for c in pre_ladder)
+                ladder_rejected = True
 
     complete = True
     try:
@@ -1248,6 +1268,7 @@ def _milp_iis_arrays(
         n_exact=eng.n_exact,
         ladder_size=ladder_size,
         ladder_calls=ladder_calls,
+        ladder_rejected=ladder_rejected,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )
