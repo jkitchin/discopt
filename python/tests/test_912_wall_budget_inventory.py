@@ -358,6 +358,18 @@ def _scan_carved_slice() -> set[tuple[str, str]]:
 # time that gates nothing. (The gate it feeds, when there is one, is recorded
 # separately in ``KNOWN`` under its own category.)
 KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
+    # ``compute_iis(total_time_limit=...)`` (#2093): each feasibility probe's
+    # ``time_limit`` is the caller's own per-probe limit, cut to what is left of
+    # the caller's own overall budget. Both numbers are the caller's; nothing is
+    # carved as a fraction for a stage to decide how much work it does -- the
+    # clock answers "when do we stop?". An IIS computed under a wall budget is
+    # machine-speed dependent by the caller's choice, and says so
+    # (``IISResult.complete``).
+    (
+        "infeasibility.py",
+        "min(tl, deadline - time.perf_counter())",
+        "contract",
+    ),
     # Caps one piece LP of the integer-ratio dive by what is left of the dive's
     # own deadline. That deadline is already ``_role2``-suppressed at its origin
     # (``mccormick_lp``, recorded in KNOWN), so under the flag it is ``None`` and
@@ -480,6 +492,32 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "deadline = None if time_limit is None else time.perf_counter() + float(time_limit)",
         "contract",
     ),
+    # #2093: ``compute_iis(total_time_limit=...)`` filters under the caller's own
+    # overall budget and, when it is spent, returns the subsystem it has with
+    # ``complete=False`` (still proven infeasible) -- ``contract``, like #1616.
+    (
+        "infeasibility.py",
+        "deadline = None if total_time_limit is None else time.perf_counter() + total_time_limit",
+        "contract",
+    ),
+    # Checkpoint 0 of the matrix IIS engine: the presolve-free confirmation of
+    # the base set stops at a share of the caller's own ``total_time_limit``
+    # (saturated at a constant, #1153). The clock decides only whether an
+    # anytime FALLBACK exists; the filter's work and the IIS it returns when it
+    # completes do not depend on it. ``contract``, like the deadline above.
+    (
+        "_iis_milp.py",
+        "base_stop = min(deadline, time.perf_counter() + base_budget)",
+        "contract",
+    ),
+    # The oracle ladder's (order flag ``l``) set is a candidate, confirmed under
+    # both presolve routes before use: the same saturated confirmation budget as
+    # checkpoint 0 above. The clock decides only whether the candidate is used.
+    (
+        "_iis_milp.py",
+        "stop_l = min(deadline, time.perf_counter() + base_budget)",
+        "contract",
+    ),
     (
         "_daemon_core.py",
         "if self.max_lifetime > 0 and time.monotonic() - started >= self.max_lifetime:",
@@ -497,7 +535,9 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solver.py",
-        "deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))",
+        # #2091: was ``_role2_horizon(...)``, which returns a duration under
+        # ``deterministic`` and so made this absolute deadline already past.
+        "deadline = _role2_deadline_inf(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))",
         "residual",
     ),
     (

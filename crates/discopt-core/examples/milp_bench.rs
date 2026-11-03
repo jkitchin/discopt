@@ -151,6 +151,7 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
         root_cuts: 16,
         cut_rounds: 1,
         gmi_cuts: true,
+        cmir_cuts: false,
         cut_select: false,
         node_cuts: false,
         max_pool_cuts: 128,

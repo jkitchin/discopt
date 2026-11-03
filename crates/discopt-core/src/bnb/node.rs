@@ -1,5 +1,7 @@
 //! B&B tree node representation.
 
+use std::sync::Arc;
+
 use crate::lp::basis::Basis;
 
 /// Unique identifier for a node in the B&B tree.
@@ -63,6 +65,33 @@ impl NodeStatus {
     }
 }
 
+/// The box a pending child shares with its sibling (#2092): its parent's box,
+/// before the branch's one-coordinate change ([`PendingBox`]).
+#[derive(Debug)]
+pub struct SharedBox {
+    /// The parent's variable lower bounds.
+    pub lb: Vec<f64>,
+    /// The parent's variable upper bounds.
+    pub ub: Vec<f64>,
+}
+
+/// A pending child's box in compact form (#2092): the parent box both siblings
+/// share, plus the one bound the branch set. Two full copies per sibling pair
+/// held the same data twice; on a long run whose gap never closes the open
+/// frontier is the solve's memory. Materialized by [`Node::materialize_box`]
+/// when the node leaves the frontier.
+#[derive(Debug, Clone)]
+pub struct PendingBox {
+    /// The parent box, shared with the sibling.
+    pub base: Arc<SharedBox>,
+    /// The column the branch bounded.
+    pub var: usize,
+    /// `true`: the branch set `ub[var] = value`; `false`: `lb[var] = value`.
+    pub upper: bool,
+    /// The bound the branch set on `var`.
+    pub value: f64,
+}
+
 /// A single node in the B&B search tree.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -74,10 +103,15 @@ pub struct Node {
     pub depth: usize,
     /// The branching decision that created this node (`None` for the root).
     pub branch: Option<BranchRecord>,
-    /// Variable lower bounds at this node.
+    /// Variable lower bounds at this node. **Empty while `pending_box` holds the
+    /// box**: read a node's box through [`Self::box_owned`] or call
+    /// [`Self::materialize_box`] first, never `lb`/`ub` of a pending child.
     pub lb: Vec<f64>,
-    /// Variable upper bounds at this node.
+    /// Variable upper bounds at this node (same caveat as `lb`).
     pub ub: Vec<f64>,
+    /// A pending child's box in shared form (#2092); `None` once materialized,
+    /// and for the root.
+    pub pending_box: Option<PendingBox>,
     /// Relaxation objective bound at this node.
     pub local_lower_bound: f64,
     /// Best-estimate of the optimal objective in this node's subtree, used by the
@@ -89,11 +123,13 @@ pub struct Node {
     /// Current status.
     pub status: NodeStatus,
     /// Parent node's NLP solution, used as warm-start for child solves.
-    pub parent_solution: Option<Vec<f64>>,
+    /// Shared by both siblings (#2092).
+    pub parent_solution: Option<Arc<Vec<f64>>>,
     /// Parent node's optimal LP basis, inherited as the dual-simplex warm-start
     /// state for the MILP simplex node engine (roadmap P3). `None` for the root
     /// and for the POUNCE/IPM-driven path, which ignores it.
-    pub basis: Option<Basis>,
+    /// Shared by both siblings (#2092).
+    pub basis: Option<Arc<Basis>>,
 }
 
 impl Node {
@@ -112,11 +148,47 @@ impl Node {
             branch: None,
             lb,
             ub,
+            pending_box: None,
             local_lower_bound: f64::NEG_INFINITY,
             best_estimate: f64::NEG_INFINITY,
             status: NodeStatus::Pending,
             parent_solution: None,
             basis: None,
+        }
+    }
+
+    /// Turn a shared [`PendingBox`] into this node's own `lb`/`ub` (#2092). The
+    /// last sibling to materialize takes the shared vectors without copying. A
+    /// no-op on a node whose box is already materialized.
+    pub fn materialize_box(&mut self) {
+        if let Some(pb) = self.pending_box.take() {
+            let (mut lb, mut ub) = match Arc::try_unwrap(pb.base) {
+                Ok(b) => (b.lb, b.ub),
+                Err(shared) => (shared.lb.clone(), shared.ub.clone()),
+            };
+            if pb.upper {
+                ub[pb.var] = pb.value;
+            } else {
+                lb[pb.var] = pb.value;
+            }
+            self.lb = lb;
+            self.ub = ub;
+        }
+    }
+
+    /// This node's box as owned vectors, whether it is materialized or not.
+    pub fn box_owned(&self) -> (Vec<f64>, Vec<f64>) {
+        match &self.pending_box {
+            None => (self.lb.clone(), self.ub.clone()),
+            Some(pb) => {
+                let (mut lb, mut ub) = (pb.base.lb.clone(), pb.base.ub.clone());
+                if pb.upper {
+                    ub[pb.var] = pb.value;
+                } else {
+                    lb[pb.var] = pb.value;
+                }
+                (lb, ub)
+            }
         }
     }
 }
@@ -142,8 +214,8 @@ mod tests {
     fn test_node_parent_solution() {
         let mut node = Node::new(NodeId(0), None, 0, vec![0.0], vec![1.0]);
         assert!(node.parent_solution.is_none());
-        node.parent_solution = Some(vec![0.5]);
-        assert_eq!(node.parent_solution.as_ref().unwrap(), &vec![0.5]);
+        node.parent_solution = Some(Arc::new(vec![0.5]));
+        assert_eq!(**node.parent_solution.as_ref().unwrap(), vec![0.5]);
     }
 
     #[test]

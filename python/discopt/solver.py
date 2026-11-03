@@ -2115,7 +2115,9 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None, s
     A verified feasible objective is only ever an *upper bound*: seeding it can prune and
     cutoff-propagate but can never loosen a bound or invent an incumbent, so an
     unverifiable candidate is simply dropped and the full solve runs unseeded."""
-    deadline = _role2_horizon(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
+    # Absolute perf_counter() deadline, so the absolute form (_role2_deadline), not
+    # _role2_horizon, whose deterministic value is a *duration* (#2091).
+    deadline = _role2_deadline_inf(time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S))
     if outer_deadline is not None:
         deadline = min(deadline, float(outer_deadline))
     if time.perf_counter() >= deadline:
@@ -2699,6 +2701,10 @@ def _try_native_spatial_kernel(
         solve_kwargs["undecided_unpropagated_retry"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
+    # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
+    _max_open = _kernel_max_open_nodes(spec)
+    if _max_open is not None:
+        solve_kwargs["max_open_nodes"] = int(_max_open)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
     # the slice at its own deadline — but only while it already holds an incumbent,
     # the one state in which that fallback has nothing to contribute. The kernel is
@@ -3118,6 +3124,8 @@ def _try_native_spatial_kernel(
     # (``DISCOPT_KERNEL_UNDECIDED_RETRY``) and how many decided; 0 when off.
     _native_stats["tree/prop_retries"] = float(int(res.get("n_prop_retries") or 0))
     _native_stats["tree/prop_retry_decided"] = float(int(res.get("n_prop_retry_decided") or 0))
+    # #2092: the search stopped on the frontier memory budget (status node_limit).
+    _native_stats["tree/frontier_capped"] = float(bool(res.get("frontier_capped")))
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -4830,6 +4838,10 @@ _NLPBB_EXIT_ABS_TOL = 1e-6
 #: the one it would replace. Only float noise is forgiven -- a refinement that
 #: genuinely loses objective is refused whenever the incumbent is already feasible.
 _REFINE_DEGRADE_EPS = 1e-12
+#: #1917: how often NLP-BB's incumbent refine hit its flat 5 s cap and was retried
+#: with the remaining budget, and how often the retry returned ``OPTIMAL``. Read by
+#: panels to show when the retry fires; never consulted by the solver.
+NLPBB_REFINE_RETRY_STATS = {"retries": 0, "recovered": 0}
 # Term-magnitude forgiveness, identical to the two arbiters above: a row built
 # from terms of size ~1e5 carries ~1e-6 of pure cancellation noise, so an
 # absolute-only test at 1e-6 rejects genuinely optimal points (the prob07 lesson
@@ -7572,12 +7584,16 @@ def _search_termination(
     debug_quit: bool = False,
     time_yield: bool = False,
     unproven_removal: bool = False,
+    frontier_capped: bool = False,
 ) -> Optional[str]:
     """Why a Python-tree B&B loop stopped, for ``SolveResult.termination`` (#1585).
 
     ``unproven_removal``: the loop fathomed a node without proof (a non-rigorous
     sentinel, tracked on the Python side), so a drain with the gap open is
     ``"unresolved"``, not ``"exhausted"`` (#1869).
+
+    ``frontier_capped``: the loop stopped on the open-frontier memory budget
+    (#2092), a resource cap reported like the node cap.
 
     Called IMMEDIATELY after the loop exits, before any terminal polish or
     re-certification can move the incumbent, so it reads the tree in the state
@@ -7613,7 +7629,7 @@ def _search_termination(
         return _st.TERMINATION_EXHAUSTED
     if _gap_converged(tree, gap_tolerance, abs_gap_tol):
         return _st.TERMINATION_GAP
-    if int(tree.stats()["total_nodes"]) >= max_nodes:
+    if int(tree.stats()["total_nodes"]) >= max_nodes or frontier_capped:
         return _st.TERMINATION_NODE_LIMIT
     if elapsed >= time_limit:
         return _st.TERMINATION_TIME_LIMIT
@@ -9980,64 +9996,8 @@ def _objective_syntactically_convex(model: Model) -> bool:
         return False
 
 
-#: The GDP lowerings the MIP-NLP branch accepts (``solve_model``'s ``gdp_methods``).
-_ROUTE_GDP_LOWERINGS = frozenset({"big-m", "hull", "mbigm", "auto"})
-
-
-def _convex_route_gdp_lowered_enabled() -> bool:
-    """Classify a GDP model's convexity on its lowering for the #1059 route (#1917).
-
-    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED``, **default OFF** (it changes the
-    algorithm a GDP model is solved by, which is bound-changing under CLAUDE.md
-    §5). The convex-MINLP auto-route is decided on the model the caller passed,
-    *before* GDP lowering, and the convexity classifier reports every
-    ``_IndicatorConstraint`` as unproven -- a linear one included. So no model
-    with a disjunction is ever routed, even when the lowering the route would
-    solve (``solve_model``'s ``mip-nlp`` branch lowers before solving) is
-    certified convex row for row. Measured on GDPlib ``batch_processing``
-    (#1917): raw model 450 of 700 rows unproven, its big-M lowering 790 of 790
-    convex. With the flag on, a model carrying GDP constraints under a lowering
-    ``gdp_method`` is classified on ``reformulate_gdp(model, gdp_method)``,
-    which is exactly the model the routed solve runs on.
-    """
-    val = os.environ.get("DISCOPT_CONVEX_ROUTE_GDP_LOWERED", "0").strip().lower()
-    return val in ("1", "true", "on", "yes")
-
-
-def _model_has_gdp_constraints(model: Model) -> bool:
-    """Whether ``model`` carries a constraint ``reformulate_gdp`` would lower."""
-    return _model_has_gdp_constraints_list(model._constraints)
-
-
-def _model_has_gdp_constraints_list(constraints: Any) -> bool:
-    """Whether any of ``constraints`` is one ``reformulate_gdp`` would lower."""
-    from discopt.modeling.core import (
-        _DisjunctiveConstraint,
-        _IndicatorConstraint,
-        _LogicalConstraint,
-        _SOSConstraint,
-    )
-
-    return any(
-        isinstance(
-            c,
-            (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint, _LogicalConstraint),
-        )
-        for c in constraints
-    )
-
-
-def _convex_minlp_auto_route(
-    model: Model, gdp_method: Optional[str] = None
-) -> tuple[Optional[str], str, dict[str, Any]]:
+def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
-
-    ``gdp_method`` is the caller's GDP lowering. With
-    ``DISCOPT_CONVEX_ROUTE_GDP_LOWERED`` on and ``model`` carrying GDP
-    constraints, every gate below is evaluated on that lowering -- the model the
-    routed solve actually runs on -- instead of on the disjunctive model, whose
-    indicator rows the classifier cannot prove (see
-    :func:`_convex_route_gdp_lowered_enabled`).
 
     Returns ``(method, reason, options)`` where ``method`` is the
     ``mip_nlp_method`` to use, or ``None`` to leave the model on the default
@@ -10149,40 +10109,6 @@ def _convex_minlp_auto_route(
     if not _convex_minlp_route_enabled():
         return None, "disabled (DISCOPT_CONVEX_MINLP_ROUTE unset)", {}
 
-    _lowered_note = ""
-    if (
-        gdp_method in _ROUTE_GDP_LOWERINGS
-        and _convex_route_gdp_lowered_enabled()
-        and _model_has_gdp_constraints(model)
-    ):
-        from discopt.transformations import get as _get_transformation
-
-        # Lowering rewrites only the GDP rows; every other row is copied as is.
-        # So when the caller's model already has a NON-GDP row the classifier
-        # rejects, the lowering cannot be certified either -- skip it rather
-        # than pay a second lowering and a full classification to learn that.
-        _raw_known, _raw_convex, _raw_mask = _classify_model_convexity(
-            model, failure_label="convex-MINLP route convexity detection failed"
-        )
-        if _raw_known and not _raw_convex and _raw_mask is not None:
-            if len(_raw_mask) != len(model._constraints):
-                raise AssertionError(
-                    f"convexity mask has {len(_raw_mask)} entries for "
-                    f"{len(model._constraints)} constraints"
-                )
-            if any(
-                not _ok and not _model_has_gdp_constraints_list([_c])
-                for _c, _ok in zip(model._constraints, _raw_mask)
-            ):
-                return None, "not routed: a non-GDP row is not convex", {}
-        # #1917: judge the model the route will solve. ``apply`` returns a new
-        # model and leaves the caller's untouched; the route lowers again on its
-        # own (box-tightened) copy, and lowering is deterministic in structure,
-        # so every row-convexity verdict made here holds there (a tighter box
-        # changes big-M constants, which enter linearly, never a Hessian).
-        model = _get_transformation("gdp").apply(model, method=gdp_method)
-        _lowered_note = f" (GDP lowered by {gdp_method}; DISCOPT_CONVEX_ROUTE_GDP_LOWERED)"
-
     if _is_pure_continuous(model):
         # A convex *continuous* model is already served by solve_model's convex
         # NLP fast path; there is no integrality for a decomposition to exploit.
@@ -10254,7 +10180,7 @@ def _convex_minlp_auto_route(
         method,
         (
             f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
-            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master}){_lowered_note}"
+            f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
         ),
         {"milp_solver": master},
     )
@@ -12050,6 +11976,97 @@ def _kernel_int_probe_enabled() -> bool:
     )
 
 
+#: #2092: default memory budget for an open branch-and-bound frontier (the native
+#: spatial kernel and the Python tree), in MiB. Same size as the native MILP
+#: engine's ``_MILP_ENGINE_FRONTIER_BYTES`` (#1874).
+_FRONTIER_MEMORY_MB_DEFAULT = 2048
+
+
+def _frontier_memory_bytes() -> Optional[int]:
+    """The open-frontier memory budget, from ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092).
+
+    Read at call time. Default 2048 MiB; ``0`` means no budget. A tree whose gap
+    never closes keeps every frontier node live (measured on a 3,600 s-class
+    synthetic: 7,948 open nodes at the time limit, none dominated by the
+    incumbent), so without a budget its memory grows for as long as the clock
+    allows: an external benchmark reported 3--8 GiB on 1-hour runs. Reaching the
+    budget ends the search as ``max_nodes`` does -- ``node_limit``, the incumbent,
+    and the rigorous frontier bound. The native kernel then sets
+    ``solver_stats["tree/frontier_capped"]``; a Python-tree loop logs a warning and
+    reports ``termination == "node_limit"``.
+    It never weakens a bound or a certificate: the search stops, it does not prune.
+
+    A memory guard, like ``time_limit``, not solver math: it changes nothing on a
+    run whose frontier stays under the budget, and a run that reaches it would
+    otherwise keep allocating. Raise it on a machine with more memory, or set
+    ``0`` to restore the unbounded behaviour.
+    """
+    raw = os.environ.get("DISCOPT_FRONTIER_MEMORY_MB", "").strip()
+    if not raw:
+        mb = _FRONTIER_MEMORY_MB_DEFAULT
+    else:
+        try:
+            mb = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"DISCOPT_FRONTIER_MEMORY_MB must be a non-negative integer, got {raw!r}"
+            ) from exc
+        if mb < 0:
+            raise ValueError(f"DISCOPT_FRONTIER_MEMORY_MB must be >= 0, got {mb}")
+    return None if mb == 0 else mb << 20
+
+
+def _kernel_max_open_nodes(spec: dict) -> Optional[int]:
+    """Open-node cap for the native spatial kernel under the frontier budget (#2092).
+
+    An open kernel node carries its share of the parent box its sibling also
+    holds (``8 n`` bytes), half of the pair's packed warm-start basis (``(n + 5
+    m) / 2``: one i8 per column and row, one u32 per row) and ~256 bytes of node,
+    heap-entry and allocator overhead; ``m`` is taken as the fixed rows plus four
+    envelope rows per lifted term, which over-counts the 1-D terms. Rounded up to
+    ``9 n + 3 m + 256``. Measured on the n=150 synthetic of #2092 (523 columns):
+    ~7.2 KB per open node against this estimate's ~8.3 KB. An overestimate only
+    stops the search earlier. ``None`` when there is no budget.
+    """
+    budget = _frontier_memory_bytes()
+    if budget is None:
+        return None
+    n = int(spec["n_cols"])
+    m = (len(spec["fixed_row_ptr"]) - 1) + 4 * len(spec["term_kind"])
+    per_node = 9 * n + 3 * max(m, 0) + 256
+    return max(1000, budget // per_node)
+
+
+def _tree_max_open_nodes(n_vars: int) -> Optional[int]:
+    """Open-node cap for a Python-tree loop under the frontier budget (#2092).
+
+    A pending ``TreeManager`` child holds half of the parent box it shares with its
+    sibling (``8 n`` bytes) and half of the shared parent solution (``4 n``),
+    plus ~256 bytes of node, heap-entry and allocator overhead; ``16 n + 256``
+    rounds that up (and covers the warm-start basis the MILP driver attaches).
+    An overestimate only stops the search earlier. ``None`` when there is no
+    budget.
+    """
+    budget = _frontier_memory_bytes()
+    if budget is None:
+        return None
+    return max(1000, budget // (16 * int(n_vars) + 256))
+
+
+def _tree_frontier_capped(stats, cap: Optional[int]) -> bool:
+    """Whether a Python-tree frontier has reached its memory cap (#2092)."""
+    if cap is None or int(stats["open_nodes"]) < cap:
+        return False
+    logger.warning(
+        "branch-and-bound frontier reached its memory budget (%d open nodes, "
+        "DISCOPT_FRONTIER_MEMORY_MB=%d): stopping the search with the incumbent "
+        "and the frontier bound (status node_limit)",
+        int(stats["open_nodes"]),
+        int((_frontier_memory_bytes() or 0) >> 20),
+    )
+    return True
+
+
 def _kernel_undecided_retry_enabled() -> bool:
     """#1995: ``DISCOPT_KERNEL_UNDECIDED_RETRY`` for the native spatial kernel
     (``SpatialTreeConfig::undecided_unpropagated_retry``).
@@ -12879,6 +12896,18 @@ def _role2_deadline(deadline):
     if not _tuning().deterministic:
         return deadline
     return _role1_deadline()
+
+
+def _role2_deadline_inf(deadline):
+    """:func:`_role2_deadline` for a callee that compares an absolute deadline with
+    ``time.perf_counter()``: ``math.inf`` is the no-clock value, not ``None``.
+
+    The counterpart of :func:`_role2_horizon` for *absolute* times. Passing an
+    absolute time to ``_role2_horizon`` returned a duration under
+    ``deterministic`` and so a deadline already in the past (#2091).
+    """
+    out = _role2_deadline(deadline)
+    return math.inf if out is None else out
 
 
 def _role2_horizon(seconds):
@@ -14604,6 +14633,9 @@ def solve_model(
     require_all_relations_lowered(model, context="solve_model")
     # Auxiliary bounds a lowering derived from the box at lowering time are
     # re-derived for the box being solved (#2061 review).
+    # #2090: exact like-term collection, before anything below reads a body.
+    # ``Model.solve`` already did this in ``validate``; this is for direct callers.
+    model._canonicalize_like_terms()
     model._refresh_if_else_bounds(context="solve_model")
     refresh_lowering_bounds(model, context="solve_model")
 
@@ -15419,7 +15451,7 @@ def solve_model(
                 _auto_route_method,
                 _auto_route_reason,
                 _auto_route_options,
-            ) = _convex_minlp_auto_route(model, gdp_method=gdp_method)
+            ) = _convex_minlp_auto_route(model)
         if _auto_route_method is not None:
             logger.info("Convex MINLP auto-route: %s", _auto_route_reason)
             _solver = "mip-nlp"
@@ -18963,6 +18995,9 @@ def solve_model(
         int_sizes,
         strategy,
     )
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
     # #1492: the box the Rust brancher measures relative widths against (its
@@ -19260,8 +19295,6 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
-    # #1917 root VUB c-MIR evidence (``DISCOPT_VUB_CMIR_ROOT``); empty when off.
-    _vub_cmir_stats: dict[str, float] = {}
     # CUT-INHERIT-GRAD diagnostic: the fraction of the ONE root pool separation
     # solve's wall spent in the square+PSD point-separation loops. Surfaced in
     # ``solver_stats`` for observability; NOT the gate predicate (the entry
@@ -19718,24 +19751,6 @@ def solve_model(
                     _probe_useful = _probe is not None and (
                         _probe.status == "infeasible" or _probe.lower_bound is not None
                     )
-                    if _probe_useful and _vub_cmir_root_enabled() and not _deadline_exhausted():
-                        # Same saturated grant as the probe above (#1153).
-                        _vub_cmir_budget = min(
-                            _role2_saturate(max(time_limit * 0.1, 2.0), 0.1),
-                            max(_setup_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
-                        )
-                        _install_root_vub_cmir_rows(
-                            model,
-                            _mc_lp_relaxer,
-                            tree,
-                            _probe_lb,
-                            _probe_ub,
-                            n_vars,
-                            int_offsets,
-                            int_sizes,
-                            _role2_budget(_vub_cmir_budget),
-                            _vub_cmir_stats,
-                        )
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
@@ -22678,9 +22693,11 @@ def solve_model(
                         n_starts=int(min(64, max(32, 2 * int(np.size(lb))))),
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
+                        # Absolute deadline: not the duration-valued
+                        # _role2_horizon (#2091).
                         deadline=min(
                             _deadline,
-                            _role2_horizon(
+                            _role2_deadline_inf(
                                 time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit)))
                             ),
                         ),
@@ -23946,6 +23963,9 @@ def solve_model(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
@@ -23960,6 +23980,7 @@ def solve_model(
         debug_quit=_debug_quit,
         time_yield=_rr_reserve_yield,
         unproven_removal=_nonrigorous_fathom,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -24440,7 +24461,7 @@ def solve_model(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -24832,7 +24853,6 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
-    _solver_stats.update(_vub_cmir_stats)
     if _model_is_convex and _sp_safe_bound_on:
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
@@ -28024,6 +28044,9 @@ def _solve_nlp_bb(
         int_sizes,
         strategy,
     )
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 
@@ -29199,6 +29222,9 @@ def _solve_nlp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
@@ -29211,6 +29237,7 @@ def _solve_nlp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -29371,6 +29398,35 @@ def _solve_nlp_bb(
             nlp_refined = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, refine_opts
             )
+            # #1917: the flat 5 s cap keeps a refine from eating the budget, but a
+            # refine that hits it leaves the unrefined incumbent, which the #1561
+            # exit gate below may refuse -- an uncertified ``feasible`` from a
+            # solve that still had most of its time. Measured on the generated
+            # convex GDP ``cgdp.cover_n8k2_s2`` (hull, conic ON): the first refine
+            # takes 1.7 s unloaded; at load1 60-96 it passed 5 s, the unrefined
+            # point violated row 49 by 5.2e-6, and 3/3 panel rows lost the
+            # certificate (3/3 certified at load1 ~8). So a refine that ends on
+            # TIME_LIMIT with more than its cap left is retried ONCE with the
+            # remaining budget; the retry's result goes through the same adoption
+            # rule and exit gate, so it can only restore a certificate the
+            # unloaded solve earns. Nothing else spends extra time.
+            if nlp_refined.status == SolveStatus.TIME_LIMIT:
+                _refine_left = time_limit - (time.perf_counter() - t_start)
+                if _refine_left > float(refine_opts["max_wall_time"]):
+                    NLPBB_REFINE_RETRY_STATS["retries"] += 1
+                    retry_opts = dict(refine_opts)
+                    retry_opts["max_wall_time"] = max(0.1, _refine_left)
+                    logger.info(
+                        "NLP-BB: incumbent refine hit its %.3g s cap; retrying once "
+                        "with the remaining %.3g s (#1917).",
+                        float(refine_opts["max_wall_time"]),
+                        _refine_left,
+                    )
+                    nlp_refined = _solve_node_nlp_kkt(
+                        evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, retry_opts
+                    )
+                    if nlp_refined.status == SolveStatus.OPTIMAL:
+                        NLPBB_REFINE_RETRY_STATS["recovered"] += 1
             if (
                 nlp_refined.status == SolveStatus.OPTIMAL
                 and nlp_refined.x is not None
@@ -29801,7 +29857,7 @@ def _solve_nlp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -36897,82 +36953,6 @@ def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
     return None
 
 
-def _vub_cmir_root_enabled() -> bool:
-    """``DISCOPT_VUB_CMIR_ROOT`` (#1917, default OFF); see :mod:`discopt._relax.vub_cmir`."""
-    from discopt._relax.vub_cmir import vub_cmir_root_enabled
-
-    return vub_cmir_root_enabled()
-
-
-def _install_root_vub_cmir_rows(
-    model: Model,
-    relaxer,
-    tree,
-    root_lb: np.ndarray,
-    root_ub: np.ndarray,
-    n_vars: int,
-    int_offsets,
-    int_sizes,
-    budget: Optional[float],
-    stats: dict,
-) -> None:
-    """Root path-aggregation c-MIR rows into the spatial McCormick LP (#1917).
-
-    Gated by ``DISCOPT_VUB_CMIR_ROOT`` (default OFF; see
-    :func:`discopt._relax.vub_cmir.vub_cmir_root_enabled`). Separates rounds of
-    :func:`~discopt._relax.vub_cmir.root_vub_cmir_cuts` over the root box and
-    installs the rows with :meth:`MccormickLPRelaxer.set_root_rows`, so every
-    node LP carries them. Sound: each row is valid for every mixed-integer point
-    of an outer relaxation over the root box, and every node box is a subset of
-    it. A verified-feasible incumbent (if one exists yet) screens every row; a
-    rejection is a separator defect and is logged as a WARNING.
-    """
-    from discopt._relax.vub_cmir import root_vub_cmir_cuts
-
-    n_orig = int(relaxer._n_orig)
-    inc = tree.incumbent()
-    screen = _verified_cut_screen_points(
-        model,
-        [None if inc is None else inc[0]],
-        n_vars,
-        n_orig,
-        int_offsets,
-        int_sizes,
-    )
-    t0 = time.perf_counter()
-    res = root_vub_cmir_cuts(
-        model,
-        root_lb,
-        root_ub,
-        n_orig,
-        deadline=t0 + (30.0 if budget is None else max(float(budget), 0.0)),
-        screen_points=screen,
-    )
-    if res.A is not None:
-        relaxer.set_root_rows(res.A, res.b)
-    n_rows = 0 if res.b is None else int(res.b.shape[0])
-    stats["vub_cmir/rows"] = float(n_rows)
-    stats["vub_cmir/rounds"] = float(res.rounds)
-    stats["vub_cmir/vub"] = float(res.n_vub)
-    stats["vub_cmir/screen_points"] = float(len(screen))
-    stats["vub_cmir/rejected"] = float(res.rejected_by_screen)
-    stats["vub_cmir/wall"] = time.perf_counter() - t0
-    if res.rejected_by_screen:
-        logger.warning(
-            "root VUB c-MIR: %d cut(s) violated a verified-feasible point and were "
-            "dropped -- a separator defect (#1917)",
-            res.rejected_by_screen,
-        )
-    logger.info(
-        "Root VUB c-MIR (#1917): %d rows over %d rounds (%d VUBs, stop=%s), LP bound %s",
-        n_rows,
-        res.rounds,
-        res.n_vub,
-        res.stop_reason,
-        " -> ".join(f"{v:.4g}" for v in res.bound_trace[:1] + res.bound_trace[-1:]),
-    )
-
-
 def _verified_cut_screen_points(
     model: Model,
     candidates,
@@ -39178,6 +39158,9 @@ def _solve_milp_bb(
 
     t_rust_start = time.perf_counter()
     tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     # #1535: integer columns and probe count for a caller-chosen branching rule.
     _branch_int_cols = np.array(
@@ -39726,6 +39709,9 @@ def _solve_milp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     wall_time = time.perf_counter() - t_start
     # #1585: why the loop stopped, read before anything below can move the pair.
@@ -39737,6 +39723,7 @@ def _solve_milp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -39990,7 +39977,7 @@ def _solve_milp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound
@@ -40229,6 +40216,9 @@ def _solve_miqp_bb(
 
     t_rust_start = time.perf_counter()
     tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    # #2092: the open-frontier memory budget, as an open-node cap.
+    _frontier_cap = _tree_max_open_nodes(n_vars)
+    _frontier_capped = False
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 
@@ -40681,6 +40671,9 @@ def _solve_miqp_bb(
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
             break
+        if _tree_frontier_capped(stats, _frontier_cap):
+            _frontier_capped = True
+            break
 
     wall_time = time.perf_counter() - t_start
     # #1585: why the loop stopped, read before anything below can move the pair.
@@ -40692,6 +40685,7 @@ def _solve_miqp_bb(
         elapsed=wall_time,
         time_limit=time_limit,
         debug_quit=_debug_quit,
+        frontier_capped=_frontier_capped,
     )
     python_time = wall_time - rust_time - jax_time
 
@@ -40948,7 +40942,7 @@ def _solve_miqp_bb(
     else:
         x_dict = None
         obj_val = None
-        if stats["total_nodes"] >= max_nodes:
+        if stats["total_nodes"] >= max_nodes or _frontier_capped:
             status = "node_limit"
             # No incumbent and a resource limit: nothing is certified. Without an
             # incumbent there is no gap to certify, and a leftover tree bound

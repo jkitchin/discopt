@@ -27,6 +27,7 @@ fn options() -> MilpOptions {
         root_cuts: 0,
         cut_rounds: 0,
         gmi_cuts: false,
+        cmir_cuts: false,
         cut_select: false,
         node_cuts: false,
         max_pool_cuts: 0,

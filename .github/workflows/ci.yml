@@ -280,13 +280,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-
       - name: Install Python dependencies
         run: |
           python -m venv .venv
@@ -445,13 +452,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-
       - name: Install Python dependencies
         run: |
           python -m venv .venv
@@ -564,16 +578,40 @@ jobs:
           # `-v` and `python -u` are deliberate: a multi-hour job that only
           # prints a summary at the end cannot be distinguished from a hung one
           # (CLAUDE.md §10).
+          #
+          # --time-budget 60 --time-budget-lane slow (#2089): a test whose call
+          # phase runs over 60 s fails unless it is in
+          # python/tests/slow_time_budget_allowlist.json. This lane took 67 min
+          # when #2089 was filed and had been pruned by hand several times; a
+          # new 2-minute test is now a reviewed allowlist entry, not a silent
+          # addition. The deliberately long tests (wall-clock budgets that ARE
+          # the thing measured, ex1252's >= 180 s adoption) are on the list.
+          # --durations=0 --durations-min=10 prints every test near the
+          # allowlist threshold (60 / 2.5 = 24 s), and the junit report below
+          # carries runner timings for scripts/update_time_budget_allowlist.py
+          # --lane slow.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             -v --tb=short --timeout=1800 -p no:cacheprovider \
             -m "correctness and slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_amp.py \
-            --durations=25
+            --time-budget 60 --time-budget-lane slow \
+            -o junit_duration_report=call \
+            --junitxml=slow-correctness-junit.xml \
+            --durations=0 --durations-min=10
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTHONUNBUFFERED: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slow-correctness-junit
+          # Runner call-phase times: the only valid input for rebuilding
+          # slow_time_budget_allowlist.json (a dev machine's are not).
+          path: slow-correctness-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Same argument as the other two scheduled lanes: a lane that fails into an
   # empty room is not a signal. This one is now dispatch-only, and a dispatched
@@ -814,13 +852,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-cov-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-cov-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-cov-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-cov-
       - name: Install Python dependencies
         # The optional-feature deps (sympy, pyomo, onnx stack, litellm, xgboost,
         # lightgbm) are installed here so the coverage gate measures the modules

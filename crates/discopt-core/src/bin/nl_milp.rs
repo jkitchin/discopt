@@ -336,6 +336,7 @@ fn run() -> Result<(), String> {
         root_cuts: args.root_cuts,
         cut_rounds: args.cut_rounds,
         gmi_cuts: true,
+        cmir_cuts: false,
         cut_select: args.cut_select,
         node_cuts: false,
         max_pool_cuts: 128,

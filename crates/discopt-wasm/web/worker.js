@@ -191,10 +191,26 @@ if _leaked:
         "of crates/discopt-wasm/web/worker.js."
     )
 `);
+  // The IIS view's helper. It is served beside the page rather than shipped in
+  // the wheel, so the page can draw an IIS from the wheel it already has; see the
+  // header of iis_view.py. Written into the file system and imported like any
+  // module, so a traceback from it names the file.
+  const res = await fetch('./iis_view.py');
+  if (!res.ok) throw new Error(`could not load iis_view.py: HTTP ${res.status}`);
+  pyodide.FS.mkdirTree('/discopt_page');
+  pyodide.FS.writeFile('/discopt_page/discopt_iis_view.py', await res.text());
+  await pyodide.runPythonAsync(`
+import sys
+
+sys.path.insert(0, "/discopt_page")
+import discopt_iis_view  # noqa: F401
+`);
   say('ready');
 }
 
 // --- running ---------------------------------------------------------------
+
+let namespace = null;
 
 self.onmessage = async (event) => {
   if (event.data.type !== 'run') return;
@@ -208,9 +224,30 @@ self.onmessage = async (event) => {
     await ensureDiscopt();
 
     self.postMessage({ type: 'running' });
+    // A fresh namespace per run, as `python script.py` would give. Sharing
+    // Pyodide's globals across runs let one script see the last one's
+    // variables, and the IIS view below would then redraw an IIS the current
+    // script never computed.
+    namespace?.destroy();
+    namespace = pyodide.globals.get('dict')();
+    namespace.set('__name__', '__main__');
     const started = performance.now();
-    await pyodide.runPythonAsync(event.data.code);
-    self.postMessage({ type: 'done', ms: performance.now() - started });
+    await pyodide.runPythonAsync(event.data.code, { globals: namespace });
+    const ms = performance.now() - started;
+
+    // Every IISResult the script left in a top-level variable is drawn. This
+    // runs after the timer: it is the page's drawing, not the solve.
+    // A failure here is the page's bug, not the script's, so it is reported as
+    // such rather than as "the script raised" -- and reported, not dropped.
+    try {
+      const collect = pyodide.runPython('discopt_iis_view.collect_json');
+      const items = JSON.parse(collect(namespace));
+      collect.destroy();
+      if (items.length) self.postMessage({ type: 'iis', items });
+    } catch (err) {
+      self.postMessage({ type: 'iis-error', message: String(err && err.message ? err.message : err) });
+    }
+    self.postMessage({ type: 'done', ms });
   } catch (err) {
     // A Python exception arrives with its traceback in `message`; show it as the
     // script's own output rather than as a page-level failure.

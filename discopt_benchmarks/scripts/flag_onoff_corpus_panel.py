@@ -71,9 +71,26 @@ print("@@" + json.dumps(out))
 """
 
 
-def solve(path: str, arm: str, tl: float, flag: str = FLAG) -> dict:
+def _wait_for_load(max_load: float | None) -> float:
+    """Block until the 1-minute load average is at most ``max_load`` (CLAUDE.md
+    section 9); return the load the solve starts at, which the row records."""
+    load = os.getloadavg()[0]
+    while max_load is not None and load > max_load:
+        time.sleep(15)
+        load = os.getloadavg()[0]
+    return load
+
+
+def solve(path: str, arm: str, tl: float, flag: str = FLAG, max_load: float | None = None) -> dict:
     # ``flag`` may name several flags (comma-separated): a bundle switched together.
     env = dict(os.environ, **{f.strip(): arm for f in flag.split(",") if f.strip()})
+    load1 = _wait_for_load(max_load)
+    res = _solve(path, tl, env)
+    res["load1"] = round(load1, 2)
+    return res
+
+
+def _solve(path: str, tl: float, env: dict) -> dict:
     try:
         p = subprocess.run(
             [sys.executable, "-c", CHILD, path, str(tl)],
@@ -90,10 +107,18 @@ def solve(path: str, arm: str, tl: float, flag: str = FLAG) -> dict:
     return {"error": f"no result (rc={p.returncode}): {p.stderr[-300:]}"}
 
 
-def run_instance(name: str, path: str, tl: float, first_on: bool, flag: str = FLAG) -> dict:
+def run_instance(
+    name: str,
+    path: str,
+    tl: float,
+    first_on: bool,
+    flag: str = FLAG,
+    max_load: float | None = None,
+    rep: int = 0,
+) -> dict:
     arms = ["1", "0"] if first_on else ["0", "1"]
-    res = {arm: solve(path, arm, tl, flag) for arm in arms}
-    return {"name": name, "off": res["0"], "on": res["1"]}
+    res = {arm: solve(path, arm, tl, flag, max_load) for arm in arms}
+    return {"name": name, "rep": rep, "off": res["0"], "on": res["1"]}
 
 
 def load_solu(path: str) -> dict:
@@ -148,6 +173,10 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", default=None, help="comma-separated subset (smoke runs)")
+    ap.add_argument("--reps", type=int, default=1, help="repetitions (OFF/ON order alternates)")
+    ap.add_argument(
+        "--max-load", type=float, default=None, help="start a solve only below this load1"
+    )
     args = ap.parse_args()
 
     insts = {p.stem: str(p) for p in sorted(CORPUS.glob("*.nl"))}
@@ -169,7 +198,17 @@ def main() -> None:
     rows = []
     with open(args.out, "w") as fh, ProcessPoolExecutor(args.jobs) as ex:
         futs = {
-            ex.submit(run_instance, n, p, args.time_limit, i % 2 == 0, args.flag): n
+            ex.submit(
+                run_instance,
+                n,
+                p,
+                args.time_limit,
+                (i + rep) % 2 == 0,
+                args.flag,
+                args.max_load,
+                rep,
+            ): n
+            for rep in range(args.reps)
             for i, (n, p) in enumerate(sorted(insts.items()))
         }
         for f in as_completed(futs):
@@ -181,10 +220,11 @@ def main() -> None:
             done += 1
             off, on = row["off"], row["on"]
             print(
-                f"[{done}/{len(insts)}] {row['name']}: "
+                f"[{done}/{len(futs)}] rep{row['rep']} {row['name']}: "
                 f"OFF {off.get('status')} cert={off.get('cert')} "
                 f"bound={off.get('bound')} | ON {on.get('status')} cert={on.get('cert')} "
-                f"bound={on.get('bound')} {row['problems'] or ''}",
+                f"bound={on.get('bound')} nodes {off.get('nodes')}/{on.get('nodes')} "
+                f"load {off.get('load1')}/{on.get('load1')} {row['problems'] or ''}",
                 flush=True,
             )
 

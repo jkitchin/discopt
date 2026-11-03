@@ -23,9 +23,9 @@ solve was conclusive (always the case for LP/MILP/convex models). See
 
 from __future__ import annotations
 
-import logging
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -40,7 +40,6 @@ from discopt.modeling.core import (
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
 
-logger = logging.getLogger(__name__)
 
 # discopt treats |bound| >= this as unbounded; relaxing a bound sets it here.
 _INF = 1e20
@@ -64,33 +63,76 @@ class IISResult:
         vector variable only the elements whose bound is essential are listed,
         so ``z[0] <= 1`` and ``z[1] <= 1`` rather than the whole ``z <= 1``
         (#1618 C-17).
+    integrality_elements : list[tuple[Variable, tuple]]
+        Only with ``include_integrality=True``: the integer/binary elements whose
+        **integrality** is in the IIS, as ``(variable, index)``. Every other
+        integrality is relaxed. The bounds of an element listed here always
+        apply and are not listed in ``bound_elements``; a relaxed element's
+        bounds are ordinary members. Empty when integrality was not filtered
+        (then every integrality is implicitly part of the subsystem).
+    certificates : dict[tuple, numpy.ndarray]
+        Only with ``include_integrality=True``: for a kept member, a point
+        proving it is necessary -- it satisfies every *other* member (within
+        ``1e-6``) and violates this one. Keys are ``("constraint", i)`` with
+        ``i`` an index into ``model._constraints``, ``("bound", col, side)`` and
+        ``("integrality", col)``, where ``col`` is the flat column (the
+        concatenated C-order layout of ``model._variables``); values are flat
+        points in that layout. A member with a certificate is proven
+        necessary by arithmetic alone; one without (its probe point failed the
+        re-check) rests on the solver's feasible verdict. See
+        :attr:`fully_certified`.
+    confirm_fallback : bool
+        Only with ``include_integrality=True``: the finished subsystem failed its
+        two-configuration infeasibility check, so the result comes from a full
+        rerun that confirms every verdict (see :mod:`discopt._iis_milp`).
     n_solves : int
         Number of feasibility solves performed (deletion-filter cost).
     proven_irreducible : bool
         ``True`` when every filtering solve was conclusive, so the result is a
-        true (minimal) IIS. ``False`` means some solves were inconclusive and the
-        set is a valid — but possibly non-minimal — infeasible subsystem.
+        true (minimal) IIS. ``False`` means some solves were inconclusive (or the
+        budget ran out) and the set is a valid — but possibly non-minimal —
+        infeasible subsystem.
+    complete : bool
+        ``False`` when ``total_time_limit`` stopped filtering early: an anytime
+        result whose undecided members are still in the subsystem.
+    portfolio_members : list[dict] or None
+        Only for a ``portfolio`` run: one entry per order, with ``order``,
+        ``outcome`` (``"ok"``, ``"timeout"``, ``"abandoned"``, ``"not started"``),
+        ``size``, ``complete`` and ``wall`` (seconds).
     """
 
     constraints: list[Constraint] = field(default_factory=list)
     variable_bounds: list[tuple["Variable", str]] = field(default_factory=list)
     bound_elements: list[tuple["Variable", str, tuple]] = field(default_factory=list)
+    integrality_elements: list[tuple["Variable", tuple]] = field(default_factory=list)
+    certificates: dict[tuple, np.ndarray] = field(default_factory=dict)
+    confirm_fallback: bool = False
     n_solves: int = 0
     proven_irreducible: bool = True
+    complete: bool = True
+    portfolio_members: list[dict] | None = None
 
     def __len__(self) -> int:
         # Members are counted at element granularity when it is known.
         n_bounds = len(self.bound_elements) if self.bound_elements else len(self.variable_bounds)
-        return len(self.constraints) + n_bounds
+        return len(self.constraints) + n_bounds + len(self.integrality_elements)
 
     def __bool__(self) -> bool:
         return len(self) > 0
+
+    @property
+    def fully_certified(self) -> bool:
+        """Every member carries a certificate, so irreducibility is proven by
+        arithmetic alone, independent of any solver verdict. Always ``False``
+        when certificates were not computed (``include_integrality=False``)."""
+        return len(self) > 0 and len(self.certificates) == len(self)
 
     def summary(self) -> str:
         """A human-readable multi-line explanation of the infeasibility."""
         lines = [
             f"Irreducible Infeasible Subsystem ({len(self)} members"
             + ("" if self.proven_irreducible else ", not proven minimal")
+            + (f", certified {len(self.certificates)}/{len(self)}" if self.certificates else "")
             + "):"
         ]
         if self.constraints:
@@ -107,6 +149,11 @@ class IISResult:
                 val = float(np.broadcast_to(bound, var.shape)[idx]) if idx else float(bound.flat[0])
                 label = var.name + (f"[{', '.join(str(i) for i in idx)}]" if idx else "")
                 lines.append(f"    - {label} {op} {val:g}")
+        if self.integrality_elements:
+            lines.append("  Integrality:")
+            for var, idx in self.integrality_elements:
+                label = var.name + (f"[{', '.join(str(i) for i in idx)}]" if idx else "")
+                lines.append(f"    - {label} integer")
         if not self:
             lines.append("  (empty)")
         return "\n".join(lines)
@@ -120,14 +167,21 @@ def _bound_candidates(model: "Model") -> list[tuple[int, str]]:
 
     Binary variables are skipped: their ``{0, 1}`` domain is intrinsic, not a
     removable bound. Infinite bounds cannot cause infeasibility and are excluded.
+
+    A vector variable is a candidate when ANY element's bound is finite; the
+    element refinement in :func:`compute_iis` then filters only the finite
+    elements. Requiring EVERY element to be finite (as this once did) left the
+    finite bounds of a partly-free vector applied in every probe yet never
+    reported, so the returned "IIS" could be feasible on its own (MIPcc27
+    ``dell``).
     """
     items: list[tuple[int, str]] = []
     for vi, v in enumerate(model._variables):
         if v.var_type == VarType.BINARY:
             continue
-        if float(np.min(np.asarray(v.lb))) > -_FINITE:
+        if float(np.max(np.asarray(v.lb))) > -_FINITE:
             items.append((vi, "lower"))
-        if float(np.max(np.asarray(v.ub))) < _FINITE:
+        if float(np.min(np.asarray(v.ub))) < _FINITE:
             items.append((vi, "upper"))
     return items
 
@@ -178,9 +232,10 @@ def _solve_is_infeasible(
         # non-streaming call returns a SolveResult with ``.status``.
         with probe_relaxed_bounds(model, marked):
             status = getattr(model.solve(time_limit=time_limit), "status", "error")
-    except Exception as exc:  # noqa: BLE001 - a crashed feasibility probe is inconclusive
-        logger.debug("IIS feasibility probe raised: %s", exc)
-        status = "error"
+    # No ``except``: a probe that RAISES is a defect, not an inconclusive solve.
+    # Swallowing it turned a tape-lowering bug (MissingJaxError) into "could not
+    # prove the model infeasible" and would silently keep every element a broken
+    # probe touched. A *returned* non-proof status stays inconclusive (below).
     finally:
         model._constraints = saved_cons
         model._objective = saved_obj
@@ -199,7 +254,11 @@ def compute_iis(
     model: "Model",
     *,
     include_bounds: bool = True,
+    include_integrality: bool = False,
     time_limit: float = 30.0,
+    total_time_limit: float | None = None,
+    portfolio: Sequence[str] | None = None,
+    workers: int | None = None,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -212,8 +271,49 @@ def compute_iis(
         Also consider finite variable bounds as removable members of the IIS.
         Required to explain infeasibilities driven by bounds (e.g. ``x >= 5`` and
         ``x <= 2`` declared as bounds rather than constraints).
+    include_integrality : bool, default False
+        Also treat the **integrality of each integer/binary element** as a
+        removable member (Guieu & Chinneck 1999), so the IIS says which
+        integrality restrictions the conflict actually needs -- often far fewer
+        than all of them. Linear (LP/MILP) models only; runs the matrix-form
+        engine in :mod:`discopt._iis_milp`, whose returned subsystem is proven
+        infeasible with presolve on AND off (the #1634 rule; intermediate
+        verdicts are confirmed once, on the finished set, with a full per-probe
+        rerun if that check fails -- see ``confirm`` there) and returns a feasibility
+        certificate for each kept member whose probe point passes an arithmetic
+        re-check (``IISResult.certificates``; ``IISResult.fully_certified`` says
+        whether every member has one). The default
+        keeps today's semantics (and Gurobi/CPLEX's): every integrality is part
+        of the subsystem and only constraints and bounds are filtered.
     time_limit : float, default 30.0
         Per-solve wall-clock limit for each feasibility probe.
+    total_time_limit : float, optional
+        Wall-clock budget for the whole computation. Each probe's limit is cut
+        to the time left; when the budget runs out filtering stops and the
+        current subsystem is returned with ``complete=False`` and
+        ``proven_irreducible=False`` -- still proven infeasible, possibly with
+        undecided members. With ``include_integrality=True`` every HiGHS run is
+        also stopped by a wall-clock interrupt (HiGHS's own limit was measured
+        overrunning 7-10x), and :class:`TimeoutError` is raised if no subsystem
+        can be confirmed infeasible in time. On the default path the bound is
+        as good as ``Model.solve``'s ``time_limit``.
+    portfolio : sequence of str, optional
+        Only with ``include_integrality=True``. Run one deletion filter per
+        listed order, each in its own process, against one shared
+        ``total_time_limit``, and return the smallest complete result (else the
+        smallest anytime one). An order is a permutation of ``"ICB"`` --
+        integrality, constraints, bounds phases -- with optional flags after a
+        ``"-"``: ``r`` visits elements in reverse, ``n`` skips the SAT core
+        candidate on a pure-binary model (``"CIB-r"``, ``"ICB-n"``);
+        :data:`discopt._iis_milp.DEFAULT_PORTFOLIO` is
+        a measured default. Which IIS a filter finds depends on its order, so a
+        portfolio buys size (and, when orders differ in speed, time) with cores.
+        Each member's result is sound on its own; ``IISResult.portfolio_members``
+        reports all of them. ``None`` (default) runs the single ``"ICB"`` order
+        in-process.
+    workers : int, optional
+        Processes for ``portfolio`` (default: one per order, at most the CPU
+        count). Orders beyond ``workers`` start as earlier members finish.
 
     Returns
     -------
@@ -225,7 +325,25 @@ def compute_iis(
     ValueError
         If ``model`` is not (provably) infeasible to begin with — there is no
         infeasibility to explain.
+    NotImplementedError
+        ``include_integrality=True`` on a model with a nonlinear or
+        non-algebraic constraint.
+    TimeoutError
+        ``total_time_limit`` ran out before any subsystem was proven infeasible.
     """
+    if include_integrality:
+        return _compute_iis_with_integrality(
+            model,
+            include_bounds=include_bounds,
+            time_limit=time_limit,
+            total_time_limit=total_time_limit,
+            portfolio=portfolio,
+            workers=workers,
+        )
+    if portfolio is not None or workers is not None:
+        raise ValueError("portfolio/workers require include_integrality=True")
+    deadline = None if total_time_limit is None else time.perf_counter() + total_time_limit
+
     all_constraints = list(model._constraints)
     bound_items: list[tuple] = _bound_candidates(model) if include_bounds else []
 
@@ -238,15 +356,33 @@ def compute_iis(
     n_solves = 0
     proven = True
 
+    complete = True
+
+    def out_of_time() -> bool:
+        """Budget exhausted: stop filtering. Every drop so far was proven, so the
+        current subsystem is still infeasible; it is just not reduced further."""
+        nonlocal complete, proven
+        if deadline is not None and time.perf_counter() >= deadline:
+            complete = False
+            proven = False
+        return not complete
+
     def probe() -> tuple[bool, bool]:
         nonlocal n_solves
         n_solves += 1
         cons = [all_constraints[i] for i in sorted(active_con_idx)]
         relaxed = set(bound_items) - active_bounds
-        return _solve_is_infeasible(model, cons, relaxed, saved_bounds, time_limit)
+        tl = time_limit
+        if deadline is not None:
+            tl = max(0.0, min(tl, deadline - time.perf_counter()))
+        return _solve_is_infeasible(model, cons, relaxed, saved_bounds, tl)
 
     # Baseline: the full system must be provably infeasible.
     base_infeasible, base_conclusive = probe()
+    if not base_infeasible and deadline is not None and time.perf_counter() >= deadline:
+        raise TimeoutError(
+            "compute_iis: total_time_limit ran out before the model was proven infeasible"
+        )
     if not base_infeasible:
         if base_conclusive:
             raise ValueError(
@@ -261,6 +397,8 @@ def compute_iis(
     # remainder is *proven* infeasible; an inconclusive probe keeps the member
     # (and flags the result as not-proven-minimal).
     for i in list(active_con_idx):
+        if out_of_time():
+            break
         active_con_idx.discard(i)
         infeasible, conclusive = probe()
         if infeasible:
@@ -270,6 +408,8 @@ def compute_iis(
             proven = False
 
     for item in list(active_bounds):
+        if out_of_time():
+            break
         active_bounds.discard(item)
         infeasible, conclusive = probe()
         if infeasible:
@@ -283,6 +423,8 @@ def compute_iis(
     # the whole ``z <= 1``. Only surviving variables are refined, so an IIS that
     # involves no vector bound costs no extra probes.
     for vi, side in sorted(i for i in active_bounds if len(i) == 2):
+        if out_of_time():
+            break
         v = model._variables[vi]
         if v.size <= 1:
             continue
@@ -299,6 +441,8 @@ def compute_iis(
         bound_items.extend(elems)
         active_bounds.update(elems)
         for e in elems:
+            if out_of_time():
+                break
             active_bounds.discard(e)
             infeasible, conclusive = probe()
             if infeasible:
@@ -325,4 +469,59 @@ def compute_iis(
         bound_elements=elements,
         n_solves=n_solves,
         proven_irreducible=proven,
+        complete=complete,
+    )
+
+
+def _compute_iis_with_integrality(
+    model: "Model",
+    *,
+    include_bounds: bool,
+    time_limit: float,
+    total_time_limit: float | None,
+    portfolio: Sequence[str] | None = None,
+    workers: int | None = None,
+) -> IISResult:
+    """:func:`compute_iis` with integrality elements, via the matrix engine."""
+    from discopt._iis_milp import milp_iis
+
+    res = milp_iis(
+        model,
+        include_bounds=include_bounds,
+        time_limit=time_limit,
+        total_time_limit=total_time_limit,
+        portfolio=portfolio,
+        workers=workers,
+    )
+
+    # Flat column -> (variable, multi-index).
+    owners: list[tuple["Variable", int]] = []
+    for v in model._variables:
+        owners.extend((v, k) for k in range(v.size))
+
+    def elem(col: int) -> tuple["Variable", tuple]:
+        v, k = owners[col]
+        idx = tuple(int(i) for i in np.unravel_index(k, v.shape)) if v.shape else ()
+        return v, idx
+
+    bound_elements: list[tuple["Variable", str, tuple]] = []
+    for j, side in res.bounds:
+        bv, bidx = elem(j)
+        bound_elements.append((bv, side, bidx))
+    per_var: list[tuple["Variable", str]] = []
+    for pv_, side, _ in bound_elements:
+        if not any(pv is pv_ and ps == side for pv, ps in per_var):
+            per_var.append((pv_, side))
+    all_constraints = list(model._constraints)
+    return IISResult(
+        constraints=[all_constraints[i] for i in res.constraints],
+        variable_bounds=per_var,
+        bound_elements=bound_elements,
+        integrality_elements=[elem(j) for j in res.integrality],
+        certificates=dict(res.certificates),
+        confirm_fallback=res.fallback,
+        n_solves=res.n_solves,
+        proven_irreducible=res.proven_irreducible,
+        complete=res.complete,
+        portfolio_members=res.members,
     )

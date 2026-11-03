@@ -26,10 +26,15 @@ EXAMPLES_JS = (
     Path(__file__).resolve().parents[2] / "crates" / "discopt-wasm" / "web" / "examples.js"
 )
 
-# The six classes the page promises. Named here rather than derived from the
-# file so that deleting an example is a test failure, not a silently shorter
-# parametrization -- the failure mode this whole module exists to prevent.
-EXPECTED_IDS = ["LP", "MILP", "QP", "MIQP", "NLP", "MINLP"]
+# The six classes the page promises, then the infeasible model whose IIS the page
+# draws. Named here rather than derived from the file so that deleting an example
+# is a test failure, not a silently shorter parametrization -- the failure mode
+# this whole module exists to prevent.
+EXPECTED_IDS = ["LP", "MILP", "QP", "MIQP", "NLP", "MINLP", "IIS"]
+
+# The status each example must print. Every one is "optimal" except the IIS
+# example, which is infeasible on purpose.
+EXPECTED_STATUS = {"IIS": "infeasible"}
 
 
 def _load_examples() -> list[dict[str, str]]:
@@ -128,7 +133,7 @@ def _block_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_browser_environment_actually_blocks() -> None:
-    """The fixture is the whole test; an inert one would report six false passes.
+    """The fixture is the whole test; an inert one would report seven false passes.
 
     Both import routes are checked, because the first version of the fixture
     blocked only one of them and this test is what found that out.
@@ -168,4 +173,5 @@ def test_example_runs(
     # output of the page.
     printed = capsys.readouterr().out
     assert printed.strip(), f"{example['id']} printed nothing"
-    assert "optimal" in printed.lower(), f"{example['id']} did not report an optimal status"
+    status = EXPECTED_STATUS.get(example["id"], "optimal")
+    assert status in printed.lower(), f"{example['id']} did not report an {status} status"

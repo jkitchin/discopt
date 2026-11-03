@@ -624,10 +624,13 @@ impl TreeManager {
         for _ in 0..batch_size {
             match self.pool.select_next() {
                 Some(nid) => {
+                    // #2092: the node leaves the frontier, so its shared box
+                    // becomes its own (every later reader sees `lb`/`ub`).
+                    self.pool.get_mut(nid).materialize_box();
                     let node = self.pool.get(nid);
                     lb.push(node.lb.clone());
                     ub.push(node.ub.clone());
-                    parent_solutions.push(node.parent_solution.clone());
+                    parent_solutions.push(node.parent_solution.as_deref().cloned());
                     node_ids.push(nid);
                     // Mark as evaluated so it won't be selected again.
                     self.pool.get_mut(nid).status = NodeStatus::Evaluated;
@@ -693,7 +696,7 @@ impl TreeManager {
             };
             node.local_lower_bound = effective_lb.max(node.local_lower_bound);
             // Store solution for warm-starting children.
-            node.parent_solution = Some(result.solution.clone());
+            node.parent_solution = Some(std::sync::Arc::new(result.solution.clone()));
         }
         self.pending_results
             .extend(results.iter().map(|r| PendingResult {
@@ -1578,8 +1581,8 @@ impl TreeManager {
                 "node_box({:?}): the node left the frontier and its box was released",
                 id
             );
-            let n = self.pool.get(id);
-            Some((n.lb.clone(), n.ub.clone()))
+            // #2092: a pending child may still hold its box in shared form.
+            Some(self.pool.get(id).box_owned())
         } else {
             None
         }
@@ -1630,13 +1633,13 @@ impl TreeManager {
     /// The warm-start basis stored on a node (cloned), for the Rust-internal
     /// simplex MILP driver. `None` if the node has no inherited basis (root).
     pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
-        self.pool.get(id).basis.clone()
+        self.pool.get(id).basis.as_deref().cloned()
     }
 
     /// Store a node's optimal basis before it is branched, so its children
     /// inherit it as their dual-simplex warm-start state.
     pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {
-        self.pool.get_mut(id).basis = basis;
+        self.pool.get_mut(id).basis = basis.map(std::sync::Arc::new);
     }
 
     /// Declare that every attainable objective value lies on the lattice
@@ -1836,6 +1839,9 @@ impl TreeManager {
     /// `process_evaluated` branches the node.
     pub fn set_node_bounds(&mut self, node_id: NodeId, lb: Vec<f64>, ub: Vec<f64>) {
         let node = self.pool.get_mut(node_id);
+        // #2092: a pending child's box may still be shared; materialize it so the
+        // length test below compares against the real box, never an empty one.
+        node.materialize_box();
         if lb.len() == node.lb.len() {
             node.lb = lb;
         }

@@ -4,6 +4,7 @@
 
 import { EXAMPLES } from './examples.js';
 import { attachEditor } from './vendor/codemirror.bundle.js';
+import { locate, renderIIS } from './iis_render.js';
 
 const $ = (id) => document.getElementById(id);
 const codeBox = $('code');
@@ -12,6 +13,9 @@ const runButton = $('run');
 const cancelButton = $('cancel');
 const statusLine = $('status');
 const titleLine = $('example-title');
+const iisSection = $('iis-section');
+const iisBox = $('iis');
+const iisNote = $('iis-note');
 
 // --- editor ----------------------------------------------------------------
 
@@ -72,12 +76,19 @@ function onWorkerMessage({ data }) {
     append(data.text);
   } else if (data.type === 'running') {
     outBox.textContent = '';
+    clearIIS();
     cancelButton.disabled = false;
     setStatus('solving…');
+  } else if (data.type === 'iis') {
+    showIIS(data.items);
+  } else if (data.type === 'iis-error') {
+    iisSection.hidden = false;
+    iisNote.textContent = `The page could not draw this IIS: ${data.message}`;
   } else if (data.type === 'done') {
     runButton.disabled = false;
     cancelButton.disabled = true;
-    setStatus(`done in ${(data.ms / 1000).toFixed(2)} s`);
+    const drawn = iisBox.childElementCount ? ' — IIS shown below the output' : '';
+    setStatus(`done in ${(data.ms / 1000).toFixed(2)} s${drawn}`);
   } else if (data.type === 'error') {
     runButton.disabled = false;
     cancelButton.disabled = true;
@@ -102,10 +113,54 @@ function append(text) {
   outBox.scrollTop = outBox.scrollHeight;
 }
 
+// The script as it was when it ran: the IIS table's line numbers are computed
+// against it.
+let ranCode = '';
+
 function run() {
   if (!ready) return;
   runButton.disabled = true;
-  worker.postMessage({ type: 'run', code: codeBox.value });
+  ranCode = codeBox.value;
+  worker.postMessage({ type: 'run', code: ranCode });
+}
+
+// --- IIS -------------------------------------------------------------------
+
+function clearIIS() {
+  iisBox.replaceChildren();
+  iisNote.textContent = '';
+  iisSection.hidden = true;
+}
+
+// Select a member's line in the editor. If the script was edited after it ran,
+// the line is looked up again in the current text, so the link follows the
+// declaration rather than pointing at whatever moved into its old place.
+function showInEditor(member, line) {
+  const current = codeBox.value;
+  const target = current === ranCode ? line : locate(current, member);
+  if (target === null) {
+    setStatus(`${member.name} is no longer in the script`, true);
+    return;
+  }
+  const view = editor.view;
+  if (!view) {
+    codeBox.focus();
+    return;
+  }
+  const at = view.state.doc.line(target);
+  view.dispatch({ selection: { anchor: at.from, head: at.to }, scrollIntoView: true });
+  view.focus();
+  setStatus(`editor: line ${target}, ${member.name}`);
+}
+
+function showIIS(items) {
+  const n = renderIIS(iisBox, items, { source: ranCode, onLocate: showInEditor });
+  iisSection.hidden = n === 0;
+  // The summary of the first one is announced; the section holds the rest.
+  iisNote.textContent = n
+    ? `Infeasibility explained: ${items[0].members.length} members in the IIS` +
+      (n > 1 ? `, and ${n - 1} more IIS below.` : '.')
+    : '';
 }
 
 runButton.addEventListener('click', run);
