@@ -8,6 +8,10 @@ objective*, which drifted an ulp inside the true maximum of a binary whose node 
 was ``[1, 1]``; the intersected box crossed, and ``f64::clamp`` aborted. Each OBBT
 edge is now the probe's Neumaier--Shcherbina safe bound, and a box crossed within
 round-off is widened outward rather than collapsed or handed to ``clamp``.
+
+``max_nodes=15`` is the smallest node limit at which the pre-fix build panics
+(measured against main 54c7f944: 10 nodes clean, 15 nodes panic). 60 nodes cost
+62 s on CI, over the 15 s fast-lane budget; 15 nodes still fail before the fix.
 """
 
 from __future__ import annotations
@@ -35,9 +39,9 @@ def _spec() -> dict:
 @pytest.mark.parametrize("run_obbt", [False, True])
 def test_cstr_kernel_with_obbt_runs_and_bounds_soundly(run_obbt):
     kw = _spec()
-    kw.update(max_nodes=60, time_limit_s=1e6, bound_time_extension_s=None, run_obbt=run_obbt)
+    kw.update(max_nodes=15, time_limit_s=1e6, bound_time_extension_s=None, run_obbt=run_obbt)
     r = R.solve_spatial_tree_py(**kw)
-    assert r["node_count"] == 60
+    assert r["node_count"] == 15
     assert r["status"] == "node_limit"
     # The bound is a lower bound on the known optimum: OBBT tightened nothing away.
     assert np.isfinite(r["bound"])
