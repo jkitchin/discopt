@@ -74,6 +74,36 @@ project_version() {
     "$root/pyproject.toml"
 }
 
+# The discopt version the staged wheel must carry. On a release commit that is
+# the project version itself. On a post-release dev commit (`X.Y.Z.devN`, which
+# the release process bumps to right after tagging) it is the newest *released*
+# tag below it: the page serves the current release, and the wheel is rebuilt at
+# the next release, not on every dev commit -- building one needs the toolchain
+# above, which no CI job carries. Requiring the dev version there made the Docs
+# build (and with it the Pages deploy) fail on every push to main between
+# releases: 23 consecutive failures from v0.11.1 (2026-10-29) to 2026-11-03.
+# A wheel from an older release than the newest tag still fails.
+expected_wheel_version() {
+  local v
+  v="$(project_version)"
+  if [[ "$v" != *.dev* ]]; then
+    echo "$v"
+    return 0
+  fi
+  git -C "$root" tag -l 'v*' | python3 -c '
+import re, sys
+def key(s):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", s)
+    return tuple(map(int, m.groups())) if m else None
+dev = re.match(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+cap = tuple(map(int, dev.groups()))
+rel = [k for k in (key(t.strip()[1:]) for t in sys.stdin) if k is not None and k < cap]
+if not rel:
+    sys.exit("no release tag v* below %s; fetch tags (git fetch --tags)" % sys.argv[1])
+print(".".join(map(str, max(rel))))
+' "$v"
+}
+
 # --check: no build, no toolchain — just the invariants CI cares about. Both
 # wheels are checked, because the page needs both and a missing `pounce-solver`
 # would surface only as a lazy `import pounce` failing mid-solve.
@@ -110,13 +140,23 @@ if [[ "${1:-}" == "--check" ]]; then
     return $bad
   }
 
-  check_manifest discopt "discopt-$(project_version)-" || fail=1
+  # A wheel built at the project version itself is always current (#2109
+  # restaged one at 0.11.2.dev0 for the IIS bindings); otherwise a dev version
+  # takes the newest release below it, per expected_wheel_version.
+  staged=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wheel"])' \
+    "$wheels/discopt-wheel.json" 2>/dev/null || true)
+  if [[ "$staged" == "discopt-$(project_version)-"* ]]; then
+    want="$(project_version)"
+  else
+    want="$(expected_wheel_version)" || exit 1
+  fi
+  check_manifest discopt "discopt-${want}-" || fail=1
   # `pounce-solver` is not built here -- it is copied from the POUNCE repo,
   # which builds and commits it. Only its presence and Pyodide version are ours
   # to check.
   check_manifest pounce "pounce_solver-" || fail=1
 
-  [[ $fail == 0 ]] && echo "wheel check OK: discopt $(project_version) + pounce-solver for Pyodide $page"
+  [[ $fail == 0 ]] && echo "wheel check OK: discopt ${want} (project $(project_version)) + pounce-solver for Pyodide $page"
   exit $fail
 fi
 
