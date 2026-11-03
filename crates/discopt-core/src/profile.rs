@@ -611,6 +611,10 @@ counters!(
     // simplex from their own (dual-feasible) basis, and how many that decided.
     HugeBoxDualCleanupAttempts,
     HugeBoxDualCleanupRescues,
+    // #2125: active-huge-bound solves by fixing the column and removing the rows
+    // it makes slack (`solve_huge_active_fixed`), and how many it certified.
+    HugeBoxFixActiveAttempts,
+    HugeBoxFixActiveDecided,
     // #2125: `Rows` audit residuals forgiven because a singleton column (a row
     // slack) absorbs them within its own representability (`singleton_absorbs`).
     AuditRowsSingletonAbsorbed,

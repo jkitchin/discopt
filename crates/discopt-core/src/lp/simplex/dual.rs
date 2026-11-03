@@ -432,7 +432,10 @@ const HUGE_BOX_ROUNDS: usize = 4;
 /// instances at a 20 s budget, 6 reach this path (`4stufen`, `beuster`,
 /// `ex14_1_7`, `nvs05`, `nvs06`, `nvs21`; 76 armed solves, 46 decided here, 30
 /// handed to the original), all through relaxation-lifted columns — none of them
-/// declares a bound that large itself.
+/// declares a bound that large itself. On those six every `solve_huge_active_fixed`
+/// attempt declined (measured: 0 decided), and node counts and certified objectives
+/// were unchanged; the bounds of `beuster` and `4stufen` at a 3-node budget moved
+/// (17742 vs 6352, 19947 vs 20712), both below their reference objectives.
 #[allow(clippy::too_many_arguments)]
 fn solve_huge_box_relaxed(
     sp: &SparseCols,
@@ -517,8 +520,292 @@ fn solve_huge_box_relaxed(
             break;
         }
     }
+    if let Some(sol) = solve_huge_active_fixed(sp, m, n, c, l, u, b, opts) {
+        crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxDecided);
+        return Some(sol);
+    }
     crate::profile::incr(crate::profile::Ctr::HugeBoxRelaxFellBack);
     Some(cold_with_dual_cleanup(sp, m, n, c, l, u, b, opts))
+}
+
+/// Neumaier-compensated sum of `terms` (#2125: rows mixing `~1e19` and `O(1)`).
+fn compensated_sum(terms: impl Iterator<Item = f64>) -> f64 {
+    let (mut sum, mut comp) = (0.0f64, 0.0f64);
+    for t in terms {
+        let s = sum + t;
+        comp += if sum.abs() >= t.abs() {
+            (sum - s) + t
+        } else {
+            (t - s) + sum
+        };
+        sum = s;
+    }
+    sum + comp
+}
+
+/// Solve an LP whose huge bound is **active** at the optimum by fixing that column
+/// at its bound and removing the rows it makes slack, then certify the result for
+/// the original LP from duals (#2125).
+///
+/// **The defect.** With `x_j` at `u = 1e19`, every `≤` row it touches carries a
+/// slack basic at `~|a·u|`. Pivoting with those magnitudes in the basis leaves
+/// `~ε·1e20` of absolute error in the moderate basics: refined and unrefined `x_B`
+/// of one basis differ by `~3e3` (measured), the basis handed back is off its box,
+/// and every route in [`solve_huge_box_relaxed`] ends `Numerical`.
+///
+/// **The construction.** A probe with each huge side clamped to `±HUGE_BOUND`
+/// (a restriction, numerically safe) names the candidates: columns that end at a
+/// clamp, fixed at their ORIGINAL huge bound. Each row they touch that has a
+/// cost-free singleton column (its slack) is removed together with that column.
+/// The remaining LP has the candidates' contribution moved to its right-hand side
+/// (compensated) and every other huge side opened, as in the relaxation rounds.
+///
+/// **Why an `Optimal` is a certificate for the original.** The reassembled point
+/// `x` (candidates at their bounds, each removed slack recomputed from its row) is
+/// checked against the ORIGINAL LP by the engine's own audit, and every opened side
+/// is checked exactly. The duals `y` of the reduced LP, extended with `0` on the
+/// removed rows, are then dual feasible for the original on every column except
+/// the fixed ones: a kept column's reduced cost is unchanged (the removed rows
+/// carry `y = 0`), a removed slack has cost `0` and is basic, and a column whose
+/// side was opened is held to the same conditions under a smaller box. So it only
+/// remains to check the fixed columns' reduced costs `d_j = c_j − A_jᵀy`, which
+/// must have the sign their bound needs (`≤ 0` at an upper, `≥ 0` at a lower) by a
+/// clear margin. With complementary slackness (removed rows slack with `y = 0`,
+/// fixed columns at their bound) the pair is optimal. Any check that fails returns
+/// `None`, and the caller solves the original LP unchanged.
+#[allow(clippy::too_many_arguments)]
+fn solve_huge_active_fixed(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    let huge = |v: f64| v.abs() >= HUGE_BOUND && v.abs() < INF;
+    // Clamp only an OUTWARD huge side (a huge-negative lower, a huge-positive
+    // upper); a huge side pointing inward cannot be clamped to a smaller box.
+    let mut lp = l.to_vec();
+    let mut up = u.to_vec();
+    for j in 0..n {
+        if huge(l[j]) {
+            if l[j] >= 0.0 {
+                return None;
+            }
+            lp[j] = -HUGE_BOUND;
+        }
+        if huge(u[j]) {
+            if u[j] <= 0.0 {
+                return None;
+            }
+            up[j] = HUGE_BOUND;
+        }
+    }
+    crate::profile::incr(crate::profile::Ctr::HugeBoxFixActiveAttempts);
+    let probe = cold_with_dual_cleanup(sp, m, n, c, &lp, &up, b, opts);
+    if probe.status != LpStatus::Optimal || probe.x.len() != n {
+        return None;
+    }
+    // Candidates, with the bound each is fixed at. `fixed_upper[j]` says which side.
+    let at_clamp = |x: f64, side: f64| (x - side).abs() <= 1e-9 * HUGE_BOUND;
+    let mut fixed: Vec<Option<bool>> = vec![None; n];
+    for j in 0..n {
+        if huge(u[j]) && at_clamp(probe.x[j], HUGE_BOUND) {
+            fixed[j] = Some(true);
+        } else if huge(l[j]) && at_clamp(probe.x[j], -HUGE_BOUND) {
+            fixed[j] = Some(false);
+        }
+    }
+    if fixed.iter().all(|f| f.is_none()) {
+        return None;
+    }
+    let fixed_val = |j: usize| match fixed[j] {
+        Some(true) => u[j],
+        Some(false) => l[j],
+        None => unreachable!(),
+    };
+    // Rows touched by a fixed column, and each one's cost-free singleton absorber.
+    let mut touched = vec![false; m];
+    for j in (0..n).filter(|&j| fixed[j].is_some()) {
+        for &i in sp.col(j).0 {
+            touched[i] = true;
+        }
+    }
+    let mut absorber: Vec<Option<usize>> = vec![None; m];
+    for j in 0..n {
+        let (rows, vals) = sp.col(j);
+        if fixed[j].is_none() && rows.len() == 1 && vals[0] != 0.0 && c[j] == 0.0 {
+            let i = rows[0];
+            if touched[i] && absorber[i].is_none() {
+                absorber[i] = Some(j);
+            }
+        }
+    }
+    let dropped: Vec<bool> = (0..m).map(|i| absorber[i].is_some()).collect();
+    let is_absorber = {
+        let mut v = vec![false; n];
+        for j in absorber.iter().flatten() {
+            v[*j] = true;
+        }
+        v
+    };
+    // Reduced LP: kept rows / kept columns, renumbered.
+    let mut row_new = vec![usize::MAX; m];
+    let mut m2 = 0usize;
+    for i in 0..m {
+        if !dropped[i] {
+            row_new[i] = m2;
+            m2 += 1;
+        }
+    }
+    if m2 == 0 {
+        return None;
+    }
+    let kept: Vec<usize> = (0..n)
+        .filter(|&j| fixed[j].is_none() && !is_absorber[j])
+        .collect();
+    let n2 = kept.len();
+    let (mut ptr, mut idx, mut val) = (vec![0usize], Vec::new(), Vec::new());
+    for &j in &kept {
+        let (rows, vals) = sp.col(j);
+        for (k, &i) in rows.iter().enumerate() {
+            if !dropped[i] {
+                idx.push(row_new[i]);
+                val.push(vals[k]);
+            }
+        }
+        ptr.push(idx.len());
+    }
+    let sp2 = SparseCols::from_csc(ptr, idx, val);
+    // b' = b − Σ_F a_ij v_j on the kept rows, compensated.
+    let mut terms: Vec<Vec<f64>> = (0..m)
+        .filter(|&i| !dropped[i])
+        .map(|i| vec![b[i]])
+        .collect();
+    for j in (0..n).filter(|&j| fixed[j].is_some()) {
+        let v = fixed_val(j);
+        let (rows, vals) = sp.col(j);
+        for (k, &i) in rows.iter().enumerate() {
+            if !dropped[i] {
+                terms[row_new[i]].push(-vals[k] * v);
+            }
+        }
+    }
+    let b2: Vec<f64> = terms
+        .into_iter()
+        .map(|t| compensated_sum(t.into_iter()))
+        .collect();
+    let c2: Vec<f64> = kept.iter().map(|&j| c[j]).collect();
+    let l2: Vec<f64> = kept
+        .iter()
+        .map(|&j| if huge(l[j]) { -INF } else { l[j] })
+        .collect();
+    let u2: Vec<f64> = kept
+        .iter()
+        .map(|&j| if huge(u[j]) { INF } else { u[j] })
+        .collect();
+    let sol2 = cold_with_dual_cleanup(&sp2, m2, n2, &c2, &l2, &u2, &b2, opts);
+    if sol2.status != LpStatus::Optimal
+        || sol2.x.len() != n2
+        || sol2.dual.len() != m2
+        || sol2.basis.basic_vars.len() != m2
+    {
+        return None;
+    }
+    // Reassemble x in the original space.
+    let mut x = vec![0.0f64; n];
+    for j in (0..n).filter(|&j| fixed[j].is_some()) {
+        x[j] = fixed_val(j);
+    }
+    for (k, &j) in kept.iter().enumerate() {
+        let xj = sol2.x[k];
+        // An opened side must hold exactly; a column the opening made free must be
+        // basic (a free nonbasic sits at 0, which is no vertex of the original).
+        if (huge(l[j]) && (xj.is_nan() || xj < l[j])) || (huge(u[j]) && (xj.is_nan() || xj > u[j]))
+        {
+            return None;
+        }
+        if l2[k] <= -INF
+            && u2[k] >= INF
+            && (huge(l[j]) || huge(u[j]))
+            && sol2.basis.col_status.get(k) != Some(&BASIC)
+        {
+            return None;
+        }
+        x[j] = xj;
+    }
+    // Removed slacks, from their rows: s = (b_i − Σ_{k≠s} a_ik x_k) / a_s.
+    let mut row_terms: Vec<Vec<f64>> = vec![Vec::new(); m];
+    for j in (0..n).filter(|&j| !is_absorber[j]) {
+        let (rows, vals) = sp.col(j);
+        for (k, &i) in rows.iter().enumerate() {
+            if dropped[i] {
+                row_terms[i].push(-vals[k] * x[j]);
+            }
+        }
+    }
+    for i in (0..m).filter(|&i| dropped[i]) {
+        let s = absorber[i].unwrap();
+        let a_s = sp.col(s).1[0];
+        let rest = compensated_sum(std::iter::once(b[i]).chain(row_terms[i].iter().copied()));
+        x[s] = rest / a_s;
+    }
+    if super::primal::point_fails_original_audit(&x, sp, m, n, b, l, u) {
+        return None;
+    }
+    // Duals: the reduced LP's on kept rows, 0 on removed ones. The fixed columns'
+    // reduced costs must carry their bound's sign by a clear margin.
+    let mut y = vec![0.0f64; m];
+    for i in (0..m).filter(|&i| !dropped[i]) {
+        y[i] = sol2.dual[row_new[i]];
+    }
+    for j in (0..n).filter(|&j| fixed[j].is_some()) {
+        let (dot, mag, _) = sp.dot_with_magnitude(j, &y);
+        let d = c[j] - dot;
+        let margin = 1e-7 * (1.0 + c[j].abs() + mag);
+        let ok = if fixed[j] == Some(true) {
+            d < -margin
+        } else {
+            d > margin
+        };
+        if !ok {
+            return None;
+        }
+    }
+    // A basis of the original: the reduced LP's (mapped back), every removed slack
+    // basic in its own row, the fixed columns nonbasic at their bound.
+    let mut col_status = vec![AT_LOWER; n];
+    for j in (0..n).filter(|&j| fixed[j].is_some()) {
+        col_status[j] = if fixed[j] == Some(true) {
+            AT_UPPER
+        } else {
+            AT_LOWER
+        };
+    }
+    for (k, &j) in kept.iter().enumerate() {
+        col_status[j] = sol2.basis.col_status[k];
+    }
+    let mut basic_vars: Vec<usize> = sol2.basis.basic_vars.iter().map(|&k| kept[k]).collect();
+    for s in absorber.iter().flatten() {
+        col_status[*s] = BASIC;
+        basic_vars.push(*s);
+    }
+    let obj = compensated_sum((0..n).map(|j| c[j] * x[j]));
+    crate::profile::incr(crate::profile::Ctr::HugeBoxFixActiveDecided);
+    Some(LpSolve {
+        status: LpStatus::Optimal,
+        x,
+        obj,
+        basis: Basis {
+            col_status,
+            basic_vars,
+        },
+        iters: probe.iters + sol2.iters,
+        dual: y,
+        ray: Vec::new(),
+    })
 }
 
 /// Cold-solve, and when that ends `Numerical` with a full basis, re-optimize that
@@ -3005,6 +3292,105 @@ mod tests {
             rejects, 1,
             "precondition should have forced cold fallback: prepare refused \
              {rejects} dual-infeasible warm starts, expected 1"
+        );
+    }
+
+    // ----- #2125: huge-but-finite bounds ------------------------------------
+
+    /// Standard form of the #2125 active-bound witness, for an upper bound `big`
+    /// on `x0`. Columns `x0, x1, x2, s0, s1`; rows
+    /// `−2·x0 + x1 + s0 = 0.5`, `x1 + x2 + s1 = 1`, `x2 − x1 = 0.3`;
+    /// `min −x0 + x1 + 0.5·x2`. The optimum puts `x0` at `big` (its only row is a
+    /// `≤` with a slack), `x1 = −5`, `x2 = −4.7`: objective `−big − 7.35`.
+    fn active_bound_witness(big: f64) -> (SparseCols, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+        let sp = SparseCols::from_csc(
+            vec![0, 1, 4, 6, 7, 8],
+            vec![0, 0, 1, 2, 1, 2, 0, 1],
+            vec![-2.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0],
+        );
+        let c = vec![-1.0, 1.0, 0.5, 0.0, 0.0];
+        let l = vec![-5.0, -5.0, -5.0, 0.0, 0.0];
+        let u = vec![big, 5.0, 5.0, INF, INF];
+        let b = vec![0.5, 1.0, 0.3];
+        (sp, c, l, u, b)
+    }
+
+    /// #2125: an ACTIVE huge bound is certified by fixing the column and removing
+    /// the row it makes slack, across the band, with a certificate that holds for
+    /// the original LP: the point passes the original audit, the duals vanish on
+    /// the removed row, the fixed column's reduced cost has its bound's sign, and
+    /// the basis is a full one of the original (removed slack basic).
+    #[test]
+    fn active_huge_bound_is_fixed_and_certified_2125() {
+        let mut checked = 0usize;
+        for big in [1e10, 1e12, 1e16, 1e17, 1e19, 9.999e19] {
+            let (sp, c, l, u, b) = active_bound_witness(big);
+            let sol = solve_huge_active_fixed(&sp, 3, 5, &c, &l, &u, &b, &opts())
+                .unwrap_or_else(|| panic!("big={big:e}: the active bound must certify"));
+            assert_eq!(sol.status, LpStatus::Optimal);
+            assert_eq!(sol.x[0], big, "x0 sits exactly at its bound");
+            assert!((sol.x[1] + 5.0).abs() < 1e-9 && (sol.x[2] + 4.7).abs() < 1e-9);
+            assert!(
+                (sol.obj - (-big - 7.35)).abs() <= 1e-12 * big,
+                "big={big:e}: obj {}",
+                sol.obj
+            );
+            assert!(!super::super::primal::point_fails_original_audit(
+                &sol.x, &sp, 3, 5, &b, &l, &u
+            ));
+            assert_eq!(sol.dual[0], 0.0, "the removed row carries no dual");
+            let d0 = c[0] - sp.dot(0, &sol.dual);
+            assert!(d0 < 0.0, "x0 at its upper bound needs d0 < 0, got {d0}");
+            assert_eq!(sol.basis.basic_vars.len(), 3);
+            assert_eq!(sol.basis.col_status[3], BASIC, "the removed slack is basic");
+            assert_eq!(sol.basis.col_status[0], AT_UPPER);
+            checked += 1;
+        }
+        assert_eq!(checked, 6, "band probe must have run every point");
+    }
+
+    /// The refusal side: when the probe's candidate is NOT optimal at its huge
+    /// bound (a row caps `x0` at `2e10`, between the probe's clamp and `u`), fixing
+    /// it there breaks that row, the original audit refuses the point, and the
+    /// construction returns `None`. The public entry still certifies the true
+    /// optimum `x0 = 2e10` (through the relaxation rounds).
+    #[test]
+    fn active_fix_refuses_a_candidate_not_at_its_bound_2125() {
+        // Columns x0, s0; row x0 + s0 = 2e10; min −x0; x0 ∈ [−5, 1e19].
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 0], vec![1.0, 1.0]);
+        let (c, l, u, b) = (
+            vec![-1.0, 0.0],
+            vec![-5.0, 0.0],
+            vec![1e19, INF],
+            vec![2e10],
+        );
+        assert!(
+            solve_huge_active_fixed(&sp, 1, 2, &c, &l, &u, &b, &opts()).is_none(),
+            "x0 = 1e19 violates x0 <= 2e10: the fix must be refused"
+        );
+        let sol = solve_lp_warm_csc(sp, 1, 2, &c, &l, &u, &b, None, &opts());
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!((sol.x[0] - 2e10).abs() <= 1e-6 * 2e10, "x0 = {}", sol.x[0]);
+    }
+
+    /// Through the public CSC entry, the active-bound witness at `9.999e19` (the
+    /// default box) certifies, and the counters show which route decided it.
+    #[test]
+    fn active_huge_bound_through_public_entry_2125() {
+        let _g = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let (sp, c, l, u, b) = active_bound_witness(9.999e19);
+        let sol = solve_lp_warm_csc(sp, 3, 5, &c, &l, &u, &b, None, &opts());
+        let armed = crate::profile::counter(crate::profile::Ctr::HugeBoxRelaxArmed);
+        let decided = crate::profile::counter(crate::profile::Ctr::HugeBoxRelaxDecided);
+        crate::profile::set_enabled(false);
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!((sol.obj - (-9.999e19 - 7.35)).abs() <= 1e-12 * 9.999e19);
+        assert_eq!(
+            (armed, decided),
+            (1, 1),
+            "the huge-box route must have decided it"
         );
     }
 

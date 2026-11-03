@@ -7,24 +7,33 @@ the band was not certified. The issue measured it on 40 mbigm M-value LPs from G
 40/40 up to 1e16, ERROR 36/40 at 3e16 and 40/40 from 5e16, while HiGHS solved all.
 
 Measured here on the seeded LP below (60 <= rows, 12 = rows, 80 columns, 8 of them
-with a huge side), before the fix, two independent mechanisms:
+with a huge side). On main, 72 of 192 sweep cases (3 modes x 8 magnitudes x 8 seeds)
+agreed with HiGHS; the rest were ERROR. Three mechanisms, each with its own fix:
 
-* **Huge bound ACTIVE at the optimum (from ~1e11).** The column sits at ``u`` and
+* **Huge bound ACTIVE, slack rounding (from ~1e11).** The column sits at ``u`` and
   its ``<=`` rows' slacks are basic at ``~|a*u|``, whose exact vertex value is not
-  an ``f64``: the residual it leaves passes ``1e-6*(1 + |b|)`` once ``|s| > ~1e10``.
-  The #1335 row floor takes the row's *minimum* grain, set by its moderate columns,
-  so it forgave nothing: ``Rows`` audit failure, ERROR on 4/40 at 1e11.
+  an ``f64``. The #1335 row floor takes the row's *minimum* grain, set by its
+  moderate columns, so it forgave nothing. Fix: ``singleton_absorbs`` in the row
+  audit.
 * **Huge bound INACTIVE (from ~1e15, the issue's own class).** A cold solve parks
-  the column at ``l = -u``; phase 1 then cancels ``~u``-sized residuals and leaves
-  ``~eps*u`` absolute error in the basics it touched (``Phase1DriftDominates``):
-  ERROR on 0/20 at 1e9, 15/20 at 1e17, 20/20 at 9.999e19.
+  the column at ``l = -u``; phase 1 cancels ``~u``-sized residuals and leaves
+  ``~eps*u`` absolute error in the basics it touched. Fix: the relax-and-verify cold
+  solve ``solve_huge_box_relaxed``, plus a dual-simplex cleanup of the basis.
+* **Huge bound ACTIVE, drift (from ~1e16).** With basic slacks at ``~2e20`` the
+  moderate basics carry ``~eps*1e20`` error; refined and unrefined ``x_B`` of one
+  basis differed by ~3e3. Fix: ``solve_huge_active_fixed`` fixes the column at its
+  bound, removes the rows it makes slack, and certifies the result for the original
+  LP from duals.
 
-The fixes are a singleton-absorption term in the row audit and a relax-and-verify
-cold solve over the huge sides (``solve_huge_box_relaxed``). Each case is compared
-against HiGHS, and every comparison is counted (CLAUDE.md section 6).
+With all three, that 192-case sweep certifies 192/192, and a wider run (3200 cases, a second
+generator with random shapes, densities and box widths) certified 3199/3200 with every
+returned point independently feasible and at HiGHS's objective. The one refusal is
+pinned below: its exact optimal vertex is not representable in ``f64``.
 """
 
 from __future__ import annotations
+
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -37,18 +46,20 @@ from discopt import _rust  # noqa: E402
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.lp_simplex import solve_lp as simplex_lp  # noqa: E402
 
-#: The band of the issue, plus the decade below it where the active-bound
+#: The band of the issue, plus the decades below it where the active-bound
 #: mechanism starts. 9.999e19 is the default ``Model.continuous`` box.
 _BAND = [1e10, 1e12, 1e15, 1e16, 3e16, 1e17, 1e19, 9.999e19]
 
-#: How the 8 huge columns get their huge side: lower only, both, or a mix.
-_MODES = ["lo", "both", "mix"]
+#: How the 8 huge columns get their huge side.
+_MODES = ["lo", "hi", "both", "mix"]
 
-_SEEDS = range(8)
+#: Seeds swept. On main this subset already fails 75 of its 128 cases (measured);
+#: it is kept small for the fast lane's per-test time budget.
+_SEEDS = range(4)
 
 
 def _seeded_lp(seed: int, u: float, mode: str):
-    """A bounded, feasible LP whose moderate optimum does not depend on ``u``.
+    """A bounded, feasible LP whose moderate part does not depend on ``u``.
 
     ``A_ub x <= b_ub`` and ``A_eq x = b_eq`` are built around an interior point
     ``x0`` so the LP is feasible; every column has a box ``[-5, 5]`` except 8, whose
@@ -90,21 +101,41 @@ def _highs(lp):
     )
 
 
-@pytest.mark.smoke
-def test_multirow_band_agrees_with_highs(monkeypatch):
-    """Every case HiGHS solves certifies at HiGHS's objective, except a known class.
+def _independently_feasible(lp, x) -> bool:
+    """Box and row feasibility of ``x``, checked here rather than by the engine.
 
-    The exception is a huge bound that is ACTIVE at the optimum with ``u >= 1e16``:
-    there the vertex needs ``~u``-sized values in the basis and the simplex
-    returns ERROR on some instances (#2125's remaining work, below). Even there it
-    must never certify a wrong objective, and it must never call the LP anything
-    but optimal.
+    Rows get the engine's ``1e-6 * (1 + |b|)`` plus four ulps of the row's own
+    magnitude ``sum |a_ij x_j|`` (the float evaluation of a row holding ``1e19``
+    terms cannot be trusted below that).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    box = np.asarray(lp["bounds"], dtype=np.float64)
+    tol = 1e-6 * (1.0 + np.abs(box).max(axis=1))
+    if np.any(x < box[:, 0] - tol) or np.any(x > box[:, 1] + tol):
+        return False
+    eps4 = 4.0 * np.finfo(float).eps
+    r_ub = lp["A_ub"] @ x - lp["b_ub"]
+    m_ub = abs(lp["A_ub"]) @ np.abs(x)
+    r_eq = lp["A_eq"] @ x - lp["b_eq"]
+    m_eq = abs(lp["A_eq"]) @ np.abs(x)
+    return bool(
+        np.all(r_ub <= 1e-6 * (1 + np.abs(lp["b_ub"])) + eps4 * m_ub)
+        and np.all(np.abs(r_eq) <= 1e-6 * (1 + np.abs(lp["b_eq"])) + eps4 * m_eq)
+    )
+
+
+@pytest.mark.smoke
+def test_multirow_band_certifies_and_agrees_with_highs(monkeypatch):
+    """Every case certifies, at HiGHS's objective, at an independently feasible point.
+
+    On main 75 of these 128 cases failed (ERROR, or not at HiGHS's objective). The
+    counters prove the new routes ran (CLAUDE.md section 6): the relaxation decided
+    cases, and the active-bound fix certified the ones where the huge bound is
+    active at the optimum.
     """
     monkeypatch.setenv("DISCOPT_PROFILE", "1")
     _rust.profile_reset_py()
     compared = 0
-    certified = 0
-    active_errors = 0
     for mode in _MODES:
         for u in _BAND:
             for seed in _SEEDS:
@@ -113,28 +144,14 @@ def test_multirow_band_agrees_with_highs(monkeypatch):
                 assert h.status == 0, f"fixture must be bounded and feasible ({mode} {u:g} {seed})"
                 r = simplex_lp(**lp)
                 tag = f"mode={mode} u={u:.4g} seed={seed}"
+                assert r.status == SolveStatus.OPTIMAL, f"{tag}: got {r.status.value}"
+                assert r.objective == pytest.approx(h.fun, rel=1e-6, abs=1e-6), tag
+                assert _independently_feasible(lp, r.x), f"{tag}: certified an infeasible point"
                 compared += 1
-                # Never a wrong certificate, at any magnitude.
-                assert r.status in (SolveStatus.OPTIMAL, SolveStatus.ERROR), (
-                    f"{tag}: a bounded feasible LP came back {r.status.value}"
-                )
-                if r.status == SolveStatus.OPTIMAL:
-                    assert r.objective == pytest.approx(h.fun, rel=1e-6, abs=1e-6), tag
-                    certified += 1
-                    continue
-                active = float(np.max(np.abs(h.x))) > 1e6
-                assert active and u >= 1e16, (
-                    f"{tag}: ERROR on a case the fix covers (huge bound "
-                    f"{'active' if active else 'inactive'} at the optimum)"
-                )
-                active_errors += 1
     assert compared == len(_MODES) * len(_BAND) * len(_SEEDS), "sweep did not run every case"
-    # The remaining class is a minority; this fails if a regression widens it.
-    assert active_errors <= compared // 20, f"{active_errors}/{compared} ERROR"
-    assert certified >= compared - active_errors
     counters = dict(_rust.profile_counters_py())
-    # The relax-and-verify path fired and decided cases (the probe is not a no-op).
     assert counters["HugeBoxRelaxDecided"] > 0, counters
+    assert counters["HugeBoxFixActiveDecided"] > 0, counters
     assert counters["HugeBoxRelaxArmed"] == (
         counters["HugeBoxRelaxDecided"] + counters["HugeBoxRelaxFellBack"]
     ), counters
@@ -142,12 +159,12 @@ def test_multirow_band_agrees_with_highs(monkeypatch):
 
 @pytest.mark.smoke
 def test_active_huge_bound_certifies_up_to_1e15():
-    """The ACTIVE-bound mechanism, isolated: the column ends at ``x = u``.
+    """The slack-rounding mechanism, isolated: the column ends at ``x = u``.
 
     Seed 5 of the ``[-5, u]`` fixture puts column 76 at ``x = u`` (it appears only
     in three ``<=`` rows, with negative coefficients, and has a negative cost). Its
-    row slacks are basic at ``~2u``. Pre-fix this was ERROR from ``u = 1e11`` —
-    the row audit refused a residual no ``f64`` slack could avoid.
+    row slacks are basic at ``~2u``. On main this was ERROR from ``u = 1e11``: the
+    row audit refused a residual no ``f64`` slack could avoid.
     """
     checked = 0
     for u in [1e11, 1e12, 1e13, 1e14, 1e15]:
@@ -159,3 +176,31 @@ def test_active_huge_bound_certifies_up_to_1e15():
         assert r.objective == pytest.approx(h.fun, rel=1e-9), f"u={u:g}"
         checked += 1
     assert checked == 5
+
+
+@pytest.mark.smoke
+def test_unrepresentable_vertex_is_refused_not_misreported():
+    """The one refusal in the wider run, and why refusing is the correct answer.
+
+    ``both``/``u = 1e19``/seed 15: column 37 sits at ``u = 1e19`` and column 11 is
+    *interior* at ``~-8.8e18``, fixed by a BINDING ``<=`` row (row 19) it shares
+    with column 37. ``ulp(8.8e18) = 2048``, so no ``f64`` value of ``x_11`` meets
+    that row to anywhere near ``1e-6``. HiGHS reports ``optimal``, but its own point
+    violates row 19 by about 371 in exact arithmetic (its float residual reads
+    ``-22``). The simplex refuses (ERROR) rather than certify a point that breaks a
+    row. What it must never do is return a wrong verdict, or an "optimal" point
+    that violates a row.
+    """
+    lp = _seeded_lp(15, 1e19, "both")
+    h = _highs(lp)
+    assert h.status == 0
+    row = lp["A_ub"].getrow(19)
+    exact = sum(
+        Fraction(float(a)) * Fraction(float(h.x[j])) for j, a in zip(row.indices, row.data)
+    ) - Fraction(float(lp["b_ub"][19]))
+    assert exact > 100, f"fixture: HiGHS's point should violate row 19, got {float(exact)}"
+    r = simplex_lp(**lp)
+    assert r.status in (SolveStatus.OPTIMAL, SolveStatus.ERROR), r.status.value
+    if r.status == SolveStatus.OPTIMAL:
+        assert _independently_feasible(lp, r.x), "an optimal point must satisfy its rows"
+        assert r.objective == pytest.approx(h.fun, rel=1e-9)
