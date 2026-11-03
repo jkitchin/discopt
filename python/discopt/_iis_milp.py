@@ -1012,10 +1012,25 @@ def _portfolio_child() -> None:
     -- a result, not a failure) or ``("error", exception)`` for anything else,
     which the parent re-raises.
     """
+    import os
     import pickle
     import sys
+    import threading
 
     job = pickle.load(sys.stdin.buffer)
+
+    def _orphan_watch() -> None:
+        # The parent keeps our stdin open until it is done with us; EOF means it
+        # closed it or died. Do not outlive it (a killed caller left members
+        # running at 100% CPU).
+        # Raw fd, not sys.stdin: a daemon thread blocked in a buffered read
+        # holds its lock and aborts interpreter shutdown.
+        fd = sys.stdin.fileno()
+        while os.read(fd, 4096):
+            pass
+        os._exit(3)
+
+    threading.Thread(target=_orphan_watch, daemon=True).start()
     deadline_wall = job["deadline_wall"]
     total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
     try:
@@ -1123,7 +1138,8 @@ def _portfolio_iis(
                         result_path=result_path,
                     )
                     pickle.dump(job, proc.stdin)
-                    proc.stdin.close()
+                    # Kept open: the member exits on EOF, so it cannot outlive us.
+                    proc.stdin.flush()
                     running[i] = (proc, time.time(), result_path, err)
                 if not running:
                     break
@@ -1135,6 +1151,8 @@ def _portfolio_iis(
                     continue
                 for i in finished:
                     proc, t0, result_path, err = running.pop(i)
+                    assert proc.stdin is not None
+                    proc.stdin.close()
                     members[i]["wall"] = round(time.time() - t0, 3)
                     if proc.returncode != 0 or not os.path.exists(result_path):
                         err.seek(0)
@@ -1163,6 +1181,8 @@ def _portfolio_iis(
             for i, (proc, t0, _, err) in running.items():
                 proc.kill()
                 proc.wait()
+                assert proc.stdin is not None
+                proc.stdin.close()
                 err.close()
                 members[i].update(outcome="abandoned", wall=round(time.time() - t0, 3))
 

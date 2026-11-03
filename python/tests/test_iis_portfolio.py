@@ -8,6 +8,7 @@ changes which IIS is found, that the smallest one wins, that every member's
 result is reported, and that failures surface instead of disappearing.
 """
 
+import sys
 import time
 
 import discopt.modeling as dm
@@ -155,3 +156,60 @@ def test_all_members_timing_out_reports_each_members_reason(monkeypatch):
     m = _two_iis_model()
     with pytest.raises(TimeoutError, match=r"\(ICB: .+; CIB: .+\)"):
         compute_iis(m, include_integrality=True, portfolio=("ICB", "CIB"), total_time_limit=1e-3)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="scans /proc")
+def test_members_do_not_outlive_a_killed_caller(tmp_path):
+    """A member blocks on the parent's pipe and exits on EOF: killing the caller
+    must not leave members running (they did, at 100% CPU, before)."""
+    import os
+    import signal
+    import subprocess
+    import uuid
+
+    marker = f"IIS_PORTFOLIO_TEST_{uuid.uuid4().hex}"
+    script = tmp_path / "caller.py"
+    # Pigeonhole 9 into 8: members stay busy for a while.
+    script.write_text(
+        "import discopt.modeling as dm\n"
+        "from discopt.infeasibility import compute_iis\n"
+        "m = dm.Model('php')\n"
+        "x = m.binary('x', shape=(9, 8))\n"
+        "for i in range(9):\n"
+        "    m.subject_to(sum(x[i, j] for j in range(8)) >= 1)\n"
+        "for j in range(8):\n"
+        "    for a in range(9):\n"
+        "        for b in range(a + 1, 9):\n"
+        "            m.subject_to(x[a, j] + x[b, j] <= 1)\n"
+        "m.minimize(0 * x[0, 0])\n"
+        "compute_iis(m, include_integrality=True, portfolio=('ICB', 'CIB'))\n"
+    )
+    env = dict(os.environ, **{marker: "1"})
+    caller = subprocess.Popen([sys.executable, str(script)], env=env)
+
+    def members():
+        found = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit() or int(pid) == caller.pid:
+                continue
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as f:
+                    envb = f.read()
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read()
+            except OSError:  # exited or not ours
+                continue
+            if marker.encode() in envb and b"_portfolio_child" in cmd:
+                found.append(int(pid))
+        return found
+
+    deadline = time.time() + 30
+    while not members() and time.time() < deadline:
+        time.sleep(0.1)
+    assert members(), "members never started"
+    caller.send_signal(signal.SIGKILL)
+    caller.wait()
+    deadline = time.time() + 10
+    while members() and time.time() < deadline:
+        time.sleep(0.1)
+    assert not members()
