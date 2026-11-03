@@ -168,3 +168,55 @@ def test_candidate_stage_stays_inside_its_budget_on_pb_rows(monkeypatch):
     assert all(lim is not None and lim <= _iis_milp._SAT_SLICE_CONFLICTS for _, lim in calls)
     assert _iis_milp._SAT_SLICE_CONFLICTS <= 100
     assert sum(t >= stop for t, _ in calls) <= 1
+
+
+def _knapsack_and_none(n=32, seed=3):
+    """A row whose BDD has ~n*K nodes (weights up to 1e6) plus `sum x <= 0`:
+    together a 2-row IIS."""
+    rng = np.random.default_rng(seed)
+    w = rng.integers(1, 10**6, size=n)
+    m = dm.Model("knap")
+    x = m.binary("x", shape=(n,))
+    m.subject_to(sum(float(w[j]) * x[j] for j in range(n)) >= float(w.sum() // 2), name="knap")
+    m.subject_to(sum(x[j] for j in range(n)) <= 0, name="none")
+    m.minimize(0 * x[0])
+    return m
+
+
+def test_a_huge_bdd_row_cannot_run_the_stage_past_its_budget():
+    """Review of #2112: the clock and the clause cap were checked only between
+    rows, and this one row ran a 2 s budget to 46 s and TimeoutError. The
+    encoding now checks both per BDD layer."""
+    m = _knapsack_and_none()
+    res = milp_iis(m, total_time_limit=2.0)
+    assert sorted(m._constraints[i].name for i in res.constraints) == ["knap", "none"]
+    assert res.complete
+
+
+def test_encode_geq_aborts_before_creating_anything():
+    w, lits, K = [7, 5, 3, 2], [1, 2, 3, 4], 9
+    clauses: list = []
+    with pytest.raises(_iis_milp._EncodeAbort, match="size"):
+        _encode_geq(w, lits, K, 5, 5, clauses, max_clauses=3)
+    assert clauses == []
+    import time as _time
+
+    with pytest.raises(_iis_milp._EncodeAbort, match="time"):
+        _encode_geq(w, lits, K, 5, 5, clauses, stop_at=_time.perf_counter() - 1)
+    assert clauses == []
+    assert _encode_geq(w, lits, K, 5, 5, clauses) > 5 and clauses  # unrestricted: encodes
+
+
+def test_an_oversized_row_is_left_out_and_the_others_still_give_a_core(monkeypatch):
+    m = _knapsack_and_none(n=20)
+    x = m._variables[0]
+    m.subject_to(x[0] >= 1, name="c_on")  # with c_off: an infeasible clause pair
+    m.subject_to(x[0] <= 0, name="c_off")
+    monkeypatch.setattr(_iis_milp, "_SAT_MAX_CLAUSES", 50)  # the knapsack row cannot fit
+    res = milp_iis(m)
+    # The core comes from the three encodable rows (knap is left out), and any
+    # 2-row IIS among them is right: c_on + c_off, or c_on + none.
+    assert res.sat_rows is not None and res.sat_rows <= 3
+    names = {m._constraints[i].name for i in res.constraints}
+    assert len(names) == 2 and "knap" not in names
+    assert res.complete
