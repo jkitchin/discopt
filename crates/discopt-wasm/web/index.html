@@ -23,11 +23,13 @@
   :root {
     --bg: #fbfaf8; --panel: #ffffff; --ink: #1b1a18; --muted: #6b6660;
     --line: #e3ded6; --accent: #1d5fa8; --ok: #1f7a4d; --bad: #a32020;
+    --line-strong: #8f887e; --edge: #4a4640; --hl-bg: #e8f0fa; --bound-bg: #fbf1f1;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   :root[data-theme="dark"] {
     --bg: #14161a; --panel: #1c1f24; --ink: #e8eaee; --muted: #949aa4;
     --line: #2d323a; --accent: #6fb0f0; --ok: #6ec894; --bad: #ef8080;
+    --line-strong: #6b727d; --edge: #aab1bc; --hl-bg: #22303f; --bound-bg: #2a1f22;
   }
   * { box-sizing: border-box; }
   body {
@@ -60,6 +62,9 @@
   select {
     font: 14px system-ui, sans-serif; padding: .5rem .6rem; color: var(--ink);
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    /* The longest example label is wider than a 320 px phone; without this the
+       dropdown alone scrolled the whole page sideways. */
+    max-width: 100%;
   }
   button {
     font: 600 15px/1 system-ui, sans-serif; padding: .7rem 1.4rem;
@@ -81,6 +86,56 @@
   .note { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
   #example-title { color: var(--muted); font-size: .9rem; margin: 0 0 .6rem; }
   footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+
+  /* --- IIS view (iis_render.js) ------------------------------------------
+     IIS members: solid, heavy border, listed first. Constraints outside the
+     IIS: dashed border, muted text, their own labelled block. Highlighting adds
+     a heavier stroke as well as the accent colour. No cue is colour alone. */
+  #iis-note { margin: 0 0 .5rem; }
+  .iis-block + .iis-block { margin-top: 2rem; }
+  .iis-block h3 { font-size: 1rem; margin: 0 0 .4rem; }
+  .iis-summary { margin: 0 0 .9rem; max-width: 46rem; }
+  .iis-muted { color: var(--muted); }
+  .iis-table-wrap { overflow-x: auto; margin-bottom: 1.25rem; }
+  .iis-table { border-collapse: collapse; font-size: .9rem; min-width: 100%; }
+  .iis-table caption { text-align: left; color: var(--muted); font-size: .85rem;
+                       padding-bottom: .4rem; }
+  .iis-table th, .iis-table td { text-align: left; padding: .35rem .7rem;
+                                 border-bottom: 1px solid var(--line); vertical-align: top; }
+  .iis-table thead th { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em;
+                        color: var(--muted); font-weight: 600; }
+  .iis-table tbody th { font-weight: 600; }
+  .iis-table tr.iis-member th { border-left: 4px solid var(--bad); }
+  .iis-table tr.iis-context th, .iis-table tr.iis-context td { color: var(--muted); }
+  .iis-table tr.iis-context th { border-left: 4px dashed var(--line); font-weight: 400; }
+  .iis-table th[scope="rowgroup"] { padding-top: 1rem; color: var(--muted);
+                                    font-weight: 600; font-size: .85rem; }
+  .iis-table tr.iis-hl th, .iis-table tr.iis-hl td { background: var(--hl-bg); }
+  button.iis-line { background: transparent; color: var(--accent); border: 1px solid var(--line);
+                    padding: .25rem .55rem; font: 13px/1.2 var(--mono); border-radius: 6px; }
+  button.iis-line:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .iis-figure { margin: 0; }
+  .iis-graph-wrap { overflow-x: auto; padding: .5rem 0; }
+  .iis-graph { display: block; max-width: 100%; height: auto; }
+  .iis-graph text { font: 12px var(--mono); fill: var(--ink); }
+  .iis-graph .iis-colhead { font: 600 11px system-ui, sans-serif; fill: var(--muted);
+                            text-transform: uppercase; letter-spacing: .06em; }
+  .iis-node rect { fill: var(--panel); stroke: var(--ink); stroke-width: 1; }
+  .iis-node.iis-con rect, .iis-node.iis-bound rect { stroke: var(--bad); stroke-width: 2.5; }
+  .iis-node.iis-bound rect { stroke-dasharray: none; fill: var(--bound-bg); }
+  .iis-node.iis-ctx rect { stroke: var(--muted); stroke-dasharray: 4 3; }
+  .iis-node.iis-ctx text { fill: var(--muted); }
+  .iis-edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+  .iis-edge-context { stroke: var(--line-strong); stroke-dasharray: 4 3; stroke-width: 1; }
+  .iis-graph.iis-focus .iis-node:not(.iis-hl) { opacity: .35; }
+  .iis-graph.iis-focus .iis-edge:not(.iis-hl) { opacity: .15; }
+  .iis-edge.iis-hl { stroke: var(--accent); stroke-width: 3; opacity: 1; }
+  .iis-node.iis-hl rect { stroke-width: 3; }
+  .iis-figure figcaption { color: var(--muted); font-size: .85rem; max-width: 46rem;
+                           margin-top: .4rem; }
+  @media (prefers-reduced-motion: no-preference) {
+    .iis-node, .iis-edge { transition: opacity .15s; }
+  }
   a { color: var(--accent); }
 </style>
 </head>
@@ -104,7 +159,8 @@
     branch-and-bound core and the in-house simplex, the same
     <code>import discopt.modeling as dm</code> you would write locally. The dropdown
     holds one model of each problem class — LP, MILP, QP, MIQP, NLP, MINLP — so you can
-    see what the solver does with each. No server, no install, nothing uploaded.
+    see what the solver does with each, and one infeasible model, to show how discopt
+    explains infeasibility. No server, no install, nothing uploaded.
   </p>
 
   <div class="row">
@@ -130,6 +186,18 @@
   <section>
     <h2>Output</h2>
     <pre id="out"></pre>
+  </section>
+
+  <section id="iis-section" aria-labelledby="iis-heading" hidden>
+    <h2 id="iis-heading">Why is it infeasible?</h2>
+    <p id="iis-note" class="status" role="status" aria-live="polite"></p>
+    <p class="note">
+      An <dfn>irreducible infeasible subsystem</dfn> (IIS) is a smallest set of
+      constraints and bounds that cannot all hold at once: drop any one of them and
+      the rest are feasible. Any <code>IISResult</code> the script leaves in a
+      variable (<code>iis = m.compute_iis()</code>) is shown here.
+    </p>
+    <div id="iis"></div>
   </section>
 
   <footer>
