@@ -383,17 +383,16 @@ def test_validate_for_export_does_not_edit_rows():
 
 
 @pytest.mark.unit
-def test_zero_coefficient_is_judged_against_the_row_scale():
-    """Matched pairs cancelling to 0 next to O(1) terms are not a defect (test_1846's
-    hull rows); the issue's ``(t + a) - t - a`` alone in its row is."""
+def test_zero_coefficient_is_rewritten_unless_exact_in_every_order():
+    """#2098 retracted the row-scale test this replaced: a zero coefficient whose sum
+    is not exact in every order is never benign, whatever else is in its row (the
+    matched hull pairs of test_1846 included -- their residue order-depends)."""
     from discopt.modeling._exact_polynomial import _sum_is_benign
 
     pairs = [Fraction(c) for c in (1e-8, -1e-8, -4e-8, 4e-8)]
-    assert _sum_is_benign(pairs, Fraction(1)) is True
-    assert _sum_is_benign(pairs, None) is False
-    issue = [Fraction(c) for c in (M, 1.0, -M, -1.0)]
-    assert _sum_is_benign(issue, Fraction(0)) is False
-    assert _sum_is_benign(issue, Fraction(1)) is False  # bound ~2**55 >> 2**27
+    assert _sum_is_benign(pairs) is False
+    assert _sum_is_benign([Fraction(M), Fraction(1), Fraction(-M), Fraction(-1)]) is False
+    assert _sum_is_benign([Fraction(M), Fraction(-M)]) is True  # exact in every order
 
 
 @pytest.mark.unit

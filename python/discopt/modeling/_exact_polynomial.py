@@ -75,10 +75,33 @@ arithmetic and sound, but a relaxation built from the expanded form can be weake
 than one built from the factored form. It only happens to rewritten bodies (none in
 the in-repo corpus).
 
-Declining is always sound here: the expression is then left exactly as written,
-which is the behaviour before this module existed. It declines for a body whose
-static shape is not ``()``, an expansion over :data:`_MAX_CONTRIBUTIONS`
-contributions, or a non-finite constant.
+Arrays (#2097). An array expression is collected as a numpy object array of
+polynomials, one per element, with numpy broadcasting and C-order flat slots (the
+slot every downstream reader uses): elementwise ``+ - * / **``, basic and fancy
+indexing of a Variable/Parameter, ``dm.sum`` over all or one axis, and ``@`` of 1-D
+and 2-D operands. A scalar ``dm.sum``/``@`` (``dm.sum(t + x - t)``, ``x @ Q @ x``,
+``dm.sum(V * x[R] * x[C])``) is expanded into its entries and merged with the row's
+visible terms, because that is what the downstream collectors do. An array *body*
+is one ``Constraint`` and many rows: each element is judged as its own row, and a
+rewrite is a sum of aligned terms ``C * x[a:b:c] * ...``, one per monomial slot
+every element shares, using basic indices only (a gather disables the Rust model's
+FBBT). When the elements do not line up that way,
+:class:`ArrayRowCancellationError` refuses the row rather than certifying its
+rounded form.
+
+Declining is sound only in the sense that the expression is then left exactly as
+written, which is the behaviour before this module existed. It declines for an
+expansion over :data:`_MAX_CONTRIBUTIONS` contributions, a non-finite constant,
+or an array node of unknown shape; a reduction that declines stays an opaque atom
+(its budget is refunded so the rest of its row is still collected).
+
+Shared sums (#2100). Every walk here follows a DAG, not a tree: the fast passes
+stop at the first sum they reach twice (a shared sum repeats its monomials), and
+an additive chain whose tree expansion is over the budget but whose DAG is not
+(``r = r + r`` repeated: ``d + 1`` nodes, ``2**d`` occurrences) is collected by
+exact multiplicity over the DAG and always rewritten, to ``2**d * x``. Downstream
+walkers then never see the sharing. When that coefficient has no binary64
+(``d >= 1024``), :class:`SharedSumOverflowError` refuses the row.
 
 Atoms are keyed **structurally** (:func:`_structural_id`), so two distinct but
 identical subtrees -- two separate ``dm.exp(z)`` objects -- are one monomial. Before
@@ -86,15 +109,16 @@ identical subtrees -- two separate ``dm.exp(z)`` objects -- are one monomial. Be
 optima. A node is merged only when its fields fully determine its value; tagged nodes,
 ``CustomCall`` and unusual index forms keep identity keys and are simply never merged.
 
-Residual exposure (not handled; recorded so it is not mistaken for covered): an
-opaque node that a downstream collector nevertheless expands -- e.g. a
-``dm.sum`` of a nonlinear array, or ``x @ Q @ x`` -- can still share a monomial with
-the visible terms of its row (#2097). A coefficient whose exact value is **zero** has no relative
-error, so its sum is judged against the row's largest exact coefficient instead
-(:func:`_sum_is_benign`): in a row dominated by a much larger coefficient, a
-zero coefficient may keep a float residue below ``2**-26`` of that scale. That is
-**not** harmless (retracted, #2098): the residue can fix a variable the written row
-leaves free and certify a wrong bound. Tracked by #2098.
+Residual exposure (not handled; recorded so it is not mistaken for covered): a
+reduction over :data:`_MAX_CONTRIBUTIONS` entries, and an index into an expression
+(``(A @ x)[i]``) are atoms -- their inner array is collected exactly once per model
+pass, but its entries are not merged with the row's visible terms.
+
+A coefficient whose exact value is **zero** is rewritten whenever its sum is not
+exact in every order (#2098): there is no relative error to bound it by, and a
+residue next to a large coefficient or constant is a coefficient the written row
+does not have -- small against the row for checking a point, but enough to fix a
+variable the row leaves free and certify a bound that excludes feasible points.
 """
 
 from __future__ import annotations
@@ -140,6 +164,20 @@ _Poly = dict
 
 class _Decline(Exception):
     """The body is outside what this module collects; leave it as written."""
+
+
+class _Overflow(_Decline):
+    """A collected coefficient is outside the binary64 range."""
+
+
+def _size(shape: tuple) -> int:
+    return int(np.prod(shape, dtype=np.int64))
+
+
+def _scalar_array(poly: _Poly) -> np.ndarray:
+    out = np.empty((), dtype=object)
+    out[()] = poly
+    return out
 
 
 def _flat_slot(var: Variable | Parameter, index) -> Optional[int]:
@@ -233,6 +271,9 @@ class _Collector:
         self.factor_nodes: dict = {}  # factor key -> node used when rebuilding
         self.param_values: dict = {}  # ("p", ...) factor key -> exact current value
         self.terms: dict = {}  # id(node) -> poly of a non-additive term (DAG reuse)
+        self.arrays: dict = {}  # id(node) -> object array of polys (#2097, DAG reuse)
+        self.tree_sizes: dict = {}  # id(node) -> leaf occurrences of its additive tree
+        self.shared = False  # a shared sum was collected through its DAG (#2100)
         self.n_contribs = 0
         self.dirty = False  # an atom's arguments were rewritten
 
@@ -277,8 +318,162 @@ class _Collector:
     def collect(self, root: Expression) -> _Poly:
         return self._sum_poly(root)
 
+    def _additive_children(self, node) -> Optional[list]:
+        """``[(child, exact factor)]`` of an additive node, ``None`` for a term.
+
+        The same edges :meth:`_sum_poly` follows: ``+``, ``-``, ``neg``,
+        ``SumOverExpression``, and ``*`` / ``/`` by a scalar constant.
+        """
+        t = type(node)
+        if t is BinaryOp:
+            op = node.op
+            if op == "+":
+                return [(node.left, _ONE), (node.right, _ONE)]
+            if op == "-":
+                return [(node.left, _ONE), (node.right, -_ONE)]
+            if op == "*":
+                if type(node.left) is Constant and node.left.value.ndim == 0:
+                    return [(node.right, self._frac(node.left))]
+                if type(node.right) is Constant and node.right.value.ndim == 0:
+                    return [(node.left, self._frac(node.right))]
+            elif op == "/" and type(node.right) is Constant and node.right.value.ndim == 0:
+                d = self._frac(node.right)
+                if d == 0:
+                    raise _Decline("division by zero")
+                return [(node.left, _ONE / d)]
+            return None
+        if t is UnaryOp and node.op == "neg":
+            return [(node.operand, -_ONE)]
+        if t is SumOverExpression:
+            return [(term, _ONE) for term in node.terms]
+        return None
+
+    def _tree_terms(self, root) -> int:
+        """Leaf occurrences of ``root``'s additive chain *as a tree* (#2100).
+
+        Linear in the DAG (memoised by node). A shared sum ``r = r + r`` nested
+        ``d`` deep is ``d + 1`` nodes and ``2**d`` occurrences -- what the walk in
+        :meth:`_sum_poly` would visit.
+        """
+        memo = self.tree_sizes
+        if id(root) in memo:
+            size: int = memo[id(root)]
+            return size
+        stack: list = [(root, None)]
+        while stack:
+            node, kids = stack.pop()
+            if id(node) in memo:
+                continue
+            if kids is None:
+                kids = self._additive_children(node)
+                if kids is None:
+                    memo[id(node)] = 1
+                    continue
+                stack.append((node, kids))
+                stack.extend((k, None) for k, _ in kids if id(k) not in memo)
+                continue
+            memo[id(node)] = sum(memo[id(k)] for k, _ in kids)
+        size = memo[id(root)]
+        return size
+
+    def _dag_leaf_edges(self, root) -> int:
+        """Term references in ``root``'s additive chain counted once per distinct
+        sum node -- what :meth:`_sum_poly_dag` reads; linear in the DAG."""
+        seen: set = set()
+        edges = 0
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            kids = self._additive_children(node)
+            if kids is None:
+                continue
+            for k, _ in kids:
+                if self._additive_children(k) is None:
+                    edges += 1
+                elif id(k) not in seen:
+                    stack.append(k)
+        return edges
+
+    def _sum_poly_dag(self, root) -> _Poly:
+        """Exact polynomial of a *shared* additive DAG, linear in its size (#2100).
+
+        Each node's coefficient is the exact sum, over every path from ``root``, of
+        the product of the factors on that path (parents before children, in
+        reverse post-order), so ``r = r + r`` ``d`` deep gives ``x`` the single
+        coefficient ``2**d``. These aggregated contributions are not the per-path
+        sums a downstream collector would form, so they cannot decide whether the
+        row needs a rewrite: the row is always rewritten (``dirty``), which is
+        sound and leaves every downstream walk a row with no sharing to expand.
+        """
+        self.dirty = True
+        self.shared = True
+        order: list = []
+        seen: set = set()
+        kids_of: dict = {}
+        stack: list = [(root, False)]
+        while stack:
+            node, done = stack.pop()
+            if done:
+                order.append(node)
+                continue
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            kids = self._additive_children(node)
+            if kids is None:
+                continue
+            kids_of[id(node)] = kids
+            stack.append((node, True))
+            stack.extend((k, False) for k, _ in reversed(kids) if id(k) not in seen)
+        coef: dict = {id(root): _ONE}
+        leaves: dict = {}  # id(leaf) -> [leaf, exact coefficient]
+        for node in reversed(order):  # reverse post-order: every parent first
+            c = coef.pop(id(node), None)
+            if c is None:
+                continue
+            for k, f in kids_of[id(node)]:
+                if id(k) in kids_of:
+                    coef[id(k)] = coef.get(id(k), Fraction(0)) + c * f
+                else:
+                    hit = leaves.get(id(k))
+                    if hit is None:
+                        leaves[id(k)] = [k, c * f]
+                    else:
+                        hit[1] += c * f
+        if not kids_of:  # ``root`` is itself a term
+            leaves[id(root)] = [root, _ONE]
+        acc: _Poly = {}
+        for leaf, c in leaves.values():
+            if c == 0:
+                continue
+            if type(leaf) is Constant:
+                if leaf.value.ndim != 0:
+                    raise _Decline("array constant in scalar position")
+                self._count(1)
+                acc.setdefault((), []).append(c * self._frac(leaf))
+                continue
+            term = self.terms.get(id(leaf))
+            if term is None:
+                term = self._term(leaf)
+                self.terms[id(leaf)] = term
+            for k, v in term.items():
+                self._count(len(v))
+                acc.setdefault(k, []).extend(q * c for q in v)
+        return acc
+
     def _sum_poly(self, root) -> _Poly:
         """Exact polynomial of ``root``: flatten its additive chain, merge once."""
+        if (
+            self._tree_terms(root) > _MAX_CONTRIBUTIONS
+            and self._dag_leaf_edges(root) <= _MAX_CONTRIBUTIONS
+        ):
+            # Over budget as a tree, within it through its sharing (#2100). A chain
+            # that is long without shared sums still declines, on the budget,
+            # exactly as before.
+            return self._sum_poly_dag(root)
         acc: _Poly = {}
         stack: list = [(root, _ONE)]
         pop, push = stack.pop, stack.append
@@ -384,16 +579,256 @@ class _Collector:
             return self._atom(node)
         if t is MatMulExpression:
             var = _array_linear_var(node)
-            if var is None:
-                return self._atom(node)
-            mat = node.left.value if type(node.left) is Constant else node.right.value
-            return self._linear_array(var, np.asarray(mat, dtype=np.float64))
+            if var is not None:
+                mat = node.left.value if type(node.left) is Constant else node.right.value
+                return self._linear_array(var, np.asarray(mat, dtype=np.float64))
+            return self._reduction(node)
         if t is SumExpression:
             aff = affine_array_sum(node)
             if aff is not None:
                 return self._linear_array(*aff)
-            return self._atom(node)
+            return self._reduction(node)
         return self._atom(node)
+
+    def _reduction(self, node) -> _Poly:
+        """A scalar ``dm.sum`` / ``@`` of an array, expanded per flat slot (#2097).
+
+        Downstream collectors expand ``dm.sum(x**2)``, ``x @ Q @ x`` and
+        ``dm.sum(V * x[R] * x[C])`` into their entries and merge them with the
+        row's other terms, so they are expanded here the same way. Falls back to
+        an opaque atom -- the pre-#2097 behaviour -- when the operand is outside the
+        array skeleton, the expansion is over budget, or the result holds an
+        element of an opaque array (rebuilding it would need an index into an
+        opaque node). The budget spent on a failed attempt is refunded, so a large
+        ``x @ Q @ x`` does not stop the rest of its row from being collected.
+        """
+        saved = self.n_contribs
+        try:
+            if type(node) is SumExpression:
+                if node.axis is not None:
+                    raise _Decline("axis reduction in scalar position")
+                arr = _scalar_array(self._add_all(self._array(node.operand).reshape(-1).tolist()))
+            else:
+                arr = self._matmul(self._array(node.left), self._array(node.right))
+        except _Decline:
+            self.n_contribs = saved
+            return self._atom(node)
+        if arr.shape != ():
+            self.n_contribs = saved
+            return self._atom(node)
+        poly = arr[()]
+        if any(f[0] == "e" for key in poly for f in key):
+            self.n_contribs = saved
+            return self._atom(node)
+        return dict(poly)
+
+    # -- the array walk (#2097) --------------------------------------------------
+    #
+    # An array expression is collected as a numpy object array of polynomials, one
+    # per element, with numpy's broadcasting and C-order flat slots: element ``j``
+    # of a Variable ``x`` is the factor ``("v", id(x), j)``, exactly the slot the
+    # scalar path gives ``x[np.unravel_index(j, x.shape)]`` and the one every
+    # downstream reader uses (the #941 rule: a wrong slot is a false certificate).
+    # Polynomials are never mutated once built, so elements may be shared.
+
+    def _array(self, node) -> np.ndarray:
+        hit = self.arrays.get(id(node))
+        if hit is None:
+            hit = self._array_uncached(node)
+            known = _known_shape(node)
+            if known is not None and tuple(known) != hit.shape:
+                raise _Decline("array walk disagrees with the static shape")
+            self.arrays[id(node)] = hit
+        return hit
+
+    def _array_uncached(self, node) -> np.ndarray:
+        t = type(node)
+        if t is Constant:
+            vals = np.asarray(node.value, dtype=np.float64)
+            if not np.all(np.isfinite(vals)):
+                raise _Decline("non-finite constant")
+            self._count(int(vals.size))
+            out = np.empty(vals.shape, dtype=object)
+            for j, v in enumerate(vals.reshape(-1).tolist()):
+                # A zero entry keeps its (zero) contribution, so ``C * y`` with a
+                # zero in ``C`` still holds ``y``'s monomial in that element and the
+                # elements stay aligned for :func:`_rebuild_array`.
+                out.reshape(-1)[j] = {(): [Fraction(v)]}
+            return out
+        if t is Variable or t is Parameter:
+            if tuple(node.shape or ()) == ():
+                return _scalar_array(self._term(node))
+            shape = tuple(node.shape)
+            return self._leaf_entries(node, np.arange(_size(shape)).reshape(shape))
+        if t is IndexExpression:
+            base = node.base
+            if type(base) is Variable or type(base) is Parameter:
+                shape = tuple(base.shape or ())
+                if shape == ():
+                    raise _Decline("index into a scalar leaf")
+                try:
+                    flat = np.arange(_size(shape)).reshape(shape)[node.index]
+                except (IndexError, TypeError, ValueError):
+                    raise _Decline("index numpy cannot resolve") from None
+                return self._leaf_entries(base, np.asarray(flat))
+            base_arr = self._array(base)
+            try:
+                sub = base_arr[node.index]
+            except (IndexError, TypeError, ValueError):
+                raise _Decline("index numpy cannot resolve") from None
+            return sub if isinstance(sub, np.ndarray) else _scalar_array(sub)
+        if t is BinaryOp:
+            op = node.op
+            if op == "+" or op == "-" or op == "*":
+                a = self._array(node.left)
+                b = self._array(node.right)
+                return self._elementwise(op, a, b)
+            if op == "/" and type(node.right) is Constant:
+                d = np.asarray(node.right.value, dtype=np.float64)
+                if not np.all(np.isfinite(d)) or np.any(d == 0.0):
+                    raise _Decline("division by zero or a non-finite constant")
+                inv = np.empty(d.shape, dtype=object)
+                for j, v in enumerate(d.reshape(-1).tolist()):
+                    inv.reshape(-1)[j] = {(): [_ONE / Fraction(v)]}
+                return self._elementwise("*", self._array(node.left), inv)
+            if op == "**":
+                k = self._small_power(node.right)
+                if k is not None:
+                    base_arr = self._array(node.left)
+                    out = np.empty(base_arr.shape, dtype=object)
+                    for j, p in enumerate(base_arr.reshape(-1).tolist()):
+                        acc: _Poly = {(): [_ONE]}
+                        for _ in range(k):
+                            acc = self._mul(acc, p)
+                        out.reshape(-1)[j] = acc
+                    return out
+        elif t is UnaryOp and node.op == "neg":
+            a = self._array(node.operand)
+            out = np.empty(a.shape, dtype=object)
+            for j, p in enumerate(a.reshape(-1).tolist()):
+                out.reshape(-1)[j] = self._scaled(p, -_ONE)
+            return out
+        elif t is SumOverExpression:
+            acc_arr: Optional[np.ndarray] = None
+            for term in node.terms:
+                a = self._array(term)
+                acc_arr = a if acc_arr is None else self._elementwise("+", acc_arr, a)
+            if acc_arr is None:
+                return _scalar_array({})
+            return acc_arr
+        elif t is SumExpression:
+            if node.axis is None:
+                return _scalar_array(self._term(node))
+            a = self._array(node.operand)
+            try:
+                moved = np.moveaxis(a, node.axis, 0)
+            except (np.exceptions.AxisError, TypeError, ValueError):
+                raise _Decline("reduction axis numpy cannot resolve") from None
+            out = np.empty(moved.shape[1:], dtype=object)
+            flat_out = out.reshape(-1)
+            cols = moved.reshape(moved.shape[0], -1)
+            for j in range(flat_out.size):
+                flat_out[j] = self._add_all(cols[:, j].tolist())
+            return out
+        elif t is MatMulExpression:
+            if _array_linear_var(node) is not None:
+                return _scalar_array(self._term(node))
+            arr = self._matmul(self._array(node.left), self._array(node.right))
+            if arr.shape == () and any(f[0] == "e" for key in arr[()] for f in key):
+                return _scalar_array(self._atom(node))
+            return arr
+        static = _known_shape(node)
+        if static == ():
+            return _scalar_array(self._sum_poly(node))
+        if static is None:
+            raise _Decline("array node of unknown shape")
+        return self._array_atom(node, tuple(static))
+
+    def _leaf_entries(self, base, flat: np.ndarray) -> np.ndarray:
+        """Polynomials of the entries ``flat`` (C-order slots) of a shaped leaf."""
+        self._count(int(flat.size))
+        out = np.empty(flat.shape, dtype=object)
+        dst = out.reshape(-1)
+        is_var = type(base) is Variable
+        for k, j in enumerate(flat.reshape(-1).tolist()):
+            if is_var:
+                fkey = ("v", id(base), j)
+                self.factor_nodes.setdefault(fkey, (base, j))
+                dst[k] = {(fkey,): [_ONE]}
+            else:
+                dst[k] = self._param(base, (base, j), j)
+        return out
+
+    def _array_atom(self, node, shape: tuple) -> np.ndarray:
+        """An opaque array node: element ``j`` is the factor ``("e", sid, j)``, with
+        the node keyed structurally (#2101) like a scalar atom."""
+        new = canonicalize_expression(
+            node, memo=self.memo, _atom_children_only=True, _params=self.params
+        )
+        if new is not node:
+            self.dirty = True
+        size = int(np.prod(shape, dtype=np.int64))
+        self._count(size)
+        out = np.empty(shape, dtype=object)
+        dst = out.reshape(-1)
+        for j in range(size):
+            fkey = ("e", _structural_id(new, self.memo), j)
+            self.factor_nodes.setdefault(fkey, (new, j))
+            dst[j] = {(fkey,): [_ONE]}
+        return out
+
+    def _scaled(self, p: _Poly, s: Fraction) -> _Poly:
+        return {k: [q * s for q in v] for k, v in p.items()}
+
+    def _add_all(self, polys: list) -> _Poly:
+        out: _Poly = {}
+        for p in polys:
+            for k, v in p.items():
+                self._count(len(v))
+                lst = out.get(k)
+                if lst is None:
+                    out[k] = list(v)
+                else:
+                    lst.extend(v)
+        return out
+
+    def _elementwise(self, op: str, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        try:
+            a2, b2 = np.broadcast_arrays(a, b)
+        except ValueError:
+            raise _Decline("operands do not broadcast") from None
+        out = np.empty(a2.shape, dtype=object)
+        dst = out.reshape(-1)
+        for j, (p, q) in enumerate(zip(a2.reshape(-1).tolist(), b2.reshape(-1).tolist())):
+            if op == "*":
+                dst[j] = self._mul(p, q)
+            elif op == "+":
+                dst[j] = self._add_all([p, q])
+            else:
+                dst[j] = self._add_all([p, self._scaled(q, -_ONE)])
+        return out
+
+    def _matmul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """numpy ``@`` for 1-D and 2-D operands, expanded exactly."""
+        if a.ndim == 0 or b.ndim == 0 or a.ndim > 2 or b.ndim > 2:
+            raise _Decline("matmul outside 1-D / 2-D")
+        a2 = a if a.ndim == 2 else a.reshape(1, -1)
+        b2 = b if b.ndim == 2 else b.reshape(-1, 1)
+        if a2.shape[1] != b2.shape[0]:
+            raise _Decline("matmul inner dimensions differ")
+        out = np.empty((a2.shape[0], b2.shape[1]), dtype=object)
+        for i in range(a2.shape[0]):
+            for k in range(b2.shape[1]):
+                out[i, k] = self._add_all(
+                    [self._mul(a2[i, j], b2[j, k]) for j in range(a2.shape[1])]
+                )
+        if a.ndim == 1 and b.ndim == 1:
+            return _scalar_array(out[0, 0])
+        if a.ndim == 1:
+            return out.reshape(-1)
+        if b.ndim == 1:
+            return out.reshape(-1)
+        return out
 
     def _param(self, base, node, flat: int) -> _Poly:
         v = float(np.asarray(base.value, dtype=np.float64).reshape(-1)[flat])
@@ -599,6 +1034,7 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
     scalar_vars: set = set()
     block_vars: set = set()
     consts: list = []
+    sums: set = set()  # additive nodes already walked (#2100)
     atoms: list = []
     try:
         stack: list = [(root, False)]  # (node, under a scale)
@@ -609,6 +1045,12 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
             if t is BinaryOp:
                 op = node.op
                 if op == "+" or op == "-":
+                    # A sum reached twice repeats every monomial under it, so it
+                    # is not clean -- and stopping here keeps this walk linear in
+                    # the DAG instead of exponential in its sharing depth (#2100).
+                    if id(node) in sums:
+                        raise _NotClean
+                    sums.add(id(node))
                     push((node.left, scaled))
                     push((node.right, scaled))
                     continue
@@ -627,6 +1069,9 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
                     push((node.operand, scaled))
                     continue
             elif t is SumOverExpression:
+                if id(node) in sums:
+                    raise _NotClean
+                sums.add(id(node))
                 stack.extend([(term, scaled) for term in node.terms])
                 continue
             elif t is Constant:
@@ -636,15 +1081,23 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
                 continue
             elif t is MatMulExpression or t is SumExpression:
                 var = _array_linear_var(node)
-                if var is None:
+                if var is not None:
+                    bases = {id(var)}
+                elif t is SumExpression and _opaque_head(node.operand):
                     key: tuple = (_fast_atom_key(node, memo, found, atoms),)
                     if key in seen:
                         raise _NotClean
                     seen.add(key)
                     continue
-                if id(var) in block_vars:
+                else:
+                    # #2097: downstream expands the reduction into its entries and
+                    # merges them with the row's other terms. A product block (one
+                    # monomial per element, no two elements alike) is clean when it
+                    # shares no variable with anything else; the rest go exact.
+                    bases = _fast_product_block(node, memo, found)
+                if not block_vars.isdisjoint(bases):
                     raise _NotClean
-                block_vars.add(id(var))
+                block_vars.update(bases)
                 continue
             # A term: a product of leaves (Parameter factors dropped, as scales).
             if t is IndexExpression or t is Variable:
@@ -664,6 +1117,279 @@ def _fast_clean(root: Expression, memo: dict, found: list) -> bool:
     if not _fast_atoms_distinct(atoms, memo):
         return False
     return len(consts) <= 1 or _floats_sum_order_exact(consts)
+
+
+def _opaque_head(node) -> bool:
+    """True when ``node`` is not part of the polynomial skeleton at its top."""
+    t = type(node)
+    if t is BinaryOp:
+        return node.op not in ("+", "-", "*", "/", "**")
+    if t is UnaryOp:
+        return bool(node.op != "neg")
+    return t is FunctionCall
+
+
+def _fast_product_block(node, memo: dict, found: list) -> set:
+    """Variable ids of ``dm.sum(P)`` when ``P`` is one elementwise product of whole
+    leaves; raises :class:`_NotClean` otherwise.
+
+    Every Variable factor must have exactly ``P``'s shape (no broadcasting), so
+    element ``j`` is one monomial over slot ``j`` of each Variable and no two
+    elements share a monomial. Constants and Parameters are scales.
+    """
+    if node.axis is not None:
+        raise _NotClean
+    op = node.operand
+    shape = _known_shape(op)
+    if not shape:
+        raise _NotClean
+    bases: set = set()
+    stack = [op]
+    while stack:
+        n = stack.pop()
+        t = type(n)
+        if t is BinaryOp:
+            if n.op == "*":
+                stack.append(n.left)
+                stack.append(n.right)
+                continue
+            if n.op == "/" and type(n.right) is Constant:
+                stack.append(n.left)
+                continue
+            if n.op == "**" and _Collector._small_power(n.right) is not None:
+                stack.append(n.left)
+                continue
+            raise _NotClean
+        if t is Constant:
+            continue
+        if t is Parameter:
+            found.append(n)
+            continue
+        if t is Variable and tuple(n.shape) == shape:
+            bases.add(id(n))
+            continue
+        raise _NotClean
+    if not bases:
+        raise _NotClean
+    return bases
+
+
+def _fast_clean_array(root: Expression, memo: dict, found: list) -> bool:
+    """:func:`_fast_clean` for an array body or one of unknown static shape (#2097).
+
+    Each element is its own row, so two terms are like terms only where they hold
+    the same monomial *in the same element*. A term over one Variable leaf (``c *
+    x[1:]``, ``x**2``) is checked per element: the flat slots it reads are compared,
+    with numpy broadcasting, against those of every other such term over the same
+    Variable and power -- so ``x[1:] - x[:-1]`` is clean and ``M*x + x - M*x`` is
+    not. Everything coarser (a product of two Variables, an atom, a reduction, a
+    matmul) is keyed by the leaves it reads, and any overlap with another term's
+    leaves sends the body to the exact pass. ``False`` is never wrong.
+    """
+    # (var id, power) -> (set of 0-d slots, list of array slots). A 0-d slot is one
+    # entry broadcast to every element, so two of them meet iff they are equal -- a
+    # set lookup, which keeps a row of n scalar terms linear (a pairwise numpy
+    # comparison made a 3000-term objective take 43 s, test_1619).
+    single: dict = {}
+    multi: set = set()  # leaf keys of products of several leaves, and of atoms
+    coarse: set = set()  # Variable keys a reduction / matmul expands
+    sums: set = set()  # additive nodes already walked (#2100, as in _fast_clean)
+    one_var_products: set = set()  # Variables with a product-of-leaves term over them alone
+    atoms: list = []  # every atom, for the #2101 structural comparison
+    n_const = 0
+    try:
+        stack: list = [(root, False)]
+        pop, push = stack.pop, stack.append
+        while stack:
+            node, scaled = pop()
+            t = type(node)
+            if t is BinaryOp:
+                op = node.op
+                if op == "+" or op == "-":
+                    if id(node) in sums:
+                        raise _NotClean
+                    sums.add(id(node))
+                    push((node.left, scaled))
+                    push((node.right, scaled))
+                    continue
+                if op == "*":
+                    if type(node.left) is Constant:
+                        push((node.right, True))
+                        continue
+                    if type(node.right) is Constant:
+                        push((node.left, True))
+                        continue
+                elif op == "/" and type(node.right) is Constant:
+                    push((node.left, True))
+                    continue
+            elif t is UnaryOp and node.op == "neg":
+                push((node.operand, scaled))
+                continue
+            elif t is SumOverExpression:
+                if id(node) in sums:
+                    raise _NotClean
+                sums.add(id(node))
+                stack.extend([(term, scaled) for term in node.terms])
+                continue
+            elif t is Constant:
+                n_const += 1
+                if scaled or n_const > 1:
+                    raise _NotClean
+                continue
+            elif t is MatMulExpression or t is SumExpression:
+                if t is MatMulExpression:
+                    var = _matmul_linear_var(node)
+                    if var is None:
+                        raise _NotClean
+                    keys: set = {("V", id(var))}
+                elif _opaque_head(node.operand):
+                    keys = {_fast_atom_key(node, memo, found, atoms)}
+                else:
+                    keys = {("V", b) for b in _fast_product_block_any_axis(node, memo, found)}
+                if not coarse.isdisjoint(keys) or not multi.isdisjoint(keys):
+                    raise _NotClean
+                if any(k[0] == "V" and (k[1], p) in single for k in keys for p in _POWERS):
+                    raise _NotClean
+                coarse |= keys
+                continue
+            keys, one = _fast_array_term_keys(node, memo, found, atoms)
+            if not keys:
+                n_const += 1  # a Parameter-only term: a constant once substituted
+                if n_const > 1:
+                    raise _NotClean
+                continue
+            if not coarse.isdisjoint(keys):
+                raise _NotClean
+            if one is None:
+                if not multi.isdisjoint(keys):
+                    raise _NotClean
+                multi |= keys
+                # A product of leaves of ONE Variable (``x*x``, ``x[1:]*x[:-1]``)
+                # can hold a single-leaf power's monomial (``x**2``); a product
+                # over two Variables or an atom never can.
+                if len(keys) == 1:
+                    (only,) = keys
+                    if only[0] == "V":
+                        if any((only[1], p) in single for p in _POWERS):
+                            raise _NotClean
+                        one_var_products.add(only[1])
+                continue
+            skey, flat = one
+            if skey[0] in one_var_products:
+                raise _NotClean
+            scalars, arrays = single.setdefault(skey, (set(), []))
+            if flat.ndim == 0:
+                j = int(flat)
+                if j in scalars or any(np.any(arr == j) for arr in arrays):
+                    raise _NotClean
+                scalars.add(j)
+                continue
+            if scalars and np.isin(flat, list(scalars)).any():
+                raise _NotClean
+            for other in arrays:
+                try:
+                    a, b = np.broadcast_arrays(flat, other)
+                except ValueError:
+                    raise _NotClean from None
+                if np.any(a == b):
+                    raise _NotClean
+            arrays.append(flat)
+    except _NotClean:
+        return False
+    # Atoms are keyed by identity above; two separate but identical ones (#2101)
+    # would read as two monomials, so they are compared structurally here.
+    return _fast_atoms_distinct(atoms, memo)
+
+
+#: Powers a single-leaf term may carry (``x``, ``x**2``, ... ``x**_MAX_POWER``).
+_POWERS = tuple(range(1, _MAX_POWER + 1))
+
+
+def _fast_product_block_any_axis(node, memo: dict, found: list) -> set:
+    """:func:`_fast_product_block` for a reduction over any axis: each entry of a
+    full-shape Variable lands in exactly one element, once."""
+    if node.axis is None:
+        return _fast_product_block(node, memo, found)
+    full = SumExpression(node.operand)
+    return _fast_product_block(full, memo, found)
+
+
+def _matmul_linear_var(node) -> Optional[Variable]:
+    """The Variable of ``C @ x`` / ``x @ C`` (constant ``C`` of any rank), else None."""
+    left, right = node.left, node.right
+    if type(left) is Constant and type(right) is Variable:
+        return right
+    if type(right) is Constant and type(left) is Variable:
+        return left
+    return None
+
+
+def _fast_array_term_keys(node, memo: dict, found: list, atoms: list) -> tuple:
+    """``(leaf keys, single)`` of one elementwise product term, or raise
+    :class:`_NotClean`. ``single`` is ``((var id, power), flat slots)`` when the term
+    reads exactly one Variable leaf once (possibly raised to a power), else None."""
+    keys: set = set()
+    leaves: list = []  # (Variable, index or None, power)
+    has_atom = False
+    stack = [(node, 1)]
+    while stack:
+        n, power = stack.pop()
+        t = type(n)
+        if t is BinaryOp:
+            op = n.op
+            if op == "*":
+                stack.append((n.left, power))
+                stack.append((n.right, power))
+                continue
+            if op == "/" and type(n.right) is Constant:
+                stack.append((n.left, power))
+                continue
+            if op == "**":
+                k = _Collector._small_power(n.right)
+                if k is not None:
+                    tb = type(n.left)
+                    if tb is not Variable and tb is not IndexExpression and tb is not Parameter:
+                        raise _NotClean
+                    stack.append((n.left, power * k))
+                    continue
+            if op == "+" or op == "-":
+                raise _NotClean
+        elif t is Constant:
+            continue
+        elif t is Parameter:
+            found.append(n)
+            continue
+        elif t is Variable:
+            keys.add(("V", id(n)))
+            leaves.append((n, None, power))
+            continue
+        elif t is IndexExpression:
+            tb = type(n.base)
+            if tb is Variable:
+                keys.add(("V", id(n.base)))
+                leaves.append((n.base, n.index, power))
+                continue
+            if tb is Parameter:
+                found.append(n.base)
+                continue
+            raise _NotClean  # an index into an expression: the exact pass reads it
+        elif t is UnaryOp and n.op == "neg":
+            raise _NotClean
+        elif t is SumOverExpression or t is MatMulExpression or t is SumExpression:
+            raise _NotClean
+        keys.add(_fast_atom_key(n, memo, found, atoms))
+        has_atom = True
+    if has_atom or len(leaves) != 1 or leaves[0][2] == 0:
+        return keys, None
+    var, index, power = leaves[0]
+    shape = tuple(var.shape or ())
+    flat = np.arange(_size(shape)).reshape(shape)
+    if index is not None:
+        try:
+            flat = np.asarray(flat[index])
+        except (IndexError, TypeError, ValueError):
+            raise _NotClean from None
+    return keys, ((id(var), power), flat)
 
 
 def _array_linear_var(node) -> Optional[Variable]:
@@ -807,7 +1533,7 @@ def _fast_leaf_key(n, memo: dict, scalar_vars: set, found: list, atoms: list) ->
 _CANCELLATION_LIMIT = 2**27
 
 
-def _sum_is_benign(contribs: list, scale: Optional[Fraction] = None) -> bool:
+def _sum_is_benign(contribs: list) -> bool:
     """True unless float summation of ``contribs`` can lose over half its digits.
 
     Any-order binary64 summation of ``n`` terms has relative error at most
@@ -825,30 +1551,30 @@ def _sum_is_benign(contribs: list, scale: Optional[Fraction] = None) -> bool:
     of magnitude between the defect and the corpus on either side. A sum that is
     exact in every order (:func:`_sum_is_order_exact`) is benign whatever its
     ``kappa`` -- that covers a full cancellation ``M - M`` to an exact zero.
+
+    A sum whose exact value is **zero** but which is *not* exact in every order is
+    never benign (#2098): its ``kappa`` is infinite, and any float residue is a
+    coefficient on a variable the written row does not hold. An earlier version
+    measured that residue against the row's largest coefficient and kept it when
+    it was below ``2**-26`` of that scale. That is safe for checking a point and
+    wrong for a bound: in ``((t + x) - t) - x + y == 1e13`` the residue ``-1`` on
+    ``x`` read the row as ``-x + y == 1e13``, which with ``y <= 1e13`` forces
+    ``x == 0``, and the certified bound excluded every feasible ``x > 0``.
+    Rewriting a zero coefficient only *drops* its terms, so it is always sound.
     """
     if _sum_is_order_exact(contribs):
         return True
     total = sum(contribs, Fraction(0))
+    if total == 0:
+        return False
     n = sum(1 for q in contribs if q != 0)
     abs_sum = sum((abs(q) for q in contribs), Fraction(0))
-    if total == 0:
-        # A coefficient that is exactly 0 has no relative error to bound, so the
-        # same error bound is measured against the row's ``scale`` (its largest
-        # exact coefficient) instead. Measured: the hull perspective rows of
-        # ``test_1846`` carry symbolically matched pairs ``[1e-8, -1e-8, -4e-8,
-        # 4e-8]`` -- residue <= ~1e-23 next to O(1) coefficients, not a defect --
-        # while the issue's ``(t + a) - t - a`` (``[M, 1, -M, -1]``, nothing else
-        # in the row) can read as ``-a``: an O(1) error in a row of zeros.
-        if scale is None or scale == 0:
-            return False
-        return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * scale)
     return bool(abs_sum * (n - 1) <= _CANCELLATION_LIMIT * abs(total))
 
 
 def _groups_benign(groups: list) -> list:
-    """The groups of one body that are *not* benign, judged against its scale."""
-    scale = max((abs(sum(g, Fraction(0))) for g in groups), default=Fraction(0))
-    return [g for g in groups if not _sum_is_benign(g, scale)]
+    """The groups of one body that are *not* benign."""
+    return [g for g in groups if not _sum_is_benign(g)]
 
 
 def _by_variable_monomial(poly: _Poly, param_values: dict) -> list:
@@ -897,6 +1623,24 @@ def _check_rewrite_is_exact(poly: _Poly, param_values: dict) -> None:
             )
 
 
+def _entry_index(shape: tuple, j: int):
+    """The index of C-order flat slot ``j`` in ``shape``, as the scalar path writes it."""
+    if len(shape) == 1:
+        return int(j)
+    return tuple(int(i) for i in np.unravel_index(j, shape))
+
+
+def _resolve(factor_nodes: dict, fkey) -> Expression:
+    """The node of a factor; array entries are stored lazily as ``(base, flat)``."""
+    node = factor_nodes[fkey]
+    if type(node) is tuple:
+        base, j = node
+        node = base[_entry_index(tuple(_known_shape(base) or base.shape), j)]
+        factor_nodes[fkey] = node
+    out: Expression = node
+    return out
+
+
 def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
     terms: list = []
     const_term = None
@@ -905,7 +1649,7 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
         try:
             c = float(exact)  # correctly rounded
         except OverflowError:
-            raise _Decline("coefficient outside the binary64 range") from None
+            raise _Overflow("coefficient outside the binary64 range") from None
         if c == 0.0:
             continue
         if key == ():
@@ -917,7 +1661,7 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
             j = i
             while j < len(key) and key[j] == key[i]:
                 j += 1
-            node = factor_nodes[key[i]]
+            node = _resolve(factor_nodes, key[i])
             factor = node if j - i == 1 else BinaryOp("**", node, _wrap(float(j - i)))
             mono = factor if mono is None else BinaryOp("*", mono, factor)
             i = j
@@ -931,6 +1675,157 @@ def _rebuild(poly: _Poly, factor_nodes: dict) -> Expression:
         only: Expression = terms[0]
         return only
     return SumOverExpression(terms)
+
+
+class SharedSumOverflowError(ValueError):
+    """A shared sum's collected coefficient is outside the binary64 range (#2100).
+
+    ``r = r + r`` nested ``d`` deep is ``2**d * x``; for ``d >= 1024`` no float holds
+    that coefficient. The row cannot be rewritten, and left as written its DAG is
+    expanded as a tree, in time ``2**d``, by every consumer that walks it -- the
+    solve would never return, whatever its time limit. So it is refused.
+    """
+
+
+class ArrayRowCancellationError(ValueError):
+    """An array-valued row needs an exact rewrite that no slice-only form can hold.
+
+    An array body (``x <= 1`` on a vector is one ``Constraint`` and many rows) whose
+    like terms cancel catastrophically is rewritten as a sum of *aligned* terms,
+    ``C * x[a:b:c] * y[...]``, one per monomial slot shared by every element. When
+    the elements' monomials do not line up that way -- different variables per
+    element, or an entry pattern no basic slice selects -- the exact form would need
+    a gather (``x[np.array([...])]``), which the Rust model cannot represent (it
+    then disables FBBT/presolve for the whole model). Leaving the row as written
+    certifies the rounded row (#2097), so this refuses instead (CLAUDE.md §3).
+    """
+
+
+def _basic_index(flat: np.ndarray, base_shape: tuple):
+    """A basic (int/slice) index of ``base_shape`` selecting exactly ``flat``, or None.
+
+    ``flat`` holds C-order slots in the result's shape. Returns ``Ellipsis`` for the
+    whole leaf in its own shape.
+    """
+    size = int(np.prod(base_shape, dtype=np.int64))
+    if flat.shape == tuple(base_shape) and np.array_equal(flat.reshape(-1), np.arange(size)):
+        return Ellipsis
+    grid = np.unravel_index(flat.reshape(-1), base_shape)
+    idx: list = []
+    for g in grid:
+        u = np.unique(g)
+        if u.size == 1:
+            idx.append(int(u[0]))
+            continue
+        step = int(u[1] - u[0])
+        if not np.array_equal(u, np.arange(int(u[0]), int(u[-1]) + 1, step)):
+            return None
+        idx.append(slice(int(u[0]), int(u[-1]) + 1, step))
+    index = idx[0] if len(idx) == 1 else tuple(idx)
+    cand = np.arange(size).reshape(base_shape)[index]
+    if np.shape(cand) != flat.shape or not np.array_equal(cand, flat):
+        return None
+    return index
+
+
+def _factor_array(fkeys: list, shape: tuple, factor_nodes: dict) -> Expression:
+    """One factor position of an aligned slot: a node whose element ``j`` is
+    ``fkeys[j]`` (a single node when every element shares the factor)."""
+    first = fkeys[0]
+    if all(k == first for k in fkeys):
+        return _resolve(factor_nodes, first)
+    kind = first[0]
+    if kind in ("v", "p", "e") and all(k[0] == kind and k[1] == first[1] for k in fkeys):
+        lazy = factor_nodes[first]
+        base = lazy[0] if type(lazy) is tuple else None
+        if base is None:  # an entry already resolved; recover its base
+            n = lazy
+            base = n.base if type(n) is IndexExpression else None
+        if base is not None:
+            flat = np.asarray([k[2] for k in fkeys], dtype=np.int64).reshape(shape)
+            base_shape = tuple(_known_shape(base) or ())
+            index = _basic_index(flat, base_shape) if base_shape else None
+            if index is Ellipsis:
+                return base
+            if index is not None and kind != "e":
+                out: Expression = base[index]
+                if _known_shape(out) == tuple(shape):
+                    return out
+    raise ArrayRowCancellationError(
+        "an array-valued row's like terms cancel catastrophically in binary64, and "
+        "its exact form does not line up element by element into slices (#2097). "
+        "Write the row with its like terms already collected, or as scalar rows."
+    )
+
+
+def _rebuild_array(arr: np.ndarray, factor_nodes: dict) -> Expression:
+    """Exact canonical form of an array body: aligned monomial slots (see
+    :class:`ArrayRowCancellationError`) plus one constant array."""
+    shape = arr.shape
+    n = int(arr.size)
+    const = np.zeros(n)
+    elems: list = []
+    for j, poly in enumerate(arr.reshape(-1).tolist()):
+        items = []
+        for key, contribs in poly.items():
+            exact = sum(contribs, Fraction(0))
+            try:
+                c = float(exact)
+            except OverflowError:
+                raise _Overflow("coefficient outside the binary64 range") from None
+            if key == ():
+                const[j] = c
+                continue
+            sig = tuple(f[:2] for f in key)
+            items.append((sig, key, c))
+        items.sort(key=lambda it: (it[0], it[1]))
+        elems.append(items)
+    sigs = [tuple(it[0] for it in e) for e in elems]
+    if any(sg != sigs[0] for sg in sigs):
+        raise ArrayRowCancellationError(
+            "an array-valued row's like terms cancel catastrophically in binary64, and "
+            "its elements do not share one monomial structure, so no slice-aligned "
+            "exact form exists (#2097). Write the row with its like terms already "
+            "collected, or as scalar rows."
+        )
+    terms: list = []
+    for slot in range(len(sigs[0])):
+        coefs = np.array([elems[j][slot][2] for j in range(n)], dtype=np.float64)
+        if not np.any(coefs):
+            continue  # cancelled to exactly zero in every element
+        keys = [elems[j][slot][1] for j in range(n)]
+        mono: Optional[Expression] = None
+        prev = None
+        power = 0
+        factors: list = []
+        for pos in range(len(keys[0])):
+            f = _factor_array([k[pos] for k in keys], shape, factor_nodes)
+            if f is prev:
+                power += 1
+                continue
+            if prev is not None:
+                factors.append((prev, power))
+            prev, power = f, 1
+        if prev is not None:
+            factors.append((prev, power))
+        for f, k in factors:
+            fac = f if k == 1 else BinaryOp("**", f, _wrap(float(k)))
+            mono = fac if mono is None else BinaryOp("*", mono, fac)
+        assert mono is not None
+        if np.all(coefs == coefs[0]):
+            c0 = float(coefs[0])
+            terms.append(mono if c0 == 1.0 else BinaryOp("*", _wrap(c0), mono))
+        else:
+            terms.append(BinaryOp("*", Constant(coefs.reshape(shape)), mono))
+    if np.any(const):
+        terms.append(Constant(const.reshape(shape)))
+    body: Optional[Expression] = None
+    for term in terms:
+        body = term if body is None else BinaryOp("+", body, term)
+    if body is None or _known_shape(body) != shape:
+        zeros = Constant(np.zeros(shape))
+        body = zeros if body is None else BinaryOp("+", zeros, body)
+    return body
 
 
 def _rebuild_atom_children(node: Expression, memo: dict, found: list) -> Expression:
@@ -949,6 +1844,20 @@ def _rebuild_atom_children(node: Expression, memo: dict, found: list) -> Express
         if left is node.left and right is node.right:
             return node
         return BinaryOp(node.op, left, right)
+    # #2097: an opaque reduction or index keeps its place in the row, but the array
+    # it reads is collected exactly (once per model pass, through ``memo``).
+    if type(node) is SumExpression:
+        new = canonicalize_expression(node.operand, memo=memo, _params=found)
+        return node if new is node.operand else SumExpression(new, axis=node.axis)
+    if type(node) is MatMulExpression:
+        left = canonicalize_expression(node.left, memo=memo, _params=found)
+        right = canonicalize_expression(node.right, memo=memo, _params=found)
+        if left is node.left and right is node.right:
+            return node
+        return MatMulExpression(left, right)
+    if type(node) is IndexExpression and not isinstance(node.base, (Variable, Parameter)):
+        new = canonicalize_expression(node.base, memo=memo, _params=found)
+        return node if new is node.base else IndexExpression(new, node.index)
     return node
 
 
@@ -978,29 +1887,78 @@ def canonicalize_expression(
         cached: Expression = hit[1]
         return cached
     found: list = []
+    shape = _known_shape(expr) if isinstance(expr, Expression) else None
     if _atom_children_only:
         out = _rebuild_atom_children(expr, memo, found)
-    elif not isinstance(expr, Expression) or _known_shape(expr) != ():
+    elif not isinstance(expr, Expression):
         out = expr
-    elif _fast_clean(expr, memo, found):
+    elif shape == ():
+        out = expr if _fast_clean(expr, memo, found) else _exact_scalar(expr, memo, found)
+    elif _fast_clean_array(expr, memo, found):
         out = expr
     else:
-        found.clear()
-        coll = _Collector(memo, found)
-        try:
-            poly = coll.collect(expr)
-            if coll.dirty or _needs_rewrite(poly, coll.param_values):
-                out = _rebuild(poly, coll.factor_nodes)
-                _check_rewrite_is_exact(poly, coll.param_values)
-            else:
-                out = expr
-        except _Decline:
-            out = expr
+        out = _exact_array(expr, memo, found)
     # Keep ``expr`` alive in the memo so its id cannot be reused within this pass.
     memo[key] = (expr, out, tuple(found))
     if _params is not None:
         _params.extend(found)
     return out
+
+
+def _shared_overflow() -> SharedSumOverflowError:
+    return SharedSumOverflowError(
+        "a sum shared through its own terms (e.g. r = r + r, repeated) collects to a "
+        "coefficient outside the binary64 range; no float row can hold it, and the "
+        "shared form costs time exponential in its sharing depth to read (#2100)."
+    )
+
+
+def _exact_scalar(expr: Expression, memo: dict, found: list) -> Expression:
+    found.clear()
+    coll = _Collector(memo, found)
+    try:
+        poly = coll.collect(expr)
+        if coll.dirty or _needs_rewrite(poly, coll.param_values):
+            out = _rebuild(poly, coll.factor_nodes)
+            _check_rewrite_is_exact(poly, coll.param_values)
+            return out
+    except _Overflow:
+        if coll.shared:
+            raise _shared_overflow() from None
+    except _Decline:
+        pass
+    return expr
+
+
+def _exact_array(expr: Expression, memo: dict, found: list) -> Expression:
+    """The exact pass for a body whose static shape is not ``()`` (#2097): an array
+    body, or one whose shape the cheap inference does not know (``dm.sum(...) - 6``).
+    Each element is a row of its own and is judged as one."""
+    found.clear()
+    coll = _Collector(memo, found)
+    try:
+        arr = coll._array(expr)
+        if arr.shape == ():
+            poly: _Poly = arr.item()  # the 0-d object array's polynomial
+            if any(f[0] == "e" for key in poly for f in key):
+                return expr  # an element of an opaque array: no scalar form to emit
+            if coll.dirty or _needs_rewrite(poly, coll.param_values):
+                out = _rebuild(poly, coll.factor_nodes)
+                _check_rewrite_is_exact(poly, coll.param_values)
+                return out
+            return expr
+        polys = arr.reshape(-1).tolist()
+        if coll.dirty or any(_needs_rewrite(p, coll.param_values) for p in polys):
+            out = _rebuild_array(arr, coll.factor_nodes)
+            for p in polys:
+                _check_rewrite_is_exact(p, coll.param_values)
+            return out
+    except _Overflow:
+        if coll.shared:
+            raise _shared_overflow() from None
+    except _Decline:
+        pass
+    return expr
 
 
 def _snapshot(params: list) -> tuple:
@@ -1029,8 +1987,12 @@ def _canonical_cached(holder, attr: str, memo: Optional[dict], what: str):
     found: list = []
     try:
         new = canonicalize_expression(expr, memo=memo, _params=found)
-    except ParameterCancellationError as e:
-        raise ParameterCancellationError(f"{what}: {e}") from None
+    except (
+        ParameterCancellationError,
+        ArrayRowCancellationError,
+        SharedSumOverflowError,
+    ) as e:
+        raise type(e)(f"{what}: {e}") from None
     holder._exact_body = new
     holder._exact_params = _snapshot(found)
     return new
@@ -1085,8 +2047,12 @@ def canonicalize_model(model) -> None:
             expr = getattr(aux, attr)
             try:
                 new = canonicalize_expression(expr, memo=memo)
-            except ParameterCancellationError as e:
-                raise ParameterCancellationError(f"if_else {attr}: {e}") from None
+            except (
+                ParameterCancellationError,
+                ArrayRowCancellationError,
+                SharedSumOverflowError,
+            ) as e:
+                raise type(e)(f"if_else {attr}: {e}") from None
             if new is not expr:
                 setattr(aux, attr, new)
 

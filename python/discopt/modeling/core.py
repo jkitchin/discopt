@@ -10266,6 +10266,24 @@ class Model:
                 # describe the recentred model).
                 if result.objective is not None and result.x is not None:
                     self._reconcile_objective_with_model(result)
+                # #1551 on THIS model too. The inner solve judged the recentred
+                # objective, which the solve door's exact pass (#2090/#2097) collects
+                # into exactly rounded coefficients -- resolvable to the ulp -- while
+                # the objective reported here is THIS model's, evaluated as written.
+                # Measured on #1551's ``6y^2 + By + C``: the inner guard saw no error
+                # and a certificate finer than the 0.039-wide enclosure of the
+                # user's objective passed. Downgrade-only, like every call of it.
+                from discopt.solver import (
+                    _resolve_abs_gap_tolerance,
+                    _withhold_unresolved_objective_certificate,
+                )
+
+                _withhold_unresolved_objective_certificate(
+                    result,
+                    self,
+                    float(gap_tolerance),
+                    _resolve_abs_gap_tolerance(abs_gap_tolerance),
+                )
                 if result.x is not None:
                     from discopt._evaluator_cache import solution_state_fingerprint
 
