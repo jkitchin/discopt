@@ -430,3 +430,21 @@ def test_same_verdicts_as_the_previous_implementation():
         assert got == want, (A.toarray(), rlo, rhi, lb, ub, ni)
         counts[got] += 1
     assert counts[True] > 100 and counts[False] > 100
+
+
+def test_projection_stops_at_its_stop_time():
+    """Review of #2113: the projection ignored ``stop_at`` and checked its size
+    cap only after a full pairwise product; 20 rows x 12 continuous columns ran
+    29 s past a 1 s stop. Now both are checked while combining. (This dense
+    24 x 12 system takes ~5 s to project without the check.)"""
+    rng = np.random.default_rng(0)
+    m, n = 24, 12
+    A = sp.csr_matrix(rng.integers(-3, 4, size=(m, n)).astype(float))
+    rlo = np.full(m, -np.inf)
+    rhi = rng.integers(0, 5, size=m).astype(float)
+    lb, ub = np.full(n, -np.inf), np.full(n, np.inf)
+    t0 = time.perf_counter()
+    got = exact_feasible(A, rlo, rhi, lb, ub, np.array([], int), stop_at=time.perf_counter() + 1.0)
+    took = time.perf_counter() - t0
+    assert got in (None, True, False)  # decided or undecided -- but on time
+    assert took < 3.0, took

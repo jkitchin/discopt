@@ -76,13 +76,17 @@ def _to_int_ineq(a: dict[int, Fraction], b: Fraction) -> tuple[dict[int, int], i
 
 
 def _fm_project(
-    ineqs: list[tuple[dict[int, int], int]], elim: list[int]
+    ineqs: list[tuple[dict[int, int], int]],
+    elim: list[int],
+    stop_at: Optional[float] = None,
 ) -> Optional[list[tuple[dict[int, int], int]]]:
     """Eliminate the columns ``elim`` from ``a.x <= b`` (integer data) by
     Fourier--Motzkin: the result holds for the other columns iff some real values
     of ``elim`` satisfy the input. ``None``: a constant row ``0 <= b < 0`` (the
     input is infeasible for every value of the other columns). Raises
-    ``_Undecided`` past ``EXACT_MAX_INEQS``.
+    ``_Undecided`` past ``EXACT_MAX_INEQS`` or ``stop_at``, both checked while
+    the pairwise combinations are formed (review of #2113: checked only after a
+    full product, 20 rows x 12 columns ran 29 s past a 1 s stop).
 
     Kohler's rule (Chernikov 1960, Kohler 1967) keeps the growth in check: after
     ``k`` eliminations a derived inequality combining more than ``k + 1`` input
@@ -106,6 +110,10 @@ def _fm_project(
             else:
                 rest[key] = orig
         for ap, bp, op in pos:
+            if stop_at is not None and time.perf_counter() >= stop_at:
+                raise _Undecided
+            if len(rest) > EXACT_MAX_INEQS:
+                raise _Undecided
             cp = ap[j]
             for an, bn, on in neg:
                 orig = op | on
@@ -204,7 +212,7 @@ def exact_feasible(
         return True
     ineqs = [(a, b) for a, b in ineqs if a]
     try:
-        proj = _fm_project(ineqs, cont)
+        proj = _fm_project(ineqs, cont, stop_at)
     except _Undecided:
         return None
     if proj is None:
