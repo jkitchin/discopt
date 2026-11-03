@@ -108,3 +108,27 @@ def test_base_set_refuted_presolve_off_reruns_with_per_probe_confirmation(monkey
     assert state["at_call"] == 2  # refuted at checkpoint 0, right after the base proof
     assert res.fallback and res.complete
     assert res.integrality == list(range(8))
+
+
+def test_checkpoint_solve_does_not_inflate_the_confirmation_reserve(monkeypatch):
+    """The reserve held back for the final confirmation is 2.5x the slowest
+    recent solve. The checkpoint-0 solve is not a filtering probe: if its
+    duration stayed in ``_recent``, a checkpoint that used its whole cap
+    (25% of the budget) would hold back ~62% of it from the filter."""
+    real_solve = _iis_milp._Engine._solve
+    state = {"offs": 0}
+    seen: list[float] = []
+
+    def solve(self, presolve, stop_at=None):
+        if presolve == "choose" and state["offs"]:
+            seen.append(max(self._recent, default=0.0))
+        out = real_solve(self, presolve, stop_at)
+        if presolve == "off" and state["offs"] == 0:
+            state["offs"] += 1
+            self._recent[-1] = 5.0  # as if the checkpoint-0 solve took 5 s
+        return out
+
+    monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
+    milp_iis(_parity_model(46), total_time_limit=60.0)
+    assert state["offs"] == 1 and seen
+    assert seen[0] < 1.0  # the filter's first probe does not see the 5 s checkpoint
