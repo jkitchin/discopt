@@ -55,6 +55,9 @@ _INF = 1e20  # discopt's unbounded-bound sentinel
 
 #: A solve is not started with less wall time than this left in its budget.
 _MIN_SOLVE_S = 0.05
+#: Share of ``total_time_limit`` the presolve-free confirmation of the base set
+#: (checkpoint 0) may use.
+_BASE_CONFIRM_FRACTION = 0.25
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -381,15 +384,17 @@ class _Engine:
         active_bounds: set[tuple[int, str]],
         active_int: set[int],
         stop_at: Optional[float] = None,
+        presolve: tuple[str, ...] = ("choose", "off"),
     ) -> Optional[bool]:
         """``True`` iff presolve-on AND presolve-off both return ``Infeasible``;
         ``False`` if either finds an exact-integer feasible point (an earlier
         verdict was wrong); ``None`` if undecided (time limit, interrupt, or a
-        "feasible" status whose point is a tolerance artifact)."""
+        "feasible" status whose point is a tolerance artifact). ``presolve``
+        restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
         MS = self.hs.HighsModelStatus
         all_infeasible = True
-        for p in ("choose", "off"):
+        for p in presolve:
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
@@ -606,8 +611,11 @@ def milp_iis(
     returned (``complete=False``, ``proven_irreducible=False``): a subsystem that
     is still proven infeasible under both configurations but may contain
     undecided members. With ``"final"`` the filter stops early enough
-    (two recent solve durations) to confirm it, and the subsystem confirmed at
-    the end of each completed phase is kept as a fallback. If no subsystem can be confirmed in time,
+    (two recent solve durations) to confirm it, and the latest confirmed
+    subsystem is kept as a fallback: the base set, confirmed presolve-free right
+    after the base proof (one extra solve, capped at ``_BASE_CONFIRM_FRACTION``
+    of the budget), then the set at the end of each completed phase. If no
+    subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
     ``sat_candidate``: on a pure-binary clause model, start from a small
@@ -878,11 +886,31 @@ def _milp_iis_arrays(
         redo.fallback = True
         return redo
 
-    complete = True
     # "final": the latest subsystem confirmed infeasible under both
     # configurations, kept as the anytime fallback. ("each" confirms every
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
+    if confirm == "final" and deadline is not None:
+        # Checkpoint 0: the base set, proven presolve-on just above, confirmed
+        # presolve-off too. Without it a budget that runs out before the first
+        # phase ends has nothing confirmed to return (TimeoutError), although
+        # the base set is a valid -- if large -- infeasible subsystem. Capped so
+        # a slow presolve-free solve cannot eat the filter's budget.
+        base_stop = min(
+            deadline, time.perf_counter() + _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0)
+        )
+        try:
+            verdict0 = eng.confirm_infeasible(
+                cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
+            )
+        except _OutOfTime:
+            verdict0 = None
+        if verdict0 is True:
+            checkpoint = (set(cons), set(bounds), set(ints_active))
+        elif verdict0 is False:
+            return redo_each()
+
+    complete = True
     try:
         by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
         phases = [by_name[c] for c in phase_order]
