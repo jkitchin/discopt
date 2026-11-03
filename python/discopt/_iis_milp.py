@@ -1089,7 +1089,13 @@ def _milp_iis_arrays(
 #: instances, 29 of them at or below Gurobi's reference size, against 29 / 23 for
 #: ICB alone; adding CIB-r changed nothing, and stopping members 2x after the
 #: first completion lost size on 2 instances.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r")
+#: With the SAT core extended to PB rows, ``ICB-n`` (no core) joins: the core
+#: steers some pure-binary models to a larger many-integralities IIS while an
+#: almost-LP one is smaller (domset-hexgrid 446* -> 176). Re-measured on the
+#: final stack (50 x 6 orders incl. ICB-n and the oracle ladder CIB-l, 60 s):
+#: ICB+CIB+ICB-r+ICB-n completes 35, 33 of them at or below Gurobi (ICB alone:
+#: 31 / 26); adding CIB-r or CIB-l completes nothing more.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
