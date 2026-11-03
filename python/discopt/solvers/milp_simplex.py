@@ -115,10 +115,11 @@ def milp_cmir_enabled() -> bool:
     in-repo corpus, 78 convex MINLPLib instances selected by metadata, the #2107 four)
     at 20 s, arms interleaved, pyscipopt absent: 757 checks, 0 violations (no bound past
     its ``minlplib.solu`` optimum, every incumbent independently verified); certified
-    99 -> 102 (``launch``, ``rsyn0820m``, ``syn20m02m``), none lost; total wall
-    1343.4 -> 1315.5 s. Of 7 looser bounds, 5 are on instances where no c-MIR cut is
-    separated (timing noise) and ``syn20m03m`` is tighter in 3/3 interleaved reps
-    (2806-2838 vs 3402-3432, maximize). The one real loss is ``m7`` (bound 28.75 vs
+    99 -> 102, none lost (``rsyn0820m`` and ``syn20m02m`` separate c-MIR cuts;
+    ``launch`` separates none, so that gain is noise); total wall 1343.4 -> 1315.5 s.
+    Of 7 looser bounds, 5 are on instances where no c-MIR cut is separated (timing
+    noise) and ``syn20m03m`` is tighter in 3/3 interleaved reps (2806-2838 vs
+    3402-3432, maximize). The one real loss is ``m7`` (bound 28.75 vs
     61.8-63.1 in 3/3, uncertified both ways): on its master the extra rows raise the
     node LPs' rejected unbounded verdicts 5 -> 27 against free layout columns, the open
     #2107 ``m6`` defect. ``=0`` restores the strong budget without c-MIR exactly.

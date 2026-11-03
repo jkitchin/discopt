@@ -14204,10 +14204,13 @@ name of the 234 MINLPLib instances with `convex = True`, integers, `nvars <= 250
 | c-MIR (noise relaxation on) | 757 | 0 | 99 -> 102 | `launch`, `rsyn0820m`, `syn20m02m` | none | 1343.4 -> 1315.5 s |
 
 Attribution with the cumulative profile counters: the relaxation fires on the two `clay`
-gains (5 and 7 entries) and on **none** of the noise panel's lost or looser instances in
+gains (5 and 7 entries) and on **none** of the noise panel's other gains
+(`rsyn0815m`, `smallinvDAXr5b150-165`), its lost instance or its looser bounds, in
 either arm, so those are timing noise (an earlier run with the first cap had
 `smallinvDAXr5b150-165` as its one loss; it certifies in 11.8 s in both arms alone).
-c-MIR separates no cut on 5 of the panel's 7 looser bounds; `syn20m03m` is tighter in
+Of the c-MIR panel's gains, `rsyn0820m` and `syn20m02m` separate c-MIR cuts (382 /
+366; `syn20m02m` certifies in 7.5 s) and `launch` separates none (noise). c-MIR
+separates no cut on 5 of the panel's 7 looser bounds; `syn20m03m` is tighter in
 3/3 interleaved reps (2806-2838 vs 3402-3432, maximize). The one reproducible loss is
 `m7` (28.75 vs 61.8-63.1, 3/3, uncertified both ways; on its master alone 38.7 vs 103.9
 at 20 s): the extra rows raise the node LPs' rejected unbounded verdicts 5 -> 27 against
