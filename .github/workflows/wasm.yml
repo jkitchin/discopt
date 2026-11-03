@@ -53,3 +53,12 @@ jobs:
             sleep 1
           done
           node crates/discopt-wasm/tests/examples_in_pyodide.mjs http://localhost:8731
+      # The IIS view: its pure functions under node --test, then the page itself
+      # in Chromium (worker, table, graph, editor links, axe in both themes,
+      # reflow at 320 px). The examples above never touch the DOM.
+      - name: Test the IIS view
+        run: |
+          set -euo pipefail
+          npm --prefix crates/discopt-wasm/tests run test:render
+          npx --prefix crates/discopt-wasm/tests playwright install --with-deps chromium
+          npm --prefix crates/discopt-wasm/tests run test:page
