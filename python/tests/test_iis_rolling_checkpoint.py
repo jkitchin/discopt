@@ -132,3 +132,22 @@ def test_a_refuting_rolling_confirmation_redoes_the_run(monkeypatch):
     res = milp_iis(_model(), total_time_limit=60.0, sat_candidate=False, order="CIB")
     assert state["n"] >= 2
     assert res.fallback and res.complete
+
+
+def test_an_unfinished_run_answers_with_the_smallest_confirmed_set(monkeypatch):
+    """Mid-way through the integrality phase the current set counts MORE
+    elements than the base set: each relaxed integrality turns the column's two
+    finite bounds into elements. An unfinished run must keep the smaller
+    checkpoint, not confirm and return the larger current set (dijle: 8005
+    instead of 6282 once the final confirmation began to succeed)."""
+    m = dm.Model("grow")
+    x = m.binary("x", shape=(3,))
+    m.subject_to(x[0] + x[1] + x[2] == 1.5, name="half")
+    m.integer("y", shape=(27,), lb=0, ub=3)  # in no row: integrality droppable
+    m.minimize(0 * x[0])
+    base = 1 + 3 + 27  # one row and every integrality (held boxes are not elements)
+    calls = _cut_after(monkeypatch, 9)
+    res = milp_iis(m, total_time_limit=60.0, sat_candidate=False)
+    assert calls["choose"] > 9 and not res.complete
+    size = len(res.constraints) + len(res.bounds) + len(res.integrality)
+    assert size <= base

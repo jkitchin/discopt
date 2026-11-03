@@ -1587,18 +1587,31 @@ def _milp_iis_arrays(
         # that the 30 s cap was the cause was falsified). It removes a solve
         # that repeated a proof on record and gives the reserve its purpose;
         # anytime progress on that class comes from rolling checkpoints (``roll``).
-        try:
-            verdict = eng.confirm_infeasible(
-                cons,
-                bounds,
-                ints_active,
-                stop_at=deadline,
-                presolve=("off",)
-                if eng.proven_on(cons, bounds, ints_active)
-                else ("choose", "off"),
-            )
-        except _OutOfTime:
-            verdict = None
+        #
+        # An unfinished run answers with the SMALLEST confirmed set, not the
+        # latest: mid-way through the integrality phase the current set counts
+        # more elements than the base set (relaxed integralities turn bounds
+        # into elements). Confirming it anyway made dijle answer 8005 instead of
+        # checkpoint 0's 6282 at 300 s, once this confirmation began to succeed.
+        if (
+            not complete
+            and checkpoint is not None
+            and reported_size(cons, bounds, ints_active) >= reported_size(*checkpoint)
+        ):
+            verdict = None  # not worth confirming: the checkpoint is the answer
+        else:
+            try:
+                verdict = eng.confirm_infeasible(
+                    cons,
+                    bounds,
+                    ints_active,
+                    stop_at=deadline,
+                    presolve=("off",)
+                    if eng.proven_on(cons, bounds, ints_active)
+                    else ("choose", "off"),
+                )
+            except _OutOfTime:
+                verdict = None
         if verdict is False and complete:
             return redo_each()
         if verdict is not True:
