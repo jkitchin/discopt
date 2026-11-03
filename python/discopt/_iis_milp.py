@@ -485,58 +485,175 @@ _SAT_REFINE_CONFLICTS = 2_000
 #: does not bound time: PHP(10,9) ran > 280 s inside 200k conflicts, and on
 #: smallset's hole9/hole10 the candidate stage overran a 60 s total_time_limit
 #: until the process was killed. Learnt clauses persist across calls, so slicing
-#: loses no search progress.
-_SAT_SLICE_CONFLICTS = 1_000
+#: loses no search progress. 1000 was too coarse once PB rows are encoded: on a
+#: 4x36 market-split model one slice outlasted a 0.2 s stage budget by 0.6 s
+#: and took the base proof's time; at 100 the overshoot is ~35 ms (50: no better).
+_SAT_SLICE_CONFLICTS = 100
 #: Wall-clock ceiling of the candidate stage; with an overall budget it gets
 #: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
 _SAT_STAGE_FRACTION = 0.10
+#: Encoding-size ceiling: past it the stage proposes nothing. The largest
+#: measured on the smallset is ~103k clauses (jjliu_clique).
+_SAT_MAX_CLAUSES = 2_000_000
 
 
-def _clause_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
-    """A small unsatisfiable set of constraints of a pure-binary CLAUSE model.
+def _pb_rows(cols, vals, lo, hi) -> Optional[list[tuple[list[int], list[int], int]]]:
+    """A linear row over binaries as ``sum w_i * l_i >= K`` constraints.
 
-    Applies only when every column is binary on [0, 1] and every row is a +-1
-    clause row (``a.x >= 1 - #neg`` or ``a.x <= #pos - 1``); otherwise ``None``.
-    Each constraint gets a selector literal; one CDCL solve under all selectors
-    gives a core, which is shrunk by deletion with core refinement (each UNSAT
-    trial replaces the remaining set by its own core). A budget-limited call keeps
-    its element, so the result is always an unsatisfiable set; it is a *proposal*
-    -- the caller still proves it infeasible with HiGHS before using it.
+    ``w_i`` are positive integers and ``l_i`` DIMACS literals of column ``c``
+    (``c + 1``, negated for a negative coefficient: ``a x = |a| (1 - x) - |a|``).
+    Each finite side gives one constraint; the lhs is integral, so a fractional
+    ``K`` rounds up. ``None`` when a coefficient is not integral.
+    """
+    if not bool(np.all(np.abs(vals - np.round(vals)) <= 1e-9)):
+        return None
+    out = []
+    for sign, side in ((1, lo), (-1, hi)):
+        if (sign == 1 and side <= -_INF) or (sign == -1 and side >= _INF):
+            continue
+        a = sign * np.round(vals).astype(np.int64)
+        k = sign * float(side)
+        K = int(round(k)) if abs(k - round(k)) <= 1e-9 else int(math.ceil(k))
+        w: list[int] = []
+        lits: list[int] = []
+        for c, ai in zip(cols, a):
+            if ai > 0:
+                w.append(int(ai))
+                lits.append(int(c) + 1)
+            elif ai < 0:
+                w.append(int(-ai))
+                lits.append(-(int(c) + 1))
+                K += int(-ai)
+        out.append((w, lits, K))
+    return out
 
-    Returns ``(constraint indices or None, conflicts spent)``. Measured with an
-    external solver as the instrument before building this (smallset): the first
-    core is 148-343 rows of up to 6,778 and the engine, run on the refined
-    candidate, returns IISs at or below Gurobi's reference size in 4-21 s
-    (bf2670-001: 399 elements / 1,913 s -> 145 / 5.7 s).
+
+class _EncodeAbort(Exception):
+    """A row's encoding would pass the clause cap ("size") or the stage's stop
+    time ("time"); raised before any variable or clause of that row exists."""
+
+
+def _encode_geq(
+    w: list[int],
+    lits: list[int],
+    K: int,
+    guard: int,
+    nv: int,
+    clauses: list,
+    stop_at: Optional[float] = None,
+    max_clauses: Optional[int] = None,
+):
+    """Clauses for ``guard -> sum w_i l_i >= K`` as a reduced BDD (Een & Sorensson
+    2006): node ``(i, k)`` means "the suffix from ``i`` reaches ``k``", with
+    ``node -> ite(l_i, (i+1, k - w_i), (i+1, k))``; the constraint is monotone, so
+    also ``node -> (i+1, k - w_i)``. ``k <= 0`` is true, ``k`` above the suffix's
+    total is false. Built layer by layer, without recursion. Returns the new
+    variable count.
+
+    The BDD can have up to n*K nodes: one 32-column knapsack row with weights up
+    to 1e6 ran a 2 s stage budget to 46 s. So the layers are sized first, the
+    clock and ``max_clauses`` (at most two clauses per node, plus one) are
+    checked per layer, and :class:`_EncodeAbort` is raised before anything of
+    the row is created.
+    """
+    order = sorted(range(len(w)), key=lambda i: -w[i])  # large weights first
+    w = [w[i] for i in order]
+    lits = [lits[i] for i in order]
+    m = len(w)
+    suf = [0] * (m + 1)
+    for i in range(m - 1, -1, -1):
+        suf[i] = suf[i + 1] + w[i]
+    if K <= 0:
+        return nv
+    if K > suf[0]:
+        clauses.append([-guard])
+        return nv
+    layers: list[set[int]] = [{K}]
+    nodes = 1
+    for i in range(m):
+        nxt = set()
+        for k in layers[i]:
+            for k2 in (k - w[i], k):
+                if 0 < k2 <= suf[i + 1]:
+                    nxt.add(k2)
+        layers.append(nxt)
+        nodes += len(nxt)
+        if max_clauses is not None and len(clauses) + 2 * nodes + 1 > max_clauses:
+            raise _EncodeAbort("size")
+        if stop_at is not None and time.perf_counter() >= stop_at:
+            raise _EncodeAbort("time")
+    var: dict[tuple[int, int], int] = {}
+    for i in range(m - 1, -1, -1):
+        for k in layers[i]:
+            nv += 1
+            v = var[(i, k)] = nv
+            kh, kl = k - w[i], k
+            hi = True if kh <= 0 else var[(i + 1, kh)] if kh <= suf[i + 1] else False
+            lo = True if kl <= 0 else var[(i + 1, kl)] if kl <= suf[i + 1] else False
+            if hi is False:
+                clauses.append([-v])
+            elif hi is not True:
+                clauses.append([-v, hi])
+            if lo is False:
+                clauses.append([-v, lits[i]])
+            elif lo is not True:
+                clauses.append([-v, lits[i], lo])
+    clauses.append([-guard, var[(0, K)]])
+    return nv
+
+
+def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
+    """A small unsatisfiable set of constraints of a pure-binary model.
+
+    Applies when every column is binary on [0, 1] and every row has integral
+    coefficients; otherwise ``None``. Each row becomes CNF guarded by its
+    constraint's selector literal: one BDD per side (:func:`_encode_geq`), which
+    is a single clause for a clause row and a sequential counter for a
+    cardinality row. One CDCL solve under all selectors gives a core, which is
+    shrunk by deletion with core refinement (each UNSAT trial replaces the
+    remaining set by its own core). A budget-limited call keeps its element, so
+    the result is always an unsatisfiable set; it is a *proposal* -- the caller
+    still proves it infeasible with HiGHS before using it.
+
+    Returns ``(constraint indices or None, conflicts spent)``. Measured before
+    building (MIPcc27 smallset, 60 s): on clause models the engine returns IISs
+    at or below Gurobi's reference size in 4-21 s (bf2670-001: 399 elements /
+    1,913 s -> 145 / 5.7 s); with cardinality/PB rows, neos-4344877-stour
+    1005 (incomplete) -> 126 in 2.2 s, neos-807454 TimeoutError -> 65,
+    normalized-3_4_13 1639 (incomplete) -> 254.
     """
     n = col_lb.size
     if n == 0 or not bool(np.all(is_int & (col_lb == 0.0) & (col_ub == 1.0))):
         return None, 0
     groups = sorted(row_groups)
-    clauses: list[tuple[int, list[int]]] = []
+    nv = n + len(groups)
+    clauses: list[list[int]] = []
     for gi, ci in enumerate(groups):
+        # Encoding is part of the stage's budget too: it grows with the model.
+        if stop_at is not None and time.perf_counter() >= stop_at:
+            return None, 0
         for r in row_groups[ci]:
             s0, e0 = A.indptr[r], A.indptr[r + 1]
-            cols, vals = A.indices[s0:e0], A.data[s0:e0]
-            if not bool(np.all(np.abs(vals) == 1.0)):
+            rows = _pb_rows(A.indices[s0:e0], A.data[s0:e0], row_lo[r], row_hi[r])
+            if rows is None:
                 return None, 0
-            npos = int(np.sum(vals > 0))
-            nneg = int(np.sum(vals < 0))
-            lo, hi = row_lo[r], row_hi[r]
-            if lo > -_INF and hi >= _INF and lo == 1 - nneg:
-                lits = [int(c) + 1 if v > 0 else -(int(c) + 1) for c, v in zip(cols, vals)]
-            elif hi < _INF and lo <= -_INF and hi == npos - 1:
-                lits = [-(int(c) + 1) if v > 0 else int(c) + 1 for c, v in zip(cols, vals)]
-            else:
-                return None, 0
-            clauses.append((gi, lits))
+            for w, lits, K in rows:
+                try:
+                    nv = _encode_geq(w, lits, K, n + 1 + gi, nv, clauses, stop_at, _SAT_MAX_CLAUSES)
+                except _EncodeAbort as why:
+                    if why.args[0] == "time":
+                        return None, 0
+                    # Too large to encode: leave this row out. The encoded rows
+                    # are exact, so a core over them is still an infeasible
+                    # subset (a group with a row left out is relaxed, not lost).
+                    continue
     from discopt._rust import PySatSolver
 
-    sat = PySatSolver(n + len(groups))
+    sat = PySatSolver(nv)
     sel = [n + 1 + gi for gi in range(len(groups))]
-    for gi, lits in clauses:
-        sat.add_clause(lits + [-sel[gi]])
+    for c in clauses:
+        sat.add_clause(c)
 
     def out_of_time() -> bool:
         return stop_at is not None and time.perf_counter() >= stop_at
@@ -634,9 +751,9 @@ def milp_iis(
     each completed phase. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
-    ``sat_candidate``: on a pure-binary clause model, start from a small
-    unsatisfiable constraint set found by discopt's CDCL solver
-    (:func:`_clause_core`). It is only a proposal: it is used if HiGHS proves it
+    ``sat_candidate``: on a pure-binary model with integral coefficients, start
+    from a small unsatisfiable constraint set found by discopt's CDCL solver
+    (:func:`_binary_core`). It is only a proposal: it is used if HiGHS proves it
     infeasible (the base probe), otherwise the full model is used, and the
     returned subsystem is confirmed and certified exactly as without it.
 
@@ -694,14 +811,25 @@ def milp_iis(
     )
 
 
-def _parse_order(order: str) -> tuple[str, bool]:
-    """``"ICB"`` -> (``"ICB"``, False); ``"CIB-r"`` -> (``"CIB"``, True)."""
-    phases, _, suffix = order.partition("-")
-    if sorted(phases) != ["B", "C", "I"] or suffix not in ("", "r"):
+def _parse_order(order: str) -> tuple[str, bool, bool]:
+    """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True).
+
+    A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
+    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate. E.g.
+    ``"CIB-r"``, ``"ICB-n"``, ``"ICB-rn"``.
+    """
+    phases, _, flags = order.partition("-")
+    if (
+        sorted(phases) != ["B", "C", "I"]
+        or not set(flags) <= {"r", "n"}
+        or len(set(flags)) != len(flags)
+        or ("-" in order and not flags)
+    ):
         raise ValueError(
-            f"order must be a permutation of 'ICB' with optional '-r' suffix, got {order!r}"
+            "order must be a permutation of 'ICB' with optional '-' flags "
+            f"('r' reverse, 'n' no SAT candidate), got {order!r}"
         )
-    return phases, suffix == "r"
+    return phases, "r" in flags, "n" not in flags
 
 
 def _milp_iis_arrays(
@@ -721,7 +849,8 @@ def _milp_iis_arrays(
     if t_start is None:
         t_start = time.perf_counter()
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
-    phase_order, reverse = _parse_order(order)
+    phase_order, reverse, order_sat = _parse_order(order)
+    sat_candidate = sat_candidate and order_sat
     A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
 
     def _ord(c: list) -> list:
@@ -771,7 +900,7 @@ def _milp_iis_arrays(
             else min(_SAT_STAGE_FRACTION * float(total_time_limit or 0.0), _SAT_STAGE_CAP_S)
         )
         sat_stop = t_start + sat_budget
-        cand, sat_conflicts = _clause_core(
+        cand, sat_conflicts = _binary_core(
             A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
         )
         if cand is not None and len(cand) < len(cons):
@@ -1020,7 +1149,13 @@ def _milp_iis_arrays(
 #: instances, 29 of them at or below Gurobi's reference size, against 29 / 23 for
 #: ICB alone; adding CIB-r changed nothing, and stopping members 2x after the
 #: first completion lost size on 2 instances.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r")
+#: With the SAT core extended to PB rows, ``ICB-n`` (no core) joins: the core
+#: steers some pure-binary models to a larger many-integralities IIS while an
+#: almost-LP one is smaller (domset-hexgrid 446* -> 176). Re-measured on the
+#: final stack (50 x 6 orders incl. ICB-n and the oracle ladder CIB-l, 60 s):
+#: ICB+CIB+ICB-r+ICB-n completes 35, 33 of them at or below Gurobi (ICB alone:
+#: 31 / 26); adding CIB-r or CIB-l completes nothing more.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
