@@ -1411,7 +1411,19 @@ def _compute_big_m_lp(
 def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
     """The LP's variable bounds: one ``(lb, ub)`` per flat scalar column, for the
     first ``n_vars`` columns (the original variables ``lp_data`` indexes; see
-    :func:`_compute_big_m_lp` on X-2 and GDP-2, #413)."""
+    :func:`_compute_big_m_lp` on X-2 and GDP-2, #413).
+
+    #1917: a side at the default box (``DEFAULT_VARIABLE_BOUND``, the bound of a
+    variable declared with none, ``constants.py``) is *read* as no bound and is
+    handed over as ``±inf``. Passed through as ``±9.999e19`` it sits just below the
+    simplex's ``1e20`` infinity, so the simplex takes it for a finite bound, starts
+    the column there and exits ``numerical``: 402 of 450 M-value LPs on GDPlib
+    ``batch_processing`` (HiGHS solves all of them), each one then falling back to
+    interval arithmetic, which refuses a free variable outright. Opening a side
+    only enlarges the LP's region, so its optimum still bounds the body and the
+    big-M stays valid."""
+    from discopt.constants import DEFAULT_VARIABLE_BOUND
+
     bounds_list: list[tuple[float, float]] = []
     for v in model._variables:
         if len(bounds_list) >= n_vars:
@@ -1423,6 +1435,10 @@ def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
                 break
             lb_i = float(lb_flat[i]) if lb_flat.size == v.size else float(lb_flat.flat[0])
             ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
+            if lb_i <= -DEFAULT_VARIABLE_BOUND:
+                lb_i = -np.inf
+            if ub_i >= DEFAULT_VARIABLE_BOUND:
+                ub_i = np.inf
             bounds_list.append((lb_i, ub_i))
     return bounds_list
 
