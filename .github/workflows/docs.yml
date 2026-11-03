@@ -74,7 +74,11 @@ jobs:
       # and an archived copy per release would be a fleet of pages quietly
       # serving old wheels.
       - name: Check the staged wasm wheels
-        run: crates/discopt-wasm/build-wheel.sh --check
+        # Tags only (no history): on a dev version the check compares the wheel
+        # against the newest release tag; see expected_wheel_version.
+        run: |
+          git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
+          crates/discopt-wasm/build-wheel.sh --check
       - name: Stage the in-browser solver page
         run: |
           set -euo pipefail
