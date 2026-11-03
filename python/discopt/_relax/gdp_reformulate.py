@@ -1421,7 +1421,8 @@ def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
     ``batch_processing`` (HiGHS solves all of them), each one then falling back to
     interval arithmetic, which refuses a free variable outright. Opening a side
     only enlarges the LP's region, so its optimum still bounds the body and the
-    big-M stays valid."""
+    big-M stays valid. The simplex's own failure on a finite bound past ~3e16 is
+    #2125; a user-declared bound that large still reaches it."""
     from discopt.constants import DEFAULT_VARIABLE_BOUND
 
     bounds_list: list[tuple[float, float]] = []
