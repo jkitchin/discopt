@@ -95,6 +95,9 @@ class MilpIIS:
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
+    ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
+    ladder_calls: int = 0  # oracle calls the ladder made
+    ladder_rejected: bool = False  # ladder's set not confirmed: its drops were discarded
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -146,6 +149,7 @@ class _Engine:
         self.n_interrupted = 0
         self.n_repairs = 0
         self.n_exact = 0  # exact (rational) decisions attempted as the second route
+        self.n_presolve = 0  # presolve-only solves (ladder rung 0)
         self.n_exact_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
@@ -157,6 +161,8 @@ class _Engine:
         self._inf = inf
         h = highspy.Highs()
         h.silent()
+        mn = h.getOptionValue("mip_max_nodes")
+        self._default_max_nodes = int(mn[1] if isinstance(mn, tuple) else mn)
         h.setOptionValue("output_flag", False)
         lp = highspy.HighsLp()
         lp.num_col_, lp.num_row_ = n, m
@@ -390,6 +396,39 @@ class _Engine:
         self.n_cross_inconclusive += 1
         return None, None
 
+    def presolve_proves(self, active_cons, active_bounds, active_int, stop_at=None) -> bool:
+        """Does HiGHS presolve ALONE prove the set infeasible? (The ladder's first
+        rung: cheap, incomplete, and a presolve-on claim like any other.)"""
+        self._configure(active_cons, active_bounds, active_int)
+        h = self.h
+        now = time.perf_counter()
+        stop = now + float(self.probe_tl)
+        for lim in (self.deadline, stop_at):
+            if lim is not None:
+                stop = min(stop, lim)
+        if stop - now < _MIN_SOLVE_S:
+            raise _OutOfTime
+        h.clearSolver()
+        h.setOptionValue("time_limit", h.getRunTime() + (stop - now))
+        h.setOptionValue("presolve", "choose")
+        self.n_presolve += 1
+        h.presolve()
+        return bool(h.getModelPresolveStatus() == self.hs.HighsPresolveStatus.kInfeasible)
+
+    def capped_proves(self, active_cons, active_bounds, active_int, max_nodes: int) -> bool:
+        """Does a presolve-on MIP solve limited to ``max_nodes`` branch-and-bound
+        nodes prove the set infeasible? (A ladder rung. A node limit, not a time
+        limit, so which elements the rung drops does not depend on machine speed
+        (#912); the overall deadline still stops it.)"""
+        self._configure(active_cons, active_bounds, active_int)
+        h = self.h
+        h.setOptionValue("mip_max_nodes", int(max_nodes))
+        try:
+            st = self._solve("choose")
+        finally:
+            h.setOptionValue("mip_max_nodes", self._default_max_nodes)
+        return bool(st == self.hs.HighsModelStatus.kInfeasible)
+
     def confirm_infeasible(
         self,
         active_cons: set[int],
@@ -524,6 +563,12 @@ _SAT_SLICE_CONFLICTS = 100
 #: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
 _SAT_STAGE_FRACTION = 0.10
+#: Staged-oracle ladder (order flag ``l``): its capped-MIP rung's node limit,
+#: ``max(_LADDER_MIN_NODES, _LADDER_NODE_FACTOR * base proof's nodes)``. It scales
+#: with the base proof because a fixed small rung could not even prove the full
+#: neos859080 or neos-1461051 (3.8 s / 7.3 s base proofs).
+_LADDER_MIN_NODES = 1000
+_LADDER_NODE_FACTOR = 10
 #: Encoding-size ceiling: past it the stage proposes nothing. The largest
 #: measured on the smallset is ~103k clauses (jjliu_clique).
 _SAT_MAX_CLAUSES = 2_000_000
@@ -842,25 +887,26 @@ def milp_iis(
     )
 
 
-def _parse_order(order: str) -> tuple[str, bool, bool]:
-    """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True).
+def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
+    """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True, ladder=False).
 
     A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
-    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate. E.g.
-    ``"CIB-r"``, ``"ICB-n"``, ``"ICB-rn"``.
+    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate, ``l``
+    runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering.
+    E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
     """
     phases, _, flags = order.partition("-")
     if (
         sorted(phases) != ["B", "C", "I"]
-        or not set(flags) <= {"r", "n"}
+        or not set(flags) <= {"r", "n", "l"}
         or len(set(flags)) != len(flags)
         or ("-" in order and not flags)
     ):
         raise ValueError(
             "order must be a permutation of 'ICB' with optional '-' flags "
-            f"('r' reverse, 'n' no SAT candidate), got {order!r}"
+            f"('r' reverse, 'n' no SAT candidate, 'l' oracle ladder), got {order!r}"
         )
-    return phases, "r" in flags, "n" not in flags
+    return phases, "r" in flags, "n" not in flags, "l" in flags
 
 
 def _milp_iis_arrays(
@@ -880,7 +926,7 @@ def _milp_iis_arrays(
     if t_start is None:
         t_start = time.perf_counter()
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
-    phase_order, reverse, order_sat = _parse_order(order)
+    phase_order, reverse, order_sat, use_ladder = _parse_order(order)
     sat_candidate = sat_candidate and order_sat
     A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
 
@@ -954,6 +1000,8 @@ def _milp_iis_arrays(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
         ) from None
     eng.probe_tl = time_limit
+    info = eng.h.getInfo()
+    base_nodes = int(getattr(info, "mip_node_count", 0) or 0)
     if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
@@ -1079,6 +1127,9 @@ def _milp_iis_arrays(
     # configurations, kept as the anytime fallback. ("each" confirms every
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
+    # Budget of a candidate set's confirmation (checkpoint 0, the ladder's set):
+    # a share of the caller's budget, saturating at a constant (#1153).
+    base_budget = min(_BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S)
     if confirm == "final" and deadline is not None:
         # Checkpoint 0: the base set, proven just above (presolve-on; or, when
         # presolve-on answered kUnboundedOrInfeasible, by the presolve-free
@@ -1087,9 +1138,6 @@ def _milp_iis_arrays(
         # to return (TimeoutError), although the base set is a valid -- if large
         # -- infeasible subsystem. Capped so a slow presolve-free solve cannot
         # eat the filter's budget.
-        base_budget = min(
-            _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S
-        )
         base_stop = min(deadline, time.perf_counter() + base_budget)
         n_recent = len(eng._recent)
         try:
@@ -1107,6 +1155,102 @@ def _milp_iis_arrays(
             checkpoint = (set(cons), set(bounds), set(ints_active))
         elif verdict0 is False:
             return redo_each()
+
+    ladder_calls = 0
+    ladder_size: Optional[int] = None
+    ladder_rejected = False
+    if use_ladder:
+        # Staged-oracle ladder: the deletion filter run first with oracles that
+        # are cheap but incomplete -- HiGHS presolve alone, then a MIP capped at
+        # a multiple of the measured base proof -- dropping an element only on a
+        # proven Infeasible and keeping it otherwise. The filter below then runs
+        # on what is left, so the result is decided, confirmed and certified
+        # exactly as without the ladder. On big-M models the engine's ordinary
+        # probes stall after integralities are relaxed, while presolve proves
+        # the subsystems that matter in milliseconds (MIPcc27's kedron: the
+        # presolve rung alone gives Gurobi's 12-element IIS in 3.4 s).
+        # Only the overall deadline stops it (when to stop, #912): its work is
+        # bounded by the element count and the rung's node limit.
+        n1 = max(_LADDER_MIN_NODES, _LADDER_NODE_FACTOR * base_nodes)
+
+        def oracle(rung: Optional[int]) -> bool:
+            nonlocal ladder_calls
+            ladder_calls += 1
+            if rung is None:
+                return eng.presolve_proves(cons, bounds, ints_active)
+            return eng.capped_proves(cons, bounds, ints_active, rung)
+
+        def ladder_filter(cands: list, active: set, rung: Optional[int]) -> None:
+            i, size = 0, 1
+            while i < len(cands):
+                batch = cands[i : i + size]
+                for e in batch:
+                    active.discard(e)
+                try:
+                    ok = oracle(rung)
+                except _OutOfTime:
+                    for e in batch:
+                        active.add(e)
+                    raise
+                if ok:
+                    i += len(batch)
+                    size *= 2
+                    continue
+                for e in batch:
+                    active.add(e)
+                if len(batch) > 1:
+                    size = max(1, len(batch) // 2)
+                else:
+                    i += 1
+
+        def ladder_phase(ph: str, rung: Optional[int]) -> None:
+            if ph == "C":
+                ladder_filter(_ord(sorted(cons)), cons, rung)
+            elif ph == "I":
+                ladder_filter(_ord(sorted(ints_active)), ints_active, rung)
+            elif include_bounds:
+                ladder_filter(
+                    _ord(sorted(jb for jb in finite_bounds if jb[0] not in ints_active)),
+                    bounds,
+                    rung,
+                )
+
+        n_before = len(cons) + len(bounds) + len(ints_active)
+        pre_ladder = (set(cons), set(bounds), set(ints_active))
+        try:
+            for rung in (None, n1):
+                # A rung that cannot prove the current set would fail on every
+                # element (dijle: presolve alone cannot, ~3000 failed calls).
+                if not oracle(rung):
+                    continue
+                for ph in phase_order:
+                    ladder_phase(ph, rung)
+        except _OutOfTime:
+            pass  # every drop so far was proven: the current set is a candidate
+        ladder_size = len(cons) + len(bounds) + len(ints_active)
+        if ladder_size < n_before:
+            # Every ladder drop rests on ONE presolve-on claim (presolve alone or a
+            # node-capped presolve-on MIP), never cross-checked -- the #1634 failure
+            # mode. Like the SAT candidate, the ladder's set is only a candidate:
+            # it is used only once confirmed infeasible under both presolve
+            # configurations, in every confirm mode. Otherwise (refuted, or not
+            # decided in time) its drops are discarded and the filter starts from
+            # the pre-ladder set, which is already confirmed. Not redo_each(): that
+            # would rerun the same ladder (PR #2114 review).
+            stop_l = None
+            if deadline is not None:
+                stop_l = min(deadline, time.perf_counter() + base_budget)
+            try:
+                verdict_l = eng.confirm_infeasible(cons, bounds, ints_active, stop_at=stop_l)
+            except _OutOfTime:
+                verdict_l = None
+            if verdict_l is True:
+                if confirm == "final":
+                    # A smaller confirmed fallback than checkpoint 0.
+                    checkpoint = (set(cons), set(bounds), set(ints_active))
+            else:
+                cons, bounds, ints_active = (set(c) for c in pre_ladder)
+                ladder_rejected = True
 
     complete = True
     try:
@@ -1172,6 +1316,9 @@ def _milp_iis_arrays(
         sat_conflicts=sat_conflicts,
         order=order,
         n_exact=eng.n_exact,
+        ladder_size=ladder_size,
+        ladder_calls=ladder_calls,
+        ladder_rejected=ladder_rejected,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )
@@ -1189,7 +1336,13 @@ def _milp_iis_arrays(
 #: final stack (50 x 6 orders incl. ICB-n and the oracle ladder CIB-l, 60 s):
 #: ICB+CIB+ICB-r+ICB-n completes 35, 33 of them at or below Gurobi (ICB alone:
 #: 31 / 26); adding CIB-r or CIB-l completes nothing more.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n")
+#: ``CIB-l`` (the oracle ladder) joins for the big-M class, where the plain
+#: filter's probes stall and presolve proves the small subsystem: at a 120 s
+#: budget neos-3135947-otra goes from 884 (incomplete, CIB) to 23 = Gurobi's size,
+#: complete; kedron 12 in 10 s vs 14.5 s. In the 60 s sweep it changed no
+#: completion (its exact confirmations need ~20 s each on otra), so it costs a
+#: core there and nothing else.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0

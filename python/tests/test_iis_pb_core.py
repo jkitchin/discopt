@@ -85,8 +85,8 @@ def test_cardinality_model_gets_a_candidate_and_a_certified_iis():
 def test_member_flag_n_skips_the_candidate():
     m = _pigeons_card(4, 3)
     assert milp_iis(m, order="ICB-n").sat_rows is None
-    assert _parse_order("ICB-rn") == ("ICB", True, False)
-    assert _parse_order("CIB") == ("CIB", False, True)
+    assert _parse_order("ICB-rn") == ("ICB", True, False, False)
+    assert _parse_order("CIB") == ("CIB", False, True, False)
     for bad in ("ICB-", "ICB-rr", "ICB-x"):
         with pytest.raises(ValueError, match="order"):
             _parse_order(bad)

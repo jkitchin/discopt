@@ -510,6 +510,14 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "base_stop = min(deadline, time.perf_counter() + base_budget)",
         "contract",
     ),
+    # The oracle ladder's (order flag ``l``) set is a candidate, confirmed under
+    # both presolve routes before use: the same saturated confirmation budget as
+    # checkpoint 0 above. The clock decides only whether the candidate is used.
+    (
+        "_iis_milp.py",
+        "stop_l = min(deadline, time.perf_counter() + base_budget)",
+        "contract",
+    ),
     (
         "_daemon_core.py",
         "if self.max_lifetime > 0 and time.monotonic() - started >= self.max_lifetime:",
