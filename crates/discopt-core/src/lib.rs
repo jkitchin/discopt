@@ -16,6 +16,7 @@ pub mod numeric;
 pub mod parallel;
 pub mod presolve;
 pub mod profile;
+pub mod sat;
 pub mod term_classifier;
 
 /// Returns the version string.
