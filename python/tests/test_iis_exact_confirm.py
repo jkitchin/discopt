@@ -199,3 +199,43 @@ def test_caps_and_deadline_give_undecided():
         stop_at=time.perf_counter() - 1,
     )
     assert got is None
+
+
+def test_large_integer_sets_are_left_undecided_at_once():
+    """3000 binaries in a row that never prunes, and a continuous contradiction
+    only leaves can see. Searching it overflowed the stack (one frame per column;
+    MIPcc27 dives raised RecursionError mid-run) and, made iterative, would grind
+    to the node cap for minutes. Past EXACT_MAX_INTS the route answers None at
+    once. (The search itself is iterative as well, so depth can never overflow.)"""
+    n = 3000
+    A = sp.csr_matrix(
+        np.vstack([np.r_[np.ones(n), 0.0], np.r_[np.zeros(n), 1.0], np.r_[np.zeros(n), 1.0]])
+    )
+    rlo = np.array([-np.inf, 1.0, -np.inf])
+    rhi = np.array([float(n), np.inf, 0.0])  # y >= 1 and y <= 0
+    lb = np.r_[np.zeros(n), -10.0]
+    ub = np.r_[np.ones(n), 10.0]
+    t0 = time.perf_counter()
+    assert exact_feasible(A, rlo, rhi, lb, ub, np.arange(n)) is None
+    assert time.perf_counter() - t0 < 5.0
+
+
+def test_deep_search_within_the_caps_is_iterative(monkeypatch):
+    """At the cap's depth with a recursion limit far below it, the search still
+    completes (it would raise RecursionError if it recursed per column)."""
+    import sys
+
+    from discopt import _iis_exact
+
+    n = _iis_exact.EXACT_MAX_INTS
+    # sum x = n - 0.5 over n binaries: infeasible, found only at the leaves'
+    # level for the last column, after a full-depth descent.
+    A = sp.csr_matrix(np.ones((1, n)))
+    rlo = rhi = np.array([n - 0.5])
+    lb, ub = np.zeros(n), np.ones(n)
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(60, n // 2 + 30))
+    try:
+        assert exact_feasible(A, rlo, rhi, lb, ub, np.arange(n)) is True
+    finally:
+        sys.setrecursionlimit(limit)
