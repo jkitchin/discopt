@@ -249,7 +249,14 @@ def write_atomic(path: str, doc: dict) -> None:
     os.replace(tmp, path)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> int:
+    """Run the entry program. ``t_launch`` (``time.perf_counter()``) is when the
+    budget began: the command line passes this module's import time, the closest
+    point to process launch it can see; an in-process caller's budget starts at
+    the call. (Measured from import time, an in-process call made minutes after
+    the import -- a pytest worker -- found its hard stop already past, and the
+    watchdog ``os._exit``'ed the worker at once.)"""
+    t0 = time.perf_counter() if t_launch is None else t_launch
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 2:
         print("usage: python -m discopt.mipcc INSTANCE SOLUTION", file=sys.stderr)
@@ -267,7 +274,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     def watchdog() -> None:
         # Stands down once main() has returned: an in-process caller (the
         # tests) must not be killed later by a watchdog left behind.
-        if finished.wait(max(hard_stop - (time.perf_counter() - _T_LAUNCH), 0.0)):
+        if finished.wait(max(hard_stop - (time.perf_counter() - t0), 0.0)):
             return
         print("mipcc: hard stop reached; exiting with the last written solution", flush=True)
         sys.stdout.flush()
@@ -275,7 +282,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     threading.Thread(target=watchdog, daemon=True).start()
     try:
-        return _run(instance, solution, threads, engine_budget)
+        return _run(instance, solution, threads, engine_budget, t0)
     except Exception:
         # A bug, not a verdict: report it in full. The file on disk is the whole
         # model, a valid answer by the competition's premise, and a non-zero exit
@@ -289,7 +296,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         finished.set()
 
 
-def _run(instance: str, solution: str, threads: int, engine_budget: float) -> int:
+def _run(instance: str, solution: str, threads: int, engine_budget: float, t0: float) -> int:
     data = read_mps(instance)
     from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
 
@@ -303,7 +310,7 @@ def _run(instance: str, solution: str, threads: int, engine_budget: float) -> in
         data["col_ub"],
         data["is_int"],
     )
-    elapsed = time.perf_counter() - _T_LAUNCH
+    elapsed = time.perf_counter() - t0
     try:
         res = milp_iis_arrays(
             arrays,
@@ -331,7 +338,7 @@ def _run(instance: str, solution: str, threads: int, engine_budget: float) -> in
                 certificates=len(res.certificates),
                 certificates_dropped=getattr(solution_json, "n_bad", 0),
                 order=res.order,
-                wall=round(time.perf_counter() - _T_LAUNCH, 2),
+                wall=round(time.perf_counter() - t0, 2),
             )
         ),
         flush=True,
@@ -340,4 +347,4 @@ def _run(instance: str, solution: str, threads: int, engine_budget: float) -> in
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(t_launch=_T_LAUNCH))

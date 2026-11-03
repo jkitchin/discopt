@@ -227,3 +227,29 @@ def test_watchdog_stands_down_after_an_in_process_main(tmp_path):
     )
     assert p.returncode == 0, p.stderr
     assert "ALIVE" in p.stdout and "hard stop" not in p.stdout
+
+
+def test_an_in_process_call_long_after_import_keeps_its_budget(tmp_path):
+    """The hard stop was measured from the module's import: an in-process call
+    made later than the limit after the import found it already past, and the
+    watchdog os._exit'ed the caller (a pytest worker, in the smoke run)."""
+    inst = _readme_example(tmp_path)
+    out = tmp_path / "sol.json"
+    script = tmp_path / "late.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            from discopt import mipcc
+            mipcc._T_LAUNCH -= 1000.0  # imported "1000 s ago", limit 60 s
+            assert mipcc.main([{inst!r}, {str(out)!r}]) == 0
+            print("ALIVE")
+            """
+        )
+    )
+    env = dict(os.environ, MIPCC_TIME_LIMIT="60")
+    p = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120, env=env
+    )
+    assert p.returncode == 0, p.stderr
+    assert "ALIVE" in p.stdout and "hard stop" not in p.stdout
+    assert json.loads(out.read_text())["rows"]["c3"] == {"action": "relax"}
