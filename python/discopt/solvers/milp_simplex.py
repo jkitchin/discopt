@@ -98,6 +98,37 @@ _STRONG_CUT_PROFILE: dict[str, object] = {
     "cut_select": True,
 }
 
+
+def milp_cmir_enabled() -> bool:
+    """``DISCOPT_MILP_CMIR`` (#2107) -- add aggregated c-MIR cuts with variable-bound
+    substitution (``crates/discopt-core/src/lp/cmir.rs``) to the #1066 strong cut
+    budget.
+
+    **Defect.** On big-M OA masters most continuous columns are bounded only through a
+    variable-bound row ``x <= beta + M y``, which single-row MIR cannot use and the GMI
+    loop does not exploit: on the ``syn20m03m`` / ``rsyn0820m`` ``lp_nlp_bb`` masters the
+    in-house root stopped at -4096 / -1656 against claims of -2647 / -1150, so the #2069
+    confirmation could not confirm a correct HiGHS claim there without SCIP. SCIP's
+    c-MIR alone closes 99.6 % / 80 % of those root gaps.
+
+    **Default OFF** (bound-changing, CLAUDE.md section 5 regime 2) until a corpus
+    differential panel graduates it; ``=1`` enables it. Read per call so an A/B panel can
+    drive both arms from one build.
+    """
+    raw = os.environ.get("DISCOPT_MILP_CMIR")
+    if raw is None:
+        return False
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _strong_cut_kwargs() -> dict[str, object]:
+    """The #1066 strong cut budget, plus c-MIR when :func:`milp_cmir_enabled`."""
+    kw = dict(_STRONG_CUT_PROFILE)
+    if milp_cmir_enabled():
+        kw["cmir_cuts"] = True
+    return kw
+
+
 #: Whether an unset ``DISCOPT_MILP_CUT_BUDGET`` enables the escalation. Escalating
 #: changes which cuts the root loop adds on a master the probe cannot close, hence
 #: that master's dual bound — a bound-changing knob (CLAUDE.md §5 regime 2). So it
@@ -1324,7 +1355,7 @@ def solve_milp(
             return probe
 
     second = _drive(
-        cut_kwargs=dict(_STRONG_CUT_PROFILE),
+        cut_kwargs=_strong_cut_kwargs(),
         node_cap=max(1, int(max_nodes) - int(probe.node_count)),
         budget=remaining,
         # Hand over the probe's incumbent so the strong attempt starts with the

@@ -18,6 +18,7 @@ use crate::bnb::node::{NodeId, NodeLineage};
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
+use crate::lp::cmir::separate_cmir_csc;
 use crate::lp::cover::separate_cover_csc;
 use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
@@ -41,6 +42,13 @@ const INT_TOL: f64 = 1e-5;
 /// Minimum efficacy (normalized violation) for a cut to be worth adding under
 /// cut selection — below this it barely separates the point and only bloats the LP.
 const CUT_MIN_EFFICACY: f64 = 1e-4;
+/// #2107: aggregation steps per starting row in the c-MIR separator. Measured on the
+/// syn20m03m / rsyn0820m OA masters (prototype, SCIP for reference): no aggregation
+/// leaves the root at -5519 / -3195 (claim -2647 / -1150), one step reaches
+/// -2657 / -1749 in SCIP; two steps were not better on syn and helped rsyn.
+const CMIR_MAX_AGGR: usize = 2;
+/// #2107: c-MIR candidates kept per round before selection (most efficacious first).
+const CMIR_MAX_CUTS: usize = 200;
 /// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
 /// already-selected cut — keeps the kept set spanning diverse faces.
 const CUT_MAX_PARALLEL: f64 = 0.99;
@@ -444,6 +452,10 @@ pub struct MilpOptions {
     /// sparse-LP fast path. `true` keeps GMI (good on dense models where tableau
     /// cuts add bound the sparse cover cuts miss).
     pub gmi_cuts: bool,
+    /// Separate aggregated c-MIR cuts with variable-bound substitution
+    /// ([`crate::lp::cmir`], #2107) in the root cut loop, beside the cover and GMI
+    /// cuts. Bound-changing; default off at every entry point.
+    pub cmir_cuts: bool,
     /// Apply efficacy + orthogonality cut selection ([`crate::lp::cut_select`])
     /// to each round's candidate cuts: keep only the strongest, most diverse few
     /// (up to the remaining `root_cuts` budget) instead of every cut found. With
@@ -1548,6 +1560,16 @@ const TINY_ENTRY_ROW_TOL: f64 = 1e-9;
 /// an absolute 1e-6 would be the whole row, and the entry must keep withdrawing.
 const NOISE_RELAX_ROW_TOL: f64 = 1e-6;
 
+/// Largest TOTAL effect the relaxed entries of one row may have, in the row's own
+/// units (#2107). The search runs on the relaxed rows, and so does its incumbent
+/// check: a point it accepts satisfies an original row only to within the effect
+/// relaxed out of it. This cap keeps that below the 1e-6 feasibility tolerance
+/// incumbents are verified at downstream. Without it, `x - 1e12 z <= 0` with
+/// `x in [0, 10]` (the #1537 big-M fixture) relaxed `x` away, an effect of 10
+/// that is negligible only next to 1e12, and the driver returned `x = 10, z = 0`,
+/// infeasible by 10.
+const NOISE_RELAX_ABS_TOL: f64 = 1e-7;
+
 /// `DISCOPT_MILP_NOISE_RELAX` (#2107): relax negligible noise-floor entries into
 /// their row's slack instead of withdrawing the certificate, and measure the #1296
 /// gate over the FBBT-implied box ([`tiny_entry_gate_box`]). Default ON; `=0`
@@ -1588,7 +1610,8 @@ struct NoiseRelaxation {
 /// derives on it, is a valid lower bound on the original. Integrality is untouched.
 ///
 /// Only an entry whose worst-case effect `|a_id| * reach_d` is at most
-/// [`NOISE_RELAX_ROW_TOL`] of the row's scale is relaxed; the rest are left for the
+/// [`NOISE_RELAX_ROW_TOL`] of the row's scale, and keeps the row's total relaxed
+/// effect within [`NOISE_RELAX_ABS_TOL`], is relaxed; the rest are left for the
 /// gate. Measured on the `clay0204hfsg` OA master (#2107): 9 gradient-noise entries
 /// (2e-14 to 6.5e-11) on columns declared `[0, inf)` with implied reach <= 58.5,
 /// worst effect 3.7e-9 against a row scale near 1. Returns `None` when nothing was
@@ -1637,6 +1660,7 @@ fn relax_noise_entries(
     let mut l_new = l.to_vec();
     let mut u_new = u.to_vec();
     let mut relaxed = 0usize;
+    let mut row_effect = vec![0.0f64; m];
     for j in 0..n {
         let (gl, gu) = (gate_l[j], gate_u[j]);
         if gl <= -INF || gu >= INF {
@@ -1653,9 +1677,14 @@ fn relax_noise_entries(
                 continue;
             }
             let Some((k, s)) = slack[i] else { continue };
-            if k == j || a.abs() * reach > NOISE_RELAX_ROW_TOL * b[i].abs().max(row_max[i]) {
+            let effect = a.abs() * reach;
+            if k == j
+                || effect > NOISE_RELAX_ROW_TOL * b[i].abs().max(row_max[i])
+                || row_effect[i] + effect > NOISE_RELAX_ABS_TOL
+            {
                 continue;
             }
+            row_effect[i] += effect;
             // a * z_j over [gl, gu], rounded outward, then divided by the slack's s.
             let tmin = mul_down(a, gl).min(mul_down(a, gu));
             let tmax = mul_up(a, gl).max(mul_up(a, gu));
@@ -2269,6 +2298,28 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                 )
             };
+            if opts.cmir_cuts {
+                // #2107: aggregated c-MIR with variable-bound substitution, from the
+                // original rows only (`n_orig_rows`). Its cuts are over the original
+                // structural and slack columns, rewritten below like every other cut.
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                let found = separate_cmir_csc(
+                    &csc_w,
+                    n_w,
+                    m_w,
+                    &l_w,
+                    &u_w,
+                    &b_w,
+                    &root.x,
+                    &is_int_full,
+                    n_orig_rows,
+                    CMIR_MAX_AGGR,
+                    CMIR_MAX_CUTS,
+                    opts.simplex.tol,
+                );
+                crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
+                cuts.extend(found);
+            }
             if opts.gmi_cuts {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory_cols(
@@ -5822,6 +5873,7 @@ mod tests {
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,
+            cmir_cuts: false,
             cut_select: false,
             node_cuts: false,
             max_pool_cuts: 0,
@@ -6519,6 +6571,7 @@ mod tests {
             root_cuts: 16,
             cut_rounds: 3,
             gmi_cuts: true,
+            cmir_cuts: false,
             cut_select: true,
             node_cuts: true,
             max_pool_cuts: 500,
@@ -7242,6 +7295,7 @@ mod tests {
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,
+            cmir_cuts: false,
             cut_select: false,
             node_cuts: false,
             max_pool_cuts: 0,
@@ -7376,6 +7430,7 @@ mod sparse_milp_diff {
                 root_cuts: 16,
                 cut_rounds: 3,
                 gmi_cuts: true,
+                cmir_cuts: false,
                 cut_select: true,
                 node_cuts: true,
                 max_pool_cuts: 500,
@@ -7675,6 +7730,7 @@ mod sparse_milp_diff {
             root_cuts: 0,
             cut_rounds: 3,
             gmi_cuts: false,
+            cmir_cuts: false,
             cut_select: true,
             node_cuts: true,
             max_pool_cuts: 500,
@@ -7969,6 +8025,7 @@ mod lazy_separation {
                 root_cuts: 16,
                 cut_rounds: 3,
                 gmi_cuts: true,
+                cmir_cuts: false,
                 cut_select: true,
                 node_cuts: true,
                 max_pool_cuts: 500,
@@ -8266,6 +8323,7 @@ mod node_separation {
                 root_cuts: 0,
                 cut_rounds: 0,
                 gmi_cuts: false,
+                cmir_cuts: false,
                 cut_select: false,
                 node_cuts: false,
                 max_pool_cuts: 128,
@@ -8546,6 +8604,7 @@ mod lazy_infeasible_node {
             root_cuts: 0,
             cut_rounds: 0,
             gmi_cuts: false,
+            cmir_cuts: false,
             cut_select: false,
             node_cuts: false,
             max_pool_cuts: 128,
@@ -8682,6 +8741,7 @@ mod root_cut_budget_tests {
             root_cuts: 200,
             cut_rounds: 30,
             gmi_cuts: true,
+            cmir_cuts: false,
             cut_select: true,
             node_cuts: false,
             max_pool_cuts: 500,
@@ -9381,6 +9441,7 @@ mod tiny_entry_tests {
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,
+            cmir_cuts: false,
             cut_select: false,
             node_cuts: false,
             max_pool_cuts: 0,
@@ -9483,13 +9544,17 @@ mod tiny_entry_tests {
 
     #[test]
     fn negligible_noise_entry_is_relaxed_not_decertified_2107() {
-        std::env::set_var("DISCOPT_PROFILE", "1");
+        // The test override, not `DISCOPT_PROFILE`: setting the env var from a
+        // threaded test arms every sibling solve and breaks the profile tests that
+        // read the unset-env behaviour.
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
         let r = noise_row(0.0);
+        let relaxed = crate::profile::counter(crate::profile::Ctr::MilpNoiseEntriesRelaxed);
+        crate::profile::set_enabled(false);
         // Anti-vacuity (CLAUDE.md section 6): the relaxation actually ran.
-        assert!(
-            crate::profile::counter(crate::profile::Ctr::MilpNoiseEntriesRelaxed) > 0,
-            "the noise entry was not relaxed"
-        );
+        assert!(relaxed > 0, "the noise entry was not relaxed");
         assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
         assert!((r.obj + 1.0).abs() < 1e-7, "{r:?}");
         assert!(
@@ -9530,6 +9595,29 @@ mod tiny_entry_tests {
         let o = opts(2, vec![0]);
         let (gl, gu) = tiny_entry_gate_box(&csc, 2, 4, &l, &u, &b, &o);
         assert!(relax_noise_entries(&csc, 2, 4, &[0.0; 4], &l, &u, &b, &gl, &gu, &o).is_none());
+    }
+
+    #[test]
+    fn relaxed_rows_keep_incumbents_feasible_in_original_units_2107() {
+        // `min -x + 3z` s.t. `x - M z <= 0`, x in [0, 10], z binary: the entry on `x`
+        // is noise next to M = 1e12 but worth 10 on its row. Relaxing it would let
+        // the search accept x = 10, z = 0 (#1537 fixture); the per-row absolute cap
+        // must refuse it, so every returned point satisfies the ORIGINAL row.
+        for big in [1e9, 1e12, 1e14] {
+            let dense = [1.0, -big, 1.0];
+            let csc = SparseCols::from_dense(&dense, 1, 3);
+            let (l, u, b) = ([0.0; 3], [10.0, 1.0, INF], [0.0]);
+            let o = opts(2, vec![1]);
+            let (gl, gu) = tiny_entry_gate_box(&csc, 1, 3, &l, &u, &b, &o);
+            assert!(
+                relax_noise_entries(&csc, 1, 3, &[-1.0, 3.0, 0.0], &l, &u, &b, &gl, &gu, &o)
+                    .is_none(),
+                "M {big:e}: an O(10) entry was relaxed"
+            );
+            let r = solve_milp_hooked(csc, 1, 3, &[-1.0, 3.0, 0.0], &l, &u, &b, 0.0, &o, None);
+            assert!(r.x[0] - big * r.x[1] <= 1e-6, "M {big:e}: {r:?}");
+            assert!(r.bound <= -7.0 + 1e-6, "M {big:e}: {r:?}");
+        }
     }
 
     #[test]
