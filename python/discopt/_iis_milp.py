@@ -462,8 +462,8 @@ _SAT_REFINE_CONFLICTS = 2_000
 #: until the process was killed. Learnt clauses persist across calls, so slicing
 #: loses no search progress.
 _SAT_SLICE_CONFLICTS = 1_000
-#: Wall-clock cap of the candidate stage without an overall budget; with one it
-#: gets ``_SAT_STAGE_FRACTION`` of it.
+#: Wall-clock ceiling of the candidate stage; with an overall budget it gets
+#: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
 _SAT_STAGE_FRACTION = 0.10
 
@@ -682,13 +682,15 @@ def milp_iis(
     sat_rows: Optional[int] = None
     sat_conflicts = 0
     if sat_candidate:
-        # The clause-core stage gets a fixed share of an overall budget, and a
-        # fixed cap without one.
-        sat_stop = t_start + (
+        # The clause-core stage gets a share of an overall budget that SATURATES
+        # at a constant ceiling (#1153): where it pays off it needs seconds, so a
+        # bigger budget must buy filtering, not a longer give-up on pigeonhole.
+        sat_budget = (
             _SAT_STAGE_CAP_S
             if deadline is None
-            else _SAT_STAGE_FRACTION * float(total_time_limit or 0.0)
+            else min(_SAT_STAGE_FRACTION * float(total_time_limit or 0.0), _SAT_STAGE_CAP_S)
         )
+        sat_stop = t_start + sat_budget
         cand, sat_conflicts = _clause_core(
             A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, sat_stop
         )
