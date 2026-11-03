@@ -1,0 +1,51 @@
+{
+ "discopt": "/Users/jkitchin/projects/discopt-1917-finish/python/discopt/__init__.py",
+ "failures": [],
+ "parsed": 74,
+ "constraints": 3796,
+ "with_gdp": [],
+ "corpus_solves": [
+  {
+   "instance": "st_miqp3.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.21
+  },
+  {
+   "instance": "st_e13.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.03
+  },
+  {
+   "instance": "nvs04.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.08
+  },
+  {
+   "instance": "ex4_1_5.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.82
+  },
+  {
+   "instance": "nvs06.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.23
+  },
+  {
+   "instance": "nvs07.nl",
+   "status": "optimal",
+   "calls": 0,
+   "wall": 0.03
+  }
+ ],
+ "control": {
+  "instance": "pyomo.eight_process",
+  "status": "optimal",
+  "calls": 9
+ },
+ "executed": 81
+}

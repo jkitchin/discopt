@@ -538,6 +538,29 @@ fn propagate_fixpoint_rounds(
             break;
         }
     }
+    order_crossed_box(lo, hi)
+}
+
+/// Make a box whose edges crossed by round-off a valid box again, outward (#1917).
+///
+/// Every tightening here is outward-guarded, but the empty-box tests accept a
+/// crossing up to `INFEAS_TOL` (relative) as round-off, and an OBBT edge can cross
+/// a node edge by an ulp. Such a box reaches consumers that require `lo <= hi` --
+/// `f64::clamp` panics on it (measured: GDPlib `cstr` big-M with `run_obbt`,
+/// `min = 1.0, max = 0.9999999999999996`), and an LP with `l > u` is a different
+/// problem. A crossing within the tolerance is therefore **widened** to
+/// `[min(lo, hi), max(lo, hi)]`, which contains both edges; it is never collapsed
+/// inward onto one of them. A crossing beyond the tolerance is real emptiness and
+/// returns `false` (the caller fathoms), exactly as the round-level scan does.
+pub fn order_crossed_box(lo: &mut [f64], hi: &mut [f64]) -> bool {
+    for j in 0..lo.len().min(hi.len()) {
+        if lo[j] > hi[j] {
+            if lo[j] > hi[j] + INFEAS_TOL * rel(hi[j]) {
+                return false;
+            }
+            std::mem::swap(&mut lo[j], &mut hi[j]);
+        }
+    }
     true
 }
 
@@ -545,6 +568,25 @@ fn propagate_fixpoint_rounds(
 mod tests {
     use super::*;
     use crate::bnb::spatial_kernel::FixedRow;
+
+    /// #1917: a crossing within round-off is widened outward to contain both edges
+    /// (never collapsed onto one), a real crossing is emptiness, and an ordered box
+    /// is untouched.
+    #[test]
+    fn order_crossed_box_widens_roundoff_and_rejects_real_crossings_1917() {
+        let mut lo = vec![1.0, 0.0, -2.0];
+        let mut hi = vec![0.9999999999999996, 3.0, -2.0];
+        assert!(order_crossed_box(&mut lo, &mut hi));
+        assert_eq!(lo, vec![0.9999999999999996, 0.0, -2.0]);
+        assert_eq!(hi, vec![1.0, 3.0, -2.0]);
+        for j in 0..3 {
+            assert!(lo[j] <= hi[j]);
+        }
+        // 1e-3 past the edge is not round-off at INFEAS_TOL = 1e-7.
+        let mut lo = vec![1.0];
+        let mut hi = vec![0.999];
+        assert!(!order_crossed_box(&mut lo, &mut hi));
+    }
 
     /// #1955: c = [1, −2^-40], x ∈ [1, 2], y fixed at 2^41, cutoff 0. cᵀx = x − 2 <= 0
     /// on the whole box, so the region is not empty. Filtering `|c| > 1e-12` dropped
