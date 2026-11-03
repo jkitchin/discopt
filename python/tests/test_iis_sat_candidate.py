@@ -91,7 +91,9 @@ def test_non_clause_model_is_computed_exactly_as_without_the_candidate():
     m = dm.Model("p")
     x = m.integer("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
-    m.subject_to(2 * x == 1, name="half")
+    # 3x = 1: integer-infeasible, but not by parity (2x = 1 would be a mod-2
+    # certificate, which the parity candidate legitimately takes).
+    m.subject_to(3 * x == 1, name="half")
     m.subject_to(y <= 3, name="red_herring")
     m.minimize(0 * x)
     a = milp_iis(m)

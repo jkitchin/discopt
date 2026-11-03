@@ -166,6 +166,15 @@ def exact_feasible(
     rows = [r for r in range(A.shape[0]) if np.isfinite(rlo[r]) or np.isfinite(rhi[r])]
     is_held = np.zeros(lb.size, dtype=bool)
     is_held[held] = True
+    # Size caps first, from the structure alone (no exact arithmetic yet): the
+    # engine asks before every presolve-free solve, mostly about large sets.
+    if rows:
+        used_cols = np.unique(
+            np.concatenate([A.indices[A.indptr[r] : A.indptr[r + 1]] for r in rows])
+        )
+        n_int = int(np.count_nonzero(is_held[used_cols]))
+        if n_int > EXACT_MAX_INTS or used_cols.size - n_int > EXACT_MAX_CONT:
+            return None
     # An empty box anywhere, or a held column with no integer in its box, is
     # infeasible on its own.
     for j in range(lb.size):

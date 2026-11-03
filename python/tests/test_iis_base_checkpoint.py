@@ -67,7 +67,9 @@ def test_without_a_budget_there_is_no_base_confirmation(monkeypatch):
 
 
 def test_base_confirmation_costs_one_solve_and_changes_nothing_else():
-    m = _parity_model(12)
+    # 46 columns: past the exact route's integer cap, so the second route is a
+    # presolve-free solve (the exact route would confirm a smaller set with none).
+    m = _parity_model(46)
     free = milp_iis(m)
     timed = milp_iis(m, total_time_limit=600.0)
     assert timed.n_solves == free.n_solves + 1
@@ -103,8 +105,8 @@ def test_base_set_refuted_presolve_off_reruns_with_per_probe_confirmation(monkey
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
     monkeypatch.setattr(_iis_milp._Engine, "_witness", witness)
-    res = milp_iis(_parity_model(8), total_time_limit=60.0)
+    res = milp_iis(_parity_model(46), total_time_limit=60.0)  # past the exact cap
     assert state["used"]
     assert state["at_call"] == 2  # refuted at checkpoint 0, right after the base proof
     assert res.fallback and res.complete
-    assert res.integrality == list(range(8))
+    assert res.integrality == list(range(46))

@@ -349,10 +349,18 @@ def test_final_confirmation_catches_a_false_infeasible_verdict(monkeypatch):
 
 
 @pytest.mark.smoke
-def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(monkeypatch):
-    """Default ``confirm="final"``: the LAST two solves are the finished set under
-    presolve on and presolve off, both ``Infeasible``."""
+@pytest.mark.parametrize("exact_route", [True, False])
+def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(
+    monkeypatch, exact_route
+):
+    """Default ``confirm="final"``: the finished set is confirmed by presolve-on
+    HiGHS AND a second route -- the exact decider when it can decide the set (it
+    is tried first), otherwise a presolve-off solve."""
+    from discopt import _iis_milp
     from discopt._iis_milp import milp_iis
+
+    if not exact_route:  # the exact route undecided on every set
+        monkeypatch.setattr(_iis_milp._Engine, "_exact", lambda self, stop_at: None)
 
     log = []
     real_run = highspy.Highs.run
@@ -373,8 +381,12 @@ def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(m
     res = milp_iis(m)
     assert res.confirm == "final" and not res.fallback
     INF = highspy.HighsModelStatus.kInfeasible
-    assert [p for p, _ in log[-2:]] == ["choose", "off"]
-    assert all(st == INF for _, st in log[-2:])
+    if exact_route:
+        assert log[-1] == ("choose", INF) and res.n_exact_confirmed >= 1
+    else:
+        assert [p for p, _ in log[-2:]] == ["choose", "off"]
+        assert all(st == INF for _, st in log[-2:])
+        assert res.n_exact_confirmed == 0
     assert compute_iis(m, include_integrality=True).confirm_fallback is False
 
 
