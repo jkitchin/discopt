@@ -63,10 +63,32 @@ _BASE_CONFIRM_FRACTION = 0.25
 #: slowest presolve-free base proof measured on MIPcc27's smallset is 107 s
 #: (neos-1461051; dives 65 s, every other instance <= 12 s).
 _BASE_CONFIRM_CAP_S = 300.0
+#: Rolling checkpoints (anytime answers inside a phase): a presolve-free
+#: confirmation is attempted after a successful deletion once the subsystem has
+#: shrunk by this factor since the last attempt ...
+_ROLL_SHRINK = 0.9
+#: ... while all attempts together have used at most this share of the elapsed
+#: time ...
+_ROLL_SHARE = 0.10
+#: ... each with 4x the last successful confirmation's time, at least this much
+#: (and never more than checkpoint 0's saturated budget). Measured on MIPcc27
+#: (exp14, 300 s): intermediate sets confirm presolve-free in 0.1-2.5 s early in
+#: a phase (dijle's down to 1417 of 3136 held integralities, all <= 0.6 s) and not
+#: in 10 s late in it; the final sets of dijle / dingo / dives not in 90 s.
+#: Falsified on the way: those integrality-phase sets are not smaller answers --
+#: each relaxed integrality turns its two bounds into elements (dijle's 1417-held
+#: set counts 8001 against the base set's 6282) -- hence the size gate in
+#: ``roll``.
+_ROLL_MIN_S = 2.0
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
 _GRACE_S = 0.5
+
+
+class _Refuted(Exception):
+    """A presolve-free confirmation found an exact-integer point for a set the
+    filter holds as proven: an earlier verdict was wrong, redo per probe."""
 
 
 class _OutOfTime(Exception):
@@ -99,6 +121,7 @@ class MilpIIS:
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
     ladder_rejected: bool = False  # ladder's set not confirmed: its drops were discarded
+    n_rolling: int = 0  # rolling checkpoints confirmed during the filter (anytime answers)
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -1268,6 +1291,7 @@ def _milp_iis_arrays(
             if res is True:
                 i += len(batch)
                 size = min(2 * size, cap)
+                roll()
                 continue
             for e in batch:
                 active.add(e)
@@ -1375,6 +1399,65 @@ def _milp_iis_arrays(
             checkpoint = (set(cons), set(bounds), set(ints_active))
         elif verdict0 is False:
             return redo_each()
+
+    def reported_size(c, b, i) -> int:
+        """Size as the result reports it (and the competition counts it): rows,
+        held integralities, and the bounds of columns NOT held integer -- a held
+        column's box is not an element. Relaxing an integrality therefore turns
+        its finite bounds into elements: mid-way through the integrality phase
+        the subsystem is usually LARGER than the base set (dijle: 8001 vs 6282)."""
+        return len(c) + len(i) + sum(1 for jb in b if jb[0] not in i)
+
+    roll_ref = reported_size(cons, bounds, ints_active)  # at the last attempt / checkpoint
+    roll_spent = 0.0  # seconds all rolling attempts used
+    roll_last_ok = 0.0  # duration of the last successful one
+    n_rolling = 0  # successful rolling checkpoints
+
+    def roll() -> None:
+        """A rolling checkpoint: confirm the current subsystem presolve-free and
+        keep it as the anytime answer. The filter holds the last set a
+        presolve-on probe proved, so only the second route runs. Without these
+        a run stopped mid-phase fell back to the last phase-end checkpoint --
+        inside the first phase, checkpoint 0 (the base set). Only a set smaller
+        than the current anytime answer, as :func:`reported_size` counts it, is
+        attempted, so the integrality phase (where the count grows) rarely
+        triggers one; the row and bound phases do."""
+        nonlocal checkpoint, roll_ref, roll_spent, roll_last_ok, n_rolling
+        if confirm != "final" or deadline is None:
+            return
+        size = reported_size(cons, bounds, ints_active)
+        if size > _ROLL_SHRINK * roll_ref:
+            return  # not 10% smaller than the last attempt: not worth a solve
+        if checkpoint is not None and size >= reported_size(*checkpoint):
+            return
+        now = time.perf_counter()
+        if roll_spent > _ROLL_SHARE * (now - t_start):
+            return
+        if not eng.proven_on(cons, bounds, ints_active):
+            return
+        roll_ref = size
+        budget = min(base_budget, max(_ROLL_MIN_S, 4.0 * roll_last_ok))
+        n_recent = len(eng._recent)
+        try:
+            verdict = eng.confirm_infeasible(
+                cons,
+                bounds,
+                ints_active,
+                stop_at=min(deadline, now + budget),
+                presolve=("off",),
+            )
+        except _OutOfTime:
+            verdict = None
+        finally:
+            while len(eng._recent) > n_recent:  # not a filtering probe (see checkpoint 0)
+                eng._recent.pop()
+            roll_spent += time.perf_counter() - now
+        if verdict is True:
+            checkpoint = (set(cons), set(bounds), set(ints_active))
+            roll_last_ok = time.perf_counter() - now
+            n_rolling += 1
+        elif verdict is False:
+            raise _Refuted
 
     ladder_calls = 0
     ladder_size: Optional[int] = None
@@ -1490,6 +1573,8 @@ def _milp_iis_arrays(
     except _OutOfTime:
         complete = False
         proven = False
+    except _Refuted:
+        return redo_each()
 
     if confirm == "final":
         eng.reserve_confirm = False  # the reserve is for this confirmation
@@ -1555,6 +1640,7 @@ def _milp_iis_arrays(
         ladder_size=ladder_size,
         ladder_calls=ladder_calls,
         ladder_rejected=ladder_rejected,
+        n_rolling=n_rolling,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )
