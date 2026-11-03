@@ -41,6 +41,7 @@ never "repaired".
 from __future__ import annotations
 
 import math
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -55,6 +56,13 @@ _INF = 1e20  # discopt's unbounded-bound sentinel
 
 #: A solve is not started with less wall time than this left in its budget.
 _MIN_SOLVE_S = 0.05
+#: Share of ``total_time_limit`` the presolve-free confirmation of the base set
+#: (checkpoint 0) may use ...
+_BASE_CONFIRM_FRACTION = 0.25
+#: ... saturating at this ceiling (#1153): a bigger budget must buy filtering. The
+#: slowest presolve-free base proof measured on MIPcc27's smallset is 107 s
+#: (neos-1461051; dives 65 s, every other instance <= 12 s).
+_BASE_CONFIRM_CAP_S = 300.0
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -382,15 +390,17 @@ class _Engine:
         active_bounds: set[tuple[int, str]],
         active_int: set[int],
         stop_at: Optional[float] = None,
+        presolve: tuple[str, ...] = ("choose", "off"),
     ) -> Optional[bool]:
         """``True`` iff presolve-on AND presolve-off both return ``Infeasible``;
         ``False`` if either finds an exact-integer feasible point (an earlier
         verdict was wrong); ``None`` if undecided (time limit, interrupt, or a
-        "feasible" status whose point is a tolerance artifact)."""
+        "feasible" status whose point is a tolerance artifact). ``presolve``
+        restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
         MS = self.hs.HighsModelStatus
         all_infeasible = True
-        for p in ("choose", "off"):
+        for p in presolve:
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
@@ -617,8 +627,11 @@ def milp_iis(
     returned (``complete=False``, ``proven_irreducible=False``): a subsystem that
     is still proven infeasible under both configurations but may contain
     undecided members. With ``"final"`` the filter stops early enough
-    (two recent solve durations) to confirm it, and the subsystem confirmed at
-    the end of each completed phase is kept as a fallback. If no subsystem can be confirmed in time,
+    (two recent solve durations) to confirm it, and the latest confirmed
+    subsystem is kept as a fallback: the base set, confirmed presolve-free right
+    after the base proof (one extra solve, capped at ``_BASE_CONFIRM_FRACTION``
+    of the budget, at most ``_BASE_CONFIRM_CAP_S``), then the set at the end of
+    each completed phase. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
     ``sat_candidate``: on a pure-binary clause model, start from a small
@@ -672,6 +685,8 @@ def milp_iis(
         confirm=confirm,
         sat_candidate=sat_candidate,
     )
+    if workers is not None and portfolio is None:
+        raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
         return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
     return _milp_iis_arrays(
@@ -900,11 +915,40 @@ def _milp_iis_arrays(
         redo.fallback = True
         return redo
 
-    complete = True
     # "final": the latest subsystem confirmed infeasible under both
     # configurations, kept as the anytime fallback. ("each" confirms every
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
+    if confirm == "final" and deadline is not None:
+        # Checkpoint 0: the base set, proven just above (presolve-on; or, when
+        # presolve-on answered kUnboundedOrInfeasible, by the presolve-free
+        # re-solve the probe ran), confirmed presolve-off too. Without it a
+        # budget that runs out before the first phase ends has nothing confirmed
+        # to return (TimeoutError), although the base set is a valid -- if large
+        # -- infeasible subsystem. Capped so a slow presolve-free solve cannot
+        # eat the filter's budget.
+        base_budget = min(
+            _BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S
+        )
+        base_stop = min(deadline, time.perf_counter() + base_budget)
+        n_recent = len(eng._recent)
+        try:
+            verdict0 = eng.confirm_infeasible(
+                cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
+            )
+        except _OutOfTime:
+            verdict0 = None
+        # Not a filtering probe: keep its duration out of the confirmation
+        # reserve (2.5x the slowest recent solve), or a checkpoint solve that
+        # used its whole cap would hold back ~62% of the budget from the filter.
+        while len(eng._recent) > n_recent:
+            eng._recent.pop()
+        if verdict0 is True:
+            checkpoint = (set(cons), set(bounds), set(ints_active))
+        elif verdict0 is False:
+            return redo_each()
+
+    complete = True
     try:
         by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
         phases = [by_name[c] for c in phase_order]
@@ -987,6 +1031,10 @@ def _iis_size(res: MilpIIS) -> int:
     return len(res.constraints) + len(res.bounds) + len(res.integrality)
 
 
+#: The parent's discopt package directory, which every portfolio member must load.
+_DISCOPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def _portfolio_child() -> None:
     """Entry point of one portfolio member process.
 
@@ -1002,6 +1050,15 @@ def _portfolio_child() -> None:
     import threading
 
     job = pickle.load(sys.stdin.buffer)
+    # The member must run the parent's discopt, not one that happens to come
+    # first on a rebuilt sys.path (CLAUDE.md s8).
+    import discopt
+
+    here = os.path.dirname(os.path.abspath(discopt.__file__))
+    if here != job["discopt_dir"]:
+        raise RuntimeError(
+            f"portfolio member imported discopt from {here}, parent uses {job['discopt_dir']}"
+        )
 
     def _orphan_watch() -> None:
         # The parent keeps our stdin open until it is done with us; EOF means it
@@ -1120,6 +1177,7 @@ def _portfolio_iis(
                         order=orders[i],
                         deadline_wall=member_deadline,
                         result_path=result_path,
+                        discopt_dir=_DISCOPT_DIR,
                     )
                     pickle.dump(job, proc.stdin)
                     # Kept open: the member exits on EOF, so it cannot outlive us.

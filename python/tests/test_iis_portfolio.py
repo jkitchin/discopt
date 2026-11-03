@@ -122,6 +122,8 @@ def test_portfolio_argument_validation():
         compute_iis(m, include_integrality=True, portfolio=("ICB", "ICB"))
     with pytest.raises(ValueError, match="workers"):
         compute_iis(m, include_integrality=True, portfolio=("ICB",), workers=0)
+    with pytest.raises(ValueError, match="workers"):
+        compute_iis(m, include_integrality=True, workers=2)  # no portfolio
     with pytest.raises(ValueError, match="at least one"):
         compute_iis(m, include_integrality=True, portfolio=())
 
@@ -267,3 +269,13 @@ def test_every_order_returns_an_irreducible_set(build, order, confirm):
     # Every reported bound carries a certificate (it was put through the filter).
     for j, s in r.bounds:
         assert ("bound", j, s) in r.certificates
+
+
+def test_member_refuses_a_different_discopt(monkeypatch):
+    """A member checks it imported the parent's discopt (CLAUDE.md s8): a
+    rebuilt sys.path must not silently load another copy."""
+    from discopt import _iis_milp
+
+    monkeypatch.setattr(_iis_milp, "_DISCOPT_DIR", "/nonexistent/discopt")
+    with pytest.raises(RuntimeError, match="imported discopt from"):
+        compute_iis(_two_iis_model(), include_integrality=True, portfolio=("ICB",))
