@@ -908,11 +908,14 @@ def milp_iis(
     each completed phase. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
-    ``sat_candidate``: on a pure-binary model with integral coefficients, start
-    from a small unsatisfiable constraint set found by discopt's CDCL solver
-    (:func:`_binary_core`). It is only a proposal: it is used if HiGHS proves it
-    infeasible (the base probe), otherwise the full model is used, and the
-    returned subsystem is confirmed and certified exactly as without it.
+    ``sat_candidate``: start from a small candidate subsystem instead of the
+    full model -- a mod-2 certificate over integer equality rows
+    (:func:`_parity_core`) when one exists, else, on a pure-binary model with
+    integral coefficients, an unsatisfiable constraint set found by discopt's
+    CDCL solver (:func:`_binary_core`). Either is only a proposal: it is used if
+    HiGHS proves it infeasible (the base probe), otherwise the full model is
+    used, and the returned subsystem is confirmed and certified exactly as
+    without it.
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, ``ValueError`` when the full model is
@@ -970,7 +973,7 @@ def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
     """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True, ladder=False).
 
     A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
-    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate, ``l``
+    flags: ``r`` visits elements in reverse, ``n`` skips the candidate stages, ``l``
     runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering.
     E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
     """
@@ -983,7 +986,7 @@ def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
     ):
         raise ValueError(
             "order must be a permutation of 'ICB' with optional '-' flags "
-            f"('r' reverse, 'n' no SAT candidate, 'l' oracle ladder), got {order!r}"
+            f"('r' reverse, 'n' no candidate stage, 'l' oracle ladder), got {order!r}"
         )
     return phases, "r" in flags, "n" not in flags, "l" in flags
 
