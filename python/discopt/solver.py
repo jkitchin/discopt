@@ -11985,6 +11985,31 @@ def _kernel_int_probe_enabled() -> bool:
 _FRONTIER_MEMORY_MB_DEFAULT = 2048
 
 
+#: A per-solve override of ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092), set by
+#: :func:`frontier_memory_override`. A context variable, not ``os.environ``: the
+#: GAMS link's warm daemon serves many solves from one process, so an environment
+#: write for one job would leak into every later one.
+_FRONTIER_MEMORY_MB_OVERRIDE: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "discopt_frontier_memory_mb", default=None
+)
+
+
+@contextlib.contextmanager
+def frontier_memory_override(mb: Optional[int]):
+    """Use ``mb`` MiB (``0`` = no budget) as the frontier memory budget inside the
+    block, in place of ``DISCOPT_FRONTIER_MEMORY_MB``; ``None`` changes nothing."""
+    if mb is None:
+        yield
+        return
+    if isinstance(mb, bool) or not isinstance(mb, int) or mb < 0:
+        raise ValueError(f"frontier memory budget must be an integer >= 0 (MiB), got {mb!r}")
+    token = _FRONTIER_MEMORY_MB_OVERRIDE.set(mb)
+    try:
+        yield
+    finally:
+        _FRONTIER_MEMORY_MB_OVERRIDE.reset(token)
+
+
 def _frontier_memory_bytes() -> Optional[int]:
     """The open-frontier memory budget, from ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092).
 
@@ -12002,8 +12027,12 @@ def _frontier_memory_bytes() -> Optional[int]:
     A memory guard, like ``time_limit``, not solver math: it changes nothing on a
     run whose frontier stays under the budget, and a run that reaches it would
     otherwise keep allocating. Raise it on a machine with more memory, or set
-    ``0`` to restore the unbounded behaviour.
+    ``0`` to restore the unbounded behaviour. Inside :func:`frontier_memory_override`
+    (the GAMS option file's ``frontier_memory_mb``) the override wins.
     """
+    override = _FRONTIER_MEMORY_MB_OVERRIDE.get()
+    if override is not None:
+        return None if override == 0 else override << 20
     raw = os.environ.get("DISCOPT_FRONTIER_MEMORY_MB", "").strip()
     if not raw:
         mb = _FRONTIER_MEMORY_MB_DEFAULT
