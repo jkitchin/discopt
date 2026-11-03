@@ -510,6 +510,13 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "base_stop = min(deadline, time.perf_counter() + base_budget)",
         "contract",
     ),
+    # The oracle ladder's (order flag ``l``) checkpoint: the same saturated
+    # confirmation budget as checkpoint 0 above, for a smaller candidate.
+    (
+        "_iis_milp.py",
+        "stop_c = min(deadline, time.perf_counter() + base_budget)",
+        "contract",
+    ),
     (
         "_daemon_core.py",
         "if self.max_lifetime > 0 and time.monotonic() - started >= self.max_lifetime:",

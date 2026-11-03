@@ -159,6 +159,8 @@ class _Engine:
         self._inf = inf
         h = highspy.Highs()
         h.silent()
+        mn = h.getOptionValue("mip_max_nodes")
+        self._default_max_nodes = int(mn[1] if isinstance(mn, tuple) else mn)
         h.setOptionValue("output_flag", False)
         lp = highspy.HighsLp()
         lp.num_col_, lp.num_row_ = n, m
@@ -411,14 +413,19 @@ class _Engine:
         h.presolve()
         return bool(h.getModelPresolveStatus() == self.hs.HighsPresolveStatus.kInfeasible)
 
-    def capped_proves(self, active_cons, active_bounds, active_int, cap, stop_at=None) -> bool:
-        """Does a presolve-on MIP solve capped at ``cap`` seconds (wall-guarded)
-        prove the set infeasible? (A ladder rung.)"""
+    def capped_proves(self, active_cons, active_bounds, active_int, max_nodes: int) -> bool:
+        """Does a presolve-on MIP solve limited to ``max_nodes`` branch-and-bound
+        nodes prove the set infeasible? (A ladder rung. A node limit, not a time
+        limit, so which elements the rung drops does not depend on machine speed
+        (#912); the overall deadline still stops it.)"""
         self._configure(active_cons, active_bounds, active_int)
-        stop = time.perf_counter() + float(cap)
-        if stop_at is not None:
-            stop = min(stop, stop_at)
-        return bool(self._solve("choose", stop) == self.hs.HighsModelStatus.kInfeasible)
+        h = self.h
+        h.setOptionValue("mip_max_nodes", int(max_nodes))
+        try:
+            st = self._solve("choose")
+        finally:
+            h.setOptionValue("mip_max_nodes", self._default_max_nodes)
+        return bool(st == self.hs.HighsModelStatus.kInfeasible)
 
     def confirm_infeasible(
         self,
@@ -552,14 +559,12 @@ _SAT_SLICE_CONFLICTS = 1_000
 #: ``_SAT_STAGE_FRACTION`` of it, never more than the ceiling (#1153).
 _SAT_STAGE_CAP_S = 30.0
 _SAT_STAGE_FRACTION = 0.10
-#: Staged-oracle ladder (order flag ``l``): its share of ``total_time_limit``,
-#: saturating at a constant (#1153), and its capped-MIP rung,
-#: ``max(_LADDER_Q_MIN_S, _LADDER_Q_FACTOR * base proof time)``: a fixed 0.5 s rung
-#: could not even prove the full neos859080 (3.8 s) or neos-1461051 (7.3 s).
-_LADDER_FRACTION = 0.5
-_LADDER_CAP_S = 1800.0
-_LADDER_Q_MIN_S = 0.5
-_LADDER_Q_FACTOR = 10.0
+#: Staged-oracle ladder (order flag ``l``): its capped-MIP rung's node limit,
+#: ``max(_LADDER_MIN_NODES, _LADDER_NODE_FACTOR * base proof's nodes)``. It scales
+#: with the base proof because a fixed small rung could not even prove the full
+#: neos859080 or neos-1461051 (3.8 s / 7.3 s base proofs).
+_LADDER_MIN_NODES = 1000
+_LADDER_NODE_FACTOR = 10
 #: Encoding-size ceiling: past it the stage proposes nothing. The largest
 #: measured on the smallset is ~103k clauses (jjliu_clique).
 _SAT_MAX_CLAUSES = 2_000_000
@@ -941,7 +946,6 @@ def _milp_iis_arrays(
     # The base proof is mandatory, so under an overall budget it may use all of
     # it rather than one probe's ``time_limit`` (no-ip-65059 needs > 30 s).
     eng.probe_tl = math.inf if deadline is not None else time_limit
-    t_base0 = time.perf_counter()
     try:
         base, _ = eng.probe(cons, bounds, ints_active)
         if base is not True and sat_rows is not None:
@@ -955,7 +959,8 @@ def _milp_iis_arrays(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
         ) from None
     eng.probe_tl = time_limit
-    t_base = time.perf_counter() - t_base0
+    info = eng.h.getInfo()
+    base_nodes = int(getattr(info, "mip_node_count", 0) or 0)
     if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
@@ -1103,20 +1108,18 @@ def _milp_iis_arrays(
         # probes stall after integralities are relaxed, while presolve proves
         # the subsystems that matter in milliseconds (MIPcc27's kedron: the
         # presolve rung alone gives Gurobi's 12-element IIS in 3.4 s).
-        stop_l = None
-        if deadline is not None:
-            budget_l = min(_LADDER_FRACTION * float(total_time_limit or 0.0), _LADDER_CAP_S)
-            stop_l = min(deadline, time.perf_counter() + budget_l)
-        q1 = max(_LADDER_Q_MIN_S, _LADDER_Q_FACTOR * t_base)
+        # Only the overall deadline stops it (when to stop, #912): its work is
+        # bounded by the element count and the rung's node limit.
+        n1 = max(_LADDER_MIN_NODES, _LADDER_NODE_FACTOR * base_nodes)
 
-        def oracle(rung: Optional[float]) -> bool:
+        def oracle(rung: Optional[int]) -> bool:
             nonlocal ladder_calls
             ladder_calls += 1
             if rung is None:
-                return eng.presolve_proves(cons, bounds, ints_active, stop_l)
-            return eng.capped_proves(cons, bounds, ints_active, rung, stop_l)
+                return eng.presolve_proves(cons, bounds, ints_active)
+            return eng.capped_proves(cons, bounds, ints_active, rung)
 
-        def ladder_filter(cands: list, active: set, rung: Optional[float]) -> None:
+        def ladder_filter(cands: list, active: set, rung: Optional[int]) -> None:
             i, size = 0, 1
             while i < len(cands):
                 batch = cands[i : i + size]
@@ -1139,7 +1142,7 @@ def _milp_iis_arrays(
                 else:
                     i += 1
 
-        def ladder_phase(ph: str, rung: Optional[float]) -> None:
+        def ladder_phase(ph: str, rung: Optional[int]) -> None:
             if ph == "C":
                 ladder_filter(_ord(sorted(cons)), cons, rung)
             elif ph == "I":
@@ -1153,7 +1156,11 @@ def _milp_iis_arrays(
 
         n_before = len(cons) + len(bounds) + len(ints_active)
         try:
-            for rung in (None, q1):
+            for rung in (None, n1):
+                # A rung that cannot prove the current set would fail on every
+                # element (dijle: presolve alone cannot, ~3000 failed calls).
+                if not oracle(rung):
+                    continue
                 for ph in phase_order:
                     ladder_phase(ph, rung)
         except _OutOfTime:
@@ -1161,11 +1168,7 @@ def _milp_iis_arrays(
         ladder_size = len(cons) + len(bounds) + len(ints_active)
         if confirm == "final" and ladder_size < n_before and deadline is not None:
             # A smaller confirmed fallback than checkpoint 0.
-            stop_c = min(
-                deadline,
-                time.perf_counter()
-                + min(_BASE_CONFIRM_FRACTION * float(total_time_limit or 0.0), _BASE_CONFIRM_CAP_S),
-            )
+            stop_c = min(deadline, time.perf_counter() + base_budget)
             try:
                 verdict_l = eng.confirm_infeasible(
                     cons, bounds, ints_active, stop_at=stop_c, presolve=("off",)
