@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **The GAMS link reads a `discopt.opt` option file.** With `optfile = 1`, the link
+  reads GAMS's usual solver option file and accepts three keys: `tol` and
+  `constr_viol_tol`, forwarded to every POUNCE NLP the solve runs (as
+  `Model.solve(pounce_options=...)`), and `frontier_memory_mb`, the open-frontier memory
+  budget for that solve only. An unknown key, a bad value, a repeated key or a missing
+  file ends the job as `9 Setup Failure` with the offending line in the log, rather
+  than solving at defaults the job did not ask for. Previously the link logged that
+  `optfile` was ignored. See `docs/gams_solver_link.md`. Checked by
+  `python/tests/test_gams_option_file.py`.
 - **The browser page explains infeasibility.** A new seventh example, an infeasible
   two-mill blending LP, calls `compute_iis()`. Any `IISResult` a script leaves in a
   top-level variable is now drawn below the output: a summary (member counts, model
@@ -79,6 +88,17 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The open branch-and-bound frontier has a memory budget, on by default (#2092).**
+  `DISCOPT_FRONTIER_MEMORY_MB` (default 2048 MiB; `0` = no budget) becomes an open-node
+  cap for the native spatial kernel and the Python-tree loops. A search whose gap never
+  closes keeps every frontier node live, and on 1-hour runs that reached 28–42 GiB. A
+  solve with no `max_nodes` can therefore now end with `node_limit` once its frontier
+  reaches the budget (never before 1,000 open nodes), with the incumbent and a valid
+  bound; it stops, it never prunes. Raise the budget on a machine with more memory, or
+  set `0` for the old unbounded behaviour. The same release cuts what each open node
+  stores (measured: about 37% less frontier growth in the native kernel, 48% less per
+  open node in the Python tree): sibling nodes share their parent's box, and in the
+  Python tree also the parent solution and basis.
 - **`.nl` complementarity rows with flag 3 (both bounds) or flag 0 (free
   variable) are now imported (#2058)** as a box MCP and as `body == 0`
   respectively, instead of refused. Flags 1/2 are unchanged.
