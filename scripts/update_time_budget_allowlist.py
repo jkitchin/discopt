@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-"""Build python/tests/time_budget_allowlist.json from call-phase timings.
+"""Build a lane's time-budget allowlist from call-phase timings.
+
+``--lane fast`` (the default) writes python/tests/time_budget_allowlist.json;
+``--lane slow`` writes python/tests/slow_time_budget_allowlist.json, from the
+``slow-correctness-junit.xml`` artifact of the dispatch-only slow lane::
+
+    python scripts/update_time_budget_allowlist.py slow-correctness-junit.xml \
+        --lane slow --budget 60
 
 The fast lane's ``--time-budget`` (python/tests/_time_budget.py) fails any test
 whose call phase exceeds the budget unless the test is allowlisted. This writes the
@@ -38,7 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "python" / "tests"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _time_budget import ALLOWLIST_PATH, RETIRE_FACTOR  # noqa: E402
+from _time_budget import LANES, RETIRE_FACTOR  # noqa: E402
 from update_test_durations import nodeid  # noqa: E402
 
 # A GitHub Actions log prefixes each line with a timestamp; allow anything before.
@@ -92,7 +99,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("reports", type=Path, nargs="+")
     ap.add_argument("--budget", type=float, required=True)
+    ap.add_argument("--lane", choices=sorted(LANES), default="fast")
     args = ap.parse_args()
+    out_path = LANES[args.lane][0]
 
     threshold = args.budget / RETIRE_FACTOR
     merged: dict[str, float] = {}
@@ -116,10 +125,10 @@ def main() -> int:
             merged[nid] = max(took, merged.get(nid, 0.0))
 
     allow = {nid: round(took, 2) for nid, took in merged.items() if took > threshold}
-    ALLOWLIST_PATH.write_text(json.dumps(dict(sorted(allow.items())), indent=0) + "\n")
+    out_path.write_text(json.dumps(dict(sorted(allow.items())), indent=0) + "\n")
     print(
         f"{len(merged)} tests read; {len(allow)} over {threshold:g} s (budget {args.budget:g} s"
-        f" / {RETIRE_FACTOR}) written to {ALLOWLIST_PATH}"
+        f" / {RETIRE_FACTOR}) written to {out_path}"
     )
     return 0
 

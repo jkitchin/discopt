@@ -1,4 +1,4 @@
-"""Per-test wall-clock budget for the CI fast lane (``--time-budget SECONDS``).
+"""Per-test wall-clock budget for a CI lane (``--time-budget SECONDS``).
 
 The fast lane was trimmed repeatedly (#390/#717, then the #1877 sharding) and grew
 back each time, because every new regression test that runs a real solve lands in
@@ -29,6 +29,22 @@ from pathlib import Path
 import pytest
 
 ALLOWLIST_PATH = Path(__file__).with_name("time_budget_allowlist.json")
+SLOW_ALLOWLIST_PATH = Path(__file__).with_name("slow_time_budget_allowlist.json")
+
+#: Lane -> (default allowlist, what to do about an over-budget test).
+LANES = {
+    "fast": (
+        ALLOWLIST_PATH,
+        "Speed it up, mark it @pytest.mark.slow (it then runs in the on-demand lane, "
+        "with @pytest.mark.correctness if it validates a known optimum)",
+    ),
+    "slow": (
+        SLOW_ALLOWLIST_PATH,
+        "Speed it up: a smaller instance on the same path, a deterministic work "
+        "budget (max_nodes / deterministic=True) instead of a wall-clock one, or one "
+        "shared solve for assertions that each re-solved the same model",
+    ),
+}
 
 #: An allowlisted test that ran in under budget / RETIRE_FACTOR is reported as a
 #: candidate for removal; the same factor sets the margin when the list is built.
@@ -53,18 +69,35 @@ def addoption(parser) -> None:
         "(python/tests/time_budget_allowlist.json)",
     )
     group.addoption(
+        "--time-budget-lane",
+        choices=sorted(LANES),
+        default="fast",
+        help="which lane's allowlist and advice --time-budget uses (default: fast)",
+    )
+    group.addoption(
         "--time-budget-allowlist",
-        default=str(ALLOWLIST_PATH),
-        help="allowlist JSON (node id -> measured seconds) for --time-budget",
+        default=None,
+        help="allowlist JSON (node id -> measured seconds) for --time-budget "
+        "(default: the lane's own list)",
     )
 
 
 class TimeBudgetPlugin:
-    def __init__(self, budget: float, allowlist: dict[str, float]) -> None:
+    def __init__(
+        self,
+        budget: float,
+        allowlist: dict[str, float],
+        lane: str = "fast",
+        allowlist_path: Path = ALLOWLIST_PATH,
+    ) -> None:
         if not budget > 0:
             raise ValueError(f"--time-budget must be positive, got {budget}")
+        if lane not in LANES:
+            raise ValueError(f"--time-budget-lane must be one of {sorted(LANES)}, got {lane!r}")
         self.budget = budget
         self.allowlist = allowlist
+        self.lane = lane
+        self.allowlist_path = allowlist_path
         self.over: list[tuple[str, float]] = []
         self.retirable: list[tuple[str, float, float]] = []
 
@@ -86,12 +119,14 @@ class TimeBudgetPlugin:
         if took > self.budget:
             report.user_properties.append(("time_budget_over", took))
             report.outcome = "failed"
+            try:
+                shown = self.allowlist_path.resolve().relative_to(Path.cwd())
+            except ValueError:
+                shown = self.allowlist_path
             report.longrepr = (
-                f"{item.nodeid} took {took:.1f} s, over the fast-lane budget of "
-                f"{self.budget:g} s (--time-budget). Speed it up, mark it "
-                "@pytest.mark.slow (it then runs in the on-demand lane, with "
-                "@pytest.mark.correctness if it validates a known optimum), or add "
-                f'"{item.nodeid}": {took:.2f} to python/tests/time_budget_allowlist.json '
+                f"{item.nodeid} took {took:.1f} s, over the {self.lane}-lane budget of "
+                f"{self.budget:g} s (--time-budget). {LANES[self.lane][1]}, or add "
+                f'"{item.nodeid}": {took:.2f} to {shown} '
                 "and justify the entry in the PR."
             )
 
@@ -106,7 +141,7 @@ class TimeBudgetPlugin:
 
     def pytest_terminal_summary(self, terminalreporter):
         tr = terminalreporter
-        tr.write_sep("-", f"fast-lane time budget: {self.budget:g} s per test (call phase)")
+        tr.write_sep("-", f"{self.lane}-lane time budget: {self.budget:g} s per test (call phase)")
         tr.write_line(
             f"{len(self.over)} over budget, {len(self.allowlist)} allowlisted, "
             f"{len(self.retirable)} allowlisted ran under {self.budget / RETIRE_FACTOR:g} s"
@@ -121,5 +156,9 @@ def configure(config) -> None:
     budget = config.getoption("--time-budget")
     if budget is None:
         return
-    allowlist = load_allowlist(Path(config.getoption("--time-budget-allowlist")))
-    config.pluginmanager.register(TimeBudgetPlugin(budget, allowlist), "discopt-time-budget")
+    lane = config.getoption("--time-budget-lane")
+    path = Path(config.getoption("--time-budget-allowlist") or LANES[lane][0])
+    allowlist = load_allowlist(path)
+    config.pluginmanager.register(
+        TimeBudgetPlugin(budget, allowlist, lane=lane, allowlist_path=path), "discopt-time-budget"
+    )

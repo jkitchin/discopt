@@ -285,6 +285,20 @@ Keys are node ids: **renaming or reparametrizing an allowlisted test drops its e
 the renamed test then fails the budget on its first CI run. Rename the key in the same PR
 (`test_ci_time_budget.py` fails on a key that names no test).
 
+The dispatch-only `slow`+`correctness` lane has the same guard, `--time-budget 60
+--time-budget-lane slow`, with its own list `python/tests/slow_time_budget_allowlist.json`
+(#2089; the lane had reached 67 min). There is no lane below it, so the remedy for an
+over-budget test is to make it cheaper, not to re-mark it: a smaller instance on the same code
+path (selected by a measured property, e.g. "runs the same branch and is bit-identical across
+repetitions"), a deterministic work budget (`max_nodes` + `deterministic=True`,
+`max_leaf_solves`) instead of a wall clock, one shared solve for assertions that each re-solved
+the same model, or skipping at collection a parameter that can only ever skip (with its
+measurement recorded and an env var to re-run it, as `test_1537_invariance.BASE_UNCERTIFIED`
+does). A wall-clock `time_limit` in such a test is a **backstop**, sized well above the
+measured time, never the quality bar: the #2089 failure was a 120 s limit on an 87 s
+dev-machine solve. Rebuild the list from the lane's `slow-correctness-junit` artifact with
+`scripts/update_time_budget_allowlist.py --lane slow --budget 60`.
+
 ### Benchmarking
 ```bash
 python discopt_benchmarks/run_benchmarks.py --suite smoke     # Quick sanity check

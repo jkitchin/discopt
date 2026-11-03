@@ -5,7 +5,9 @@
 //! on each variable, enabling reliability branching (use pseudocosts when
 //! reliable, fall back to strong branching otherwise).
 
-use crate::bnb::node::{BranchRecord, Node, NodeId, NodeStatus};
+use std::sync::Arc;
+
+use crate::bnb::node::{BranchRecord, Node, NodeId, NodeStatus, PendingBox, SharedBox};
 
 /// Minimal variable info for branching decisions.
 ///
@@ -295,10 +297,10 @@ pub fn create_children(
     // This prevents the global lower bound from dropping to -inf when
     // unsolved children enter the pool.
     let inherited_lb = parent.local_lower_bound;
+    // #2092: one copy of the parent box, shared by both children.
+    let shared = parent_shared_box(parent);
 
     // Left child: x_i <= floor(val)
-    let mut left_ub = parent.ub.clone();
-    left_ub[idx] = bp; // bp is already floor(val)
     let left = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -308,8 +310,14 @@ pub fn create_children(
             up: false,
             value: bp,
         }),
-        lb: parent.lb.clone(),
-        ub: left_ub,
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared.clone(),
+            var: idx,
+            upper: true,
+            value: bp,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -318,8 +326,7 @@ pub fn create_children(
     };
 
     // Right child: x_i >= ceil(val)
-    let mut right_lb = parent.lb.clone();
-    right_lb[idx] = bp + 1.0; // ceil(val) = floor(val) + 1
+    let right_value = bp + 1.0;
     let right = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -329,8 +336,14 @@ pub fn create_children(
             up: true,
             value: bp + 1.0,
         }),
-        lb: right_lb,
-        ub: parent.ub.clone(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared,
+            var: idx,
+            upper: false,
+            value: right_value,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -355,10 +368,10 @@ pub fn create_children_spatial(
 
     let parent_sol = parent.parent_solution.clone();
     let inherited_lb = parent.local_lower_bound;
+    // #2092: one copy of the parent box, shared by both children.
+    let shared = parent_shared_box(parent);
 
     // Left child: x_i <= midpoint
-    let mut left_ub = parent.ub.clone();
-    left_ub[idx] = bp;
     let left = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -368,8 +381,14 @@ pub fn create_children_spatial(
             up: false,
             value: bp,
         }),
-        lb: parent.lb.clone(),
-        ub: left_ub,
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared.clone(),
+            var: idx,
+            upper: true,
+            value: bp,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -378,8 +397,7 @@ pub fn create_children_spatial(
     };
 
     // Right child: x_i >= midpoint (no gap)
-    let mut right_lb = parent.lb.clone();
-    right_lb[idx] = bp;
+    let right_value = bp;
     let right = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -389,8 +407,14 @@ pub fn create_children_spatial(
             up: true,
             value: bp,
         }),
-        lb: right_lb,
-        ub: parent.ub.clone(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared,
+            var: idx,
+            upper: false,
+            value: right_value,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -894,9 +918,9 @@ pub fn create_children_spatial_int(
 ) -> (Node, Node) {
     let parent_sol = parent.parent_solution.clone();
     let inherited_lb = parent.local_lower_bound;
+    // #2092: one copy of the parent box, shared by both children.
+    let shared = parent_shared_box(parent);
 
-    let mut left_ub = parent.ub.clone();
-    left_ub[idx] = bp;
     let left = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -906,8 +930,14 @@ pub fn create_children_spatial_int(
             up: false,
             value: bp,
         }),
-        lb: parent.lb.clone(),
-        ub: left_ub,
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared.clone(),
+            var: idx,
+            upper: true,
+            value: bp,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -915,8 +945,7 @@ pub fn create_children_spatial_int(
         basis: None,
     };
 
-    let mut right_lb = parent.lb.clone();
-    right_lb[idx] = bp + 1.0;
+    let right_value = bp + 1.0;
     let right = Node {
         id: next_id(),
         parent: Some(parent.id),
@@ -926,8 +955,14 @@ pub fn create_children_spatial_int(
             up: true,
             value: bp + 1.0,
         }),
-        lb: right_lb,
-        ub: parent.ub.clone(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base: shared,
+            var: idx,
+            upper: false,
+            value: right_value,
+        }),
         local_lower_bound: inherited_lb,
         best_estimate: inherited_lb,
         status: NodeStatus::Pending,
@@ -936,6 +971,17 @@ pub fn create_children_spatial_int(
     };
 
     (left, right)
+}
+
+/// The parent's box as the [`SharedBox`] its two children share (#2092). A
+/// parent is always materialized before it is branched (it was exported).
+fn parent_shared_box(parent: &Node) -> Arc<SharedBox> {
+    debug_assert!(
+        parent.pending_box.is_none(),
+        "branching an unmaterialized node"
+    );
+    let (lb, ub) = parent.box_owned();
+    Arc::new(SharedBox { lb, ub })
 }
 
 #[cfg(test)]
@@ -949,7 +995,7 @@ mod tests {
         // inherit that basis as their dual-simplex warm-start state.
         let mut parent = Node::new(NodeId(0), None, 0, vec![0.0, 0.0], vec![5.0, 5.0]);
         let basis = Basis::from_basic(4, vec![2, 3]);
-        parent.basis = Some(basis.clone());
+        parent.basis = Some(Arc::new(basis.clone()));
         parent.local_lower_bound = -10.0;
         let decision = BranchDecision {
             var_index: 0,
@@ -961,8 +1007,70 @@ mod tests {
             counter += 1;
             id
         });
-        assert_eq!(left.basis.as_ref(), Some(&basis));
-        assert_eq!(right.basis.as_ref(), Some(&basis));
+        assert_eq!(left.basis.as_deref(), Some(&basis));
+        assert_eq!(right.basis.as_deref(), Some(&basis));
+        // #2092: one basis shared by both siblings, not two copies.
+        assert!(Arc::ptr_eq(
+            left.basis.as_ref().unwrap(),
+            right.basis.as_ref().unwrap()
+        ));
+    }
+
+    /// #2092: siblings share one copy of the parent box and the parent solution,
+    /// and each materializes exactly the box the old full copies held.
+    #[test]
+    fn children_share_parent_box_and_solution() {
+        let mut parent = Node::new(NodeId(0), None, 0, vec![0.0, -1.0], vec![5.0, 4.0]);
+        parent.parent_solution = Some(Arc::new(vec![2.5, 0.0]));
+        let mut counter = 1usize;
+        let mut ids = || {
+            counter += 1;
+            NodeId(counter)
+        };
+        let int = BranchDecision {
+            var_index: 0,
+            branch_point: 2.0,
+        };
+        let spatial = BranchDecision {
+            var_index: 1,
+            branch_point: 0.5,
+        };
+        let cases = [
+            (create_children(&parent, &int, &mut ids), (0, 2.0, 3.0)),
+            (
+                create_children_spatial(&parent, &spatial, &mut ids),
+                (1, 0.5, 0.5),
+            ),
+            (
+                create_children_spatial_int(&parent, 0, 2.0, &mut ids),
+                (0, 2.0, 3.0),
+            ),
+        ];
+        for ((mut l, mut r), (i, down_ub, up_lb)) in cases {
+            let (lb, ub) = (
+                l.pending_box.as_ref().unwrap(),
+                r.pending_box.as_ref().unwrap(),
+            );
+            assert!(
+                Arc::ptr_eq(&lb.base, &ub.base),
+                "siblings must share the box"
+            );
+            assert!(Arc::ptr_eq(
+                l.parent_solution.as_ref().unwrap(),
+                r.parent_solution.as_ref().unwrap()
+            ));
+            let mut want_l = (parent.lb.clone(), parent.ub.clone());
+            want_l.1[i] = down_ub;
+            let mut want_r = (parent.lb.clone(), parent.ub.clone());
+            want_r.0[i] = up_lb;
+            assert_eq!(l.box_owned(), want_l);
+            assert_eq!(r.box_owned(), want_r);
+            l.materialize_box();
+            r.materialize_box();
+            assert!(l.pending_box.is_none() && r.pending_box.is_none());
+            assert_eq!((l.lb.clone(), l.ub.clone()), want_l);
+            assert_eq!((r.lb, r.ub), want_r);
+        }
     }
 
     #[test]
@@ -1080,20 +1188,24 @@ mod tests {
             id
         });
 
+        // #2092: a pending child's box is read through `box_owned`.
+        let (left_lb, left_ub) = left.box_owned();
+        let (right_lb, right_ub) = right.box_owned();
+
         // Left: x0 <= 3
         assert_eq!(left.id, NodeId(1));
         assert_eq!(left.parent, Some(NodeId(0)));
         assert_eq!(left.depth, 1);
-        assert_eq!(left.lb, vec![0.0, 0.0]);
-        assert_eq!(left.ub, vec![3.0, 10.0]);
+        assert_eq!(left_lb, vec![0.0, 0.0]);
+        assert_eq!(left_ub, vec![3.0, 10.0]);
         assert_eq!(left.status, NodeStatus::Pending);
 
         // Right: x0 >= 4
         assert_eq!(right.id, NodeId(2));
         assert_eq!(right.parent, Some(NodeId(0)));
         assert_eq!(right.depth, 1);
-        assert_eq!(right.lb, vec![4.0, 0.0]);
-        assert_eq!(right.ub, vec![10.0, 10.0]);
+        assert_eq!(right_lb, vec![4.0, 0.0]);
+        assert_eq!(right_ub, vec![10.0, 10.0]);
         assert_eq!(right.status, NodeStatus::Pending);
     }
 
@@ -1229,13 +1341,16 @@ mod tests {
             id
         });
 
+        let (left_lb, left_ub) = left.box_owned();
+        let (right_lb, right_ub) = right.box_owned();
+
         // Left: x1 <= 4
-        assert_eq!(left.ub[1], 4.0);
-        assert_eq!(left.lb[1], 2.0); // unchanged
+        assert_eq!(left_ub[1], 4.0);
+        assert_eq!(left_lb[1], 2.0); // unchanged
 
         // Right: x1 >= 5
-        assert_eq!(right.lb[1], 5.0);
-        assert_eq!(right.ub[1], 8.0); // unchanged
+        assert_eq!(right_lb[1], 5.0);
+        assert_eq!(right_ub[1], 8.0); // unchanged
     }
 
     #[test]
@@ -1466,6 +1581,7 @@ mod tests_1978 {
             branch: None,
             lb: lb.to_vec(),
             ub: ub.to_vec(),
+            pending_box: None,
             local_lower_bound: 0.0,
             best_estimate: 0.0,
             status: NodeStatus::Pending,
@@ -1477,8 +1593,9 @@ mod tests_1978 {
             next += 1;
             NodeId(next)
         });
+        let ((llb, lub), (rlb, rub)) = (l.box_owned(), r.box_owned());
         assert_eq!(
-            (l.lb[i], l.ub[i], r.lb[i], r.ub[i]),
+            (llb[i], lub[i], rlb[i], rub[i]),
             (lb[i], d.branch_point, d.branch_point, ub[i])
         );
     }
