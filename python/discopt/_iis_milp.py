@@ -448,23 +448,32 @@ class _Engine:
         all_infeasible = True
         for p in presolve:
             if p == "off":
-                # The second route. Try the exact decision first: it is strictly
-                # stronger than a presolve-free solve, tolerance-free, and on the
-                # sets it can decide much cheaper (big-M sets, where presolve-off
-                # returns "Optimal" points whose integers are 1e-11 off; parity
-                # sets, where it needed 47 s on enlight11's certificate). It
-                # answers None at once on sets beyond its caps.
+                rlo, rhi, _, _ = self._cfg
+                if self._parity_infeasible(rlo, rhi):
+                    # A mod-2 certificate: an exact proof in milliseconds, where
+                    # a presolve-free solve needed 47 s on enlight11's set.
+                    self.n_exact += 1
+                    self.n_exact_confirmed += 1
+                    continue
+            st = self._solve(p, stop_at)
+            if st == MS.kOptimal and self._witness(stop_at) is not None:
+                return False
+            ok = st == MS.kInfeasible
+            if not ok and p == "off":
+                # Presolve-off could not answer (on big-M sets it returns
+                # "Optimal" points whose integers are 1e-11 off and do not
+                # survive rounding). Decide the set exactly instead -- a strictly
+                # stronger second route -- or None when too large. Not tried
+                # first: its caps bound size, not time, and on flugplinf it ran
+                # 13 s and 46 s to "undecided" where presolve-off took 0.04 s.
                 exact = self._exact(stop_at)
                 if exact is False:
                     self.n_exact_refuted += 1
                     return False
                 if exact is True:
                     self.n_exact_confirmed += 1
-                    continue
-            st = self._solve(p, stop_at)
-            if st == MS.kOptimal and self._witness(stop_at) is not None:
-                return False
-            all_infeasible &= st == MS.kInfeasible
+                    ok = True
+            all_infeasible &= ok
         return True if all_infeasible else None
 
     def _exact(self, stop_at: Optional[float]) -> Optional[bool]:
@@ -477,8 +486,6 @@ class _Engine:
             stop = min(stop, self.deadline)
         rlo, rhi, lb, ub = self._cfg
         self.n_exact += 1
-        if self._parity_infeasible(rlo, rhi):
-            return True
         return exact_feasible(self.A, rlo, rhi, lb, ub, self._held, stop_at=stop)
 
     def _parity_infeasible(self, rlo, rhi) -> bool:
