@@ -98,6 +98,48 @@ _STRONG_CUT_PROFILE: dict[str, object] = {
     "cut_select": True,
 }
 
+
+def milp_cmir_enabled() -> bool:
+    """``DISCOPT_MILP_CMIR`` (#2107) -- add aggregated c-MIR cuts with variable-bound
+    substitution (``crates/discopt-core/src/lp/cmir.rs``) to the #1066 strong cut
+    budget.
+
+    **Defect.** On big-M OA masters most continuous columns are bounded only through a
+    variable-bound row ``x <= beta + M y``, which single-row MIR cannot use and the GMI
+    loop does not exploit: on the ``syn20m03m`` / ``rsyn0820m`` ``lp_nlp_bb`` masters the
+    in-house root stopped at -4096 / -1656 against claims of -2647 / -1150, so the #2069
+    confirmation could not confirm a correct HiGHS claim there without SCIP. SCIP's
+    c-MIR alone closes 99.6 % / 80 % of those root gaps.
+
+    **Graduated (default ON, #2107).** CLAUDE.md section 5 panel, 150 instances (the
+    in-repo corpus, 78 convex MINLPLib instances selected by metadata, the #2107 four)
+    at 20 s, arms interleaved, pyscipopt absent: 757 checks, 0 violations (no bound past
+    its ``minlplib.solu`` optimum, every incumbent independently verified); certified
+    99 -> 102, none lost (``rsyn0820m`` and ``syn20m02m`` separate c-MIR cuts;
+    ``launch`` separates none, so that gain is noise); total wall 1343.4 -> 1315.5 s.
+    Of 7 looser bounds, 5 are on instances where no c-MIR cut is separated (timing
+    noise) and ``syn20m03m`` is tighter in 3/3 interleaved reps (2806-2838 vs
+    3402-3432, maximize). The one real loss is ``m7`` (bound 28.75 vs
+    61.8-63.1 in 3/3, uncertified both ways): on its master the extra rows raise the
+    node LPs' rejected unbounded verdicts 5 -> 27 against free layout columns, the open
+    #2107 ``m6`` defect. ``=0`` restores the strong budget without c-MIR exactly.
+
+    Read per call so an A/B panel can drive both arms from one build.
+    """
+    raw = os.environ.get("DISCOPT_MILP_CMIR")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _strong_cut_kwargs() -> dict[str, object]:
+    """The #1066 strong cut budget, plus c-MIR when :func:`milp_cmir_enabled`."""
+    kw = dict(_STRONG_CUT_PROFILE)
+    if milp_cmir_enabled():
+        kw["cmir_cuts"] = True
+    return kw
+
+
 #: Whether an unset ``DISCOPT_MILP_CUT_BUDGET`` enables the escalation. Escalating
 #: changes which cuts the root loop adds on a master the probe cannot close, hence
 #: that master's dual bound — a bound-changing knob (CLAUDE.md §5 regime 2). So it
@@ -1324,7 +1366,7 @@ def solve_milp(
             return probe
 
     second = _drive(
-        cut_kwargs=dict(_STRONG_CUT_PROFILE),
+        cut_kwargs=_strong_cut_kwargs(),
         node_cap=max(1, int(max_nodes) - int(probe.node_count)),
         budget=remaining,
         # Hand over the probe's incumbent so the strong attempt starts with the

@@ -241,3 +241,18 @@ wins) and §2 (fix the class, not the instance — and here there is no class-wi
 to fix), no separator build is scheduled. nvs24's residual is root-fixpoint solve
 cost (Phase 1/2/4), not a missing cut. The parked separator stays default-off for a
 future, distinct class whose LP optimum *is* c-MIR-cuttable.
+
+## Addendum (2026-11-03, #2107): a class whose LP optimum *is* c-MIR-cuttable
+
+The NO-GO above stands for the nvs17/19/24 spatial family, where discopt's default root
+already closed 99.9 % of the gap. #2107 found the opposite class: big-M OA masters
+(`lp_nlp_bb`) whose continuous columns are bounded only by variable-bound rows
+`x <= beta + M y`. There the in-house GMI loop stopped at the bound SCIP's GMI-only root
+reaches, and SCIP's c-MIR alone closed 99.6 % / 80 % of the `syn20m03m` / `rsyn0820m`
+root gaps. A new native separator (`crates/discopt-core/src/lp/cmir.rs`; the
+`lp/aggregation.rs` this note refers to is no longer in the tree) with variable-bound
+substitution lets the in-house engine confirm both masters, and graduated default-ON
+behind `DISCOPT_MILP_CMIR` on a 150-instance panel (performance-plan §103.17). This
+addendum does not reverse the verdict above; it is the "future, distinct class" its last
+paragraph reserved.
+
