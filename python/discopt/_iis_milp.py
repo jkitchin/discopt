@@ -44,7 +44,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import numpy as np
 
@@ -86,6 +86,11 @@ class MilpIIS:
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
+    order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
+    # Portfolio runs only: one entry per member, in portfolio order, with keys
+    # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
+    # and a timed-out member's own TimeoutError message.
+    members: Optional[list] = None
 
 
 class _Engine:
@@ -393,59 +398,69 @@ class _Engine:
         return True if all_infeasible else None
 
 
-def _violation(x, eng: _Engine, rows=None, cols_lb=None, cols_ub=None, cols_int=None):
-    """Max violation of the given rows / bounds / integralities at ``x``."""
-    v = 0.0
-    if rows is not None and len(rows):
-        act = eng.A[rows] @ x
-        lo, hi = eng.row_lo[rows], eng.row_hi[rows]
-        v = max(v, float(np.max(np.where(lo > -_INF, lo - act, 0.0), initial=0.0)))
-        v = max(v, float(np.max(np.where(hi < _INF, act - hi, 0.0), initial=0.0)))
-    if cols_lb is not None and len(cols_lb):
-        v = max(v, float(np.max(eng.col_lb[cols_lb] - x[cols_lb], initial=0.0)))
-    if cols_ub is not None and len(cols_ub):
-        v = max(v, float(np.max(x[cols_ub] - eng.col_ub[cols_ub], initial=0.0)))
-    if cols_int is not None and len(cols_int):
-        xi = x[cols_int]
-        v = max(v, float(np.max(np.abs(xi - np.round(xi)), initial=0.0)))
-    return v
+def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
+    """The points in ``pending`` that certify their element: ``x`` satisfies the
+    final subsystem minus ``key`` (every other row, applied bound and integrality
+    within ``tol``) and violates ``key`` by more than ``tol``.
 
-
-def _check_certificate(x, key, eng, cons, bounds, ints, tol) -> bool:
-    """``x`` satisfies the final subsystem minus ``key`` and violates ``key``."""
-    kind = key[0]
-    cons_o = [c for c in cons if not (kind == "constraint" and c == key[1])]
-    ints_o = [j for j in ints if not (kind == "integrality" and j == key[1])]
-    held = set(ints_o)
-    # Bounds of a column held integer apply; for the integrality element itself
-    # its own bounds still apply too (relaxing integrality keeps the box).
-    lb_cols = sorted(held | {j for j, s in bounds if s == "lower"})
-    ub_cols = sorted(held | {j for j, s in bounds if s == "upper"})
-    if kind == "integrality":
-        lb_cols = sorted(set(lb_cols) | {key[1]})
-        ub_cols = sorted(set(ub_cols) | {key[1]})
-    if kind == "bound":
-        j, s = key[1], key[2]
-        if s == "lower":
-            lb_cols = [c for c in lb_cols if c != j]
-        else:
-            ub_cols = [c for c in ub_cols if c != j]
-    rows = np.concatenate([eng.row_groups[c] for c in cons_o]) if cons_o else np.zeros(0, int)
-    lb_cols = [c for c in lb_cols if eng.col_lb[c] > -_INF]
-    ub_cols = [c for c in ub_cols if eng.col_ub[c] < _INF]
-    if _violation(x, eng, rows, lb_cols, ub_cols, ints_o) > tol:
-        return False
-    # ``key`` itself must be violated by more than tol.
-    if kind == "constraint":
-        e = _violation(x, eng, rows=eng.row_groups[key[1]])
-    elif kind == "integrality":
-        e = _violation(x, eng, cols_int=[key[1]])
-    else:
-        j, s = key[1], key[2]
-        e = _violation(
-            x, eng, cols_lb=[j] if s == "lower" else None, cols_ub=[j] if s == "upper" else None
+    The final set's masks are built once and each point is checked with one
+    sparse product and vector operations. Rebuilding the set per point cost
+    O(|IIS|) Python work per certificate: on dijle's 6,282-element anytime set
+    that ran past the deadline and a portfolio member's result was discarded.
+    """
+    m, n = eng.row_lo.size, eng.col_lb.size
+    row_kept = np.zeros(m, dtype=bool)
+    for c in cons:
+        row_kept[eng.row_groups[c]] = True
+    held = np.zeros(n, dtype=bool)
+    held[list(ints)] = True
+    # A held column's box applies; so do the kept bounds of the other columns.
+    lbm = held.copy()
+    ubm = held.copy()
+    for j, side in bounds:
+        (lbm if side == "lower" else ubm)[j] = True
+    lbm &= eng.col_lb > -_INF
+    ubm &= eng.col_ub < _INF
+    lo_f = eng.row_lo > -_INF
+    hi_f = eng.row_hi < _INF
+    out = {}
+    for key, x in pending.items():
+        act = eng.A @ x
+        rv = np.maximum(
+            np.where(lo_f, eng.row_lo - act, 0.0), np.where(hi_f, act - eng.row_hi, 0.0)
         )
-    return bool(e > tol)
+        rv = np.maximum(rv, 0.0)
+        lbv = np.where(lbm, eng.col_lb - x, 0.0)
+        ubv = np.where(ubm, x - eng.col_ub, 0.0)
+        iv = np.where(held, np.abs(x - np.round(x)), 0.0)
+        kind = key[0]
+        rows_ok = row_kept
+        if kind == "constraint":
+            own = eng.row_groups[key[1]]
+            rows_ok = row_kept.copy()
+            rows_ok[own] = False
+            e = float(np.max(rv[own], initial=0.0))
+        elif kind == "integrality":
+            j = key[1]
+            iv[j] = 0.0  # its box still applies (held -> lbm/ubm), as when relaxed
+            e = abs(float(x[j] - np.round(x[j])))
+        else:
+            j, side = key[1], key[2]
+            if side == "lower":
+                lbv[j] = 0.0
+                e = float(eng.col_lb[j] - x[j])
+            else:
+                ubv[j] = 0.0
+                e = float(x[j] - eng.col_ub[j])
+        rest = max(
+            float(np.max(np.where(rows_ok, rv, 0.0), initial=0.0)),
+            float(np.max(lbv, initial=0.0)),
+            float(np.max(ubv, initial=0.0)),
+            float(np.max(iv, initial=0.0)),
+        )
+        if rest <= tol and e > tol:
+            out[key] = x
+    return out
 
 
 #: CDCL conflict budgets for the clause-core candidate: the first UNSAT proof and
@@ -557,6 +572,9 @@ def milp_iis(
     confirm: str = "final",
     total_time_limit: Optional[float] = None,
     sat_candidate: bool = True,
+    order: str = "ICB",
+    portfolio: Optional[Sequence[str]] = None,
+    workers: Optional[int] = None,
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
@@ -614,7 +632,6 @@ def milp_iis(
     not proven infeasible, and ``TimeoutError`` as above.
     """
     t_start = time.perf_counter()
-    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
     import scipy.sparse as sp
 
     from discopt.decomposition._linear import extract_linear
@@ -646,6 +663,54 @@ def milp_iis(
     is_int = np.concatenate(ints) if ints else np.zeros(0, dtype=bool)
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
+    arrays = (A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)
+    kwargs: dict[str, Any] = dict(
+        include_bounds=include_bounds,
+        time_limit=time_limit,
+        cert_tol=cert_tol,
+        max_batch=max_batch,
+        confirm=confirm,
+        sat_candidate=sat_candidate,
+    )
+    if portfolio is not None:
+        return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
+    return _milp_iis_arrays(
+        arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
+    )
+
+
+def _parse_order(order: str) -> tuple[str, bool]:
+    """``"ICB"`` -> (``"ICB"``, False); ``"CIB-r"`` -> (``"CIB"``, True)."""
+    phases, _, suffix = order.partition("-")
+    if sorted(phases) != ["B", "C", "I"] or suffix not in ("", "r"):
+        raise ValueError(
+            f"order must be a permutation of 'ICB' with optional '-r' suffix, got {order!r}"
+        )
+    return phases, suffix == "r"
+
+
+def _milp_iis_arrays(
+    arrays: tuple,
+    *,
+    include_bounds: bool,
+    time_limit: float,
+    cert_tol: float,
+    max_batch: Optional[int],
+    confirm: str,
+    sat_candidate: bool,
+    order: str,
+    total_time_limit: Optional[float],
+    t_start: Optional[float] = None,
+) -> MilpIIS:
+    """:func:`milp_iis` on the extracted matrix, with one deletion order."""
+    if t_start is None:
+        t_start = time.perf_counter()
+    deadline = None if total_time_limit is None else t_start + float(total_time_limit)
+    phase_order, reverse = _parse_order(order)
+    A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
+
+    def _ord(c: list) -> list:
+        return c[::-1] if reverse else c
 
     if confirm not in ("each", "final"):
         raise ValueError(f"confirm must be 'each' or 'final', got {confirm!r}")
@@ -783,19 +848,30 @@ def milp_iis(
         if res is True:
             ints_active.clear()
         else:
-            batch_filter(sorted(ints_active), ints_active, lambda j: ("integrality", j))
+            batch_filter(_ord(sorted(ints_active)), ints_active, lambda j: ("integrality", j))
 
     def phase_constraints() -> None:
-        batch_filter(sorted(cons), cons, lambda ci: ("constraint", ci))
+        batch_filter(_ord(sorted(cons)), cons, lambda ci: ("constraint", ci))
+
+    # Bounds already put through the deletion filter. A bound of a column held
+    # integer is not an element while it is held; if a later I phase releases the
+    # column (orders with B before I), its bounds become elements of the result and
+    # must be filtered too, or a removable bound is reported as proven irreducible.
+    tested_bounds: set[tuple[int, str]] = set()
+
+    def untested_bounds() -> list[tuple[int, str]]:
+        return [
+            jb
+            for jb in finite_bounds
+            if jb in bounds and jb[0] not in ints_active and jb not in tested_bounds
+        ]
 
     def phase_bounds() -> None:
         # Bounds of columns not held integer (a held column's box is not an element).
         if include_bounds:
-            batch_filter(
-                [jb for jb in finite_bounds if jb[0] not in ints_active],
-                bounds,
-                lambda jb: ("bound", jb[0], jb[1]),
-            )
+            todo = untested_bounds()
+            batch_filter(_ord(todo), bounds, lambda jb: ("bound", jb[0], jb[1]))
+            tested_bounds.update(todo)
 
     def redo_each() -> MilpIIS:
         # A presolve-on verdict the filter acted on did not survive: the set is
@@ -807,15 +883,16 @@ def milp_iis(
                 "compute_iis: a presolve-on verdict was refuted and total_time_limit "
                 "leaves no time to redo the filter with per-probe confirmation"
             )
-        redo = milp_iis(
-            model,
+        redo = _milp_iis_arrays(
+            arrays,
             include_bounds=include_bounds,
             time_limit=time_limit,
             cert_tol=cert_tol,
             max_batch=max_batch,
             confirm="each",
-            total_time_limit=left,
             sat_candidate=sat_candidate,
+            order=order,
+            total_time_limit=left,
         )
         redo.n_solves += eng.n_solves
         redo.n_interrupted += eng.n_interrupted
@@ -829,9 +906,14 @@ def milp_iis(
     # verdict, so its current subsystem is always confirmed.)
     checkpoint: Optional[tuple[set, set, set]] = None
     try:
-        for phase in (phase_integrality, phase_constraints, phase_bounds):
+        by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
+        phases = [by_name[c] for c in phase_order]
+        if include_bounds and phase_order.index("B") < phase_order.index("I"):
+            # B runs before I: bounds of columns I releases are filtered at the end.
+            phases.append(phase_bounds)
+        for k, phase in enumerate(phases):
             phase()
-            if confirm == "final" and phase is not phase_bounds:
+            if confirm == "final" and k < len(phases) - 1:
                 verdict = eng.confirm_infeasible(cons, bounds, ints_active)
                 if verdict is False:
                     return redo_each()
@@ -866,12 +948,7 @@ def milp_iis(
     # include_bounds=False that is every finite bound, but none is an element.
     applied_bounds = sorted((j, s) for j, s in bounds if j not in ints_active)
     kept_bounds = applied_bounds if include_bounds else []
-    certs = {}
-    for key, x in pending.items():
-        if _check_certificate(
-            x, key, eng, sorted(cons), applied_bounds, sorted(ints_active), cert_tol
-        ):
-            certs[key] = x
+    certs = _check_certificates(pending, eng, cons, applied_bounds, ints_active, cert_tol)
     return MilpIIS(
         constraints=sorted(cons),
         bounds=kept_bounds,
@@ -889,4 +966,218 @@ def milp_iis(
         n_artifacts=eng.n_artifacts,
         sat_rows=sat_rows,
         sat_conflicts=sat_conflicts,
+        order=order,
     )
+
+
+#: The recommended portfolio (``compute_iis(portfolio=DEFAULT_PORTFOLIO)``).
+#: Chosen on MIPcc27's smallset (50 instances x 4 orders, 60 s, every output
+#: verified): as a portfolio waiting for all members, ICB+CIB+ICB-r completes 31
+#: instances, 29 of them at or below Gurobi's reference size, against 29 / 23 for
+#: ICB alone; adding CIB-r changed nothing, and stopping members 2x after the
+#: first completion lost size on 2 instances.
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r")
+#: Wall time held back from the members' budget for process start-up and for
+#: returning their results, capped at this fraction of the budget.
+_PORTFOLIO_MARGIN_S = 2.0
+_PORTFOLIO_MARGIN_FRACTION = 0.05
+
+
+def _iis_size(res: MilpIIS) -> int:
+    return len(res.constraints) + len(res.bounds) + len(res.integrality)
+
+
+def _portfolio_child() -> None:
+    """Entry point of one portfolio member process.
+
+    Reads a pickled job from stdin, runs one deletion order and pickles its
+    outcome to the job's result file: ``("ok", MilpIIS)``, ``("timeout",
+    message)`` for a :class:`TimeoutError` (this order confirmed nothing in time
+    -- a result, not a failure) or ``("error", exception)`` for anything else,
+    which the parent re-raises.
+    """
+    import os
+    import pickle
+    import sys
+    import threading
+
+    job = pickle.load(sys.stdin.buffer)
+
+    def _orphan_watch() -> None:
+        # The parent keeps our stdin open until it is done with us; EOF means it
+        # closed it or died. Do not outlive it (a killed caller left members
+        # running at 100% CPU).
+        # Raw fd, not sys.stdin: a daemon thread blocked in a buffered read
+        # holds its lock and aborts interpreter shutdown.
+        fd = sys.stdin.fileno()
+        while os.read(fd, 4096):
+            pass
+        os._exit(3)
+
+    threading.Thread(target=_orphan_watch, daemon=True).start()
+    deadline_wall = job["deadline_wall"]
+    total = None if deadline_wall is None else max(0.0, deadline_wall - time.time())
+    try:
+        res = _milp_iis_arrays(
+            job["arrays"], **job["kwargs"], order=job["order"], total_time_limit=total
+        )
+        out: tuple = ("ok", res)
+    except TimeoutError as e:
+        out = ("timeout", str(e))
+    except Exception as e:  # forwarded: the parent re-raises it
+        out = ("error", e)
+    with open(job["result_path"], "wb") as f:
+        pickle.dump(out, f)
+
+
+def _portfolio_iis(
+    arrays: tuple,
+    kwargs: dict,
+    portfolio: Sequence[str],
+    workers: Optional[int],
+    t_start: float,
+    total_time_limit: Optional[float],
+    grace: float = math.inf,
+) -> MilpIIS:
+    """Run one deletion filter per order in ``portfolio``, each in its own process,
+    against one shared budget, and return the smallest complete result.
+
+    Each member is an ordinary :func:`milp_iis` run, so each result is sound on its
+    own (confirmed infeasible under both presolve configurations, certificates
+    checked); the portfolio only chooses among them. Choice: the smallest
+    *complete* result, ties to the earlier order in ``portfolio``; if no member
+    completed, the smallest anytime result. :class:`TimeoutError` only when every
+    member timed out; any other member exception is re-raised.
+
+    Members are fresh ``python -c`` interpreters fed a pickled job, not
+    ``multiprocessing`` children: a spawned child re-imports the caller's
+    ``__main__``, which would re-run an unguarded script once per member.
+
+    ``grace``: once the first member completes at elapsed time ``t``, the others
+    may run until ``grace * t`` (and never past the budget); then they are
+    terminated and recorded as ``"abandoned"``. ``inf`` waits for every member.
+    """
+    import os
+    import pickle
+    import subprocess
+    import sys
+    import tempfile
+
+    orders = list(portfolio)
+    if not orders:
+        raise ValueError("portfolio must name at least one order")
+    if len(set(orders)) != len(orders):
+        raise ValueError(f"portfolio has duplicate orders: {orders}")
+    for o in orders:
+        _parse_order(o)
+    if kwargs["confirm"] not in ("each", "final"):
+        raise ValueError(f"confirm must be 'each' or 'final', got {kwargs['confirm']!r}")
+    n_workers = min(len(orders), os.cpu_count() or 1) if workers is None else int(workers)
+    if n_workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    if not grace >= 1.0:
+        raise ValueError(f"grace must be >= 1, got {grace}")
+
+    # perf_counter is per-process; members get an absolute wall-clock deadline.
+    wall0 = time.time() - (time.perf_counter() - t_start)
+    hard_end = None if total_time_limit is None else wall0 + float(total_time_limit)
+    member_deadline = None
+    if total_time_limit is not None:
+        margin = min(_PORTFOLIO_MARGIN_S, _PORTFOLIO_MARGIN_FRACTION * float(total_time_limit))
+        member_deadline = wall0 + float(total_time_limit) - margin
+    boot = (
+        f"import sys; sys.path[:0] = {list(sys.path)!r}; "
+        "from discopt._iis_milp import _portfolio_child; _portfolio_child()"
+    )
+
+    todo = list(range(len(orders)))
+    # index -> (process, start wall time, result path, stderr file)
+    running: dict[int, tuple[Any, float, str, Any]] = {}
+    results: list[Optional[MilpIIS]] = [None] * len(orders)
+    members: list[dict] = [
+        {"order": o, "outcome": "not started", "size": None, "complete": None, "wall": None}
+        for o in orders
+    ]
+    cutoff = hard_end
+    with tempfile.TemporaryDirectory(prefix="discopt_iis_portfolio_") as tmp:
+        try:
+            while todo or running:
+                now = time.time()
+                while todo and len(running) < n_workers and (cutoff is None or now < cutoff):
+                    i = todo.pop(0)
+                    result_path = os.path.join(tmp, f"member{i}.pkl")
+                    err = open(os.path.join(tmp, f"member{i}.err"), "w+b")
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", boot],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=err,
+                    )
+                    assert proc.stdin is not None
+                    job = dict(
+                        arrays=arrays,
+                        kwargs=kwargs,
+                        order=orders[i],
+                        deadline_wall=member_deadline,
+                        result_path=result_path,
+                    )
+                    pickle.dump(job, proc.stdin)
+                    # Kept open: the member exits on EOF, so it cannot outlive us.
+                    proc.stdin.flush()
+                    running[i] = (proc, time.time(), result_path, err)
+                if not running:
+                    break
+                finished = [i for i, r in running.items() if r[0].poll() is not None]
+                if not finished:
+                    if cutoff is not None and time.time() >= cutoff:
+                        break  # the rest are abandoned below
+                    time.sleep(0.02)
+                    continue
+                for i in finished:
+                    proc, t0, result_path, err = running.pop(i)
+                    assert proc.stdin is not None
+                    proc.stdin.close()
+                    members[i]["wall"] = round(time.time() - t0, 3)
+                    if proc.returncode != 0 or not os.path.exists(result_path):
+                        err.seek(0)
+                        tail = err.read().decode(errors="replace").strip()[-2000:]
+                        err.close()
+                        raise RuntimeError(
+                            f"compute_iis portfolio member {orders[i]!r} exited without a "
+                            f"result (exit code {proc.returncode}):\n{tail}"
+                        )
+                    err.close()
+                    with open(result_path, "rb") as f:
+                        kind, payload = pickle.load(f)
+                    if kind == "error":
+                        raise payload
+                    if kind == "timeout":
+                        members[i].update(outcome="timeout", message=payload)
+                        continue
+                    results[i] = payload
+                    members[i].update(
+                        outcome="ok", size=_iis_size(payload), complete=payload.complete
+                    )
+                    if payload.complete and math.isfinite(grace):
+                        grace_end = wall0 + grace * (time.time() - wall0)
+                        cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
+        finally:
+            for i, (proc, t0, _, err) in running.items():
+                proc.kill()
+                proc.wait()
+                assert proc.stdin is not None
+                proc.stdin.close()
+                err.close()
+                members[i].update(outcome="abandoned", wall=round(time.time() - t0, 3))
+
+    done = [(i, r) for i, r in enumerate(results) if r is not None]
+    if not done:
+        why = "; ".join(f"{mb['order']}: {mb.get('message') or mb['outcome']}" for mb in members)
+        raise TimeoutError(
+            "compute_iis: no portfolio member confirmed a subsystem infeasible "
+            f"within total_time_limit ({why})"
+        )
+    pool = [(i, r) for i, r in done if r.complete] or done
+    _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
+    best.members = members
+    return best
