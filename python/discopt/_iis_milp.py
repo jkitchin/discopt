@@ -94,6 +94,9 @@ class MilpIIS:
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
+    n_exact: int = 0  # confirmations decided exactly when presolve-off could not
+    n_exact_confirmed: int = 0
+    n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
     # Portfolio runs only: one entry per member, in portfolio order, with keys
     # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
@@ -142,6 +145,9 @@ class _Engine:
         self._stop = math.inf
         self.n_interrupted = 0
         self.n_repairs = 0
+        self.n_exact = 0  # exact (rational) decisions attempted as the second route
+        self.n_exact_confirmed = 0  # ... that proved the set infeasible
+        self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
@@ -404,8 +410,33 @@ class _Engine:
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
-            all_infeasible &= st == MS.kInfeasible
+            ok = st == MS.kInfeasible
+            if not ok and p == "off":
+                # Presolve-off could not answer (on big-M sets it returns
+                # "Optimal" points whose integers are 1e-11 off and do not
+                # survive rounding). Decide the set exactly instead; that is a
+                # strictly stronger second route, and ``None`` when too large.
+                exact = self._exact(stop_at)
+                if exact is False:
+                    self.n_exact_refuted += 1
+                    return False
+                if exact is True:
+                    self.n_exact_confirmed += 1
+                    ok = True
+            all_infeasible &= ok
         return True if all_infeasible else None
+
+    def _exact(self, stop_at: Optional[float]) -> Optional[bool]:
+        """Exact decision of the configured set (:mod:`discopt._iis_exact`):
+        True infeasible, False feasible, None undecided."""
+        from discopt._iis_exact import exact_feasible
+
+        stop = self.deadline if stop_at is None else stop_at
+        if stop is not None and self.deadline is not None:
+            stop = min(stop, self.deadline)
+        rlo, rhi, lb, ub = self._cfg
+        self.n_exact += 1
+        return exact_feasible(self.A, rlo, rhi, lb, ub, self._held, stop_at=stop)
 
 
 def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
@@ -1140,6 +1171,9 @@ def _milp_iis_arrays(
         sat_rows=sat_rows,
         sat_conflicts=sat_conflicts,
         order=order,
+        n_exact=eng.n_exact,
+        n_exact_confirmed=eng.n_exact_confirmed,
+        n_exact_refuted=eng.n_exact_refuted,
     )
 
 
