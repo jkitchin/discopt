@@ -89,3 +89,44 @@ def test_ladder_out_of_time_midway_still_returns_a_valid_iis(monkeypatch):
 def test_ladder_flag_parses():
     assert _parse_order("CIB-l") == ("CIB", False, True, True)
     assert _parse_order("ICB-rnl") == ("ICB", True, False, True)
+
+
+def _ladder_lie_model():
+    m = dm.Model("ladder_lie")
+    x = m.binary("x", shape=(3,))
+    m.subject_to(x[0] + x[1] >= 2, name="r0")
+    m.subject_to(x[0] + x[2] <= 0, name="r1")
+    m.subject_to(x[1] + x[2] <= 2, name="r2")
+    m.minimize(0 * x[0])
+    return m
+
+
+@pytest.mark.parametrize("confirm", ["final", "each"])
+def test_false_presolve_claim_cannot_shrink_the_certified_set(monkeypatch, confirm):
+    """A ladder drop rests on one presolve-on claim; it must be cross-checked.
+
+    PR #2114 review: presolve is stubbed to claim {r0} (feasible: x0=x1=1) is
+    infeasible -- the #1634 failure mode. Before the fix the ladder dropped r1 on
+    that claim and {r0} came back ``proven_irreducible=True`` in both confirm modes.
+    The ladder's set must now be confirmed under both presolve configurations, and
+    its drops discarded when it is not.
+    """
+    import discopt._iis_milp as im
+
+    real = im._Engine.presolve_proves
+    lies = {"n": 0}
+
+    def lying(self, cons, bounds, ints, stop_at=None):
+        if 0 in cons and 1 not in cons:
+            lies["n"] += 1
+            return True
+        return real(self, cons, bounds, ints, stop_at)
+
+    monkeypatch.setattr(im._Engine, "presolve_proves", lying)
+    m = _ladder_lie_model()
+    r = im.milp_iis(m, order="CIB-l", confirm=confirm)
+    assert lies["n"] > 0  # the stub fired: the ladder did act on the false claim
+    names = {m._constraints[i].name for i in r.constraints}
+    assert names == {"r0", "r1"}  # the true IIS, not the feasible {r0}
+    assert r.proven_irreducible and r.complete
+    assert r.ladder_rejected
