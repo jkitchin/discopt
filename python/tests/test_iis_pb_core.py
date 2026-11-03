@@ -109,11 +109,17 @@ def test_encoding_over_the_size_cap_gets_no_candidate(monkeypatch):
     assert res.sat_rows is None and res.complete
 
 
-def test_candidate_stage_stays_inside_its_budget_on_pb_rows():
+def test_candidate_stage_stays_inside_its_budget_on_pb_rows(monkeypatch):
     """Large-coefficient equality rows (Cornuejols-Dawande market split) make
-    every CDCL conflict expensive: the stage must still stop near its budget,
-    not one coarse conflict slice later (it overran 0.2 s by 0.6 s)."""
+    every CDCL conflict expensive, so the stage must look at its clock often: each
+    solver call is capped at ``_SAT_SLICE_CONFLICTS`` conflicts, and once the
+    stage's stop time has passed it makes no further call. (At 1000 conflicts
+    per slice one slice overran a 0.2 s stage budget by 0.6 s and took the base
+    proof's time.) Asserted on the calls, not on wall time, so load cannot flip it.
+    """
     import time
+
+    import discopt._rust as rust
 
     rng = np.random.default_rng(7)
     A = rng.integers(0, 100, size=(4, 36))
@@ -123,19 +129,42 @@ def test_candidate_stage_stays_inside_its_budget_on_pb_rows():
     for i in range(4):
         m.subject_to(sum(float(A[i, j]) * x[j] for j in range(36)) == float(rhs[i]))
     m.minimize(0 * x[0])
-    over = []
-    real = _iis_milp._binary_core
 
-    def timed(*a, **k):
-        out = real(*a, **k)
-        over.append(time.perf_counter() - a[-1])
-        return out
+    # The stage's own inputs, captured from a real call (the run itself is cut
+    # short: only the arrays are wanted).
+    captured: list[tuple] = []
 
-    _iis_milp._binary_core = timed
-    try:
-        with pytest.raises((TimeoutError, ValueError)):
-            milp_iis(m, total_time_limit=2.0)
-    finally:
-        _iis_milp._binary_core = real
-    assert len(over) == 1
-    assert over[0] < 0.25, over
+    def capture(*a, **k):
+        captured.append(a)
+        return None, 0
+
+    monkeypatch.setattr(_iis_milp, "_binary_core", capture)
+    with pytest.raises((TimeoutError, ValueError)):
+        milp_iis(m, total_time_limit=0.5)
+    monkeypatch.undo()
+    assert len(captured) == 1
+    args = captured[0][:-1]
+
+    calls: list[tuple[float, int]] = []  # (time of call, conflict limit)
+    real_solver = rust.PySatSolver
+
+    class Recording:
+        def __init__(self, n):
+            self._s = real_solver(n)
+
+        def solve(self, assumptions, conflict_limit=None):
+            calls.append((time.perf_counter(), conflict_limit))
+            return self._s.solve(assumptions, conflict_limit)
+
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    monkeypatch.setattr(rust, "PySatSolver", Recording)
+    # A stop time the encoding (~0.15 s) fits in even under load; the search
+    # cannot finish market split in it, so the stage must stop on the clock.
+    stop = time.perf_counter() + 1.0
+    _iis_milp._binary_core(*args, stop)
+    assert len(calls) >= 1
+    assert all(lim is not None and lim <= _iis_milp._SAT_SLICE_CONFLICTS for _, lim in calls)
+    assert _iis_milp._SAT_SLICE_CONFLICTS <= 100
+    assert sum(t >= stop for t, _ in calls) <= 1

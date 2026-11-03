@@ -634,6 +634,9 @@ def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at)
     nv = n + len(groups)
     clauses: list[list[int]] = []
     for gi, ci in enumerate(groups):
+        # Encoding is part of the stage's budget too: it grows with the model.
+        if stop_at is not None and time.perf_counter() >= stop_at:
+            return None, 0
         for r in row_groups[ci]:
             s0, e0 = A.indptr[r], A.indptr[r + 1]
             rows = _pb_rows(A.indices[s0:e0], A.data[s0:e0], row_lo[r], row_hi[r])
