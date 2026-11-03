@@ -88,7 +88,8 @@ class MilpIIS:
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
     # Portfolio runs only: one entry per member, in portfolio order, with keys
-    # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall.
+    # order / outcome ("ok" | "timeout" | "abandoned") / size / complete / wall,
+    # and a timed-out member's own TimeoutError message.
     members: Optional[list] = None
 
 
@@ -1111,7 +1112,7 @@ def _portfolio_iis(
                     if kind == "error":
                         raise payload
                     if kind == "timeout":
-                        members[i]["outcome"] = "timeout"
+                        members[i].update(outcome="timeout", message=payload)
                         continue
                     results[i] = payload
                     members[i].update(
@@ -1129,9 +1130,10 @@ def _portfolio_iis(
 
     done = [(i, r) for i, r in enumerate(results) if r is not None]
     if not done:
+        why = "; ".join(f"{mb['order']}: {mb.get('message') or mb['outcome']}" for mb in members)
         raise TimeoutError(
             "compute_iis: no portfolio member confirmed a subsystem infeasible "
-            "within total_time_limit"
+            f"within total_time_limit ({why})"
         )
     pool = [(i, r) for i, r in done if r.complete] or done
     _, best = min(pool, key=lambda ir: (_iis_size(ir[1]), ir[0]))
