@@ -237,6 +237,15 @@ def discover_models(
                 specs.append(
                     GDPModelSpec(name=name, builder=px.builder(name), module="pyomo_gdp_examples")
                 )
+        # #1917: seeded convex-quadratic GDP instances (``cgdp.<family>_<size>_s<seed>``),
+        # likewise resolved only by name.
+        from benchmarks import convex_gdp_generator as cg
+
+        for name in sorted(want):
+            if cg.is_name(name):
+                specs.append(
+                    GDPModelSpec(name=name, builder=cg.builder(name), module="convex_gdp_generator")
+                )
     if exclude_set:
         specs = [s for s in specs if s.name not in exclude_set]
     return sorted(specs, key=lambda s: s.name)

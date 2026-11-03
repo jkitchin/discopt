@@ -218,6 +218,12 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
         "bound": None if r.bound is None or not math.isfinite(r.bound) else float(r.bound),
         "minimize": conv.model._objective.sense.name == "MINIMIZE",
         "node_count": getattr(r, "node_count", None),
+        # flag-attribution stats (#1917 F1: whether the VUB c-MIR rows fired)
+        "stats": {
+            k: v
+            for k, v in (getattr(r, "solver_stats", None) or {}).items()
+            if k.startswith("vub_cmir/")
+        },
     }
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)

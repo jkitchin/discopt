@@ -50,12 +50,20 @@ def _ellipse(sense="<="):
 
 
 def test_flag_off_emits_no_cone(monkeypatch):
-    monkeypatch.delenv(FLAG, raising=False)
+    monkeypatch.setenv(FLAG, "0")
     m, x, y = nesting._circles()
     m.minimize(x + y)
     rows = _nonlinear_rows(reformulate_gdp(m, "hull"))
     assert rows and not any(_is_cone(c) for c in rows)
     assert all("/" in str(c.body) for c in rows)  # today's eps-perspective
+
+
+def test_the_cone_is_the_default(monkeypatch):
+    """Graduated by the #1917 panel: unset means ON."""
+    monkeypatch.delenv(FLAG, raising=False)
+    m, x, y = nesting._circles()
+    m.minimize(x + y)
+    assert any(_is_cone(c) for c in _nonlinear_rows(reformulate_gdp(m, "hull")))
 
 
 @pytest.mark.parametrize("sense", ["<=", ">="])

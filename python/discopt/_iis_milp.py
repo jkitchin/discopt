@@ -994,14 +994,25 @@ def _milp_iis_arrays(
     def phase_constraints() -> None:
         batch_filter(_ord(sorted(cons)), cons, lambda ci: ("constraint", ci))
 
+    # Bounds already put through the deletion filter. A bound of a column held
+    # integer is not an element while it is held; if a later I phase releases the
+    # column (orders with B before I), its bounds become elements of the result and
+    # must be filtered too, or a removable bound is reported as proven irreducible.
+    tested_bounds: set[tuple[int, str]] = set()
+
+    def untested_bounds() -> list[tuple[int, str]]:
+        return [
+            jb
+            for jb in finite_bounds
+            if jb in bounds and jb[0] not in ints_active and jb not in tested_bounds
+        ]
+
     def phase_bounds() -> None:
         # Bounds of columns not held integer (a held column's box is not an element).
         if include_bounds:
-            batch_filter(
-                _ord([jb for jb in finite_bounds if jb[0] not in ints_active]),
-                bounds,
-                lambda jb: ("bound", jb[0], jb[1]),
-            )
+            todo = untested_bounds()
+            batch_filter(_ord(todo), bounds, lambda jb: ("bound", jb[0], jb[1]))
+            tested_bounds.update(todo)
 
     def redo_each() -> MilpIIS:
         # A presolve-on verdict the filter acted on did not survive: the set is
@@ -1059,9 +1070,12 @@ def _milp_iis_arrays(
     try:
         by_name = {"I": phase_integrality, "C": phase_constraints, "B": phase_bounds}
         phases = [by_name[c] for c in phase_order]
-        for phase in phases:
+        if include_bounds and phase_order.index("B") < phase_order.index("I"):
+            # B runs before I: bounds of columns I releases are filtered at the end.
+            phases.append(phase_bounds)
+        for k, phase in enumerate(phases):
             phase()
-            if confirm == "final" and phase is not phases[-1]:
+            if confirm == "final" and k < len(phases) - 1:
                 verdict = eng.confirm_infeasible(cons, bounds, ints_active)
                 if verdict is False:
                     return redo_each()

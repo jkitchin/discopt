@@ -280,13 +280,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-
       - name: Install Python dependencies
         run: |
           python -m venv .venv
@@ -445,13 +452,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-
       - name: Install Python dependencies
         run: |
           python -m venv .venv
@@ -838,13 +852,20 @@ jobs:
       - name: Install system dependencies (Ipopt)
         # Cached per runner image; see .github/actions/install-ipopt/action.yml.
         uses: ./.github/actions/install-ipopt
+      # The key carries the runner image: uv caches *built* wheels, and cyipopt's links the
+      # system libipopt. When ubuntu-latest moved 24 -> 26 (libipopt.so.1 -> .so.3) an
+      # image-blind key restored a wheel linked to a library the new image does not ship.
+      - name: Runner image id (uv cache key)
+        id: uvimg
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py312-cov-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          key: uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-cov-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
           restore-keys: |
-            uv-${{ runner.os }}-py312-cov-
+            uv-${{ runner.os }}-${{ steps.uvimg.outputs.image }}-py312-cov-
       - name: Install Python dependencies
         # The optional-feature deps (sympy, pyomo, onnx stack, litellm, xgboost,
         # lightgbm) are installed here so the coverage gate measures the modules
