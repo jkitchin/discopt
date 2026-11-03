@@ -367,7 +367,7 @@ pub fn solve_lp_warm_csc(
     start: Option<&Basis>,
     opts: &SimplexOptions,
 ) -> LpSolve {
-    if start.is_none() {
+    if start.is_none() && super::primal::huge_bound_relax_enabled() {
         if let Some(sol) = solve_huge_box_relaxed(&sp, m, n, c, l, u, b, opts) {
             return sol;
         }
@@ -3445,6 +3445,22 @@ mod tests {
             "cleanup at x = {:?}",
             cleaned.x
         );
+    }
+
+    /// `DISCOPT_LP_HUGE_BOUND_RELAX`: unset is on, the off spellings are off, and a
+    /// typo is refused instead of silently picking an arm.
+    #[test]
+    fn huge_bound_relax_parse_table_2125() {
+        use super::super::primal::parse_huge_bound_relax as p;
+        for on in ["", "1", "true", "True", "on", "ON", " 1 "] {
+            assert_eq!(p(on), Ok(true), "{on:?}");
+        }
+        for off in ["0", "false", "False", "off", "OFF"] {
+            assert_eq!(p(off), Ok(false), "{off:?}");
+        }
+        for bad in ["2", "yes", "of", "-1"] {
+            assert!(p(bad).is_err(), "{bad:?} must be refused");
+        }
     }
 
     // ----- F2: warm dual-simplex stall guard --------------------------------

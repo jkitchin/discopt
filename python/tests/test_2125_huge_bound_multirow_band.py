@@ -225,3 +225,63 @@ def test_unrepresentable_vertex_is_refused_not_misreported():
     if r.status == SolveStatus.OPTIMAL:
         assert _independently_feasible(lp, r.x), "an optimal point must satisfy its rows"
         assert r.objective == pytest.approx(h.fun, rel=1e-9)
+
+
+_OPT_OUT_PROBE = r"""
+import sys
+sys.path.insert(0, {tests!r})
+from discopt import _rust
+from test_2125_huge_bound_multirow_band import _seeded_lp
+from discopt.solvers.lp_simplex import solve_lp
+_rust.profile_reset_py()
+statuses = [solve_lp(**_seeded_lp(s, 1e17, "lo")).status.value for s in range(4)]
+c = dict(_rust.profile_counters_py())
+print(statuses.count("error"), c["HugeBoxRelaxArmed"], c["AuditRowsSingletonAbsorbed"])
+"""
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_opt_out_restores_the_legacy_path(value):
+    """``DISCOPT_LP_HUGE_BOUND_RELAX=0`` is the pre-#2125 engine; ``=1`` is the default.
+
+    Read once per process, so each arm runs in its own interpreter. On the ``lo``
+    fixture at ``u = 1e17``, seeds 0-3, main returns ERROR on 4/4, and so does the
+    ``=0`` arm, with no #2125 route armed. The default arm certifies all four.
+    (Measured: ``=0`` is bit-identical to main on 257 LPs, the 256-case sweep plus
+    #1287's LP.)
+    """
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    tests = str(pathlib.Path(__file__).parent)
+    env = dict(os.environ, DISCOPT_PROFILE="1", DISCOPT_LP_HUGE_BOUND_RELAX=value)
+    out = subprocess.run(
+        [sys.executable, "-c", _OPT_OUT_PROBE.format(tests=tests)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    errors, armed, absorbed = (int(v) for v in out[-3:])
+    if value == "0":
+        assert (errors, armed, absorbed) == (4, 0, 0), out
+    else:
+        assert errors == 0 and armed > 0, out
+
+
+def test_opt_out_refuses_an_unrecognized_value():
+    """A typo must not silently pick an arm."""
+    import os
+    import subprocess
+    import sys
+
+    probe = (
+        "from discopt.solvers.lp_simplex import solve_lp\n"
+        "solve_lp([1.0], A_ub=[[1.0]], b_ub=[1.0], bounds=[(0.0, 1e17)])\n"
+    )
+    env = dict(os.environ, DISCOPT_LP_HUGE_BOUND_RELAX="of")
+    r = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and "DISCOPT_LP_HUGE_BOUND_RELAX" in r.stderr, r.stderr[-500:]

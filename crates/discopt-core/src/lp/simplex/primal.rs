@@ -458,6 +458,46 @@ pub(super) fn point_fails_original_audit(
     fails
 }
 
+/// Whether the #2125 huge-bound routes are on, read once from
+/// `DISCOPT_LP_HUGE_BOUND_RELAX`. Default **on**; `0`/`false`/`off` is the opt-out.
+///
+/// It gates all of #2125 together: the row audit's singleton absorption
+/// ([`singleton_absorbs`]), and, on cold CSC solves, the relax-and-verify rounds,
+/// the dual cleanup and the active-bound fix
+/// (`dual::solve_huge_box_relaxed`). With it off, the engine is the pre-#2125 one
+/// byte for byte.
+///
+/// **Why it is the default, and what would change that.** It turns `ERROR` into
+/// a certified answer on LPs with a finite bound in `[1e10, 1e20)`. On the GDPlib
+/// `batch_processing` mbigm LPs at `u >= 3e16`, it agreed with HiGHS on 40/40
+/// where main agreed on 7-8/40. On the in-repo corpus it reaches 6 instances,
+/// only through relaxation-lifted columns, and changes no certified result. It is
+/// not graduated by a §5 panel. A panel showing a node-count or wall regression
+/// on that class (e.g. `4stufen`, whose 3-node bound loosens 20712 -> 19947)
+/// would be the reason to make it default-off.
+///
+/// An unrecognized value is refused loudly, as for `DISCOPT_LP_DUAL_STALL_BAIL`:
+/// a typo in an A/B arm must not quietly measure one arm twice.
+pub(crate) fn huge_bound_relax_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_HUGE_BOUND_RELAX").unwrap_or_default();
+        parse_huge_bound_relax(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`huge_bound_relax_enabled`] (unset = on).
+pub(crate) fn parse_huge_bound_relax(raw: &str) -> Result<bool, String> {
+    match raw.trim() {
+        "" | "1" | "true" | "True" | "on" | "ON" => Ok(true),
+        "0" | "false" | "False" | "off" | "OFF" => Ok(false),
+        other => Err(format!(
+            "DISCOPT_LP_HUGE_BOUND_RELAX={other:?} is not a recognized value. \
+             Use 1/true/on (the default), or 0/false/off for the pre-#2125 path."
+        )),
+    }
+}
+
 /// The final audit's feasibility tolerance: relative to `1 + |bound|` on a finite
 /// bound, and to `1 + |b_i|` on a row (see [`audit_feasibility`]).
 pub(crate) const AUDIT_FEAS: f64 = 1e-6;
@@ -561,11 +601,13 @@ fn audit_feasibility(
     // #2125: per row, the coarsest-grained SINGLETON column (one nonzero, so it is
     // in this row only) — `(j, A_ij, |A_ij|·ulp(x_j))`. See `singleton_absorbs`.
     let mut single: Vec<Option<(usize, f64, f64)>> = vec![None; m];
+    // `DISCOPT_LP_HUGE_BOUND_RELAX=0` keeps the pre-#2125 audit: no absorber.
+    let absorb = huge_bound_relax_enabled();
     for j in 0..n {
         let xj = x[j];
         let gj = 2.0 * f64::EPSILON * xj.abs();
         let (rows, vals) = cols.col(j);
-        if rows.len() == 1 && vals[0] != 0.0 {
+        if absorb && rows.len() == 1 && vals[0] != 0.0 {
             let sg = vals[0].abs() * gj;
             let i = rows[0];
             if single[i].is_none_or(|(_, _, g)| sg > g) {
