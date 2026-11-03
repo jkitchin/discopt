@@ -66,9 +66,32 @@ pub fn deflated_magnitude(d: f64, abs_sum: f64, k: usize) -> Option<f64> {
     }
 }
 
+/// `v` clamped into the box edge pair `(a, b)` taken in either order, so a box
+/// crossed by round-off never panics `f64::clamp` (#1917). On an ordered box this
+/// is exactly `v.clamp(a, b)`.
+#[inline]
+pub fn clamp_ordered(v: f64, a: f64, b: f64) -> f64 {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    v.clamp(lo, hi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1917: an ulp-crossed edge pair clamps instead of panicking, and an ordered
+    /// pair is exactly `f64::clamp`.
+    #[test]
+    fn clamp_ordered_accepts_a_crossed_pair_1917() {
+        assert_eq!(clamp_ordered(1.0, 1.0, 0.9999999999999996), 1.0);
+        assert_eq!(
+            clamp_ordered(0.0, 1.0, 0.9999999999999996),
+            0.9999999999999996
+        );
+        for &(v, a, b) in &[(0.5, 0.0, 1.0), (-3.0, -1.0, 2.0), (9.0, -1.0, 2.0)] {
+            assert_eq!(clamp_ordered(v, a, b), f64::clamp(v, a, b));
+        }
+    }
 
     #[test]
     fn gamma_is_monotone_and_bails_at_the_limit() {
