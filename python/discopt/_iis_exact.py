@@ -44,6 +44,10 @@ EXACT_MAX_NODES = 1 << 18
 #: Fourier--Motzkin is doubly exponential in the eliminated columns; past these
 #: caps the decision is left undecided.
 EXACT_MAX_CONT = 12
+#: Integer columns in active rows. The route is for small sets -- MIPcc27's
+#: kedron / osun / otra hold 2 / 14 / 16 -- and a set with thousands (dives)
+#: would only spend the budget on a decision it cannot reach.
+EXACT_MAX_INTS = 40
 EXACT_MAX_INEQS = 20_000
 
 
@@ -127,7 +131,7 @@ def exact_feasible(
         used.update(j for j, _ in terms)
     ints = sorted(j for j in used if is_held[j])
     cont = sorted(j for j in used if not is_held[j])
-    if len(cont) > EXACT_MAX_CONT:
+    if len(cont) > EXACT_MAX_CONT or len(ints) > EXACT_MAX_INTS:
         return None
     for j in ints:
         if not (np.isfinite(lb[j]) and np.isfinite(ub[j])):
@@ -192,24 +196,41 @@ def exact_feasible(
                 return False
         return _fm_feasible([(a, b) for a, b in ineqs if a])
 
-    def dfs(k: int) -> bool:
-        """True if some completion of ``fixed`` is feasible."""
+    def visit() -> bool:
+        """Count a node; True when ``fixed`` is pruned (no completion is feasible)."""
         nodes[0] += 1
         if nodes[0] > EXACT_MAX_NODES or (stop_at is not None and time.perf_counter() >= stop_at):
             raise _Undecided
-        if pruned():
+        return pruned()
+
+    def search() -> bool:
+        """True if some completion of ``fixed`` is feasible. Iterative: one stack
+        frame per integer column overflowed Python's recursion limit on a set
+        with few continuous but thousands of integer columns (MIPcc27 dives)."""
+        if visit():
             return False
-        if k == len(order):
+        if not order:
             return leaf_feasible()
-        j = order[k]
-        for v in dom[j]:
+        stack = [iter(dom[order[0]])]  # stack[k]: values left for column order[k]
+        while stack:
+            k = len(stack) - 1
+            j = order[k]
+            v = next(stack[-1], None)
+            if v is None:
+                stack.pop()
+                fixed.pop(j, None)
+                continue
             fixed[j] = F(v)
-            if dfs(k + 1):
-                return True
-            del fixed[j]
+            if visit():
+                continue
+            if k + 1 == len(order):
+                if leaf_feasible():
+                    return True
+                continue
+            stack.append(iter(dom[order[k + 1]]))
         return False
 
     try:
-        return not dfs(0)
+        return not search()
     except _Undecided:
         return None
