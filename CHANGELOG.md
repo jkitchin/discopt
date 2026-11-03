@@ -109,6 +109,16 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The `pounce-solver` floor is now 0.15 (was 0.14)**, for both the core
+  dependency and the `pounce` extra. POUNCE 0.15.0 adds a declared-complementarity
+  driver, caps the slack-row inertia perturbation (`perturb_slack_max_rows`,
+  default 1000; models with at most 1000 inequality rows solve exactly as before),
+  and fixes a convex infeasibility test that could report a feasible LP infeasible
+  off an approximate Farkas ray. It still has no in-memory solve report, so
+  `_pounce_report.py` keeps its temporary-file route. CI already installs POUNCE
+  from git `main`, so the CI lanes do not change. The Pyodide wheel in
+  `crates/discopt-wasm/web/wheels/` is still 0.14.0; it is built in the POUNCE
+  repository and is updated separately.
 - **The open branch-and-bound frontier has a memory budget, on by default (#2092).**
   `DISCOPT_FRONTIER_MEMORY_MB` (default 2048 MiB; `0` = no budget) becomes an open-node
   cap for the native spatial kernel and the Python-tree loops. A search whose gap never
