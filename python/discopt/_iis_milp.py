@@ -94,6 +94,7 @@ class MilpIIS:
     n_artifacts: int = 0  # ... whose point did not survive rounding (verdict -> undecided)
     sat_rows: Optional[int] = None  # constraints in the SAT-core candidate (None: not used)
     sat_conflicts: int = 0  # CDCL conflicts spent building the candidate
+    parity_rows: Optional[int] = None  # constraints in the mod-2 candidate (None: not used)
     n_exact: int = 0  # confirmations decided exactly when presolve-off could not
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
@@ -446,6 +447,14 @@ class _Engine:
         MS = self.hs.HighsModelStatus
         all_infeasible = True
         for p in presolve:
+            if p == "off":
+                rlo, rhi, _, _ = self._cfg
+                if self._parity_infeasible(rlo, rhi):
+                    # A mod-2 certificate: an exact proof in milliseconds, where
+                    # a presolve-free solve needed 47 s on enlight11's set.
+                    self.n_exact += 1
+                    self.n_exact_confirmed += 1
+                    continue
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
@@ -453,8 +462,10 @@ class _Engine:
             if not ok and p == "off":
                 # Presolve-off could not answer (on big-M sets it returns
                 # "Optimal" points whose integers are 1e-11 off and do not
-                # survive rounding). Decide the set exactly instead; that is a
-                # strictly stronger second route, and ``None`` when too large.
+                # survive rounding). Decide the set exactly instead -- a strictly
+                # stronger second route -- or None when too large. Not tried
+                # first: its caps bound size, not time, and on flugplinf it ran
+                # 13 s and 46 s to "undecided" where presolve-off took 0.04 s.
                 exact = self._exact(stop_at)
                 if exact is False:
                     self.n_exact_refuted += 1
@@ -476,6 +487,31 @@ class _Engine:
         rlo, rhi, lb, ub = self._cfg
         self.n_exact += 1
         return exact_feasible(self.A, rlo, rhi, lb, ub, self._held, stop_at=stop)
+
+    def _parity_infeasible(self, rlo, rhi) -> bool:
+        """The configured set's equality rows over held integer columns (integer
+        data) contain a mod-2 contradiction: an exact proof of infeasibility, in
+        integer arithmetic, whatever the bounds (:func:`_gf2_certificates`)."""
+        held = np.zeros(self.col_lb.size, dtype=bool)
+        held[self._held] = True
+        A = self.A
+        bits: list[tuple[int, int]] = []
+        for r in np.flatnonzero(np.isfinite(rlo) & (rlo == rhi)):
+            b = rlo[r]
+            if b != round(b):
+                continue
+            s0, e0 = A.indptr[r], A.indptr[r + 1]
+            cols, vals = A.indices[s0:e0], A.data[s0:e0]
+            if cols.size == 0 or not bool(np.all(held[cols])):
+                continue
+            if not bool(np.all(vals == np.round(vals))):
+                continue
+            mask = 0
+            for j, a in zip(cols, vals):
+                if int(round(a)) % 2:
+                    mask |= 1 << int(j)
+            bits.append((mask, int(round(b)) % 2))
+        return bool(bits) and bool(_gf2_certificates(bits))
 
 
 def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
@@ -679,6 +715,92 @@ def _encode_geq(
     return nv
 
 
+def _gf2_certificates(rows: list[tuple[int, int]]) -> list[int]:
+    """Row subsets (bitmasks over ``rows``) whose sum is ``0 = 1`` mod 2.
+
+    ``rows[i] = (lhs_mask, rhs_bit)``: the odd-coefficient columns and the rhs
+    parity of an integer equality row. Gaussian elimination over GF(2), tracking
+    which input rows each reduced row combines."""
+    piv: dict[int, tuple[int, int, int]] = {}
+    out = []
+    for i, (lhs, rhs) in enumerate(rows):
+        comb = 1 << i
+        while lhs:
+            top = lhs.bit_length() - 1
+            if top not in piv:
+                piv[top] = (lhs, rhs, comb)
+                break
+            pl, pr, pc = piv[top]
+            lhs ^= pl
+            rhs ^= pr
+            comb ^= pc
+        else:
+            if rhs:
+                out.append(comb)
+    return out
+
+
+def _parity_core(A, row_lo, row_hi, is_int, row_groups) -> Optional[tuple[set, set]]:
+    """A small constraint set that is infeasible by a mod-2 argument alone.
+
+    Eligible: equality constraints whose rows have integer coefficients and rhs
+    over integer columns only. A subset of them summing to ``even.x = odd`` mod
+    2 has no integer solution, whatever the bounds. The smallest such subset
+    found is shrunk to a minimal one (no proper subset is a certificate) and
+    returned as ``(constraints, columns they touch)``: a proposal -- the caller
+    holds the integrality of those columns, drops every other element, and has
+    HiGHS prove it infeasible before using it.
+
+    On MIPcc27's smallset certificates exist for enlight4 (8 rows), enlight11 (48)
+    and neos-807454 (9; Gurobi's IIS there is those 9 rows and 56 integralities);
+    the elimination takes milliseconds.
+    """
+    elig: list[int] = []  # constraint indices
+    rowbits: list[tuple[int, int]] = []
+    for ci in sorted(row_groups):
+        rs = row_groups[ci]
+        if len(rs) != 1:
+            continue
+        r = int(rs[0])
+        if row_lo[r] != row_hi[r] or row_lo[r] != round(row_lo[r]) or abs(row_lo[r]) >= _INF:
+            continue
+        s0, e0 = A.indptr[r], A.indptr[r + 1]
+        cols, vals = A.indices[s0:e0], A.data[s0:e0]
+        if cols.size == 0 or not bool(np.all(is_int[cols])):
+            continue
+        if not bool(np.all(vals == np.round(vals))):
+            continue
+        mask = 0
+        for j, a in zip(cols, vals):
+            if int(round(a)) % 2:
+                mask |= 1 << int(j)
+        elig.append(ci)
+        rowbits.append((mask, int(round(row_lo[r])) % 2))
+    certs = _gf2_certificates(rowbits)
+    if not certs:
+        return None
+    best = min(certs, key=lambda c: bin(c).count("1"))
+    support = [i for i in range(len(rowbits)) if best >> i & 1]
+    # Deletion to a minimal certificate: drop a row whenever the rest still
+    # contains one (then restrict to that one).
+    k = 0
+    while k < len(support):
+        rest = support[:k] + support[k + 1 :]
+        sub = _gf2_certificates([rowbits[i] for i in rest])
+        if sub:
+            c = min(sub, key=lambda c: bin(c).count("1"))
+            support = [rest[t] for t in range(len(rest)) if c >> t & 1]
+            k = 0
+            continue
+        k += 1
+    cons = {elig[i] for i in support}
+    touched: set[int] = set()
+    for ci in cons:
+        r = int(row_groups[ci][0])
+        touched.update(int(j) for j in A.indices[A.indptr[r] : A.indptr[r + 1]])
+    return cons, touched
+
+
 def _binary_core(A, row_lo, row_hi, col_lb, col_ub, is_int, row_groups, stop_at):
     """A small unsatisfiable set of constraints of a pure-binary model.
 
@@ -827,11 +949,14 @@ def milp_iis(
     each completed phase. If no subsystem can be confirmed in time,
     :class:`TimeoutError` is raised rather than an unconfirmed claim returned.
 
-    ``sat_candidate``: on a pure-binary model with integral coefficients, start
-    from a small unsatisfiable constraint set found by discopt's CDCL solver
-    (:func:`_binary_core`). It is only a proposal: it is used if HiGHS proves it
-    infeasible (the base probe), otherwise the full model is used, and the
-    returned subsystem is confirmed and certified exactly as without it.
+    ``sat_candidate``: start from a small candidate subsystem instead of the
+    full model -- a mod-2 certificate over integer equality rows
+    (:func:`_parity_core`) when one exists, else, on a pure-binary model with
+    integral coefficients, an unsatisfiable constraint set found by discopt's
+    CDCL solver (:func:`_binary_core`). Either is only a proposal: it is used if
+    HiGHS proves it infeasible (the base probe), otherwise the full model is
+    used, and the returned subsystem is confirmed and certified exactly as
+    without it.
 
     Raises ``NotImplementedError`` (from the linear extractor) for a model with a
     nonlinear or non-algebraic constraint, ``ValueError`` when the full model is
@@ -891,7 +1016,7 @@ def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
     """``"ICB"`` -> (``"ICB"``, reverse=False, sat=True, ladder=False).
 
     A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
-    flags: ``r`` visits elements in reverse, ``n`` skips the SAT candidate, ``l``
+    flags: ``r`` visits elements in reverse, ``n`` skips the candidate stages, ``l``
     runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering.
     E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
     """
@@ -904,7 +1029,7 @@ def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
     ):
         raise ValueError(
             "order must be a permutation of 'ICB' with optional '-' flags "
-            f"('r' reverse, 'n' no SAT candidate, 'l' oracle ladder), got {order!r}"
+            f"('r' reverse, 'n' no candidate stage, 'l' oracle ladder), got {order!r}"
         )
     return phases, "r" in flags, "n" not in flags, "l" in flags
 
@@ -967,7 +1092,23 @@ def _milp_iis_arrays(
 
     sat_rows: Optional[int] = None
     sat_conflicts = 0
+    parity_rows: Optional[int] = None
+    full_state = (set(cons), set(bounds), set(ints_active))
     if sat_candidate:
+        pc = _parity_core(A, row_lo, row_hi, is_int, row_groups)
+        if pc is not None:
+            # The certificate needs only its rows and the integrality of the
+            # columns they touch. The bounds of those columns are kept as well
+            # (elements once a column's integrality is relaxed, filtered like any
+            # other): dropping them left relaxed columns unbounded, and their
+            # probe points then failed the 1e-6 certificate check (neos-807454:
+            # 9 of 65 members certified instead of 65) and led to a larger IIS
+            # (enlight4: 19 instead of 18).
+            cons = set(pc[0])
+            ints_active &= pc[1]
+            bounds = {jb for jb in bounds if jb[0] in pc[1]}
+            parity_rows = len(cons)
+    if sat_candidate and parity_rows is None:
         # The clause-core stage gets a share of an overall budget that SATURATES
         # at a constant ceiling (#1153): where it pays off it needs seconds, so a
         # bigger budget must buy filtering, not a longer give-up on pigeonhole.
@@ -989,11 +1130,11 @@ def _milp_iis_arrays(
     eng.probe_tl = math.inf if deadline is not None else time_limit
     try:
         base, _ = eng.probe(cons, bounds, ints_active)
-        if base is not True and sat_rows is not None:
-            # HiGHS did not prove the SAT candidate infeasible: discard it and
-            # take the base proof on the full model, exactly as without it.
-            cons = set(row_groups)
-            sat_rows = None
+        if base is not True and (sat_rows is not None or parity_rows is not None):
+            # HiGHS did not prove the candidate infeasible: discard it and take
+            # the base proof on the full model, exactly as without it.
+            cons, bounds, ints_active = (set(x) for x in full_state)
+            sat_rows = parity_rows = None
             base, _ = eng.probe(cons, bounds, ints_active)
     except _OutOfTime:
         raise TimeoutError(
@@ -1314,6 +1455,7 @@ def _milp_iis_arrays(
         n_artifacts=eng.n_artifacts,
         sat_rows=sat_rows,
         sat_conflicts=sat_conflicts,
+        parity_rows=parity_rows,
         order=order,
         n_exact=eng.n_exact,
         ladder_size=ladder_size,
