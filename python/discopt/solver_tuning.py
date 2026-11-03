@@ -1189,11 +1189,12 @@ class SolverTuning:
     in ``docs/dev/flag-retirement-audit.md``."""
 
     mbigm_lp_components: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_MBIGM_LP_COMPONENTS", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_MBIGM_LP_COMPONENTS", default=True)
     )
     """Solve each mbigm LP big-M over only the connected components of the LP
     relaxation that the row's body touches (``DISCOPT_MBIGM_LP_COMPONENTS``, default
-    **OFF**; #1917, bound-changing on the ``"mbigm"`` route).
+    **ON** since its #1917 §5 panel; ``=0`` restores the full-LP path; bound-changing
+    on the ``"mbigm"`` route).
 
     Two columns are connected when a linear row of the model holds both. Dropping
     the rows of components the body does not touch is a relaxation, so the sub-LP
@@ -1213,9 +1214,15 @@ class SolverTuning:
     lower no LP row). On ``batch_processing``
     36 of 450 M's are smaller ON. There the in-house simplex returns ``numerical``
     on 448 of 450 full LPs, so OFF uses the interval M; each of the 48 OPTIMAL
-    sub-LPs equals the HiGHS full-LP optimum (worst relative 3e-16). Not
-    graduated: the §5 panel is owed, and its rule is pre-registered in
-    ``docs/dev/data/1917-flag-panel/DISCOPT_MBIGM_LP_COMPONENTS.prereg.md``.
+    sub-LPs equals the HiGHS full-LP optimum (worst relative 3e-16).
+
+    Graduated (2026-11-03) by the §5 panel pre-registered in
+    ``docs/dev/data/1917-flag-panel/DISCOPT_MBIGM_LP_COMPONENTS.prereg.md``: 24
+    instances, 6796 sub-LPs re-solved by the soundness audit with 0 violations;
+    M's ON vs OFF 7481 equal, 40 smaller, 0 larger; solved 15/15 both arms in both
+    reps, 0 incumbents lost; node geomean ON/OFF 1.00; SGM solve wall ON/OFF 0.918
+    and 0.911 in the two reps; lowering faster on ``biofuel`` and ``kaibel`` in
+    both reps, slower on none.
     Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     obbt_ns_strict: bool = field(

@@ -6,7 +6,7 @@ Measured on GDPlib ``biofuel`` at 6d3e2f79: mbigm lowering ran past 600 s
 * ``_lp_box_memo`` (bound-neutral, always on): the LP box was rebuilt per row,
   78 % of the profiled lowering. It is now rebuilt only when a variable object or
   a bound array has been replaced, so every M is byte-identical to the old path.
-* ``DISCOPT_MBIGM_LP_COMPONENTS`` (bound-changing, default OFF): solve each LP
+* ``DISCOPT_MBIGM_LP_COMPONENTS`` (bound-changing, default ON since its §5 panel): solve each LP
   over the connected components of the column-row graph that the body touches.
   Dropping rows relaxes the LP, so an M can only grow; on a separable polytope
   it is unchanged.
@@ -70,8 +70,12 @@ def _oracle():
         pytest.skip("no exact LP oracle")
 
 
-def test_flag_defaults_off(monkeypatch):
+def test_flag_defaults_on_with_opt_out(monkeypatch):
+    # Graduated 2026-11-03 by its pre-registered §5 panel; =0 keeps the full-LP path.
     monkeypatch.delenv("DISCOPT_MBIGM_LP_COMPONENTS", raising=False)
+    assert SolverTuning().mbigm_lp_components is True
+    assert G._mbigm_lp_components_enabled() is True
+    monkeypatch.setenv("DISCOPT_MBIGM_LP_COMPONENTS", "0")
     assert SolverTuning().mbigm_lp_components is False
     assert G._mbigm_lp_components_enabled() is False
 

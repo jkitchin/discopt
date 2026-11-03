@@ -1350,7 +1350,7 @@ def _compute_big_m_lp(
         """Solve LP to get bound. Returns None if LP fails."""
         obj = -c_vec if maximize else c_vec
         optima: dict | None = getattr(lp_data, "optima", None)
-        # #1917: DISCOPT_MBIGM_LP_COMPONENTS (default OFF) solves over the
+        # #1917: DISCOPT_MBIGM_LP_COMPONENTS (default ON; =0 opts out) solves over the
         # components the body touches; see _component_sub_lp. It is part of the
         # memo key so the two arms never share an answer.
         by_component = isinstance(lp_data, _LPData) and _mbigm_lp_components_enabled()
@@ -1711,7 +1711,7 @@ class _LPData(tuple):
 
 def _mbigm_lp_components_enabled() -> bool:
     """Is #1917's per-component mbigm LP on? (``DISCOPT_MBIGM_LP_COMPONENTS``,
-    default OFF; see ``SolverTuning.mbigm_lp_components``)."""
+    default ON; see ``SolverTuning.mbigm_lp_components``)."""
     from discopt.solver_tuning import current as _tuning
 
     return bool(_tuning().mbigm_lp_components)
