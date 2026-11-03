@@ -159,6 +159,59 @@ method and its pre-registered rule in the header. Re-derive the verdict with
   The only incorrect rows belong to OFF: Pyomo clay0303 certified at 28351.42
   against an optimum of 26669.11 (#2088).
 
+## Pre-registered panels of 2026-11-02/03: `DISCOPT_MBIGM_LP_COMPONENTS` graduated, `DISCOPT_SUBNLP_IMPLIED_BOX` retired
+
+Both were run from the `fix/1917-finish` worktree (§8 preflight asserted the tree
+and the flag code), one process at a time apart from IMPLIED_BOX's two
+prereg-sanctioned panels, every thread env set to 1, load 4-11. Each verdict
+script's output is reproduced below unchanged; re-run it on the files to
+re-derive.
+
+**`DISCOPT_MBIGM_LP_COMPONENTS` -> GRADUATE** (`issue1917_mbigm_components_verdict.py`):
+
+```
+== DISCOPT_MBIGM_LP_COMPONENTS: L 24 instances, A 24 (6796 sub-LPs re-solved), S 24
+M's ON vs OFF (first rep both arms lowered): {'equal': 7481, 'smaller': 40, 'larger': 0}
+lowering faster (both reps): ['biofuel', 'kaibel']
+lowering slower (both reps): []
+solved in both reps: {'off': 15, 'on': 15}; incumbents lost: []
+node geomean ON/OFF over 15 cells: 1.0
+rep0 SGM solve elapsed OFF 33.89 s, ON 31.10 s, ratio 0.918
+rep1 SGM solve elapsed OFF 33.99 s, ON 30.95 s, ratio 0.911
+cert-clean and net-positive -> GRADUATE
+```
+
+The V7 corpus guard (`.corpus_guard.json`) ran 81 checks: 0 `_compute_big_m_lp`
+calls on the in-repo corpus, 9 on the `pyomo.eight_process` positive control. Its
+first launch died on import (it named a solver helper deleted with
+`DISCOPT_CONVEX_ROUTE_GDP_LOWERED`); that run wrote no data, the import was
+inlined (`b0d029b9`) and the whole panel was restarted from scratch.
+
+**`DISCOPT_SUBNLP_IMPLIED_BOX` -> RETIRE** (`issue1917_implied_box_verdict.py`, exit 1):
+
+```
+== DISCOPT_SUBNLP_IMPLIED_BOX: 122 cells, 192 GDP + 296 corpus solves
+feasibility checks on ON incumbents: 280
+rep0 SGM wall OFF 15.97 s, ON 15.93 s, ratio 0.998
+rep1 SGM wall OFF 15.95 s, ON 15.91 s, ratio 0.998
+gained (2): [('gdp', 'gdp_col', 'hull'), ('gdp', 'hda', 'hull')]
+lost (1): [('corpus', 'heatexch_gen3', '')]
+primal better 0 / worse 2: [] / [('gdp', 'gdp_col', 'big-m'), ('corpus', 'contvar', '')]
+node geomean ON/OFF over 85 certified cells: 0.9732729454662137
+NOT CERT-CLEAN (K1: stays OFF, root-cause):
+  C3 ('gdp', 'spectralog', 'hull') rep0: certified OFF, not ON
+```
+
+K1 asks for the C3 violation to be root-caused first. The spectralog hull rows: OFF
+rep 0 `optimal` at 119.974 s of the 120 s limit; OFF rep 1, ON rep 0 and ON rep 1
+all `feasible` at the limit with the identical bound 12.087709. OFF itself flips
+between reps, so it is a time-limit coin flip and not caused by the flag. With C
+then holding, the prereg's rule is "C holds and N fails -> retire", and N fails on
+three counts: N1 (2 cells gained, bar 3), N2 (heatexch_gen3: OFF incumbent 274378
+after 3 nodes, ON none after 31, identical in both reps) and N3 (worse 2 > better
+0). Had the C3 violation been flag-caused, K1 would retire it as well, so both
+readings give the same outcome.
+
 ## Hull follow-ups outside any panel (2026-11-01, `fix/1917-hull-remaining`)
 
 These are single-run measurements, taken on 6d3e2f79 plus this branch, at load
