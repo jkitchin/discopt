@@ -235,6 +235,21 @@ def _cached_flat_terms(model: Model, expr) -> list[tuple[float, object]]:
 _ROWSTRUCT_MISS = object()
 
 
+def _leaf_interval(leaf, model: Model, box: dict):
+    """``evaluate_interval(leaf, model, box)``, reading a scalar variable leaf directly.
+
+    For a ``Variable`` that ``box`` holds, ``evaluate_interval`` returns ``box[leaf]``
+    itself (``_variable_interval``), so returning it here is the same object without
+    the walk's per-call setup (highs-parity P2.0: the bare-variable leaves of linear
+    rows, which ``DefinedVariableForwardRule`` reads every round).
+    """
+    if type(leaf) is Variable and leaf in box:
+        return box[leaf]
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    return evaluate_interval(leaf, model, box)
+
+
 def _cached_row_structure(model: Model, rule_name: str, constraint, metadata, build):
     """Memoize a rule's *bound-independent* decomposition of one constraint row.
 
@@ -3774,7 +3789,6 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
 
     def tighten(self, model, flat_lb, flat_ub, metadata, deadline=None):
         from discopt._relax.convexity.interval import Interval
-        from discopt._relax.convexity.interval_eval import evaluate_interval
 
         out_lb = flat_lb.copy()
         out_ub = flat_ub.copy()
@@ -3820,7 +3834,7 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
             for k, (c_k, leaf_k) in enumerate(terms):
                 if k == iso_pos:
                     continue
-                iv = evaluate_interval(leaf_k, model, box)
+                iv = _leaf_interval(leaf_k, model, box)
                 if iv is None or not (np.isfinite(iv.lo) and np.isfinite(iv.hi)):
                     ok = False
                     break
@@ -4562,6 +4576,19 @@ class UnivariatePolynomialRootBoundRule(NonlinearBoundTighteningRule):
     name = "univariate_polynomial_root_bound"
     row_scan_is_anytime = True
 
+    @staticmethod
+    def _expand(con, model):
+        poly = _poly_expand(con.body, model)
+        if poly is None:
+            return None
+        degree: dict[int, int] = {}
+        for mono in poly:
+            for v, k in mono:
+                degree[v] = max(degree.get(v, 0), k)
+        if all(d < 2 for d in degree.values()):
+            return None
+        return poly, degree
+
     def tighten(self, model, flat_lb, flat_ub, metadata, deadline=None):
         lb = np.asarray(flat_lb, dtype=np.float64).copy()
         ub = np.asarray(flat_ub, dtype=np.float64).copy()
@@ -4571,16 +4598,20 @@ class UnivariatePolynomialRootBoundRule(NonlinearBoundTighteningRule):
         for con in _rows_until(model, deadline):
             if getattr(con, "sense", None) != "==":
                 continue
-            poly = _poly_expand(con.body, model)
-            if poly is None:
+            # The expansion and its per-variable degrees depend only on the body, so
+            # they are cached across rounds and nodes (highs-parity P2.0); ``rhs`` is
+            # applied to a copy each time, as before. A row with no variable of
+            # degree >= 2 is skipped for every ``x`` below, so it caches as ``None``.
+            cached = _cached_row_structure(
+                model, self.name, con, metadata, lambda c=con: self._expand(c, model)
+            )
+            if cached is None:
                 continue
+            poly = dict(cached[0])
+            degree: dict[int, int] = cached[1]
             rhs = float(con.rhs)
             if rhs != 0.0:
                 poly[()] = poly.get((), 0.0) - rhs
-            degree: dict[int, int] = {}
-            for mono in poly:
-                for v, k in mono:
-                    degree[v] = max(degree.get(v, 0), k)
             for x, d in degree.items():
                 if d < 2 or (lb[x] > -big and ub[x] < big):
                     continue  # linear in x, or x already bounded

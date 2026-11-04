@@ -1700,6 +1700,28 @@ def has_factorable_work(model: Model, *, deadline: Optional[Callable[[], bool]] 
 def _has_factorable_work_inner(
     model: Model, *, deadline: Optional[Callable[[], bool]] = None
 ) -> bool:
+    # highs-parity P2.0: a model whose objective and every row are scalar-linear over
+    # ``Constant`` coefficients has no factorable work. Every scan below is False on
+    # that grammar: no division by a non-``Constant`` (``_find_clearable_denominator``
+    # skips a ``Constant`` denominator), no call (both call scans), no non-integer
+    # power (``**1`` only), and each ``*`` has a constant side, so a ``*`` chain has
+    # one non-constant factor (the translated-monomial scan needs three) and every
+    # distributed product has one variable slot (not a mixed product). The early
+    # exit is taken only when the WHOLE model is in the grammar, so the per-pass
+    # distribution budget below cannot change any answer: the scan would have
+    # returned False (found nothing, or abstained on the budget) either way.
+    from discopt._relax.affine_array import is_scalar_linear
+
+    if all(
+        is_scalar_linear(c.body, allow_parameters=False)
+        for c in model._constraints
+        if isinstance(c, Constraint)
+    ) and (
+        model._objective is None
+        or is_scalar_linear(model._objective.expression, allow_parameters=False)
+    ):
+        return False
+
     def scan(expr: Expression) -> bool:
         if _find_clearable_denominator(expr, model) is not None:
             return True
