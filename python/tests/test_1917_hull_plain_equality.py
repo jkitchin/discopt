@@ -19,8 +19,8 @@ and neither dominates. What stays pinned here:
 * GDPlib ``cstr`` under hull is still declined by the native spatial kernel on the
   default route: the 1/yhat products make the probe-box and real-box relaxations
   differ in shape. Marked strict ``xfail`` (#2142) so a fix of that gap announces
-  itself; ``DISCOPT_HULL_LIFTED_PERSPECTIVE=1`` (default OFF) reaches the kernel,
-  pinned by the flag-ON twin.
+  itself. (The retired ``DISCOPT_HULL_LIFTED_PERSPECTIVE`` reached the kernel here
+  but failed its §5 panel; see the audit.)
 """
 
 from __future__ import annotations
@@ -151,23 +151,9 @@ def _cstr_hull_kernel_specs(monkeypatch, time_limit):
 @pytest.mark.xfail(
     strict=True,
     reason="#2142: the eps-perspective rows of cstr's rate law make the probe-box and "
-    "real-box relaxations differ in shape, so the native spatial kernel declines it "
-    "(flag-OFF route; DISCOPT_HULL_LIFTED_PERSPECTIVE=1 is the twin below)",
+    "real-box relaxations differ in shape, so the native spatial kernel declines it",
 )
 def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
-    monkeypatch.delenv("DISCOPT_HULL_LIFTED_PERSPECTIVE", raising=False)
     specs = _cstr_hull_kernel_specs(monkeypatch, 5)
-    assert specs, "the spec producer was never called"
-    assert specs[0] is not None, "the native kernel declined cstr under hull"
-
-
-@pytest.mark.slow
-def test_cstr_hull_reaches_the_native_kernel_lifted_perspective(monkeypatch):
-    """#2142: with the absorbed exact perspective there is no ``1/yhat`` factor, so
-    the probe-box and real-box relaxations have the same shape and the kernel takes
-    cstr. ``time_limit=40``: the producer is reached only after ~10 s of root work
-    on a 4-core container."""
-    monkeypatch.setenv("DISCOPT_HULL_LIFTED_PERSPECTIVE", "1")
-    specs = _cstr_hull_kernel_specs(monkeypatch, 40)
     assert specs, "the spec producer was never called"
     assert specs[0] is not None, "the native kernel declined cstr under hull"
