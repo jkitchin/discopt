@@ -12,8 +12,9 @@ usage: replay.py --flag {coef,tabcmir} [--profile {captured,strong}] [--base ENV
 ``--profile strong`` is the root profile of the gate doc: 200 cuts, 10 rounds, selection,
                    #2107's aggregated c-MIR on. ``captured`` keeps the captured options.
 
-Each arm asserts its flag's firing counter (zero OFF, nonzero ON), so a row cannot pass
-on an arm that never ran the mechanism. Exits non-zero when no row was judged."""
+The OFF arm asserts its flag's firing counter is zero; each row records whether the ON
+arm fired (``fired``), so a row whose ON arm never ran the mechanism is visible as such.
+Exits non-zero when no row was judged or no row fired."""
 
 from __future__ import annotations
 
@@ -68,7 +69,7 @@ def main() -> int:
         assert k != env, "the flag under test cannot be held in --base"
         os.environ[k] = v
     out = open(a.out, "a")
-    nrows = nchecks = nbad = 0
+    nrows = nchecks = nbad = nfired = 0
     for p in a.pkls:
         d = pickle.load(open(p, "rb"))
         d.pop("had_debug_hook", None)
@@ -111,8 +112,9 @@ def main() -> int:
             ctr = {k: pc.get(k, 0) for k in CTRS}
             if arm == "0":
                 assert ctr[fire_ctr] == 0, (name, arm, ctr)
-            else:
-                assert ctr[fire_ctr] >= 1, (name, arm, ctr)
+            # The ON arm can legitimately not fire (e.g. an unbounded root LP ends the
+            # cut loop before any separator runs: loa__spectralog). Such a row is
+            # recorded as `fired: false`; the run fails unless some row fired.
             v = oracle.verify(d, x) if np.isfinite(obj) and len(x) else None
             arms[f"arm{arm}"] = {
                 "status": st,
@@ -126,6 +128,8 @@ def main() -> int:
                 "viol": v,
             }
         os.environ.pop(env, None)
+        row["fired"] = arms["arm1"]["ctr"][fire_ctr] >= 1
+        nfired += row["fired"]
         verdict = oracle.judge(h, arms, gap_tol=d["gap_tol"], abs_gap_tol=d.get("abs_gap_tol"))
         row.update(arms)
         row.update(verdict)
@@ -141,11 +145,12 @@ def main() -> int:
             f"OFF {a0['status'][:9]:9s} b {a0['bound']:12.6g} n {a0['nodes']:7d} {a0['wall']:6.2f}s | "
             f"ON {a1['status'][:9]:9s} b {a1['bound']:12.6g} n {a1['nodes']:7d} {a1['wall']:6.2f}s"
             + (f" BAD {verdict['bad']}" if verdict["bad"] else "")
-            + (f" NOTE {verdict['notes']}" if verdict["notes"] else ""),
+            + (f" NOTE {verdict['notes']}" if verdict["notes"] else "")
+            + ("" if row["fired"] else " NOT-FIRED"),
             flush=True,
         )
-    print(f"PROBE_DONE rows={nrows} checks={nchecks} bad_rows={nbad}")
-    return 0 if nrows and nchecks else 1
+    print(f"PROBE_DONE rows={nrows} fired={nfired} checks={nchecks} bad_rows={nbad}")
+    return 0 if nrows and nchecks and nfired else 1
 
 
 if __name__ == "__main__":
