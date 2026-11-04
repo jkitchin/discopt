@@ -276,7 +276,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   reported as route `presolve` rather than raised or counted as an engine row.
   Regression test `python/tests/test_highs_parity_p01_panel_harness.py` (21 tests; 19
   error before — load marker `check_route` absent — 21 pass after).
-- [ ] **P0.2 — Rebuild the MIPLIB-38 harness and check it in.** Scope: new
+- [x] **P0.2 — Rebuild the MIPLIB-38 harness and check it in.** Scope: new
   `discopt_benchmarks/scripts/miplib_panel.py` (+ `data/miplib/panel.json`). The
   §6 harness of `milp-competitiveness-plan.md` is not on disk (`scratchpad/` has no
   `miplib/`). Rebuild per its §0: MIPLIB 2017 "easy" set fetched from miplib.zib.de
@@ -291,6 +291,20 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   0 oracle mismatches; a 3-instance `run --time-limit 5` prints `executed=9`, exits 0.
   Kill: fewer than 30 instances pass validation → record and run with what validates;
   thresholds in §1.3 scale as `⌈0.9·n⌉`. Regime: harness.
+  **Result (2026-11-04):** the size filter is not recorded anywhere, but the 38 *names* are:
+  `scratchpad/a14/rens_panel.json` (A14's run on this panel) lists exactly 38, and each of
+  its reference optima equals the `miplib2017-v31.solu` `=opt=` value, so the panel is
+  **recovered, not reconstructed** (no size rule had to be guessed). `miplib_panel.py
+  fetch` caches the 38 `.mps.gz` + `.solu` in git-ignored `ref/miplib2017/` (764 KB) and
+  pins 39 sha256s in `data/miplib/panel.json` (a re-fetch verifies them); `screen` →
+  **38 members, 0 oracle mismatches**. `neos-3118745-obra` was *unvalidated* at the 60 s
+  validation limit (raw HiGHS timed out; not a wrong objective) and validated at 900 s
+  (255, 41,713 nodes, 146 s) — it is the panel's hardest instance for HiGHS on this host.
+  `run` delegates to `lp_milp_panel.py run` (P0.1's route marker, counters, load gate,
+  rotation) with the new `--h0-subprocess`, so every arm is a fresh process. Done run
+  (`gr4x6,p0201,neos-911970`, TL 5 s): `executed=9`, `incorrect_count=0`, exit 0.
+  Regression test `python/tests/test_highs_parity_p02_miplib_panel.py` (6 error before,
+  6 pass after). Branch synced with `origin/main` (#2125 `lp/` commits) in this iteration.
 - [ ] **P0.3 — Fresh R1 baselines at HEAD.** Scope: results under
   `docs/dev/data/highs-parity/baseline-<commit>/`. Run P0.1's L/M/INF and P0.2's
   MIPLIB-38, arms R/H/H0, 3 rounds, TL 20 s, load gate < 2 (if the gate never opens, run
@@ -634,8 +648,8 @@ and is re-written by P4.1.**
 
 | Task | State | Result (one line) | Commit |
 |---|---|---|---|
-| P0.1 | [x] | L 25 / M 24 / INF 16 manifest at HiGHS v1.15.1; Done run executed 195/195, incorrect 0; route marker, per-panel counter, load gate, rotation added | see git log |
-| P0.2 | [ ] | | |
+| P0.1 | [x] | L 25 / M 24 / INF 16 manifest at HiGHS v1.15.1; Done run executed 195/195, incorrect 0; route marker, per-panel counter, load gate, rotation added | `69ead3f` |
+| P0.2 | [x] | 38/38 recovered from the A14 artifact, validated against `.solu` (0 mismatches; obra needs > 60 s); Done run executed 9, incorrect 0 | see git log |
 | P0.3 | [ ] | | |
 | P0.4 | [ ] | | |
 | P0.5 | [ ] | | |

@@ -345,7 +345,18 @@ def _roundtrip_member(inst, f, panel, td, nnz, n_int, ref, x_h0) -> dict:
 
 
 # ----------------------------------------------------------------------------- run
+def solve_h0(inst: L.LinearInstance, time_limit: float, gap: float) -> dict:
+    """H0 row: raw highspy on the arrays, verified by the script's own dense check."""
+    r = solve_arrays(inst, time_limit, gap)
+    x_h0 = r.pop("x")
+    r["max_viol"] = None if x_h0 is None else L.dense_max_violation(inst, x_h0)
+    r["status"] = {"Optimal": "optimal"}.get(r["status"], r["status"])
+    return r
+
+
 def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -> dict:
+    if arm == "H0":
+        return solve_h0(L.read_instance(path), time_limit, gap)
     import discopt.solver as solver_mod
     from discopt.modeling.core import from_nl
     from discopt.status import TERMINATION_PRESOLVE
@@ -427,7 +438,8 @@ def load_ok(gate: float | None, *loads: float) -> bool:
 
 def _run_sub(path: str, arm: str, a) -> dict:
     env = dict(os.environ, PYTHONUNBUFFERED="1")
-    env["DISCOPT_LP_MILP_BACKEND"] = ARM_BACKEND[arm]
+    if arm in ARM_BACKEND:
+        env["DISCOPT_LP_MILP_BACKEND"] = ARM_BACKEND[arm]
     cmd = [sys.executable, str(HERE), "worker", path, arm, str(a.time_limit), str(a.gap),
            str(a.max_nodes)]  # fmt: skip
     p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3 * a.time_limit + 120)
@@ -502,11 +514,12 @@ def cmd_run(a) -> int:
         load_start = os.getloadavg()[0]
         for rnd in range(a.rounds):
             for arm in arm_order(arms, rnd):
-                if arm == "H0":
-                    r = solve_arrays(inst, a.time_limit, a.gap)
-                    x_h0 = r.pop("x")
-                    r["max_viol"] = None if x_h0 is None else L.dense_max_violation(inst, x_h0)
-                    r["status"] = {"Optimal": "optimal"}.get(r["status"], r["status"])
+                if arm == "H0" and not a.h0_subprocess:
+                    r = solve_h0(inst, a.time_limit, a.gap)
+                elif arm == "H0":
+                    # A fresh process per solve: HiGHS's scheduler and any state a previous
+                    # solve left behind are not shared across rows (P0.2).
+                    r = _run_sub(path, arm, a)
                 else:
                     r = _run_sub(path, arm, a)
                     if "skipped" not in r and "error" not in r:
@@ -732,6 +745,11 @@ def main(argv=None) -> int:
     r.add_argument("--gap", type=float, default=GAP)
     r.add_argument("--max-nodes", type=int, default=100_000_000)
     r.add_argument("--out", default="")
+    r.add_argument(
+        "--h0-subprocess",
+        action="store_true",
+        help="run the H0 arm in a fresh subprocess per solve, like R and H",
+    )
     r.add_argument("--load-gate", type=float, default=None,
                    help="withhold walls of an instance whose 1-min load exceeds this")  # fmt: skip
     t = sub.add_parser("tiny")
