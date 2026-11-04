@@ -14386,3 +14386,85 @@ mechanism.
 net-positive bar, recorded in the flag audit. The rationale: OFF discards a correct
 `Optimal` for a `Numerical` built on a pivot whose reduced cost is rounding residue.
 ON settles that column through the existing verification instead.
+
+## 105. #2142 item 3: cstr big-M's per-node propagation is exonerated (2026-11-04)
+
+**Hypothesis (killed).** cstr big-M's dual bound gets less from per-node propagation than
+SCIP's does: at the same node budget, ours is 35-40 % lower. With node propagation off,
+both solvers collapse (ours 0.070, SCIP 0.110). The guess was that the kernel's
+`propagate_spec_fixpoint` stops looser than a full FBBT, or looser than SCIP's
+propagation, on the same box.
+
+**Instrument (bound-neutral).** Two additions:
+
+- `_rust.propagate_spec_py(spec..., lo, hi, cutoff, rounds)` runs the kernel's fixpoint
+  on one box.
+- The `node_observer` record now also carries:
+  - `pre_lo` / `pre_hi`: the box as it was popped;
+  - `lo` / `hi`: the box the LP was assembled over;
+  - `cutoff`: the cutoff propagation ran under.
+
+Pinned by `test_2142_propagate_spec_binding.py`. The observer copies the box only while
+it is attached. cstr big-M at a deterministic 10k nodes gives bound
+`0.970778897578354` with the observer and without it, the same as the pre-change baseline.
+
+**Experiment.** The scripts and logs are in `docs/dev/data/2142-propagation/`.
+
+1. Capture 187 node boxes from cstr big-M (`p1_capture.py`, every 100th node of a
+   deterministic 20k-node run). The capture was taken with `DISCOPT_LP_DUAL_REBUILD`
+   OFF, because that flag is retired; the run reproduces the OFF baseline bound of
+   1.3432. The `rebuild10k_*` logs repeat the experiment on a flag-ON 10k capture, with
+   the same conclusions.
+2. On each pre-propagation box, under its cutoff, compute three boxes (`p2_compare.py`):
+   - **K:** the kernel;
+   - **R:** a numpy reference FBBT (`fbbt_ref.py`). It has the full textbook
+     contractors, including extended division for a factor that straddles zero and the
+     two-piece even-power reverse step. It runs to convergence with a 1e-12 margin.
+   - **S:** SCIP 6.3 root propagation on the same spec (`scip_prop.py`). Presolve,
+     separation, LP, heuristics, symmetry, conflict analysis, OBBT and redcost are all
+     off; `numerics/boundstreps=1e-9`; `limits/nodes=1`.
+
+| comparison (flag OFF, 187 boxes, 17,325 column comparisons) | result |
+|---|---|
+| `propagate_spec_py(pre, cutoff, 15)` == the tree's own post-propagation box | **187/187 bit-identical** (proves the probe fired) |
+| boxes proven empty: K / R / S | 22 / 22 / 22 |
+| K looser than S (>1e-6 rel.) | **0 columns** |
+| S looser than K | 1,148 columns on 76 boxes |
+| K looser than R | 184 columns on 26 boxes; width ratio R/K: median 0.999996, min 0.9973 |
+| R run with the kernel's own `EPS` (1e-9 margin and change threshold) vs K (`p4_eps.py`) | **0 differences either way, 165/165 boxes** |
+
+Two arms were also run:
+
+- **SCIP's default `boundstreps=0.05`:** looser still. 6 of 11 empty boxes found on the
+  flag-ON capture, and never tighter than K.
+- **K at 100,000 rounds instead of 15:** it does not change the K-vs-R residual. The
+  residual is entirely the `EPS = 1e-9` outward margin and change threshold acting on
+  geometric-convergence tails.
+
+**Verdict.** On every box, the kernel's propagation is at least as tight as SCIP's
+propagation. It equals the reference FBBT up to the `EPS` tail, which is under 0.3 %
+of a width. So propagation strength per box is not the gap.
+
+- **Do not build:** lowering `EPS`, more rounds, a straddling-zero extended division,
+  or the even-power union reverse step. None of them changes a box here.
+- SCIP's in-tree propagation edge (§3 of the #2142 attribution) is therefore not
+  stronger propagation. It must come from what propagation is fed: a tighter LP bound
+  per node, which turns into more cutoff fathoming.
+
+**Next candidate (entry measurement only, `p5_relax.py`).** This compares the node
+relaxation at fixed boxes. For each of the 95 captured nodes with a finite bound, take
+our node bound on its post-propagation box. Compare it with SCIP's root dual bound on
+the same box, with separators off but LP and constraint enforcement on.
+
+- SCIP is tighter by more than 1e-4 on **31 of 94** boxes: mean +0.014, max +0.31
+  (0.27 -> 0.59). We are tighter on 7 boxes.
+- SCIP proves 1 box infeasible that our LP bounds finitely.
+- The flag-ON capture shows the same: 29 of 123 boxes, max +0.50.
+
+The kernel relaxes each lifted `Q²` monomial with three fixed tangents, at `li`, the
+midpoint and `ui` (`mccormick_patch::monomial_rows`). `detect_convex_quad_forms` finds no
+cut form, so `tree/cut_forms = 0`. SCIP's nonlinear handler adds a tangent at the LP
+point whenever enforcement finds it violated. The next entry experiment is therefore
+**LP-point tangent (OA) cuts for convex lifted monomials** in the kernel's node
+separation loop, measured at these fixed boxes before any tree run. That is still a
+hypothesis; this section only measures the relaxation gap.
