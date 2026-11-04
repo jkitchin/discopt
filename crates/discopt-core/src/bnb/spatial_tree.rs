@@ -610,6 +610,13 @@ pub struct NodeObservation<'a> {
     pub lo: &'a [f64],
     /// Upper side of that box.
     pub hi: &'a [f64],
+    /// #2142: the box as the node was popped, BEFORE propagation (`None` when
+    /// propagation is off). Copied only while an observer is attached.
+    pub pre_lo: Option<&'a [f64]>,
+    /// Upper side of the pre-propagation box.
+    pub pre_hi: Option<&'a [f64]>,
+    /// #2142: the objective cutoff propagation ran under (the incumbent then).
+    pub cutoff: Option<f64>,
     /// The basis the LP was started from, if any.
     pub start: Option<&'a Basis>,
     /// The node solve's result.
@@ -1120,6 +1127,11 @@ pub fn solve_spatial_tree_observed(
         // #1995: the box as the node was pushed, kept only under the retry flag.
         let mut pre_propagation = (config.undecided_unpropagated_retry && config.run_propagation)
             .then(|| (lo.clone(), hi.clone()));
+        // #2142: the pre-propagation box and its cutoff, for an attached observer
+        // only (instrumentation; nothing here reaches the search).
+        let observed_pre =
+            (observer.is_some() && config.run_propagation).then(|| (lo.clone(), hi.clone()));
+        let observed_cutoff = incumbent;
         if config.run_propagation
             && !propagate_spec_fixpoint(
                 spec,
@@ -1224,6 +1236,9 @@ pub fn solve_spatial_tree_observed(
                 parent: parent_id,
                 lo: &lo,
                 hi: &hi,
+                pre_lo: observed_pre.as_ref().map(|(l, _)| l.as_slice()),
+                pre_hi: observed_pre.as_ref().map(|(_, h)| h.as_slice()),
+                cutoff: observed_cutoff,
                 start: parent_basis.as_ref(),
                 result: &node,
             });

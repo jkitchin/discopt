@@ -56,6 +56,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         spatial_bindings::solve_spatial_tree_py,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(spatial_bindings::propagate_spec_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_batch_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_csc_py, m)?)?;

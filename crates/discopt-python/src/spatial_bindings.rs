@@ -20,6 +20,7 @@
 use discopt_core::bnb::spatial_kernel::{
     assemble_node_lp, BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec,
 };
+use discopt_core::bnb::spatial_propagate::propagate_spec_fixpoint;
 use discopt_core::bnb::spatial_tree::{
     solve_spatial_tree_observed, IncumbentPrice, IncumbentValueFn, NodeObservation, NodeObserver,
     PrimalHook, SpatialTreeConfig, TreeStatus,
@@ -128,162 +129,35 @@ pub fn solve_spatial_tree_py<'py>(
     // #2092: the frontier memory budget in open nodes; `None` never binds.
     max_open_nodes: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let c = c.as_slice()?;
-    let integrality = integrality.as_slice()?;
-    let global_lo = global_lo.as_slice()?;
-    let global_hi = global_hi.as_slice()?;
-    if c.len() != n_cols
-        || integrality.len() != n_cols
-        || global_lo.len() != n_cols
-        || global_hi.len() != n_cols
-    {
-        return Err(PyValueError::new_err(
-            "c / integrality / global_lo / global_hi must all have length n_cols",
-        ));
-    }
-
-    // Fixed rows (CSR-style).
-    let row_ptr = fixed_row_ptr.as_slice()?;
-    let fcols = fixed_cols.as_slice()?;
-    let fcoef = fixed_coeffs.as_slice()?;
-    let frhs = fixed_rhs.as_slice()?;
-    if row_ptr.is_empty() || row_ptr.len() != frhs.len() + 1 {
-        return Err(PyValueError::new_err(
-            "fixed_row_ptr must have length n_fixed+1",
-        ));
-    }
-    let mut fixed_rows = Vec::with_capacity(frhs.len());
-    for r in 0..frhs.len() {
-        let (s, e) = (row_ptr[r] as usize, row_ptr[r + 1] as usize);
-        if e > fcols.len() || e > fcoef.len() || s > e {
-            return Err(PyValueError::new_err("fixed_row_ptr out of range"));
-        }
-        fixed_rows.push(FixedRow {
-            cols: fcols[s..e].iter().map(|&v| v as usize).collect(),
-            coeffs: fcoef[s..e].to_vec(),
-            rhs: frhs[r],
-        });
-    }
-
-    // Terms.
-    let kind = term_kind.as_slice()?;
-    let ti = term_i.as_slice()?;
-    let tj = term_j.as_slice()?;
-    let tout = term_out.as_slice()?;
-    let tp = term_p.as_slice()?;
-    let tcoeff = term_coeff.as_slice()?;
-    let tcst = term_cst.as_slice()?;
-    let nt = kind.len();
-    if [
-        ti.len(),
-        tj.len(),
-        tout.len(),
-        tp.len(),
-        tcoeff.len(),
-        tcst.len(),
-    ]
-    .iter()
-    .any(|&l| l != nt)
-    {
-        return Err(PyValueError::new_err(
-            "all term_* arrays must have the same length",
-        ));
-    }
-    let mut terms = Vec::with_capacity(nt);
-    for k in 0..nt {
-        let term = match kind[k] {
-            0 => EnvTerm::Bilinear {
-                i: ti[k] as usize,
-                j: tj[k] as usize,
-                w: tout[k] as usize,
-            },
-            1 => EnvTerm::Monomial {
-                i: ti[k] as usize,
-                s: tout[k] as usize,
-                p: tp[k] as i32,
-            },
-            2 => EnvTerm::AffineSquare {
-                j: ti[k] as usize,
-                w: tout[k] as usize,
-                coeff: tcoeff[k],
-                cst: tcst[k],
-            },
-            3 => EnvTerm::Sqrt {
-                x: ti[k] as usize,
-                w: tout[k] as usize,
-                coeff: tcoeff[k],
-                cst: tcst[k],
-            },
-            4 => EnvTerm::AffinePow {
-                x: ti[k] as usize,
-                w: tout[k] as usize,
-                coeff: tcoeff[k],
-                cst: tcst[k],
-                p: tp[k] as i32,
-            },
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown term_kind {other} at index {k}"
-                )))
-            }
-        };
-        terms.push(term);
-    }
-
-    // Affine-form product terms (CSR-encoded forms A, B).
-    let blf_w = blf_w.as_slice()?;
-    let a_ptr = blf_a_ptr.as_slice()?;
-    let a_cols = blf_a_cols.as_slice()?;
-    let a_coeffs = blf_a_coeffs.as_slice()?;
-    let a_const = blf_a_const.as_slice()?;
-    let b_ptr = blf_b_ptr.as_slice()?;
-    let b_cols = blf_b_cols.as_slice()?;
-    let b_coeffs = blf_b_coeffs.as_slice()?;
-    let b_const = blf_b_const.as_slice()?;
-    let n_blf = blf_w.len();
-    if a_ptr.len() != n_blf + 1
-        || b_ptr.len() != n_blf + 1
-        || a_const.len() != n_blf
-        || b_const.len() != n_blf
-    {
-        return Err(PyValueError::new_err(
-            "blf_*_ptr must have length n_blf+1 and blf_*_const length n_blf",
-        ));
-    }
-    let mut blf_terms = Vec::with_capacity(n_blf);
-    for t in 0..n_blf {
-        let (as_, ae) = (a_ptr[t] as usize, a_ptr[t + 1] as usize);
-        let (bs, be) = (b_ptr[t] as usize, b_ptr[t + 1] as usize);
-        if ae > a_cols.len() || ae > a_coeffs.len() || be > b_cols.len() || be > b_coeffs.len() {
-            return Err(PyValueError::new_err("blf form pointer out of range"));
-        }
-        blf_terms.push(BlfTerm {
-            a_cols: a_cols[as_..ae].iter().map(|&v| v as usize).collect(),
-            a_coeffs: a_coeffs[as_..ae].to_vec(),
-            a_const: a_const[t],
-            b_cols: b_cols[bs..be].iter().map(|&v| v as usize).collect(),
-            b_coeffs: b_coeffs[bs..be].to_vec(),
-            b_const: b_const[t],
-            w: blf_w[t] as usize,
-        });
-    }
-
-    let spec = SpatialKernelSpec {
+    let spec = build_spec(
         n_cols,
         n_orig,
-        c: c.to_vec(),
-        integrality: integrality.iter().map(|&v| v != 0).collect(),
-        global_lo: global_lo.to_vec(),
-        global_hi: global_hi.to_vec(),
-        fixed_rows,
-        terms,
-        blf_terms,
-        obbt_candidates: obbt_candidates
-            .as_slice()?
-            .iter()
-            .map(|&v| v as usize)
-            .collect(),
-    };
+        &c,
+        &integrality,
+        &global_lo,
+        &global_hi,
+        &fixed_row_ptr,
+        &fixed_cols,
+        &fixed_coeffs,
+        &fixed_rhs,
+        &term_kind,
+        &term_i,
+        &term_j,
+        &term_out,
+        &term_p,
+        &term_coeff,
+        &term_cst,
+        &blf_w,
+        &blf_a_ptr,
+        &blf_a_cols,
+        &blf_a_coeffs,
+        &blf_a_const,
+        &blf_b_ptr,
+        &blf_b_cols,
+        &blf_b_coeffs,
+        &blf_b_const,
+        &obbt_candidates,
+    )?;
 
     // Budget semantics, deliberately explicit at the boundary rather than left to
     // the caller. Two spellings mean "no wall-clock cap" (`None` and `+inf`); a
@@ -525,6 +399,16 @@ pub fn solve_spatial_tree_py<'py>(
                 d.set_item("l", PyArray1::from_slice(py, &lp.l))?;
                 d.set_item("u", PyArray1::from_slice(py, &lp.u))?;
                 d.set_item("c", PyArray1::from_vec(py, c))?;
+                // #2142: the node box itself (post-propagation), the box as popped
+                // (pre-propagation; absent when propagation is off) and the cutoff
+                // propagation ran under -- so a box can be re-propagated offline.
+                d.set_item("lo", PyArray1::from_slice(py, o.lo))?;
+                d.set_item("hi", PyArray1::from_slice(py, o.hi))?;
+                if let (Some(pl), Some(ph)) = (o.pre_lo, o.pre_hi) {
+                    d.set_item("pre_lo", PyArray1::from_slice(py, pl))?;
+                    d.set_item("pre_hi", PyArray1::from_slice(py, ph))?;
+                }
+                d.set_item("cutoff", o.cutoff)?;
                 d.set_item("status", status)?;
                 d.set_item("n_pivots", r.n_pivots)?;
                 d.set_item("lp_s", r.lp_s)?;
@@ -617,4 +501,285 @@ pub fn solve_spatial_tree_py<'py>(
     // #2092: the search stopped on the frontier memory budget.
     out.set_item("frontier_capped", res.frontier_capped)?;
     Ok(out)
+}
+
+/// Run the kernel's per-node FBBT fixpoint (`propagate_spec_fixpoint`) on one box,
+/// exactly as the tree runs it before a node LP (#2142 instrumentation). Takes the
+/// spec in the [`solve_spatial_tree_py`] encoding plus a box `(lo, hi)` (length
+/// `n_cols`, the `1e20` sentinel for an infinite bound), an optional objective
+/// cutoff and the round cap. Returns `(live, lo, hi)`: `live = False` means the box
+/// was proven empty under the cutoff (the returned box is then whatever the
+/// propagator left). Observes only -- no solve path calls it.
+#[pyfunction]
+#[pyo3(signature = (
+    n_cols, n_orig, c, integrality, global_lo, global_hi,
+    fixed_row_ptr, fixed_cols, fixed_coeffs, fixed_rhs,
+    term_kind, term_i, term_j, term_out, term_p, term_coeff, term_cst,
+    blf_w, blf_a_ptr, blf_a_cols, blf_a_coeffs, blf_a_const,
+    blf_b_ptr, blf_b_cols, blf_b_coeffs, blf_b_const,
+    obbt_candidates, lo, hi, cutoff=None, rounds=15,
+))]
+pub fn propagate_spec_py<'py>(
+    py: Python<'py>,
+    n_cols: usize,
+    n_orig: usize,
+    c: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, i64>,
+    global_lo: PyReadonlyArray1<'py, f64>,
+    global_hi: PyReadonlyArray1<'py, f64>,
+    fixed_row_ptr: PyReadonlyArray1<'py, i64>,
+    fixed_cols: PyReadonlyArray1<'py, i64>,
+    fixed_coeffs: PyReadonlyArray1<'py, f64>,
+    fixed_rhs: PyReadonlyArray1<'py, f64>,
+    term_kind: PyReadonlyArray1<'py, i64>,
+    term_i: PyReadonlyArray1<'py, i64>,
+    term_j: PyReadonlyArray1<'py, i64>,
+    term_out: PyReadonlyArray1<'py, i64>,
+    term_p: PyReadonlyArray1<'py, i64>,
+    term_coeff: PyReadonlyArray1<'py, f64>,
+    term_cst: PyReadonlyArray1<'py, f64>,
+    blf_w: PyReadonlyArray1<'py, i64>,
+    blf_a_ptr: PyReadonlyArray1<'py, i64>,
+    blf_a_cols: PyReadonlyArray1<'py, i64>,
+    blf_a_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_a_const: PyReadonlyArray1<'py, f64>,
+    blf_b_ptr: PyReadonlyArray1<'py, i64>,
+    blf_b_cols: PyReadonlyArray1<'py, i64>,
+    blf_b_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_b_const: PyReadonlyArray1<'py, f64>,
+    obbt_candidates: PyReadonlyArray1<'py, i64>,
+    lo: PyReadonlyArray1<'py, f64>,
+    hi: PyReadonlyArray1<'py, f64>,
+    cutoff: Option<f64>,
+    rounds: usize,
+) -> PyResult<(bool, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let spec = build_spec(
+        n_cols,
+        n_orig,
+        &c,
+        &integrality,
+        &global_lo,
+        &global_hi,
+        &fixed_row_ptr,
+        &fixed_cols,
+        &fixed_coeffs,
+        &fixed_rhs,
+        &term_kind,
+        &term_i,
+        &term_j,
+        &term_out,
+        &term_p,
+        &term_coeff,
+        &term_cst,
+        &blf_w,
+        &blf_a_ptr,
+        &blf_a_cols,
+        &blf_a_coeffs,
+        &blf_a_const,
+        &blf_b_ptr,
+        &blf_b_cols,
+        &blf_b_coeffs,
+        &blf_b_const,
+        &obbt_candidates,
+    )?;
+    let mut lo = lo.as_slice()?.to_vec();
+    let mut hi = hi.as_slice()?.to_vec();
+    if lo.len() != n_cols || hi.len() != n_cols {
+        return Err(PyValueError::new_err("lo / hi must have length n_cols"));
+    }
+    if cutoff.is_some_and(|v| v.is_nan()) {
+        return Err(PyValueError::new_err("cutoff must not be NaN"));
+    }
+    let live = propagate_spec_fixpoint(&spec, &mut lo, &mut hi, cutoff, rounds);
+    Ok((live, PyArray1::from_vec(py, lo), PyArray1::from_vec(py, hi)))
+}
+
+/// Decode the flat-array spec encoding (module docs) into a [`SpatialKernelSpec`].
+/// Shared by [`solve_spatial_tree_py`] and [`propagate_spec_py`] so both read the
+/// same structure from the same arrays.
+fn build_spec(
+    n_cols: usize,
+    n_orig: usize,
+    c: &PyReadonlyArray1<'_, f64>,
+    integrality: &PyReadonlyArray1<'_, i64>,
+    global_lo: &PyReadonlyArray1<'_, f64>,
+    global_hi: &PyReadonlyArray1<'_, f64>,
+    fixed_row_ptr: &PyReadonlyArray1<'_, i64>,
+    fixed_cols: &PyReadonlyArray1<'_, i64>,
+    fixed_coeffs: &PyReadonlyArray1<'_, f64>,
+    fixed_rhs: &PyReadonlyArray1<'_, f64>,
+    term_kind: &PyReadonlyArray1<'_, i64>,
+    term_i: &PyReadonlyArray1<'_, i64>,
+    term_j: &PyReadonlyArray1<'_, i64>,
+    term_out: &PyReadonlyArray1<'_, i64>,
+    term_p: &PyReadonlyArray1<'_, i64>,
+    term_coeff: &PyReadonlyArray1<'_, f64>,
+    term_cst: &PyReadonlyArray1<'_, f64>,
+    blf_w: &PyReadonlyArray1<'_, i64>,
+    blf_a_ptr: &PyReadonlyArray1<'_, i64>,
+    blf_a_cols: &PyReadonlyArray1<'_, i64>,
+    blf_a_coeffs: &PyReadonlyArray1<'_, f64>,
+    blf_a_const: &PyReadonlyArray1<'_, f64>,
+    blf_b_ptr: &PyReadonlyArray1<'_, i64>,
+    blf_b_cols: &PyReadonlyArray1<'_, i64>,
+    blf_b_coeffs: &PyReadonlyArray1<'_, f64>,
+    blf_b_const: &PyReadonlyArray1<'_, f64>,
+    obbt_candidates: &PyReadonlyArray1<'_, i64>,
+) -> PyResult<SpatialKernelSpec> {
+    let c = c.as_slice()?;
+    let integrality = integrality.as_slice()?;
+    let global_lo = global_lo.as_slice()?;
+    let global_hi = global_hi.as_slice()?;
+    if c.len() != n_cols
+        || integrality.len() != n_cols
+        || global_lo.len() != n_cols
+        || global_hi.len() != n_cols
+    {
+        return Err(PyValueError::new_err(
+            "c / integrality / global_lo / global_hi must all have length n_cols",
+        ));
+    }
+
+    // Fixed rows (CSR-style).
+    let row_ptr = fixed_row_ptr.as_slice()?;
+    let fcols = fixed_cols.as_slice()?;
+    let fcoef = fixed_coeffs.as_slice()?;
+    let frhs = fixed_rhs.as_slice()?;
+    if row_ptr.is_empty() || row_ptr.len() != frhs.len() + 1 {
+        return Err(PyValueError::new_err(
+            "fixed_row_ptr must have length n_fixed+1",
+        ));
+    }
+    let mut fixed_rows = Vec::with_capacity(frhs.len());
+    for r in 0..frhs.len() {
+        let (s, e) = (row_ptr[r] as usize, row_ptr[r + 1] as usize);
+        if e > fcols.len() || e > fcoef.len() || s > e {
+            return Err(PyValueError::new_err("fixed_row_ptr out of range"));
+        }
+        fixed_rows.push(FixedRow {
+            cols: fcols[s..e].iter().map(|&v| v as usize).collect(),
+            coeffs: fcoef[s..e].to_vec(),
+            rhs: frhs[r],
+        });
+    }
+
+    // Terms.
+    let kind = term_kind.as_slice()?;
+    let ti = term_i.as_slice()?;
+    let tj = term_j.as_slice()?;
+    let tout = term_out.as_slice()?;
+    let tp = term_p.as_slice()?;
+    let tcoeff = term_coeff.as_slice()?;
+    let tcst = term_cst.as_slice()?;
+    let nt = kind.len();
+    if [
+        ti.len(),
+        tj.len(),
+        tout.len(),
+        tp.len(),
+        tcoeff.len(),
+        tcst.len(),
+    ]
+    .iter()
+    .any(|&l| l != nt)
+    {
+        return Err(PyValueError::new_err(
+            "all term_* arrays must have the same length",
+        ));
+    }
+    let mut terms = Vec::with_capacity(nt);
+    for k in 0..nt {
+        let term = match kind[k] {
+            0 => EnvTerm::Bilinear {
+                i: ti[k] as usize,
+                j: tj[k] as usize,
+                w: tout[k] as usize,
+            },
+            1 => EnvTerm::Monomial {
+                i: ti[k] as usize,
+                s: tout[k] as usize,
+                p: tp[k] as i32,
+            },
+            2 => EnvTerm::AffineSquare {
+                j: ti[k] as usize,
+                w: tout[k] as usize,
+                coeff: tcoeff[k],
+                cst: tcst[k],
+            },
+            3 => EnvTerm::Sqrt {
+                x: ti[k] as usize,
+                w: tout[k] as usize,
+                coeff: tcoeff[k],
+                cst: tcst[k],
+            },
+            4 => EnvTerm::AffinePow {
+                x: ti[k] as usize,
+                w: tout[k] as usize,
+                coeff: tcoeff[k],
+                cst: tcst[k],
+                p: tp[k] as i32,
+            },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown term_kind {other} at index {k}"
+                )))
+            }
+        };
+        terms.push(term);
+    }
+
+    // Affine-form product terms (CSR-encoded forms A, B).
+    let blf_w = blf_w.as_slice()?;
+    let a_ptr = blf_a_ptr.as_slice()?;
+    let a_cols = blf_a_cols.as_slice()?;
+    let a_coeffs = blf_a_coeffs.as_slice()?;
+    let a_const = blf_a_const.as_slice()?;
+    let b_ptr = blf_b_ptr.as_slice()?;
+    let b_cols = blf_b_cols.as_slice()?;
+    let b_coeffs = blf_b_coeffs.as_slice()?;
+    let b_const = blf_b_const.as_slice()?;
+    let n_blf = blf_w.len();
+    if a_ptr.len() != n_blf + 1
+        || b_ptr.len() != n_blf + 1
+        || a_const.len() != n_blf
+        || b_const.len() != n_blf
+    {
+        return Err(PyValueError::new_err(
+            "blf_*_ptr must have length n_blf+1 and blf_*_const length n_blf",
+        ));
+    }
+    let mut blf_terms = Vec::with_capacity(n_blf);
+    for t in 0..n_blf {
+        let (as_, ae) = (a_ptr[t] as usize, a_ptr[t + 1] as usize);
+        let (bs, be) = (b_ptr[t] as usize, b_ptr[t + 1] as usize);
+        if ae > a_cols.len() || ae > a_coeffs.len() || be > b_cols.len() || be > b_coeffs.len() {
+            return Err(PyValueError::new_err("blf form pointer out of range"));
+        }
+        blf_terms.push(BlfTerm {
+            a_cols: a_cols[as_..ae].iter().map(|&v| v as usize).collect(),
+            a_coeffs: a_coeffs[as_..ae].to_vec(),
+            a_const: a_const[t],
+            b_cols: b_cols[bs..be].iter().map(|&v| v as usize).collect(),
+            b_coeffs: b_coeffs[bs..be].to_vec(),
+            b_const: b_const[t],
+            w: blf_w[t] as usize,
+        });
+    }
+
+    Ok(SpatialKernelSpec {
+        n_cols,
+        n_orig,
+        c: c.to_vec(),
+        integrality: integrality.iter().map(|&v| v != 0).collect(),
+        global_lo: global_lo.to_vec(),
+        global_hi: global_hi.to_vec(),
+        fixed_rows,
+        terms,
+        blf_terms,
+        obbt_candidates: obbt_candidates
+            .as_slice()?
+            .iter()
+            .map(|&v| v as usize)
+            .collect(),
+    })
 }
