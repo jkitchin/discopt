@@ -271,6 +271,9 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
 
     # Safety net: the empty document keeps every element (the whole model).
     write_atomic(solution, {})
+    # What the file on disk holds, for the failure message below: _run updates
+    # it after each write.
+    on_disk = {"answer": "the full model"}
 
     finished = threading.Event()
 
@@ -285,15 +288,16 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
 
     threading.Thread(target=watchdog, daemon=True).start()
     try:
-        return _run(instance, solution, threads, engine_budget, t0, hard_stop)
+        return _run(instance, solution, threads, engine_budget, t0, hard_stop, on_disk)
     except Exception:
-        # A bug, not a verdict: report it in full. The file on disk is the whole
-        # model, a valid answer by the competition's premise, and a non-zero exit
-        # would discard it (PROGRAM_INTERFACE.md, "Result").
+        # A bug, not a verdict: report it in full. The file on disk is a valid
+        # answer -- the whole model (valid by the competition's premise) or, when
+        # the failure came after it was written, the confirmed subsystem -- and a
+        # non-zero exit would discard it (PROGRAM_INTERFACE.md, "Result").
         import traceback
 
         traceback.print_exc()
-        print("mipcc: engine failed; answer is the full model", flush=True)
+        print(f"mipcc: run failed; answer is {on_disk['answer']}", flush=True)
         return 0
     finally:
         finished.set()
@@ -384,8 +388,16 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
 
 
 def _run(
-    instance: str, solution: str, threads: int, engine_budget: float, t0: float, hard_stop: float
+    instance: str,
+    solution: str,
+    threads: int,
+    engine_budget: float,
+    t0: float,
+    hard_stop: float,
+    on_disk: Optional[dict] = None,
 ) -> int:
+    if on_disk is None:
+        on_disk = {}
     data = read_mps(instance)
     from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
 
@@ -420,11 +432,13 @@ def _run(
     # answer on disk is this one, not the full-model fallback (#2145 review).
     doc = solution_json(data, res)
     write_atomic(solution, doc)
+    on_disk["answer"] = "the confirmed subsystem"
     left = min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)
     if checker_rejects(data, res, left):
         # Infeasible in truth (two proofs), feasible within the checker's 1e-5:
         # submitting it would fail the run. The whole model replaces it.
         write_atomic(solution, {})
+        on_disk["answer"] = "the full model"
         print(
             "mipcc: the checker's own settings find the subsystem feasible within "
             f"{CHECK_TOL}; answer is the full model",

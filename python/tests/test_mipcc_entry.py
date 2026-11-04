@@ -280,7 +280,7 @@ def test_checker_settings_catch_a_subsystem_feasible_within_tolerance():
     assert mipcc.checker_rejects(data(2.5), res, 30.0) is False
 
 
-def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monkeypatch):
+def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monkeypatch, capsys):
     """#2145 follow-up: the checker-settings solve ran before the answer was
     written, so an overrun into the watchdog (or an exception) left only the
     full-model fallback on disk. Now the answer is on disk while it runs."""
@@ -298,4 +298,8 @@ def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monke
     assert mipcc.main([inst, str(out)]) == 0  # the failure is reported, exit 0
     assert seen["on_disk"]["rows"]["c3"] == {"action": "relax"}  # the answer, not {}
     assert json.loads(out.read_text()) == seen["on_disk"]  # and it stays
+    # ... and the failure message names what is on disk, not "the full model".
+    printed = capsys.readouterr().out
+    assert "answer is the confirmed subsystem" in printed
+    assert "full model" not in printed
     assert seen["time_limit"] <= mipcc.CHECKER_SOLVE_CAP_S
