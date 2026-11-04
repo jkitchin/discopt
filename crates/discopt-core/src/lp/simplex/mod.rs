@@ -272,6 +272,15 @@ pub struct SimplexOptions {
     /// Default `false`. The native spatial kernel sets it when
     /// `DISCOPT_NATIVE_WARM_START=2`.
     pub warm_flip_boxed: bool,
+    /// #2142: at the warm dual's empty-ratio-test exit (no entering column, Farkas
+    /// ray not certified), refactorize from scratch and, if the leaving row is
+    /// still off its bound by at most `1e-7·(1+|bound|)`, stop selecting it and
+    /// continue instead of handing the LP to the cold primal. An `Optimal` reached
+    /// that way is returned only if its point passes the original-LP audit.
+    ///
+    /// Default from `DISCOPT_LP_DUAL_REBUILD` (default **OFF**, bound-changing at
+    /// the LP level). Inert on the cold-only entry points.
+    pub dual_rebuild: bool,
 }
 
 impl SimplexOptions {
@@ -317,6 +326,7 @@ impl Default for SimplexOptions {
             dual_cost_perturb: dual::cost_perturb_default(),
             cold_dual_start: false,
             warm_flip_boxed: false,
+            dual_rebuild: dual::dual_rebuild_default(),
         }
     }
 }

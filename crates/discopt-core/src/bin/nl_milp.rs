@@ -363,6 +363,7 @@ fn run() -> Result<(), String> {
             recover_unstable_pivot: false,
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+            dual_rebuild: SimplexOptions::default().dual_rebuild,
             cold_dual_start: false,
             warm_flip_boxed: false,
         },
