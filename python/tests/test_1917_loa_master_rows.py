@@ -122,13 +122,14 @@ def test_loa_cuts_no_row_the_master_holds_exactly():
 # ── HiGHS master over the default box ─────────────────────────────────────
 
 
-def test_highs_master_bound_survives_the_default_box():
+def test_highs_master_bound_survives_the_default_box(monkeypatch):
     """Reduced from GDPlib med_term_purchasing's first master (two columns of
     498): HiGHS with presolve off calls it infeasible; presolve on, optimal 0."""
     pytest.importorskip("highspy")
+    import discopt.solvers.milp_highs as mh
     from discopt.constants import DEFAULT_VARIABLE_BOUND
     from discopt.solvers import SolveStatus
-    from discopt.solvers.milp_highs import _solve_milp_once, solve_milp
+    from discopt.solvers.milp_simplex import _marshal_col_bounds
 
     kw = dict(
         c=np.zeros(2),
@@ -140,12 +141,19 @@ def test_highs_master_bound_survives_the_default_box():
         integrality=np.array([1, 0], dtype=np.int32),
         gap_tolerance=1e-4,
     )
-    # HiGHS over the declared box called this feasible master infeasible with
-    # presolve off. Every HiGHS solve now opens the default box (highs-parity P0.4,
+    # The precondition: HiGHS handed the DECLARED box (the default-box sides left at
+    # 9.999e19) calls this feasible master infeasible with presolve off. If a HiGHS
+    # upgrade fixes that, this test no longer exercises the opened box.
+    with monkeypatch.context() as mp:
+        mp.setattr(mh, "_hand_highs_col_bounds", _marshal_col_bounds)
+        declared = mh._solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
+    if declared.status != SolveStatus.INFEASIBLE:
+        pytest.skip(f"HiGHS no longer fails over the declared box ({declared.status})")
+    # Every HiGHS solve now opens the default box (#2146,
     # milp_highs._hand_highs_col_bounds), so neither solve sees that scale.
-    declared = _solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
-    assert declared.status != SolveStatus.INFEASIBLE
-    r = solve_milp(time_limit=10.0, **kw)
+    opened = mh._solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
+    assert opened.status != SolveStatus.INFEASIBLE
+    r = mh.solve_milp(time_limit=10.0, **kw)
     assert r.status == SolveStatus.OPTIMAL
     assert r.bound is not None and r.bound == pytest.approx(0.0, abs=1e-9)
 
