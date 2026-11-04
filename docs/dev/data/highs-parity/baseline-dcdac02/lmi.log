@@ -12,3 +12,18 @@ header {"load": [0.55615234375, 0.30126953125, 0.109375], "commit": "dcdac02", "
 [run 11/65] L    israel                   {'R': ('optimal', 0, -896644.8218630458, '0.613*'), 'H': ('optimal', 0, -896644.8218630456, '0.603*'), 'H0': ('optimal', 0, -896644.8218630459, '0.005*')}  (* wall indicative: load over the gate)
 [run 12/65] L    nan1                     {'R': ('optimal', 0, -1000.0, '0.072*'), 'H': ('optimal', 0, -1000.0, '0.074*'), 'H0': ('optimal', 0, -1000.0, '0.001*')}  (* wall indicative: load over the gate)
 [run 13/65] L    no-newline-eof           {'R': ('optimal', 0, 0.0, '0.074*'), 'H': ('optimal', 0, 0.0, '0.077*'), 'H0': ('optimal', 0, 0.0, '0.001*')}  (* wall indicative: load over the gate)
+[run 14/65] L    perold                   {'R': ('feasible', 0, -9380.75527823518, '9.670*'), 'H': ('optimal', 0, -9380.755278235269, '4.221*'), 'H0': ('optimal', 0, -9380.755278235098, '0.067*')}  (* wall indicative: load over the gate)
+[run 15/65] L    qap04                    {'R': ('optimal', 0, 32.0, '0.209*'), 'H': ('optimal', 0, 32.0, '0.197*'), 'H0': ('optimal', 0, 32.0, '0.003*')}  (* wall indicative: load over the gate)
+[run 16/65] L    scrs8                    {'R': ('optimal', 0, 904.2969538007917, '6.999*'), 'H': ('optimal', 0, 904.2969538007915, '1.555*'), 'H0': ('optimal', 0, 904.296953800792, '0.012*')}  (* wall indicative: load over the gate)
+[run 17/65] L    sctest                   {'R': ('optimal', 0, 5.75, '0.085'), 'H': ('optimal', 0, 5.75, '0.088'), 'H0': ('optimal', 0, 5.75, '0.001')}
+[run 18/65] L    shell                    {'R': ('optimal', 0, 1208825346.0, '3.644'), 'H': ('optimal', 0, 1208825346.0, '2.398'), 'H0': ('optimal', 0, 1208825346.0, '0.014')}
+[run 19/65] L    silly-names              {'R': ('optimal', 0, -1.0, '0.072'), 'H': ('optimal', 0, -1.0, '0.079'), 'H0': ('optimal', 0, -1.0, '0.001')}
+[run 20/65] L    smalllp                  {'R': ('optimal', 0, 54.0, '0.119'), 'H': ('optimal', 0, 54.0, '0.118'), 'H0': ('optimal', 0, 54.0, '0.001')}
+[run 21/65] L    stair                    {'R': ('optimal', 0, -251.26695119296357, '5.626'), 'H': ('optimal', 0, -251.26695119296764, '1.689'), 'H0': ('optimal', 0, -251.2669511929631, '0.016')}
+[run 22/65] L    standata                 {'R': ('optimal', 0, 1257.6995, '1.859'), 'H': ('optimal', 0, 1257.6995, '0.967'), 'H0': ('optimal', 0, 1257.6995, '0.005')}
+[run 23/65] L    standgub                 {'R': ('optimal', 0, 1257.6995, '2.130'), 'H': ('optimal', 0, 1257.6995, '1.040'), 'H0': ('optimal', 0, 1257.6995, '0.006')}
+[run 24/65] L    standmps                 {'R': ('optimal', 0, 1406.0174999999995, '2.149'), 'H': ('optimal', 0, 1406.0175, '1.163'), 'H0': ('optimal', 0, 1406.0175, '0.007')}
+[run 25/65] L    test                     {'R': ('optimal', 0, -4.75, '0.084'), 'H': ('optimal', 0, -4.75, '0.076'), 'H0': ('optimal', 0, -4.75, '0.001')}
+[run 26/65] M    1451                     {'R': ('optimal', 1, 2.0, '0.079'), 'H': ('optimal', 0, 2.0, '0.076'), 'H0': ('optimal', 0, 2.0, '0.001')}
+header {"load": [0.05126953125, 0.01416015625, 0.0029296875], "commit": "053232e", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 65
+resume: 26 instance rows already in docs/dev/data/highs-parity/baseline-dcdac02/lmi.json
