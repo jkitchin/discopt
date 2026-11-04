@@ -253,3 +253,28 @@ def test_an_in_process_call_long_after_import_keeps_its_budget(tmp_path):
     assert p.returncode == 0, p.stderr
     assert "ALIVE" in p.stdout and "hard stop" not in p.stdout
     assert json.loads(out.read_text())["rows"]["c3"] == {"action": "relax"}
+
+
+def test_checker_settings_catch_a_subsystem_feasible_within_tolerance():
+    """#2145 review (borderline zone): a set infeasible in truth -- an integer
+    column with ub = 2.9999999 and a row x >= 3 -- is feasible within the
+    checker's 1e-5, so submitting it would fail the run. The entry re-solves the
+    final set with the checker's own settings and rejects it; a clearly
+    infeasible set is accepted."""
+    from types import SimpleNamespace
+
+    import scipy.sparse as sp
+
+    def data(ub):
+        return dict(
+            A=sp.csr_matrix(np.array([[1.0]])),
+            row_lo=np.array([3.0]),
+            row_hi=np.array([1e20]),
+            col_lb=np.array([0.0]),
+            col_ub=np.array([ub]),
+            is_int=np.array([True]),
+        )
+
+    res = SimpleNamespace(constraints=[0], bounds=[], integrality=[0])
+    assert mipcc.checker_rejects(data(2.9999999), res, 30.0) is True
+    assert mipcc.checker_rejects(data(2.5), res, 30.0) is False

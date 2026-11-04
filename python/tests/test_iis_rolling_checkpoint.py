@@ -151,3 +151,27 @@ def test_an_unfinished_run_answers_with_the_smallest_confirmed_set(monkeypatch):
     assert calls["choose"] > 9 and not res.complete
     size = len(res.constraints) + len(res.bounds) + len(res.integrality)
     assert size <= base
+
+
+def test_a_phase_end_confirmation_out_of_its_own_budget_does_not_end_the_filter(monkeypatch):
+    """#2145 review: phase-end confirmations got their own ``stop_at``; when one
+    used it up, ``_OutOfTime`` reached the phase loop's outer handler and every
+    remaining phase was skipped, although the overall deadline was far off. Now
+    it is undecided, like ``roll()``'s. (Rolling checkpoints off; the second
+    budgeted confirmation -- after checkpoint 0 -- is the phase-end one.)"""
+    monkeypatch.setattr(_iis_milp, "_ROLL_SHRINK", 0.0)
+    real = _iis_milp._Engine.confirm_infeasible
+    budgeted = {"n": 0}
+
+    def confirm(self, *a, **k):
+        if k.get("stop_at") is not None:
+            budgeted["n"] += 1
+            if budgeted["n"] == 2:
+                raise _iis_milp._OutOfTime  # this confirmation's own budget ran out
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(_iis_milp._Engine, "confirm_infeasible", confirm)
+    res = milp_iis(_model(), total_time_limit=60.0, sat_candidate=False, order="CIB")
+    assert budgeted["n"] >= 2  # the phase-end confirmation was reached and ran out
+    assert res.complete
+    assert res.constraints == [0] and sorted(res.integrality) == [0, 1, 2]

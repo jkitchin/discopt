@@ -274,7 +274,8 @@ class Model:
                 others |= set(self.rows[r])
                 self._remove_row(r)
             self.n_rules["D"] += 1
-            return others
+            # The rows of the columns that lost a row: those may now propagate.
+            return {rr for c in others for rr in self.cols.get(c, ())}
         self.lb[j] = self.ub[j] = target
         self.n_rules["D"] += 1
         return self.fix_and_substitute(j)
@@ -419,9 +420,8 @@ class Model:
                 if not self.cols.get(j):
                     continue
                 t = self.dominated(j)
-                if t is not None:
+                if t is not None:  # rows to revisit
                     queue |= {rr for rr in t if rr in self.rows}
-                    queue |= {rr for jj in t if jj in self.cols for rr in self.cols[jj]}
                     progress = True
                     continue
                 t = self.aggregate(j)

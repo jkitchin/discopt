@@ -97,6 +97,9 @@ PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
     "fast": (2.0, (10.0, 30.0)),
     "all": (math.inf, None),
 }
+#: Share of a confirmation's remaining budget the exact-reduction route may use
+#: (``_Engine._reduced``); the existing routes run with the rest.
+_REDUCE_SHARE = 0.5
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -436,13 +439,8 @@ class _Engine:
             return (False, x) if x is not None else (None, None)
         if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
             return None, None
-        if ms == MS.kInfeasible:
-            self._proven_on = (
-                frozenset(active_cons),
-                frozenset(active_bounds),
-                frozenset(active_int),
-            )
         if ms == MS.kInfeasible and not self.confirm_each:
+            self._record_proven(active_cons, active_bounds, active_int)
             return True, None
         # An infeasibility claim is what lets the filter DROP an element, so it
         # stands only when a presolve-free solve agrees -- the #1634 policy of
@@ -453,6 +451,8 @@ class _Engine:
         self.n_cross_checks += 1
         ms2 = self._solve("off")
         if ms2 == MS.kInfeasible:
+            if ms == MS.kInfeasible:  # the presolve-on proof stands: on record
+                self._record_proven(active_cons, active_bounds, active_int)
             return True, None
         if ms2 == MS.kOptimal:
             x = self._witness()
@@ -497,6 +497,15 @@ class _Engine:
         finally:
             h.setOptionValue("mip_max_nodes", self._default_max_nodes)
         return bool(st == self.hs.HighsModelStatus.kInfeasible)
+
+    def _record_proven(self, active_cons, active_bounds, active_int) -> None:
+        """Record this exact set's presolve-on ``Infeasible`` -- only when the
+        probe returns it as proven, never a claim a cross-check then refuted."""
+        self._proven_on = (
+            frozenset(active_cons),
+            frozenset(active_bounds),
+            frozenset(active_int),
+        )
 
     def proven_on(self, active_cons, active_bounds, active_int) -> bool:
         """Whether this exact set's presolve-on ``Infeasible`` is on record."""
@@ -568,6 +577,10 @@ class _Engine:
         stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at
         if self.deadline is not None:
             stop = min(stop, self.deadline)
+        # Half of what is left: an undecided reduction must leave the raw
+        # presolve-free solve and the rational decider time to run (#2145 review).
+        t_now = time.perf_counter()
+        stop = t_now + _REDUCE_SHARE * max(stop - t_now, 0.0)
         held = np.zeros(self.col_lb.size, dtype=bool)
         held[self._held] = True
         rlo, rhi, lb, ub = self._cfg
@@ -1730,17 +1743,27 @@ def _milp_iis_arrays(
                 # only the presolve-free route when presolve-on is on record.
                 t_pe = time.perf_counter()
                 n_recent_pe = len(eng._recent)
-                verdict = eng.confirm_infeasible(
-                    cons,
-                    bounds,
-                    ints_active,
-                    stop_at=None if deadline is None else min(deadline, t_pe + base_budget),
-                    presolve=("off",)
-                    if eng.proven_on(cons, bounds, ints_active)
-                    else ("choose", "off"),
-                )
-                while len(eng._recent) > n_recent_pe:  # not a filtering probe
-                    eng._recent.pop()
+                try:
+                    verdict = eng.confirm_infeasible(
+                        cons,
+                        bounds,
+                        ints_active,
+                        stop_at=None if deadline is None else min(deadline, t_pe + base_budget),
+                        presolve=("off",)
+                        if eng.proven_on(cons, bounds, ints_active)
+                        else ("choose", "off"),
+                    )
+                except _OutOfTime:
+                    # Out of THIS confirmation's budget: undecided, like roll()'s
+                    # and checkpoint 0's. Only the overall deadline ends the
+                    # filter -- before, a phase-end confirmation that used up its
+                    # own budget skipped every remaining phase (#2145 review).
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        raise
+                    verdict = None
+                finally:
+                    while len(eng._recent) > n_recent_pe:  # not a filtering probe
+                        eng._recent.pop()
                 if verdict is False:
                     return redo_each()
                 if verdict is True:

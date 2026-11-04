@@ -282,7 +282,7 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
 
     threading.Thread(target=watchdog, daemon=True).start()
     try:
-        return _run(instance, solution, threads, engine_budget, t0)
+        return _run(instance, solution, threads, engine_budget, t0, hard_stop)
     except Exception:
         # A bug, not a verdict: report it in full. The file on disk is the whole
         # model, a valid answer by the competition's premise, and a non-zero exit
@@ -296,7 +296,83 @@ def main(argv: Optional[list[str]] = None, t_launch: Optional[float] = None) -> 
         finished.set()
 
 
-def _run(instance: str, solution: str, threads: int, engine_budget: float, t0: float) -> int:
+def checker_rejects(data: dict, res, time_limit: float) -> bool:
+    """Whether the official checker would find the kept subsystem feasible:
+    one HiGHS solve with presolve on and both feasibility tolerances at
+    :data:`CHECK_TOL`, as the checker runs it, and -- on a point -- the checker's
+    1e-5 rule on every kept row, bound and integrality.
+
+    The engine proves its answer infeasible twice (presolve-on HiGHS at HiGHS's
+    tighter default tolerances, and an independent route), so a ``True`` here
+    means a set infeasible in truth that the checker's looser judgement would
+    still reject (#2145 review: the borderline zone). Undecided within
+    ``time_limit``, or a point that fails the 1e-5 rule (the checker then
+    retries tighter): ``False`` -- the doubly proven answer stands."""
+    import highspy
+
+    if time_limit <= 0.5:
+        return False
+    m, n = data["row_lo"].size, data["col_lb"].size
+    rows = np.zeros(m, dtype=bool)
+    rows[list(res.constraints)] = True
+    held = np.zeros(n, dtype=bool)
+    held[list(res.integrality)] = True
+    lbk = held.copy()
+    ubk = held.copy()
+    for j, side in res.bounds:
+        (lbk if side == "lower" else ubk)[j] = True
+    inf = highspy.kHighsInf
+    lb = np.where(lbk & (data["col_lb"] > -_INF), data["col_lb"], -inf)
+    ub = np.where(ubk & (data["col_ub"] < _INF), data["col_ub"], inf)
+    h = highspy.Highs()
+    h.silent()
+    h.setOptionValue("presolve", "on")
+    h.setOptionValue("mip_feasibility_tolerance", CHECK_TOL)
+    h.setOptionValue("primal_feasibility_tolerance", CHECK_TOL)
+    h.setOptionValue("time_limit", float(time_limit))
+    h.addVars(n, lb, ub)
+    vt = highspy.HighsVarType
+    h.changeColsIntegrality(
+        n,
+        np.arange(n, dtype=np.int32),
+        np.array([vt.kInteger if k else vt.kContinuous for k in held]),
+    )
+    A = data["A"].tocsr()
+    for r in np.flatnonzero(rows):
+        s, e = A.indptr[r], A.indptr[r + 1]
+        lo, hi = data["row_lo"][r], data["row_hi"][r]
+        h.addRow(
+            lo if lo > -_INF else -inf,
+            hi if hi < _INF else inf,
+            e - s,
+            A.indices[s:e].astype(np.int32),
+            A.data[s:e],
+        )
+    run = h.run()
+    if run not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
+        raise RuntimeError(f"HiGHS failed on the checker-settings solve: {run}")
+    if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+        return False
+    x = np.asarray(h.getSolution().col_value, dtype=np.float64)
+    act = A @ x
+    rlo, rhi = data["row_lo"], data["row_hi"]
+    viol = max(
+        float(np.max(np.where(rows & (rlo > -_INF), rlo - act, 0.0), initial=0.0)),
+        float(np.max(np.where(rows & (rhi < _INF), act - rhi, 0.0), initial=0.0)),
+        float(
+            np.max(np.where(lbk & (data["col_lb"] > -_INF), data["col_lb"] - x, 0.0), initial=0.0)
+        ),
+        float(
+            np.max(np.where(ubk & (data["col_ub"] < _INF), x - data["col_ub"], 0.0), initial=0.0)
+        ),
+        float(np.max(np.where(held, np.abs(x - np.round(x)), 0.0), initial=0.0)),
+    )
+    return viol <= CHECK_TOL
+
+
+def _run(
+    instance: str, solution: str, threads: int, engine_budget: float, t0: float, hard_stop: float
+) -> int:
     data = read_mps(instance)
     from discopt._iis_milp import DEFAULT_PORTFOLIO, PORTFOLIO_WAITS, milp_iis_arrays
 
@@ -325,6 +401,17 @@ def _run(instance: str, solution: str, threads: int, engine_budget: float, t0: f
         # No subsystem was confirmed in the budget: the whole model (already
         # written) is the answer. Said loudly; it is a valid but poor result.
         print(f"mipcc: no confirmed subsystem in the budget ({exc}); answer is the full model")
+        return 0
+    left = hard_stop - (time.perf_counter() - t0) - 5.0  # keep time to write and exit
+    if checker_rejects(data, res, left):
+        # Infeasible in truth (two proofs), feasible within the checker's 1e-5:
+        # submitting it would fail the run. The whole model (already on disk)
+        # is the answer instead.
+        print(
+            "mipcc: the checker's own settings find the subsystem feasible within "
+            f"{CHECK_TOL}; answer is the full model",
+            flush=True,
+        )
         return 0
     doc = solution_json(data, res)
     write_atomic(solution, doc)

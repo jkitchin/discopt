@@ -170,3 +170,59 @@ def test_engine_confirms_through_the_reduction_when_presolve_free_cannot(monkeyp
     res = milp_iis(_dijle_like(), total_time_limit=60.0, sat_candidate=False)
     assert res.n_reduced_confirmed >= 1
     assert res.complete and not res.fallback
+
+
+def test_the_reduction_route_gets_half_the_remaining_budget(monkeypatch):
+    import time
+
+    import discopt._iis_reduce as red
+
+    seen = {}
+
+    def capture(A, rlo, rhi, lb, ub, held, stop_at, guard=None):
+        seen["left"] = stop_at - time.perf_counter()
+        return None
+
+    monkeypatch.setattr(red, "reduced_infeasible", capture)
+    eng = _iis_milp._Engine(
+        sp.csr_matrix(np.array([[1.0, 1.0]])),
+        np.array([2.5]),
+        np.array([1e20]),
+        np.zeros(2),
+        np.ones(2),
+        np.array([True, True]),
+        {0: np.array([0])},
+        30.0,
+        confirm_each=False,
+    )
+    eng._configure({0}, set(), {0, 1})
+    eng._reduced(time.perf_counter() + 40.0)
+    assert 0.0 < seen["left"] <= 20.0 + 1e-3  # half of the 40 s left
+
+
+def test_a_refuted_presolve_on_claim_is_not_recorded_as_proven(monkeypatch):
+    """#2145 review: probe() recorded a presolve-on Infeasible before the
+    confirm_each cross-check; a claim the presolve-free route refutes must not
+    stay on record (it would let a later confirmation skip presolve-on)."""
+    eng = _iis_milp._Engine(
+        sp.csr_matrix(np.array([[1.0, 1.0]])),
+        np.array([1.0]),
+        np.array([1e20]),
+        np.zeros(2),
+        np.ones(2),
+        np.array([True, True]),
+        {0: np.array([0])},
+        30.0,
+        confirm_each=True,
+    )
+    real = _iis_milp._Engine._solve
+
+    def solve(self, presolve, stop_at=None):
+        if presolve == "choose":
+            return highspy.HighsModelStatus.kInfeasible  # a false presolve-on claim
+        return real(self, presolve, stop_at)
+
+    monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
+    res, x = eng.probe({0}, set(), {0, 1})  # x0 + x1 >= 1: feasible in truth
+    assert res is False and x is not None
+    assert not eng.proven_on({0}, set(), {0, 1})
