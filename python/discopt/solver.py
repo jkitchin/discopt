@@ -764,6 +764,20 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _warn_gdp_config_raised(site: str) -> None:
+    """Report a raising GDP disjunct-configuration constructor at WARNING, with traceback.
+
+    The constructor is a primal heuristic: a crash in it must not kill a solve whose
+    bound is still certifiable, so every call site catches and continues. It used to
+    log at DEBUG, which hid the failure entirely (CLAUDE.md §7) -- a raising
+    constructor read exactly like one that searched and found nothing. Call only
+    from inside an ``except`` block.
+    """
+    logger.warning(
+        "GDP config subNLP (%s) raised; continuing without its incumbent", site, exc_info=True
+    )
+
+
 def _gdp_config_primal_enabled() -> bool:
     """Whether the #823/#993 disjunct-configuration primal is on (**default ON**
     since the §5 graduation panel; opt out with ``DISCOPT_GDP_CONFIG_PRIMAL=0``).
@@ -2033,8 +2047,8 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     ):
                         _cf_n += 1
                         yield np.asarray(_cf_x, dtype=np.float64)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug("native seed one-hot config raised: %s", exc)
+                except Exception:
+                    _warn_gdp_config_raised("native seed")
                 finally:
                     logger.info("GDP config subNLP: %d feasible point(s)", _cf_n)
             if xr is not None and time.perf_counter() < deadline:
@@ -20898,8 +20912,8 @@ def solve_model(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:
-                    logger.debug("one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("spatial deferred")
                     _gdd_results = []
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
@@ -22428,8 +22442,8 @@ def solve_model(
                     deadline=_cfg_until,
                     stats=_cfg_stats,
                 )
-            except Exception as _e:
-                logger.debug("one_hot_config_subnlp raised: %s", _e)
+            except Exception:
+                _warn_gdp_config_raised("spatial root")
                 _cfg_results = []
             _gdp_cfg_deferred = _gdp_config_hold_back(
                 _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
@@ -28344,8 +28358,8 @@ def _solve_nlp_bb(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:  # pragma: no cover - defensive
-                    logger.debug("nlp-bb one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("nlp-bb deferred")
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
                 for _gdd_x, _ in _gdd_found:
@@ -28759,8 +28773,8 @@ def _solve_nlp_bb(
                             deadline=_cfg_until,
                             stats=_cfg_stats,
                         )
-                    except Exception as _e:  # pragma: no cover - defensive
-                        logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
+                    except Exception:
+                        _warn_gdp_config_raised("nlp-bb root")
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
