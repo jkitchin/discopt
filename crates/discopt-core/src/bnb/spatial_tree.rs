@@ -3027,6 +3027,63 @@ mod tests {
         assert_eq!(spatial_split_point(0.0, 0.0, 4.0, &cfg(0.0)), 2.0);
     }
 
+    /// #2142 item 3: whatever the midpull, the two spatial children cover the
+    /// parent box exactly: each differs from it in the split column only, they meet
+    /// at the split point, and that point is strictly interior. So the split rule
+    /// moves no bound. (Kept from the retired `DISCOPT_SPATIAL_BRANCH_CLAMP`, whose
+    /// clamp / relative-width trigger arms it also covered; performance-plan §107.)
+    #[test]
+    fn spatial_children_cover_parent_under_every_midpull() {
+        let lo = vec![0.0, -3.0, 1.0];
+        let hi = vec![2.0, 5.0, 1.5];
+        let mut checked = 0usize;
+        for m in [0.0, 0.25, 0.75, 1.0] {
+            let cfg = SpatialTreeConfig {
+                spatial_midpull: m,
+                ..SpatialTreeConfig::default()
+            };
+            for col in 0..3 {
+                for f in [0.0, 1e-12, 0.01, 0.37, 0.5, 0.93, 1.0 - 1e-12, 1.0] {
+                    let xv = lo[col] + f * (hi[col] - lo[col]);
+                    let p = spatial_split_point(xv, lo[col], hi[col], &cfg);
+                    assert!(p > lo[col] && p < hi[col], "{p} not interior");
+                    let mut heap = BinaryHeap::new();
+                    push_children(
+                        &mut heap,
+                        &lo,
+                        &hi,
+                        col,
+                        p,
+                        0.0,
+                        false,
+                        None,
+                        None,
+                        None,
+                        Rc::new(Vec::new()),
+                        true,
+                    );
+                    let boxes = drain_boxes(&mut heap);
+                    assert_eq!(boxes.len(), 2);
+                    let (down, up) = if boxes[0].1[col] == p {
+                        (&boxes[0], &boxes[1])
+                    } else {
+                        (&boxes[1], &boxes[0])
+                    };
+                    for j in 0..3 {
+                        assert_eq!(down.0[j], lo[j]);
+                        assert_eq!(up.1[j], hi[j]);
+                        if j != col {
+                            assert_eq!((down.1[j], up.0[j]), (hi[j], lo[j]));
+                        }
+                    }
+                    assert_eq!((down.1[col], up.0[col]), (p, p));
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 4 * 3 * 8);
+    }
+
     /// #1970: the scored rule certifies the same optima as the legacy one, and
     /// reports that it ran. `min -x*y - y*z  s.t.  x + y + z <= 3` on `[0, 2]^3`:
     /// `-y * (x + z) >= -y * (3 - y) >= -2.25`, attained at `y = 1.5`.

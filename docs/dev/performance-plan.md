@@ -14570,3 +14570,154 @@ is still the only existing knob that moves this bound.
 **Candidate, not built.** Raise the per-node round cap, or replace it with a
 progress-based stop. The measured price is +55 % wall at 20k nodes for +7.6 % bound. It
 needs its own §5 panel, and on this evidence it is a small lever.
+
+## 107. #2142 item 3: the branching point — slivers falsified, SCIP's point rule wins on cstr only (2026-11-04)
+
+**Hypothesis (killed).** The kernel splits at the raw LP value with only a `1e-9·width`
+interior margin, while SCIP keeps the point at least `branching/clamp = 0.2` of the width
+from either bound. The guess was that we often split slivers near a bound, so one child
+barely changes and the bound crawls.
+
+**Kill criterion:** fewer than 10 % of spatial splits within 5 % of an edge.
+
+**The premise was wrong for the default path.** The kernel's own default is
+`spatial_midpull = 0`, but `Model.solve` passes `spatial_midpull = 0.75` (with
+`spatial_score` and `spatial_pscost_weight = 1`) since #1970 graduated. A 0.75 midpull
+puts every split at least 37.5 % of the width inside, so a sliver is impossible.
+
+**Instrument (bound-neutral).** `s1_splits.py` reads the `node_observer` stream. A child's
+pre-propagation box is its parent's post-propagation box with one coordinate overridden
+(`QNode::into_box`), so each branching decision (column and value) is recovered exactly
+whenever at least one child was solved. The run asserts that no child differs from its
+parent in more than one coordinate. The observer leaves the bound unchanged: 0.5568486578
+at 10k nodes and 1.3431805086 at 20k, both equal to the baseline.
+
+| cstr big-M, default path | 10k nodes | 20k nodes |
+|---|---|---|
+| spatial / integer splits recovered | 4,982 / 14 | 9,980 / 14 |
+| splits within 1 % / 5 % / 20 % / 35 % of an edge | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| relative position, min – max | 0.3754 – 0.6246 | 0.3752 – 0.6246 |
+| position histogram, 0.35–0.65 in 0.05 bins | 1213 1329 1035 893 416 96 | 1410 2818 2613 2048 952 139 |
+| split-domain width / root width: median (q25, q75) | 0.34 (0.15, 0.52) | 0.23 (0.11, 0.39) |
+| share of splits on a domain narrower than half its root width | 73 % | 82 % |
+
+**Verdict: killed** (0 % against the 10 % criterion).
+
+**The converse.** SCIP's `branching/midpullreldomtrig = 0.5` means that `pyscipopt`'s
+`libscip` describes the parameter as "multiply midpull by relative domain width if the
+latter is below this value". That is a scaling, not an on/off switch. On a domain narrower
+than half its global width, SCIP therefore splits nearer the LP value: at the median width
+here (0.23), its effective midpull is about 0.17, against our fixed 0.75. Ours is the
+over-centred rule.
+
+**Step 2: SCIP's rule as kernel options** (commit `feat(kernel): #2142 item 3`):
+
+- `SpatialTreeConfig::spatial_clamp` and `spatial_midpull_reldomtrig` both default to 0.
+  At 0 they are bit-identical to the #1970 rule (Rust test over 30,000 points).
+- The trigger uses the column's global width and is skipped when a global bound is the
+  `1e20` sentinel. The clamp acts only on finite domains.
+- The flag is `DISCOPT_SPATIAL_BRANCH_CLAMP` (clamp 0.2, trigger 0.5).
+- Profile counters `SpatialSplits` and `SpatialSplitMoved` record each spatial split and
+  each split whose point the rule moved.
+
+Arms were injected into `solve_spatial_tree_py` (`s2_arms.py`, deterministic, at most 3
+concurrent).
+
+| cstr big-M arm | 10k nodes | 20k nodes |
+|---|---|---|
+| base (#1970: midpull 0.75) | 0.5568 (51.1 s) | 1.3432 (85.6 s) |
+| clamp 0.2 | 0.5568 (50.3 s), bit-identical | 1.3432 (80.5 s), bit-identical |
+| midpull 0.75 + trigger 0.5 | 1.1078 (52.5 s) | 1.6985 (82.5 s) |
+| **clamp 0.2 + midpull 0.75 + trigger 0.5 (= SCIP)** | **1.1636 (47.5 s)** | **1.6787 (62.7 s)** |
+| SCIP + `scale_free_branching` | 1.2697 (43.3 s) | 1.7740 (65.5 s) |
+| midpull 0 + clamp 0.2 (LP value, clamped) | 1.0685 (43.3 s) | 1.4798 (58.4 s) |
+| `scale_free_branching` alone | | 1.8436 (203.4 s) |
+| SCIP 10 (PySCIPOpt 6.3) on the same spec (§105) | 1.534 | 2.393 |
+
+The clamp alone is a no-op under a 0.75 midpull. The whole effect comes from splitting
+narrowed domains nearer the LP value.
+
+Nodes to certify, with a 150k cap:
+
+| arm | result at the cap or at certification |
+|---|---|
+| base | **not certified**, bound 2.8697 at 150k nodes (2,946 s) |
+| trigger alone | not certified, bound 3.0539 at 150k nodes (463 s) |
+| **SCIP rule** | **certified at 119,015 nodes**, bound 3.06171 (368 s) |
+| SCIP itself | ~38k nodes |
+
+**Step 3: decision replay.** The 200 sampled nodes are spread evenly over the 9,994
+branched parents of the default 20k tree (`s3_capture.py`). For each one, SCIP is run on
+discopt's spec with:
+
+- every column bounded to the node's post-propagation box;
+- `setObjlimit` set to the node's cutoff;
+- presolve, heuristics and root separation off;
+- `limits/nodes = 1`.
+
+SCIP's decision is read from the root's children with `getParentBranchings`, and its LP
+value from an `LPSOLVED` event handler (`s3_scip.py`, `s3_analyse.py`).
+
+- **On SCIP defaults, SCIP branches on only 82 of the 200 boxes.** It closes the other 118.
+  Without the objective limit, 116 of those 118 are still infeasible: the box holds no
+  feasible point. With `propagating/obbt/freq = -1`, 113 of the 118 stop being infeasible.
+  With `propagating/maxroundsroot = 0`, all 118 do. So **SCIP's root OBBT proves 57 % of the
+  boxes our 20k tree branches on empty.** SCIP runs OBBT at the root only (`freq = 0`), so
+  this is an artefact of replaying a node as a fresh root, not something SCIP does at that
+  node in its own tree. The kernel's OBBT was falsified as an in-tree lever in the #2142
+  attribution. It is recorded here because the replay must switch it off to emulate an
+  in-tree node.
+- **With OBBT off (the in-tree emulation),** SCIP branches on 195 of the 200 boxes:
+  - **Variable agreement is 27/195 = 13.8 %.**
+  - SCIP picks a spec-original column 191 times; we do 170 times.
+  - Where the column agrees, the point agrees too: median |Δ relative position| 0, 90th
+    percentile 0.03. The LP value also agrees: median |Δ|/width 1e-4.
+  - SCIP's point equals `0.75·mid + 0.25·lp` on 194 of 194 continuous picks. At a replay
+    root, SCIP's global domain is the box, so its trigger never fires there.
+- **Not run:** driving the kernel with SCIP's variable rule (violation-based, with violation
+  split by midness, pseudocost, `highscorefactor`). The replay says that rule is the
+  remaining difference: the point now matches, and the variable choice agrees on one
+  decision in seven.
+
+**Step 4: §5 panel.** `DISCOPT_SPATIAL_BRANCH_CLAMP` ON vs OFF. Each solve ran in its own
+process under `DISCOPT_PROFILE=1` and `PYTHONHASHSEED=0`, deterministic, with arms
+interleaved.
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74 instances, `max_nodes=2000`, 120 s backstop, 2 jobs | 858 / 0; unfired bit-identical 57 checked, 16 at the wall backstop | **1 (tanksize)** | tanksize certified in both arms, **519 → 705 nodes** (+36 %) |
+| `python/tests/data/minlplib` instances not in the corpus, plus nous1 and st_m2 (60 total), ON-only fire screen at 2000 nodes / 30 s (`s4_screen.py`) | — | 12 | — |
+| those 12, same panel settings | 129 + 11 / 0 | 12 | certified 8 → 8, nodes on the 8 certified 700 → 720. Better: fuel 17 → 15, st_e07 29 → 25, st_z 23 → 17. Worse: nvs20 181 → 187, st_e03 263 → 267, st_e05 131 → 153. Node-limited bounds: st_e31 tighter, rbrock and ex1252a looser, **nous1 1.2849 → 1.2744** |
+| nous1 to certification (`gap_tolerance=1e-4`) | certified in both arms | | **15,233 → 17,187 nodes** (+13 %), 36.1 → 38.2 s |
+| GDP parity, 24 instances × {big-m, hull}, `max_nodes=5000`, 120 s backstop, 1 rep (96 solves, split over 3 processes by `--include`) | 0 incorrect, 0 crossings, 0 solved lost; unfired bit-identical 24 pairs checked (18 at the wall, 0 differ); kaibel and mod_hens error in both arms | **cstr only** (big-m, hull) | cstr big-M bound **0.2152 → 0.7584** at 5000 nodes; cstr hull wall-terminated in both arms, 437 → 658 nodes, bound 0.0940 in both. The one "solved-gained" row, `constrained_layout_clay0203` big-M (OFF 120.8 s at the wall, ON 119.1 s), is unfired (`SpatialSplits = 0`, 133 nodes in both arms), so it is wall noise and not the flag |
+
+**Verdict: cert-clean, not net-positive. Retired.** The rule wins big only on the
+motivating instance. On cstr it takes the tree from uncertified at 150k nodes to certified
+at 119k. Beyond cstr it is mixed to harmful:
+
+- tanksize +36 % nodes;
+- nous1 +13 % nodes to certify (nous1 is #1970's probe);
+- three of eight small certifiers worse and three better.
+
+CLAUDE.md §2 rejects a change whose benefit is confined to one instance. The flag, the two
+kernel options and the `SpatialSplit*` counters are removed (commit `revert(kernel): #2142
+item 3`). The measured state is the commit before it.
+
+**What this changes in the #2142 picture.**
+
+- The branching **point** is not where SCIP's edge comes from in general. It does matter for
+  cstr, whose splits fall 82 % on narrowed domains. That is a property of the instance,
+  not a rule to ship.
+- The replay localises the remaining difference to the branching **variable**: 13.8 %
+  agreement at identical boxes, LP points and split points.
+- The next entry experiment is a kernel scoring arm that follows SCIP's
+  `constraints/nonlinear/branching/*`: violation split by midness, `highscorefactor = 0.9`,
+  pseudocost weight 1 under SCIP's reliability rule. It must first replay at these 195
+  boxes and show agreement well above 13.8 %, and only then be run as a tree arm.
+
+**Do not build:**
+
+- a clamp alone (a no-op under the 0.75 midpull);
+- any further split-point tweak aimed at cstr.
+
+Data: `docs/dev/data/2142-branching/` (see its README).
