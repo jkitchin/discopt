@@ -465,7 +465,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   the plan's "wall ≤ 2×" bar for R5 will be judged at sub-second scale. Kill not fired.
   `test_highs_parity_p06_iis_baseline.py` pins every set exactly (54 tests, 1.5 s); data
   `docs/dev/data/highs-parity/iis-3e5dbfa3/`.
-- [ ] **P0.7 — Entry experiment for M-1671: the UC witness on the Rust driver.** Scope:
+- [x] **P0.7 — Entry experiment for M-1671: the UC witness on the Rust driver.** Scope:
   `scripts`-free: run `test_1667_…::test_unit_commitment_returns_within_its_time_limit`'s
   `UC_SCRIPT` with `DISCOPT_LP_MILP_BACKEND=rust` at `time_limit` 20/60/120 s, 3 reps,
   fresh subprocess each, load gate; also with `presolve=False` and with
@@ -474,6 +474,61 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   states the gap (bound/incumbent at 20/60/120 s). Kill: a Rust bound above
   `450623.7692 + 1e-6·|·|` or a wrong `optimal` → correctness defect, P0-blocking. Then
   **D0** (§3): present routes (a)/(b)/(c) of §4 with these numbers and stop.
+  **Result (2026-11-04):** `discopt_benchmarks/scripts/uc_witness_rust.py` (the test's own
+  `UC_SCRIPT`, solve line parametrised), fresh subprocess per solve, 3 interleaved reps,
+  idle 4-core host (load 0.0 at start); data `docs/dev/data/highs-parity/uc-a937847b/`.
+  **18 executed, 0 violations** (no Rust bound above 450623.7692; kill not fired).
+
+  | arm | status (3/3) | incumbent | bound | nodes | wall (s) |
+  |---|---|---|---|---|---|
+  | Rust @ 20 s | `time_limit` | **none** | 447,483.14 | 3, 3, 3 | 21.4, 20.8, 20.6 |
+  | Rust @ 60 s | `time_limit` | **none** | 448,231.82 / 448,369.12 | 63, 95, 95 | 61.4, **88.0, 88.2** |
+  | Rust @ 120 s | `time_limit` | **none** | 448,817.54 (gap 0.40 %) | 159 ×3 | **142.2, 141.3, 147.3** |
+  | Rust, `presolve=False` @ 60 s | `time_limit` | none | same two modes | 63, 95, 63 | 60.8, 86.7, 62.8 |
+  | Rust, `DISCOPT_MILP_CMIR=0` @ 60 s | `time_limit` | none | same two modes | 95, 95, 63 | 85.7, 87.5, 60.3 |
+  | HiGHS route @ 20 s (default) | `optimal`, certified | 450,623.7692 | 450,587.00 | 7 ×3 | 9.9, 10.3, 10.5 |
+
+  - **Rust does not certify the witness in 20 s, nor in 120 s, and finds no incumbent
+    at all.** Its bound rises 447,483 → 448,818 (gap 0.40 % at 120 s).
+  - **What actually runs:** every Rust row's route is `milp-tree: discopt MILP branch and
+    bound (milp_backend='rust')`. The monolithic Rust driver exhausts its budget with
+    no incumbent and **defers** (`_solve_milp_simplex` returns `None`, handing back its
+    bound; `solver.py` ~38880), and the Python MILP tree runs after it. So the
+    "Rust route" on this class is driver + Python tree.
+  - **Wall time is not bounded by the limit:** +18–23 % at 120 s, and up to +47 % at
+    60 s (the 95-node runs). That fails §4 close condition 4 ("return within the
+    limit + the certificate overhead") as the route stands today.
+  - **Attribution:** `presolve=False` and c-MIR off show the same two modes (63/95
+    nodes) as the default. Neither is the lever; the bimodality follows wall-clock
+    timing, not the option.
+  - Kill not fired; nothing to fix before D0.
+
+  **D0 decision memo — the loop stops here for the owner.** Close condition for #1671:
+  *no default discopt path depends on HiGHS presolve.* The routes, with these numbers:
+  - **(a) Rust default for every pure MILP** (the full P4 track): today Rust certifies
+    14/38 MIPLIB, 18/24 M, and **0/1 on the witness** (no incumbent in 120 s). Far; it
+    waits on D2.
+  - **(b) Rust default for a measured sub-class containing the witness**: not viable
+    yet. The witness is exactly where Rust fails worst (no primal at all), so no general
+    predicate can put it on the Rust side today. It would first need a primal
+    heuristic (P4.6 feasibility jump/shifting) and the deadline fix below; it then needs
+    its own entry experiment.
+  - **(c) `presolve=off` on the default HiGHS MILP route**: closes #1671 *and* makes
+    #1634 moot at once, at HiGHS's measured cost (no_presolve 36/38 at 1.7× wall vs
+    38/38 in `milp-competitiveness-plan.md` §1c; not yet re-measured on this host).
+    Loud, not an approximation, but a default-path slowdown.
+  - **Interim guard (ask, don't presume):** a subprocess hard-kill watchdog around the
+    HiGHS `run()` bounds wall time but leaves the dependence; it is not a closure.
+  - **Independent of D0** (recommend scheduling either way): the Rust route overruns its
+    time limit by up to 47 % because the Python tree runs after the driver's deferral.
+    That is a correctness-adjacent contract bug (`time_limit`), small and general.
+
+  **Also for the owner (raised by P0.3/P0.4):** (1) does §1.3's "wall ratio ≤ 3.0" mean
+  against the HiGHS route (H) or raw HiGHS (H0)? On LP they differ ~100× here (Rust/H
+  1.41×, Rust/H0 ≈ 155×). (2) GDPlib's 17 instances need `gdplib` installed from source
+  (`pip install "gdplib @ git+https://github.com/SECQUOIA/gdplib.git"`), which this
+  session was not permitted to do; R2b's "large GDP masters" question is untested
+  until then.
 
 ### Phase 1 — bound-neutral ports and the engine seam (R6, R4, R3)
 
@@ -775,7 +830,7 @@ and is re-written by P4.1.**
 | P0.4 | [x] | kill fired: false HiGHS master optimum (#2146), fixed; post-fix 3103 masters, 6206 compared, 0 contradictions; Rust SGM 0.08× HiGHS on decomposition masters; route 91–92/94 | `6351f589` + see git log |
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
-| P0.7 / D0 | [ ] | | |
+| P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [ ] | | |
 | P2.1–P2.6 / D1 | [ ] | | |
 | P3.1–P3.3 | [ ] | | |
@@ -791,7 +846,7 @@ Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 | M (24) | R / H / H0 | 18 / 24 / 24 (cert 18 / 24 / —) | 119.92 / 32.54 / 4.90 s | 0.255 / 0.424 / 0.038 s | 117,596 / 518 / 328 | 0 / 0 / 0 | 4/24 valid → indicative |
 | INF (16) | R / H / H0 | 16 / 16 / 16 verdicts (cert 15 / 15 / —; `gas11` unbounded uncertified) | 23.25 / 5.39 / 0.38 s | 0.192 / 0.264 / 0.003 s | — | 0 / 0 / 0 | 11/16 valid → indicative |
 | MIPLIB-38 | R / H / H0 | 14 / 35 / 35 (cert 14 / 35 / —) | 344.89 / 253.17 / 171.04 s | 2.023 / 3.602 / 1.358 s | 708,937 / 14,015 / 18,685 | 0 / 0 / 0 | 12/38 valid → indicative |
-| UC witness (P0.7) | R @ 20/60/120 s | | | | | | |
+| UC witness (P0.7) | R @ 20/60/120 s; H @ 20 s | R 0/3 at every limit (no incumbent); H 3/3 certified | R 21 / 61–88 / 141–147 s; H 9.9–10.5 s | — | R 3 / 63–95 / 159; H 7 | 0 | idle (load 0.0) |
 
 ---
 
