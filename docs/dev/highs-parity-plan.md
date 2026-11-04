@@ -773,7 +773,27 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     the pass cheaper with identical outputs" (standalone it costs 0.20–0.29 s on `scrs8`,
     ~1.1 s inside a solve: the extra is not import cost, warm repeat solves measure the
     same).
-  - **(ii) open:** the post-solve re-check's evaluator build (up to 5 s, both routes).
+  - **(ii) done (2026-11-04).** The evaluator was already the #1743 affine walk, not a
+    tape; its cost was `affine_of` building one scipy matrix per expression node (~0.2 ms
+    each: 9,461 nodes, 1.7 s on `scrs8`). `affine_array.scalar_linear_of` reads a scalar
+    `+ - neg * / **1` row over scalar variables and constants in one dict walk, and
+    declines everything else to `affine_of` unchanged; `affine_constraint_rows` and
+    `AffineEvaluator.try_build` try it first. Same-input probe on the 65 L/M/INF
+    instances: `J`, `g0`, `c`, `c0` and row map **bit-identical** to the `affine_of` build
+    (325 comparisons; 160 nonlinear corpus models declined by both), build 14.2 → 0.57 s
+    in total. Panel L/M/INF R+H, 1 round, 20 s (`p2.0/scalar_affine_lmi.json`): 130/130
+    status, certificate and objective identical to P0.3 (H) and P2.0 (i) (R), every
+    objective **bit-identical**, node counts unchanged on every certified row, 0
+    incorrect. Interleaved A/B of this piece alone, on vs off, 13 rows × 2 routes × 3
+    reps (`p20_scalar_affine_ab.py`, `p2.0/scalar_affine_ab.json`, load 1.3–2.1): 130
+    comparisons, 0 differences; median wall ratio **R 0.625 (sd 0.16), H 0.589 (sd
+    0.15)**, totals R 18.8 → 11.9 s, H 17.7 → 10.5 s. Test
+    `test_highs_parity_p20_scalar_affine.py`.
+  - **Done criterion against P0.3** (13 rows, median of per-row wall ratio, this run vs
+    `baseline-dcdac02`): **R 0.262, H 0.477** — both ≥ 50 % reductions. Caveat (§9): P0.3
+    is a different session, not an interleaved control; the interleaved evidence is the
+    two A/Bs ((i) and (ii) each against its own off arm). H's 0.477 is close to the bar,
+    so (iii) is still done before P2.0 is checked off.
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
