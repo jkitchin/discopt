@@ -16,6 +16,7 @@ pure functions -- no solve, no HiGHS reference files:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -172,3 +173,22 @@ def test_resume_rows_appends_only_to_the_same_run(panel, tmp_path, monkeypatch):
         panel.resume_rows(f, "abc", _args())
     with pytest.raises(SystemExit, match="does not exist"):
         panel.resume_rows(tmp_path / "missing.json", "abc", _args())
+
+
+def test_resumed_run_keeps_every_earlier_header(panel, tmp_path):
+    # Nothing left to solve: the resume only finalises, so no solver runs here.
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({"members": [{"name": "a", "panel": "M", "path": "x"}]}))
+    out = tmp_path / "run.json"
+    head = panel._header()["commit"]
+    first = {"commit": head, "load": [9.0, 9.0, 9.0]}
+    args = {"manifest": str(man), "panel": None, "instances": "", "arms": "R", "rounds": 1,
+            "time_limit": 20.0, "gap": panel.GAP, "max_nodes": 100_000_000,
+            "h0_subprocess": False, "load_gate": None}  # fmt: skip
+    panel._write_run(out, first, args, [_summ("a", "M", 1, 0, True)], ["R"], complete=False)
+    rc = panel.main(["run", "--manifest", str(man), "--arms", "R", "--rounds", "1",
+                     "--out", str(out), "--resume"])  # fmt: skip
+    assert rc == 0
+    d = json.loads(out.read_text())
+    assert d["complete"] is True and d["executed"] == 1
+    assert d["header"]["resumed_from"] == [first]

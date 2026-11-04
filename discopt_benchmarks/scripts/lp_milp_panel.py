@@ -507,6 +507,10 @@ def cmd_run(a) -> int:
     rows: list[dict] = []
     if a.resume:
         rows = resume_rows(Path(a.out), hdr["commit"], vars(a))
+        # Keep every earlier segment's header (commit, start load): the run's identity is
+        # the first segment's commit, and each segment's load belongs in the record.
+        old_hdr = json.loads(Path(a.out).read_text())["header"]
+        hdr["resumed_from"] = [*old_hdr.pop("resumed_from", []), old_hdr]
         print(f"resume: {len(rows)} instance rows already in {a.out}", flush=True)
     done = {r["name"] for r in rows}
     for i, x in enumerate(mem, 1):

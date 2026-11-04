@@ -12,3 +12,65 @@ header {"load": [0.55615234375, 0.30126953125, 0.109375], "commit": "dcdac02", "
 [run 11/65] L    israel                   {'R': ('optimal', 0, -896644.8218630458, '0.613*'), 'H': ('optimal', 0, -896644.8218630456, '0.603*'), 'H0': ('optimal', 0, -896644.8218630459, '0.005*')}  (* wall indicative: load over the gate)
 [run 12/65] L    nan1                     {'R': ('optimal', 0, -1000.0, '0.072*'), 'H': ('optimal', 0, -1000.0, '0.074*'), 'H0': ('optimal', 0, -1000.0, '0.001*')}  (* wall indicative: load over the gate)
 [run 13/65] L    no-newline-eof           {'R': ('optimal', 0, 0.0, '0.074*'), 'H': ('optimal', 0, 0.0, '0.077*'), 'H0': ('optimal', 0, 0.0, '0.001*')}  (* wall indicative: load over the gate)
+[run 14/65] L    perold                   {'R': ('feasible', 0, -9380.75527823518, '9.670*'), 'H': ('optimal', 0, -9380.755278235269, '4.221*'), 'H0': ('optimal', 0, -9380.755278235098, '0.067*')}  (* wall indicative: load over the gate)
+[run 15/65] L    qap04                    {'R': ('optimal', 0, 32.0, '0.209*'), 'H': ('optimal', 0, 32.0, '0.197*'), 'H0': ('optimal', 0, 32.0, '0.003*')}  (* wall indicative: load over the gate)
+[run 16/65] L    scrs8                    {'R': ('optimal', 0, 904.2969538007917, '6.999*'), 'H': ('optimal', 0, 904.2969538007915, '1.555*'), 'H0': ('optimal', 0, 904.296953800792, '0.012*')}  (* wall indicative: load over the gate)
+[run 17/65] L    sctest                   {'R': ('optimal', 0, 5.75, '0.085'), 'H': ('optimal', 0, 5.75, '0.088'), 'H0': ('optimal', 0, 5.75, '0.001')}
+[run 18/65] L    shell                    {'R': ('optimal', 0, 1208825346.0, '3.644'), 'H': ('optimal', 0, 1208825346.0, '2.398'), 'H0': ('optimal', 0, 1208825346.0, '0.014')}
+[run 19/65] L    silly-names              {'R': ('optimal', 0, -1.0, '0.072'), 'H': ('optimal', 0, -1.0, '0.079'), 'H0': ('optimal', 0, -1.0, '0.001')}
+[run 20/65] L    smalllp                  {'R': ('optimal', 0, 54.0, '0.119'), 'H': ('optimal', 0, 54.0, '0.118'), 'H0': ('optimal', 0, 54.0, '0.001')}
+[run 21/65] L    stair                    {'R': ('optimal', 0, -251.26695119296357, '5.626'), 'H': ('optimal', 0, -251.26695119296764, '1.689'), 'H0': ('optimal', 0, -251.2669511929631, '0.016')}
+[run 22/65] L    standata                 {'R': ('optimal', 0, 1257.6995, '1.859'), 'H': ('optimal', 0, 1257.6995, '0.967'), 'H0': ('optimal', 0, 1257.6995, '0.005')}
+[run 23/65] L    standgub                 {'R': ('optimal', 0, 1257.6995, '2.130'), 'H': ('optimal', 0, 1257.6995, '1.040'), 'H0': ('optimal', 0, 1257.6995, '0.006')}
+[run 24/65] L    standmps                 {'R': ('optimal', 0, 1406.0174999999995, '2.149'), 'H': ('optimal', 0, 1406.0175, '1.163'), 'H0': ('optimal', 0, 1406.0175, '0.007')}
+[run 25/65] L    test                     {'R': ('optimal', 0, -4.75, '0.084'), 'H': ('optimal', 0, -4.75, '0.076'), 'H0': ('optimal', 0, -4.75, '0.001')}
+[run 26/65] M    1451                     {'R': ('optimal', 1, 2.0, '0.079'), 'H': ('optimal', 0, 2.0, '0.076'), 'H0': ('optimal', 0, 2.0, '0.001')}
+header {"load": [0.05126953125, 0.01416015625, 0.0029296875], "commit": "053232e", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 65
+resume: 26 instance rows already in docs/dev/data/highs-parity/baseline-dcdac02/lmi.json
+[run 27/65] M    2122                     {'R': ('time_limit', 127, None, '20.760'), 'H': ('optimal', 2, -187612.9441943997, '2.932'), 'H0': ('optimal', 1, -187612.94419439966, '0.372')}
+[run 28/65] M    2171                     {'R': ('optimal', 17, -22375.758546075132, '0.282'), 'H': ('optimal', 1, -22375.758546075085, '0.350'), 'H0': ('optimal', 1, -22375.75854607508, '0.018')}
+[run 29/65] M    bell5                    {'R': ('optimal', 20429, 8966406.491519999, '5.365*'), 'H': ('optimal', 416, 8966635.631743703, '1.210*'), 'H0': ('optimal', 180, 8966406.49152, '0.415*')}  (* wall indicative: load over the gate)
+[run 30/65] M    bound_implied            {'R': ('optimal', 1, 0.0, '0.196*'), 'H': ('optimal', 1, 0.0, '0.177*'), 'H0': ('optimal', 0, 0.0, '0.002*')}  (* wall indicative: load over the gate)
+[run 31/65] M    dcmulti                  {'R': ('optimal', 21353, 188182.0, '8.540*'), 'H': ('optimal', 3, 188182.0, '4.337*'), 'H0': ('optimal', 5, 188182.0, '1.893*')}  (* wall indicative: load over the gate)
+[run 32/65] M    egout                    {'R': ('optimal', 2439, 568.1007, '1.109*'), 'H': ('optimal', 1, 568.1007, '0.497*'), 'H0': ('optimal', 1, 568.1007000000001, '0.020*')}  (* wall indicative: load over the gate)
+[run 33/65] M    fixed-binary             {'R': ('optimal', 1, 0.0, '0.146*'), 'H': ('optimal', 0, 0.0, '0.152*'), 'H0': ('optimal', 0, 0.0, '0.001*')}  (* wall indicative: load over the gate)
+[run 34/65] M    flugpl                   {'R': ('optimal', 443, 1201499.9999999988, '0.163*'), 'H': ('optimal', 51, 1201500.0, '0.257*'), 'H0': ('optimal', 89, 1201500.0, '0.125*')}  (* wall indicative: load over the gate)
+[run 35/65] M    gesa2                    {'R': ('feasible', 9803, 27279827.359579917, '14.228*'), 'H': ('optimal', 1, 25779856.371697903, '5.021*'), 'H0': ('optimal', 1, 25779856.371697918, '0.724*')}  (* wall indicative: load over the gate)
+[run 36/65] M    gt2                      {'R': ('feasible', 45493, 24106.0, '20.232*'), 'H': ('optimal', 1, 21166.0, '0.454*'), 'H0': ('optimal', 1, 21166.0, '0.056*')}  (* wall indicative: load over the gate)
+[run 37/65] M    issue-2095               {'R': ('optimal', 1, 3.0, '0.284*'), 'H': ('optimal', 1, 3.0, '0.377*'), 'H0': ('optimal', 1, 3.0, '0.015*')}  (* wall indicative: load over the gate)
+[run 38/65] M    issue-2173               {'R': ('optimal', 87, -26770.807548852565, '1.428*'), 'H': ('optimal', 29, -26770.807548852565, '1.749*'), 'H0': ('optimal', 36, -26770.80754885264, '0.196*')}  (* wall indicative: load over the gate)
+[run 39/65] M    issue-2204               {'R': ('optimal', 1, 6.0, '0.155*'), 'H': ('optimal', 1, 6.0, '0.183*'), 'H0': ('optimal', 1, 6.0, '0.012*')}  (* wall indicative: load over the gate)
+[run 40/65] M    issue-2290               {'R': ('optimal', 1, -1.6666666666, '0.229*'), 'H': ('optimal', 0, -1.6666666666, '0.208*'), 'H0': ('optimal', 0, -1.6666666666000012, '0.002*')}  (* wall indicative: load over the gate)
+[run 41/65] M    issue-2388               {'R': ('optimal', 1, 4.532197275894728e-31, '0.206*'), 'H': ('optimal', 1, 0.0, '0.201*'), 'H0': ('optimal', 0, 0.0, '0.001*')}  (* wall indicative: load over the gate)
+[run 42/65] M    issue-2446               {'R': ('time_limit', 1, None, '20.097*'), 'H': ('optimal', 1, -785.3552363096959, '8.630*'), 'H0': ('optimal', 1, -785.3552363097108, '0.151*')}  (* wall indicative: load over the gate)
+[run 43/65] M    issue-2585               {'R': ('optimal', 1, -175.91000000000003, '0.125*'), 'H': ('optimal', 0, -175.91000000000003, '0.151*'), 'H0': ('optimal', 0, -175.9100000000001, '0.001*')}  (* wall indicative: load over the gate)
+[run 44/65] M    lseu                     {'R': ('optimal', 5551, 1120.0, '1.274*'), 'H': ('optimal', 5, 1120.0, '0.730*'), 'H0': ('optimal', 7, 1120.0000000000002, '0.364*')}  (* wall indicative: load over the gate)
+[run 45/65] M    p01                      {'R': ('optimal', 1, 263.0, '0.361*'), 'H': ('optimal', 1, 263.0, '0.393*'), 'H0': ('optimal', 1, 263.0, '0.008*')}  (* wall indicative: load over the gate)
+[run 46/65] M    p0548                    {'R': ('time_limit', 831, None, '13.232*'), 'H': ('optimal', 0, 8691.0, '1.202*'), 'H0': ('optimal', 0, 8691.0, '0.085*')}  (* wall indicative: load over the gate)
+[run 47/65] M    rgn                      {'R': ('optimal', 2461, 82.19999923999998, '0.551*'), 'H': ('optimal', 1, 82.19999923999998, '0.913*'), 'H0': ('optimal', 1, 82.19999923999991, '0.338*')}  (* wall indicative: load over the gate)
+[run 48/65] M    small_mip                {'R': ('optimal', 1, 3.2368421052631438, '0.126'), 'H': ('optimal', 0, 3.236842105263158, '0.145'), 'H0': ('optimal', 0, 3.236842105263158, '0.001')}
+[run 49/65] M    sp150x300d               {'R': ('feasible', 4179, 93.0, '10.747*'), 'H': ('optimal', 1, 69.0, '2.191*'), 'H0': ('optimal', 1, 69.0, '0.097*')}  (* wall indicative: load over the gate)
+[run 50/65] INF  bgetam                   {'R': ('infeasible', 0, None, '1.776*'), 'H': ('infeasible', 0, None, '0.391*'), 'H0': ('Infeasible', 0, None, '0.005*')}  (* wall indicative: load over the gate)
+[run 51/65] INF  box1                     {'R': ('infeasible', 0, None, '0.260*'), 'H': ('infeasible', 0, None, '0.207*'), 'H0': ('Infeasible', 0, None, '0.002*')}  (* wall indicative: load over the gate)
+[run 52/65] INF  cplex1                   {'R': ('infeasible', 0, None, '7.063*'), 'H': ('infeasible', 0, None, '1.699*'), 'H0': ('Infeasible', 0, 16770215.25715349, '0.152*')}  (* wall indicative: load over the gate)
+[run 53/65] INF  ex72a                    {'R': ('infeasible', 0, None, '0.254'), 'H': ('infeasible', 0, None, '0.155'), 'H0': ('Infeasible', 0, None, '0.001')}
+[run 54/65] INF  forest6                  {'R': ('infeasible', 0, None, '0.120'), 'H': ('infeasible', 0, None, '0.100'), 'H0': ('Infeasible', 0, None, '0.001')}
+[run 55/65] INF  galenet                  {'R': ('infeasible', 0, None, '0.085'), 'H': ('infeasible', 0, None, '0.080'), 'H0': ('Infeasible', 0, None, '0.001')}
+[run 56/65] INF  gams10am                 {'R': ('infeasible', 0, None, '0.077'), 'H': ('infeasible', 0, None, '0.089'), 'H0': ('Infeasible', 0, None, '0.001')}
+  note R: answered by root presolve, neither engine ran
+  note H: answered by root presolve, neither engine ran
+[run 57/65] INF  gas11                    {'R': ('unbounded', 0, None, '2.604'), 'H': ('unbounded', 0, None, '0.453'), 'H0': ('Unbounded', 0, -3194585510.155974, '0.013')}
+[run 58/65] INF  infeasible-mip0          {'R': ('infeasible', 23, None, '0.131*'), 'H': ('infeasible', 7, None, '0.432*'), 'H0': ('Infeasible', 7, None, '0.166*')}  (* wall indicative: load over the gate)
+[run 59/65] INF  infeasible-mip1          {'R': ('infeasible', 55, None, '0.129*'), 'H': ('infeasible', 16, None, '0.379*'), 'H0': ('Infeasible', 0, None, '0.018*')}  (* wall indicative: load over the gate)
+[run 60/65] INF  issue-2402               {'R': ('infeasible', 3, None, '0.121'), 'H': ('infeasible', 0, None, '0.134'), 'H0': ('Infeasible', 0, None, '0.001')}
+[run 61/65] INF  issue-2874-3             {'R': ('infeasible', 1, None, '0.124'), 'H': ('infeasible', 0, None, '0.144'), 'H0': ('Infeasible', 0, None, '0.001')}
+[run 62/65] INF  klein1                   {'R': ('infeasible', 0, None, '0.365'), 'H': ('infeasible', 0, None, '0.367'), 'H0': ('Infeasible', 0, 0.0, '0.004')}
+[run 63/65] INF  refinery                 {'R': ('infeasible', 0, None, '5.397'), 'H': ('infeasible', 0, None, '0.321'), 'H0': ('Infeasible', 0, None, '0.006')}
+[run 64/65] INF  vol1                     {'R': ('infeasible', 0, None, '4.627'), 'H': ('infeasible', 0, None, '0.340'), 'H0': ('Infeasible', 0, None, '0.012')}
+[run 65/65] INF  woodinfe                 {'R': ('infeasible', 0, None, '0.120'), 'H': ('infeasible', 0, None, '0.096'), 'H0': ('Infeasible', 0, None, '0.001')}
+run: panel=INF executed=144
+run: panel=L executed=225
+run: panel=M executed=216
+run: presolve_answered={'R': 1, 'H': 1}
+run: executed=585 incorrect_count=0 walls_gated=36/65 load_end=(1.26513671875, 1.775390625, 1.25048828125)
+RC=0 2026-11-04T12:32:48Z
