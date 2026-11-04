@@ -243,7 +243,9 @@ def _run_discopt(
         from discopt._rust import profile_counters_py
 
         ctrs = dict(profile_counters_py())
-        out["counters"] = {k: int(v) for k, v in ctrs.items() if k.startswith("DualRebuild")}
+        out["counters"] = {
+            k: int(v) for k, v in ctrs.items() if k.startswith(("DualRebuild", "SpatialSplit"))
+        }
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
     return out

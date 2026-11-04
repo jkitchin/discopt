@@ -107,6 +107,16 @@ _FLAGS = {
         "leak": lambda off: off["DualRebuilds"],
         "show": ("DualRebuilds", "DualRebuildOptimal"),
     },
+    # #2142 item 3: SCIP's branching-point rule in the native spatial kernel
+    # (``spatial_clamp`` / ``spatial_midpull_reldomtrig``). Only a spatial split
+    # whose point the rule moved can change the search, so ``SpatialSplitMoved``
+    # ON is where it ran; OFF it must be 0.
+    "DISCOPT_SPATIAL_BRANCH_CLAMP": {
+        "fired": lambda off, on: on["SpatialSplitMoved"],
+        "ran": lambda off, on: on["SpatialSplitMoved"] > 0,
+        "leak": lambda off: off["SpatialSplitMoved"],
+        "show": ("SpatialSplits", "SpatialSplitMoved"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -123,6 +133,8 @@ _CTRS = (
     "DualRebuildBails",
     "DualRebuildOptimal",
     "DualRebuildAuditFail",
+    "SpatialSplits",
+    "SpatialSplitMoved",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
@@ -361,8 +373,11 @@ def main() -> int:
             checks += 1
             if "/home/user/discopt/" not in a["module"] and str(_REPO) not in a["module"]:
                 violations.append(f"{name}[{tag}]: loaded discopt from {a['module']}")
-            if a.get("missing_counters"):
-                violations.append(f"{name}[{tag}]: build lacks {a['missing_counters']}")
+            # Only the counters this flag's probe reads must exist: a retired flag's
+            # counters (``DualRebuild*``) are absent from later builds by design.
+            missing = [k for k in a.get("missing_counters") or [] if k in cfg["show"]]
+            if missing:
+                violations.append(f"{name}[{tag}]: build lacks {missing}")
             if a["verified"] is False:
                 violations.append(f"{name}[{tag}]: incumbent failed the false-primal screen")
             if a["verified"] is not None:

@@ -95,6 +95,11 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # --deterministic`` under ``DISCOPT_PROFILE=1``; the ``DualRebuilds`` counter
     # says where it ran and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_LP_DUAL_REBUILD": ("big-m", "hull"),
+    # #2142 item 3: SCIP's branching-point clamp / midpull trigger in the native
+    # spatial kernel. Acts at solve time only (lowering identical): solve ``--all``
+    # with ``--max-nodes N --deterministic``; ``SpatialSplitMoved`` says where a
+    # split point moved, and ``--report`` asserts bit-identity everywhere else.
+    "DISCOPT_SPATIAL_BRANCH_CLAMP": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -136,7 +141,10 @@ def _env(flag: str, on: bool) -> dict:
 
 
 #: flag -> the profile counter that is non-zero exactly where its mechanism ran.
-_COUNTER_FLAGS = {"DISCOPT_LP_DUAL_REBUILD": "DualRebuilds"}
+_COUNTER_FLAGS = {
+    "DISCOPT_LP_DUAL_REBUILD": "DualRebuilds",
+    "DISCOPT_SPATIAL_BRANCH_CLAMP": "SpatialSplitMoved",
+}
 
 
 def _append(out: Path, rec: dict) -> None:

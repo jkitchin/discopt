@@ -430,6 +430,16 @@ pub struct SpatialTreeConfig {
     /// `m * mid + (1 - m) * lp` (SCIP's `branching/midpull`), which keeps the
     /// point at least `m / 2` of the width from either bound.
     pub spatial_midpull: f64,
+    /// #2142: SCIP's `branching/midpullreldomtrig`. `0` (the default) applies
+    /// [`Self::spatial_midpull`] at every width. `t in (0, 1]`: where the column's
+    /// width relative to its global (root) width `r = (hi - lo) / (ghi - glo)` is
+    /// below `t`, the midpull is multiplied by `r`, so a narrow domain is split
+    /// closer to the LP value. Ignored for a column with an infinite global bound.
+    pub spatial_midpull_reldomtrig: f64,
+    /// #2142: SCIP's `branching/clamp`. `0` (the default) keeps only the legacy
+    /// ~1e-9 interior margin; `c in (0, 0.5]` moves a spatial split point at
+    /// least `c * (hi - lo)` away from either bound of a finite domain.
+    pub spatial_clamp: f64,
     /// #1995: when a node LP decides nothing (`Numerical` / `IterLimit` /
     /// `Unbounded`) over a box that propagation tightened, solve the node again
     /// over the box it had BEFORE propagation and use that result. The objective
@@ -475,6 +485,8 @@ impl Default for SpatialTreeConfig {
             spatial_score: false,
             spatial_pscost_weight: 0.0,
             spatial_midpull: 0.0,
+            spatial_midpull_reldomtrig: 0.0,
+            spatial_clamp: 0.0,
             undecided_unpropagated_retry: false,
         }
     }
@@ -1721,7 +1733,21 @@ pub fn solve_spatial_tree_observed(
                 col
             };
             // Spatial branch at the LP value, pulled to the interior.
-            Some((col, spatial_split_point(x[col], lo[col], hi[col], config)))
+            let at = spatial_split_point(x[col], lo[col], hi[col], global_width(spec, col), config);
+            crate::profile::incr(crate::profile::Ctr::SpatialSplits);
+            if (config.spatial_clamp > 0.0 || config.spatial_midpull_reldomtrig > 0.0)
+                && crate::profile::enabled()
+            {
+                let legacy = SpatialTreeConfig {
+                    spatial_clamp: 0.0,
+                    spatial_midpull_reldomtrig: 0.0,
+                    ..*config
+                };
+                if spatial_split_point(x[col], lo[col], hi[col], None, &legacy) != at {
+                    crate::profile::incr(crate::profile::Ctr::SpatialSplitMoved);
+                }
+            }
+            Some((col, at))
         } else {
             fallback()
         };
@@ -1972,15 +1998,52 @@ fn push_children(
 /// `config.spatial_midpull` of the way from `xv` to the midpoint (`0` is the
 /// legacy LP-value split). Any point strictly inside the box gives two covering
 /// children, so the choice moves no bound.
-fn spatial_split_point(xv: f64, lo: f64, hi: f64, config: &SpatialTreeConfig) -> f64 {
-    let m = config.spatial_midpull.clamp(0.0, 1.0);
-    let p = if m > 0.0 {
+///
+/// #2142: SCIP's two refinements (`SCIPbranchGetBranchingPoint`), both off at their
+/// `0` defaults, which leave this function bit-identical to the #1970 rule:
+/// `spatial_midpull_reldomtrig` scales the midpull by the relative width
+/// `(hi - lo) / gw` when that is below the trigger (`gw` is the column's global
+/// width, `None` when a global bound is infinite), and `spatial_clamp` keeps the
+/// point at least that fraction of the width from either finite bound.
+fn spatial_split_point(
+    xv: f64,
+    lo: f64,
+    hi: f64,
+    gw: Option<f64>,
+    config: &SpatialTreeConfig,
+) -> f64 {
+    let mut m = config.spatial_midpull.clamp(0.0, 1.0);
+    let trig = config.spatial_midpull_reldomtrig;
+    if m > 0.0 && trig > 0.0 {
+        if let Some(gw) = gw.filter(|&g| g > 0.0) {
+            let r = (hi - lo) / gw;
+            if r < trig {
+                m *= r.max(0.0);
+            }
+        }
+    }
+    let mut p = if m > 0.0 {
         m * 0.5 * (lo + hi) + (1.0 - m) * xv
     } else {
         xv
     };
+    let c = config.spatial_clamp.clamp(0.0, 0.5);
+    if c > 0.0 && lo > -INF_BOUND && hi < INF_BOUND {
+        let d = c * (hi - lo);
+        p = p.max(lo + d).min(hi - d);
+    }
     clamp_interior(p, lo, hi)
 }
+
+/// #2142: the column's global (root) width for `spatial_midpull_reldomtrig`, or
+/// `None` when either global bound is the `1e20` infinity sentinel.
+fn global_width(spec: &SpatialKernelSpec, c: usize) -> Option<f64> {
+    let (gl, gh) = (spec.global_lo[c], spec.global_hi[c]);
+    (gl > -INF_BOUND && gh < INF_BOUND).then(|| gh - gl)
+}
+
+/// The `1e20` sentinel the LP layer uses for an infinite bound (CLAUDE.md).
+const INF_BOUND: f64 = 1e20;
 
 /// The operand columns of a lifted term (a bilinear term's two, a 1-D term's one).
 fn term_operands(t: &EnvTerm) -> [Option<usize>; 2] {
@@ -2087,7 +2150,7 @@ fn spatial_score_pick(
             };
             const EPS: f64 = 1e-6;
             for (k, &c) in cands.iter().enumerate() {
-                let p = spatial_split_point(x[c], lo[c], hi[c], config);
+                let p = spatial_split_point(x[c], lo[c], hi[c], global_width(spec, c), config);
                 let down = (pc(0, c) * (hi[c] - p)).max(EPS);
                 let up = (pc(1, c) * (p - lo[c])).max(EPS);
                 ps[k] = down * up;
@@ -3020,11 +3083,156 @@ mod tests {
             spatial_midpull: m,
             ..SpatialTreeConfig::default()
         };
-        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, &cfg(0.0)), 0.1);
-        assert!((spatial_split_point(0.1, 0.0, 4.0, &cfg(0.75)) - 1.525).abs() < 1e-12);
-        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, &cfg(1.0)), 2.0);
+        let g = Some(4.0);
+        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, g, &cfg(0.0)), 0.1);
+        assert!((spatial_split_point(0.1, 0.0, 4.0, g, &cfg(0.75)) - 1.525).abs() < 1e-12);
+        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, g, &cfg(1.0)), 2.0);
         // At a bound the legacy rule already takes the midpoint.
-        assert_eq!(spatial_split_point(0.0, 0.0, 4.0, &cfg(0.0)), 2.0);
+        assert_eq!(spatial_split_point(0.0, 0.0, 4.0, g, &cfg(0.0)), 2.0);
+    }
+
+    /// The #1970 rule exactly as it stood before #2142 added the clamp and the
+    /// relative-width trigger.
+    fn split_point_1970(xv: f64, lo: f64, hi: f64, m: f64) -> f64 {
+        let m = m.clamp(0.0, 1.0);
+        let p = if m > 0.0 {
+            m * 0.5 * (lo + hi) + (1.0 - m) * xv
+        } else {
+            xv
+        };
+        clamp_interior(p, lo, hi)
+    }
+
+    /// #2142: with `spatial_clamp = 0` and `spatial_midpull_reldomtrig = 0` (the
+    /// defaults) the split point is bit-identical to the #1970 rule, at every
+    /// midpull, LP value, width and global width, finite or not.
+    #[test]
+    fn spatial_clamp_and_trigger_off_are_bit_identical() {
+        let mut n = 0usize;
+        let mut state = 0x2142_u64;
+        let mut rnd = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for m in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let cfg = SpatialTreeConfig {
+                spatial_midpull: m,
+                ..SpatialTreeConfig::default()
+            };
+            for _ in 0..2000 {
+                let lo = -10.0 + 20.0 * rnd();
+                let hi = lo + 1e-6 + 10.0 * rnd();
+                let xv = lo + (hi - lo) * rnd();
+                for gw in [None, Some(hi - lo), Some(100.0 * (hi - lo))] {
+                    let a = spatial_split_point(xv, lo, hi, gw, &cfg);
+                    assert_eq!(a.to_bits(), split_point_1970(xv, lo, hi, m).to_bits());
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 30_000);
+    }
+
+    /// #2142: SCIP's `branching/midpullreldomtrig` and `branching/clamp`.
+    #[test]
+    fn spatial_clamp_and_trigger_follow_scip() {
+        let scip = SpatialTreeConfig {
+            spatial_midpull: 0.75,
+            spatial_midpull_reldomtrig: 0.5,
+            spatial_clamp: 0.2,
+            ..SpatialTreeConfig::default()
+        };
+        // Wide domain (r = 1 >= 0.5): the full midpull, the clamp idle.
+        let p = spatial_split_point(0.01, 0.0, 1.0, Some(1.0), &scip);
+        assert!((p - (0.375 + 0.25 * 0.01)).abs() < 1e-15, "{p}");
+        // Narrow domain (r = 0.1 < 0.5): midpull 0.075, then clamped to 0.2.
+        let p = spatial_split_point(0.01, 0.0, 1.0, Some(10.0), &scip);
+        assert!((p - 0.2).abs() < 1e-15, "{p}");
+        // Narrow domain, LP value inside the clamp band: midpull 0.075 only.
+        let p = spatial_split_point(0.3, 0.0, 1.0, Some(10.0), &scip);
+        assert!((p - (0.075 * 0.5 + 0.925 * 0.3)).abs() < 1e-15, "{p}");
+        // No global width (an infinite global bound): the trigger is skipped.
+        let p = spatial_split_point(0.01, 0.0, 1.0, None, &scip);
+        assert!((p - (0.375 + 0.25 * 0.01)).abs() < 1e-15, "{p}");
+        // Clamp alone, LP value at the upper edge.
+        let clamp = SpatialTreeConfig {
+            spatial_clamp: 0.2,
+            ..SpatialTreeConfig::default()
+        };
+        assert!((spatial_split_point(3.999, 0.0, 4.0, Some(4.0), &clamp) - 3.2).abs() < 1e-15);
+        // An infinite (sentinel) local bound leaves the clamp idle: the point is
+        // the legacy rule's.
+        let p = spatial_split_point(1e12, 0.0, 1e20, None, &clamp);
+        assert_eq!(p, 1e12);
+        assert_eq!(p, split_point_1970(1e12, 0.0, 1e20, 0.0));
+    }
+
+    /// #2142: whatever the split rule, the two spatial children cover the parent
+    /// box exactly: each differs from it in the split column only, they meet at
+    /// the split point, and that point is strictly interior. So the rule moves no
+    /// bound.
+    #[test]
+    fn spatial_children_cover_parent_under_every_split_rule() {
+        let lo = vec![0.0, -3.0, 1.0];
+        let hi = vec![2.0, 5.0, 1.5];
+        let gw = [Some(2.0), Some(80.0), None];
+        let mut checked = 0usize;
+        for (m, t, c) in [
+            (0.0, 0.0, 0.0),
+            (0.75, 0.0, 0.0),
+            (0.75, 0.5, 0.0),
+            (0.0, 0.0, 0.2),
+            (0.75, 0.5, 0.2),
+            (1.0, 1.0, 0.5),
+        ] {
+            let cfg = SpatialTreeConfig {
+                spatial_midpull: m,
+                spatial_midpull_reldomtrig: t,
+                spatial_clamp: c,
+                ..SpatialTreeConfig::default()
+            };
+            for col in 0..3 {
+                for f in [0.0, 1e-12, 0.01, 0.37, 0.5, 0.93, 1.0 - 1e-12, 1.0] {
+                    let xv = lo[col] + f * (hi[col] - lo[col]);
+                    let p = spatial_split_point(xv, lo[col], hi[col], gw[col], &cfg);
+                    assert!(p > lo[col] && p < hi[col], "{p} not interior");
+                    let mut heap = BinaryHeap::new();
+                    push_children(
+                        &mut heap,
+                        &lo,
+                        &hi,
+                        col,
+                        p,
+                        0.0,
+                        false,
+                        None,
+                        None,
+                        None,
+                        Rc::new(Vec::new()),
+                        true,
+                    );
+                    let boxes = drain_boxes(&mut heap);
+                    assert_eq!(boxes.len(), 2);
+                    let (down, up) = if boxes[0].1[col] == p {
+                        (&boxes[0], &boxes[1])
+                    } else {
+                        (&boxes[1], &boxes[0])
+                    };
+                    for j in 0..3 {
+                        assert_eq!(down.0[j], lo[j]);
+                        assert_eq!(up.1[j], hi[j]);
+                        if j != col {
+                            assert_eq!((down.1[j], up.0[j]), (hi[j], lo[j]));
+                        }
+                    }
+                    assert_eq!((down.1[col], up.0[col]), (p, p));
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 6 * 3 * 8);
     }
 
     /// #1970: the scored rule certifies the same optima as the legacy one, and

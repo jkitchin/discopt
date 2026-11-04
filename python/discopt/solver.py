@@ -2696,6 +2696,8 @@ def _try_native_spatial_kernel(
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
     # #1970: the scored spatial branching rule (see the helper; default ON).
     solve_kwargs.update(_kernel_spatial_branching_kwargs())
+    # #2142: SCIP's branching-point clamp and midpull trigger (default OFF).
+    solve_kwargs.update(_spatial_branch_clamp_kwargs())
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -12195,6 +12197,37 @@ def _kernel_spatial_branching_kwargs() -> dict:
     if raw in ("0", "false", "no", "off", ""):
         return {}
     return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
+
+
+def _spatial_branch_clamp_kwargs() -> dict:
+    """#2142: ``DISCOPT_SPATIAL_BRANCH_CLAMP`` for the native spatial kernel.
+
+    **Default OFF** (bound-changing in the tree only through branching order:
+    every child pair still covers its parent box, so no node bound moves).
+
+    ON, the kernel's spatial split point follows SCIP's ``SCIPbranchGetBranchingPoint``
+    rather than #1970's fixed midpull: ``branching/midpullreldomtrig = 0.5``
+    (the 0.75 midpull is multiplied by the column's width relative to its global
+    width when that is below 0.5, so a narrowed domain is split nearer the LP
+    value) and ``branching/clamp = 0.2`` (the point stays at least 20% of the
+    width from either bound). See ``SpatialTreeConfig::spatial_clamp`` /
+    ``spatial_midpull_reldomtrig``. With the flag off both are 0, which is
+    bit-identical to the #1970 rule (Rust unit test).
+
+    Entry measurement (``performance-plan.md`` section 107): on cstr big-M the
+    default path never splits near an edge (0 of 9,980 spatial splits within 35%
+    of a bound at 20k deterministic nodes, because the 0.75 midpull keeps every
+    point 37.5% inside), so the "sliver children" hypothesis was dead; the flag
+    tests the converse, that SCIP splits narrowed domains nearer the LP value.
+    cstr big-M, deterministic: bound 0.5568 -> 1.1636 at 10k nodes and 1.3432 ->
+    1.6787 at 20k; certified in 119,015 nodes, where the default has bound 2.870
+    and no certificate at 150k. Probe: profile counters ``SpatialSplits`` /
+    ``SpatialSplitMoved``. Read at call time.
+    """
+    raw = os.environ.get("DISCOPT_SPATIAL_BRANCH_CLAMP", "0").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return {}
+    return {"spatial_clamp": 0.2, "spatial_midpull_reldomtrig": 0.5}
 
 
 def _py_tree_spatial_score_enabled() -> bool:
