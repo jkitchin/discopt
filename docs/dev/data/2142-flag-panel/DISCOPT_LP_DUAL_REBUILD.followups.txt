@@ -1,0 +1,20 @@
+# DISCOPT_LP_DUAL_REBUILD follow-ups (deterministic, scip blocked, PYTHONHASHSEED=0, DISCOPT_PROFILE=1, one process at a time, interleaved)
+# cvxnonsep_psig30 max_nodes=2000 tl=120: flag obj nodes wall DualExitDeadline DualRebuilds DualWarmSolves load1
+0 78.9988543406092 89 116.2 0 0 2461 4.00341796875
+1 78.9988543406092 89 111.3 0 0 2461 3.3173828125
+0 78.9988543406092 89 101.8 0 0 2461 3.00732421875
+1 78.9988543406092 89 107.1 0 0 2461 3.26220703125
+# launch max_nodes=2000 tl=120: flag obj nodes wall DualRebuilds DualRebuildOptimal DualColdFallbacks LpVerdictNumerical load1
+0 2257.7975608214465 5 17.36 0 0 62 21 5.17
+1 2257.7975608214465 5 23.03 1182 28 160 241 5.84
+0 2257.7975608214465 5 13.19 0 0 62 21 5.98
+1 2257.7975608214465 5 19.48 1182 28 160 241 5.56
+0 2257.7975608214465 5 14.1 0 0 62 21 5.53
+1 2257.7975608214465 5 20.11 1182 28 160 241 5.35
+0 2257.7975608214465 5 13.23 0 0 62 21 5.65
+1 2257.7975608214465 5 19.3 1182 28 160 241 5.69
+# contvar max_nodes=2000 tl=120: flag status obj bound nodes wall DualRebuilds LpVerdictNumerical load1
+@@ 0 time_limit None 183652.08848688295 3 120.1 0 168 3.9
+@@ 1 time_limit None 183652.08848688295 3 120.1 20 168 4.7
+@@ 0 time_limit None 183652.08848688295 3 120.1 0 168 8.6
+@@ 1 time_limit None 183652.08848688295 3 120.1 22 176 5.3
