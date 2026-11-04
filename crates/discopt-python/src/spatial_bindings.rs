@@ -18,7 +18,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use discopt_core::bnb::spatial_kernel::{
-    assemble_node_lp, BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec,
+    assemble_node_lp, solve_spatial_node_with_cuts, BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec,
 };
 use discopt_core::bnb::spatial_propagate::propagate_spec_fixpoint;
 use discopt_core::bnb::spatial_tree::{
@@ -592,6 +592,141 @@ pub fn propagate_spec_py<'py>(
     }
     let live = propagate_spec_fixpoint(&spec, &mut lo, &mut hi, cutoff, rounds);
     Ok((live, PyArray1::from_vec(py, lo), PyArray1::from_vec(py, hi)))
+}
+
+/// Solve ONE node LP of the kernel on a fixed box, exactly as the tree does for a
+/// node with no warm start (`solve_spatial_node_with_cuts`, OBBT off), optionally
+/// with extra globally valid `<=` rows appended as the cut block (#2142 item 3
+/// instrumentation: the fixed-box tangent experiment re-solves the kernel's own LP
+/// with LP-point tangents added). Cuts are CSR-style (`cut_ptr` into
+/// `cut_cols`/`cut_coeffs`, plus `cut_rhs`). Returns a dict with `status`, `bound`
+/// (the Neumaier-Shcherbina safe bound the tree would use), `obj`, `x` (structural
+/// + slacks) and `n_pivots`. Observes only -- no solve path calls it.
+#[pyfunction]
+#[pyo3(signature = (
+    n_cols, n_orig, c, integrality, global_lo, global_hi,
+    fixed_row_ptr, fixed_cols, fixed_coeffs, fixed_rhs,
+    term_kind, term_i, term_j, term_out, term_p, term_coeff, term_cst,
+    blf_w, blf_a_ptr, blf_a_cols, blf_a_coeffs, blf_a_const,
+    blf_b_ptr, blf_b_cols, blf_b_coeffs, blf_b_const,
+    obbt_candidates, lo, hi, cut_ptr, cut_cols, cut_coeffs, cut_rhs,
+    cold_dual_start=false,
+))]
+pub fn solve_spatial_node_py<'py>(
+    py: Python<'py>,
+    n_cols: usize,
+    n_orig: usize,
+    c: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, i64>,
+    global_lo: PyReadonlyArray1<'py, f64>,
+    global_hi: PyReadonlyArray1<'py, f64>,
+    fixed_row_ptr: PyReadonlyArray1<'py, i64>,
+    fixed_cols: PyReadonlyArray1<'py, i64>,
+    fixed_coeffs: PyReadonlyArray1<'py, f64>,
+    fixed_rhs: PyReadonlyArray1<'py, f64>,
+    term_kind: PyReadonlyArray1<'py, i64>,
+    term_i: PyReadonlyArray1<'py, i64>,
+    term_j: PyReadonlyArray1<'py, i64>,
+    term_out: PyReadonlyArray1<'py, i64>,
+    term_p: PyReadonlyArray1<'py, i64>,
+    term_coeff: PyReadonlyArray1<'py, f64>,
+    term_cst: PyReadonlyArray1<'py, f64>,
+    blf_w: PyReadonlyArray1<'py, i64>,
+    blf_a_ptr: PyReadonlyArray1<'py, i64>,
+    blf_a_cols: PyReadonlyArray1<'py, i64>,
+    blf_a_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_a_const: PyReadonlyArray1<'py, f64>,
+    blf_b_ptr: PyReadonlyArray1<'py, i64>,
+    blf_b_cols: PyReadonlyArray1<'py, i64>,
+    blf_b_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_b_const: PyReadonlyArray1<'py, f64>,
+    obbt_candidates: PyReadonlyArray1<'py, i64>,
+    lo: PyReadonlyArray1<'py, f64>,
+    hi: PyReadonlyArray1<'py, f64>,
+    cut_ptr: PyReadonlyArray1<'py, i64>,
+    cut_cols: PyReadonlyArray1<'py, i64>,
+    cut_coeffs: PyReadonlyArray1<'py, f64>,
+    cut_rhs: PyReadonlyArray1<'py, f64>,
+    cold_dual_start: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let spec = build_spec(
+        n_cols,
+        n_orig,
+        &c,
+        &integrality,
+        &global_lo,
+        &global_hi,
+        &fixed_row_ptr,
+        &fixed_cols,
+        &fixed_coeffs,
+        &fixed_rhs,
+        &term_kind,
+        &term_i,
+        &term_j,
+        &term_out,
+        &term_p,
+        &term_coeff,
+        &term_cst,
+        &blf_w,
+        &blf_a_ptr,
+        &blf_a_cols,
+        &blf_a_coeffs,
+        &blf_a_const,
+        &blf_b_ptr,
+        &blf_b_cols,
+        &blf_b_coeffs,
+        &blf_b_const,
+        &obbt_candidates,
+    )?;
+    let lo = lo.as_slice()?;
+    let hi = hi.as_slice()?;
+    if lo.len() != n_cols || hi.len() != n_cols {
+        return Err(PyValueError::new_err("lo / hi must have length n_cols"));
+    }
+    let (cp, cc, cv, cr) = (
+        cut_ptr.as_slice()?,
+        cut_cols.as_slice()?,
+        cut_coeffs.as_slice()?,
+        cut_rhs.as_slice()?,
+    );
+    if cp.len() != cr.len() + 1 || cp.first() != Some(&0) || cc.len() != cv.len() {
+        return Err(PyValueError::new_err(
+            "cut_ptr must have length len(cut_rhs)+1 starting at 0; cut_cols/cut_coeffs equal length",
+        ));
+    }
+    let mut cuts = Vec::with_capacity(cr.len());
+    for r in 0..cr.len() {
+        let (a, b) = (cp[r] as usize, cp[r + 1] as usize);
+        if b < a || b > cc.len() || cc[a..b].iter().any(|&j| j < 0 || j as usize >= n_cols) {
+            return Err(PyValueError::new_err(format!(
+                "cut row {r}: bad ptr or column"
+            )));
+        }
+        cuts.push(FixedRow {
+            cols: cc[a..b].iter().map(|&j| j as usize).collect(),
+            coeffs: cv[a..b].to_vec(),
+            rhs: cr[r],
+        });
+    }
+    let opts = SimplexOptions {
+        cold_dual_start,
+        ..SimplexOptions::default()
+    };
+    let r = solve_spatial_node_with_cuts(&spec, lo, hi, false, &opts, None, &cuts);
+    let status = match r.status {
+        LpStatus::Optimal => "optimal",
+        LpStatus::Infeasible => "infeasible",
+        LpStatus::Unbounded => "unbounded",
+        LpStatus::IterLimit => "iter_limit",
+        LpStatus::Numerical => "numerical",
+    };
+    let d = PyDict::new(py);
+    d.set_item("status", status)?;
+    d.set_item("bound", r.bound)?;
+    d.set_item("obj", r.obj)?;
+    d.set_item("x", PyArray1::from_vec(py, r.x))?;
+    d.set_item("n_pivots", r.n_pivots)?;
+    Ok(d)
 }
 
 /// Decode the flat-array spec encoding (module docs) into a [`SpatialKernelSpec`].

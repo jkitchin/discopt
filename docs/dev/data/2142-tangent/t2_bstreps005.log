@@ -1,0 +1,22 @@
+[numerics/boundstreps=0.05] boxes 95; kernel-LP re-solve reproduces the tree's node obj (1e-6 rel): 94/95
+[numerics/boundstreps=0.05] max |re-solved safe bound - tree node bound|: inf
+[numerics/boundstreps=0.05] tangent violation checks executed: 1340; undecided (dropped) rounds: 0; dual-simplex retries: 121
+[numerics/boundstreps=0.05] SCIP infeasible: 0; SCIP tighter than ours by >1e-4: 26; ours tighter by >1e-4: 8
+[numerics/boundstreps=0.05] boxes with >=1 violated tangent: 72; cuts total 344; max rounds 20
+/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/tan/t2_tangent.py:127: RuntimeWarning: invalid value encountered in subtract
+  gain = np.where(fT, oT - o0, np.nan)
+[numerics/boundstreps=0.05] tangent gain (finite): mean 0.00026 max 0.00815; >1e-4 on 13; tangents prove infeasible: 1
+[numerics/boundstreps=0.05] GAP CLOSURE on the 26 SCIP-tighter boxes: inf / inf = nan%
+[numerics/boundstreps=0.05]   after tangents SCIP still tighter by >1e-4 on 17 of them
+[numerics/boundstreps=0.05] boxes where the tangent bound exceeds SCIP's by >1e-6: 10
+[numerics/boundstreps=0.05]   node  19300 ours0 -inf tangents -inf scip 1.3288 cuts 0 rounds 0
+[numerics/boundstreps=0.05]   node   6000 ours0 0.2746 tangents 0.2746 scip 0.4902 cuts 0 rounds 0
+[numerics/boundstreps=0.05]   node   3100 ours0 0.2203 tangents 0.2203 scip 0.3219 cuts 0 rounds 0
+[numerics/boundstreps=0.05]   node   3500 ours0 0.2101 tangents 0.2101 scip 0.2748 cuts 3 rounds 1
+[numerics/boundstreps=0.05]   node  12300 ours0 0.8451 tangents 0.8451 scip 0.8836 cuts 1 rounds 1
+[numerics/boundstreps=0.05]   node   8700 ours0 0.4706 tangents 0.4706 scip 0.4979 cuts 9 rounds 3
+[numerics/boundstreps=0.05]   node   2900 ours0 0.3132 tangents 0.3132 scip 0.3300 cuts 1 rounds 1
+[numerics/boundstreps=0.05]   node   3300 ours0 0.1769 tangents 0.1769 scip 0.1892 cuts 4 rounds 1
+[numerics/boundstreps=0.05]   node   5500 ours0 0.3322 tangents 0.3322 scip 0.3434 cuts 3 rounds 3
+[numerics/boundstreps=0.05]   node   6400 ours0 0.2712 tangents 0.2713 scip 0.2819 cuts 4 rounds 1
+[numerics/boundstreps=0.05] executed comparisons: 95

@@ -1,0 +1,13 @@
+boxes 95; SCIP-tighter (vs R=15) 31; rounds to reach the R=1e5 box: {15: 49, 30: 8, 50: 8, 100: 1, 200: 1, 500: 20, 1000: 8, 5000: 0, 100000: 0}
+/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/tan/t5_rounds.py:42: RuntimeWarning: invalid value encountered in subtract
+  f"bound > R=15 by >1e-4 on {int((br - b15 > 1e-4).sum())}; empty {int(np.isinf(br).sum())}; prop wall {tm[r]*1e3/n_cmp:.3f} ms/box")
+R=    15: gap closed 0.0000/1.3399 =   0.0%; bound > R=15 by >1e-4 on 0; empty 1; prop wall 0.383 ms/box
+R=    30: gap closed 0.1928/1.3399 =  14.4%; bound > R=15 by >1e-4 on 23; empty 1; prop wall 0.486 ms/box
+R=    50: gap closed 0.5169/1.3399 =  38.6%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 0.676 ms/box
+R=   100: gap closed 1.0442/1.3399 =  77.9%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 0.986 ms/box
+R=   200: gap closed 1.2934/1.3399 =  96.5%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 1.635 ms/box
+R=   500: gap closed 1.3066/1.3399 =  97.5%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 3.133 ms/box
+R=  1000: gap closed 1.3066/1.3399 =  97.5%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 3.158 ms/box
+R=  5000: gap closed 1.3066/1.3399 =  97.5%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 3.154 ms/box
+R=100000: gap closed 1.3066/1.3399 =  97.5%; bound > R=15 by >1e-4 on 26; empty 1; prop wall 3.157 ms/box
+executed comparisons: 855

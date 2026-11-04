@@ -14468,3 +14468,105 @@ point whenever enforcement finds it violated. The next entry experiment is there
 **LP-point tangent (OA) cuts for convex lifted monomials** in the kernel's node
 separation loop, measured at these fixed boxes before any tree run. That is still a
 hypothesis; this section only measures the relaxation gap.
+
+**Retraction (2026-11-04, CLAUDE.md §11; measured in §106).** The verdict above, "on every
+box the kernel's propagation is at least as tight as SCIP's … so propagation strength per
+box is not the gap", is wrong for the box the tree actually uses. The K-vs-S and K-vs-R
+rows compared boxes started from the *pre*-propagation box. The tree stops at 15 rounds,
+and its own `p2` log already shows that 15 rounds is looser than the converged kernel
+fixpoint on 90 of 187 boxes (`k15_vs_kinf_looser_boxes: 90`); the "K at 100,000 rounds"
+arm was read only against R. On the 95 finite-bound boxes, re-running the kernel's own
+propagator to convergence closes **97.5 %** of the fixed-box SCIP-vs-ours LP gap (§106).
+The kernel's contractors are exonerated. The 15-round cap on the per-node box is not.
+"Do not build more rounds" also falls: in the tree, 1000 rounds is worth +36 % at 10k nodes
+and +7.6 % at 20k (§106).
+
+## 106. #2142 item 3: LP-point tangents falsified; the fixed-box gap is the propagation round cap (2026-11-04)
+
+**Hypothesis (killed).** §105 found SCIP's fixed-box bound tighter than ours on 31 of 94
+boxes. The guess was that SCIP's nonlinear handler gets this by enforcing an LP-point
+tangent for each violated convex term. The kernel has no cut family here
+(`tree/cut_forms = 0`). The 5 lifted `Q²` monomials get three fixed tangents each.
+
+**Kill criterion:** tangent refinement closes less than 50 % of the summed SCIP-vs-ours gap
+on the 31 boxes.
+
+**Instrument.** `_rust.solve_spatial_node_py` runs `solve_spatial_node_with_cuts` on one box.
+That is the tree's node solve, with no warm start, OBBT off, and an optional cut block.
+It returns the NS safe bound. It is pinned by `test_2142_solve_spatial_node_binding.py`.
+
+The scripts and logs are in `docs/dev/data/2142-tangent/`:
+
+- `t1_capture_lp.py` re-captures the 20k-node `DISCOPT_LP_DUAL_REBUILD`-absent run. It
+  reproduces the bound 1.3431805 and the 187 boxes of the §105 capture bit for bit.
+- `t2_tangent.py` adds the tangent `s >= 2x0·x - x0²` at the LP point for every violated
+  square, re-solves, and stops after 20 rounds or when nothing is violated.
+- On these boxes the cold kernel re-solve reproduces the tree's node objective on 94/95.
+  The 95th box is uncertified cold, and SCIP proves it infeasible.
+
+There is nothing else to refine. Every other term is a single-column product `x_i·x_j`
+(24 BLFs), and McCormick is already its exact envelope on the box. The secant of `x²` is
+already its concave envelope.
+
+| fixed-box arm (95 boxes, the §105 capture, 15-round tree boxes) | SCIP tighter > 1e-4 / ours tighter | Σ(SCIP − ours) over SCIP-tighter boxes |
+|---|---|---|
+| ours vs SCIP (p5 arm: LP + enforcement, separators off, `boundstreps=1e-9`) | 31 / 7 | 1.340 |
+| **ours + LP-point tangents (≤ 20 rounds)** | tangents fire on 72 boxes (344 cuts), raise the bound > 1e-4 on 13 | closes **0.023 = 1.7 %** |
+| SCIP with each `nlhdlr/*/enabled=False` (bilinear, convex, concave, quadratic, perspective, soc, quotient, signomial) | 31 / 7, every arm identical | 1.340 |
+| SCIP `propagating/maxroundsroot=0` | 10 / 13 | 0.023 |
+| SCIP `constraints/linear/propfreq=-1` | 9 / 14 | 0.023 |
+| SCIP `constraints/nonlinear/propfreq=-1` | 18 / 16 | 0.046 |
+| SCIP default `boundstreps=0.05` | 25 / 8 | 0.551 |
+
+**Verdict: killed** (1.7 % against the 50 % criterion). No tangent separator was built. No
+SCIP nonlinear handler contributes; the advantage disappears when SCIP's root
+propagation is off. The kernel's own propagator explains why (`t3`–`t5`):
+
+- Re-running `propagate_spec_py` on the tree's post-propagation box tightens it on 44/95
+  boxes. SCIP's propagation of that same box tightens the same 44.
+- Our node LP on SCIP's re-propagated box closes 97.5 % of the gap.
+- From the pre-propagation box under the node's cutoff, the round cap sweeps as follows:
+
+| rounds | 15 | 30 | 50 | 100 | 200 | 500 – 100,000 |
+|---|---|---|---|---|---|---|
+| gap closed | 0 % | 14.4 % | 38.6 % | 77.9 % | 96.5 % | **97.5 %** |
+| propagation, ms/box | 0.38 | 0.49 | 0.68 | 0.99 | 1.64 | 3.1 |
+
+Only 49/95 boxes reach their fixpoint within 15 rounds; 28 need 500–1000. The contraction
+is geometric, with up to a 97.5 % width shrink beyond round 15.
+
+Applied to the tree, the round cap is worth far less than at fixed boxes (`t6_tree.py`, deterministic, `propagation_rounds` injected):
+
+| cstr big-M | 10k nodes | 20k nodes |
+|---|---|---|
+| 15 rounds (default) | 0.5568 (50.5 s) | 1.3432 (79.3 s) |
+| 200 rounds | 0.7391 (54.3 s) | |
+| 1000 rounds | 0.7581 (57.7 s) | 1.4448 (123.0 s) |
+| SCIP default | 1.534 | 2.393 |
+
+Inside the tree a child inherits its parent's propagated box, so the tail keeps contracting
+with depth. That is why the fixed-box 97.5 % turns into +36 % / +7.6 %.
+
+**Per-node relaxation is at parity once the box is converged.** On the 110 finite-bound
+boxes of the 1000-round tree (`t1` with `PROP_ROUNDS=1000`, `t2_r1000.log`):
+
+- SCIP is tighter on 14 boxes and we are tighter on 10.
+- The summed SCIP edge is **0.037**.
+- Tangents close 91.6 % of that residual.
+
+Yet that tree's bound is 1.44 against SCIP's 2.39 at 20k nodes. **The remaining in-tree gap
+is not the node relaxation on a given box. It is which boxes the search creates.**
+
+That reopens branching *variable and point* selection. Integer-first, originals-only, and
+node selection were falsified in the #2142 attribution, but SCIP's violation-based
+candidate scoring and its branching point were not tested. `DISCOPT_SCALE_FREE_BRANCHING=1`
+is still the only existing knob that moves this bound.
+
+**Do not build:**
+
+- LP-point tangent cuts for this class;
+- any SCIP nonlinear-handler port.
+
+**Candidate, not built.** Raise the per-node round cap, or replace it with a
+progress-based stop. The measured price is +55 % wall at 20k nodes for +7.6 % bound. It
+needs its own §5 panel, and on this evidence it is a small lever.
