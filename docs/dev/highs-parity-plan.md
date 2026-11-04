@@ -107,9 +107,9 @@ Every threshold cites the measurement it comes from; the P0 baselines re-measure
 
 | Role | Panel (TL, tolerance) | HiGHS today | Rust today | **Parity bar** | Basis |
 |---|---|---|---|---|---|
-| R1-LP | L panel, 25 LPs from `ref/HiGHS/check/instances` @ v1.15.1 (P0.1; was 24) (20 s) | 24/24 certified, 3.16 s total | 21/24, 116.8 s, geomean R/H 11.9× (`routing-plan.md` §12 "final before/after") | **25/25 certified, `incorrect_count=0`, per-instance geomean wall ratio ≤ 3.0** | the existing `lp_vs_highs_geomean ≤ 3.0` gate, `benchmarks.toml:218` |
-| R1-MILP (small) | M panel, 24 MILPs, `discopt_benchmarks/data/lp_milp/manifest.json` (20 s, gap 1e-4) | 24/24, 5.35 s, 217 nodes | 19/24, 104 s, 610,256 nodes (same entry) | **≥ 23/24 certified, geomean wall ratio ≤ 3.0, 0 incorrect** | one instance of slack because `issue-2173` already favours Rust 0.6× |
-| R1-MILP (MIPLIB-38) | MIPLIB 2017 easy, size-filtered, validated (20 s, `mip_rel_gap` 1e-4) | 38/38, 72 s, 15,417 nodes | 21/38, 400 s, 4.69 M nodes (`milp-competitiveness-plan.md` §4, pre-#2107/#2115) | **≥ 34/38 solved, total wall ≤ 2× HiGHS, 0 incorrect** | §4 of that plan: "within a few instances … wall within ~2×"; D2 (§3) decides what happens short of it |
+| R1-LP | L panel, 25 LPs from `ref/HiGHS/check/instances` @ v1.15.1 (P0.1; was 24) (20 s) | **P0.3:** H 25/25 certified, 21.15 s; H0 0.32 s (was 24/24, 3.16 s) | **P0.3:** 24/25 (`perold` `feasible`), 47.42 s, geomean R/H **1.41×**, R/H0 ≈ 155× (was 21/24, 116.8 s, 11.9×) | **25/25 certified, `incorrect_count=0`, per-instance geomean wall ratio ≤ 3.0** | the existing `lp_vs_highs_geomean ≤ 3.0` gate, `benchmarks.toml:218` |
+| R1-MILP (small) | M panel, 24 MILPs, `discopt_benchmarks/data/lp_milp/manifest.json` (20 s, gap 1e-4) | **P0.3:** H 24/24, 32.54 s, 518 nodes; H0 4.90 s, 328 nodes (was 24/24, 5.35 s, 217) | **P0.3:** 18/24, 119.92 s, 117,596 nodes, geomean R/H 1.73× (was 19/24, 104 s, 610,256) | **≥ 23/24 certified, geomean wall ratio ≤ 3.0, 0 incorrect** | one instance of slack because `issue-2173` already favours Rust 0.6× |
+| R1-MILP (MIPLIB-38) | MIPLIB 2017 easy, size-filtered, validated (20 s, `mip_rel_gap` 1e-4) | **P0.3:** H 35/38, 253.17 s, 14,015 nodes; H0 35/38, 171.04 s (was 38/38, 72 s, 15,417) | **P0.3:** 14/38, 344.89 s, 708,937 nodes, geomean R/H 1.78× (was 21/38, 400 s, 4.69 M) | **≥ 34/38 solved, total wall ≤ 2× HiGHS, 0 incorrect** | §4 of that plan: "within a few instances … wall within ~2×"; D2 (§3) decides what happens short of it |
 | R2a | §76.4 route panel: 26 in-repo diverted instances × spans {0,3,6} + 16 portfolios = 94 (30 s) | 92 optimal, 339.5 s (`performance-plan.md` §76.4) | retired `auto` arm: tied on syn/rsyn with kernel ON (20/1040 s vs 20/1040 s), lost with kernel OFF (22 vs 31) (`solver.py:9922-9931`) | **certified ≥ HiGHS arm's count, total wall ≤ 1.25×, 0 lost certificates** | the 1.25× is the noise floor the §76.4 spans show (20–30 s per span on six rows) |
 | R2b | every decomposition test + the GDPlib/`gdp_parity` masters replayed (`gdp-parity-baseline.md`) | HiGHS wins large masters: total 81 s vs 114 s | Rust SGM 2.8× faster on small (`master.py:26-39`) | **identical certified set; SGM ≤ 1.0 (Rust no slower by SGM) and total ≤ 1.5×** | G3.2's own bar, inverted |
 | R3 | NLP-BB convex corpus subset (the #781 probe set + §21 Regime-2 panel, 153 instances) | — | — | **cert-clean on the Regime-2 panel; root bound after the cut loop ≥ HiGHS-engine bound − 1e-6(1+\|b\|) on ≥ 90 % of instances and never looser by > 1e-4 relative; nodes/wall not worse in total** | this is a *bound-changing* port (§1.4) |
@@ -312,7 +312,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (`gr4x6,p0201,neos-911970`, TL 5 s): `executed=9`, `incorrect_count=0`, exit 0.
   Regression test `python/tests/test_highs_parity_p02_miplib_panel.py` (6 error before,
   6 pass after). Branch synced with `origin/main` (#2125 `lp/` commits) in this iteration.
-- [ ] **P0.3 — Fresh R1 baselines at HEAD.** Scope: results under
+- [x] **P0.3 — Fresh R1 baselines at HEAD.** Scope: results under
   `docs/dev/data/highs-parity/baseline-<commit>/`. Run P0.1's L/M/INF and P0.2's
   MIPLIB-38, arms R/H/H0, 3 rounds, TL 20 s, load gate < 2 (if the gate never opens, run
   anyway and mark walls *indicative*; nodes/statuses carry). Done: a table per panel
@@ -321,6 +321,31 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   `executed` ≥ 3·(25+24+16+38)·3 (panel sizes re-screened by P0.1, §7). Kill: `incorrect_count > 0` on **either** arm → that is
   a P0-blocking correctness defect: file it, fix it before any other task (CLAUDE.md
   correctness-first), and re-run. Regime: measurement.
+  **Result (2026-11-04):** solver at `dcdac02` (= `53d0e42`; the run spans two
+  container restarts, resumed under the code-under-test fingerprint check, P0.3 harness
+  commits), data in `docs/dev/data/highs-parity/baseline-dcdac02/`. **`executed` = 585 +
+  342 = 927** = the Done bound, **`incorrect_count = 0` on every arm** (kill not fired).
+  The load gate (< 2) never held for the whole run on this 4-core host (the run's own
+  solves keep the 1-min load near 2): timing-valid rows L 14/25, M 4/24, INF 11/16,
+  MIPLIB 12/38, so every wall below is *indicative*; statuses, certificates and nodes
+  carry. Table in §6; §1.3's "today" columns replaced. What the numbers say:
+  - **The H route's own overhead dominates its walls here**: geomean H/H0 = 110× (L),
+    20× (M), 56× (INF), 3.3× (MIPLIB). `25fv47` takes 4.35 s on H (sd 0.1 s over 3
+    rounds) vs 0.16 s raw; the routing plan measured ~0.82 s. So R/H is 1.41× (L),
+    1.73× (M), 1.72× (INF), 1.78× (MIPLIB), while R/H0 is two orders larger on LP.
+    **Open for the owner (raised at D0):** §1.3's "wall ratio ≤ 3.0" does not say whether
+    it is against H (the route Rust would replace) or H0 (HiGHS's own speed); on L the
+    two readings are 1.41× vs ≈ 155×. P2.1 should attribute the H − H0 gap first.
+  - Rust uncertified: L `perold` (`feasible`); M `2122`, `issue-2446`, `p0548`
+    (`time_limit`), `gesa2`, `gt2`, `sp150x300d` (`feasible`); INF `gas11` (unbounded,
+    uncertified on R **and** H). MIPLIB: 24/38 unsolved, 21 of them `feasible` — many
+    well before 20 s (`neos-911970` after 7 nodes), which P4.1 must explain;
+    `neos-1425699` hits `time_limit` where `milp-competitiveness-plan.md` §0.1 recorded
+    29 nodes / 0.00 s at matched gap (different entry: the plan drove the Rust driver
+    directly; this is `Model.solve`).
+  - HiGHS on this host: H misses `enlight_hard`, `neos-2624317-amur`,
+    `neos-3118745-obra` (`feasible`); H0 misses `amur`, `gsvm2rl3`, `obra` at 20 s —
+    35/38 each, not the 38/38 of the 14-core dev machine.
 - [ ] **P0.4 — Master baselines (R2a/R2b/R2c).** Scope: new
   `discopt_benchmarks/scripts/master_parity_panel.py`. (i) R2a: replay the captured
   masters (`python/tests/data/oa_masters/*.npz`, `issue2069/clay0203_master.mps.gz`,
@@ -657,7 +682,7 @@ and is re-written by P4.1.**
 |---|---|---|---|
 | P0.1 | [x] | L 25 / M 24 / INF 16 manifest at HiGHS v1.15.1; Done run executed 195/195, incorrect 0; route marker, per-panel counter, load gate, rotation added | `69ead3f` |
 | P0.2 | [x] | 38/38 recovered from the A14 artifact, validated against `.solu` (0 mismatches; obra needs > 60 s); Done run executed 9, incorrect 0 | see git log |
-| P0.3 | [ ] | | |
+| P0.3 | [x] | 927 executed, 0 incorrect; walls indicative (gate open on 41/103 rows); R/H geomean 1.41 (L) / 1.73 (M) / 1.78 (MIPLIB) but H/H0 = 110× on L | see git log |
 | P0.4 | [ ] | | |
 | P0.5 | [ ] | | |
 | P0.6 | [ ] | | |
@@ -673,10 +698,10 @@ Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 
 | Panel | Arm | solved/certified | total wall | median (solved) | nodes | incorrect | load gate |
 |---|---|---|---|---|---|---|---|
-| L (25) | R / H / H0 | | | | — | | |
-| M (24) | R / H / H0 | | | | | | |
-| INF (16) | R / H | | | | — | | |
-| MIPLIB-38 | R / H / H0 | | | | | | |
+| L (25) | R / H / H0 | 24 / 25 / 25 (cert 24 / 25 / —) | 47.42 / 21.15 / 0.32 s | 0.205 / 0.197 / 0.002 s | — | 0 / 0 / 0 | 14/25 valid → indicative |
+| M (24) | R / H / H0 | 18 / 24 / 24 (cert 18 / 24 / —) | 119.92 / 32.54 / 4.90 s | 0.255 / 0.424 / 0.038 s | 117,596 / 518 / 328 | 0 / 0 / 0 | 4/24 valid → indicative |
+| INF (16) | R / H / H0 | 16 / 16 / 16 verdicts (cert 15 / 15 / —; `gas11` unbounded uncertified) | 23.25 / 5.39 / 0.38 s | 0.192 / 0.264 / 0.003 s | — | 0 / 0 / 0 | 11/16 valid → indicative |
+| MIPLIB-38 | R / H / H0 | 14 / 35 / 35 (cert 14 / 35 / —) | 344.89 / 253.17 / 171.04 s | 2.023 / 3.602 / 1.358 s | 708,937 / 14,015 / 18,685 | 0 / 0 / 0 | 12/38 valid → indicative |
 | UC witness (P0.7) | R @ 20/60/120 s | | | | | | |
 
 ---
@@ -711,6 +736,16 @@ the H arm, so neither LP engine runs. Consequence: the route marker has a third 
 `presolve`; such a row keeps its oracle verdict check and is counted
 (`presolve_answered`), but is never attributed to an engine. Any parity statistic over
 INF compares 15 engine rows, not 16.
+
+**2026-11-04 — P0.3: §1.3's "HiGHS today" / "Rust today" figures.** Solver `dcdac02`,
+4-core host, load gate open on 41/103 instances (walls indicative), executed 927.
+Measured: HiGHS route (H) L 25/25 21.15 s, M 24/24 32.54 s, MIPLIB 35/38 253.17 s; raw
+HiGHS (H0) MIPLIB 35/38 171.04 s; Rust L 24/25, M 18/24, MIPLIB 14/38. Expected (14-core
+dev machine, earlier commits): H L 3.16 s, M 5.35 s, MIPLIB 38/38 72 s; Rust L 21/24, M
+19/24, MIPLIB 21/38. Consequence: §1.3's columns replaced by the P0.3 numbers; the parity
+*bars* are unchanged, but whether "wall ratio" means against H or H0 is put to the owner
+(they differ by ~100× on LP here). Retraction of: none — the earlier figures were
+measured on a different host and commit; they are superseded, not wrong.
 
 ---
 
