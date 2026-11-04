@@ -1009,6 +1009,210 @@ def _root_warm_start_first_enabled() -> bool:
     )
 
 
+def _gdp_loa_proposer_enabled() -> bool:
+    """Whether the root runs LOA as a configuration proposer when the wave fails (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panels; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    It fires at the root of a solve whose model came out of a GDP lowering, when
+    three things hold:
+
+    * the configuration wave (and its dive) returned no feasible point;
+    * no incumbent exists;
+    * the solve is not one of the proposer's own LOA subproblems.
+
+    It then runs :class:`discopt.gdp.algorithms.loa.LOA` on the source GDP until
+    LOA's first verified incumbent, for the time left minus a 10 % reserve. The point
+    is placed on the lowered model:
+
+    * the source columns are its prefix;
+    * the lowering's ``_gdp_disjunct_selectors`` record places LOA's disjunct choice;
+    * the other appended columns start at the root relaxation point.
+
+    It is then posed through ``subnlp`` (verified on the lowered evaluator) and
+    injected like a wave point. Primal only: LOA's bound never reaches the search.
+
+    Why: GDPlib ``syngas`` under hull has no incumbent at 120 s. No root heuristic
+    proposes a feasible disjunct configuration, and LOA reaches the optimal one in
+    2-3 iterations.
+
+    * Entry experiment, all #2143 flags ON (probe-level prototype, 2 reps, load
+      1.1-1.7): the wave ended at 44.2 s, LOA certified 4669.0235 and the
+      incumbent 4669.0235 reached the hull solve at 84.7 s and 82.6 s. Stage 2,
+      without the item-1/item-2 time, had none.
+    * This code, all flags ON: incumbent at 100.0 s. LOA took 3 iterations here,
+      not 2.
+    * The status stays ``feasible``: the hull B&B bound (4347.80 after 3 nodes)
+      does not close in 120 s.
+
+    Under hull the proposer's sub-NLP needs ``DISCOPT_SUBNLP_REDUCED``. On the
+    legacy pose the toy's right configuration fails as #2143 describes.
+
+    **Kill criterion**: any certificate lost on the GDP panel (``gdp_parity`` cells:
+    modprodnet hull, eight_process, ex_633, nonconvex_hen, clay0203), or an instance
+    where the proposer spends its budget without an incumbent and OFF had one.
+    """
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: Set while the root LOA proposer's LOA runs (#2143). LOA solves each
+#: configuration's subproblem with a nested ``Model.solve``; without this the
+#: proposer fired again inside it (measured on syngas hull: a second LOA on a
+#: subproblem took 8.8 s of the outer LOA's budget).
+_IN_GDP_LOA_PROPOSER: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IN_GDP_LOA_PROPOSER", default=False
+)
+
+#: Share of the time left that the root LOA proposer leaves to the search (#2143).
+_GDP_LOA_PROPOSER_RESERVE = 0.1
+#: Below this many seconds of LOA budget the proposer does not start (#2143).
+_GDP_LOA_PROPOSER_MIN_S = 5.0
+
+
+def _place_loa_configuration(
+    x: np.ndarray,
+    work: Model,
+    loa_work: Model,
+    loa_x: dict,
+    selector_names: Optional[dict],
+) -> int:
+    """Write LOA's disjunct choice onto ``work``'s selectors in ``x``, in place (#2143).
+
+    ``selector_names`` maps a top-level disjunction's index in the source model's
+    ``_constraints`` to its selector names in ``work``. ``loa_work`` (LOA's clone of
+    the source) holds the same disjunction at the same index with its indicators
+    materialized, and ``loa_x`` their values. The disjunct with the largest
+    indicator value is set to 1 and the others to 0. A disjunction whose record is
+    missing or does not line up is left to the completion. Returns how many were
+    placed.
+    """
+    from discopt.modeling.core import _DisjunctiveConstraint
+
+    if not selector_names:
+        return 0
+    offsets: dict[str, int] = {}
+    off = 0
+    for v in work._variables:
+        offsets[v.name] = off
+        off += int(v.size)
+    placed = 0
+    for ci, names in selector_names.items():
+        if names is None or ci >= len(loa_work._constraints):
+            continue
+        c = loa_work._constraints[ci]
+        inds = c._indicator_vars if isinstance(c, _DisjunctiveConstraint) else None
+        if inds is None or len(inds) != len(names) or not all(nm in offsets for nm in names):
+            continue
+        if not all(iv.name in loa_x for iv in inds):
+            continue
+        vals = [float(np.asarray(loa_x[iv.name], dtype=np.float64).ravel()[0]) for iv in inds]
+        pick = int(np.argmax(vals))
+        for k, nm in enumerate(names):
+            x[offsets[nm]] = 1.0 if k == pick else 0.0
+        placed += 1
+    return placed
+
+
+def _gdp_loa_root_proposal(
+    src: Model,
+    work: Model,
+    *,
+    selector_names: Optional[dict] = None,
+    seed: Optional[np.ndarray] = None,
+    evaluator: Any,
+    backend: Any,
+    nlp_options: Optional[dict],
+    deadline: float,
+) -> Optional[tuple[np.ndarray, float]]:
+    """A point for ``work`` from LOA run on its source GDP ``src`` (#2143).
+
+    Runs :class:`discopt.gdp.algorithms.loa.LOA` on ``src`` until its first
+    verified incumbent, under the time left before ``deadline`` minus a
+    :data:`_GDP_LOA_PROPOSER_RESERVE` share kept for the search. The point is
+    mapped onto ``work``:
+
+    * ``src``'s columns are a prefix of ``work``'s, as the lowering appends;
+    * the configuration LOA chose is written onto ``work``'s selector binaries
+      through ``selector_names`` (the lowering's record, ``_gdp_disjunct_selectors``:
+      top-level disjunction index in ``src._constraints`` -> selector names in
+      disjunct order), matched to LOA's materialized indicators at the same index;
+    * every other appended column starts at ``seed`` (the root relaxation point the
+      wave was seeded with), whose auxiliary columns are consistent with the
+      lowering's own rows; without a usable seed, at
+      :func:`discopt.warm_start.complete_initial_point`'s defaults. On the test
+      toy, those defaults put a factorable auxiliary at 5e7 and the sub-NLP failed
+      from them.
+
+    It is then posed through :func:`~discopt._relax.primal_heuristics.subnlp` on ``work``. That
+    returns only a point verified on ``work``'s own evaluator, and the caller's
+    ``_inject_incumbent`` verifies it again. Primal only: nothing LOA proves reaches
+    the search's bound.
+
+    Returns ``None``, with the reason logged at INFO, when the budget is too small,
+    the variables do not line up, LOA finds no point, or the sub-NLP fails.
+    """
+    from discopt._relax.primal_heuristics import subnlp
+    from discopt.gdp.algorithms.loa import LOA
+    from discopt.warm_start import complete_initial_point
+
+    now = time.perf_counter()
+    remaining = float(deadline) - now
+    budget = remaining - max(1.0, _GDP_LOA_PROPOSER_RESERVE * remaining)
+    if not np.isfinite(budget) or budget < _GDP_LOA_PROPOSER_MIN_S:
+        logger.info("GDP LOA proposer (root): %.1f s budget, not started", budget)
+        return None
+    src_vars = list(src._variables)
+    work_vars = list(work._variables)
+    if len(work_vars) < len(src_vars) or any(
+        a.name != b.name or int(a.size) != int(b.size) for a, b in zip(src_vars, work_vars)
+    ):
+        logger.info("GDP LOA proposer (root): source variables are not a prefix of the model's")
+        return None
+    logger.info("GDP LOA proposer (root): LOA on the source GDP, %.1f s", budget)
+    token = _IN_GDP_LOA_PROPOSER.set(True)
+    try:
+        alg = LOA(src, time_limit=budget, stop_at_first_incumbent=True)
+        r = alg.run()
+    finally:
+        _IN_GDP_LOA_PROPOSER.reset(token)
+    logger.info(
+        "GDP LOA proposer (root): LOA %s after %d iteration(s), %.1f s, objective %s",
+        r.status,
+        alg.iterations,
+        time.perf_counter() - now,
+        r.objective,
+    )
+    if r.x is None:
+        return None
+    head = np.concatenate([np.asarray(r.x[v.name], dtype=np.float64).ravel() for v in src_vars])
+    n_work = sum(int(v.size) for v in work_vars)
+    if seed is not None and np.size(seed) == n_work and np.all(np.isfinite(seed)):
+        x_full = np.asarray(seed, dtype=np.float64).ravel().copy()
+        x_full[: head.size] = head
+    else:
+        x_full = complete_initial_point(work, head, evaluator=evaluator)
+    if x_full is None:
+        logger.info("GDP LOA proposer (root): the LOA point does not complete on the model")
+        return None
+    placed = _place_loa_configuration(x_full, work, alg.space.work, r.x, selector_names)
+    logger.info("GDP LOA proposer (root): %d disjunction selector(s) placed", placed)
+    outcome: dict = {}
+    found = subnlp(
+        work, x_full, backend=backend, nlp_options=nlp_options, evaluator=evaluator, outcome=outcome
+    )
+    logger.info(
+        "GDP LOA proposer (root): sub-NLP %s",
+        f"found nothing ({outcome})" if found is None else f"objective {found[1]:.10g}",
+    )
+    return found
+
+
 def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
     """Deadline for the #823 constructor: a bounded share of what is left.
 
@@ -16650,6 +16854,11 @@ def solve_model(
         model, method=gdp_method, fbbt_deadline=_solve_t0 + float(time_limit)
     )
     _carry_solve_clocks(_gdp_src, model)
+    # #2143: the lowering returns ``model`` itself when there is nothing to lower.
+    # Its selector names per top-level disjunction are read here, before later
+    # passes rebuild ``model`` into fresh objects.
+    _gdp_lowered = model is not _gdp_src
+    _gdp_selector_names = getattr(model, "_gdp_disjunct_selectors", None) if _gdp_lowered else None
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
     # flattened against the variables the USER declared no longer describes this
@@ -22575,6 +22784,35 @@ def solve_model(
             # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
             # running, which is the exact reading that named this issue.
             _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+            # #2143 (``DISCOPT_GDP_LOA_PROPOSER``, default OFF): the wave and its dive
+            # found no configuration on a lowered GDP. Run LOA on the source GDP as a
+            # proposer; its point is posed and verified on this model, like a wave
+            # point, and injected below.
+            if (
+                not _cfg_results
+                and _gdp_lowered
+                and tree.incumbent() is None
+                and _gdp_loa_proposer_enabled()
+                and not _IN_GDP_LOA_PROPOSER.get()
+            ):
+                _subnlp_calls += 1
+                try:
+                    _loa_pt = _gdp_loa_root_proposal(
+                        _gdp_src,
+                        model,
+                        selector_names=_gdp_selector_names,
+                        seed=np.asarray(_cfg_seed, dtype=np.float64),
+                        evaluator=evaluator,
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        deadline=_deadline,
+                    )
+                except Exception as _e:
+                    # A proposer failure costs only its point; logged, not hidden.
+                    logger.warning("GDP LOA proposer (root) raised: %s: %s", type(_e).__name__, _e)
+                    _loa_pt = None
+                if _loa_pt is not None:
+                    _cfg_results = [_loa_pt]
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:

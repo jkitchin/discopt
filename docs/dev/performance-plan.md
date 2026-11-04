@@ -14609,3 +14609,67 @@ instances. The default path never adopts that box.
 On the default path, then, the flag changes no model the search sees. What it
 changes is time: the solve starts its root ~19 s earlier on `syngas` hull. Its
 §5 panels therefore measure what that time does downstream (results in 106.4).
+
+### 106.3 Tier B rerun: the root LOA proposer reaches an incumbent on `syngas` hull (`DISCOPT_GDP_LOA_PROPOSER`, default OFF)
+
+**Entry experiment redone.** This is stage 2's prototype (`probe_tierb_entry.py`,
+probe-level), now on top of 106.1 and 106.2. All flags were ON:
+
+- `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXING_SCREEN`,
+  `DISCOPT_ROOT_WARMSTART_FIRST`;
+- `DISCOPT_PRESOLVE_MARGINAL_STOP`.
+
+Two reps, load 1.1-1.7:
+
+| rep | wave ends | LOA budget | LOA | incumbent in the hull solve | end |
+|---|---|---|---|---|---|
+| 0 | 44.2 s | 72.8 s | optimal 4669.0235, 2 iterations, 83.5 s | **4669.0235 at 84.7 s** | feasible, bound 4347.80, 3 nodes, 120.5 s |
+| 1 | 44.2 s | 72.8 s | optimal 4669.0235, 2 iterations, 81.5 s | **4669.0235 at 82.6 s** | same, 120.5 s |
+
+In stage 2 the wave ended at 61.7 / 62.5 s and LOA's third iteration never
+finished, so there was no incumbent. The 17-18 s the presolve stop frees is what
+lets LOA finish here. The entry bar was an incumbent within 120 s. It **passed**,
+so the proposer was built.
+
+**Built behind the flag.**
+
+- `_gdp_loa_root_proposal` runs LOA on the source GDP:
+  - with 90 % of the time left;
+  - until its first verified incumbent (`GDPAlgorithm(stop_at_first_incumbent=True)`).
+- The point goes onto the lowered model:
+  - the source columns are its prefix;
+  - LOA's disjunct choice is written onto the lowering's selectors, through a new
+    record of them, `_gdp_disjunct_selectors`;
+  - the other appended columns come from the root relaxation point.
+- It is posed through `subnlp`.
+
+Two defects found while building it, both fixed before measuring:
+
+1. **Recursion.** LOA solves each configuration's subproblem with a nested
+   `Model.solve`, and the proposer fired again inside it. A second LOA on a
+   subproblem took 8.8 s of the outer one's budget, and that run ended with no
+   incumbent. A context variable now keeps the proposer out of its own LOA.
+2. **Placement.** `complete_initial_point`'s generic completion cannot place hull
+   selectors. It left both selectors of the toy's disjunction at 1, because the
+   disaggregated copies sat at their defaults. Its default for a factorable
+   auxiliary was 5e7, and the sub-NLP failed from it. Hence the selector record
+   and the relaxation-point start. On `syngas` the indicators are user variables,
+   so they are part of the source prefix ("0 selectors placed"). On the toy's
+   `either_or` the record places them.
+
+**Product code, all flags ON** (`probe_proposer_e2e.py`, load 1.6): the proposer
+started at 47 s with 65.8 s of budget. LOA took 3 iterations this time, not 2,
+and proved 4669.0235 optimal. The hull solve had the incumbent **4669.0235 at
+100.0 s** and ended `feasible`: bound 4347.80, 3 nodes, 120.5 s.
+
+**What stays open.** The proposer gives `syngas` hull its incumbent. It does not
+certify. The hull B&B explores 3 nodes in what is left, and its root bound 4347.80
+is 7 % below the optimum. LOA itself proves 4669.0235 optimal (master bound
+4668.809 against 4669.0235), but that bound is LOA's. Using it as the hull solve's
+dual bound would be a bound-changing step that needs its own soundness argument,
+since LOA's bound rests on OA cuts certified convex on the source model. It is not
+done here.
+
+Under hull the proposer's sub-NLP needs `DISCOPT_SUBNLP_REDUCED`. On the toy, the
+legacy pose fails on the right configuration (status ERROR) and the reduced pose
+returns 2.0.

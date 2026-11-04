@@ -100,6 +100,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2143 stage 3: the root presolve's marginal stop acts at solve time (the
     # lowering is identical), so solve ``--all``.
     "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
+    # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
+    # configuration wave found nothing (lowering identical): solve ``--all``.
+    "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

@@ -102,6 +102,7 @@ class GDPAlgorithm:
         iteration_limit: Optional[int] = None,
         clock: Callable[[], float] = time.perf_counter,
         deadline: Optional[Deadline] = None,
+        stop_at_first_incumbent: bool = False,
     ) -> None:
         if deadline is not None and time_limit is not None:
             raise ValueError("GDPAlgorithm: pass time_limit or deadline, not both")
@@ -116,6 +117,9 @@ class GDPAlgorithm:
         self.gap_tolerance = float(gap_tolerance)
         self.abs_gap_tolerance = float(abs_gap_tolerance)
         self.iteration_limit = iteration_limit
+        #: Stop once a verified incumbent exists (``stop_reason="first_incumbent"``):
+        #: the run is then a primal proposer, as the #2143 root LOA proposer uses it.
+        self.stop_at_first_incumbent = bool(stop_at_first_incumbent)
         self.obj_sign = -1.0 if model._objective.sense == ObjectiveSense.MAXIMIZE else 1.0
         # Minimization convention from here to _build_result.
         self.lb = -math.inf
@@ -237,6 +241,9 @@ class GDPAlgorithm:
                 break
             if self.iteration_limit is not None and self.iterations >= self.iteration_limit:
                 self.stop_reason = "iteration_limit"
+                break
+            if self.stop_at_first_incumbent and self.incumbent is not None:
+                self.stop_reason = "first_incumbent"
                 break
             more = self.iterate()
             self.iterations += 1

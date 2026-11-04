@@ -415,6 +415,13 @@ def reformulate_gdp(
             )
 
     _hull_emitted: set[str] = set()
+    # #2143: for each top-level ``either_or`` (keyed by its index in
+    # ``model._constraints``), the names of the selector binaries its lowering used,
+    # one per disjunct in disjunct order; ``None`` when they cannot be told apart
+    # from other generated binaries. Metadata only: published as
+    # ``_gdp_disjunct_selectors`` on the lowered model, read by the root LOA
+    # proposer to place a configuration found on the source GDP.
+    _selector_names: dict[int, Optional[list[str]]] = {}
     for ci, c in enumerate(model._constraints):
         if _hulled_inside(c):
             continue  # lowered inside its parent's hull (#1775 G2.1)
@@ -487,6 +494,13 @@ def reformulate_gdp(
             own_sels = list(c._indicator_vars) if c._indicator_vars is not None else None
             if chosen != "big-m":
                 _warn_user_m_ignored(c, chosen)
+            _made: list[Variable] = []
+
+            def _add_selector(prefix: str, shape=(), _made=_made) -> Variable:
+                var = _add_aux_binary(prefix, shape)
+                _made.append(var)
+                return var
+
             if chosen == "simplex":
                 if own_sels is not None:
                     raise ValueError(
@@ -501,7 +515,7 @@ def reformulate_gdp(
                 )
             elif chosen == "hull":
                 new_vars, new_cons = _reformulate_disjunction_hull(
-                    c, new_model, _add_aux_binary, selectors=own_sels, arg_split=_disagg
+                    c, new_model, _add_selector, selectors=own_sels, arg_split=_disagg
                 )
             else:
                 # big-m and mbigm both go through _reformulate_disjunction;
@@ -514,13 +528,20 @@ def reformulate_gdp(
                 new_vars, new_cons = _reformulate_disjunction(
                     c,
                     new_model,
-                    _add_aux_binary,
+                    _add_selector,
                     lp_data=disj_lp,
                     selectors=own_sels,
                     pretransform=_pt_on and chosen in ("big-m", "mbigm"),
                     multiply=chosen == "binary_multiplication",
                     user_ms=_user_ms(c, nested=False) if chosen == "big-m" else None,
                     disagg=_disagg,
+                )
+            if chosen != "simplex":
+                _used = own_sels if own_sels is not None else _made
+                _selector_names[ci] = (
+                    [v.name for v in _used]
+                    if len(_used) == len(c.disjuncts) and all(int(v.size) == 1 for v in _used)
+                    else None
                 )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -559,6 +580,7 @@ def reformulate_gdp(
     carry_complementarities(model, new_model, pass_name="gdp lowering")
     carry_validation_guards(model, new_model)  # #1498
     carry_builder_objective(model, new_model)  # #1798; after the last new column
+    new_model._gdp_disjunct_selectors = _selector_names  # type: ignore[attr-defined]
 
     return new_model
 
