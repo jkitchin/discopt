@@ -32,6 +32,14 @@ def _parity_model(n=30):
     return m
 
 
+@pytest.fixture(autouse=True)
+def _raw_presolve_free_route(monkeypatch):
+    """These tests pin checkpoint 0 against the raw presolve-free solve, faked
+    through ``_Engine._solve``. The exact-reduction route (tried first, see
+    test_iis_reduce.py) would decide these sets before the faked solve runs."""
+    monkeypatch.setattr(_iis_milp._Engine, "_reduced", lambda self, stop_at: None)
+
+
 def _choose_budget(monkeypatch, n_real):
     """Presolve-on solves after the first ``n_real`` raise out-of-time; record calls."""
     real = _iis_milp._Engine._solve

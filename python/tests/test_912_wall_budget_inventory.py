@@ -518,6 +518,16 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "stop_l = min(deadline, time.perf_counter() + base_budget)",
         "contract",
     ),
+    # The exact-reduction second route (``_Engine._reduced``) runs inside a
+    # confirmation and takes the confirmation's own ``stop_at``; without one it
+    # gets one probe's limit, exactly as a presolve-free solve would. The clock
+    # decides only whether this route concludes; an inconclusive result falls
+    # through to the other routes, so which elements are kept never depends on it.
+    (
+        "_iis_milp.py",
+        "stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at",
+        "contract",
+    ),
     (
         "_daemon_core.py",
         "if self.max_lifetime > 0 and time.monotonic() - started >= self.max_lifetime:",

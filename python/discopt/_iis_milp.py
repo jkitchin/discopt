@@ -139,6 +139,7 @@ class MilpIIS:
     ladder_calls: int = 0  # oracle calls the ladder made
     ladder_rejected: bool = False  # ladder's set not confirmed: its drops were discarded
     n_rolling: int = 0  # rolling checkpoints confirmed during the filter (anytime answers)
+    n_reduced_confirmed: int = 0  # confirmations decided via the exact reduction
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -202,6 +203,8 @@ class _Engine:
         self.n_exact = 0  # exact (rational) decisions attempted as the second route
         self.n_presolve = 0  # presolve-only solves (ladder rung 0)
         self.n_exact_confirmed = 0  # ... that proved the set infeasible
+        self.n_reduced = 0  # second-route attempts through the exact reduction
+        self.n_reduced_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
         # Held-integer columns and their declared box in the current configuration.
@@ -528,6 +531,12 @@ class _Engine:
                     self.n_exact += 1
                     self.n_exact_confirmed += 1
                     continue
+                if self._reduced(stop_at) is True:
+                    # Exact reduction + presolve-free HiGHS on the reduced model
+                    # (:mod:`discopt._iis_reduce`): decides in 0.3-11 s the
+                    # general-integer sets the raw presolve-free solve could not
+                    # in 60-300 s (MIPcc27 dijle / dingo / dives).
+                    continue
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
@@ -548,6 +557,34 @@ class _Engine:
                     ok = True
             all_infeasible &= ok
         return True if all_infeasible else None
+
+    def _reduced(self, stop_at: Optional[float]) -> Optional[bool]:
+        """The configured set through :func:`discopt._iis_reduce.reduced_infeasible`:
+        True when proven infeasible, else None (no conclusion either way). Its
+        budget is ``stop_at`` (or one probe's limit without one), cut to the
+        deadline, with the engine's wall-clock guard on the HiGHS run."""
+        from discopt._iis_reduce import reduced_infeasible
+
+        stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at
+        if self.deadline is not None:
+            stop = min(stop, self.deadline)
+        held = np.zeros(self.col_lb.size, dtype=bool)
+        held[self._held] = True
+        rlo, rhi, lb, ub = self._cfg
+
+        def guard(h, s) -> None:
+            def _g(event) -> None:
+                event.interrupt(time.perf_counter() > s + _GRACE_S)
+
+            h.cbMipInterrupt.subscribe(_g)
+            h.cbSimplexInterrupt.subscribe(_g)
+            h.cbIpmInterrupt.subscribe(_g)
+
+        self.n_reduced += 1
+        verdict = reduced_infeasible(self.A, rlo, rhi, lb, ub, held, stop, guard)
+        if verdict is True:
+            self.n_reduced_confirmed += 1
+        return verdict
 
     def _exact(self, stop_at: Optional[float]) -> Optional[bool]:
         """Exact decision of the configured set (:mod:`discopt._iis_exact`):
@@ -1724,6 +1761,7 @@ def _milp_iis_arrays(
         ladder_calls=ladder_calls,
         ladder_rejected=ladder_rejected,
         n_rolling=n_rolling,
+        n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )

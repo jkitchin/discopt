@@ -152,6 +152,9 @@ def test_final_confirmation_still_refutes_a_wrong_presolve_on_claim(monkeypatch)
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
     monkeypatch.setattr(_iis_milp._Engine, "_witness", witness)
     monkeypatch.setattr(_iis_milp._Engine, "confirm_infeasible", confirm)
+    # The faked presolve-free point must be reached: keep the exact-reduction
+    # route (tried first) from deciding the set before it.
+    monkeypatch.setattr(_iis_milp._Engine, "_reduced", lambda self, stop_at: None)
     res = milp_iis(_parity_model(8), sat_candidate=False)
     assert state["used"]
     assert res.fallback and res.complete  # redone with per-probe confirmation
