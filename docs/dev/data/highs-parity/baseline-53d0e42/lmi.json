@@ -1,0 +1,4536 @@
+{
+ "header": {
+  "load": [
+   0.64599609375,
+   1.8740234375,
+   3.24169921875
+  ],
+  "commit": "53d0e42",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python",
+  "load_gate": 2.0,
+  "load_end": [
+   2.0224609375,
+   2.20556640625,
+   2.58984375
+  ]
+ },
+ "args": {
+  "cmd": "run",
+  "manifest": "discopt_benchmarks/data/lp_milp/manifest.json",
+  "panel": [
+   "L",
+   "M",
+   "INF"
+  ],
+  "instances": "",
+  "arms": "R,H,H0",
+  "rounds": 3,
+  "time_limit": 20.0,
+  "gap": 0.0001,
+  "max_nodes": 100000000,
+  "out": "docs/dev/data/highs-parity/baseline-53d0e42/lmi.json",
+  "h0_subprocess": true,
+  "load_gate": 2.0
+ },
+ "rows": [
+  {
+   "name": "25fv47",
+   "panel": "L",
+   "oracle": 5501.845888286757,
+   "oracle_status": "Optimal",
+   "load": [
+    0.64599609375,
+    1.521484375
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 5501.845888286734,
+    "bound": 5501.845888286551,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 5.842082373419544e-11,
+    "wall_med": 9.797550634000345,
+    "wall_sd": 0.27869038012566033,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 5501.8458882867235,
+    "bound": 5501.845888286529,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.943778471513724e-12,
+    "wall_med": 4.106464803999643,
+    "wall_sd": 0.22329419139946616,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 5501.845888286757,
+    "bound": 5501.845888286757,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 2.0463630789890885e-12,
+    "wall_med": 0.14558689499972388,
+    "wall_sd": 0.005603334980464067,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "adlittle",
+   "panel": "L",
+   "oracle": 225494.9631623803,
+   "oracle_status": "Optimal",
+   "load": [
+    1.521484375,
+    1.4794921875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 225494.96316238027,
+    "bound": 225494.96316215445,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.2737367544323206e-13,
+    "wall_med": 0.2258687280000231,
+    "wall_sd": 0.024445421618448163,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 225494.96316238042,
+    "bound": 225494.96316215445,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.1368683772161603e-13,
+    "wall_med": 0.22243136699989918,
+    "wall_sd": 0.0035363137093197077,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 225494.9631623803,
+    "bound": 225494.9631623803,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.1368683772161603e-13,
+    "wall_med": 0.0021710789997086977,
+    "wall_sd": 8.768970418481317e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "afiro",
+   "panel": "L",
+   "oracle": -464.75314285714285,
+   "oracle_status": "Optimal",
+   "load": [
+    1.4794921875,
+    1.44091796875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -464.75314285714285,
+    "bound": -464.7531428576089,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.1316282072803006e-14,
+    "wall_med": 0.11310195800024303,
+    "wall_sd": 0.007612294276471027,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -464.7531428571429,
+    "bound": -464.75314285760874,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.10406019399988509,
+    "wall_sd": 0.0022341709054198447,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -464.75314285714285,
+    "bound": -464.75314285714285,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.001112584000111383,
+    "wall_sd": 1.0696619618501355e-06,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "avgas",
+   "panel": "L",
+   "oracle": -7.75,
+   "oracle_status": "Optimal",
+   "load": [
+    1.44091796875,
+    1.4052734375
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -7.75,
+    "bound": -7.750000000008751,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09170262199995705,
+    "wall_sd": 0.0047276484444090825,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -7.75,
+    "bound": -7.75000000000875,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.08691232999990461,
+    "wall_sd": 0.005409847326256823,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -7.75,
+    "bound": -7.75,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 2.220446049250313e-16,
+    "wall_med": 0.000898667999990721,
+    "wall_sd": 3.965540486182511e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "blending",
+   "panel": "L",
+   "oracle": -3200.0000000000005,
+   "oracle_status": "Optimal",
+   "load": [
+    1.4052734375,
+    1.533203125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -3200.0,
+    "bound": -3200.000000003201,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09360818699997253,
+    "wall_sd": 0.006982945620581631,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -3200.0,
+    "bound": -3200.000000003201,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.07550205400002596,
+    "wall_sd": 0.0039101937349723835,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -3200.0000000000005,
+    "bound": -3200.0000000000005,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.000796237999566074,
+    "wall_sd": 0.00017372524714364014,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "chip",
+   "panel": "L",
+   "oracle": -900.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.533203125,
+    1.73095703125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -900.0,
+    "bound": -900.000000000901,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08275281500027631,
+    "wall_sd": 0.011867270756780037,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -900.0,
+    "bound": -900.000000000901,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.07284556700005851,
+    "wall_sd": 0.024559302400684213,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -900.0,
+    "bound": -900.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0008013050000954536,
+    "wall_sd": 0.00012731206206604312,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "dD2e",
+   "panel": "L",
+   "oracle": -3000.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.73095703125,
+    1.67236328125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -3000.0,
+    "bound": -3000.000000003001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08239017100004276,
+    "wall_sd": 0.009231425710295178,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -3000.0,
+    "bound": -3000.000000003001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.0721569859997544,
+    "wall_sd": 0.0013519713021332772,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -3000.0,
+    "bound": -3000.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0005151020000084827,
+    "wall_sd": 1.7599653416639195e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "e226",
+   "panel": "L",
+   "oracle": -11.638929066370537,
+   "oracle_status": "Optimal",
+   "load": [
+    1.67236328125,
+    1.7900390625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -11.638929066370508,
+    "bound": -11.638929066373345,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.8379998644345092e-13,
+    "wall_med": 0.9916917299997294,
+    "wall_sd": 0.017671523101237895,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -11.638929066370547,
+    "bound": -11.638929066370574,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.814172378999956,
+    "wall_sd": 0.037146604492372746,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -11.638929066370522,
+    "bound": -11.638929066370522,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 8.526512829121202e-14,
+    "wall_med": 0.007886927000072319,
+    "wall_sd": 0.00067356119577678,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "egout-ac",
+   "panel": "L",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.7900390625,
+    1.96728515625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.3322676295501878e-14,
+    "wall_med": 0.18244508899988432,
+    "wall_sd": 0.0030587606968235383,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.17568433199994615,
+    "wall_sd": 0.009023412703241002,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.0012646509999285627,
+    "wall_sd": 1.725132057901852e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "etamacro",
+   "panel": "L",
+   "oracle": -755.7152333005275,
+   "oracle_status": "Optimal",
+   "load": [
+    1.96728515625,
+    1.75244140625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -755.7152333749132,
+    "bound": -755.7152333759533,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.2440182217687833e-13,
+    "wall_med": 2.22974092000004,
+    "wall_sd": 0.32683314211182507,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -755.7152333005279,
+    "bound": -755.7152335693901,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.5309975509580909e-13,
+    "wall_med": 0.780942141000196,
+    "wall_sd": 0.3016428939613662,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -755.7152333005275,
+    "bound": -755.7152333005275,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.3644640972643174e-13,
+    "wall_med": 0.010131927000202268,
+    "wall_sd": 0.0009005636626637111,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "israel",
+   "panel": "L",
+   "oracle": -896644.8218630459,
+   "oracle_status": "Optimal",
+   "load": [
+    1.75244140625,
+    1.63623046875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -896644.8218630458,
+    "bound": -896644.8218639427,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.9103830456733704e-11,
+    "wall_med": 0.5875021079996259,
+    "wall_sd": 0.018207655044254884,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -896644.8218630456,
+    "bound": -896644.8218639425,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.6329604335396652e-11,
+    "wall_med": 0.5477080000000569,
+    "wall_sd": 0.015505604823744159,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -896644.8218630459,
+    "bound": -896644.8218630459,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.5711432155285365e-11,
+    "wall_med": 0.004205548000300041,
+    "wall_sd": 0.00017217183269982827,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "nan1",
+   "panel": "L",
+   "oracle": -1000.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.63623046875,
+    1.5849609375
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -1000.0,
+    "bound": -1000.000000001001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.0829145449997668,
+    "wall_sd": 0.0005626533718317735,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -1000.0,
+    "bound": -1000.000000001001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.0831685739999557,
+    "wall_sd": 0.013957650155213207,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -1000.0,
+    "bound": -1000.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0008761019998928532,
+    "wall_sd": 5.460160746106332e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "no-newline-eof",
+   "panel": "L",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.5849609375,
+    1.77880859375
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08400261899987527,
+    "wall_sd": 0.004339642631789782,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.08426212100039265,
+    "wall_sd": 0.008953141081323434,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0010363500000494241,
+    "wall_sd": 0.0012722542728574508,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "perold",
+   "panel": "L",
+   "oracle": -9380.755278235187,
+   "oracle_status": "Optimal",
+   "load": [
+    1.77880859375,
+    1.7744140625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "feasible",
+    "objective": -9380.75527823518,
+    "bound": null,
+    "gap_certified": false,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 6.490154191851616e-09,
+    "wall_med": 9.277615298,
+    "wall_sd": 0.06263427925550143,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -9380.755278235269,
+    "bound": -9380.755278237215,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.439275365555659e-09,
+    "wall_med": 4.041296603999854,
+    "wall_sd": 0.2421887369148639,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -9380.755278235098,
+    "bound": -9380.755278235098,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 3.5452103475108743e-09,
+    "wall_med": 0.06399709300012546,
+    "wall_sd": 0.004498741921744163,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "qap04",
+   "panel": "L",
+   "oracle": 32.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.7744140625,
+    1.7119140625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 32.0,
+    "bound": 31.999999999966988,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.20225759200002358,
+    "wall_sd": 0.006455893237881577,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 32.0,
+    "bound": 31.999999999967,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.1668406909998339,
+    "wall_sd": 0.02395527998122185,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 32.0,
+    "bound": 32.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0021940049996374,
+    "wall_sd": 7.061513595712551e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "scrs8",
+   "panel": "L",
+   "oracle": 904.296953800792,
+   "oracle_status": "Optimal",
+   "load": [
+    1.7119140625,
+    1.4306640625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 904.2969538007917,
+    "bound": 904.2969538007616,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.7053025658242404e-13,
+    "wall_med": 6.861429518000023,
+    "wall_sd": 0.08977406168797677,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 904.2969538007915,
+    "bound": 904.2969538007726,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 1.4102921290000268,
+    "wall_sd": 0.13622468357061115,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 904.296953800792,
+    "bound": 904.296953800792,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.009817119000217644,
+    "wall_sd": 0.0004011343954956582,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "sctest",
+   "panel": "L",
+   "oracle": 5.75,
+   "oracle_status": "Optimal",
+   "load": [
+    1.4306640625,
+    1.63671875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 5.75,
+    "bound": 5.74999999999325,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08815542100001039,
+    "wall_sd": 0.0012395768761471583,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 5.75,
+    "bound": 5.74999999999325,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.08501174599996375,
+    "wall_sd": 0.01339965357742474,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 5.75,
+    "bound": 5.75,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0007995690002644551,
+    "wall_sd": 7.292219540577163e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "shell",
+   "panel": "L",
+   "oracle": 1208825346.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.63671875,
+    1.642578125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 1208825346.0,
+    "bound": 1208825345.998751,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 3.0446627689998422,
+    "wall_sd": 0.06860909481264399,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1208825346.0,
+    "bound": 1208825345.998751,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 2.2325800369999342,
+    "wall_sd": 0.33239089590289544,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1208825346.0,
+    "bound": 1208825346.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.012501487999998062,
+    "wall_sd": 0.002758627589512082,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "silly-names",
+   "panel": "L",
+   "oracle": -1.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.642578125,
+    1.83154296875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.000000000002,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08136742400029107,
+    "wall_sd": 0.011399133525068257,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.000000000002,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.09086811299994224,
+    "wall_sd": 0.02975313758986084,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0007420350002576015,
+    "wall_sd": 0.0003350403958975764,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "smalllp",
+   "panel": "L",
+   "oracle": 54.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.83154296875,
+    2.08544921875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 54.0,
+    "bound": 53.999999999873,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 54.0,
+    "bound": 53.999999999849,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 54.0,
+    "bound": 54.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "stair",
+   "panel": "L",
+   "oracle": -251.26695119296335,
+   "oracle_status": "Optimal",
+   "load": [
+    2.08544921875,
+    1.7138671875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": -251.26695119296357,
+    "bound": -251.26695119422482,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 4.973799150320701e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -251.26695119296764,
+    "bound": -251.26695176529583,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 5.111999712426041e-10,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -251.2669511929631,
+    "bound": -251.2669511929631,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 6.0822458181064576e-12,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standata",
+   "panel": "L",
+   "oracle": 1257.6995,
+   "oracle_status": "Optimal",
+   "load": [
+    1.7138671875,
+    1.623046875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 1.9092528060000404,
+    "wall_sd": 0.06421253185846487,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.9862468299998,
+    "wall_sd": 0.027931603178209002,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6995,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.005457320999994408,
+    "wall_sd": 0.0004755021166380721,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standgub",
+   "panel": "L",
+   "oracle": 1257.6995,
+   "oracle_status": "Optimal",
+   "load": [
+    1.623046875,
+    1.68798828125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 2.082214618999842,
+    "wall_sd": 0.08422039482642904,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.9954372080001122,
+    "wall_sd": 0.04655190849069865,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6995,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.0052968919999329955,
+    "wall_sd": 0.0006211274031335518,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standmps",
+   "panel": "L",
+   "oracle": 1406.0175,
+   "oracle_status": "Optimal",
+   "load": [
+    1.68798828125,
+    1.53515625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 1406.0174999999995,
+    "bound": 1406.017499998593,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 5.99945648716016e-13,
+    "wall_med": 2.1063615899997785,
+    "wall_sd": 0.09581340195240044,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1406.0175,
+    "bound": 1406.017499998593,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 8.217537761368021e-14,
+    "wall_med": 1.1891157909999492,
+    "wall_sd": 0.15634497315981255,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1406.0175,
+    "bound": 1406.0175,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.4519829782955184e-13,
+    "wall_med": 0.006517531000099552,
+    "wall_sd": 0.0007407958238804703,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "test",
+   "panel": "L",
+   "oracle": -4.75,
+   "oracle_status": "Optimal",
+   "load": [
+    1.53515625,
+    1.4921875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": -4.75,
+    "bound": -4.75000000001175,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.0913720859998648,
+    "wall_sd": 0.01686474405557755,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -4.75,
+    "bound": -4.75000000001175,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.08881406799991964,
+    "wall_sd": 0.013280637412961958,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -4.75,
+    "bound": -4.75,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.000827164000384073,
+    "wall_sd": 3.366442203327481e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "1451",
+   "panel": "M",
+   "oracle": 2.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.4921875,
+    1.45263671875
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 1.999999999997,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.07802551099985067,
+    "wall_sd": 0.004073753557963124,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.0749103909997757,
+    "wall_sd": 0.010109259575035928,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0008792059998086188,
+    "wall_sd": 0.00011523464282138811,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2122",
+   "panel": "M",
+   "oracle": -187612.94419439966,
+   "oracle_status": "Optimal",
+   "load": [
+    1.45263671875,
+    2.5263671875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -187606.107438975,
+    "gap_certified": false,
+    "nodes": 191,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     223,
+     191,
+     191
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -187612.9441943997,
+    "bound": -187606.59879688933,
+    "gap_certified": true,
+    "nodes": 2,
+    "route": "highs",
+    "max_viol": 3.3817286748671904e-09,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     2,
+     2,
+     2
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -187612.94419439966,
+    "bound": -187608.08483222598,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 3.3817286748671904e-09,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2171",
+   "panel": "M",
+   "oracle": -22375.75854607508,
+   "oracle_status": "Optimal",
+   "load": [
+    2.5263671875,
+    2.291015625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": -22375.758546075132,
+    "bound": -22375.758546097775,
+    "gap_certified": true,
+    "nodes": 17,
+    "route": "rust",
+    "max_viol": 1.1368683772161603e-12,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     17,
+     17,
+     17
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -22375.758546075085,
+    "bound": -22375.758546075085,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -22375.75854607508,
+    "bound": -22375.75854607508,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bell5",
+   "panel": "M",
+   "oracle": 8966406.49152,
+   "oracle_status": "Optimal",
+   "load": [
+    2.291015625,
+    2.818359375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 8966406.491519999,
+    "bound": 8965514.22460479,
+    "gap_certified": true,
+    "nodes": 20429,
+    "route": "rust",
+    "max_viol": 1.2505552149377763e-12,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     20429,
+     20429,
+     20429
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 8966635.631743703,
+    "bound": 8965754.935459498,
+    "gap_certified": true,
+    "nodes": 416,
+    "route": "highs",
+    "max_viol": 1.4210854715202004e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     416,
+     416,
+     416
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 8966406.49152,
+    "bound": 8965524.177778862,
+    "gap_certified": null,
+    "nodes": 180,
+    "route": null,
+    "max_viol": 9.094947017729282e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     180,
+     180,
+     180
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bound_implied",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.818359375,
+    2.67236328125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 3.293721867932805e-45,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "dcmulti",
+   "panel": "M",
+   "oracle": 188182.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.67236328125,
+    2.56982421875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 188182.0,
+    "bound": 188163.45173309272,
+    "gap_certified": true,
+    "nodes": 21353,
+    "route": "rust",
+    "max_viol": 9.094947017729282e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     21353,
+     21353,
+     21353
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 188182.0,
+    "bound": 188164.75860281635,
+    "gap_certified": true,
+    "nodes": 3,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     3,
+     3,
+     3
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 188182.0,
+    "bound": 188164.45598283247,
+    "gap_certified": null,
+    "nodes": 5,
+    "route": null,
+    "max_viol": 6.827871601444713e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     5,
+     5,
+     5
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "egout",
+   "panel": "M",
+   "oracle": 568.1007000000001,
+   "oracle_status": "Optimal",
+   "load": [
+    2.56982421875,
+    2.54931640625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 568.1007,
+    "bound": 568.100699999418,
+    "gap_certified": true,
+    "nodes": 2439,
+    "route": "rust",
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     2439,
+     2439,
+     2439
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 568.1007,
+    "bound": 568.1007,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 7.105427357601002e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 568.1007000000001,
+    "bound": 568.1007,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "fixed-binary",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.54931640625,
+    2.66552734375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "flugpl",
+   "panel": "M",
+   "oracle": 1201500.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.66552734375,
+    2.53173828125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 1201499.9999999988,
+    "bound": 1201499.9999986193,
+    "gap_certified": true,
+    "nodes": 443,
+    "route": "rust",
+    "max_viol": 3.2741809263825417e-11,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     443,
+     443,
+     443
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1201500.0,
+    "bound": 1201500.0,
+    "gap_certified": true,
+    "nodes": 51,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     51,
+     51,
+     51
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1201500.0,
+    "bound": 1201500.0,
+    "gap_certified": null,
+    "nodes": 89,
+    "route": null,
+    "max_viol": 3.552713678800501e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     89,
+     89,
+     89
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gesa2",
+   "panel": "M",
+   "oracle": 25779856.371697918,
+   "oracle_status": "Optimal",
+   "load": [
+    2.53173828125,
+    3.26708984375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "feasible",
+    "objective": 27279827.359579917,
+    "bound": 25567743.208206736,
+    "gap_certified": false,
+    "nodes": 15215,
+    "route": "rust",
+    "max_viol": 4.547473508864641e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     16147,
+     15749,
+     15215
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 25779856.371697903,
+    "bound": 25777297.834232416,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 6.394884621840902e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 25779856.371697918,
+    "bound": 25779774.83520285,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 5.684341886080802e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gt2",
+   "panel": "M",
+   "oracle": 21166.0,
+   "oracle_status": "Optimal",
+   "load": [
+    3.26708984375,
+    3.2421875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "feasible",
+    "objective": 24106.0,
+    "bound": 21165.999999978834,
+    "gap_certified": false,
+    "nodes": 68573,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     68725,
+     68063,
+     68573
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 21166.0,
+    "bound": 21166.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 21166.0,
+    "bound": 21166.0,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2095",
+   "panel": "M",
+   "oracle": 3.0,
+   "oracle_status": "Optimal",
+   "load": [
+    3.2421875,
+    3.0625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 3.0,
+    "bound": 2.999999999996,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 3.0,
+    "bound": 3.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 3.0,
+    "bound": 3.0,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2173",
+   "panel": "M",
+   "oracle": -26770.80754885264,
+   "oracle_status": "Optimal",
+   "load": [
+    3.0625,
+    2.82470703125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": -26770.807548852565,
+    "bound": -26770.807548899335,
+    "gap_certified": true,
+    "nodes": 87,
+    "route": "rust",
+    "max_viol": 1.3926637620897964e-12,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     87,
+     87,
+     87
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -26770.807548852565,
+    "bound": -26771.673420988773,
+    "gap_certified": true,
+    "nodes": 29,
+    "route": "highs",
+    "max_viol": 8.100187187665142e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     29,
+     29,
+     29
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -26770.80754885264,
+    "bound": -26770.80754885264,
+    "gap_certified": null,
+    "nodes": 36,
+    "route": null,
+    "max_viol": 2.701838752727781e-11,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     36,
+     36,
+     36
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2204",
+   "panel": "M",
+   "oracle": 6.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.82470703125,
+    2.9189453125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 6.0,
+    "bound": 5.999999999993,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 6.0,
+    "bound": 6.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 6.0,
+    "bound": 6.0,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2290",
+   "panel": "M",
+   "oracle": -1.6666666666000012,
+   "oracle_status": "Optimal",
+   "load": [
+    2.9189453125,
+    2.62353515625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": -1.6666666666,
+    "bound": -1.6666666666026668,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 8.326672684688674e-17,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -1.6666666666,
+    "bound": -1.6666666666000012,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 8.326672684688674e-17,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -1.6666666666000012,
+    "bound": -1.6666666666000012,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 1.3322676295501878e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2388",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.62353515625,
+    2.73388671875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 4.532197275894728e-31,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 3.552713678800501e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 6.617711111747014e-17,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 6.617711111747014e-17,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2446",
+   "panel": "M",
+   "oracle": -785.3552363097108,
+   "oracle_status": "Optimal",
+   "load": [
+    2.73388671875,
+    2.201171875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 18930.002285397146,
+    "gap_certified": false,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -785.3552363096959,
+    "bound": -785.3178115287958,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 3.9108272176235914e-11,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -785.3552363097108,
+    "bound": -785.3552363097108,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 9.094947017729282e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2585",
+   "panel": "M",
+   "oracle": -175.9100000000001,
+   "oracle_status": "Optimal",
+   "load": [
+    2.201171875,
+    2.10498046875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": -175.91000000000003,
+    "bound": -175.9100000001769,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 5.684341886080802e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": -175.91000000000003,
+    "bound": -175.9100000000001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 5.684341886080802e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": -175.9100000000001,
+    "bound": -175.9100000000001,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 2.8421709430404007e-13,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "lseu",
+   "panel": "M",
+   "oracle": 1120.0000000000002,
+   "oracle_status": "Optimal",
+   "load": [
+    2.10498046875,
+    2.55029296875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 1120.0,
+    "bound": 1120.0,
+    "gap_certified": true,
+    "nodes": 5551,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     5551,
+     5551,
+     5551
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 1120.0,
+    "bound": 1119.9999999999955,
+    "gap_certified": true,
+    "nodes": 5,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     5,
+     5,
+     5
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 1120.0000000000002,
+    "bound": 1120.0000000000002,
+    "gap_certified": null,
+    "nodes": 7,
+    "route": null,
+    "max_viol": 2.6749844169792007e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     7,
+     7,
+     7
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p01",
+   "panel": "M",
+   "oracle": 263.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.55029296875,
+    2.42578125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 263.0,
+    "bound": 262.999999999676,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 263.0,
+    "bound": 263.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 263.0,
+    "bound": 263.0,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p0548",
+   "panel": "M",
+   "oracle": 8691.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.42578125,
+    2.0498046875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 8051.192840517012,
+    "gap_certified": false,
+    "nodes": 1023,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     991,
+     1119,
+     1023
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 8691.0,
+    "bound": 8691.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 8691.0,
+    "bound": 8691.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "rgn",
+   "panel": "M",
+   "oracle": 82.19999923999991,
+   "oracle_status": "Optimal",
+   "load": [
+    2.0498046875,
+    1.8876953125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "optimal",
+    "objective": 82.19999923999998,
+    "bound": 82.19999923979249,
+    "gap_certified": true,
+    "nodes": 2461,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     2461,
+     2461,
+     2461
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 82.19999923999998,
+    "bound": 82.19999923999282,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 82.19999923999991,
+    "bound": 82.19999923999991,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 9.325873406851315e-15,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "small_mip",
+   "panel": "M",
+   "oracle": 3.236842105263158,
+   "oracle_status": "Optimal",
+   "load": [
+    1.8876953125,
+    1.81640625
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "optimal",
+    "objective": 3.2368421052631438,
+    "bound": 3.2368421052583805,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 2.6645352591003757e-14,
+    "wall_med": 0.08968679300051008,
+    "wall_sd": 0.011688177365370676,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 3.236842105263158,
+    "bound": 3.236842105263158,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": 0.10912198000005446,
+    "wall_sd": 0.0102490576075794,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 3.236842105263158,
+    "bound": 3.236842105263158,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 0.0,
+    "wall_med": 0.0009639280006012996,
+    "wall_sd": 5.0556572688462525e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "sp150x300d",
+   "panel": "M",
+   "oracle": 69.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.81640625,
+    2.26611328125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "feasible",
+    "objective": 93.0,
+    "bound": 40.0,
+    "gap_certified": false,
+    "nodes": 7519,
+    "route": "rust",
+    "max_viol": 1.0913936421275139e-11,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     8423,
+     8891,
+     7519
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "optimal",
+    "objective": 69.0,
+    "bound": 69.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "highs",
+    "max_viol": 0.0,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "optimal",
+    "objective": 69.0,
+    "bound": 69.0,
+    "gap_certified": null,
+    "nodes": 1,
+    "route": null,
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bgetam",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.26611328125,
+    2.0712890625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "box1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.0712890625,
+    2.22607421875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "cplex1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.22607421875,
+    1.806640625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": 16770215.25715349,
+    "bound": 16770215.25715349,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 234160.1893612201,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "ex72a",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    1.806640625,
+    1.9033203125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.20949742199991306,
+    "wall_sd": 0.01190056526288632,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": 0.12321354300001985,
+    "wall_sd": 0.0032037738600205292,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": 0.0014062349991945666,
+    "wall_sd": 0.00013289883454203465,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "forest6",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    1.9033203125,
+    1.9033203125
+   ],
+   "wall_valid": true,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.10167403000014019,
+    "wall_sd": 0.005815489576719907,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": 0.09406749899972056,
+    "wall_sd": 0.005414789874535808,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": 0.00133147300039127,
+    "wall_sd": 4.0915496216287424e-05,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "galenet",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    1.9033203125,
+    2.1513671875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gams10am",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.1513671875,
+    2.3798828125
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "presolve",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "presolve"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "presolve",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "presolve"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gas11",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Unbounded",
+   "load": [
+    2.3798828125,
+    2.27734375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "unbounded",
+    "objective": null,
+    "bound": null,
+    "gap_certified": false,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "unbounded",
+    "objective": null,
+    "bound": null,
+    "gap_certified": false,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Unbounded",
+    "objective": -3194585510.155974,
+    "bound": -3194585510.155974,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 5.4495923892051374e-09,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "infeasible-mip0",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.27734375,
+    2.1748046875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 23,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     23,
+     23,
+     23
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 7,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     7,
+     7,
+     7
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": Infinity,
+    "gap_certified": null,
+    "nodes": 7,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     7,
+     7,
+     7
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "infeasible-mip1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.1748046875,
+    2.08056640625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 55,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     55,
+     55,
+     55
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 16,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     16,
+     16,
+     16
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": Infinity,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2402",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.08056640625,
+    1.99365234375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 3,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     3,
+     3,
+     3
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": -Infinity,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2874-3",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    1.99365234375,
+    2.15478515625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     1,
+     1,
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": -Infinity,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "klein1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.15478515625,
+    2.06201171875
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": 5345402.623355746,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "refinery",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.06201171875,
+    2.0927734375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "vol1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.0927734375,
+    1.85009765625
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "woodinfe",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    1.85009765625,
+    2.0224609375
+   ],
+   "wall_valid": false,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   },
+   "H": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "highs",
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [
+     "highs"
+    ],
+    "incorrect": []
+   },
+   "H0": {
+    "status": "Infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": null,
+    "nodes": 0,
+    "route": null,
+    "max_viol": null,
+    "wall_med": null,
+    "wall_sd": null,
+    "nodes_all": [
+     0,
+     0,
+     0
+    ],
+    "routes": [],
+    "incorrect": []
+   }
+  }
+ ],
+ "executed": 585,
+ "executed_by_panel": {
+  "L": 225,
+  "M": 216,
+  "INF": 144
+ },
+ "walls_withheld": 38,
+ "presolve_answered": {
+  "R": 1,
+  "H": 1
+ },
+ "incorrect_count": 0
+}

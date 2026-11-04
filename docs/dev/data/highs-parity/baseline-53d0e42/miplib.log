@@ -1,0 +1,8 @@
+header {"load": [2.0224609375, 2.20556640625, 2.58984375], "commit": "ff2029a", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 38
+[run 1/38] MIPLIB neos-1425699             {'R': ('time_limit', 4607, None, 'load>gate'), 'H': ('optimal', 1, 3179698977.0, 'load>gate'), 'H0': ('optimal', 1, 3179698977.0, 'load>gate')}
+[run 2/38] MIPLIB blend2                   {'R': ('optimal', 5793, 7.598985, 'load>gate'), 'H': ('optimal', 72, 7.598985, 'load>gate'), 'H0': ('optimal', 67, 7.598985, 'load>gate')}
+[run 3/38] MIPLIB enlight8                 {'R': ('optimal', 115212, 27.0, 'load>gate'), 'H': ('optimal', 412, 27.0, 'load>gate'), 'H0': ('optimal', 412, 27.00000000000027, 'load>gate')}
+[run 4/38] MIPLIB p0201                    {'R': ('optimal', 587, 7614.999999999998, 'load>gate'), 'H': ('optimal', 5, 7615.0, 'load>gate'), 'H0': ('optimal', 5, 7614.999999997075, 'load>gate')}
+[run 5/38] MIPLIB mik-250-20-75-5          {'R': ('feasible', 17075, -25062.999999999956, 'load>gate'), 'H': ('optimal', 159, -51532.0, 'load>gate'), 'H0': ('optimal', 71, -51532.00000000009, 'load>gate')}
+[run 6/38] MIPLIB neos-911970              {'R': ('feasible', 7, 226.5099999999999, 'load>gate'), 'H': ('optimal', 1077, 54.760000000209644, 'load>gate'), 'H0': ('optimal', 1370, 54.76000000000019, 'load>gate')}
+[run 7/38] MIPLIB mik-250-20-75-3          {'R': ('feasible', 13663, -39298.999999999985, 'load>gate'), 'H': ('optimal', 433, -52242.0, 'load>gate'), 'H0': ('optimal', 455, -52242.00000000018, 'load>gate')}
