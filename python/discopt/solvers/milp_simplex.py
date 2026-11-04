@@ -1024,7 +1024,7 @@ def _open_default_box(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.nd
     An explicit ``+-inf`` and every bound below the default box are untouched (see
     :func:`_marshal_col_bounds` on why ``inf`` itself is not clamped here). Scoped to
     the MILP std form only: the HiGHS wrappers share :func:`_marshal_col_bounds` and
-    handle the default box themselves (``milp_highs._default_box_opened``). Same
+    apply this same map before every HiGHS solve (``milp_highs._hand_highs_col_bounds``). Same
     defect class as the simplex's large-finite-bound failure (#2125) and the GDP
     LP-box fix (#2126).
     """

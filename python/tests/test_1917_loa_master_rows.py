@@ -122,13 +122,14 @@ def test_loa_cuts_no_row_the_master_holds_exactly():
 # ── HiGHS master over the default box ─────────────────────────────────────
 
 
-def test_highs_master_bound_survives_the_default_box():
+def test_highs_master_bound_survives_the_default_box(monkeypatch):
     """Reduced from GDPlib med_term_purchasing's first master (two columns of
     498): HiGHS with presolve off calls it infeasible; presolve on, optimal 0."""
     pytest.importorskip("highspy")
+    import discopt.solvers.milp_highs as mh
     from discopt.constants import DEFAULT_VARIABLE_BOUND
     from discopt.solvers import SolveStatus
-    from discopt.solvers.milp_highs import _solve_milp_once, solve_milp
+    from discopt.solvers.milp_simplex import _marshal_col_bounds
 
     kw = dict(
         c=np.zeros(2),
@@ -140,28 +141,32 @@ def test_highs_master_bound_survives_the_default_box():
         integrality=np.array([1, 0], dtype=np.int32),
         gap_tolerance=1e-4,
     )
-    # The precondition this test guards: the presolve-free solve over the
-    # declared box is wrong. If a HiGHS upgrade fixes it, the test still passes
-    # below but no longer exercises the retry.
-    declared = _solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
-    r = solve_milp(time_limit=10.0, **kw)
-    diag = r.callback_stats["presolve_cross_check"]
-    if declared.status == SolveStatus.INFEASIBLE:
-        assert diag.get("default_box_opened") is True
+    # The precondition: HiGHS handed the DECLARED box (the default-box sides left at
+    # 9.999e19) calls this feasible master infeasible with presolve off. If a HiGHS
+    # upgrade fixes that, this test no longer exercises the opened box.
+    with monkeypatch.context() as mp:
+        mp.setattr(mh, "_hand_highs_col_bounds", _marshal_col_bounds)
+        declared = mh._solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
+    if declared.status != SolveStatus.INFEASIBLE:
+        pytest.skip(f"HiGHS no longer fails over the declared box ({declared.status})")
+    # Every HiGHS solve now opens the default box (#2146,
+    # milp_highs._hand_highs_col_bounds), so neither solve sees that scale.
+    opened = mh._solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
+    assert opened.status != SolveStatus.INFEASIBLE
+    r = mh.solve_milp(time_limit=10.0, **kw)
     assert r.status == SolveStatus.OPTIMAL
     assert r.bound is not None and r.bound == pytest.approx(0.0, abs=1e-9)
 
 
 def test_default_box_opening_keeps_declared_sides():
     from discopt.constants import DEFAULT_VARIABLE_BOUND
-    from discopt.solvers.milp_highs import _default_box_opened
+    from discopt.solvers.milp_highs import _hand_highs_col_bounds
     from discopt.solvers.milp_simplex import _INF
 
     B = DEFAULT_VARIABLE_BOUND
-    kw = {"c": np.zeros(4), "bounds": [(-B, B), (-5.0, B), (0.0, 1e15), (-np.inf, 3.0)]}
-    got = _default_box_opened(kw)
-    assert got == [(-_INF, _INF), (-5.0, _INF), (0.0, 1e15), (-np.inf, 3.0)]
-    assert _default_box_opened({"c": np.zeros(1), "bounds": [(0.0, 1e15)]}) is None
+    lb, ub = _hand_highs_col_bounds([(-B, B), (-5.0, B), (0.0, 1e15), (-np.inf, 3.0)], 4)
+    assert lb.tolist() == [-_INF, -5.0, 0.0, -np.inf]
+    assert ub.tolist() == [_INF, _INF, 1e15, 3.0]
 
 
 # ── LOA re-solves a configuration its subproblem cap stopped ──────────────
