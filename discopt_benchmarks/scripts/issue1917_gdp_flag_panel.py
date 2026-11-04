@@ -86,6 +86,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
     # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
     "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
+    # #2142 A: the absorbed exact perspective for nonlinear hull rows (lowering
+    # changes wherever a disjunct has a nonlinear row, so the fire phase decides).
+    "DISCOPT_HULL_LIFTED_PERSPECTIVE": ("hull",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

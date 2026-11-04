@@ -1249,6 +1249,27 @@ class SolverTuning:
     (``require_ns``, #2088): OBBT runs there only because ``g`` is rigorous, so the
     1e-6 guard does not apply. The flag governs well-conditioned LPs only."""
 
+    hull_lifted_perspective: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_LIFTED_PERSPECTIVE", default=False)
+    )
+    """Hull a nonlinear disjunct row by the absorbed exact perspective
+    (``DISCOPT_HULL_LIFTED_PERSPECTIVE``, default **OFF**, #2142; bound-changing on
+    the ``"hull"`` route).
+
+    Without it a nonlinear row gets the eps-perspective ``yhat * g(v / yhat) -
+    eps * g(0) * (1 - y) <= 0``, whose ``1/yhat`` factor is relaxed with
+    box-dependent reciprocal facets; on GDPlib ``cstr`` that makes the native
+    kernel's probe-box and real-box relaxations differ in shape and the kernel
+    declines the model. With it, each body variable gets a ratio column ``t`` in
+    the disjunct's box with ``v - y t = 0`` (as the eps-free lifted perspective of
+    #1917 already does for rows with no finite ``g(0)``) and the row is
+    ``y * g(t)`` with ``y`` folded into one factor per monomial -- exact at every
+    ``y``, no ``eps``, polynomial degree unchanged
+    (``gdp_reformulate._absorb_perspective``). A row with a Parameter, or with no
+    finite enclosure on the disjunct box, keeps the eps-perspective: the flag never
+    adds a refusal. Default OFF until the §5 panel passes; audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
+
     hull_conic_quadratic: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=True)
     )

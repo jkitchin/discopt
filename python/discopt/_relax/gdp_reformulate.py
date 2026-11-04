@@ -3220,15 +3220,13 @@ def _reformulate_disjunction_hull(
                 # 3.86e-09 (the on disjunct). Shrinking eps does not help --
                 # the model is still exactly infeasible at eps = 1e-14 -- which is
                 # why only cancelling the terms, not making them small, fixes it.
-                try:
-                    g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
-                    g0_live = _parametric_body_at_zero(con.body, zero_vars)
-                except HullPerspectiveOriginError as origin_exc:
-                    # #1917: g(0) is not finite, so the eps-perspective cannot cancel
-                    # its residual. The eps-free lifted perspective needs no g(0);
-                    # it is used when g is bounded on the disjunct's own box, and the
-                    # refusal stands otherwise (_origin_free_hull_row).
-                    hull_body, rhs_expr = _origin_free_hull_row(
+                # #2142 (``DISCOPT_HULL_LIFTED_PERSPECTIVE``, default OFF): the exact
+                # perspective with ``y_k`` absorbed into one factor per monomial, on
+                # the same ratio columns and links as the eps-free lifted
+                # perspective. ``None`` (the flag off, a Parameter in the body, or no
+                # finite enclosure on the disjunct box) keeps today's lowering below.
+                lifted = (
+                    _lifted_hull_row_absorbed(
                         con,
                         y_k,
                         [*((n, disagg[k][n]) for n in all_vars), *local[k].items()],
@@ -3238,30 +3236,55 @@ def _reformulate_disjunction_hull(
                         f"{prefix}_{k}",
                         new_vars,
                         new_cons,
-                        origin_exc,
                     )
-                    g0_live = None
+                    if _hull_lifted_perspective_enabled()
+                    else None
+                )
+                if lifted is not None:
+                    hull_body, rhs_expr = lifted
                     origin_free = True
                 else:
-                    origin_free = False
-                if not origin_free:
-                    y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
-                    persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
-                    persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
-                    subst_body = _substitute_vars(con.body, persp_map)
-                    hull_body = subst_body * y_clamp
-                    if g0_live is not None:
-                        # A Parameter in the body: g(0) must track its live value, or a
-                        # model lowered once (``transformations.create_using``) keeps
-                        # ``eps * g0_old`` after ``p.value`` changes and leaves an
-                        # off-disjunct residual -- the #1043 false-infeasible class
-                        # (PR #1862 review).
-                        g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
-                        hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
-                    elif g0 != 0.0:
-                        hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
-                    rhs_expr = _wrap(con.rhs) * y_clamp
-
+                    try:
+                        g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
+                        g0_live = _parametric_body_at_zero(con.body, zero_vars)
+                    except HullPerspectiveOriginError as origin_exc:
+                        # #1917: g(0) is not finite, so the eps-perspective cannot cancel
+                        # its residual. The eps-free lifted perspective needs no g(0);
+                        # it is used when g is bounded on the disjunct's own box, and the
+                        # refusal stands otherwise (_origin_free_hull_row).
+                        hull_body, rhs_expr = _origin_free_hull_row(
+                            con,
+                            y_k,
+                            [*((n, disagg[k][n]) for n in all_vars), *local[k].items()],
+                            disjunct_bounds[k],
+                            origin_ratio[k],
+                            model,
+                            f"{prefix}_{k}",
+                            new_vars,
+                            new_cons,
+                            origin_exc,
+                        )
+                        g0_live = None
+                        origin_free = True
+                    else:
+                        origin_free = False
+                    if not origin_free:
+                        y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
+                        persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                        persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
+                        subst_body = _substitute_vars(con.body, persp_map)
+                        hull_body = subst_body * y_clamp
+                        if g0_live is not None:
+                            # A Parameter in the body: g(0) must track its live value, or a
+                            # model lowered once (``transformations.create_using``) keeps
+                            # ``eps * g0_old`` after ``p.value`` changes and leaves an
+                            # off-disjunct residual -- the #1043 false-infeasible class
+                            # (PR #1862 review).
+                            g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
+                            hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
+                        elif g0 != 0.0:
+                            hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
+                        rhs_expr = _wrap(con.rhs) * y_clamp
             if con.sense == "<=":
                 new_cons.append(
                     Constraint(
@@ -3474,6 +3497,37 @@ def _origin_free_hull_row(
     """
     if isinstance(origin_exc, HullOriginCollectionError):  # not a g(0) failure
         raise origin_exc
+    persp_map, fresh = _lifted_ratio_columns(con, owned, bounds_k, cache, model, stem)
+    g_t = _substitute_vars(con.body, persp_map)
+    why = _lifted_enclosure_failure(g_t, persp_map.values())
+    if why is not None:
+        raise HullPerspectiveOriginError(
+            f"{origin_exc}; and the row is not bounded on its disjunct's own box "
+            f"({why}), so the eps-free lifted perspective would have an unbounded "
+            "relaxation as well (#1917)"
+        ) from origin_exc
+    _register_ratio_columns(fresh, y_k, cache, model, stem, new_vars, new_cons)
+    return g_t * y_k, _wrap(con.rhs) * y_k
+
+
+def _lifted_ratio_columns(
+    con: Constraint,
+    owned: list[tuple[str, Variable]],
+    bounds_k: dict[str, tuple[float, float]],
+    cache: dict[str, Variable],
+    model: Model,
+    stem: str,
+) -> tuple[dict[str, Expression], list[tuple[str, Variable, Variable]]]:
+    """The ratio column ``t`` of each of ``con``'s owned variables, and the new ones.
+
+    ``t`` lives in the disjunct's own box (:func:`_lifted_bounds`); one already in
+    ``cache`` (an earlier row of the same disjunct) is reused. The new columns are
+    *constructed* but not registered, so a caller that then refuses the row leaves
+    the model untouched; :func:`_register_ratio_columns` registers them and emits
+    their links. Shared by the eps-free lifted perspective
+    (:func:`_origin_free_hull_row`) and the absorbed one
+    (:func:`_lifted_hull_row_absorbed`, #2142).
+    """
     in_body = _collect_variables(con.body)
     fresh: list[tuple[str, Variable, Variable]] = []
     persp_map: dict[str, Expression] = {}
@@ -3493,14 +3547,20 @@ def _origin_free_hull_row(
             )
             fresh.append((vname, v, t))
         persp_map[vname] = t
-    g_t = _substitute_vars(con.body, persp_map)
-    why = _lifted_enclosure_failure(g_t, persp_map.values())
-    if why is not None:
-        raise HullPerspectiveOriginError(
-            f"{origin_exc}; and the row is not bounded on its disjunct's own box "
-            f"({why}), so the eps-free lifted perspective would have an unbounded "
-            "relaxation as well (#1917)"
-        ) from origin_exc
+    return persp_map, fresh
+
+
+def _register_ratio_columns(
+    fresh: list[tuple[str, Variable, Variable]],
+    y_k: Expression,
+    cache: dict[str, Variable],
+    model: Model,
+    stem: str,
+    new_vars: list[Variable],
+    new_cons: list[Constraint],
+) -> None:
+    """Register the ratio columns :func:`_lifted_ratio_columns` constructed, with
+    their bilinear links ``v - y_k * t = 0``."""
     for vname, v, t in fresh:
         # Every ``t`` of this row was constructed before any was registered (so a
         # refusal above leaves the model untouched), which gave them all the same
@@ -3517,7 +3577,117 @@ def _origin_free_hull_row(
             )
         )
         cache[vname] = t
-    return g_t * y_k, _wrap(con.rhs) * y_k
+
+
+def _absorb_perspective(
+    e: Expression,
+    y: Expression,
+    t_map: dict[str, Expression],
+    v_map: dict[str, Expression],
+) -> Expression:
+    """An expression equal to ``y * e(t)`` wherever ``v = y * t`` (#2142).
+
+    ``t_map``/``v_map`` send each body variable to its ratio column ``t`` and its
+    disaggregated copy ``v``. ``y`` is folded into ONE factor of every monomial:
+    since ``v = y * t``, a variable factor becomes its ``v`` and a constant ``c``
+    becomes ``c * y``, so a degree-``d`` polynomial stays degree ``d`` (the generic
+    ``y * g(t)`` of :func:`_origin_free_hull_row` is degree ``d + 1``). Sums,
+    negation, products, constant quotients and positive integer powers recurse;
+    any other node ``h`` (``exp``, ``log``, a quotient by an expression, a
+    non-integer power, an indexed or matrix node) becomes ``y * h(t)``, which is
+    the same identity without the degree saving. The identity is exact for every
+    ``y``, so the row is the exact perspective: ``y = 1`` gives ``t = v``, the
+    original row; ``y = 0`` gives ``0 = 0`` once the links pin ``v = 0``.
+    """
+
+    def sub(x: Expression) -> Expression:
+        return _substitute_vars(x, t_map)
+
+    def is_const(x) -> bool:
+        return isinstance(x, (Constant, int, float))
+
+    def absorb(x: Expression) -> Expression:
+        if isinstance(x, Variable):
+            return v_map[x.name]
+        if is_const(x):
+            return _wrap(x) * y
+        if isinstance(x, UnaryOp) and x.op == "neg":
+            return UnaryOp("neg", absorb(x.operand))
+        terms = _sumover_terms(x)
+        if terms is not None:
+            return SumOverExpression([absorb(t) for t in terms])
+        if isinstance(x, BinaryOp):
+            if x.op in ("+", "-"):
+                return BinaryOp(x.op, absorb(x.left), absorb(x.right))
+            if x.op == "*":
+                if is_const(x.left):
+                    return BinaryOp("*", x.left, absorb(x.right))
+                if is_const(x.right):
+                    return BinaryOp("*", absorb(x.left), x.right)
+                return BinaryOp("*", absorb(x.left), sub(x.right))
+            if x.op == "/" and is_const(x.right):
+                return BinaryOp("/", absorb(x.left), x.right)
+            if x.op == "**" and isinstance(x.right, Constant) and np.ndim(x.right.value) == 0:
+                p = float(x.right.value)
+                if p.is_integer() and p >= 1.0:
+                    base = absorb(x.left)
+                    if p == 1.0:
+                        return base
+                    return BinaryOp("*", base, BinaryOp("**", sub(x.left), _wrap(p - 1.0)))
+        return sub(x) * y
+
+    return absorb(e)
+
+
+def _lifted_hull_row_absorbed(
+    con: Constraint,
+    y_k: Expression,
+    owned: list[tuple[str, Variable]],
+    bounds_k: dict[str, tuple[float, float]],
+    cache: dict[str, Variable],
+    model: Model,
+    stem: str,
+    new_vars: list[Variable],
+    new_cons: list[Constraint],
+) -> Optional[tuple[Expression, Expression]]:
+    """The absorbed exact perspective of a nonlinear hull row, or ``None`` (#2142).
+
+    Same ratio columns ``t`` (disjunct box) and links ``v - y_k t = 0`` as the
+    eps-free lifted perspective (:func:`_origin_free_hull_row`); the body is
+    :func:`_absorb_perspective`, equal to ``y_k * g(t)``. No ``eps`` and no
+    ``1/yhat``, so the reciprocal facets the eps-perspective puts on the box
+    (which make ``build_spatial_kernel_spec``'s probe and real boxes differ in
+    shape on GDPlib ``cstr``) never arise.
+
+    ``None`` -- the caller lowers the row exactly as without the flag, so the
+    flag never adds a refusal -- when the body has a Parameter (its ``g(0)`` path
+    stays on the eps-perspective in v1), a variable this disjunct does not own,
+    or no finite enclosure on the disjunct's box (:func:`_lifted_enclosure_failure`,
+    the eps-free form's own admissibility test). Nothing is registered then.
+    """
+    from discopt.modeling.core import Parameter, _iter_model_leaves
+
+    if any(isinstance(leaf, Parameter) for leaf in _iter_model_leaves(con.body)):
+        return None
+    owned_names = {vname for vname, _v in owned}
+    if not set(_collect_variables(con.body)) <= owned_names:
+        return None
+    t_map, fresh = _lifted_ratio_columns(con, owned, bounds_k, cache, model, stem)
+    if _lifted_enclosure_failure(_substitute_vars(con.body, t_map), t_map.values()) is not None:
+        return None
+    v_map: dict[str, Expression] = {vname: v for vname, v in owned if vname in t_map}
+    body = _absorb_perspective(con.body, y_k, t_map, v_map)
+    _register_ratio_columns(fresh, y_k, cache, model, stem, new_vars, new_cons)
+    return body, _wrap(con.rhs) * y_k
+
+
+def _hull_lifted_perspective_enabled() -> bool:
+    """Is the absorbed exact perspective on for nonlinear hull rows?
+    (``DISCOPT_HULL_LIFTED_PERSPECTIVE``, default OFF, #2142; bound-changing on the
+    ``"hull"`` route; audit row in ``docs/dev/flag-retirement-audit.md``)."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().hull_lifted_perspective)
 
 
 def _hull_conic_quadratic_enabled() -> bool:

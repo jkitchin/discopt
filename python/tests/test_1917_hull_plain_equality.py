@@ -16,9 +16,11 @@ and neither dominates. What stays pinned here:
 * the differential battery (no feasible point cut, no infeasible point admitted) on
   two nonlinear-equality shapes under hull;
 * hull solves of those shapes agree with big-M;
-* GDPlib ``cstr`` under hull is still declined by the native spatial kernel: the
-  1/yhat products make the probe-box and real-box relaxations differ in shape.
-  Marked strict ``xfail`` so a fix of that gap announces itself.
+* GDPlib ``cstr`` under hull is still declined by the native spatial kernel on the
+  default route: the 1/yhat products make the probe-box and real-box relaxations
+  differ in shape. Marked strict ``xfail`` (#2142) so a fix of that gap announces
+  itself; ``DISCOPT_HULL_LIFTED_PERSPECTIVE=1`` (default OFF) reaches the kernel,
+  pinned by the flag-ON twin.
 """
 
 from __future__ import annotations
@@ -121,12 +123,8 @@ def test_hull_solve_agrees_with_big_m():
     assert r.objective == pytest.approx(ref.objective, abs=1e-5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#1917: the eps-perspective rows of cstr's rate law make the probe-box and "
-    "real-box relaxations differ in shape, so the native spatial kernel declines it",
-)
-def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
+def _cstr_hull_kernel_specs(monkeypatch, time_limit):
+    """Solve GDPlib cstr under hull and return every spec the kernel producer built."""
     pytest.importorskip("pyomo")
     cstr = pytest.importorskip("gdplib.cstr")
     import discopt._relax.spatial_producer as sp
@@ -146,6 +144,30 @@ def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
         if getattr(solver, name, None) is orig:
             monkeypatch.setattr(solver, name, spy)
     model = convert_pyomo_gdp(cstr.build_model()).model
-    model.solve(gdp_method="hull", time_limit=5)
+    model.solve(gdp_method="hull", time_limit=time_limit)
+    return specs
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#2142: the eps-perspective rows of cstr's rate law make the probe-box and "
+    "real-box relaxations differ in shape, so the native spatial kernel declines it "
+    "(flag-OFF route; DISCOPT_HULL_LIFTED_PERSPECTIVE=1 is the twin below)",
+)
+def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
+    monkeypatch.delenv("DISCOPT_HULL_LIFTED_PERSPECTIVE", raising=False)
+    specs = _cstr_hull_kernel_specs(monkeypatch, 5)
+    assert specs, "the spec producer was never called"
+    assert specs[0] is not None, "the native kernel declined cstr under hull"
+
+
+@pytest.mark.slow
+def test_cstr_hull_reaches_the_native_kernel_lifted_perspective(monkeypatch):
+    """#2142: with the absorbed exact perspective there is no ``1/yhat`` factor, so
+    the probe-box and real-box relaxations have the same shape and the kernel takes
+    cstr. ``time_limit=40``: the producer is reached only after ~10 s of root work
+    on a 4-core container."""
+    monkeypatch.setenv("DISCOPT_HULL_LIFTED_PERSPECTIVE", "1")
+    specs = _cstr_hull_kernel_specs(monkeypatch, 40)
     assert specs, "the spec producer was never called"
     assert specs[0] is not None, "the native kernel declined cstr under hull"
