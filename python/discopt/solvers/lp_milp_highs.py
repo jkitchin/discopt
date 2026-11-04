@@ -1008,7 +1008,9 @@ def exact_ns_bound(
     return g, ""
 
 
-def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> tuple[bool, str]:
+def phase1_infeasibility_proof(
+    sf: StdForm, *, time_limit: Optional[float], engine: Optional[str] = None
+) -> tuple[bool, str]:
     """Prove ``{A x = b, xl <= x <= xu}`` empty without a Farkas ray.
 
     The phase-1 LP ``min 1ᵀ(p + q)  s.t.  A x + p - q = b`` over ``x`` in the FBBT box of
@@ -1016,9 +1018,10 @@ def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> t
     with ``p = q = 0``, lies in the box). A rigorous lower bound on it above a relative
     margin therefore proves the LP empty. The bound comes from HiGHS's phase-1 dual
     through ``ns_bound``, then ``exact_ns_bound``. Returns ``(True, provenance)`` or
-    ``(False, reason)``.
+    ``(False, reason)``. ``engine`` picks who solves the phase-1 LP (P1.1,
+    :mod:`~discopt.solvers.lp_std_engine`); the proof is the same either way.
     """
-    highspy = require_highspy()
+    eng = _lp_engine(engine)
     t0 = time.perf_counter()
     m, n = sf.m, sf.n
     if m == 0:
@@ -1028,24 +1031,14 @@ def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> t
         np.r_[np.zeros(n), np.ones(2 * m)], sp.hstack([sf.A, eye, -eye], format="csc"), sf.b,
         np.r_[sf.xl, np.zeros(2 * m)], np.r_[sf.xu, np.full(2 * m, INF)],
     )  # fmt: skip
-    opts: list[tuple[str, Any]] = [
-        ("primal_feasibility_tolerance", 1e-7),
-        ("dual_feasibility_tolerance", 1e-7),
-        ("run_crossover", "on"),
-    ]
-    if time_limit is not None:
-        if time_limit <= 0.0:
-            return False, "no time left for the phase-1 LP"
-        opts.append(("time_limit", float(time_limit)))
-    h = _new_highs(highspy, opts)
-    pass_st, pass_why = _pass_model(h, highspy, work, integer=False)
-    if pass_st == highspy.HighsStatus.kError:
-        return False, f"phase-1 LP: {pass_why}"
-    h.run()
-    name = _status_name(h)
-    if name != "kOptimal":
-        return False, f"phase-1 LP {name}"
-    y = np.asarray(h.getSolution().row_dual, dtype=np.float64)
+    if time_limit is not None and time_limit <= 0.0:
+        return False, "no time left for the phase-1 LP"
+    raw = eng.solve(work, time_limit=time_limit, presolve=None, tight_tolerances=True)
+    if raw.pass_error:
+        return False, f"phase-1 LP: {raw.pass_error}"
+    if raw.status != "optimal":
+        return False, f"phase-1 LP {raw.name}"
+    y = raw.y
     if not np.all(np.isfinite(y)):
         return False, "phase-1 dual is not finite"
     box = fbbt_box(work, n)
@@ -1062,7 +1055,9 @@ def phase1_infeasibility_proof(sf: StdForm, *, time_limit: Optional[float]) -> t
     return False, f"phase-1 bound {best} does not exceed {margin:.3g}{'; ' + why if why else ''}"
 
 
-def recession_ray(sf: StdForm, *, time_limit: Optional[float]) -> Optional[np.ndarray]:
+def recession_ray(
+    sf: StdForm, *, time_limit: Optional[float], engine: Optional[str] = None
+) -> Optional[np.ndarray]:
     """A candidate descent ray of ``{A x = b, xl <= x <= xu}``, or ``None``.
 
     Solves ``min cᵀd  s.t.  A d = 0`` with ``d_j`` in ``[-1, 0]`` on an open lower side,
@@ -1071,7 +1066,7 @@ def recession_ray(sf: StdForm, *, time_limit: Optional[float]) -> Optional[np.nd
     value gives a ray. The caller still checks it with ``primal_ray_verified``, so this
     decides only whether a ray is found, never whether one is accepted.
     """
-    highspy = require_highspy()
+    eng = _lp_engine(engine)
     if time_limit is not None and time_limit <= 0.0:
         return None
     lo = np.where(sf.xl <= -INF, -1.0, 0.0)
@@ -1079,17 +1074,25 @@ def recession_ray(sf: StdForm, *, time_limit: Optional[float]) -> Optional[np.nd
     if not np.any(lo) and not np.any(hi):
         return None
     work = StdForm.from_arrays(sf.c, sf.A, np.zeros(sf.m), lo, hi)
-    opts: list[tuple[str, Any]] = [("run_crossover", "on")]
-    if time_limit is not None:
-        opts.append(("time_limit", float(time_limit)))
-    h = _new_highs(highspy, opts)
-    if _pass_model(h, highspy, work, integer=False)[0] == highspy.HighsStatus.kError:
+    raw = eng.solve(work, time_limit=time_limit, presolve=None, tight_tolerances=False)
+    if raw.pass_error or raw.status != "optimal":
         return None
-    h.run()
-    if _status_name(h) != "kOptimal":
-        return None
-    d = np.asarray(h.getSolution().col_value, dtype=np.float64)
+    d = raw.x
     return d if float(sf.c @ d) < 0.0 else None
+
+
+def _lp_engine(engine: Optional[str]):
+    """The raw-LP engine for ``solve_lp_std`` and its helpers (highs-parity P1.1).
+
+    ``None`` reads ``DISCOPT_LP_STD_ENGINE`` (``highs`` unless set). It is a measurement
+    lever for the P1/P2 Rust-engine work, kept OFF as the default until the R1-LP parity
+    gate (P2.6, decision D1) passes; a value other than ``highs``/``rust`` raises.
+    """
+    from discopt.solvers.lp_std_engine import get_engine
+
+    if engine is None:
+        engine = os.environ.get("DISCOPT_LP_STD_ENGINE", "highs").strip().lower()
+    return get_engine(engine)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1654,12 +1657,22 @@ def _new_highs(highspy, opts: list[tuple[str, Any]]):
 # ─────────────────────────────────────────────────────────────
 
 
-def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOutcome:
-    """Solve the continuous relaxation of ``sf`` under the §3.1 contract."""
-    highspy = require_highspy()
+def solve_lp_std(
+    sf: StdForm, *, time_limit: Optional[float] = None, engine: Optional[str] = None
+) -> HighsOutcome:
+    """Solve the continuous relaxation of ``sf`` under the §3.1 contract.
+
+    ``engine`` (``highs``, the default, or ``rust``; ``None`` reads
+    ``DISCOPT_LP_STD_ENGINE``) picks who produces the raw answer (P1.1,
+    :mod:`~discopt.solvers.lp_std_engine`). Every certificate below is the same for both:
+    it reads ``sf`` and the returned vectors only.
+    """
+    eng = _lp_engine(engine)
     t0 = time.perf_counter()
     sf = sf.relaxed() if sf.int_idx.size else sf
-    stats: dict[str, float] = {"route/lp_milp_backend": 1.0}
+    stats: dict[str, float] = (
+        {"route/lp_milp_backend": 1.0} if eng.name == "highs" else {"lp/std_engine_rust": 1.0}
+    )
 
     def remaining() -> Optional[float]:
         return None if time_limit is None else float(time_limit) - (time.perf_counter() - t0)
@@ -1676,57 +1689,50 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
     # problem also proves the declared problem empty, and it is verified against the
     # declared bounds regardless. Nothing else from that re-solve is used.
     huge_lo, huge_hi = _huge_box(sf)
-    presolve_off = False
+    # An engine with no presolve gives the same answer twice: start where the
+    # presolve-free re-solve would.
+    presolve_off = not eng.has_presolve
     relaxed = False
     last_reason = ""
     while True:
         rem = remaining()
         if rem is not None and rem <= 0.0:
             return done(HighsOutcome("time_limit", message="LP time budget exhausted"))
-        opts: list[tuple[str, Any]] = [
-            ("primal_feasibility_tolerance", 1e-7),
-            ("dual_feasibility_tolerance", 1e-7),
-            ("run_crossover", "on"),
-        ]
-        if rem is not None:
-            opts.append(("time_limit", float(rem)))
-        if presolve_off or relaxed:
-            opts.append(("presolve", "off"))
-        h = _new_highs(highspy, opts)
-        stats["highs/version"] = _version_number(h)
         sf_pass = _relax_huge_box(sf, huge_lo, huge_hi) if relaxed else sf
-        pass_st, pass_why = _pass_model(h, highspy, sf_pass, integer=False)
-        if pass_st == highspy.HighsStatus.kError:
-            return done(HighsOutcome("error", message=pass_why))
-        if pass_why:
+        raw = eng.solve(
+            sf_pass,
+            time_limit=rem,
+            presolve=False if (presolve_off or relaxed) else None,
+            tight_tolerances=True,
+        )
+        if raw.version is not None:
+            stats["highs/version"] = raw.version
+        if raw.pass_error:
+            return done(HighsOutcome("error", message=raw.pass_error))
+        if raw.pass_warning:
             # kWarning: HiGHS solves a perturbed LP. Every certificate below -- the
             # point's feasibility, the NS bound, the Farkas and primal rays -- is
             # re-verified against ``sf`` itself, so a perturbed answer is refused, not
             # trusted.
             stats["lp/highs_pass_warning"] = 1.0
-        run_st = h.run()
-        name = _status_name(h)
-        info = h.getInfo()
-        stats["lp/iters"] = stats.get("lp/iters", 0.0) + float(info.simplex_iteration_count)
-        if run_st == highspy.HighsStatus.kError:
+        name = raw.name
+        stats["lp/iters"] = stats.get("lp/iters", 0.0) + raw.iters
+        if raw.run_error:
             return done(
                 HighsOutcome("error", message=f"HiGHS run() error ({name})", highs_status=name)
             )
 
         if relaxed:
-            if name == "kInfeasible":
-                y = _ray(h.getDualRay)
+            if raw.status == "infeasible":
+                y = raw.dual_ray()
                 if y is not None and farkas_verified(y, sf):
                     return done(
                         HighsOutcome("infeasible", ray=y, gap_certified=True, highs_status=name)
                     )
             return done(HighsOutcome("error", highs_status=name, message=last_reason))
 
-        if name == "kOptimal":
-            sol = h.getSolution()
-            x = np.asarray(sol.col_value, dtype=np.float64)
-            y = np.asarray(sol.row_dual, dtype=np.float64)
-            rc = np.asarray(sol.col_dual, dtype=np.float64)
+        if raw.status == "optimal":
+            x, y, rc = raw.x, raw.y, raw.rc
             why = readback_problem(x, sf, row_dual=y, col_dual=rc) or feasibility_problem(
                 x, sf, check_integrality=False
             )
@@ -1769,8 +1775,8 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
                 out.message = f"NS safe bound {ns:.12g} is {gap:.3g} below the objective"
             return done(out)
 
-        if name == "kInfeasible":
-            y = _ray(h.getDualRay)
+        if raw.status == "infeasible":
+            y = raw.dual_ray()
             if y is not None and farkas_verified(y, sf):
                 return done(
                     HighsOutcome("infeasible", ray=y, gap_certified=True, highs_status=name)
@@ -1781,31 +1787,28 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
                 stats["lp/infeasible_provenance_farkas_fbbt_box"] = 1.0
                 return done(out)
             last_reason = "infeasible label without a verifiable Farkas ray"
-        elif name == "kUnbounded":
-            d = _ray(h.getPrimalRay)
-            xp: np.ndarray | None = None
-            if info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible:
-                xp = np.asarray(h.getSolution().col_value, dtype=np.float64)
+        elif raw.status == "unbounded":
+            d = raw.primal_ray()
+            xp: np.ndarray | None = raw.x_primal
             point_ok = xp is not None and not (
                 readback_problem(xp, sf) or feasibility_problem(xp, sf, check_integrality=False)
             )
             if point_ok and (d is None or not primal_ray_verified(d, sf)):
                 # HiGHS can label an LP unbounded with no ray (measured: ``min x`` over a
                 # free column and no rows, highspy 1.12 and 1.15). Look for one directly.
-                d = recession_ray(sf, time_limit=remaining())
+                d = recession_ray(sf, time_limit=remaining(), engine=eng.name)
                 if d is not None:
                     stats["lp/recession_ray_lp"] = 1.0
             if d is not None and point_ok and primal_ray_verified(d, sf):
                 return done(HighsOutcome("unbounded", x=xp, ray=d, highs_status=name))
             last_reason = "unbounded label without a verified ray and feasible point"
-        elif name == "kUnboundedOrInfeasible":
-            last_reason = "HiGHS could not decide between infeasible and unbounded"
-        elif name in ("kTimeLimit", "kIterationLimit"):
+        elif raw.status == "undecided":
+            last_reason = f"{eng.name} could not decide between infeasible and unbounded"
+        elif raw.status in ("time_limit", "iteration_limit"):
             # #2053: an iteration cap is not a clock. ``highs_status`` kept the
             # truth, but ``status`` is the field callers read.
-            st = "iteration_limit" if name == "kIterationLimit" else "time_limit"
-            return done(HighsOutcome(st, highs_status=name, message=name))
-        elif name == "kModelEmpty" and sf.n == 0 and sf.m == 0:
+            return done(HighsOutcome(raw.status, highs_status=name, message=name))
+        elif raw.status == "empty" and sf.n == 0 and sf.m == 0:
             # #1385: an LP with no columns and no rows has one feasible point --
             # the empty assignment -- so ``obj_const`` is the optimum and the
             # certificate is exact. This name was not in the dispatch above, so
@@ -1827,8 +1830,12 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             return done(HighsOutcome("error", highs_status=name, message=f"HiGHS LP status {name}"))
 
         if presolve_off:
-            if name == "kInfeasible":
-                proved, how = phase1_infeasibility_proof(sf, time_limit=remaining())
+            if raw.status in ("infeasible", "undecided") and (
+                raw.status == "infeasible" or not eng.has_presolve
+            ):
+                proved, how = phase1_infeasibility_proof(
+                    sf, time_limit=remaining(), engine=eng.name
+                )
                 stats["lp/phase1_proof_ran"] = 1.0
                 if proved:
                     out = HighsOutcome("infeasible", gap_certified=True, highs_status=name)

@@ -1,0 +1,684 @@
+{
+ "25fv47": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 5501.845888286757,
+  "status": "optimal",
+  "objective": "5501.845888286741",
+  "bound": "5501.845888286671",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_exact_dual_correction": 1.0,
+   "lp/iters": 4061.0,
+   "lp/ns_gap": 7.003109203651547e-11,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "adlittle": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 225494.9631623803,
+  "status": "optimal",
+  "objective": "225494.96316238027",
+  "bound": "225494.9631621546",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 113.0,
+   "lp/ns_gap": 2.2567110136151314e-07,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "afiro": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -464.75314285714285,
+  "status": "optimal",
+  "objective": "-464.7531428571429",
+  "bound": "-464.7531428576088",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 17.0,
+   "lp/ns_gap": 4.658886609831825e-10,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "avgas": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -7.75,
+  "status": "optimal",
+  "objective": "-7.75",
+  "bound": "-7.750000000008751",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 9.0,
+   "lp/ns_gap": 8.751221969305334e-12,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "blending": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -3200.0000000000005,
+  "status": "optimal",
+  "objective": "-3200.0",
+  "bound": "-3200.000000003201",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 2.0,
+   "lp/ns_gap": 3.200966602889821e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "chip": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -900.0,
+  "status": "optimal",
+  "objective": "-900.0",
+  "bound": "-900.000000000901",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 2.0,
+   "lp/ns_gap": 9.00968188943807e-10,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "dD2e": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -3000.0,
+  "status": "optimal",
+  "objective": "-3000.0",
+  "bound": "-3000.000000003001",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 2.0,
+   "lp/ns_gap": 3.0008777684997767e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "e226": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -11.638929066370537,
+  "status": "optimal",
+  "objective": "-11.638929066370544",
+  "bound": "-11.63892906637057",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_exact_dual_correction": 1.0,
+   "lp/iters": 506.0,
+   "lp/ns_gap": 2.6645352591003757e-14,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "egout-ac": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 0.0,
+  "status": "optimal",
+  "objective": "0.0",
+  "bound": "-1e-12",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 42.0,
+   "lp/ns_gap": 1e-12,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "etamacro": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -755.7152333005275,
+  "status": "optimal",
+  "objective": "-755.7152333749134",
+  "bound": "-755.7152333759534",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 1073.0,
+   "lp/ns_gap": 1.0400071914773434e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "israel": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -896644.8218630459,
+  "status": "optimal",
+  "objective": "-896644.8218630455",
+  "bound": "-896644.8218639427",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 169.0,
+   "lp/ns_gap": 8.972128853201866e-07,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "nan1": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -1000.0,
+  "status": "optimal",
+  "objective": "-1000.0",
+  "bound": "-1000.000000001001",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 0.0,
+   "lp/ns_gap": 1.0010126061388291e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "no-newline-eof": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 0.0,
+  "status": "optimal",
+  "objective": "0.0",
+  "bound": "-1e-12",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 1.0,
+   "lp/ns_gap": 1e-12,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "perold": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -9380.755278235187,
+  "status": "feasible",
+  "objective": "-9380.755278234918",
+  "bound": "None",
+  "cert": false,
+  "labels": {},
+  "message": "NS safe bound is -inf for the HiGHS dual over the declared box, the FBBT box and after exact dual correction; optimality not certified. exact dual correction: pivot block singular in exact arithmetic, or work/time limit reached",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 3221.0,
+   "lp/ns_bound_missing": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "qap04": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 32.0,
+  "status": "optimal",
+  "objective": "32.0",
+  "bound": "31.99999999996694",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 172.0,
+   "lp/ns_gap": 3.306155349491746e-11,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "scrs8": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 904.296953800792,
+  "status": "optimal",
+  "objective": "904.2969538007914",
+  "bound": "904.2969538007806",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_exact_dual_correction": 1.0,
+   "lp/iters": 1078.0,
+   "lp/ns_gap": 1.0800249583553523e-11,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "sctest": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 5.75,
+  "status": "optimal",
+  "objective": "5.75",
+  "bound": "5.74999999999325",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 13.0,
+   "lp/ns_gap": 6.750155989720952e-12,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "shell": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 1208825346.0,
+  "status": "optimal",
+  "objective": "1208825346.0",
+  "bound": "1208825345.998751",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 866.0,
+   "lp/ns_gap": 0.001249074935913086,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "silly-names": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -1.0,
+  "status": "optimal",
+  "objective": "-1.0",
+  "bound": "-1.000000000002",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 0.0,
+   "lp/ns_gap": 1.999955756559757e-12,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "smalllp": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 54.0,
+  "status": "optimal",
+  "objective": "54.0",
+  "bound": "53.999999999921",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 5.0,
+   "lp/ns_gap": 7.899814136180794e-11,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "stair": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -251.26695119296335,
+  "status": "optimal",
+  "objective": "-251.26695119296318",
+  "bound": "-251.2669511947432",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_exact_dual_correction": 1.0,
+   "lp/iters": 1176.0,
+   "lp/ns_gap": 1.7800232399167726e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "standata": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 1257.6995,
+  "status": "optimal",
+  "objective": "1257.6995",
+  "bound": "1257.6994999987412",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 305.0,
+   "lp/ns_gap": 1.2587406672537327e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "standgub": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 1257.6995,
+  "status": "optimal",
+  "objective": "1257.6995",
+  "bound": "1257.6994999987412",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 305.0,
+   "lp/ns_gap": 1.2587406672537327e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "standmps": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": 1406.0175,
+  "status": "optimal",
+  "objective": "1406.0175000000004",
+  "bound": "1406.017499998593",
+  "cert": true,
+  "labels": {
+   "lp/bound_provenance": "ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/bound_provenance_ns_fbbt_box": 1.0,
+   "lp/iters": 693.0,
+   "lp/ns_gap": 1.4074430509936064e-09,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "test": {
+  "panel": "L",
+  "oracle_status": "Optimal",
+  "oracle": -4.75,
+  "status": "optimal",
+  "objective": "-4.75",
+  "bound": "-4.75000000001175",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:optimal",
+  "stats": {
+   "lp/iters": 10.0,
+   "lp/ns_gap": 1.1749712314212957e-11,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "bgetam": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 572.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "box1": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 195.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "cplex1": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 2729.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "ex72a": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 181.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "forest6": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 74.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "galenet": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:infeasible",
+  "stats": {
+   "lp/iters": 7.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "gams10am": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:infeasible",
+  "stats": {
+   "lp/iters": 40.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "gas11": {
+  "panel": "INF",
+  "oracle_status": "Unbounded",
+  "oracle": null,
+  "status": "unbounded",
+  "objective": "None",
+  "bound": "None",
+  "cert": false,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:unbounded",
+  "stats": {
+   "lp/iters": 835.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "klein1": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_exact_dual_correction": 1.0,
+   "lp/iters": 135.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "refinery": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-exact-dual-correction"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_exact_dual_correction": 1.0,
+   "lp/iters": 467.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "vol1": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {
+   "lp/infeasible_provenance": "phase1-ns-fbbt-box"
+  },
+  "message": "",
+  "highs_status": "rust:numerical",
+  "stats": {
+   "lp/infeasible_provenance_phase1_ns_fbbt_box": 1.0,
+   "lp/iters": 559.0,
+   "lp/phase1_proof_ran": 1.0,
+   "lp/std_engine_rust": 1.0
+  }
+ },
+ "woodinfe": {
+  "panel": "INF",
+  "oracle_status": "Infeasible",
+  "oracle": null,
+  "status": "infeasible",
+  "objective": "None",
+  "bound": "None",
+  "cert": true,
+  "labels": {},
+  "message": "",
+  "highs_status": "rust:infeasible",
+  "stats": {
+   "lp/iters": 31.0,
+   "lp/std_engine_rust": 1.0
+  }
+ }
+}

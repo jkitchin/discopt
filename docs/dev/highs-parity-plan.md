@@ -547,7 +547,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
 
 ### Phase 1 — bound-neutral ports and the engine seam (R6, R4, R3)
 
-- [ ] **P1.1 — Engine seam for the verified LP route.** Scope: `lp_milp_highs.py`
+- [x] **P1.1 — Engine seam for the verified LP route.** Scope: `lp_milp_highs.py`
   (`solve_lp_std` `:1657`, `_pass_model` `:1452`, `_new_highs` `:1638`,
   `phase1_infeasibility_proof` `:1011`, `recession_ray` `:1065`), new
   `python/discopt/solvers/lp_std_engine.py`. Hypothesis: the certificate ladder
@@ -568,6 +568,32 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   supply a verifiable Farkas ray on ≥ 1 of the 18 INF-panel instances where HiGHS can,
   the phase-1 proof path (`:1011`) must close it, else record the gap in §7 and the LP
   default stays HiGHS. Regime: bound-neutral (HiGHS arm exact; Rust arm measured).
+  **Result (2026-11-04):** entry check first: the ladder helpers (`readback_problem` …
+  `exact_ns_bound`, lines 227–1010) touch **no** HiGHS object; only `solve_lp_std`'s raw
+  solve, `phase1_infeasibility_proof` and `recession_ray` do. Hypothesis confirmed, no
+  helper to list. New `python/discopt/solvers/lp_std_engine.py`: `LpEngine` protocol,
+  `HighsEngine` (today's option lists and calls, rays fetched lazily) and `RustEngine`
+  (`solve_lp_warm_csc_py` on `A x = b` directly; no presolve, so `solve_lp_std` starts at
+  the presolve-free step; its `numerical` exit maps to `undecided` and reaches the
+  phase-1 proof, as in `lp_simplex`). `solve_lp_std`, `phase1_infeasibility_proof` and
+  `recession_ray` take `engine=` (`None` reads `DISCOPT_LP_STD_ENGINE`, default
+  `highs`; audit row added as a documented opt-out until P2.6/D1). The Rust engine sets
+  `lp/std_engine_rust`, never the HiGHS route marker.
+  - **HiGHS engine, exact:** the named files pass unchanged (96 tests); old vs new
+    `solve_lp_std` on the 37 L/INF standard forms built by `_highs_std_form`: **37/37
+    identical in every field** (status, objective repr, bound, certificate, labels,
+    message, `highs_status`, stats). Counter 37 ≥ 24.
+  - **Rust engine, measured** (same 37): L **24/25 certified** (P0.3 Rust route: 24;
+    `perold` `feasible`, the NS bound is −∞ for its dual on every rung, as on the old
+    route), **0 wrong answers**; INF **12/12 verdicts proved** (11 Farkas, `gas11`
+    unbounded) — the kill (a Farkas ray HiGHS has and Rust cannot supply) did not fire.
+    Provenance: every `optimal` is certified by a rung of the same ladder, 13 by rung 1
+    (NS over the declared box, unlabelled by design — HiGHS's `blending`/`shell` are
+    unlabelled too) and the rest by exact dual correction; on `standata` the Rust dual
+    certifies on rung 1 where HiGHS's needed the FBBT box.
+  - Script `discopt_benchmarks/scripts/lp_engine_seam_check.py`; data
+    `docs/dev/data/highs-parity/p11-engine-seam/`. Test
+    `test_highs_parity_p11_lp_engine_seam.py` (5 tests; all fail before the seam).
 - [ ] **P1.2 — R6: MINLP-path verified LPs on the Rust engine, HiGHS as fallback.**
   Scope: `solver.py` `_linear_node_verified_empty` (`:34903`),
   `_highs_lp_verifier_available` (`:34732`), `_linear_node_lp_rescue` (`:37710`),
@@ -846,7 +872,7 @@ and is re-written by P4.1.**
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
-| P1.1–P1.4 | [ ] | | |
+| P1.1–P1.4 | P1.1 [x] | P1.1: seam; HiGHS 37/37 byte-identical; Rust engine L 24/25, INF 12/12, 0 wrong | see git log |
 | P2.1–P2.6 / D1 | [ ] | | |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
