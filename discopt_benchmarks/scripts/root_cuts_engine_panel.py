@@ -149,8 +149,8 @@ def cmd_run(a) -> int:
             f"{arm} cert={summ[arm]['cert']} nodes={summ[arm]['nodes']} "
             f"bound={summ[arm]['bound'][:1]} wall={summ[arm]['wall_med']}" for arm in arms),
             flush=True)  # fmt: skip
-        Path(a.out).write_text(json.dumps({"rows": rows, "checks": checks, "violations": viol,
-                                           "errors": errors}, indent=1, default=str) + "\n")  # fmt: skip
+        doc = {"rows": rows, "checks": checks, "violations": viol, "errors": errors}
+        Path(a.out).write_text(json.dumps(doc, indent=1, default=str) + "\n")
     executed = sum(len(r[arm]["cert"]) for r in rows for arm in arms)
     print(f"run: rows={len(rows)} executed={executed} checks={checks} "
           f"violations={len(viol)} errors={len(errors)}", flush=True)  # fmt: skip
