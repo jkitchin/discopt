@@ -2644,6 +2644,8 @@ def solve_milp_std(
         out = _cross_form_infeasible_check(sf, out, kw, t0)
     if out.gap_certified and out.status == "optimal":
         out = _tighten_feasibility_artefact(sf, out, kw, t0)
+    if not out.gap_certified and out.labels.get("milp/refuted_by") == "own-integers":
+        out = _reseed_refuted(sf, out, kw, t0, n_struct)
     if not out.gap_certified and out.status != "unbounded" and _coef_tighten_enabled():
         out = _coefficient_tightening_rescue(sf, out, kw, t0)
     return out
@@ -2970,6 +2972,90 @@ def _tighten_feasibility_artefact(
     tight.iterations += out.iterations
     tight.wall_time = time.monotonic() - t0
     return tight
+
+
+def _reseed_refuted(
+    sf: StdForm,
+    out: HighsOutcome,
+    kw: dict[str, Any],
+    t0: float,
+    n_struct: Optional[int],
+) -> HighsOutcome:
+    """#2151: one certified re-solve, seeded with the point that refuted HiGHS's bound.
+
+    Runs only when the #1509 refutation's best point is the LP over HiGHS's OWN
+    incumbent's integers (label ``milp/refuted_by == "own-integers"``). HiGHS then had
+    the right integer assignment, but its continuous part was not optimal for it, and its
+    tree bound sat on that suboptimal objective. Measured on the issue's 2-32-32-1
+    ``relu_bigm`` network: HiGHS reported ``kOptimal`` with objective and
+    ``mip_dual_bound`` both -46.6583412166 and ``mip_gap`` 0. The LP over the same
+    integers gives -46.6583423116 with row residual 1.5e-16, so the bound is genuinely
+    1.09e-6 above a feasible point, not refuted by row slack. The cause is not the stop
+    rule: with ``mip_rel_gap = 0`` and ``mip_abs_gap = 1e-9`` the same bound comes back.
+    It is not ``mip_feasibility_tolerance`` either at 1e-7 or 1e-8 (1e-9 does clear it).
+    Started from the verified point, HiGHS certifies -46.6583423116 with bound
+    -46.6583423557, and that run passes every route check.
+
+    The re-solve is the whole certified pipeline (:func:`_certified_milp`: the #1509
+    refutation of its own, the #1634 presolve-free cross-solve). Its result replaces
+    ``out`` only if it is a certified ``optimal`` and no verified point in hand -- the
+    refuting point ``out`` publishes, and the re-solve's own incumbent -- lies below its
+    bound by more than the refutation yardstick. Otherwise ``out`` is returned unchanged,
+    so this never withdraws anything. A refutation by a DIFFERENT integer assignment (the
+    #1509 class itself: the root LP point, or its rounding) does not run it. There the
+    tree pruned a branch, and a seeded re-run of the same tree is no new evidence.
+    """
+    if out.x is None or out.objective is None or not sf.int_idx.size:
+        return out
+    kw2 = dict(kw)
+    if kw["time_limit"] is not None:
+        kw2["time_limit"] = float(kw["time_limit"]) - (time.monotonic() - t0)
+        if kw2["time_limit"] <= 0.0:
+            out.stats["milp/refuted_reseed_skipped"] = 1.0
+            return out
+    ns = sf.n if n_struct is None else int(n_struct)
+    kw2["initial_point"] = np.asarray(out.x, dtype=np.float64)[:ns]
+    again = _certified_milp(sf, kw2)
+    out.stats["milp/refuted_reseed_ran"] = 1.0
+    out.stats["milp/refuted_reseed_time"] = float(again.wall_time)
+    why = None
+    b = float("nan")
+    if not (again.gap_certified and again.status == "optimal" and again.bound is not None):
+        why = f"re-solve status {again.status}"
+    else:
+        b = float(again.bound)
+        pts = [float(out.objective)] + [p[1] for p in (_verified_mip_point(sf, again.x),) if p]
+        if any(b - p > CERT_ABS + CERT_REL * abs(b) for p in pts):
+            why = f"bound {b:.12g} is above a verified point's objective {min(pts):.12g}"
+    if why is not None:
+        out.labels["milp/refuted_reseed_declined"] = why
+        return out
+    again.stats = {**out.stats, **again.stats, "milp/refuted_reseed_adopted": 1.0}
+    # The primary's decline and refutation are superseded: only the re-solve's own
+    # verdict may label the result (as in the #1654 rescue). The refutation stays on
+    # record under its own key.
+    primary = {
+        k: v
+        for k, v in out.labels.items()
+        if k not in ("milp/certificate", "milp/highs_certificate", "milp/refuted_by")
+    }
+    again.labels = {
+        **primary,
+        **again.labels,
+        "milp/primary_refuted_by": out.labels.get("milp/refuted_by", ""),
+        "milp/bound_provenance": f"{again.labels.get('milp/bound_provenance', 'highs-fp')}, "
+        "re-solved from the refuting point (#2151)",
+    }
+    again.node_count += out.node_count
+    again.iterations += out.iterations
+    again.wall_time = time.monotonic() - t0
+    logger.info(
+        "HiGHS MILP route: re-solved from the point that refuted the bound; certified "
+        "%.12g with bound %.12g (#2151)",
+        float(again.objective) if again.objective is not None else float("nan"),
+        b,
+    )
+    return again
 
 
 def _solve_milp_scaled(sf: StdForm, *, presolve: bool = True, **kw: Any) -> HighsOutcome:
@@ -3867,9 +3953,13 @@ def _solve_milp_std(
         caller should stop; ``True`` otherwise (refuted results are repaired in place).
         """
         cands: list[tuple[np.ndarray, float]] = []
+        # #2151: where each candidate came from; "own-integers" is the LP over the
+        # incumbent's own integer assignment (read by :func:`_reseed_refuted`).
+        kinds: list[str] = []
         root_pt = _verified_mip_point(sf, lp.x) if lp.status == "optimal" else None
         if root_pt is not None:
             cands.append(root_pt)
+            kinds.append("root-lp")
         if out.x is not None and sf.int_idx.size:
             rem_fx = remaining()
             if rem_fx is not None and rem_fx <= 0.0:
@@ -3890,6 +3980,7 @@ def _solve_milp_std(
                 )
                 return False
             cands.append(pt)
+            kinds.append("own-integers")
             # #1612: the incumbent's own integers, re-optimised by a separate LP; the
             # distance from HiGHS's objective is what its feasibility tolerance bought
             # (read by :func:`_tighten_feasibility_artefact`).
@@ -3924,9 +4015,11 @@ def _solve_milp_std(
                 pt = _verified_mip_point(sf, rd.x) if rd.status == "optimal" else None
                 if pt is not None:
                     cands.append(pt)
+                    kinds.append("rounded-root")
         if not cands:
             return True
-        best_x, best = min(cands, key=lambda p: p[1])
+        i_best = min(range(len(cands)), key=lambda i: cands[i][1])
+        best_x, best = cands[i_best]
         assert out.bound is not None
         margin = out.bound - best
         stats["milp/refutation_margin"] = float(margin)
@@ -3937,6 +4030,7 @@ def _solve_milp_std(
             return True
         stats["milp/certificate_refuted"] = 1.0
         labels["milp/highs_certificate"] = "refuted"
+        labels["milp/refuted_by"] = kinds[i_best]
         was = out.bound
         if out.objective is None or best < out.objective:
             out.x, out.objective = best_x, best
