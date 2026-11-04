@@ -175,7 +175,7 @@ measured" — it may be scheduled only with an entry experiment. From the routin
 
 | ID | After | Question for the owner |
 |---|---|---|
-| **D0** (M-1671) | P0.7 | Which of §4's three closure routes for #1671 to take, given the P0.3/P0.7 numbers. |
+| **D0** (M-1671) | P0.7 | Which of §4's three closure routes for #1671 to take, given the P0.3/P0.7 numbers. **Decided 2026-11-04: (a).** |
 | **D1** | P2.6 | R1-LP parity reached → flip the pure-LP class to Rust (P6.1). If missed after P2.1–P2.5: keep HiGHS for LP (HiGHS stays *optional* only if R1-MILP also lands) or fund one more LP task. |
 | **D2** | P4.9 | R1-MILP: MIPLIB-38 ≥ 34/38 at ≤ 2× wall reached → flip. If not: accept the *narrower* end state "HiGHS optional for R1 by class" (Rust default for instances the harness classifies as small, HiGHS opt-in otherwise — needs its own entry experiment), or keep HiGHS as the MILP default and stop the MILP track. |
 | **D3** | P5.3 | R2a/R2b masters on Rust — and whether the #2069 independent confirmation (today: Rust confirms HiGHS) is still required when the primary *is* Rust, and what plays the second engine. |
@@ -522,6 +522,21 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   - **Independent of D0** (recommend scheduling either way): the Rust route overruns its
     time limit by up to 47 % because the Python tree runs after the driver's deferral.
     That is a correctness-adjacent contract bug (`time_limit`), small and general.
+
+  **D0 DECIDED (owner, 2026-11-04): route (a)** — the Rust engine becomes the default
+  for every pure MILP, via the full P4 track (gated by D2); and "fix the time-limit
+  overrun, then continue". #1671 closes when P4.9/D2 flips the default (P6.5 drafts the
+  closing record). Route (c) is not taken; the HiGHS route stays the default, presolve
+  on, until then.
+  **Time-limit overrun — fixed (2026-11-04).** Cause, measured with a per-call probe on the
+  witness at TL 30: the Rust driver ran 11 s and deferred; the Python MILP tree then
+  checked the deadline only once per loop iteration, and an iteration solves a whole
+  batch of ~1 s node LPs. Node LPs started at 30.3, 31.6, 32.5, 33.2 and 33.7 s; wall
+  34.3–38.5 s. Fix (`_solve_milp_bb`): the deadline is checked before every node after
+  the first; nodes not reached are handed back with `tree.requeue_nodes` (pop-time bound
+  kept, never pruned). Witness at TL 30 after the fix: 30.8 / 31.2 s, same bound
+  (448,108.54). Regression test `test_milp_tree_time_limit_per_node.py` (fails before: 7
+  tree node solves started after a 3 s limit; passes after).
 
   **Also for the owner (raised by P0.3/P0.4):** (1) does §1.3's "wall ratio ≤ 3.0" mean
   against the HiGHS route (H) or raw HiGHS (H0)? On LP they differ ~100× here (Rust/H

@@ -39616,6 +39616,9 @@ def _solve_milp_bb(
 
         t_jax_start = time.perf_counter()
         result_ids = np.array(batch_ids, dtype=np.int64)
+        # How many of this batch's nodes were evaluated (highs-parity P0.7 / D0): the
+        # deadline is checked before every node, not only once per batch.
+        _n_eval = n_batch
 
         if _structured_avail:
             # Path B: solve each node's relaxation with the structured engine
@@ -39632,6 +39635,16 @@ def _solve_milp_bb(
             # (node_id, column) pairs from `_integral_claim_branch_col` (#1414).
             _unpromotable_hints: list[tuple[int, int]] = []
             for i in range(n_batch):
+                # The time limit is a contract (highs-parity D0). Checked once per
+                # batch, a batch of ~1 s node LPs ran 4-8 s past it: on the #1667
+                # unit-commitment model the route returned at 141-147 s on a 120 s
+                # limit and at up to 88 s on 60 s. The first node always runs (the
+                # loop head admitted this batch before the deadline); the rest are
+                # requeued below with the bound they were popped with -- open, never
+                # pruned without a proof.
+                if i > 0 and time.perf_counter() - t_start >= time_limit:
+                    _n_eval = i
+                    break
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
                 _mid = 0.5 * np.add(*_clip_start_box(node_lb, node_ub))
@@ -39681,6 +39694,17 @@ def _solve_milp_bb(
                 "The JAX LP-IPM node fallback was retired in #370; build the Rust "
                 "extension or install POUNCE."
             )
+
+        if _n_eval < n_batch:
+            # Deadline reached mid-batch: hand the unevaluated nodes back to the open
+            # frontier (``requeue_nodes`` keeps each one's pop-time bound, valid for
+            # its whole subtree) and carry only the evaluated ones forward.
+            tree.requeue_nodes(np.ascontiguousarray(result_ids[_n_eval:]))
+            batch_lb, batch_ub = batch_lb[:_n_eval], batch_ub[:_n_eval]
+            batch_ids, result_ids = batch_ids[:_n_eval], result_ids[:_n_eval]
+            result_lbs, result_sols = result_lbs[:_n_eval], result_sols[:_n_eval]
+            result_feas, result_excl = result_feas[:_n_eval], result_excl[:_n_eval]
+            n_batch = _n_eval
 
         # Lagrangian node bounds: combine a valid dual lower bound with each
         # node's LP relaxation bound. Gated by cadence and applied only to nodes

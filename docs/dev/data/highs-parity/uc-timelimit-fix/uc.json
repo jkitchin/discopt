@@ -1,0 +1,210 @@
+{
+ "rows": [
+  {
+   "arm": "rust@20",
+   "time_limit": 20.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 447859.38672243495,
+   "certified": false,
+   "nodes": 7,
+   "wall": 21.307080060999965,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    0.4951171875,
+    0.63916015625
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "rust@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 75,
+   "wall": 60.98317546099997,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    0.63916015625,
+    1.1201171875
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "rust@120",
+   "time_limit": 120.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448817.5429016184,
+   "certified": false,
+   "nodes": 155,
+   "wall": 121.27034062399991,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.1201171875,
+    1.21728515625
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "rust-nopresolve@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 77,
+   "wall": 60.972659418000035,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.21728515625,
+    1.21240234375
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "rust-nocmir@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 73,
+   "wall": 60.41679135200002,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.21240234375,
+    1.24853515625
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "highs@20",
+   "time_limit": 20.0,
+   "status": "optimal",
+   "objective": 450623.7692106869,
+   "bound": 450587.0036674801,
+   "certified": true,
+   "nodes": 7,
+   "wall": 8.812092728000039,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp",
+   "load": [
+    1.24853515625,
+    1.2099609375
+   ],
+   "rep": 0,
+   "violations": []
+  },
+  {
+   "arm": "rust@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 75,
+   "wall": 60.26039869099998,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.2099609375,
+    1.19873046875
+   ],
+   "rep": 1,
+   "violations": []
+  },
+  {
+   "arm": "rust@120",
+   "time_limit": 120.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448817.5429016184,
+   "certified": false,
+   "nodes": 153,
+   "wall": 120.17475544499996,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.19873046875,
+    1.42529296875
+   ],
+   "rep": 1,
+   "violations": []
+  },
+  {
+   "arm": "rust-nopresolve@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 75,
+   "wall": 60.6081905210001,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.42529296875,
+    1.36328125
+   ],
+   "rep": 1,
+   "violations": []
+  },
+  {
+   "arm": "rust-nocmir@60",
+   "time_limit": 60.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 448369.12163830904,
+   "certified": false,
+   "nodes": 73,
+   "wall": 60.8319743479999,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.36328125,
+    1.1318359375
+   ],
+   "rep": 1,
+   "violations": []
+  },
+  {
+   "arm": "highs@20",
+   "time_limit": 20.0,
+   "status": "optimal",
+   "objective": 450623.7692106869,
+   "bound": 450587.0036674801,
+   "certified": true,
+   "nodes": 7,
+   "wall": 8.710616730999845,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp",
+   "load": [
+    1.1318359375,
+    1.18505859375
+   ],
+   "rep": 1,
+   "violations": []
+  },
+  {
+   "arm": "rust@20",
+   "time_limit": 20.0,
+   "status": "time_limit",
+   "objective": null,
+   "bound": 447859.38672243495,
+   "certified": false,
+   "nodes": 7,
+   "wall": 21.236340304999885,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "load": [
+    1.18505859375,
+    1.1318359375
+   ],
+   "rep": 1,
+   "violations": []
+  }
+ ],
+ "executed": 12,
+ "violations": []
+}
