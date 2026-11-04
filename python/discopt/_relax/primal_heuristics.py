@@ -1321,13 +1321,26 @@ def subnlp(
             opts.setdefault("max_wall_time", float(time_budget))
         t_start = time.perf_counter()
 
-        found = _subnlp_solve_and_verify(
+        found, raw_status = _subnlp_solve_and_verify(
             backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
         )
         # #1917: the legacy solve found nothing. Re-solve once on the node-FBBT box
         # of this fixing (see :func:`_apply_implied_box`). Only after a failure, so
-        # every point the legacy solve finds is still the point returned.
-        if found is None and implied is not None and _subnlp_fbbt_box_enabled():
+        # every point the legacy solve finds is still the point returned. Not after
+        # a solve that *converged* to a locally infeasible point
+        # (``Infeasible_Problem_Detected``): the box addresses an ill-conditioned
+        # solve that never converged, and does not help a fixing whose rows the IPM
+        # already drove to a stationary infeasibility. Measured with the flag ON on
+        # the GDP panel: every box re-solve after status 2 failed (syngas big-m
+        # 16/16, which cost 3-5 s of wall per solve; syngas hull 1/1), and every
+        # rescue followed a non-converged legacy solve (gdp_col hull after
+        # ITERATION_LIMIT; hda hull 2 of 3 after Invalid_Number_Detected).
+        if (
+            found is None
+            and implied is not None
+            and raw_status != _INFEASIBLE_PROBLEM_DETECTED
+            and _subnlp_fbbt_box_enabled()
+        ):
             if "max_wall_time" in opts:
                 left = float(opts["max_wall_time"]) - (time.perf_counter() - t_start)
                 if left <= 0.0:
@@ -1336,23 +1349,42 @@ def subnlp(
             x_box = _apply_implied_box(model, implied, x0)
             if x_box is None:
                 return None
-            found = _subnlp_solve_and_verify(
-                backend, evaluator, x_box, opts, int_mask, integer_tol, feas_tol
-            )
+            from discopt.solvers.nlp_pounce import constant_row_retry_on_restoration_failure
+
+            with constant_row_retry_on_restoration_failure():
+                found, _ = _subnlp_solve_and_verify(
+                    backend, evaluator, x_box, opts, int_mask, integer_tol, feas_tol
+                )
     return found
+
+
+#: Ipopt/POUNCE ``Infeasible_Problem_Detected``: the solve converged to a point of
+#: local infeasibility (as opposed to stopping short of convergence).
+_INFEASIBLE_PROBLEM_DETECTED = 2
 
 
 def _subnlp_solve_and_verify(
     backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
-) -> Optional[tuple[np.ndarray, float]]:
-    """One :func:`subnlp` solve from ``x0`` and its verification; ``None`` if unusable."""
+) -> tuple[Optional[tuple[np.ndarray, float]], Optional[int]]:
+    """One :func:`subnlp` solve from ``x0`` and its verification.
+
+    Returns ``(point_or_None, raw_status)``; ``raw_status`` is the backend's raw
+    solver code (``None`` when it raised or reports none).
+    """
     try:
         nlp_result = backend(evaluator, x0, options=opts)
     except BaseException:
         # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
         # raise PanicException, which is not a subclass of Exception.
-        return None
+        return None, None
+    found = _subnlp_verify_result(nlp_result, evaluator, x0, int_mask, integer_tol, feas_tol)
+    return found, getattr(nlp_result, "raw_status", None)
 
+
+def _subnlp_verify_result(
+    nlp_result, evaluator, x0, int_mask, integer_tol, feas_tol
+) -> Optional[tuple[np.ndarray, float]]:
+    """Verify one :func:`subnlp` solve's point; ``None`` if unusable."""
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
     # test at a point that is already constraint-feasible (prob07's true-global

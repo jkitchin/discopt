@@ -10,6 +10,8 @@ from the cyipopt backend are reused unchanged.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
@@ -263,21 +265,31 @@ _NOT_ENOUGH_DEGREES_OF_FREEDOM = -10
 _RESTORATION_FAILED = -2
 
 
-def _constant_row_retry_on_restoration_failure() -> bool:
-    """Whether a ``Restoration_Failed`` solve gets the constant-row retry (#1917).
+#: Set only around :func:`discopt._relax.primal_heuristics.subnlp`'s node-FBBT-box
+#: re-solve (#1917), so every other solve -- B&B node NLPs, the legacy heuristic
+#: solve -- keeps its unchanged behaviour on ``Restoration_Failed``.
+_RESTORATION_RETRY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "discopt_pounce_restoration_retry", default=False
+)
 
-    The second half of ``DISCOPT_SUBNLP_FBBT_BOX`` (see
-    :func:`discopt._relax.primal_heuristics._subnlp_fbbt_box_enabled`), which shares
-    its switch (default OFF). Measured on GDPlib ``syngas`` under hull at bdc54a48: a
-    fixed-configuration sub-NLP on its node-FBBT box has 2056 of 3141 rows over
-    fixed columns only, none violated; POUNCE 0.15.0 returns Restoration_Failed
-    after 2 iterations, and the same NLP without those rows is OPTIMAL in 86
-    iterations. The retry runs only after a failed solve and only when every
-    dropped row holds at the fixed point.
+
+@contextlib.contextmanager
+def constant_row_retry_on_restoration_failure():
+    """Within this block, a ``Restoration_Failed`` solve gets the constant-row retry (#1917).
+
+    Measured on GDPlib ``syngas`` under hull at bdc54a48: a fixed-configuration
+    sub-NLP on its node-FBBT box has 2056 of 3141 rows over fixed columns only, none
+    violated; POUNCE 0.15.0 returns Restoration_Failed after 2 iterations, and the
+    same NLP without those rows is OPTIMAL in 86 iterations. The retry runs only
+    after a failed solve and only when every dropped row holds at the fixed point,
+    so the reduced NLP has the same feasible set. Scoped rather than global: only
+    the box re-solve is known to produce that degenerate row set.
     """
-    from discopt._relax.primal_heuristics import _subnlp_fbbt_box_enabled
-
-    return _subnlp_fbbt_box_enabled()
+    token = _RESTORATION_RETRY.set(True)
+    try:
+        yield
+    finally:
+        _RESTORATION_RETRY.reset(token)
 
 
 #: Largest violation (absolute, in the row's own units) at which a row whose
@@ -662,7 +674,7 @@ def solve_nlp(
     )
     status_code = info.get("status", -100)
     if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM or (
-        status_code == _RESTORATION_FAILED and _constant_row_retry_on_restoration_failure()
+        status_code == _RESTORATION_FAILED and _RESTORATION_RETRY.get()
     ):
         dof_retry = _constant_row_retry(callbacks, lb, ub, cl, cu, x0)
         if dof_retry is not None:

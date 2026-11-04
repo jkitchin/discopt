@@ -130,11 +130,11 @@ def _fail_first_solve(monkeypatch):
     return calls
 
 
-def test_restoration_failure_with_constant_rows_is_resolved_without_them(monkeypatch):
-    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", "1")
+def test_restoration_failure_with_constant_rows_is_resolved_inside_the_scope(monkeypatch):
     calls = _fail_first_solve(monkeypatch)
     ev, bounds = _one_constant_row()
-    r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
+    with nlp_pounce.constant_row_retry_on_restoration_failure():
+        r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
     assert len(calls) == 2
     assert r.status == SolveStatus.OPTIMAL
     assert r.x[1] == pytest.approx(2.0, abs=1e-6)
@@ -142,8 +142,11 @@ def test_restoration_failure_with_constant_rows_is_resolved_without_them(monkeyp
     assert r.multipliers[0] == 0.0
 
 
-def test_restoration_failure_stands_with_the_flag_off(monkeypatch):
-    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", "0")
+@pytest.mark.parametrize("flag", ["0", "1"])
+def test_restoration_failure_stands_outside_the_scope(monkeypatch, flag):
+    # B&B node NLPs and the legacy heuristic solve never enter the scope, so the
+    # flag does not change them: bound-neutral by construction.
+    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", flag)
     calls = _fail_first_solve(monkeypatch)
     ev, bounds = _one_constant_row()
     r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
@@ -151,12 +154,34 @@ def test_restoration_failure_stands_with_the_flag_off(monkeypatch):
     assert r.raw_status == _RESTORATION_FAILED and r.status == SolveStatus.ERROR
 
 
-def test_flag_is_default_off(monkeypatch):
-    """Default OFF: its panel measured a syngas big-m slowdown (audit row)."""
-    from discopt._relax.primal_heuristics import _subnlp_fbbt_box_enabled
+def _failing_backend(raw_status, calls):
+    from discopt.solvers import NLPResult
 
-    monkeypatch.delenv("DISCOPT_SUBNLP_FBBT_BOX", raising=False)
-    assert _subnlp_fbbt_box_enabled() is False
-    assert nlp_pounce._constant_row_retry_on_restoration_failure() is False
+    def backend(evaluator, x0, options=None):
+        calls.append(nlp_pounce._RESTORATION_RETRY.get())
+        return NLPResult(status=SolveStatus.ERROR, x=None, raw_status=raw_status)
+
+    return backend
+
+
+@pytest.mark.parametrize(
+    "raw_status, expected_calls",
+    [
+        (2, 1),  # converged local infeasibility: no box re-solve
+        (-1, 2),  # ITERATION_LIMIT: box re-solve
+        (-13, 2),  # Invalid_Number_Detected: box re-solve
+    ],
+)
+def test_box_resolve_follows_only_a_nonconverged_legacy_solve(
+    monkeypatch, raw_status, expected_calls
+):
     monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", "1")
-    assert _subnlp_fbbt_box_enabled() is True
+    low = reformulate_gdp(_chain(3), "hull")
+    x = next(_configurations(low, 3))
+    calls: list = []
+    assert PH.subnlp(low, x, backend=_failing_backend(raw_status, calls)) is None
+    assert len(calls) == expected_calls
+    # the constant-row retry is scoped to the box re-solve only
+    assert calls[0] is False
+    if expected_calls == 2:
+        assert calls[1] is True
