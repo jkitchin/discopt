@@ -140,17 +140,21 @@ def _stack_sparse(
 
     Exactly the nonzeros of the dense stack, in row order and sorted by column
     (#2079): building the dense stack first cost 39 s on a 7909 x 57828 master.
+    A row stored by its nonzeros (``oa._SparseRow``, :meth:`MasterMILP.add_row`)
+    is read as such (#2153): scanning 15,205 dense 57,828-wide rows for their
+    nonzeros cost 2.7 s of every LOA master solve on GDPlib ``stranded_gas``.
     """
+    from discopt.solvers.oa import _row_nonzeros
+
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
     cols: list[np.ndarray] = []
     vals: list[np.ndarray] = []
     for k, row in enumerate(rows):
-        row = np.asarray(row, dtype=np.float64).ravel()
-        if row.shape[0] > width:
-            raise ValueError(f"master row {k} has {row.shape[0]} entries; the master has {width}")
-        nz = np.flatnonzero(row)
+        nz, val, length = _row_nonzeros(row)
+        if length > width:
+            raise ValueError(f"master row {k} has {length} entries; the master has {width}")
         cols.append(nz)
-        vals.append(row[nz] if signs is None or signs[k] == 1.0 else signs[k] * row[nz])
+        vals.append(val if signs is None or signs[k] == 1.0 else signs[k] * val)
         indptr[k + 1] = indptr[k] + nz.size
     return sp.csr_matrix(
         (
@@ -363,7 +367,9 @@ class MasterMILP:
         self.objective = objective
         self.objective_convex = bool(objective_convex)
         self.backend = backend
-        self.rows: list[np.ndarray] = []
+        #: The problem's own rows, each kept by its nonzeros (``oa._SparseRow``,
+        #: #2153); ``np.asarray(row)`` gives the dense vector.
+        self.rows: list[Any] = []
         self.rhs: list[float] = []
         self.senses: list[str] = []
         self.cuts: list[np.ndarray] = []
@@ -382,11 +388,19 @@ class MasterMILP:
         return 0.0 if self.objective is None else float(self.objective[1])
 
     def add_row(self, coeffs: Any, sense: str, rhs: float) -> None:
-        """A linear row of the problem itself (``coeffs @ x  sense  rhs``)."""
+        """A linear row of the problem itself (``coeffs @ x  sense  rhs``).
+
+        ``coeffs`` is a dense vector or an ``oa._SparseRow``; the row is stored by
+        its nonzeros either way (#2153). A master of ``m`` rows over ``n``
+        columns held ``8 m n`` bytes dense -- 7 GB on GDPlib ``stranded_gas``
+        (15,205 x 57,828, 367,404 nonzeros) -- and every solve rescanned them.
+        """
+        from discopt.solvers.oa import _SparseRow
+
         if sense not in ("<=", ">=", "=="):
             raise ValueError(f"MasterMILP.add_row: unknown sense {sense!r}")
-        row = np.asarray(coeffs, dtype=np.float64)
-        if row.shape != (self.n_vars,):
+        row = coeffs if isinstance(coeffs, _SparseRow) else _SparseRow.from_dense(coeffs)
+        if row.n != self.n_vars or (not isinstance(coeffs, _SparseRow) and np.ndim(coeffs) != 1):
             raise ValueError(f"MasterMILP.add_row: expected {self.n_vars} coefficients")
         self.rows.append(row)
         self.senses.append(sense)
@@ -607,12 +621,27 @@ class RelaxationMaster(MasterMILP):
             )
         A = relaxation._A_ub
         if A is not None:
-            A = A.toarray() if sp.issparse(A) else np.asarray(A, dtype=np.float64)
+            from discopt.solvers.oa import _SparseRow
+
             b = np.asarray(relaxation._b_ub, dtype=np.float64).reshape(-1)
             if A.shape != (b.shape[0], n_cols):
                 raise ValueError("RelaxationMaster: the relaxation's rows do not match its columns")
-            for row, rhs in zip(A, b):
-                self.add_row(row, "<=", float(rhs))
+            if sp.issparse(A):
+                # Row by row from the CSR, never densified (#2153): the same
+                # nonzeros, sorted by column, that ``from_dense`` reads off a row
+                # of ``A.toarray()``.
+                A = sp.csr_matrix(A, dtype=np.float64)
+                A.sum_duplicates()
+                A.sort_indices()
+                for i, rhs in enumerate(b):
+                    lo, hi = A.indptr[i], A.indptr[i + 1]
+                    val = A.data[lo:hi]
+                    keep = val != 0.0
+                    row = _SparseRow(A.indices[lo:hi][keep], val[keep].copy(), n_cols)
+                    self.add_row(row, "<=", float(rhs))
+            else:
+                for row, rhs in zip(np.asarray(A, dtype=np.float64), b):
+                    self.add_row(row, "<=", float(rhs))
         self.truncated = bool(getattr(relaxation, "_build_truncated", False))
 
     def model_row(self, coeffs: Any, *, epigraph: bool = False) -> np.ndarray:
@@ -696,8 +725,9 @@ def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> Mast
     once it has a convexity certificate). Bounds and integrality are the
     lowered model's own.
     """
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs, _extract_body_terms
     from discopt.modeling.core import Constraint, ObjectiveSense, VarType
+    from discopt.solvers.oa import _SparseRow
 
     variables = lowered._variables
     n = sum(int(v.size) for v in variables)
@@ -730,10 +760,15 @@ def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> Mast
     for con in lowered._constraints:
         if not isinstance(con, Constraint):
             continue
-        coeffs = _extract_body_coeffs(con.body, lowered, n)
-        if coeffs is None:
+        # Sparse (#2153): one dense ``n``-long vector per row was 7 GB on GDPlib
+        # ``stranded_gas``, and 2.8 s or 27 s to allocate depending on the
+        # allocator's state -- the bimodal ``_make_master`` step of #2153.
+        terms = _extract_body_terms(con.body, lowered, n)
+        if terms is None:
             continue
-        c_vec, off = coeffs
+        coeffs, off = terms
+        idx = np.array(sorted(k for k, v in coeffs.items() if v != 0.0), dtype=np.intp)
+        val = np.array([coeffs[int(k)] for k in idx], dtype=np.float64)
         sense = con.sense if isinstance(con.sense, str) else getattr(con.sense, "value", con.sense)
-        master.add_row(c_vec, str(sense), float(con.rhs) - float(off))
+        master.add_row(_SparseRow(idx, val, n), str(sense), float(con.rhs) - float(off))
     return master
