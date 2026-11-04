@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from discopt.ml.activations import activation_interval
 from discopt.ml.network import Activation, NetworkDefinition
 
 # Sentinel "unbounded" values matching Model.continuous defaults; used when no
@@ -25,23 +26,16 @@ class LayerBounds:
 
 
 def _apply_activation_bounds(
-    activation: Activation, pre_lb: np.ndarray, pre_ub: np.ndarray
+    activation: Activation, pre_lb: np.ndarray, pre_ub: np.ndarray, beta: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply activation function to pre-activation bounds (monotone functions)."""
-    if activation == Activation.LINEAR:
-        return pre_lb.copy(), pre_ub.copy()
-    elif activation == Activation.RELU:
-        return np.maximum(pre_lb, 0.0), np.maximum(pre_ub, 0.0)
-    elif activation == Activation.SIGMOID:
-        sig = lambda z: 1.0 / (1.0 + np.exp(-z))  # noqa: E731
-        return sig(pre_lb), sig(pre_ub)
-    elif activation == Activation.TANH:
-        return np.tanh(pre_lb), np.tanh(pre_ub)
-    elif activation == Activation.SOFTPLUS:
-        sp = lambda z: np.logaddexp(z, 0)  # noqa: E731
-        return sp(pre_lb), sp(pre_ub)
-    else:
-        raise ValueError(f"Unknown activation: {activation}")
+    """Interval image of ``[pre_lb, pre_ub]`` under the activation.
+
+    Exact (up to endpoint rounding, which is not outward) for every supported
+    activation, including the non-monotone SWISH and GELU, whose lower end is
+    the global minimum when the interval contains the minimizer; see
+    :func:`discopt.ml.activations.activation_interval`.
+    """
+    return activation_interval(activation, pre_lb, pre_ub, beta)
 
 
 def propagate_bounds(
@@ -52,7 +46,8 @@ def propagate_bounds(
     """Propagate input bounds through the network via interval arithmetic.
 
     Uses natural interval extension: split weights into positive and negative
-    parts to compute tight affine bounds, then apply monotone activation bounds.
+    parts to compute tight affine bounds, then take the interval image of
+    each activation (monotone or not).
 
     Parameters
     ----------
@@ -98,7 +93,7 @@ def propagate_bounds(
         pre_lb = W_pos.T @ lb + W_neg.T @ ub + b
         pre_ub = W_pos.T @ ub + W_neg.T @ lb + b
 
-        post_lb, post_ub = _apply_activation_bounds(layer.activation, pre_lb, pre_ub)
+        post_lb, post_ub = _apply_activation_bounds(layer.activation, pre_lb, pre_ub, layer.beta)
 
         result.append(LayerBounds(pre_lb, pre_ub, post_lb, post_ub))
 

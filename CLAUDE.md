@@ -401,8 +401,10 @@ mypy python/discopt/
     model (a neural rate law inside a collocation DAE, à la Lueg et al. 2025).
     `TrainableNetwork.freeze()`/`from_definition()` bridge the two; `train()` is a thin
     local-NLP solve, not a deep-learning trainer.
-  - **Only two of the four encodings are MIP.** `relu_bigm.py` and
-    `formulations/tree_ensemble.py` emit binaries and big-M; `full_space.py` (smooth
+  - **Not every encoding is a MIP.** `relu_bigm.py`, `relu_partition.py` (Tsay et al.
+    2021 partitions and the Anderson et al. 2020 extended/hull formulation, plus the
+    `AndersonCutSeparator` ideal-cut `cut_callback`, #2134) and
+    `formulations/tree_ensemble.py` emit binaries; `full_space.py` (smooth
     activation equalities) and `reduced_space.py` (nested expressions, one var per layer)
     emit **no binaries**. Do not assume embedding a network makes the model a MIP.
   - **`surrogate.py`'s `Surrogate` protocol is `runtime_checkable` and duck-typed**
