@@ -212,6 +212,9 @@ def test_wave_hands_over_on_a_solve_count_not_a_clock_slice(monkeypatch):
     by an unbounded factor pins that: the count is identical, and the deadline is
     left doing only the job #912 allows it to do — deciding when to stop.
     """
+    # The #2144 feasibility-first samples are capped separately and would add to
+    # the count; this test is about the ranked wave's own handover.
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "0")
     m = _capacity_gdp()
     x_relax = _relaxation_point()
     deadline = 120.0  # in the fake clock's own units, not seconds

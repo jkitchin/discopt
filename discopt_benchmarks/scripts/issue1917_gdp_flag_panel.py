@@ -86,6 +86,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
     # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
     "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
+    # #2144: feasibility-first samples in the GDP configuration search; acts at
+    # solve time (lowering identical), so solve ``--all``.
+    "DISCOPT_GDP_CONFIG_FEAS_SAMPLE": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

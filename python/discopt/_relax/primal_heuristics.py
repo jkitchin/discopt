@@ -2342,6 +2342,42 @@ def _residual_assignments(
 #: is what leaves the dive a share to work in.
 _WAVE_SOLVE_CAP = 48
 
+#: Cap on the #2144 feasibility-first samples one :func:`one_hot_config_subnlp`
+#: call may add to its wave. Counted separately from :data:`_WAVE_SOLVE_CAP`, so
+#: sampling never pushes a ranked plan out of the wave. Sampling stops at the
+#: first feasible point, so the cap binds only on models where uniformly random
+#: configurations are themselves rarely feasible, and it bounds the waste there.
+#: On batch_processing 54 of 60 uniform samples were feasible (#2144), so the
+#: expected number needed is ~1.1; at that rate 16 misses with probability
+#: 0.1**16, and it costs at most 16 sub-NLPs where it does not help.
+_FEAS_SAMPLE_CAP = 16
+
+
+def _gdp_config_feas_sample_enabled() -> bool:
+    """Whether :func:`one_hot_config_subnlp` interleaves uniformly sampled
+    configurations into its wave while nothing feasible has been found (#2144).
+    **Default OFF** pending the CLAUDE.md §5 panel; ``=1`` turns it on.
+
+    Primal only: samples go through :func:`subnlp`'s verification, so the flag can
+    change which incumbent is found and when, never the soundness of the bound.
+
+    Measured (#2144, 120 s, ``gdp_parity`` worker path). GDPlib
+    ``batch_processing`` has no incumbent OFF under big-M or hull and 1623421.03
+    ON under both (two runs each, sequential). Over the 7 in-repo ``pyomo.*``
+    instances of ``gdp_parity`` x {big-m, hull}, all 14 cells certified the same
+    objective in the same node count in both arms (SGM wall 11.09 -> 10.97 s).
+    **What would graduate it:** the same panel over the 17 GDPlib instances
+    (``issue1917_gdp_flag_panel.py --flag DISCOPT_GDP_CONFIG_FEAS_SAMPLE --phase
+    solve --all``), which needs gdplib from source and could not run where this
+    was written. Row in ``docs/dev/flag-retirement-audit.md``.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
 
 def one_hot_config_subnlp(
     model: Model,
@@ -2580,27 +2616,29 @@ def one_hot_config_subnlp(
     from discopt.solver import _role1_deadline
 
     wave_deadline = _role1_deadline() if _st.current().deterministic else deadline
-    for ci, ri in wave_plans:
-        if wave_deadline is not None and _now() >= wave_deadline:
-            stop = "deadline"
-            break
+
+    def _seed_for(picks: list[int], resid: tuple[float, ...]) -> np.ndarray:
         seed = zero_start.copy()
-        choice = configs[ci]
         for gi, g in enumerate(groups):
-            pick = ranked[gi][choice.get(gi, 0)]
             for j in g:
                 seed[j] = 0.0
-            seed[pick] = 1.0
-        for j, v in zip(residual, residual_assigns[ri]):
+            seed[ranked[gi][picks[gi]]] = 1.0
+        for j, v in zip(residual, resid):
             seed[j] = v
+        return seed
+
+    def _attempt(seed: np.ndarray) -> Optional[bool]:
+        """One fixed-configuration sub-NLP. ``None`` means the deadline stopped it."""
+        nonlocal attempted
+        if wave_deadline is not None and _now() >= wave_deadline:
+            return None
         # The caller's deadline is a stopping contract, so the per-solve budget is
         # what remains of it — not a slice of it. ``wave_deadline`` is ``deadline``
         # except under ``deterministic``, where it is the solve's own role-1
         # deadline and the wave's extent is its solve cap (see above).
         budget = None if wave_deadline is None else max(0.0, wave_deadline - _now())
         if budget is not None and budget <= 0.0:
-            stop = "deadline"
-            break
+            return None
         attempted += 1
         found = subnlp(
             model,
@@ -2613,22 +2651,97 @@ def one_hot_config_subnlp(
         )
         if found is not None:
             results.append(found)
+            return True
+        return False
+
+    # #2144 feasibility-first fallback. Every ranked plan sits near the
+    # relaxation's argmax, and on batch_processing that whole neighbourhood is
+    # infeasible: the root relaxation is confident in the *wrong* disjunct of every
+    # group (17 of 29 groups differ from LOA's feasible configuration), so the
+    # least-confident flips never leave it. Measured there, a uniformly random valid
+    # configuration solves feasibly 54 times in 60, while 4 root + 27 deferred
+    # ranked attempts found 0 — the solve ended with no incumbent under both big-M
+    # and hull. So once the anchor plan has failed, and for as long as nothing
+    # feasible has been found, each ranked plan is followed by one uniformly sampled
+    # configuration (one disjunct per group, residual binaries 0/1 uniform). The
+    # first feasible point ends the sampling; the ranked wave then continues
+    # undisturbed. Samples are capped separately (``_FEAS_SAMPLE_CAP``) so they never
+    # displace a ranked plan from the wave's own cap, and they are drawn from a
+    # fixed-seed RNG so the heuristic stays reproducible. Primal only: each point
+    # still comes from ``subnlp``'s verification, so a sample can cost time but
+    # cannot yield an infeasible incumbent or touch the bound.
+    feas_sample = _gdp_config_feas_sample_enabled()
+    sample_rng = np.random.default_rng(0)
+    sampled = 0
+    tried: set[tuple] = set()
+    sample_space = 1
+    for g in groups:
+        sample_space *= len(g)
+    sample_space *= 2 ** len(residual)
+
+    def _draw_sample() -> Optional[tuple[list[int], tuple[float, ...]]]:
+        for _ in range(8):
+            picks = [int(sample_rng.integers(len(g))) for g in groups]
+            resid = tuple(float(v) for v in sample_rng.integers(0, 2, size=len(residual)))
+            key = (tuple(picks), resid)
+            if key not in tried:
+                return picks, resid
+        return None
+
+    def _sampling() -> bool:
+        return (
+            feas_sample and not results and sampled < _FEAS_SAMPLE_CAP and len(tried) < sample_space
+        )
+
+    pi = 0
+    while True:
+        if pi < len(wave_plans):
+            ci, ri = wave_plans[pi]
+            pi += 1
+            choice = configs[ci]
+            picks = [choice.get(gi, 0) for gi in range(len(groups))]
+            resid = tuple(float(v) for v in residual_assigns[ri])
+            key = (tuple(picks), resid)
+            # A sample may already have tested this fixing; one start per
+            # candidate (#1004), so do not solve it twice.
+            if key not in tried:
+                tried.add(key)
+                if _attempt(_seed_for(picks, resid)) is None:
+                    stop = "deadline"
+                    break
+        elif not _sampling():
+            break
+        # Interleave: after each ranked plan (so never before the anchor), one sample.
+        if not _sampling():
+            continue
+        draw = _draw_sample()
+        if draw is None:
+            if pi >= len(wave_plans):
+                break
+            continue
+        tried.add((tuple(draw[0]), draw[1]))
+        sampled += 1
+        if _attempt(_seed_for(*draw)) is None:
+            stop = "deadline"
+            break
     # An empty return has several distinct causes — no sub-NLP was even started,
     # the deadline cut the search short, or every fixing was genuinely infeasible.
     # Reporting the count and the stop reason is what makes those distinguishable
     # after the fact; without it "found nothing" is unfalsifiable (CLAUDE.md §6).
     logger.debug(
         "one_hot_config_subnlp: %d group(s), %d residual binaries, %d/%d sub-NLP(s) "
-        "attempted (%s), %d feasible",
+        "attempted (%s; %d of them feasibility-first samples), %d feasible",
         len(groups),
         len(residual),
         attempted,
         len(plans[:max_configs]),
         stop,
+        sampled,
         len(results),
     )
     if stats is not None:
         stats["attempted"] = attempted
+        stats["sampled"] = sampled
     if not groups:
         return results
     # Spend what is left of the budget on the dive, which re-solves between choices
