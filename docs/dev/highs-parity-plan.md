@@ -417,7 +417,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     source; that install was not permitted in this session). R2b's G3.2 finding that
     HiGHS wins *large* GDP masters is therefore untested here; the captured masters
     are small, which is where Rust wins.
-- [ ] **P0.5 — Fixture capture for R3/R4/R6.** Scope: new `python/tests/data/highs_parity/`
+- [x] **P0.5 — Fixture capture for R3/R4/R6.** Scope: new `python/tests/data/highs_parity/`
   + a capture script. Instrument (temporary, not committed) `_root_cuts._solve_lp`,
   `convex_node_bound._lp_dual` and `solve_lp_std`'s MINLP-path callers to dump each LP
   (`StdForm` arrays) with HiGHS's `x`, `y`, status, and for R3 the GMI cuts emitted, over
@@ -425,6 +425,25 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (with cuts), every #1537/#1611 arbitration LP reached. Done: fixtures ≤ 5 MB total,
   loader test asserts shapes and that HiGHS re-solve reproduces the stored objective to
   1e-9. Kill: none (capture). Regime: measurement.
+  **Result (2026-11-04):** `discopt_benchmarks/scripts/capture_highs_parity_fixtures.py`
+  wraps the HiGHS calls at runtime (no solver edit; the plan's "temporary instrumentation"
+  lives in the script) and captured **4,447 LPs**: R3 181, R4 3,997, R6 269. Three passes:
+  the 132-file in-repo corpus by default, the corpus again with
+  `DISCOPT_CONVEX_KERNEL=0 DISCOPT_CONVEX_MINLP_ROUTE=0` (label `@nlpbb`: by default
+  the kernel/route answer convex instances first and only 3 root LPs were reached), and
+  the #1537/#1611/#1869 regression files under pytest. Fixtures in
+  `python/tests/data/highs_parity/`, **1.31 MB**: R3 30 (all with GMI cuts, 9
+  instances), R4 60 (round-robin over instances), R6 178 (#1537 arbitration 94, #1869
+  free-column 81, #1611 rescue 3; de-duplicated; verdict-only LPs carry the status HiGHS
+  must reproduce), plus **5 hard R6 LPs** under `hard/`. Plain HiGHS (presolve off)
+  can't reproduce those: `Unknown` ×2, `Infeasible` against the route's point (feasible
+  to 1.2e-7) ×1, objective off by ~5e-8 relative ×2. All are nvs16 #1869 LPs with
+  columns boxed at 1.6e9, i.e. the inputs P1.2 must survive.
+  `test_highs_parity_p05_fixtures.py`: 274 tests, 1.5 s total, each fixture's shapes,
+  and HiGHS reproducing its objective to 1e-9 relative (or its verdict); the hard ones
+  hold the route's point to 1e-6 row-scaled. Measurement note: `_lp_dual`'s returned
+  value excludes the slack form's `obj_const` (100/100 sampled LPs differ by exactly it);
+  the fixtures store the row form's objective, constant included.
 - [ ] **P0.6 — IIS baseline.** Scope: new `discopt_benchmarks/scripts/iis_parity_panel.py`.
   Run `compute_iis(include_integrality=True)` on every IIS-exercising test model in
   `python/tests/` (grep `compute_iis`/`milp_iis`) and the MIPcc27 smallset **if** on disk
@@ -741,7 +760,7 @@ and is re-written by P4.1.**
 | P0.2 | [x] | 38/38 recovered from the A14 artifact, validated against `.solu` (0 mismatches; obra needs > 60 s); Done run executed 9, incorrect 0 | see git log |
 | P0.3 | [x] | 927 executed, 0 incorrect; walls indicative (gate open on 41/103 rows); R/H geomean 1.41 (L) / 1.73 (M) / 1.78 (MIPLIB) but H/H0 = 110× on L | see git log |
 | P0.4 | [x] | kill fired: false HiGHS master optimum (#2146), fixed; post-fix 3103 masters, 6206 compared, 0 contradictions; Rust SGM 0.08× HiGHS on decomposition masters; route 91–92/94 | `6351f589` + see git log |
-| P0.5 | [ ] | | |
+| P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [ ] | | |
 | P0.7 / D0 | [ ] | | |
 | P1.1–P1.4 | [ ] | | |
