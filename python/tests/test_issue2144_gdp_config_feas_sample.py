@@ -223,3 +223,20 @@ def test_draws_breaking_an_integer_only_row_are_rejected_unsolved(monkeypatch):
     for x in samples:
         assert sum(x[-N_RESID:]) <= 1, x
     assert found
+
+
+@pytest.mark.smoke
+def test_process_wide_counter_counts_every_solved_sample(monkeypatch):
+    """The panel's fire counter must see samples from call sites that pass no
+    ``stats`` (the native kernel's seed generator does not), so it is counted
+    inside the constructor, not at the call site."""
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "1")
+    monkeypatch.setattr(ph, "one_hot_config_dive", lambda *a, **kw: [])
+    before = ph.feas_samples_solved_total()
+    stats: dict = {}
+    ph.one_hot_config_subnlp(_argmax_infeasible_gdp(), _relaxation_point(), stats=stats)
+    assert stats["sampled"] > 0, "probe vacuous: no sample was solved"
+    assert ph.feas_samples_solved_total() - before == stats["sampled"]
+    before = ph.feas_samples_solved_total()
+    ph.one_hot_config_subnlp(_argmax_infeasible_gdp(), _relaxation_point())  # no stats
+    assert ph.feas_samples_solved_total() > before

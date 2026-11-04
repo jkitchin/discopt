@@ -2357,6 +2357,19 @@ _FEAS_SAMPLE_CAP = 16
 #: counted against :data:`_FEAS_SAMPLE_CAP`; when the budget runs out sampling stops.
 _FEAS_SAMPLE_DRAWS = 64
 
+#: Process-wide count of #2144 samples solved, over every caller of
+#: :func:`one_hot_config_subnlp`. The per-call ``stats`` only reach
+#: ``solver_stats`` from the call sites that pass a dict, and the native spatial
+#: kernel's seed generator passes none, so a solve-level "did the flag act" read
+#: from ``solver_stats`` alone is blind on that path (CLAUDE.md §6). The GDP panel
+#: worker runs one solve per process and reads this instead.
+_FEAS_SAMPLES_SOLVED = [0]
+
+
+def feas_samples_solved_total() -> int:
+    """#2144 samples solved in this process so far, over every call site."""
+    return _FEAS_SAMPLES_SOLVED[0]
+
 
 def _gdp_config_feas_sample_enabled() -> bool:
     """Whether :func:`one_hot_config_subnlp` interleaves uniformly sampled
@@ -2764,6 +2777,7 @@ def one_hot_config_subnlp(
             continue
         tried.add((tuple(draw[0]), draw[1]))
         sampled += 1
+        _FEAS_SAMPLES_SOLVED[0] += 1
         if _attempt(_seed_for(*draw)) is None:
             stop = "deadline"
             break

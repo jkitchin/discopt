@@ -198,30 +198,42 @@ def discover_models(
     failure as an ``ERROR`` run rather than hiding it — honest reporting over a
     hardcoded, environment-specific skip list.
     """
-    import gdplib
+    from benchmarks import convex_gdp_generator as cg
+    from benchmarks import pyomo_gdp_examples as px
 
     exclude_set = set(exclude or [])
     specs: list[GDPModelSpec] = []
     seen: set[str] = set()
-    for mod_info in pkgutil.iter_modules(gdplib.__path__):
-        mod_name = mod_info.name
-        try:
-            sub = importlib.import_module(f"gdplib.{mod_name}")
-        except Exception:
-            continue
-        for attr in dir(sub):
-            if not attr.startswith("build"):
+
+    def _in_repo(n: str) -> bool:
+        return (n.startswith(px.PREFIX) and n[len(px.PREFIX) :] in px.CATALOG) or cg.is_name(n)
+
+    # The vendored Pyomo examples and the seeded convex GDPs need no gdplib, so a
+    # request naming only those does not import it (#2144: the in-repo half of the
+    # gdp_parity panel then runs where gdplib is not installed). Any other request
+    # still imports it, and a missing gdplib still raises.
+    if include is None or not all(_in_repo(n) for n in include):
+        import gdplib
+
+        for mod_info in pkgutil.iter_modules(gdplib.__path__):
+            mod_name = mod_info.name
+            try:
+                sub = importlib.import_module(f"gdplib.{mod_name}")
+            except Exception:
                 continue
-            fn = getattr(sub, attr)
-            if not callable(fn) or not _is_zero_arg(fn):
-                continue
-            # Prefer the short module name when the builder is the canonical
-            # ``build_model``; otherwise disambiguate as ``module.builder``.
-            name = mod_name if attr == "build_model" else f"{mod_name}.{attr}"
-            if name in seen:
-                continue
-            seen.add(name)
-            specs.append(GDPModelSpec(name=name, builder=fn, module=mod_name))
+            for attr in dir(sub):
+                if not attr.startswith("build"):
+                    continue
+                fn = getattr(sub, attr)
+                if not callable(fn) or not _is_zero_arg(fn):
+                    continue
+                # Prefer the short module name when the builder is the canonical
+                # ``build_model``; otherwise disambiguate as ``module.builder``.
+                name = mod_name if attr == "build_model" else f"{mod_name}.{attr}"
+                if name in seen:
+                    continue
+                seen.add(name)
+                specs.append(GDPModelSpec(name=name, builder=fn, module=mod_name))
 
     if include is not None:
         want = set(include)
@@ -230,8 +242,6 @@ def discover_models(
         # resolved only when asked for by name, so the default sweep is unchanged.
         # An unknown ``pyomo.`` name is dropped like any other absent name; the
         # --suite path refuses that loudly.
-        from benchmarks import pyomo_gdp_examples as px
-
         for name in sorted(want):
             if name.startswith(px.PREFIX) and name[len(px.PREFIX) :] in px.CATALOG:
                 specs.append(
@@ -239,8 +249,6 @@ def discover_models(
                 )
         # #1917: seeded convex-quadratic GDP instances (``cgdp.<family>_<size>_s<seed>``),
         # likewise resolved only by name.
-        from benchmarks import convex_gdp_generator as cg
-
         for name in sorted(want):
             if cg.is_name(name):
                 specs.append(

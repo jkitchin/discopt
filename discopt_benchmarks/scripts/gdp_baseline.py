@@ -226,6 +226,11 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
             if k.startswith(("vub_cmir/", "gdp_config/"))
         },
     }
+    # #2144: samples solved over EVERY call site in this process (the native
+    # kernel's seed generator does not report through ``solver_stats``).
+    from discopt._relax.primal_heuristics import feas_samples_solved_total
+
+    out["stats"]["gdp_config/feas_sampled_process"] = feas_samples_solved_total()
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
     return out

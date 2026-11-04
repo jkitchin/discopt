@@ -51,12 +51,14 @@ instance is lost.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -103,7 +105,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
 #: ``solver_stats`` key ``gdp_baseline.py --worker`` records. ``--report`` counts the
 #: ON solves where it is non-zero, and fails if an OFF solve reports it.
 _FIRE_STATS: dict[str, str] = {
-    "DISCOPT_GDP_CONFIG_FEAS_SAMPLE": "gdp_config/feas_sampled",
+    # The process-wide count, not ``gdp_config/feas_sampled``: the native spatial
+    # kernel's seed generator does not report through ``solver_stats``.
+    "DISCOPT_GDP_CONFIG_FEAS_SAMPLE": "gdp_config/feas_sampled_process",
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -226,80 +230,153 @@ def _fired(args) -> set[tuple[str, str]]:
     }
 
 
-def phase_solve(args, names: list[str]) -> int:
+def _solve_one(args, name: str, method: str, on: bool, rep: int) -> dict:
+    """One fresh-subprocess solve of (instance, method) with the flag ON or OFF."""
     import gdp_baseline as gb
 
+    arm = "on" if on else "off"
+    load = _wait_for_load(args.max_load)
+    t0 = time.perf_counter()
+    cmd = [
+        sys.executable,
+        "-u",
+        str(HERE.parent / "gdp_baseline.py"),
+        "--worker",
+        name,
+        f"discopt-{method}",
+        str(args.time_limit),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=args.time_limit + args.grace,
+            env=_env(args.flag, on),
+            cwd=str(REPO),
+        )
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@RESULT ")]
+        if lines:
+            rec = json.loads(lines[-1][len("@@RESULT ") :])
+        else:
+            tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
+            rec = {"error": " | ".join(tail)[:400], "returncode": proc.returncode}
+    except subprocess.TimeoutExpired:
+        rec = {
+            "status": "killed",
+            "objective": None,
+            "bound": None,
+            "wall": args.time_limit + args.grace,
+        }
+    rec.update(
+        phase="solve",
+        flag=args.flag,
+        instance=name,
+        method=method,
+        arm=arm,
+        rep=rep,
+        load1=round(load, 2),
+        elapsed=round(time.perf_counter() - t0, 2),
+        time_limit=args.time_limit,
+        jobs=args.jobs,
+    )
+    rec["verdict"] = gb.score(rec, gb_oracle().get(name))
+    return rec
+
+
+def _unfired(rec: dict, stat_key: str) -> bool:
+    """True when an ON solve proves the flag never acted: it completed, and its
+    process-wide counter reads 0. Then OFF runs the same sub-NLP sequence, so the
+    cell has no channel through which the flag could change it."""
+    stats = rec.get("stats")
+    return (
+        rec.get("arm") == "on"
+        and "error" not in rec
+        and rec.get("status") != "killed"
+        and isinstance(stats, dict)
+        and stat_key in stats
+        and stats[stat_key] == 0
+    )
+
+
+def phase_solve(args, names: list[str]) -> int:
     fired = _fired(args)
+    rows = _rows(args.out)
     done = {
-        (r["instance"], r["method"], r["arm"], r["rep"])
-        for r in _rows(args.out)
-        if r.get("phase") == "solve"
+        (r["instance"], r["method"], r["arm"], r["rep"]) for r in rows if r.get("phase") == "solve"
     }
     plan = [(n, m) for n in names for m in FLAG_METHODS[args.flag] if args.all or (n, m) in fired]
     if not plan:
         print("nothing to solve: no instance fired (run --phase fire first)", flush=True)
         return 1
-    print(f"solve: {len(plan)} (instance, method) pairs x 2 arms x {args.reps} reps", flush=True)
-    for rep in range(args.reps):
-        for i, (name, method) in enumerate(plan):
-            order = (False, True) if (rep + i) % 2 == 0 else (True, False)
+    stat_key = _FIRE_STATS.get(args.flag)
+    if args.skip_unfired and stat_key is None:
+        print(f"--skip-unfired needs a fire counter; {args.flag} has none", flush=True)
+        return 2
+    print(
+        f"solve: {len(plan)} (instance, method) pairs x 2 arms x {args.reps} reps, "
+        f"jobs={args.jobs}, skip_unfired={args.skip_unfired}",
+        flush=True,
+    )
+    lock = threading.Lock()
+
+    def _emit(rec: dict) -> None:
+        with lock:
+            _append(args.out, rec)
+            print(
+                f"solve rep{rec['rep']} {rec['instance']:34s} {rec['method']:6s} "
+                f"{rec['arm']:3s} {rec['verdict']:18s} status={rec.get('status')} "
+                f"obj={rec.get('objective')} bound={rec.get('bound')} "
+                f"nodes={rec.get('node_count')} wall={rec.get('wall')} "
+                f"acted={(rec.get('stats') or {}).get(stat_key) if stat_key else None} "
+                f"load={rec['load1']}",
+                flush=True,
+            )
+
+    def _cell(i: int, name: str, method: str) -> None:
+        # The arms of one cell run sequentially and interleaved, so --jobs never puts
+        # a cell's ON and OFF solves under different foreign load by construction.
+        prior = [
+            r
+            for r in rows
+            if r.get("phase") == "solve" and r["instance"] == name and r["method"] == method
+        ]
+        for rep in range(args.reps):
+            if args.skip_unfired:
+                # ON first in rep 0: it is the probe that decides whether the cell can
+                # be affected at all.
+                order = (
+                    (True, False)
+                    if rep == 0
+                    else ((False, True) if (rep + i) % 2 else (True, False))
+                )
+            else:
+                order = (False, True) if (rep + i) % 2 == 0 else (True, False)
             for on in order:
                 arm = "on" if on else "off"
-                if (name, method, arm, rep) in done:
-                    continue
-                load = _wait_for_load(args.max_load)
-                t0 = time.perf_counter()
-                cmd = [
-                    sys.executable,
-                    "-u",
-                    str(HERE.parent / "gdp_baseline.py"),
-                    "--worker",
-                    name,
-                    f"discopt-{method}",
-                    str(args.time_limit),
-                ]
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=args.time_limit + args.grace,
-                        env=_env(args.flag, on),
-                        cwd=str(REPO),
-                    )
-                    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@RESULT ")]
-                    if lines:
-                        rec = json.loads(lines[-1][len("@@RESULT ") :])
-                    else:
-                        tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
-                        rec = {"error": " | ".join(tail)[:400], "returncode": proc.returncode}
-                except subprocess.TimeoutExpired:
-                    rec = {
-                        "status": "killed",
-                        "objective": None,
-                        "bound": None,
-                        "wall": args.time_limit + args.grace,
-                    }
-                rec.update(
-                    phase="solve",
-                    flag=args.flag,
-                    instance=name,
-                    method=method,
-                    arm=arm,
-                    rep=rep,
-                    load1=round(load, 2),
-                    elapsed=round(time.perf_counter() - t0, 2),
-                    time_limit=args.time_limit,
-                )
-                rec["verdict"] = gb.score(rec, gb_oracle().get(name))
-                _append(args.out, rec)
-                print(
-                    f"solve rep{rep} {name:34s} {method:6s} {arm:3s} {rec['verdict']:18s} "
-                    f"status={rec.get('status')} obj={rec.get('objective')} "
-                    f"bound={rec.get('bound')} nodes={rec.get('node_count')} "
-                    f"wall={rec.get('wall')} load={rec['load1']}",
-                    flush=True,
-                )
+                if (name, method, arm, rep) not in done:
+                    rec = _solve_one(args, name, method, on, rep)
+                    _emit(rec)
+                    prior.append(rec)
+                if args.skip_unfired and rep == 0 and on:
+                    probe = [r for r in prior if r["arm"] == "on" and r["rep"] == 0]
+                    if probe and _unfired(probe[-1], stat_key):
+                        with lock:
+                            print(
+                                f"skip {name:34s} {method:6s}: ON reports {stat_key}=0, "
+                                "same code path as OFF; no further solves",
+                                flush=True,
+                            )
+                        return
+
+    if args.jobs <= 1:
+        for i, (name, method) in enumerate(plan):
+            _cell(i, name, method)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            futs = [ex.submit(_cell, i, n, m) for i, (n, m) in enumerate(plan)]
+            for f in concurrent.futures.as_completed(futs):
+                f.result()  # re-raise; a crashed cell is never silent
     return 0
 
 
@@ -378,7 +455,18 @@ def report(args) -> int:
         f"{'OFF wall':>9s} {'ON wall':>9s} {'OFF nodes':>9s} {'ON nodes':>9s}  verdicts"
     )
     walls_off, walls_on = [], []
+    stat_key = _FIRE_STATS.get(args.flag)
+    skipped: list[tuple[str, str]] = []
     for (name, method), arms in sorted(cells.items()):
+        if not arms["off"]:
+            # --skip-unfired stopped this cell after an ON solve whose counter read 0.
+            # Anything else with no OFF row is an incomplete run, never a comparison.
+            if stat_key and arms["on"] and all(_unfired(r, stat_key) for r in arms["on"]):
+                skipped.append((name, method))
+            else:
+                print(f"{name:34s} {method:6s} INCOMPLETE: ON rows without an OFF arm")
+                lost.append((name, method, -1, -1))
+            continue
         s_off = sum(r["verdict"] == "solved" for r in arms["off"])
         s_on = sum(r["verdict"] == "solved" for r in arms["on"])
         n = min(len(arms["off"]), len(arms["on"]))
@@ -401,10 +489,14 @@ def report(args) -> int:
             f"{_f(w_off):>9s} {_f(w_on):>9s} {_f(med('node_count', arms['off'])):>9s} "
             f"{_f(med('node_count', arms['on'])):>9s}  {verdicts}"
         )
+    if skipped:
+        print(
+            f"\nskipped (ON reports {stat_key}=0, OFF runs the same code; still checked "
+            f"above for incorrect/bound-crossing): {len(skipped)} cells: {skipped}"
+        )
     # A solve-time flag has no lowering to fingerprint, so the fire phase marks every
     # instance; whether the flag acted is read from the solve's own counter where the
     # solver reports one (CLAUDE.md section 6: count where the probe fired).
-    stat_key = _FIRE_STATS.get(args.flag)
     if stat_key is not None:
         on_rows = [r for r in solve if r["arm"] == "on"]
         acted = sorted(
@@ -471,6 +563,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--fire-timeout", type=float, default=900.0)
     ap.add_argument("--all", action="store_true", help="also solve instances it did not fire on")
+    ap.add_argument(
+        "--skip-unfired",
+        action="store_true",
+        help="solve-time flags with a fire counter: run each cell's rep-0 ON solve "
+        "first and stop the cell when the counter reads 0 (OFF would run the same code)",
+    )
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="cells solved concurrently; a cell's own arms stay sequential",
+    )
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args(argv)
     if args.report:
