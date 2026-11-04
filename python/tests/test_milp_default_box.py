@@ -100,3 +100,30 @@ def test_loa_proposes_a_configuration_when_its_master_is_unbounded(monkeypatch):
     assert calls["feasibility_resolves"] >= 1
     assert r.objective == pytest.approx(1.0, abs=1e-6)
     assert r.bound is None or r.bound <= 1.0 + 1e-6
+
+
+# ── HiGHS master over the default box (highs-parity P0.4) ──────────────────
+
+
+@pytest.mark.parametrize("entry", ["solve_milp", "solve_milp_with_lazy_cuts"])
+def test_highs_master_no_false_optimum(entry):
+    """The HiGHS master certified a false optimum over the default box.
+
+    Found by the highs-parity P0.4 master replay: ``milp_highs.solve_milp`` returned
+    OPTIMAL with bound 41573.26 (primary 41595.42; the #1634 presolve-free cross-solve
+    41573.26, so the cross-check confirmed it) against the true 41420.272, a point the
+    Rust engine verifies feasible. Every HiGHS master solve now opens the default box.
+    """
+    pytest.importorskip("highspy")
+    from discopt.solvers import milp_highs
+
+    c, a_ub, b_ub, bounds, integ = _load()
+    # The lazy master with a separator that accepts every point is the plain master.
+    extra = {"lazy_callback": lambda _x: []} if entry == "solve_milp_with_lazy_cuts" else {}
+    r = getattr(milp_highs, entry)(
+        c, A_ub=a_ub, b_ub=b_ub, bounds=bounds, integrality=integ, time_limit=60.0, **extra
+    )
+    tol = 1e-6 * abs(_TRUE_OPT)
+    assert r.bound is not None and r.bound <= _TRUE_OPT + tol, (r.status, r.bound)
+    assert r.status == SolveStatus.OPTIMAL, (r.status, r.objective, r.bound)
+    assert r.objective == pytest.approx(_TRUE_OPT, abs=tol)

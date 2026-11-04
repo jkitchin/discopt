@@ -140,28 +140,25 @@ def test_highs_master_bound_survives_the_default_box():
         integrality=np.array([1, 0], dtype=np.int32),
         gap_tolerance=1e-4,
     )
-    # The precondition this test guards: the presolve-free solve over the
-    # declared box is wrong. If a HiGHS upgrade fixes it, the test still passes
-    # below but no longer exercises the retry.
+    # HiGHS over the declared box called this feasible master infeasible with
+    # presolve off. Every HiGHS solve now opens the default box (highs-parity P0.4,
+    # milp_highs._hand_highs_col_bounds), so neither solve sees that scale.
     declared = _solve_milp_once(time_limit=10.0, presolve=False, mip_start=None, **kw)
+    assert declared.status != SolveStatus.INFEASIBLE
     r = solve_milp(time_limit=10.0, **kw)
-    diag = r.callback_stats["presolve_cross_check"]
-    if declared.status == SolveStatus.INFEASIBLE:
-        assert diag.get("default_box_opened") is True
     assert r.status == SolveStatus.OPTIMAL
     assert r.bound is not None and r.bound == pytest.approx(0.0, abs=1e-9)
 
 
 def test_default_box_opening_keeps_declared_sides():
     from discopt.constants import DEFAULT_VARIABLE_BOUND
-    from discopt.solvers.milp_highs import _default_box_opened
+    from discopt.solvers.milp_highs import _hand_highs_col_bounds
     from discopt.solvers.milp_simplex import _INF
 
     B = DEFAULT_VARIABLE_BOUND
-    kw = {"c": np.zeros(4), "bounds": [(-B, B), (-5.0, B), (0.0, 1e15), (-np.inf, 3.0)]}
-    got = _default_box_opened(kw)
-    assert got == [(-_INF, _INF), (-5.0, _INF), (0.0, 1e15), (-np.inf, 3.0)]
-    assert _default_box_opened({"c": np.zeros(1), "bounds": [(0.0, 1e15)]}) is None
+    lb, ub = _hand_highs_col_bounds([(-B, B), (-5.0, B), (0.0, 1e15), (-np.inf, 3.0)], 4)
+    assert lb.tolist() == [-_INF, -5.0, 0.0, -np.inf]
+    assert ub.tolist() == [_INF, _INF, 1e15, 3.0]
 
 
 # ── LOA re-solves a configuration its subproblem cap stopped ──────────────
