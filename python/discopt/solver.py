@@ -37608,7 +37608,7 @@ def _highs_takes_pure_lp_milp(
     """
     if backend is None:
         backend = _lp_milp_backend()
-    if backend != "highs" or solver_name == "gurobi":
+    if backend not in _pure_route_presolve_skip_backends() or solver_name == "gurobi":
         return False
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
@@ -37623,6 +37623,19 @@ def _highs_takes_pure_lp_milp(
         and not lagrangian_bound
         and _milp_is_exactly_linear(model)
     )
+
+
+def _pure_route_presolve_skip_backends() -> tuple[str, ...]:
+    """Backends whose pure LP/MILP route skips discopt's root presolve.
+
+    HiGHS since #1229 (it presolves itself; plan §12 H5). The Rust route since
+    highs-parity P2.0: P2.1 found root presolve the largest single piece of the Rust LP
+    route's wall (up to 4.8 s on a 13 ms LP), and skipping it left all 65 L/M/INF
+    instances' status, certificate and objective identical (0 incorrect) while the Rust
+    arm's total wall fell 190.6 -> 137.4 s (``docs/dev/highs-parity-plan.md`` P2.0). The
+    declared box stays valid, merely looser, so skipping is never unsound.
+    """
+    return ("highs", "rust")
 
 
 def _milp_is_exactly_linear(model: Model) -> bool:

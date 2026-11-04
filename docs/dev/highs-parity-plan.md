@@ -757,6 +757,23 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   #1537 / #1611 / #1869 files and the route tests pass. Kill: any changed status,
   certificate or bound → root-cause; a piece that cannot be made bound-neutral is dropped
   from the task and recorded. Regime: bound-neutral (H arm exact; R arm exact).
+  **Progress (2026-11-04):**
+  - **(i) done.** `_pure_route_presolve_skip_backends()` = `("highs", "rust")`. L/M/INF,
+    Rust arm, 1 round, 20 s: **65/65 identical status, certificate and objective** to
+    P0.3, 0 incorrect; Rust arm total wall **190.6 → 137.4 s (−28 %)**. Node counts
+    unchanged on every certified instance; the 5 M instances whose count moved are
+    time-limited/uncertified ones that now get more nodes into the same 20 s (`2122`
+    127 → 247, `gesa2`, `gt2`, `p0548`, `sp150x300d`). Data `p2.0/`. Test
+    `test_highs_parity_p20_rust_route_presolve.py`; `test_highs_route_skips_discopt_root_
+    presolve` now uses the native route as its positive control.
+  - **(iii) re-scoped by measurement:** `_declared_box_tightening` is **not** a no-op on
+    linear models: on `scrs8` it tightens 677 bounds (`defined_variable_forward`,
+    `separable_quadratic_upper_bound`), and it is what proves `gams10am` infeasible in
+    presolve on both arms (P0.1). Skipping it is not bound-neutral, so (iii) becomes "make
+    the pass cheaper with identical outputs" (standalone it costs 0.20–0.29 s on `scrs8`,
+    ~1.1 s inside a solve: the extra is not import cost, warm repeat solves measure the
+    same).
+  - **(ii) open:** the post-solve re-check's evaluator build (up to 5 s, both routes).
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
