@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
+from discopt.ml.activations import symbolic
 from discopt.ml.bounds import LayerBounds, propagate_bounds, scaled_output_bounds
 from discopt.ml.formulations.full_space import _family_name
 from discopt.ml.network import Activation, NetworkDefinition
@@ -23,12 +24,9 @@ _SUPPORTED = {
     Activation.SIGMOID,
     Activation.TANH,
     Activation.SOFTPLUS,
-}
-
-_SMOOTH_FN = {
-    Activation.SIGMOID: dm.sigmoid,
-    Activation.TANH: dm.tanh,
-    Activation.SOFTPLUS: dm.softplus,
+    Activation.SQUAREPLUS,
+    Activation.SWISH,
+    Activation.GELU,
 }
 
 
@@ -163,15 +161,19 @@ class ReluBigMFormulation:
             elif layer.activation == Activation.LINEAR:
                 z = zhat
             else:
-                # Smooth activation (sigmoid, tanh, softplus)
+                # Smooth activation (sigmoid, tanh, softplus, squareplus, swish,
+                # gelu); the post-activation box is the exact interval image,
+                # including the interior minimum of the non-monotone ones.
                 z = m.continuous(
                     f"{pfx}_z_{k}",
                     shape=(n_out,),
                     lb=bounds.post_lb,
                     ub=bounds.post_ub,
                 )
-                act_fn = _SMOOTH_FN[layer.activation]
-                m.subject_to(z == act_fn(zhat), name=_family_name(f"{pfx}_act_{k}", n_out))
+                m.subject_to(
+                    z == symbolic(layer.activation, zhat, layer.beta),
+                    name=_family_name(f"{pfx}_act_{k}", n_out),
+                )
 
             prev_z = z
             # The box the next layer consumes: this layer's post-activation

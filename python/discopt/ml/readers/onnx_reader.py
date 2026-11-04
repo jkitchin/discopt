@@ -8,12 +8,32 @@ import numpy as np
 
 from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 
+# ONNX `Softplus` has no beta attribute (it is always log(1 + exp(x))), so it
+# maps to beta = 1 exactly. torch exports `nn.Softplus(beta != 1)` as
+# Mul -> Softplus -> Div, which this sequential reader refuses at the `Mul`
+# rather than reading as beta = 1 (#2135).
 _ONNX_ACTIVATION_MAP = {
     "Relu": Activation.RELU,
     "Sigmoid": Activation.SIGMOID,
     "Tanh": Activation.TANH,
     "Softplus": Activation.SOFTPLUS,
+    "Gelu": Activation.GELU,
 }
+
+
+def _onnx_activation(node) -> Activation:
+    """Activation of an activation node, refusing attributes discopt cannot embed."""
+    if node.op_type == "Gelu":
+        for attr in node.attribute:
+            if attr.name == "approximate":
+                approx = attr.s.decode() if isinstance(attr.s, bytes) else str(attr.s)
+                if approx != "none":
+                    raise ValueError(
+                        f"ONNX Gelu with approximate={approx!r} is not supported; only "
+                        f"the exact erf form is embedded."
+                    )
+    return _ONNX_ACTIVATION_MAP[node.op_type]
+
 
 _STRUCTURAL_OPS = ("Flatten", "Reshape", "Identity", "Dropout")
 
@@ -25,7 +45,9 @@ def load_onnx(
     """Load an ONNX model into a :class:`NetworkDefinition`.
 
     Supports strictly *sequential* feedforward networks with dense layers
-    (Gemm/MatMul) and standard activations (ReLU, Sigmoid, Tanh, Softplus).
+    (Gemm/MatMul) and standard activations (ReLU, Sigmoid, Tanh, Softplus,
+    exact Gelu). ONNX ``Softplus`` carries no beta, so it is embedded at
+    ``beta = 1``.
     The parser tracks the single data tensor threading through the graph and
     refuses (rather than silently mis-reads) any branched / residual topology,
     input-transposed Gemm, mis-oriented MatMul, or non-constant weight.
@@ -95,7 +117,7 @@ def load_onnx(
             if i < len(nodes) and nodes[i].op_type in _ONNX_ACTIVATION_MAP:
                 act_node = nodes[i]
                 _check_data_input(act_node, current, act_node.op_type)
-                activation = _ONNX_ACTIVATION_MAP[act_node.op_type]
+                activation = _onnx_activation(act_node)
                 current = act_node.output[0]
                 i += 1
             else:

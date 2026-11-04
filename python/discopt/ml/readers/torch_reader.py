@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
@@ -22,6 +24,57 @@ def _linear_wb(linear) -> tuple[np.ndarray, np.ndarray]:
     return W, b
 
 
+# `nn.Softplus(beta, threshold)` returns `x` exactly once `beta * x > threshold`
+# instead of `log(1 + exp(beta x)) / beta`. The largest gap between the two is
+# at the switch point, `log1p(exp(-threshold)) / beta` (2.1e-9 / beta at torch's
+# default threshold of 20). discopt embeds the smooth function; it refuses a
+# threshold whose linear tail would differ from it by more than this.
+_SOFTPLUS_THRESHOLD_TOL = 1e-8
+
+
+def _torch_activation(child, nn) -> tuple[Activation, float] | None:
+    """``(Activation, beta)`` for a torch activation module, or ``None``.
+
+    Reads every parameter that changes the function. A parameter discopt cannot
+    represent raises instead of being dropped: an ignored ``beta`` embeds a
+    different function and the model still solves -- to the wrong answer
+    (#2135).
+    """
+    t = type(child)
+    if t is nn.ReLU:
+        return Activation.RELU, 1.0
+    if t is nn.Sigmoid:
+        return Activation.SIGMOID, 1.0
+    if t is nn.Tanh:
+        return Activation.TANH, 1.0
+    if t is nn.SiLU:
+        return Activation.SWISH, 1.0
+    if t is nn.Softplus:
+        beta = float(child.beta)
+        threshold = float(child.threshold)
+        if not (math.isfinite(beta) and beta > 0.0):
+            raise ValueError(f"nn.Softplus with beta={beta!r} is not supported (need beta > 0)")
+        gap = math.log1p(math.exp(-threshold)) / beta if threshold < 700 else 0.0
+        if gap > _SOFTPLUS_THRESHOLD_TOL:
+            raise ValueError(
+                f"nn.Softplus(beta={beta}, threshold={threshold}) switches to its linear "
+                f"tail where it differs from the smooth softplus by up to {gap:.3g}; "
+                f"discopt embeds only the smooth function. Use a threshold with "
+                f"log1p(exp(-threshold)) / beta <= {_SOFTPLUS_THRESHOLD_TOL:g} "
+                f"(torch's default threshold=20 qualifies)."
+            )
+        return Activation.SOFTPLUS, beta
+    if t is nn.GELU:
+        approximate = getattr(child, "approximate", "none")
+        if approximate != "none":
+            raise ValueError(
+                f"nn.GELU(approximate={approximate!r}) is not supported; only the exact "
+                f"erf form (approximate='none') is embedded."
+            )
+        return Activation.GELU, 1.0
+    return None
+
+
 def load_torch_sequential(
     model,
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
@@ -30,7 +83,8 @@ def load_torch_sequential(
 
     Supports models composed of ``nn.Linear`` layers interleaved with
     activation layers (``nn.ReLU``, ``nn.Sigmoid``, ``nn.Tanh``,
-    ``nn.Softplus``).
+    ``nn.Softplus`` -- its ``beta`` is carried into ``DenseLayer.beta`` --,
+    ``nn.SiLU`` and exact ``nn.GELU``).
 
     Parameters
     ----------
@@ -52,13 +106,6 @@ def load_torch_sequential(
             "The `nn` extra is the ONNX toolchain only and does not include torch."
         ) from exc
 
-    _TORCH_ACT_MAP = {
-        nn.ReLU: Activation.RELU,
-        nn.Sigmoid: Activation.SIGMOID,
-        nn.Tanh: Activation.TANH,
-        nn.Softplus: Activation.SOFTPLUS,
-    }
-
     layers: list[DenseLayer] = []
     pending_linear = None
 
@@ -70,11 +117,12 @@ def load_torch_sequential(
                 layers.append(DenseLayer(W, b, Activation.LINEAR))
             pending_linear = child
 
-        elif type(child) in _TORCH_ACT_MAP:
+        elif (act := _torch_activation(child, nn)) is not None:
             if pending_linear is None:
                 raise ValueError(f"Activation {type(child).__name__} without preceding Linear")
             W, b = _linear_wb(pending_linear)
-            layers.append(DenseLayer(W, b, _TORCH_ACT_MAP[type(child)]))
+            activation, beta = act
+            layers.append(DenseLayer(W, b, activation, beta=beta))
             pending_linear = None
 
         elif isinstance(child, (nn.Flatten, nn.Dropout, nn.Identity)):

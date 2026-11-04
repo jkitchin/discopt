@@ -19,6 +19,14 @@ It spans two regimes of one hybrid-model story:
   bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
   ``from_definition()`` — train, freeze, then optimize.
 
+Both regimes share one activation table (:mod:`discopt.ml.activations`):
+linear, ReLU (frozen only), sigmoid, tanh, and the smooth ReLU-like softplus,
+squareplus, Swish/SiLU and GELU. The last four take a sharpness ``beta``
+(``DenseLayer(W, b, Activation.SOFTPLUS, beta=10.0)``, meaning
+``f(z) = g(beta * z) / beta``). Swish and GELU are not monotone, and
+bound propagation takes the interval image of each activation (including the
+interior minimum of the non-monotone ones).
+
 The trainable regime is open: any object satisfying the :class:`Surrogate`
 protocol (a callable ``__call__(x) -> expression`` plus ``parameters`` /
 ``n_parameters`` / ``l2_penalty`` / ``initial_values``) plugs into the hybrid
