@@ -37,20 +37,20 @@ OFF/OFF −8359.00.
 
 ## Probes
 
+Both flags these probes were built to decide, `DISCOPT_RUST_MILP_COEF_TIGHTEN` and
+`DISCOPT_RUST_MILP_TABLEAU_CMIR`, were **retired by #2136** (gate doc, section "#2136
+decisions"). The probes that only toggled them (`prof2.py`, `grid2x2.py`, `rustgrid.py`,
+`replay_step1.py`, `replay_step2.py`, `nsentry.py`, `ct_seed.py`, `mk_rustcoef.py`) were
+deleted with them; they are in git history at `3eba9bf`. What remains is reusable:
+
 | script | measures | gate-doc section |
 |---|---|---|
-| `prof2.py <coef 0/1> <root_cuts> <rounds> <select 0/1> <cmir 0/1>` | Rust root bound on the MTP replay at `max_nodes=2`, with the cut counters | step 2 grid |
-| `grid2x2.py` | the coef × c-MIR 2×2 grid on MTP; asserts every c-MIR arm separated | step 2 grid |
-| `rustgrid.py` | the Rust cut-loop budget grid (GMI only) on MTP | "the loop is the lever" |
-| `replay.py --flag {coef,tabcmir} [--profile strong] [--base ENV=V] T out.jsonl pkl...` | flag OFF vs ON, interleaved, judged by `oracle.judge` against the best verified point (arms + HiGHS) | §5 differential |
-| `replay_step1.py T out.jsonl pkl...` | `replay.py --flag coef` (captured options) | step 1 panel |
-| `replay_step2.py T out.jsonl pkl...` | `replay.py --flag tabcmir --profile strong --base DISCOPT_RUST_MILP_COEF_TIGHTEN=1` | step 2 differential |
-| `cutgrid.py out.jsonl pkl...` | root gap closed per cut-loop budget (GMI + cover, coef ON) over every capture | step 5 cut-loop budget |
-| `nsentry.py out.jsonl pkl...` | NS default-box entry experiment (killed, 0/36 at default) | NS default-box |
+| `replay.py --env NAME --fire-ctr CTR [--profile captured\|strong\|big] [--base ENV=V] T out.jsonl pkl...` | any Rust-MILP flag OFF vs ON on the captures, interleaved, judged by `oracle.judge` against the best verified point (arms + HiGHS); the ON arm's firing counter is recorded per row | #2136 differentials |
+| `oracle.py` | the verdict rules (`python/tests/test_2136_g32_oracle.py`) | #2136 oracle |
+| `cutgrid.py out.jsonl pkl...` | root gap closed per cut-loop budget (GMI + cover) over every capture | step 5 cut-loop budget |
 | `hugechk.py pkl...` | columns at the `±9.999e19` default box per input | NS default-box |
-| `ct_seed.py` | coef tightening with a seeded incumbent | step 1 |
-| `coef_entry.py`, `mk_rustcoef.py`, `rtight.py`, `feas_chk.py`, `mps2pkl.py` | step 1 entry experiment: FBBT + coef tightening on the MTP root LP, and HiGHS-side checks | step 1 entry |
-| `tab_cmir_entry2.py <pkl> <cmir|cmir_novub> <rounds>`, `proto_abl.py` | the Python tableau c-MIR prototype and ablations; every cut is checked to keep the HiGHS-optimal point; env `CAP` = cuts per round | step 2 entry |
+| `coef_entry.py`, `rtight.py`, `feas_chk.py`, `mps2pkl.py` | step 1 entry experiment on the HiGHS side (FBBT + coefficient tightening of the MTP root LP in Python) | step 1 entry |
+| `tab_cmir_entry2.py <pkl> <cmir\|cmir_novub> <rounds>`, `proto_abl.py` | the Python tableau c-MIR prototype and ablations; every cut is checked to keep the HiGHS-optimal point; env `CAP` = cuts per round | step 2 entry |
 
 ## The step-2 replay oracle defect (fixed 2026-11-04, #2136)
 
@@ -81,10 +81,10 @@ Both halves of the diagnosis are now resolved:
    `notes`, not BAD rows. `python/tests/test_2136_g32_oracle.py` pins the rules, including
    the row above.
 3. **`replay_step2.py` did not measure step 2.** It toggled `COEF_TIGHTEN`, and its
-   `cmir_cuts=True` is #2107's aggregated c-MIR, not the tableau separator. Both replays
-   are now wrappers over `replay.py --flag {coef,tabcmir}`, which asserts the flag's firing
-   counter on each arm; `replay_step2.py` toggles `DISCOPT_RUST_MILP_TABLEAU_CMIR` with
-   coefficient tightening held ON in both arms.
+   `cmir_cuts=True` is #2107's aggregated c-MIR, not the tableau separator. The #2136
+   panels ran through `replay.py`, which toggles the named flag and records its firing
+   counter on each arm (step 2: `DISCOPT_RUST_MILP_TABLEAU_CMIR` with coefficient
+   tightening held ON in both arms).
 
 ## Counter names
 

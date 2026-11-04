@@ -1963,53 +1963,6 @@ fn solve_milp_node_search(
     );
     tm.initialize();
 
-    // #1917 G3.2: big-M coefficient tightening (HiGHS `HPresolve::rowPresolve`
-    // `strengthenCoefs`; SCIP `consdataTightenCoefs`), default OFF behind
-    // `DISCOPT_RUST_MILP_COEF_TIGHTEN`. It runs on the presolved box, after the
-    // lattice and the tree read the original rows. Every point the tree can
-    // reach lies in that box, where the tightened rows keep the integer
-    // projection exactly and the LP region only shrinks (proof in
-    // `coef_tighten`). Only values change, never the CSC structure, and a
-    // tightened row's slack is never larger than the original's, so the
-    // presolved slack bounds stay valid.
-    let b_tight: Vec<f64>;
-    let b: &[f64] = if crate::bnb::coef_tighten::coef_tighten_enabled() {
-        let mut bt = b.to_vec();
-        let st = crate::bnb::coef_tighten::tighten_big_m_coefficients(
-            &mut csc_w,
-            m,
-            n,
-            ns,
-            &mut bt,
-            &base_l,
-            &base_u,
-            l,
-            u,
-            &is_int_full,
-        );
-        crate::profile::incr(crate::profile::Ctr::MilpCoefTightenRuns);
-        crate::profile::incr_by(
-            crate::profile::Ctr::MilpCoefTightenRows,
-            st.rows_tightened.len() as u64,
-        );
-        crate::profile::incr_by(
-            crate::profile::Ctr::MilpCoefTightenCoefs,
-            st.coefs_tightened as u64,
-        );
-        crate::profile::incr_by(
-            crate::profile::Ctr::MilpCoefTightenSkipUnbounded,
-            st.rows_skipped_unbounded as u64,
-        );
-        crate::profile::incr_by(
-            crate::profile::Ctr::MilpCoefTightenSkipPrecision,
-            st.rows_skipped_precision as u64,
-        );
-        b_tight = bt;
-        &b_tight
-    } else {
-        b
-    };
-
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
     // columns; structural columns [0, ns) are untouched, so the tree's
     // structural bounds still apply unchanged.
@@ -2094,9 +2047,8 @@ fn solve_milp_node_search(
     }
 
     // --- Caller-seeded incumbent: validate, then inject before the search ---
-    // Runs on the pre-cut matrix (original rows, or their coefficient-tightened
-    // form under `DISCOPT_RUST_MILP_COEF_TIGHTEN`, which agrees with the original at
-    // every integral point of the box) with the presolve-tightened bounds (FBBT
+    // Runs on the pre-cut matrix (the original rows) with the presolve-tightened
+    // bounds (FBBT
     // never cuts a feasible point, so a genuinely feasible seed survives the
     // tightening). A seed that cannot be proven feasible is dropped silently —
     // seeding is an optimization and must never be able to produce a false
@@ -2281,30 +2233,6 @@ fn solve_milp_node_search(
     // usable. See `substitute_slacks_to_structural`.
     let (m_base0, n_base0) = (m_w, n_w);
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
-    // #1917 G3.2 step 2: tableau c-MIR, default OFF behind
-    // `DISCOPT_RUST_MILP_TABLEAU_CMIR`. Variable bounds are read once from the
-    // base rows (after coefficient tightening, when that is on), before any cut
-    // is appended. Root separation only.
-    let cmir_on = opts.root_cuts > 0 && crate::lp::tableau_cmir::tableau_cmir_enabled();
-    let cmir_vbs: Vec<Vec<crate::lp::tableau_cmir::VarBound>> = if cmir_on {
-        let v = crate::lp::tableau_cmir::detect_variable_bounds(
-            &csc_w,
-            m_base0,
-            n_base0,
-            ns,
-            &b_w,
-            &l_w,
-            &u_w,
-            &is_int_full,
-        );
-        crate::profile::incr_by(
-            crate::profile::Ctr::SepCmirVbFound,
-            v.iter().map(|x| x.len() as u64).sum(),
-        );
-        v
-    } else {
-        Vec::new()
-    };
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
     if opts.root_cuts > 0 {
@@ -2484,24 +2412,6 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                     1e7,
                 ));
-            }
-            if cmir_on {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepTabCmir);
-                let (cm, _st) = crate::lp::tableau_cmir::separate_tableau_cmir(
-                    &csc_w,
-                    m_w,
-                    n_w,
-                    &l_w,
-                    &u_w,
-                    &b_w,
-                    &root.basis,
-                    &is_int_full,
-                    &root.x,
-                    &cmir_vbs,
-                    opts.simplex.tol,
-                    1e7,
-                );
-                cuts.extend(cm);
             }
             // Rewrite every separated cut over structural columns only, before
             // anything downstream looks at it. Doing it here (rather than at

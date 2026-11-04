@@ -1,19 +1,21 @@
-"""#2136 G3.2 differential replay: captured Rust-MILP inputs, flag OFF vs ON
-(interleaved per instance), judged by ``oracle.judge`` against the best independently
+"""Differential replay of captured Rust-MILP inputs (#2136): one environment flag OFF vs
+ON, interleaved per instance, judged by ``oracle.judge`` against the best independently
 verified point across both arms and HiGHS (no solver's status is trusted).
 
-usage: replay.py --flag {coef,tabcmir} [--profile {captured,strong}] [--base ENV=V ...]
-                 T out.jsonl pkl...
+usage: replay.py --env NAME [--fire-ctr COUNTER] [--profile {captured,strong,big}]
+                 [--base ENV=V ...] T out.jsonl pkl...
 
-``--flag coef``    toggles DISCOPT_RUST_MILP_COEF_TIGHTEN (step 1).
-``--flag tabcmir`` toggles DISCOPT_RUST_MILP_TABLEAU_CMIR (step 2). Coefficient tightening
-                   is its measured precondition, so pass ``--base
-                   DISCOPT_RUST_MILP_COEF_TIGHTEN=1`` to hold it ON in both arms.
+``--env``       the flag under test (``=0`` OFF, ``=1`` ON).
+``--fire-ctr``  a ``DISCOPT_PROFILE`` counter that is zero on the OFF arm and nonzero when
+                the mechanism ran on the ON arm. Without it no row can show it fired, so the
+                run fails (CLAUDE.md section 6).
 ``--profile strong`` is the root profile of the gate doc: 200 cuts, 10 rounds, selection,
-                   #2107's aggregated c-MIR on. ``captured`` keeps the captured options.
+                #2107's aggregated c-MIR on. ``big`` is the same with 1000 total cuts.
+                ``captured`` keeps the captured options.
 
-The OFF arm asserts its flag's firing counter is zero; each row records whether the ON
-arm fired (``fired``), so a row whose ON arm never ran the mechanism is visible as such.
+This is the instrument #2136 used to retire DISCOPT_RUST_MILP_COEF_TIGHTEN and
+DISCOPT_RUST_MILP_TABLEAU_CMIR (docs/dev/g32-tableau-cmir-entry-gate.md); neither exists any
+more. The OFF arm asserts its counter is zero; each row records whether the ON arm fired.
 Exits non-zero when no row was judged or no row fired."""
 
 from __future__ import annotations
@@ -37,33 +39,26 @@ import numpy as np  # noqa: E402
 import oracle  # noqa: E402
 
 _so = open(R.__file__, "rb").read()
-for marker in (b"SepTabCmir", b"MilpCoefTightenRuns", b"MilpIncumbentMisvaluedDecert"):
-    assert marker in _so, f"marker {marker!r} absent from {R.__file__}"
+assert b"MilpIncumbentMisvaluedDecert" in _so, f"marker absent from {R.__file__}"
 
-FLAGS = {
-    "coef": ("DISCOPT_RUST_MILP_COEF_TIGHTEN", "MilpCoefTightenRuns"),
-    "tabcmir": ("DISCOPT_RUST_MILP_TABLEAU_CMIR", "SepCmirCalls"),
-}
 STRONG = dict(root_cuts=200, cut_rounds=10, cut_select=True, cmir_cuts=True)
-CTRS = (
-    "MilpCoefTightenRuns",
-    "MilpCoefTightenCoefs",
-    "SepCmirCalls",
-    "SepCmirCutsEmitted",
-    "MilpIncumbentMisvaluedDecert",
-)
+# The step-5 candidate (#2136): the strong profile with a 1000-cut total root budget.
+BIG = dict(STRONG, root_cuts=1000)
+BASE_CTRS = ("MilpIncumbentMisvaluedDecert",)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--flag", choices=sorted(FLAGS), required=True)
-    ap.add_argument("--profile", choices=("captured", "strong"), default="captured")
+    ap.add_argument("--env", required=True)
+    ap.add_argument("--fire-ctr", default=None)
+    ap.add_argument("--profile", choices=("captured", "strong", "big"), default="captured")
     ap.add_argument("--base", action="append", default=[], help="ENV=V held in both arms")
     ap.add_argument("T", type=float)
     ap.add_argument("out")
     ap.add_argument("pkls", nargs="+")
     a = ap.parse_args()
-    env, fire_ctr = FLAGS[a.flag]
+    env, fire_ctr = a.env, a.fire_ctr
+    CTRS = BASE_CTRS + ((fire_ctr,) if fire_ctr else ())
     for kv in a.base:
         k, v = kv.split("=", 1)
         assert k != env, "the flag under test cannot be held in --base"
@@ -97,6 +92,8 @@ def main() -> int:
         kw["max_nodes"] = 10**9  # full run, not the captured probe budget
         if a.profile == "strong":
             kw.update(STRONG)
+        elif a.profile == "big":
+            kw.update(BIG)
         if kw.get("initial_incumbent") is not None:
             kw["initial_incumbent"] = np.ascontiguousarray(kw["initial_incumbent"])
         arms = {}
@@ -110,7 +107,7 @@ def main() -> int:
             w = time.perf_counter() - t0
             pc = R.profile_counters_py()
             ctr = {k: pc.get(k, 0) for k in CTRS}
-            if arm == "0":
+            if arm == "0" and fire_ctr:
                 assert ctr[fire_ctr] == 0, (name, arm, ctr)
             # The ON arm can legitimately not fire (e.g. an unbounded root LP ends the
             # cut loop before any separator runs: loa__spectralog). Such a row is
@@ -128,7 +125,7 @@ def main() -> int:
                 "viol": v,
             }
         os.environ.pop(env, None)
-        row["fired"] = arms["arm1"]["ctr"][fire_ctr] >= 1
+        row["fired"] = bool(fire_ctr) and arms["arm1"]["ctr"][fire_ctr] >= 1
         nfired += row["fired"]
         verdict = oracle.judge(h, arms, gap_tol=d["gap_tol"], abs_gap_tol=d.get("abs_gap_tol"))
         row.update(arms)

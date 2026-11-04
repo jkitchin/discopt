@@ -141,8 +141,6 @@ timed_phases!(
     // #2107: the aggregated c-MIR separator in the root cut loop.
     SepCmir,
     SepGomory,
-    // #1917 G3.2 step 2: the tableau c-MIR separator (`DISCOPT_RUST_MILP_TABLEAU_CMIR`).
-    SepTabCmir,
     Augment,
     DiveRepair,
     // A12/RINS: wall time inside the sub-MILP improvement heuristic.
@@ -218,16 +216,6 @@ counters!(
     // flag exists for; a zero here means the lever never engaged and any timing
     // read off that run is measuring nothing (CLAUDE.md §6).
     ObjLatticeSubst,
-    // #1917 G3.2 big-M coefficient tightening (`DISCOPT_RUST_MILP_COEF_TIGHTEN`): solves
-    // that ran the pass, rows it changed, coefficients it replaced. A zero
-    // `MilpCoefTightenCoefs` on an ON arm means the lever never engaged (§6).
-    MilpCoefTightenRuns,
-    MilpCoefTightenRows,
-    MilpCoefTightenCoefs,
-    // Skips: a side at or past EFFECTIVE_INF (default box), and a gap `d` not
-    // known to relative COEF_TOL.
-    MilpCoefTightenSkipUnbounded,
-    MilpCoefTightenSkipPrecision,
     // Caller-supplied MILP seeds that passed / failed `validate_seed_incumbent`.
     MilpSeedValidated,
     MilpSeedRefused,
@@ -692,24 +680,6 @@ counters!(
     // argument. Both are needed: the ratio is meaningless without its denominator.
     SepGomoryCutsEmitted,
     SepGomoryCutNnz,
-    // #1917 G3.2 step 2: tableau c-MIR (`DISCOPT_RUST_MILP_TABLEAU_CMIR`).
-    // `SepCmirCalls` is the denominator (separator invocations); `SepCmirRows` the
-    // tableau rows aggregated; `SepCmirCutsEmitted` what left the separator;
-    // `SepCmirVbSubst` how many variable-bound substitutions those rows used (zero
-    // on an ON arm with VUB structure means the VUB half never engaged, §6);
-    // `SepCmirVbFound` the variable bounds detected on the base rows. Refusals:
-    // a free column in the row, no delta giving a usable fractionality, and the
-    // numerics gates (coefficient or rhs size, a non-finite value) and, counted
-    // apart, the dynamism gate.
-    SepCmirCalls,
-    SepCmirRows,
-    SepCmirCutsEmitted,
-    SepCmirVbSubst,
-    SepCmirVbFound,
-    SepCmirRefusedFree,
-    SepCmirNoDelta,
-    SepCmirRefusedNumerics,
-    SepCmirRefusedDynamism,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,
