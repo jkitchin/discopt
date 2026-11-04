@@ -225,7 +225,9 @@ def _tiny_net(act: Activation, beta: float) -> NetworkDefinition:
     )
 
 
-@pytest.mark.parametrize("strategy", ["full_space", "reduced_space", "relu_bigm"])
+@pytest.mark.parametrize(
+    "strategy", ["full_space", "reduced_space", "relu_bigm", "relu_partition", "relu_extended"]
+)
 @pytest.mark.parametrize(
     "act,beta",
     [

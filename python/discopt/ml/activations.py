@@ -204,11 +204,18 @@ def evaluate(activation: Activation, z, beta: float = 1.0) -> np.ndarray:
 def activation_interval(
     activation: Activation, pre_lb, pre_ub, beta: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Exact interval image ``f([pre_lb, pre_ub])``, elementwise.
+    """Interval image ``f([pre_lb, pre_ub])``, elementwise, exact up to endpoint rounding.
 
     Monotone activations map endpoints to endpoints.  For Swish and GELU the
     lower end is the (slightly lowered) global minimum whenever the interval
     contains the minimizer, and the upper end is the larger endpoint value.
+
+    Endpoint values ``f(lb)``, ``f(ub)`` are computed in ordinary floating point
+    and are **not** rounded outward, exactly as the pre-#2135 bounds code did,
+    so a sampled value can exceed an end by an ulp-scale amount (measured worst
+    8.7e-17 over 2.1e7 samples in review of #2139).  Rounding them outward would
+    loosen every existing sigmoid/tanh/softplus network's bounds and is a
+    separate, bound-changing decision.
     """
     b = check_beta(activation, beta)
     lb = np.asarray(pre_lb, dtype=np.float64)

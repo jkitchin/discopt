@@ -30,9 +30,10 @@ def _apply_activation_bounds(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Interval image of ``[pre_lb, pre_ub]`` under the activation.
 
-    Exact for every supported activation, including the non-monotone SWISH and
-    GELU (whose lower end is the global minimum when the interval contains the
-    minimizer); see :func:`discopt.ml.activations.activation_interval`.
+    Exact (up to endpoint rounding, which is not outward) for every supported
+    activation, including the non-monotone SWISH and GELU, whose lower end is
+    the global minimum when the interval contains the minimizer; see
+    :func:`discopt.ml.activations.activation_interval`.
     """
     return activation_interval(activation, pre_lb, pre_ub, beta)
 
@@ -45,7 +46,7 @@ def propagate_bounds(
     """Propagate input bounds through the network via interval arithmetic.
 
     Uses natural interval extension: split weights into positive and negative
-    parts to compute tight affine bounds, then take the exact interval image of
+    parts to compute tight affine bounds, then take the interval image of
     each activation (monotone or not).
 
     Parameters
