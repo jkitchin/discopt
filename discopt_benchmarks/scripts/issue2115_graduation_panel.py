@@ -6,12 +6,13 @@
 * ``DISCOPT_SUBTOL_NOISE_GLOBAL`` -- the #1595 sub-``tol`` noise test measured
   against ``‖a_j‖₁·‖y‖∞`` (the scale of ``y``'s error), not only a column's own
   terms;
-* ``DISCOPT_LP_DUAL_REBUILD`` (#2142) -- at the warm dual's empty-ratio-test exit,
-  refactorize and tolerate a leaving row within ``1e-7(1+|bound|)`` instead of
-  handing the LP to the cold primal. Run it with ``--deterministic --max-nodes N
-  --assert-unfired-identical``: an instance on which ``DualRebuilds`` is 0 in the
-  ON arm executed the same code as OFF, so (when neither arm reached the wall
-  backstop) its status, objective, bound and node count must be bit-identical.
+* ``DISCOPT_LP_DUAL_REBUILD`` (#2142, retired by its panel) -- at the warm
+  dual's empty-ratio-test exit, refactorize and tolerate a leaving row within
+  ``1e-7(1+|bound|)`` instead of handing the LP to the cold primal. Run it with
+  ``--deterministic --max-nodes N --assert-unfired-identical``: an instance on
+  which ``DualRebuilds`` is 0 in the ON arm executed the same code as OFF, so
+  (when neither arm reached the wall backstop) its status, objective, bound and
+  node count must be bit-identical.
 
 The CLAUDE.md §5 differential panel for a bound-changing gate: flag ON vs OFF,
 requiring BOTH
@@ -95,7 +96,10 @@ _FLAGS = {
         "leak": lambda off: 0,
         "show": ("SubtolPivots", "LpVerdictNumerical"),
     },
-    # #2142 B: the rebuild path is entered only ON (``tolerated`` is empty OFF), so
+    # #2142 B: RETIRED by this panel (docs/dev/data/2142-flag-panel/); the build no
+    # longer has the DualRebuild* counters, so a fresh run reports them missing.
+    # Kept so ``--rows`` re-derives the recorded verdict.
+    # The rebuild path is entered only ON (``tolerated`` is empty OFF), so
     # any ``DualRebuilds`` OFF is a leak and ``DualRebuilds`` ON is where it ran.
     "DISCOPT_LP_DUAL_REBUILD": {
         "fired": lambda off, on: on["DualRebuilds"],

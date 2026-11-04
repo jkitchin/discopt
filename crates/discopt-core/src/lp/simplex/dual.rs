@@ -1701,17 +1701,6 @@ impl<'a> PreparedDual<'a> {
         // solve so a persistently singular selection still reaches the cold
         // fallback promptly.
         let mut unstable_recoveries = 0usize;
-        // #2142 (`DISCOPT_LP_DUAL_REBUILD`, default OFF): per-column "this basic
-        // row was rebuilt, cannot be moved, and its residual is inside the
-        // acceptance tolerance" marks, and the rebuild count. Empty when the flag
-        // is off, which keeps every pivot of the legacy path identical.
-        let mut tolerated: Vec<bool> = if opts.dual_rebuild {
-            vec![false; n]
-        } else {
-            Vec::new()
-        };
-        let mut tolerated_any = false;
-        let mut rebuilds = 0usize;
         // Warm-restart **stall guard** (discopt F2). Bland's rule above makes the
         // dual loop cycle-free in exact arithmetic, but a warm re-solve after a
         // row-append can still spin near the *feasibility tolerance* in floating
@@ -1786,7 +1775,7 @@ impl<'a> PreparedDual<'a> {
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
             let (r, to_lower, delta) =
-                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland, &tolerated) {
+                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
                     Some(sel) => sel,
                     None => {
                         xb = tagged(
@@ -1794,7 +1783,7 @@ impl<'a> PreparedDual<'a> {
                             crate::profile::Ctr::DualExitXbSolveFail,
                         )?;
                         since_refresh = 0;
-                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland, &tolerated) {
+                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
                             Some(sel) => sel,
                             None => {
                                 dvec = refresh_rc!();
@@ -1832,7 +1821,6 @@ impl<'a> PreparedDual<'a> {
                                             Some(xb_r) => {
                                                 if select_leaving(
                                                     m, &basis, l, u, &gamma, &xb_r, tol, bland,
-                                                    &tolerated,
                                                 )
                                                 .is_some()
                                                 {
@@ -1857,7 +1845,7 @@ impl<'a> PreparedDual<'a> {
                                     } else {
                                         Vec::new()
                                     };
-                                    let sol = assemble(
+                                    return Some(assemble(
                                         n,
                                         m,
                                         &basis,
@@ -1871,26 +1859,7 @@ impl<'a> PreparedDual<'a> {
                                         pivots,
                                         dual,
                                         Vec::new(),
-                                    );
-                                    // #2142: an optimum reached past a tolerated row
-                                    // is returned only if the point passes the
-                                    // ORIGINAL-LP audit (bounds and rows, relative
-                                    // `AUDIT_FEAS`); otherwise the legacy cold
-                                    // fallback runs, exactly as before the flag.
-                                    if tolerated_any {
-                                        if !super::primal::point_passes_original_audit(
-                                            &sol.x, sp, m, n, b, l, u,
-                                        ) {
-                                            crate::profile::incr(
-                                                crate::profile::Ctr::DualRebuildAuditFail,
-                                            );
-                                            return None;
-                                        }
-                                        crate::profile::incr(
-                                            crate::profile::Ctr::DualRebuildOptimal,
-                                        );
-                                    }
-                                    return Some(sol);
+                                    ));
                                 }
                                 // Exact reduced costs reveal dual infeasibility (a drifted
                                 // pivot): hand off to the robust cold solve.
@@ -1981,63 +1950,6 @@ impl<'a> PreparedDual<'a> {
                             rho.clone(),
                             Vec::new(),
                         ));
-                    }
-                    // #2142 (`DISCOPT_LP_DUAL_REBUILD`, default OFF): rebuild and
-                    // decide on exact values instead of handing the LP to the cold
-                    // primal. Measured on GDPlib cstr big-M (warm replay of 60
-                    // captured node LPs, 219 exits here): the leaving row is
-                    // violated by 6e-9..5e-8 against `tol` = 1e-9, a FRESH
-                    // factorization reproduces that residual to every printed digit
-                    // and still finds no entering column, and the Farkas ray does
-                    // not certify. That is not drift: the row is off its bound by
-                    // less than a primal feasibility tolerance (HiGHS: 1e-7), which
-                    // is why HiGHS calls these LPs optimal. So:
-                    //  * refactorize from scratch, recompute x_B and d exactly;
-                    //  * row now within `tol`: the residual was drift, continue;
-                    //  * row within `rebuild_accept_tol` (1e-7·(1+|bound|), a
-                    //    decade inside the audit's 1e-6): stop selecting it and
-                    //    continue; the loop keeps dual feasibility, so the duals it
-                    //    ends with are what the caller's Neumaier–Shcherbina bound
-                    //    is computed from (sound for ANY multiplier vector), and the
-                    //    point must pass the original-LP audit before `Optimal` is
-                    //    returned (above);
-                    //  * otherwise (or past `DUAL_REBUILD_MAX`): the legacy exit.
-                    if !tolerated.is_empty() && rebuilds < DUAL_REBUILD_MAX {
-                        rebuilds += 1;
-                        crate::profile::incr(crate::profile::Ctr::DualRebuilds);
-                        let cols: Vec<Vec<(usize, f64)>> = basis
-                            .iter()
-                            .map(|&j| {
-                                let (rows, vals) = sp.col(j);
-                                rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-                            })
-                            .collect();
-                        if lu.factorize_sparse(m, &cols).is_ok() {
-                            xb = tagged(
-                                recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
-                                crate::profile::Ctr::DualExitXbSolveFail,
-                            )?;
-                            dvec = refresh_rc!();
-                            updates = 0;
-                            since_refresh = 0;
-                            let bi = basis[r];
-                            let (bound, viol) = if to_lower {
-                                (l[bi], l[bi] - xb[r])
-                            } else {
-                                (u[bi], xb[r] - u[bi])
-                            };
-                            if viol <= tol {
-                                crate::profile::incr(crate::profile::Ctr::DualRebuildCleared);
-                                continue;
-                            }
-                            if viol <= rebuild_accept_tol(bound) {
-                                tolerated[bi] = true;
-                                tolerated_any = true;
-                                crate::profile::incr(crate::profile::Ctr::DualRebuildTolerated);
-                                continue;
-                            }
-                        }
-                        crate::profile::incr(crate::profile::Ctr::DualRebuildBails);
                     }
                     crate::profile::incr(crate::profile::Ctr::DualExitFarkasUncertified);
                     return None;
@@ -2231,11 +2143,6 @@ impl<'a> PreparedDual<'a> {
             xb[r] = v_q + t;
 
             stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
-            if !tolerated.is_empty() {
-                // A mark is about the basis it was proved in; a column that leaves
-                // and later re-enters is judged afresh.
-                tolerated[leaving] = false;
-            }
             slot_of[leaving] = -1;
             basis[r] = q;
             slot_of[q] = r as i64;
@@ -2321,49 +2228,6 @@ impl<'a> PreparedDual<'a> {
         }
         crate::profile::incr(crate::profile::Ctr::DualExitPivotCap);
         None // stall cap / iteration cap → cold fallback
-    }
-}
-
-/// Most rebuilds one warm dual solve may run before an empty ratio test takes the
-/// legacy exit (#2142). Each costs one fresh factorization; the measured class
-/// needs one per tolerated row, and a solve that keeps tripping is not converging.
-const DUAL_REBUILD_MAX: usize = 16;
-
-/// The residual a rebuilt, provably immovable basic row may keep (#2142):
-/// `1e-7·(1 + |bound|)` — HiGHS's default primal feasibility tolerance, one decade
-/// inside the original-LP audit's [`AUDIT_FEAS`](super::primal::AUDIT_FEAS) that
-/// every such optimum must still pass.
-#[inline]
-fn rebuild_accept_tol(bound: f64) -> f64 {
-    1e-7 * (1.0 + bound.abs())
-}
-
-/// The default of [`SimplexOptions::dual_rebuild`]: `DISCOPT_LP_DUAL_REBUILD`
-/// (read once; default **OFF**, #2142).
-///
-/// Bound-changing at the LP level — a node LP that used to fall back to the cold
-/// primal (and on GDPlib cstr big-M mostly end `Numerical`, an undecided node) is
-/// decided by the warm dual instead — so it is default-OFF until a §5 panel
-/// graduates it. Audit row in `docs/dev/flag-retirement-audit.md`.
-/// Unrecognized input is refused (an A/B arm that silently reads as OFF measures
-/// one arm twice).
-pub(crate) fn dual_rebuild_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_LP_DUAL_REBUILD").unwrap_or_default();
-        parse_dual_rebuild(&raw).unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
-/// The parse table behind [`dual_rebuild_default`].
-fn parse_dual_rebuild(raw: &str) -> Result<bool, String> {
-    match raw.trim() {
-        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(false),
-        "1" | "true" | "True" | "on" | "ON" => Ok(true),
-        other => Err(format!(
-            "DISCOPT_LP_DUAL_REBUILD={other:?} is not a recognized value. Use \
-             1/true/on or 0/false/off (the default)."
-        )),
     }
 }
 
@@ -2634,7 +2498,6 @@ fn select_leaving(
     xb: &[f64],
     tol: f64,
     bland: bool,
-    tolerated: &[bool],
 ) -> Option<(usize, bool, f64)> {
     let mut r = None;
     let mut best_score = 0.0f64;
@@ -2655,15 +2518,6 @@ fn select_leaving(
             None
         };
         if let Some((v, lo)) = viol {
-            // #2142 (`DISCOPT_LP_DUAL_REBUILD`): a row the rebuild proved cannot
-            // be moved, whose residual is inside the acceptance tolerance, is not
-            // a leaving candidate while it stays there. Empty slice = flag off.
-            if !tolerated.is_empty()
-                && tolerated[bi]
-                && v <= rebuild_accept_tol(if lo { l[bi] } else { u[bi] })
-            {
-                continue;
-            }
             // Bland (anti-cycling): smallest variable index. Devex (default):
             // largest bound-violation steepest-edge score. Either choice is a
             // *valid* leaving row — any primal-infeasible basic var may leave — so
@@ -3052,18 +2906,18 @@ mod tests {
         let xb = [-1.0, -1.0];
 
         // Devex: equal scores, so the first infeasible slot (0) wins.
-        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false, &[]).unwrap();
+        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false).unwrap();
         assert_eq!(dev.0, 0, "Devex should take the first equal-score slot");
         assert!(dev.1, "both violate the lower bound → leave toward lower");
 
         // Bland: the smallest *variable* index wins — variable 2 sits in slot 1.
-        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true, &[]).unwrap();
+        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true).unwrap();
         assert_eq!(bl.0, 1, "Bland must pick slot 1 (variable 2 < variable 5)");
 
         // Both modes agree there is no leaving row once feasible.
         let feasible = [1.0, 1.0];
-        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false, &[]).is_none());
-        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true, &[]).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true).is_none());
     }
 
     // #928: a deadline that is already spent when the warm re-solve starts must
@@ -3872,71 +3726,38 @@ mod tests {
         }
     }
 
-    /// #2142: a GDPlib cstr big-M node LP the warm dual could not decide. The
-    /// capture's start basis (the kernel's: `warm_flip_boxed`) reaches the
-    /// empty-ratio-test exit with the leaving row off its bound by ~1e-8; the
-    /// Farkas ray does not certify and the cold primal ends `Numerical`. HiGHS
-    /// (presolve off, entries kept) solves it to `highs_obj`. With
-    /// `dual_rebuild` off the legacy verdict is pinned; with it on the solve is
-    /// `Optimal`, its objective is HiGHS's to 1e-6, and its point passes the
-    /// original-LP audit.
+    /// #2142: a GDPlib cstr big-M node LP the warm dual cannot decide. From the
+    /// capture's start basis (the kernel's: `warm_flip_boxed`) the dual reaches the
+    /// empty-ratio-test exit with the leaving row off its bound by ~1e-8, a fresh
+    /// factorization reproduces that residual, the Farkas ray does not certify, and
+    /// the cold primal does not return `Optimal`; HiGHS (presolve off, entries
+    /// kept) solves it to `highs_obj`. `DISCOPT_LP_DUAL_REBUILD` (tolerate such a
+    /// row within `1e-7(1+|bound|)`) decided it and was RETIRED by its section 5
+    /// panel (not net-positive; `docs/dev/flag-retirement-audit.md`). This pins the
+    /// defect: a future fix that decides the LP must also match `highs_obj`, and
+    /// then updates this test.
     #[test]
-    fn dual_rebuild_decides_captured_cstr_bigm_node_lp_2142() {
+    fn captured_cstr_bigm_node_lp_stays_undecided_2142() {
         let json = include_str!("testdata/cstr_bigm_dual_rebuild_lp.json");
         let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
             parse_stall_fixture(json);
-        let highs_obj: f64 = {
-            let k = "\"highs_obj\":";
-            let s = &json[json.find(k).expect("highs_obj") + k.len()..];
-            s[..s.find([',', '}']).unwrap()].trim().parse().unwrap()
-        };
         let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
         let start = Basis {
             col_status,
             basic_vars,
         };
-        let mut checked = 0usize;
-        for rebuild in [false, true] {
-            let o = SimplexOptions {
-                warm_flip_boxed: true,
-                dual_rebuild: rebuild,
-                ..opts()
-            };
-            let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &o);
-            if !rebuild {
-                assert_ne!(
-                    sol.status,
-                    LpStatus::Optimal,
-                    "legacy path: this captured LP is expected to stay undecided"
-                );
-                checked += 1;
-                continue;
-            }
-            assert_eq!(sol.status, LpStatus::Optimal, "rebuild must decide the LP");
-            assert!(
-                (sol.obj - highs_obj).abs() <= 1e-6 * (1.0 + highs_obj.abs()),
-                "obj {} vs HiGHS {}",
-                sol.obj,
-                highs_obj
-            );
-            assert!(super::super::primal::point_passes_original_audit(
-                &sol.x, &sp, m, n, &b, &l, &u
-            ));
-            assert_eq!(sol.dual.len(), m, "row duals exported for the NS bound");
-            checked += 3;
-        }
-        assert_eq!(checked, 4, "every assertion executed");
-    }
-
-    #[test]
-    fn dual_rebuild_parse_table_2142() {
-        for on in ["1", "true", "True", "on", "ON"] {
-            assert_eq!(parse_dual_rebuild(on), Ok(true));
-        }
-        for off in ["", "0", "false", "False", "off", "OFF"] {
-            assert_eq!(parse_dual_rebuild(off), Ok(false));
-        }
-        assert!(parse_dual_rebuild("yes").is_err());
+        let o = SimplexOptions {
+            warm_flip_boxed: true,
+            ..opts()
+        };
+        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &o);
+        assert_ne!(
+            sol.status,
+            LpStatus::Optimal,
+            "#2142: this captured LP is now decided; check its objective against the \
+             fixture's highs_obj and update this pin"
+        );
+        assert_ne!(sol.status, LpStatus::Infeasible, "HiGHS solves it: never infeasible");
     }
 
     // #1013: the degeneracy-stall DETECTOR fires where `DualStallTrips` is blind.

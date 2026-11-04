@@ -1,4 +1,4 @@
-"""#2142 B: GDPlib ``cstr`` big-M node LPs the warm dual could not decide.
+"""#2142 B: GDPlib ``cstr`` big-M node LPs the warm dual cannot decide.
 
 ``data/cstr_bigm_warm_node_lps.npz`` holds 16 node LPs captured from the native
 spatial kernel on ``cstr`` (``gdp_method="big-m"``), each with the basis the kernel
@@ -8,21 +8,24 @@ has a HiGHS reference objective (presolve off, ``small_matrix_value=1e-12`` so n
 entry is dropped).
 
 They are replayed through ``solve_lp_warm_csc`` -- the kernel's own warm entry,
-with the kernel's ``warm_flip_boxed`` -- in a fresh interpreter per arm, because
-``DISCOPT_LP_DUAL_REBUILD`` is read once per process.
+with the kernel's ``warm_flip_boxed`` -- in a fresh interpreter.
 
 The B0 counters named the exit: the dual ratio test comes back empty with the
 leaving row off its bound by ~1e-8 (against the loop's ``tol`` = 1e-9), a fresh
 factorization reproduces that residual, and the Farkas ray does not certify, so
-the LP is handed to the cold primal, which ends ``Numerical``. With the flag on
-the dual rebuilds, tolerates the immovable row inside ``1e-7*(1+|bound|)`` and
-continues; an ``Optimal`` reached that way must pass the original-LP audit.
+the LP is handed to the cold primal, which ends ``Numerical``.
+``DISCOPT_LP_DUAL_REBUILD`` (tolerate such a row within ``1e-7*(1+|bound|)``)
+decided 11 of the 12 at HiGHS's objective, and was RETIRED by its CLAUDE.md
+section 5 panel: cert-clean but not net-positive (cstr big-M was the only outcome
+it changed; ``launch`` ran 41% slower with 21 -> 241 ``Numerical`` LP verdicts).
+See ``docs/dev/flag-retirement-audit.md`` and ``docs/dev/data/2142-flag-panel/``.
+This file pins the defect, and holds the bar a future fix must meet as a strict
+xfail.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -56,11 +59,9 @@ print(json.dumps(out))
 """
 
 
-def _replay(flag: str) -> list[dict]:
-    env = {**os.environ, "DISCOPT_LP_DUAL_REBUILD": flag}
+def _replay() -> list[dict]:
     proc = subprocess.run(
         [sys.executable, "-c", _WORKER, str(FIXTURE)],
-        env=env,
         capture_output=True,
         text=True,
         timeout=240,
@@ -84,49 +85,58 @@ def _audit_ok(d, i: int, x: np.ndarray) -> bool:
 
 
 @pytest.fixture(scope="module")
-def arms():
-    return _replay("0"), _replay("1")
+def replay():
+    return _replay()
 
 
-def test_dual_rebuild_decides_cstr_bigm_node_lps(arms):
-    d = np.load(FIXTURE)
-    off, on = arms
-    kinds = [str(d[f"lp{i}_kind"]) for i in range(len(off))]
-    ref = [float(d[f"lp{i}_highs_obj"]) for i in range(len(off))]
+def _kinds(d, n):
+    kinds = [str(d[f"lp{i}_kind"]) for i in range(n)]
     num = [i for i, k in enumerate(kinds) if k == "numerical"]
     ctrl = [i for i, k in enumerate(kinds) if k == "control"]
+    return num, ctrl
+
+
+def test_cstr_bigm_node_lps_pin_legacy_verdicts(replay):
+    """The defect, pinned: the class stays undecided, nothing is called infeasible
+    (HiGHS solves all 12), and the controls are solved at HiGHS's optimum."""
+    d = np.load(FIXTURE)
+    num, ctrl = _kinds(d, len(replay))
     executed = 0
     assert len(num) == 12 and len(ctrl) == 4
     executed += 1
-
-    # Before: the legacy path leaves the class undecided (pins the defect).
-    off_decided = sum(off[i]["status"] in ("optimal", "infeasible") for i in num)
-    assert off_decided <= 2, f"flag OFF decided {off_decided}/12; the fixture no longer pins #2142"
-    executed += 1
-
-    # After: most are decided, and every decision is HiGHS's optimum on a point the
-    # original-LP audit accepts. None may be called infeasible: HiGHS solves all 12.
-    on_opt = [i for i in num if on[i]["status"] == "optimal"]
-    assert len(on_opt) >= 10, f"flag ON decided {len(on_opt)}/12"
+    decided = sum(replay[i]["status"] in ("optimal", "infeasible") for i in num)
+    assert decided <= 2, (
+        f"{decided}/12 decided: the warm dual now decides the #2142 class; move the "
+        "strict xfail below to a pass and update this pin"
+    )
     executed += 1
     for i in num:
-        assert on[i]["status"] != "infeasible", f"lp{i}: false infeasible"
+        assert replay[i]["status"] != "infeasible", f"lp{i}: false infeasible"
         executed += 1
-    for i in on_opt:
-        assert abs(on[i]["obj"] - ref[i]) <= 1e-6 * (1.0 + abs(ref[i])), (i, on[i]["obj"], ref[i])
-        assert _audit_ok(d, i, np.asarray(on[i]["x"])), f"lp{i}: point fails the audit"
-        assert on[i]["n_dual"] == int(d[f"lp{i}_m"]), "row duals exported for the NS bound"
-        executed += 3
-
-    # Controls never reach the rebuild: identical in both arms, and HiGHS's optimum.
     for i in ctrl:
-        assert off[i]["status"] == on[i]["status"] == "optimal"
-        assert off[i]["obj"] == on[i]["obj"] and off[i]["x"] == on[i]["x"]
-        assert abs(on[i]["obj"] - ref[i]) <= 1e-6 * (1.0 + abs(ref[i]))
+        ref = float(d[f"lp{i}_highs_obj"])
+        assert replay[i]["status"] == "optimal"
+        assert abs(replay[i]["obj"] - ref) <= 1e-6 * (1.0 + abs(ref))
+        assert _audit_ok(d, i, np.asarray(replay[i]["x"]))
         executed += 3
+    print(f"#2142 node-LP replay: decided {decided}/12; executed assertions: {executed}")
+    assert executed == 1 + 1 + 12 + 3 * 4
 
-    print(
-        f"#2142 node-LP replay: OFF decided {off_decided}/12, ON optimal {len(on_opt)}/12; "
-        f"executed assertions: {executed}"
-    )
-    assert executed >= 1 + 1 + 1 + 12 + 3 * 10 + 3 * 4
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#2142: the warm dual leaves these node LPs undecided "
+    "(DISCOPT_LP_DUAL_REBUILD, which decided them, was retired by its panel)",
+)
+def test_cstr_bigm_node_lps_decided_at_highs_optimum(replay):
+    """The bar a fix must meet: at least 10 of 12 ``Optimal`` at HiGHS's objective
+    on a point the original-LP audit accepts, with row duals for the NS bound."""
+    d = np.load(FIXTURE)
+    num, _ = _kinds(d, len(replay))
+    on_opt = [i for i in num if replay[i]["status"] == "optimal"]
+    assert len(on_opt) >= 10, f"decided {len(on_opt)}/12"
+    for i in on_opt:
+        ref = float(d[f"lp{i}_highs_obj"])
+        assert abs(replay[i]["obj"] - ref) <= 1e-6 * (1.0 + abs(ref))
+        assert _audit_ok(d, i, np.asarray(replay[i]["x"]))
+        assert replay[i]["n_dual"] == int(d[f"lp{i}_m"])

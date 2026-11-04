@@ -89,8 +89,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2142 A: the absorbed exact perspective for nonlinear hull rows. RETIRED by
     # its panel (docs/dev/data/2142-flag-panel/); kept so --report re-derives it.
     "DISCOPT_HULL_LIFTED_PERSPECTIVE": ("hull",),
-    # #2142 B: an LP-layer flag (the warm dual's empty-ratio-test exit). Lowering
-    # identical by construction, so solve ``--all`` with ``--max-nodes N
+    # #2142 B: an LP-layer flag (the warm dual's empty-ratio-test exit), RETIRED by
+    # its panel (docs/dev/data/2142-flag-panel/); kept so --report re-derives it.
+    # Lowering identical by construction, so solve ``--all`` with ``--max-nodes N
     # --deterministic`` under ``DISCOPT_PROFILE=1``; the ``DualRebuilds`` counter
     # says where it ran and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_LP_DUAL_REBUILD": ("big-m", "hull"),

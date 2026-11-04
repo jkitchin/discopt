@@ -500,17 +500,6 @@ counters!(
     DualExitFlipFtranFail,
     DualExitRefacFail,
     DualExitPivotCap,
-    // #2142 B-fix (`DISCOPT_LP_DUAL_REBUILD`): at the empty-ratio-test exit, the
-    // fresh-factorization rebuilds run, and what each found -- the row back within
-    // `tol` (drift), the row tolerated (residual <= 1e-7(1+|bound|), immovable), or
-    // the legacy exit -- and how tolerated solves ended: `Optimal` that passed the
-    // original-LP audit, or an audit refusal that took the legacy cold fallback.
-    DualRebuilds,
-    DualRebuildCleared,
-    DualRebuildTolerated,
-    DualRebuildBails,
-    DualRebuildOptimal,
-    DualRebuildAuditFail,
     // #2142 B0: the cold primal's `Err(Numerical)` exits that had no counter.
     // `assemble`'s audit refusals are already split (`LpAudit*`), as is the
     // subtol budget (`SubtolCapNumerical`); these are the linear-algebra and
