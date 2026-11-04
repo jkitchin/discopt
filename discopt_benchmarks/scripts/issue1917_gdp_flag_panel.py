@@ -77,7 +77,6 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_MBIGM_CONDITIONED": ("mbigm",),
     "DISCOPT_GDP_BOUND_PRETRANSFORM": ("big-m", "mbigm"),
     "DISCOPT_HULL_CONIC_QUADRATIC": ("hull",),
-    "DISCOPT_HULL_PLAIN_EQUALITY": ("hull",),
     "DISCOPT_GDP_DISJUNCT_FBBT": ("big-m",),
     "DISCOPT_GDP_ENUMERATE_CUTOFF": ("enumerate",),
     # Acts on the mbigm lowering's LPs; on 23 of 24 instances it leaves every M

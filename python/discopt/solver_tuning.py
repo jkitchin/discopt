@@ -1291,48 +1291,6 @@ class SolverTuning:
     arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
     ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
-    hull_plain_equality: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_HULL_PLAIN_EQUALITY", default=False)
-    )
-    """Hull a nonlinear disjunct *equality* as the plain disaggregated row
-    (``DISCOPT_HULL_PLAIN_EQUALITY``, default **OFF**; bound-changing on the
-    ``"hull"`` route; #1917).
-
-    Without it every nonlinear disjunct row ``g(x) = 0`` gets the eps-perspective
-    ``yhat * g(v / yhat) - eps * g(0) * (1 - y) = 0``, ``yhat = (1 - eps) y + eps``,
-    ``eps = 1e-8``. The perspective is the convex hull of a disjunct only when ``g``
-    is convex and the row is ``<=``, and the solution set of a nonlinear equality is
-    never convex, so for an equality it buys no hull tightness. It does put
-    ``1 / yhat`` (range ``[1, 1e8]``) into every product of the row, and the
-    McCormick envelopes of those products are vacuous on the real box. ON, a row
-    with sense ``==``, a scalar right-hand side, no Parameter, and ``g(0) = 0``
-    (every disaggregated copy and every local at 0) is emitted as ``g(v_k) = 0``
-    instead: no division, and exact at both integer faces. At ``y_k = 1``, ``v_k =
-    x``. At ``y_k = 0`` the bound links pin every copy to 0 and every local is 0, so
-    the row reads ``g(0) = 0``, which holds. Every other row keeps the
-    eps-perspective (and ``=0`` restores it for every row).
-
-    Entry measurement (GDPlib ``cstr``, NT = 5, hull; the row is the rate law
-    ``rate * Q^2 + k * F_A * F_B = 0``): OFF, the 1/yhat products make the
-    probe-box and real-box relaxations differ in row count, so the native spatial
-    kernel declines the model and the Python tree runs (bound 0.094 at 300 s, 1,317
-    nodes, 201 s of it in FBBT). ON, the kernel accepts it (bound 1.841 at 300 s,
-    23,710 nodes; still uncertified, incumbent 3.0620 in both arms).
-
-    §5 panel 2026-11-03 (``issue1917_gdp_flag_panel.py``, the 11 GDPlib hull
-    instances where the flag fires, 3 reps x 120 s, interleaved): **cert-clean**
-    (0 incorrect, 0 bound crossings, 0 solved lost). Gains: modprodnet certified
-    3/3 vs 1/3, eight_process 59 -> 3 nodes, eight_process_logical 41 -> 3, gdp_col
-    finds an incumbent (OFF none), mod_hens and cstr bounds tighter. Costs:
-    methanol loses its incumbent 3/3 with a looser bound, hda bound looser, and
-    biofuel is OOM-killed 3/3 (peak RSS 15.3 GB vs 2.4 GB OFF). The blowup is in
-    convexity classification, not in the flag's row. ``affine_sign`` falls through
-    to ``affine_range``, which calls ``lp_pounce.solve_lp``, and
-    ``_stack_constraints`` densifies biofuel's ~15k-row sparse GDP system. **Not
-    net-positive: stays OFF.** What would change that: a sparse ``lp_pounce`` row
-    stack (or a size guard in ``affine_range``) plus a rerun that keeps methanol's
-    incumbent. Audit row in ``docs/dev/flag-retirement-audit.md``."""
-
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )
