@@ -398,6 +398,29 @@ fn propagate_env_term(t: &EnvTerm, lo: &mut [f64], hi: &mut [f64]) -> Option<boo
             let (al, ah) = (mul_down(wl, wl), mul_up(wh, wh));
             changed |= tighten_form_to(&[x], &[coeff], cst, al, ah, lo, hi)?;
         }
+        EnvTerm::AffinePow {
+            x,
+            w,
+            coeff,
+            cst,
+            p,
+        } => {
+            // #2142: FORWARD only -- the closed-form aux enclosure, outward widened
+            // (the same one `assemble_node_lp` intersects into the aux bounds). No
+            // reverse step: it would only tighten, and the envelope rows already
+            // carry the w -> x direction into the LP. Omitting it is sound.
+            let (flo, fhi) =
+                crate::bnb::mccormick_patch::affine_pow_aux_bounds(coeff, cst, lo[x], hi[x], p);
+            if flo.is_finite() {
+                changed |= raise_lo(lo, w, flo);
+            }
+            if fhi.is_finite() {
+                changed |= cap_hi(hi, w, fhi);
+            }
+            if lo[w] > hi[w] + INFEAS_TOL * rel(hi[w]) {
+                return None;
+            }
+        }
     }
     Some(changed)
 }
