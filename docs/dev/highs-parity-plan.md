@@ -594,7 +594,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   - Script `discopt_benchmarks/scripts/lp_engine_seam_check.py`; data
     `docs/dev/data/highs-parity/p11-engine-seam/`. Test
     `test_highs_parity_p11_lp_engine_seam.py` (5 tests; all fail before the seam).
-- [ ] **P1.2 — R6: MINLP-path verified LPs on the Rust engine, HiGHS as fallback.**
+- [x] **P1.2 — R6: MINLP-path verified LPs on the Rust engine, HiGHS as fallback.**
   Scope: `solver.py` `_linear_node_verified_empty` (`:34903`),
   `_highs_lp_verifier_available` (`:34732`), `_linear_node_lp_rescue` (`:37710`),
   `mccormick_lp._verified_free_column_bound` (`:535`). Switch the three callers to
@@ -607,6 +607,27 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   root-cause; if it is a Rust verdict `none` where HiGHS certified (lost bound), the
   fallback order stays HiGHS-first for that caller and the gap goes to §7 with the LP
   attached to P2.1's profile list. Regime: bound-neutral.
+  **Result (2026-11-04): the kill fired for two of the three callers; one moved.** Entry
+  experiment first: P0.5's 183 R6 fixtures through both engines (`p12-rust-first/
+  entry_verdicts.json`), verdict = certified infeasible / certified bound / none:
+  - **#1611 rescue: 3/3 identical** → `_linear_node_lp_rescue` now calls
+    `lp_milp_highs.solve_lp_std_rust_first` (Rust, then HiGHS on anything not decisive:
+    the plan said "only on Numerical/IterLimit"; any non-decisive Rust answer falls back
+    instead, which can only add a proof).
+  - **#1537 arbitration: 93/94 identical; 1 differs** (`nvs0`, scaled): HiGHS proves the
+    node LP empty with a verified Farkas ray, Rust returns a point feasible to 4.0e-7 on
+    rows with |b| up to 1.2e9 (≈ 3e-16 relative), certified optimal. Both certificates
+    are valid at their tolerance. The arbitration needs the emptiness proof, so it
+    **stays HiGHS-first** (kill).
+  - **#1869 free-column certificate: 61/85 identical; Rust loses the bound on 23 and
+    certifies a looser one on 1** (22 of the 24 are nvs16's LPs with columns boxed at
+    1.6e9, plus `ex8_5_3@nlpbb` and two `test_1537` scalings; the hard ones of P0.5).
+    **Stays HiGHS-first** (kill); these LPs go to P2.1's profile list.
+  - Corpus: the 132-file corpus at 20 s with a call counter reaches the rescue **0
+    times** (P0.5's capture: also 0 at 10 s, default and `@nlpbb`), so no corpus drift
+    is possible from this change; the probe fires (3 rescue calls, all Rust-decisive,
+    under `test_issue_1611_remainder.py`). Regression files #1537/#1611/#1869 pass (56).
+    Test `test_highs_parity_p12_rust_first_rescue.py` (5; all fail before).
 - [ ] **P1.3 — R4: Rust dual first in `_lp_dual`.** Scope: `convex_node_bound.py:215-260`.
   Reorder to `_simplex_dual` → HiGHS → row-equilibrated HiGHS; `_simplex_dual` gains the
   slack-form `sf` input so all three solve the same LP. Done: on the P0.5 R4 fixtures,
@@ -872,7 +893,7 @@ and is re-written by P4.1.**
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
-| P1.1–P1.4 | P1.1 [x] | P1.1: seam; HiGHS 37/37 byte-identical; Rust engine L 24/25, INF 12/12, 0 wrong | see git log |
+| P1.1–P1.4 | P1.1–P1.2 [x] | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first | see git log |
 | P2.1–P2.6 / D1 | [ ] | | |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
@@ -942,6 +963,15 @@ Consequence: P0-blocking correctness defect jkitchin/discopt#2146, fixed in `635
 on the fix: 6206 compared, 0 contradictions. Retraction of: none in this plan; it limits
 #1634's "min of the two bounds is valid whenever either one is" to inputs where at least
 one configuration is right.
+
+
+**2026-11-04 — P1.2: "the Rust engine reaches HiGHS's verdicts on the MINLP-path LPs".**
+Commit `ac54f5d9` + P1.2, P0.5's 183 R6 fixtures, compared 183. Measured: 158 identical;
+#1537 arbitration 1/94 differs (HiGHS: verified Farkas proof of emptiness; Rust: a point
+feasible to ~3e-16 relative); #1869 free-column 24/85 differ (Rust: no certified bound on
+23, a looser one on 1; 22 are nvs16 LPs boxed at 1.6e9). Expected: identical verdicts.
+Consequence: #1537 and #1869 stay HiGHS-first (P1.2 kill); only the #1611 rescue (3/3
+identical) is Rust-first. The 24 #1869 LPs and the nvs0 arbitration LP are P2.1 inputs.
 
 ---
 

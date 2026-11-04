@@ -1081,6 +1081,35 @@ def recession_ray(
     return d if float(sf.c @ d) < 0.0 else None
 
 
+def solve_lp_std_rust_first(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOutcome:
+    """``solve_lp_std`` on the Rust engine, falling to HiGHS on anything not decisive.
+
+    Decisive: a certified ``optimal`` or ``infeasible``, or ``unbounded`` (verified ray and
+    point). Anything else -- ``feasible`` without a certificate, ``error``, a limit -- is
+    re-solved on HiGHS within the same budget, and the outcome says so
+    (``stats["lp/rust_first_fallback"]``, ``labels["lp/rust_first_fallback"]``). Both
+    answers pass the same certificate ladder, so the fallback can only add a proof.
+
+    Used only where P1.2's entry experiment showed the two engines reach the same verdicts
+    (the #1611 linear-node rescue: 3/3 fixtures). It is NOT used by the #1537 arbitration
+    or the #1869 free-column certificate: on P0.5's fixtures Rust disagreed on 1/94 and
+    24/85 of those LPs (``docs/dev/highs-parity-plan.md`` P1.2, §7).
+    """
+    t0 = time.perf_counter()
+    out = solve_lp_std(sf, time_limit=time_limit, engine="rust")
+    decisive = out.status == "unbounded" or (
+        out.status in ("optimal", "infeasible") and out.gap_certified
+    )
+    if decisive:
+        out.stats["lp/rust_first_decisive"] = 1.0
+        return out
+    rem = None if time_limit is None else max(0.0, float(time_limit) - (time.perf_counter() - t0))
+    back = solve_lp_std(sf, time_limit=rem, engine="highs")
+    back.stats["lp/rust_first_fallback"] = 1.0
+    back.labels["lp/rust_first_fallback"] = f"rust {out.status}: {out.message}"[:200]
+    return back
+
+
 def _lp_engine(engine: Optional[str]):
     """The raw-LP engine for ``solve_lp_std`` and its helpers (highs-parity P1.1).
 
@@ -4149,7 +4178,9 @@ def _solve_milp_std(
 # ─────────────────────────────────────────────────────────────
 
 
-def solve_lp(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, time_limit=None):
+def solve_lp(
+    c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, time_limit=None, engine=None
+):
     """``min cᵀx s.t. A_ub x <= b_ub, A_eq x = b_eq`` returning an ``LPResult``.
 
     Used for relaxation-dual recovery. Inequality rows get a nonnegative logical, so
@@ -4182,7 +4213,7 @@ def solve_lp(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, time_li
         np.concatenate([xl, np.zeros(n_ub)]),
         np.concatenate([xu, np.full(n_ub, INF)]),
     )
-    out = solve_lp_std(sf, time_limit=time_limit)
+    out = solve_lp_std(sf, time_limit=time_limit, engine=engine)
     status = {
         "optimal": SolveStatus.OPTIMAL,
         "infeasible": SolveStatus.INFEASIBLE,

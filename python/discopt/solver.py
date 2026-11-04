@@ -37775,7 +37775,7 @@ def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, tim
     """
     import scipy.sparse as _sp
 
-    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std
+    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std_rust_first
 
     lb = np.maximum(np.asarray(sf.xl, dtype=np.float64).copy(), -INF)
     ub = np.minimum(np.asarray(sf.xu, dtype=np.float64).copy(), INF)
@@ -37818,7 +37818,9 @@ def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, tim
         lb = np.concatenate([lb, s_lo])
         ub = np.concatenate([ub, s_hi])
     node_sf = StdForm.from_arrays(c, A, b, lb, ub, float(sf.obj_const), None)
-    out = solve_lp_std(node_sf, time_limit=time_limit)
+    # highs-parity P1.2: the Rust engine first, HiGHS only when Rust is not decisive
+    # (same certificate ladder either way; the two agreed on every rescue LP measured).
+    out = solve_lp_std_rust_first(node_sf, time_limit=time_limit)
     if out.status == "infeasible":
         return "infeasible", None, None
     if out.bound is not None and np.isfinite(out.bound) and out.x is not None:
