@@ -50,6 +50,9 @@ PORTFOLIO_WAIT = "fast"
 
 # Competition tolerance (SOLUTION_FORMAT.md, "Certificates"). Judging uses it.
 CHECK_TOL = 1e-5
+# Cap on the checker-settings re-solve of the final answer (it runs after the
+# answer is written; an undecided result keeps the answer).
+CHECKER_SOLVE_CAP_S = 60.0
 # Our own acceptance is stricter on both sides, so a certificate at the edge of
 # the checker's tolerance -- where its arithmetic (summation order) and ours may
 # disagree -- is dropped rather than risked: one rejected certificate rejects
@@ -330,6 +333,16 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     h.setOptionValue("mip_feasibility_tolerance", CHECK_TOL)
     h.setOptionValue("primal_feasibility_tolerance", CHECK_TOL)
     h.setOptionValue("time_limit", float(time_limit))
+    # Wall-clock guard: HiGHS was measured overrunning its time_limit 7-10x on
+    # presolve-free solves; stop it at the limit (plus a little) whatever it does.
+    stop = time.perf_counter() + float(time_limit) + 1.0
+
+    def _guard(event) -> None:
+        event.interrupt(time.perf_counter() > stop)
+
+    h.cbMipInterrupt.subscribe(_guard)
+    h.cbSimplexInterrupt.subscribe(_guard)
+    h.cbIpmInterrupt.subscribe(_guard)
     h.addVars(n, lb, ub)
     vt = highspy.HighsVarType
     h.changeColsIntegrality(
@@ -402,19 +415,22 @@ def _run(
         # written) is the answer. Said loudly; it is a valid but poor result.
         print(f"mipcc: no confirmed subsystem in the budget ({exc}); answer is the full model")
         return 0
-    left = hard_stop - (time.perf_counter() - t0) - 5.0  # keep time to write and exit
+    # Write the doubly proven answer FIRST: whatever happens to the checker-
+    # settings solve below (an overrun into the watchdog, an exception), the
+    # answer on disk is this one, not the full-model fallback (#2145 review).
+    doc = solution_json(data, res)
+    write_atomic(solution, doc)
+    left = min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)
     if checker_rejects(data, res, left):
         # Infeasible in truth (two proofs), feasible within the checker's 1e-5:
-        # submitting it would fail the run. The whole model (already on disk)
-        # is the answer instead.
+        # submitting it would fail the run. The whole model replaces it.
+        write_atomic(solution, {})
         print(
             "mipcc: the checker's own settings find the subsystem feasible within "
             f"{CHECK_TOL}; answer is the full model",
             flush=True,
         )
         return 0
-    doc = solution_json(data, res)
-    write_atomic(solution, doc)
     size = len(res.constraints) + len(res.bounds) + len(res.integrality)
     print(
         "mipcc: "

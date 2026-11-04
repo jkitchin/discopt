@@ -278,3 +278,24 @@ def test_checker_settings_catch_a_subsystem_feasible_within_tolerance():
     res = SimpleNamespace(constraints=[0], bounds=[], integrality=[0])
     assert mipcc.checker_rejects(data(2.9999999), res, 30.0) is True
     assert mipcc.checker_rejects(data(2.5), res, 30.0) is False
+
+
+def test_the_answer_is_written_before_the_checker_settings_solve(tmp_path, monkeypatch):
+    """#2145 follow-up: the checker-settings solve ran before the answer was
+    written, so an overrun into the watchdog (or an exception) left only the
+    full-model fallback on disk. Now the answer is on disk while it runs."""
+    inst = _readme_example(tmp_path)
+    out = tmp_path / "sol.json"
+    seen = {}
+
+    def checking(data, res, time_limit):
+        seen["on_disk"] = json.loads(out.read_text())
+        seen["time_limit"] = time_limit
+        raise RuntimeError("checker-settings solve failed")
+
+    monkeypatch.setattr(mipcc, "checker_rejects", checking)
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "3600")
+    assert mipcc.main([inst, str(out)]) == 0  # the failure is reported, exit 0
+    assert seen["on_disk"]["rows"]["c3"] == {"action": "relax"}  # the answer, not {}
+    assert json.loads(out.read_text()) == seen["on_disk"]  # and it stays
+    assert seen["time_limit"] <= mipcc.CHECKER_SOLVE_CAP_S
