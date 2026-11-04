@@ -135,7 +135,7 @@ def test_tally_recomputes_totals_from_rows(panel):
     assert t["executed"] == 27
     assert t["incorrect_count"] == 1
     assert t["executed_by_panel"] == {"L": 18, "INF": 9}
-    assert t["walls_withheld"] == 1
+    assert t["walls_gated"] == 1
     assert t["presolve_answered"] == {"R": 1}
 
 

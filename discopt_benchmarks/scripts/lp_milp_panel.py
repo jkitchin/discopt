@@ -17,9 +17,11 @@ Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md`` (§6). Subcommands:
             subprocess with ``DISCOPT_LP_MILP_BACKEND=rust|highs``; H0 runs raw highspy
             in-process. Every R/H row must carry the route marker of its arm (a row
             answered by the other engine raises: it would be a measurement of the wrong
-            route). ``--load-gate G`` withholds wall times for any instance whose 1-min
-            load exceeded ``G`` at its start or end; statuses and nodes are still
-            reported.
+            route). ``--load-gate G`` marks the walls of any instance whose 1-min load
+            exceeded ``G`` at its start or end as not timing-valid (``wall_valid``
+            false on the row, ``*`` in the progress line); they are still recorded so
+            a report can show them as indicative. Statuses and nodes do not depend on
+            load.
 ``tiny``    E1: per-call overhead on generated 2-20 variable LP/MILPs, in-process.
 
 Discipline (CLAUDE.md §6-§10): every run ends with an executed-comparison count and
@@ -554,19 +556,24 @@ def cmd_run(a) -> int:
             summ[arm] = {
                 **{k: last.get(k) for k in ("status", "objective", "bound", "gap_certified",
                                             "nodes", "route", "max_viol")},
-                "wall_med": statistics.median(walls) if wall_ok else None,
-                "wall_sd": (statistics.stdev(walls) if len(walls) > 1 else 0.0)
-                if wall_ok else None,
+                # Walls are always recorded; ``wall_valid`` on the row says whether the
+                # load gate held, and a report must label a gated wall indicative.
+                "wall_med": statistics.median(walls),
+                "wall_sd": statistics.stdev(walls) if len(walls) > 1 else 0.0,
+                "walls_all": walls,
+                "status_all": [r.get("status") for r in ok],
+                "certified_all": [r.get("gap_certified") for r in ok],
                 "nodes_all": [r.get("nodes") for r in ok],
                 "routes": sorted({str(r.get("route")) for r in ok if "route" in r}),
                 "incorrect": sorted({w for r in ok for w in r["incorrect"]}),
             }  # fmt: skip
         rows.append(summ)
         brief = {arm: (v.get("status"), v.get("nodes"), v.get("objective"),
-                       (round(v["wall_med"], 3) if v["wall_med"] is not None else "load>gate")
+                       f"{v['wall_med']:.3f}{'' if wall_ok else '*'}"
                        if "wall_med" in v else v)
                  for arm, v in summ.items() if arm in arms}  # fmt: skip
-        print(f"[run {i}/{len(mem)}] {x['panel']:4s} {x['name']:24s} {brief}", flush=True)
+        gated = "" if wall_ok else "  (* wall indicative: load over the gate)"
+        print(f"[run {i}/{len(mem)}] {x['panel']:4s} {x['name']:24s} {brief}{gated}", flush=True)
         for arm in arms:
             if "presolve" in summ[arm].get("routes", ()):
                 print(f"  note {arm}: answered by root presolve, neither engine ran", flush=True)
@@ -582,7 +589,7 @@ def cmd_run(a) -> int:
         print(f"run: panel={panel} executed={n}", flush=True)
     print(f"run: presolve_answered={t['presolve_answered']}", flush=True)
     print(f"run: executed={t['executed']} incorrect_count={t['incorrect_count']} "
-          f"walls_withheld={t['walls_withheld']}/{len(rows)} load_end={hdr['load_end']}",
+          f"walls_gated={t['walls_gated']}/{len(rows)} load_end={hdr['load_end']}",
           flush=True)  # fmt: skip
     return 0 if t["executed"] > 0 else 1
 
@@ -605,7 +612,7 @@ def tally(rows: list[dict], arms: list[str]) -> dict:
         "executed": sum(r["executed"] for r in rows),
         "incorrect_count": sum(r["incorrect_solves"] for r in rows),
         "executed_by_panel": by_panel,
-        "walls_withheld": sum(not r["wall_valid"] for r in rows),
+        "walls_gated": sum(not r["wall_valid"] for r in rows),
         "presolve_answered": presolve,
     }
 
@@ -805,7 +812,7 @@ def main(argv=None) -> int:
         help="run the H0 arm in a fresh subprocess per solve, like R and H",
     )
     r.add_argument("--load-gate", type=float, default=None,
-                   help="withhold walls of an instance whose 1-min load exceeds this")  # fmt: skip
+                   help="mark walls not timing-valid when the 1-min load exceeds this")  # fmt: skip
     t = sub.add_parser("tiny")
     t.add_argument("--count", type=int, default=200)
     t.add_argument("--seed", type=int, default=0)
