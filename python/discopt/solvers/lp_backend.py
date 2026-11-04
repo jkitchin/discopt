@@ -27,6 +27,7 @@ fallback — POUNCE is the QP engine.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, TypeVar, cast
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -256,7 +257,22 @@ def get_decomposition_master_solver() -> tuple[Callable, str]:
     the in-house tree). It is a core dependency, so it is the default here;
     the in-house simplex B&B remains the fallback for an install without
     ``highspy`` and is then named in the route.
+
+    ``DISCOPT_DECOMP_MASTER`` (``highs`` | ``simplex``) forces one engine. It is a
+    measurement lever for the HiGHS-parity master baselines
+    (``docs/dev/highs-parity-plan.md`` P0.4), not a tuning knob: unset, the choice
+    above is unchanged; ``highs`` without ``highspy`` raises at call time like any
+    HiGHS master; any other value raises here, so a typo cannot silently measure
+    the default engine.
     """
+    forced = os.environ.get("DISCOPT_DECOMP_MASTER")
+    if forced is not None:
+        val = forced.strip().lower()
+        if val == "highs":
+            return _milp_highs(), "HiGHS"  # type: ignore[return-value]
+        if val == "simplex":
+            return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
+        raise ValueError(f"DISCOPT_DECOMP_MASTER={forced!r}: expected 'highs' or 'simplex'")
     if _highspy_available():
         return _milp_highs(), "HiGHS"  # type: ignore[return-value]
     return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
