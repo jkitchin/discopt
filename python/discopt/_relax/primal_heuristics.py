@@ -707,6 +707,202 @@ def _implied_box(evaluator) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndar
     return lb, ub, t_lb, t_ub, bool(infeasible)
 
 
+def _subnlp_reduced_enabled() -> bool:
+    """Whether :func:`subnlp` poses its NLP on the FBBT-reduced problem (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    With the integers fixed, node FBBT (the ``_implied_box`` pass ``subnlp`` already
+    runs to refute a fixing) pins some continuous columns to a single value: under
+    the hull reformulation every disaggregated copy of a disjunct whose indicator is
+    0 is pinned to exactly 0 by its linking rows. ON fixes those columns, drops the
+    rows that are then structurally over fixed columns only (each is checked at the
+    fixed point first, and a violation beyond ten times the final accept tolerance
+    refuses the fixing without a solve), and solves ONCE on the remaining rows. A
+    fixing with nothing pinned is posed exactly as before. The returned point is
+    still verified against EVERY row of the full evaluator, so a dropped row cannot
+    admit a point the legacy path would reject.
+
+    Why: on the legacy pose the interior-point solve has to approach ``v = 0``
+    through the eps-perspective rows ``yhat * g(v / yhat)`` at ``yhat ~ eps``, and
+    POUNCE stops at ``Invalid_Number_Detected``. Measured (the #2143 entry
+    experiment, sub-NLP by sub-NLP inside real hull solves, legacy result kept):
+    ``ex_633_trespalacios`` 0 -> 20 points found, ``nonconvex_hen`` 1 -> 29
+    (12.3 s -> 2.4 s of NLP), ``eight_process`` 0 -> 42, ``clay0203`` both
+    infeasible; 349 comparisons in all, 0 lost, 0 refusals, 0 verification
+    failures. Big-M controls: 0 pins on ``ex_633`` / ``nonconvex_hen`` (identical
+    pose); ``eight_process`` big-M pins on 22 calls, 22/22 found in both arms,
+    objective difference <= 7.9e-7. Toy (``test_1917_hull_subnlp_regression``'s
+    ``_chain(3)``): 1/8 configurations legacy, 8/8 reduced.
+
+    It differs from the retired ``DISCOPT_SUBNLP_FBBT_BOX`` / ``DISCOPT_SUBNLP_IMPLIED_BOX``
+    in that it never narrows a column FBBT does not pin and never adds a second
+    solve. Still bound-changing in §5's sense (incumbents move pruning), so it is
+    default-OFF until ``issue1917_gdp_flag_panel.py --flag DISCOPT_SUBNLP_REDUCED
+    --phase solve --all`` (hull and big-M) and the corpus ON/OFF panel pass both
+    bars. **Kill criterion**: any sub-NLP where the legacy pose finds a verified
+    point and the reduced pose does not, a reduced point that fails verification on
+    the full rows, or a panel that is not cert-clean.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_REDUCED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+class _RowSubsetEvaluator:
+    """``base`` restricted to the rows ``keep``, on the column box ``lb``/``ub`` (#2143).
+
+    Everything else is forwarded. The rows left out are the ones over fixed columns
+    only: constants, with no gradient in any free column, so the Lagrangian Hessian
+    gives each of them a zero multiplier, which is what removing a constant row
+    means. The box is carried explicitly (not read from the model), so the pins
+    reach the solve whatever ``base.variable_bounds`` is built from.
+
+    Hand it to an NLP backend only together with explicit ``constraint_bounds``:
+    the source constraint list belongs to ``base`` and would describe the full row
+    set, so the two attributes that expose it refuse instead of forwarding. Never
+    verify a point with it; feasibility is judged on ``base``.
+    """
+
+    def __init__(self, base, keep: np.ndarray, lb: np.ndarray, ub: np.ndarray) -> None:
+        self._base = base
+        self._keep = np.asarray(keep, dtype=np.int64)
+        self._m_full = int(base.n_constraints)
+        self._lb = np.asarray(lb, dtype=np.float64)
+        self._ub = np.asarray(ub, dtype=np.float64)
+        rows, cols = base.jacobian_structure()
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        new_index = np.full(self._m_full, -1, dtype=np.int64)
+        new_index[self._keep] = np.arange(self._keep.size, dtype=np.int64)
+        self._jac_mask = new_index[rows] >= 0
+        self._jac_struct = (new_index[rows[self._jac_mask]], cols[self._jac_mask])
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    @property
+    def _source_constraints(self):
+        raise TypeError("_RowSubsetEvaluator has no source constraint list; pass constraint_bounds")
+
+    @property
+    def _constraint_flat_sizes(self):
+        raise TypeError("_RowSubsetEvaluator has no source constraint list; pass constraint_bounds")
+
+    @property
+    def n_constraints(self) -> int:
+        return int(self._keep.size)
+
+    @property
+    def variable_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._lb, self._ub
+
+    def has_sparse_structure(self) -> bool:
+        return True
+
+    def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._jac_struct
+
+    def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self._base.evaluate_constraints(x), dtype=np.float64)[self._keep]
+
+    def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        vals = np.asarray(self._base.evaluate_jacobian_values(x), dtype=np.float64)
+        return vals[self._jac_mask]
+
+    def evaluate_jacobian(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self._base.evaluate_jacobian(x), dtype=np.float64)[self._keep]
+
+    def _full_lambda(self, lambda_: np.ndarray) -> np.ndarray:
+        full = np.zeros(self._m_full, dtype=np.float64)
+        full[self._keep] = np.asarray(lambda_, dtype=np.float64).ravel()
+        return full
+
+    def evaluate_hessian_values(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        return self._base.evaluate_hessian_values(x, obj_factor, self._full_lambda(lambda_))
+
+    def evaluate_lagrangian_hessian(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        return self._base.evaluate_lagrangian_hessian(x, obj_factor, self._full_lambda(lambda_))
+
+
+#: :func:`_reduce_subnlp`'s verdict that the fixing breaks a row over fixed columns.
+_REDUCED_REFUTED = "refuted"
+
+
+def _reduce_subnlp(
+    evaluator, implied, x0: np.ndarray, feas_tol: float
+) -> Optional[tuple[Any, np.ndarray, list[tuple[float, float]]] | str]:
+    """The reduced pose of a fixed-integer sub-NLP (#2143), or why there is none.
+
+    Returns ``None`` when FBBT pins no column, the evaluator has no sparse
+    structure or no rows (the caller poses the legacy NLP, unchanged);
+    :data:`_REDUCED_REFUTED` when a row over fixed columns only is non-finite or
+    violated beyond ten times what :func:`subnlp`'s final
+    :func:`_check_constraint_feasibility` accepts on it -- the same 10x rule as
+    :func:`_refuted_by_integer_rows`, so no point the legacy pose could return is
+    lost; else ``(ev_solve, x0, constraint_bounds)``.
+
+    Only EXACT pins (``t_lb == t_ub``) are fixed; a column FBBT narrows to a
+    sliver of width ~1e-14 stays free, and no column FBBT merely narrows is
+    touched (narrowing every column is what lost ``heatexch_gen3`` incumbents under
+    the retired ``DISCOPT_SUBNLP_IMPLIED_BOX``).
+    """
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    m = int(evaluator.n_constraints)
+    if m == 0 or not (
+        hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
+    ):
+        return None
+    lb, ub, t_lb, t_ub, _ = implied
+    t_lb = np.asarray(t_lb, dtype=np.float64)
+    t_ub = np.asarray(t_ub, dtype=np.float64)
+    already = lb == ub
+    pinned = (t_lb == t_ub) & ~already & np.isfinite(t_lb)
+    if not pinned.any():
+        return None
+    x0 = x0.copy()
+    x0[pinned] = t_lb[pinned]
+    lb_red = lb.copy()
+    ub_red = ub.copy()
+    lb_red[pinned] = t_lb[pinned]
+    ub_red[pinned] = t_lb[pinned]
+
+    fixed = already | pinned
+    rows, cols = evaluator.jacobian_structure()
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    touches_free = np.zeros(m, dtype=bool)
+    touches_free[rows[~fixed[cols]]] = True
+    constant = ~touches_free
+    cl, cu = _infer_constraint_bounds(evaluator)
+    cl = np.asarray(cl, dtype=np.float64)
+    cu = np.asarray(cu, dtype=np.float64)
+    if constant.any():
+        g = np.asarray(evaluator.evaluate_constraints(x0), dtype=np.float64)
+        if not np.all(np.isfinite(g[constant])):
+            return _REDUCED_REFUTED
+        vals = np.asarray(evaluator.evaluate_jacobian_values(x0), dtype=np.float64)
+        scale = np.zeros(m, dtype=np.float64)
+        np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
+        threshold = 10.0 * np.maximum(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale)
+        if np.any(constant & ~(viol <= threshold)):
+            return _REDUCED_REFUTED
+    keep = np.flatnonzero(touches_free)
+    ev_solve = _RowSubsetEvaluator(evaluator, keep, lb_red, ub_red)
+    bounds = list(zip(cl[keep].tolist(), cu[keep].tolist()))
+    return ev_solve, x0, bounds
+
+
 class _RepairDeadline(Exception):
     """Raised by :class:`_DeadlineCallbacks` once the caller's deadline has passed."""
 
@@ -1239,12 +1435,27 @@ def subnlp(
             if implied[4]:
                 return None
 
+        # #2143 (``DISCOPT_SUBNLP_REDUCED``, default OFF): pose the NLP with the
+        # columns that FBBT pins fixed and the rows over fixed columns only checked
+        # here and dropped. Under hull those are an off disjunct's copies and its
+        # eps-perspective rows at ``yhat ~ eps``. Verification below stays on the
+        # full ``evaluator``.
+        reduced = None
+        if implied is not None and _subnlp_reduced_enabled():
+            reduced = _reduce_subnlp(evaluator, implied, x0, feas_tol)
+            if isinstance(reduced, str):  # _REDUCED_REFUTED
+                return None
+
         opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
 
         try:
-            nlp_result = backend(evaluator, x0, options=opts)
+            if reduced is None or isinstance(reduced, str):
+                nlp_result = backend(evaluator, x0, options=opts)
+            else:
+                ev_solve, x0, bounds = reduced
+                nlp_result = backend(ev_solve, x0, constraint_bounds=bounds, options=opts)
         except BaseException:
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
