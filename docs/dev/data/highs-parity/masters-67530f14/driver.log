@@ -1,0 +1,7 @@
+start fixtures 2026-11-04T13:45:02Z
+end fixtures rc=0 2026-11-04T13:45:03Z
+start capture-decomp 2026-11-04T13:45:03Z
+end capture-decomp rc=0 2026-11-04T13:46:23Z
+start capture-gdp 2026-11-04T13:46:23Z
+end capture-gdp rc=1 2026-11-04T13:46:31Z
+start replay 2026-11-04T13:46:31Z

@@ -4,7 +4,13 @@ Wraps :func:`discopt.solvers.lp_backend.get_decomposition_master_solver` so ever
 MILP a decomposition solve builds is pickled (its ``solve_milp`` keyword arguments) into
 ``$MASTER_CAPTURE_DIR`` together with the engine's answer. Every caller imports the selector
 inside the function, so patching the module attribute reaches all of them. The wrapped
-solver's result is returned unchanged: capture never alters a solve.
+solver's result is returned unchanged, but pickling each master costs wall time, so a
+solve with a wall-clock budget runs fewer master iterations under capture. Measured
+(P0.4, 3042 masters): ``test_1611_lagrangian.py::
+test_requested_lagrangian_is_not_replaced_by_bnb_fallback`` passes alone and fails under
+capture with a weaker, still valid, bound (323.67 vs the asserted 331.6 +/- 1; ``<= Z_IP``
+holds). The captured masters are real masters either way; the per-test outcomes of a
+capture run are not a measurement of the solver (``decomp-e2e`` runs without it).
 """
 
 from __future__ import annotations

@@ -118,3 +118,22 @@ def test_decomp_master_env_forces_the_engine(monkeypatch):
     monkeypatch.setenv("DISCOPT_DECOMP_MASTER", "higs")
     with pytest.raises(ValueError, match="DISCOPT_DECOMP_MASTER"):
         lp_backend.get_decomposition_master_solver()
+
+
+def test_vendored_gdp_models_resolve_without_gdplib(monkeypatch):
+    # P0.4's GDP capture: the vendored Pyomo GDPopt models need no GDPlib, but
+    # discover_models imported it unconditionally, so with GDPlib absent the 7 vendored
+    # masters could not be captured either. A request needing GDPlib still raises.
+    pytest.importorskip("pyomo.environ")
+    import sys
+
+    monkeypatch.syspath_prepend(str(_ROOT / "discopt_benchmarks"))
+    monkeypatch.setitem(sys.modules, "gdplib", None)  # makes ``import gdplib`` fail
+    from benchmarks import gdplib_runner as gr
+
+    specs = gr.discover_models(include=["pyomo.eight_process", "pyomo.jobshop_small"])
+    assert [s.name for s in specs] == ["pyomo.eight_process", "pyomo.jobshop_small"]
+    with pytest.raises(ImportError):
+        gr.discover_models(include=["pyomo.eight_process", "biofuel"])
+    with pytest.raises(ImportError):
+        gr.discover_models()

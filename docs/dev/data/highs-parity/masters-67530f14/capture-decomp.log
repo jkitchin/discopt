@@ -1,0 +1,181 @@
+........................................................................ [ 54%]
+...F........................................................             [100%]
+=================================== FAILURES ===================================
+__________ test_requested_lagrangian_is_not_replaced_by_bnb_fallback ___________
+
+    def test_requested_lagrangian_is_not_replaced_by_bnb_fallback():
+        # max_nodes caps the Kelley iterations. 100, not 60: the masters moved to HiGHS
+        # (#1614 D-27), which breaks ties between optimal subproblem vertices differently
+        # from the in-house simplex, so Kelley's trajectory changes. Measured: both
+        # engines converge to 331.6; HiGHS reaches it between 60 and 70 iterations
+        # (330.40 at 60), the simplex by 60.
+        r = _gap().solve(decomposition="lagrangian", lagrangian_method="kelley", max_nodes=100)
+        # Pre-fix: status "optimal", bound_source "bnb_tree", node_count 484 > max_nodes.
+        assert r.bound_source != "bnb_tree"
+        assert r.status != "optimal" or r.gap_certified
+        assert r.bound is not None
+        assert r.bound <= _Z_IP + 1e-6
+>       assert r.bound == pytest.approx(331.6, abs=1.0)
+E       assert 323.6666666666671 == 331.6 ± 1
+E         
+E         comparison failed
+E         Obtained: 323.6666666666671
+E         Expected: 331.6 ± 1
+
+python/tests/test_1611_lagrangian.py:67: AssertionError
+=============================== warnings summary ===============================
+python/tests/test_benders.py: 1 warning
+python/tests/test_gbd.py: 19 warnings
+python/tests/test_946_gbd_degenerate_multiplier.py: 6 warnings
+python/tests/test_decomposition_adversarial.py: 7 warnings
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear objective; could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((8.4051 * (((0 + y[3][0]) ); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((((0 + (x[3][0] * x[3][0])) + (x[3][1] * x[3][1])) + (x[3][2] * x[3][2])) - ((2); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((8.26599 * (((0 + y[3][0]) + y[3][1]) + y[3][2])) + 0.1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((3.03807 * ((0 + y[2][0]) ); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((5.49752 * (0 + y[0])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((3.84985 * (0 + y[0])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((5.95777 * (0 + y[0])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((6.69889 * (((0 + y[3][0]) + y[3][1]) + y[3][2])) + 0.1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((6.61649 * ((0 + y[2][0]) + y[2][1])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((((0 + (x[3][0] * x[3][0])) + (x[3][1] * x[3][1])) + (x[3][2] * x[3][2])) - ((4); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((((0 + (x[3][0] * x[3][0])) + (x[3][1] * x[3][1])) + (x[3][2] * x[3][2])) - ((8); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((((0 + (x[3][0] * x[3][0])) + (x[3][1] * x[3][1])) + (x[3][2] * x[3][2])) - ((5); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((2.80456 * ((0 + y[2][0]) ); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((7.10309 * (((0 + y[3][0]) + y[3][1]) + y[3][2])) + 0.1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((((0 + (x[3][0] * x[3][0])) + (x[3][1] * x[3][1])) + (x[3][2] * x[3][2])) - ((7); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((5.08969 * (0 + y[0])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((5.21936 * ((0 + y[2][0]) ); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((4.99241 * (((0 + y[3][0])); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((3.50136 * ((0 + y[2][0]) + y[2][1])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((4.46709 * (((0 + y[3][0]) + y[3][1]) + y[3][2])) + 0.1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((6.31836 * ((0 + y[2][0]) + y[2][1])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((3.32364 * ((0 + y[2][0]) + y[2][1])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((2.97766 * ((0 + y[2][0]) ); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((6.82173 * (0 + y[0])) + 0); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((4.18929 * (((0 + y[3][0]) + y[3][1]) + y[3][2])) + 0.1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((0 + (x[2][0] * x[2][0])) + (x[2][1] * x[2][1])) - ((2.84618 * (0 + y[0])) + 0); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_gbd_soundness_fuzz_vs_monolithic
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((0 + (x[0] * x[0])) - ((5.70706 * ((0 + y[2][0]) + y[2][1])) + 0.1))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_master_only_nonlinear_constraint
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((y[2][0] * y[2][0]) + (y[2][1] * y[2][1])) - 1)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_linear_objective_nonlinear_constraint
+python/tests/test_946_gbd_degenerate_multiplier.py::test_degenerate_recourse_still_certifies
+python/tests/test_946_gbd_degenerate_multiplier.py::test_degenerate_recourse_converges_without_exhausting_the_budget
+python/tests/test_946_gbd_degenerate_multiplier.py::test_bound_relaxed_arm_unchanged
+python/tests/test_946_gbd_degenerate_multiplier.py::test_nonbinary_first_stage_explains_the_lost_certificate
+python/tests/test_946_gbd_degenerate_multiplier.py::test_nonbinary_first_stage_certifies_with_the_full_budget
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: (((x[2][0] * x[2][0]) + (x[2][1] * x[2][1])) - (8 * y))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_gbd.py::test_c2_master_only_nonlinear_nonbinary_rejected
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((z * z) - 9)); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_946_gbd_degenerate_multiplier.py::test_lshaped_floor_is_sound_with_unbounded_recourse_variables[unbounded_above]
+  /home/user/discopt/python/discopt/debug/__init__.py:100: UserWarning: Variables with very large or infinite declared bounds: x[0] (lb=0, ub=9.999e+19 [default]), x[1] (lb=0, ub=9.999e+19 [default]), x[2] (lb=0, ub=9.999e+19 [default]). Nonlinear tightening can adjust 3 bounds via separable_quadratic_upper_bound. A bound marked [default] is the box applied to a column you declared with no bounds (9.999e+19). discopt reads it as 'no bound' (#1678): an LP/MILP that runs off along it is proved 'unbounded', and any other result whose point sits on it is reported 'feasible' with no dual bound, never a certified 'optimal' at that corner. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+python/tests/test_946_gbd_degenerate_multiplier.py::test_lshaped_floor_is_sound_with_unbounded_recourse_variables[free]
+  /home/user/discopt/python/discopt/debug/__init__.py:100: UserWarning: Variables with very large or infinite declared bounds: x[0] (lb=-9.999e+19 [default], ub=9.999e+19 [default]), x[1] (lb=-9.999e+19 [default], ub=9.999e+19 [default]). A bound marked [default] is the box applied to a column you declared with no bounds (9.999e+19). discopt reads it as 'no bound' (#1678): an LP/MILP that runs off along it is proved 'unbounded', and any other result whose point sits on it is reported 'feasible' with no dual bound, never a certified 'optimal' at that corner. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+    return fn(*args, **kwargs)
+
+python/tests/test_decomposition_adversarial.py::test_gb3_tight_nonlinear_active_constraint
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((x * x) - (4 * y))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+python/tests/test_decomposition_adversarial.py::test_c1_flaky_nlp_never_certifies_wrong[0.3]
+python/tests/test_decomposition_adversarial.py::test_c1_flaky_nlp_never_certifies_wrong[0.6]
+python/tests/test_decomposition_adversarial.py::test_c1_flaky_nlp_never_certifies_wrong[0.9]
+  /home/user/discopt/python/discopt/solvers/lp_backend.py:294: UserWarning: decomposition='benders': model not recognised as linear, so using Generalized Benders (convex-NLP recourse): Decomposition v1 requires a linear constraint (model._constraints[0]: ((x0 * x0) - (9 * b0))); could not extract its coefficients (a nonlinear term or an unsupported construct)
+    res = fn(*args, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED python/tests/test_1611_lagrangian.py::test_requested_lagrangian_is_not_replaced_by_bnb_fallback
+1 failed, 131 passed, 74 warnings in 78.70s (0:01:18)
+capture-decomp: pytest rc=1 masters=3042
