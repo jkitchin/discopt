@@ -86,6 +86,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
     # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
     "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
+    # Solve-time, primal-only (subnlp on its FBBT box + the Restoration_Failed
+    # constant-row retry): solve ``--all``.
+    "DISCOPT_SUBNLP_FBBT_BOX": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

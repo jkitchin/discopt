@@ -257,6 +257,29 @@ def _invalid_option_error(opts: dict) -> PounceOptionError:
 #: rows once the fixed columns are removed, refused before iteration 0.
 _NOT_ENOUGH_DEGREES_OF_FREEDOM = -10
 
+#: Ipopt's ``Restoration_Failed``. With many fixed columns the rows over them alone
+#: are constants with an all-zero free Jacobian; restoration's least-squares
+#: subproblem over that degenerate row set fails at iteration ~2 (#1917).
+_RESTORATION_FAILED = -2
+
+
+def _constant_row_retry_on_restoration_failure() -> bool:
+    """Whether a ``Restoration_Failed`` solve gets the constant-row retry (#1917).
+
+    The second half of ``DISCOPT_SUBNLP_FBBT_BOX`` (see
+    :func:`discopt._relax.primal_heuristics._subnlp_fbbt_box_enabled`), which shares
+    its switch. Measured on GDPlib ``syngas`` under hull at bdc54a48: a
+    fixed-configuration sub-NLP on its node-FBBT box has 2056 of 3141 rows over
+    fixed columns only, none violated; POUNCE 0.15.0 returns Restoration_Failed
+    after 2 iterations, and the same NLP without those rows is OPTIMAL in 86
+    iterations. The retry runs only after a failed solve and only when every
+    dropped row holds at the fixed point.
+    """
+    from discopt._relax.primal_heuristics import _subnlp_fbbt_box_enabled
+
+    return _subnlp_fbbt_box_enabled()
+
+
 #: Largest violation (absolute, in the row's own units) at which a row whose
 #: columns are all fixed is accepted as satisfied and dropped by the retry in
 #: :func:`solve_nlp`. The NLP-BB exit gate's absolute tolerance; a row violated
@@ -638,7 +661,9 @@ def solve_nlp(
         callbacks, m, cl, cu, kkt_schur_block, ordering, block_structure, warm_start
     )
     status_code = info.get("status", -100)
-    if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM:
+    if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM or (
+        status_code == _RESTORATION_FAILED and _constant_row_retry_on_restoration_failure()
+    ):
         dof_retry = _constant_row_retry(callbacks, lb, ub, cl, cu, x0)
         if dof_retry is not None:
             keep, sub = dof_retry

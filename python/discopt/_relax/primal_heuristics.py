@@ -674,6 +674,74 @@ def _subnlp_verify_any_status() -> bool:
     )
 
 
+def _subnlp_fbbt_box_enabled() -> bool:
+    """Whether a failed :func:`subnlp` solve is retried on its node-FBBT box (#1917).
+
+    Shares its switch with the ``Restoration_Failed`` constant-row retry in
+    :mod:`discopt.solvers.nlp_pounce`. Primal-only: it adds a second solve after a
+    legacy solve that found nothing, never changes a bound, and the returned point
+    is verified against the original constraints. ``0`` restores the legacy single
+    solve. (Solving on the box *instead of* the legacy box was measured and lost
+    incumbents: corpus ``heatexch_gen3`` 23 -> 19 of 25 root sub-NLPs feasible,
+    the retired ``DISCOPT_SUBNLP_IMPLIED_BOX`` had the same loss.)
+    """
+    return os.environ.get("DISCOPT_SUBNLP_FBBT_BOX", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _apply_implied_box(model: Model, implied, x0: np.ndarray) -> Optional[np.ndarray]:
+    """Narrow the continuous columns to the node-FBBT box ``implied``; return clipped ``x0``.
+
+    ``None`` when FBBT narrows no continuous column: the re-solve would be the
+    same NLP.
+
+    #1917: under the hull reformulation an inactive disjunct's disaggregated columns
+    are held at 0 only by their linking rows ``lb*y <= v <= ub*y``, so with ``y``
+    fixed to 0 the interior-point solve approaches ``v = 0`` through
+    eps-perspective rows evaluated at ``yhat ~ eps``. Measured on GDPlib ``syngas``
+    at bdc54a48, on the first root sub-NLP with its integers set to the big-M
+    incumbent's (known-feasible) configuration: ITERATION_LIMIT and infeasible at
+    300 iterations (4.5 s) and still at 3000 (41 s). The node-FBBT box that
+    ``subnlp`` already computes to refute fixes 540 of those columns; on it (with
+    the all-fixed rows dropped, :mod:`discopt.solvers.nlp_pounce`) the same
+    sub-NLP is OPTIMAL at 4669.0235 in 86 iterations / 0.21 s.
+
+    Sound: FBBT removes no point that satisfies the constraints with these integers
+    fixed (it is the box B&B solves that node on), and the bounds are restored by
+    the caller's ``saved_bounds``. Integer columns are already fixed and left as is.
+    """
+    _, _, t_lb, t_ub, _ = implied
+    t_lb = np.asarray(t_lb, dtype=np.float64)
+    t_ub = np.asarray(t_ub, dtype=np.float64)
+    narrowed = False
+    offset = 0
+    for v in model._variables:
+        sz = v.size
+        if not _is_free_integer(v, model):
+            shape = np.shape(v.lb)
+            lo = np.maximum(
+                np.asarray(v.lb, dtype=np.float64), t_lb[offset : offset + sz].reshape(shape)
+            )
+            hi = np.minimum(
+                np.asarray(v.ub, dtype=np.float64), t_ub[offset : offset + sz].reshape(shape)
+            )
+            if np.all(lo <= hi) and (
+                np.any(lo > np.asarray(v.lb)) or np.any(hi < np.asarray(v.ub))
+            ):
+                v.lb = lo
+                v.ub = hi
+                narrowed = True
+        offset += sz
+    if not narrowed:
+        return None
+    lb, ub = _get_variable_bounds(model)
+    return np.clip(x0, lb, ub)
+
+
 def _pump_repair_enabled() -> bool:
     """Whether the pump's feasibility repair runs (#1435). Default ON.
 
@@ -1242,13 +1310,39 @@ def subnlp(
         opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
+        t_start = time.perf_counter()
 
-        try:
-            nlp_result = backend(evaluator, x0, options=opts)
-        except BaseException:
-            # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
-            # raise PanicException, which is not a subclass of Exception.
-            return None
+        found = _subnlp_solve_and_verify(
+            backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
+        )
+        # #1917: the legacy solve found nothing. Re-solve once on the node-FBBT box
+        # of this fixing (see :func:`_apply_implied_box`). Only after a failure, so
+        # every point the legacy solve finds is still the point returned.
+        if found is None and implied is not None and _subnlp_fbbt_box_enabled():
+            if "max_wall_time" in opts:
+                left = float(opts["max_wall_time"]) - (time.perf_counter() - t_start)
+                if left <= 0.0:
+                    return None
+                opts = dict(opts, max_wall_time=left)
+            x_box = _apply_implied_box(model, implied, x0)
+            if x_box is None:
+                return None
+            found = _subnlp_solve_and_verify(
+                backend, evaluator, x_box, opts, int_mask, integer_tol, feas_tol
+            )
+    return found
+
+
+def _subnlp_solve_and_verify(
+    backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
+) -> Optional[tuple[np.ndarray, float]]:
+    """One :func:`subnlp` solve from ``x0`` and its verification; ``None`` if unusable."""
+    try:
+        nlp_result = backend(evaluator, x0, options=opts)
+    except BaseException:
+        # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
+        # raise PanicException, which is not a subclass of Exception.
+        return None
 
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
@@ -1288,6 +1382,8 @@ def subnlp(
         if not _is_integer_feasible(x_out, int_mask, tol=integer_tol):
             return None
 
+    # Verified against the evaluator's constraints only: the bounds a fallback
+    # narrowed are a subset of the original box, so a point inside them is inside it.
     if not _check_constraint_feasibility(evaluator, x_out, tol=feas_tol):
         return None
 
