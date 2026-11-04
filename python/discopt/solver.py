@@ -2696,6 +2696,8 @@ def _try_native_spatial_kernel(
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
     # #1970: the scored spatial branching rule (see the helper; default ON).
     solve_kwargs.update(_kernel_spatial_branching_kwargs())
+    # #2142: SCIP's violation measure for the spatial score (default OFF).
+    solve_kwargs.update(_spatial_viol_scip_kwargs())
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -12195,6 +12197,35 @@ def _kernel_spatial_branching_kwargs() -> dict:
     if raw in ("0", "false", "no", "off", ""):
         return {}
     return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
+
+
+def _spatial_viol_scip_kwargs() -> dict:
+    """#2142: ``DISCOPT_SPATIAL_VIOL_SCIP`` for the native spatial kernel.
+
+    **Default OFF** (bound-changing in the tree only through branching order:
+    every child pair still covers its parent box, so no node bound moves).
+
+    ON, the violation component of #1970's spatial score is computed as SCIP's
+    ``cons_nonlinear`` does: a term's McCormick gap is divided by ``max(1,
+    |f(x)|)`` (``SCIPgetExprRelAuxViolationNonlinear``) and split over its
+    operands in proportion to their midness ``max(0.05, min(x - lo, hi - x) /
+    (hi - lo))`` (``constraints/nonlinear/branching/violsplit = 'm'``), instead of
+    the absolute gap split evenly. The pseudocost component and the split point
+    are unchanged. See ``SpatialTreeConfig::spatial_viol_scip``. Only acts when
+    #1970's ``spatial_score`` is on (the default). Probe: profile counters
+    ``SpatialViolScipPicks`` / ``SpatialViolScipChanged``.
+
+    Entry measurement (``performance-plan.md`` section 108): on the 192 cstr
+    big-M boxes of the #2142 decision replay, scored at the kernel's own node LP
+    point, the top-scored column matches SCIP's pick on 44.3% of boxes (the #1970
+    violation measure: 17.2%), and SCIP's pick is in the rule's
+    ``highscorefactor = 0.9`` set on 66% (23%); at SCIP's own LP point the set
+    holds SCIP's pick on 99.0%. Read at call time.
+    """
+    raw = os.environ.get("DISCOPT_SPATIAL_VIOL_SCIP", "0").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return {}
+    return {"spatial_viol_scip": True}
 
 
 def _py_tree_spatial_score_enabled() -> bool:

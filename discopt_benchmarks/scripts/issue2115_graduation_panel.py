@@ -119,6 +119,16 @@ _FLAGS = {
         "leak": lambda off: off["SpatialSplitMoved"],
         "show": ("SpatialSplits", "SpatialSplitMoved"),
     },
+    # #2142: SCIP's violation measure for the kernel's spatial score
+    # (``spatial_viol_scip``, performance-plan §108). Only a pick whose column
+    # differs from the #1970 rule's can change the search, so
+    # ``SpatialViolScipChanged`` ON is where it ran; OFF both counters must be 0.
+    "DISCOPT_SPATIAL_VIOL_SCIP": {
+        "fired": lambda off, on: on["SpatialViolScipChanged"],
+        "ran": lambda off, on: on["SpatialViolScipChanged"] > 0,
+        "leak": lambda off: off["SpatialViolScipPicks"],
+        "show": ("SpatialViolScipPicks", "SpatialViolScipChanged"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -137,6 +147,8 @@ _CTRS = (
     "DualRebuildAuditFail",
     "SpatialSplits",
     "SpatialSplitMoved",
+    "SpatialViolScipPicks",
+    "SpatialViolScipChanged",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 

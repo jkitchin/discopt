@@ -101,6 +101,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # with ``--max-nodes N --deterministic``; ``SpatialSplitMoved`` says where a
     # split point moved, and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_SPATIAL_BRANCH_CLAMP": ("big-m", "hull"),
+    # #2142: SCIP's violation measure for the kernel's spatial score (performance-plan
+    # §108). Solve time only, like the entry above; ``SpatialViolScipChanged`` says
+    # where a branching column changed.
+    "DISCOPT_SPATIAL_VIOL_SCIP": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -145,6 +149,7 @@ def _env(flag: str, on: bool) -> dict:
 _COUNTER_FLAGS = {
     "DISCOPT_LP_DUAL_REBUILD": "DualRebuilds",
     "DISCOPT_SPATIAL_BRANCH_CLAMP": "SpatialSplitMoved",
+    "DISCOPT_SPATIAL_VIOL_SCIP": "SpatialViolScipChanged",
 }
 
 

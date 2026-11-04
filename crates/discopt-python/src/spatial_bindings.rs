@@ -58,6 +58,7 @@ use std::time::{Duration, Instant};
     node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
     int_fix_probe=false, spatial_score=false, spatial_pscost_weight=0.0,
     spatial_midpull=0.0, undecided_unpropagated_retry=false, max_open_nodes=None,
+    spatial_viol_scip=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -128,6 +129,8 @@ pub fn solve_spatial_tree_py<'py>(
     undecided_unpropagated_retry: bool,
     // #2092: the frontier memory budget in open nodes; `None` never binds.
     max_open_nodes: Option<usize>,
+    // #2142: SCIP's violation measure for the spatial score.
+    spatial_viol_scip: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let spec = build_spec(
         n_cols,
@@ -259,6 +262,7 @@ pub fn solve_spatial_tree_py<'py>(
         spatial_score,
         spatial_pscost_weight,
         spatial_midpull,
+        spatial_viol_scip,
         undecided_unpropagated_retry,
         max_open_nodes: max_open_nodes.unwrap_or(usize::MAX),
     };

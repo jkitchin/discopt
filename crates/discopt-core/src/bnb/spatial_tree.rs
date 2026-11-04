@@ -430,6 +430,14 @@ pub struct SpatialTreeConfig {
     /// `m * mid + (1 - m) * lp` (SCIP's `branching/midpull`), which keeps the
     /// point at least `m / 2` of the width from either bound.
     pub spatial_midpull: f64,
+    /// #2142: the violation component of [`Self::spatial_score`] as SCIP's
+    /// `cons_nonlinear` computes it (`SCIPgetExprRelAuxViolationNonlinear`,
+    /// `constraints/nonlinear/branching/violsplit = 'm'`): each term's gap is
+    /// divided by `max(1, |f(x)|)` and split over its operands in proportion to
+    /// their midness `max(0.05, min(x - lo, hi - x) / (hi - lo))`, instead of the
+    /// absolute gap split evenly. Off (the default) is the #1970 rule. Branching
+    /// order only: every child pair still covers its parent box.
+    pub spatial_viol_scip: bool,
     /// #1995: when a node LP decides nothing (`Numerical` / `IterLimit` /
     /// `Unbounded`) over a box that propagation tightened, solve the node again
     /// over the box it had BEFORE propagation and use that result. The objective
@@ -475,6 +483,7 @@ impl Default for SpatialTreeConfig {
             spatial_score: false,
             spatial_pscost_weight: 0.0,
             spatial_midpull: 0.0,
+            spatial_viol_scip: false,
             undecided_unpropagated_retry: false,
         }
     }
@@ -2013,8 +2022,43 @@ fn spatial_score_pick(
     config: &SpatialTreeConfig,
     (spc_sum, spc_cnt): (&[Vec<f64>; 2], &[Vec<usize>; 2]),
 ) -> Option<usize> {
+    if !config.spatial_viol_scip {
+        return spatial_score_pick_with(
+            spec,
+            x,
+            (lo, hi),
+            root_w,
+            config,
+            (spc_sum, spc_cnt),
+            false,
+        );
+    }
+    let pick = spatial_score_pick_with(spec, x, (lo, hi), root_w, config, (spc_sum, spc_cnt), true);
+    crate::profile::incr(crate::profile::Ctr::SpatialViolScipPicks);
+    // The fire probe (CLAUDE.md section 6): count the picks the rule changed.
+    if crate::profile::enabled()
+        && pick
+            != spatial_score_pick_with(spec, x, (lo, hi), root_w, config, (spc_sum, spc_cnt), false)
+    {
+        crate::profile::incr(crate::profile::Ctr::SpatialViolScipChanged);
+    }
+    pick
+}
+
+/// [`spatial_score_pick`] with the violation measure chosen by `scip_viol` (see
+/// `SpatialTreeConfig::spatial_viol_scip`).
+fn spatial_score_pick_with(
+    spec: &SpatialKernelSpec,
+    x: &[f64],
+    (lo, hi): (&[f64], &[f64]),
+    root_w: &[f64],
+    config: &SpatialTreeConfig,
+    (spc_sum, spc_cnt): (&[Vec<f64>; 2], &[Vec<usize>; 2]),
+    scip_viol: bool,
+) -> Option<usize> {
     let mut viol = vec![0.0f64; spec.n_cols];
-    let mut add = |cols: &mut dyn Iterator<Item = usize>, gap: f64, aux: usize| {
+    // `fx` is the term's true value at `x` (for the relative violation).
+    let mut add = |cols: &mut dyn Iterator<Item = usize>, gap: f64, fx: f64, aux: usize| {
         let gap = if config.scale_free_branching {
             gap / root_w[aux]
         } else {
@@ -2023,20 +2067,39 @@ fn spatial_score_pick(
         let cols: Vec<usize> = cols
             .filter(|&c| hi[c] - lo[c] > config.min_box_width)
             .collect();
-        let share = gap / cols.len().max(1) as f64;
-        for c in cols {
-            viol[c] += share;
+        if scip_viol {
+            // SCIP: relative violation, split by midness (floor 0.05).
+            let gap = gap / fx.abs().max(1.0);
+            let mid = |c: usize| {
+                let w = hi[c] - lo[c];
+                let m = (x[c] - lo[c]).min(hi[c] - x[c]) / w;
+                if m.is_finite() {
+                    m.max(0.05)
+                } else {
+                    0.05
+                }
+            };
+            let wsum: f64 = cols.iter().map(|&c| mid(c)).sum();
+            for &c in &cols {
+                viol[c] += gap * mid(c) / wsum;
+            }
+        } else {
+            let share = gap / cols.len().max(1) as f64;
+            for c in cols {
+                viol[c] += share;
+            }
         }
     };
     for t in &spec.terms {
-        let gap = match term_true_value(t, x) {
-            Some(v) => (x[t.aux_col()] - v).abs(),
-            None => f64::INFINITY,
+        let (gap, fx) = match term_true_value(t, x) {
+            Some(v) => ((x[t.aux_col()] - v).abs(), v),
+            None => (f64::INFINITY, 0.0),
         };
         if gap > 0.0 {
             add(
                 &mut term_operands(t).into_iter().flatten(),
                 gap,
+                fx,
                 t.aux_col(),
             );
         }
@@ -2044,12 +2107,13 @@ fn spatial_score_pick(
     for t in &spec.blf_terms {
         let a_val = t.a_const + dot_form(&t.a_cols, &t.a_coeffs, x);
         let b_val = t.b_const + dot_form(&t.b_cols, &t.b_coeffs, x);
-        let gap = (x[t.w] - a_val * b_val).abs();
+        let fx = a_val * b_val;
+        let gap = (x[t.w] - fx).abs();
         if gap > 0.0 {
             let mut cols: Vec<usize> = t.a_cols.iter().chain(t.b_cols.iter()).copied().collect();
             cols.sort_unstable();
             cols.dedup();
-            add(&mut cols.into_iter(), gap, t.w);
+            add(&mut cols.into_iter(), gap, fx, t.w);
         }
     }
     let cands: Vec<usize> = (0..spec.n_cols).filter(|&c| viol[c] > 0.0).collect();
@@ -3014,6 +3078,67 @@ mod tests {
         assert_eq!(pick, Some(1));
     }
 
+    /// #2142: `spatial_viol_scip` scores a term's gap relative to `max(1, |f(x)|)`
+    /// and splits it by the operands' midness (SCIP's `cons_nonlinear` rule).
+    #[test]
+    fn spatial_viol_scip_scores_relative_gaps_split_by_midness() {
+        let spec = SpatialKernelSpec {
+            n_cols: 6,
+            n_orig: 4,
+            c: vec![0.0; 6],
+            integrality: vec![false; 6],
+            global_lo: vec![0.0; 6],
+            global_hi: vec![20.0, 20.0, 1.0, 1.0, 400.0, 1.0],
+            fixed_rows: vec![],
+            terms: vec![
+                EnvTerm::Bilinear { i: 0, j: 1, w: 4 },
+                EnvTerm::Bilinear { i: 2, j: 3, w: 5 },
+            ],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let (lo, hi) = (spec.global_lo.clone(), spec.global_hi.clone());
+        let none = [vec![0.0; 6], vec![0.0; 6]];
+        let zero = [vec![0usize; 6], vec![0usize; 6]];
+        let cfg = |on: bool| SpatialTreeConfig {
+            spatial_score: true,
+            spatial_viol_scip: on,
+            ..SpatialTreeConfig::default()
+        };
+        // Gaps 10 (f = 100) and 0.5 (f = 0.25): absolute, columns 0/1 win (5 each
+        // vs 0.25); relative, 0.1 vs 0.5, so columns 2/3 win.
+        let x = [10.0, 10.0, 0.5, 0.5, 110.0, 0.75];
+        let pick = |on: bool, x: &[f64]| {
+            spatial_score_pick(&spec, x, (&lo, &hi), &[1.0; 6], &cfg(on), (&none, &zero))
+        };
+        assert_eq!(pick(false, &x), Some(0));
+        assert_eq!(pick(true, &x), Some(2));
+        // Midness: only the second term is violated, column 2 sits near its bound
+        // (weight floored at 0.05) and column 3 mid-box (0.5). Evenly split, the
+        // tie goes to the lower index; by midness column 3 takes 10/11 of it.
+        let x = [10.0, 10.0, 0.01, 0.5, 100.0, 0.5];
+        assert_eq!(pick(false, &x), Some(2));
+        assert_eq!(pick(true, &x), Some(3));
+        // Off is the #1970 rule: no measure leaks from the flag's code path.
+        let x = [10.0, 10.0, 0.5, 0.5, 110.0, 0.75];
+        let cfg_default = SpatialTreeConfig {
+            spatial_score: true,
+            ..SpatialTreeConfig::default()
+        };
+        assert!(!cfg_default.spatial_viol_scip);
+        assert_eq!(
+            spatial_score_pick(
+                &spec,
+                &x,
+                (&lo, &hi),
+                &[1.0; 6],
+                &cfg_default,
+                (&none, &zero)
+            ),
+            Some(0)
+        );
+    }
+
     #[test]
     fn spatial_midpull_moves_the_split_toward_the_midpoint() {
         let cfg = |m: f64| SpatialTreeConfig {
@@ -3108,12 +3233,18 @@ mod tests {
             blf_terms: vec![],
             obbt_candidates: vec![],
         };
-        for (score, w, m) in [(false, 0.0, 0.0), (true, 0.0, 0.0), (true, 1.0, 0.75)] {
+        for (score, w, m, sv) in [
+            (false, 0.0, 0.0, false),
+            (true, 0.0, 0.0, false),
+            (true, 1.0, 0.75, false),
+            (true, 1.0, 0.75, true), // #2142: SCIP's violation measure
+        ] {
             for s in [&spec, &xy_min_spec()] {
                 let cfg = SpatialTreeConfig {
                     spatial_score: score,
                     spatial_pscost_weight: w,
                     spatial_midpull: m,
+                    spatial_viol_scip: sv,
                     gap_tol: 1e-5,
                     ..SpatialTreeConfig::default()
                 };
