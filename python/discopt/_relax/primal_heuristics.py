@@ -452,6 +452,7 @@ def feasibility_pump(
     backend: Optional[Callable] = None,
     evaluator: Optional[NLPEvaluator] = None,
     deadline: Optional[float] = None,
+    stats: Optional[dict] = None,
 ) -> Optional[np.ndarray]:
     """Try to find an integer-feasible solution via rounding + re-solve.
 
@@ -481,6 +482,9 @@ def feasibility_pump(
             The evaluator reads variable bounds from the model on each solve, so
             the integer-pinning below is honoured regardless of which evaluator
             is used. If None, a fresh one is constructed.
+        stats: Optional dict counting rounds ``posed`` (an NLP ran) and
+            ``screened`` (refuted before any solve under
+            ``DISCOPT_HEUR_FIXING_SCREEN``, #2143).
 
     Returns:
         An integer-feasible solution vector, or None if not found.
@@ -502,6 +506,7 @@ def feasibility_pump(
 
     rng = np.random.default_rng(42)
     repairs_left = _PUMP_REPAIR_ATTEMPTS
+    screen = _heur_fixing_screen_enabled()
 
     for round_idx in range(max_rounds):
         # Always run the first round (a feasible incumbent is the primary goal,
@@ -541,6 +546,22 @@ def feasibility_pump(
                     v.lb = fixed.copy()
                     v.ub = fixed.copy()
                 offset += sz
+
+            # #2143 (``DISCOPT_HEUR_FIXING_SCREEN``, default OFF): the two
+            # refutations ``subnlp`` runs before its NLP. A refuted fixing has no
+            # continuous completion, so neither the projection nor the repair
+            # below can return a point: solve nothing, keep the repair for a
+            # round that can use it, and perturb. Measured on GDPlib syngas under
+            # hull: all 5 rounds refuted, 28.7 s of NLP and repair for nothing.
+            if screen and (
+                _refuted_by_integer_rows(model, int_mask, x0, _PUMP_SCREEN_TOL)
+                or (evaluator.n_constraints > 0 and _implied_box(evaluator)[4])
+            ):
+                if stats is not None:
+                    stats["screened"] = stats.get("screened", 0) + 1
+                continue
+            if stats is not None:
+                stats["posed"] = stats.get("posed", 0) + 1
             solve_opts = dict(opts)
             _wall_cap = _deadline_wall_cap(deadline)
             if _wall_cap is not None:
@@ -641,6 +662,13 @@ _PUMP_REPAIR_OUTER_ITERS = 10
 #: exactly when the point it is producing would pass, rather than at some looser
 #: or tighter criterion of its own.
 _PUMP_REPAIR_TOL = 1e-6
+
+#: Tolerance the pump's #2143 integer-row screen refuses beyond (ten times what
+#: :func:`_refuted_by_integer_rows` derives from it). The ``tol`` that
+#: :func:`_verified_pump_point`'s :func:`_check_constraint_feasibility` call
+#: verifies a candidate with, so a screened round is one whose every candidate
+#: that check would reject anyway.
+_PUMP_SCREEN_TOL = 1e-6
 
 
 def _subnlp_verify_any_status() -> bool:
@@ -1341,6 +1369,116 @@ def passes_false_primal_screen(evaluator: NLPEvaluator, x: np.ndarray) -> bool:
     )
 
 
+def _heur_fixing_screen_enabled() -> bool:
+    """Whether root heuristics skip integer fixings already known to fail (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``. Two pieces, one question each -- "has
+    this fixing already been shown to give nothing?":
+
+    * :func:`integer_local_search` keeps a :class:`_FixingMemo` for the call and
+      does not re-pose a fixing ``subnlp`` already refused by a proof over the
+      fixed box (integer rows, node FBBT, the reduced pose's fixed rows), nor the
+      SAME start (integers and continuous values bit-identical) whose NLP ended
+      without a point on any status but ``TIME_LIMIT``. The work budget is charged
+      exactly as if the sub-NLP had run, so the search visits the same fixings in
+      the same order: only the repeated solve is skipped.
+    * :func:`feasibility_pump` screens each round's fixing with the same two
+      refutations ``subnlp`` runs (:func:`_refuted_by_integer_rows`,
+      :func:`_implied_box`) before its NLP and before :func:`_repair_to_feasible`;
+      a refuted round solves nothing and does not spend the repair.
+
+    Measured on GDPlib ``syngas`` under hull (#2143 diagnosis): the root ILS posed
+    7 sub-NLPs on ONE fixing at 3.5-4.2 s each (30.2 s); every one of the pump's
+    5 rounds was FBBT-refuted (all but the first also integer-row refuted), and the
+    pump spent 29.1 s on 5 capped NLPs and a 12.7 s repair. Inside the LOA route's
+    native-kernel seed, 25 of 25 ILS sub-NLPs posed the same start.
+
+    Why it is not simply ON: the pump half changes which round the repair runs on,
+    so the pump's trajectory is not the legacy one, and the memo assumes the NLP
+    backend is deterministic for an identical start. **Kill criterion**: a
+    memoized fixing that a later identical pose would have solved, or a pump point
+    the screen loses, on the panel.
+    """
+    return os.environ.get("DISCOPT_HEUR_FIXING_SCREEN", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+class _FixingMemo:
+    """Integer fixings one heuristic call has already seen fail in :func:`subnlp` (#2143).
+
+    Two kinds of failure, kept apart because they generalize differently:
+
+    * ``refuted`` -- keyed by the integer values alone. ``subnlp`` refused the
+      fixing on a proof over the fixed box (``outcome["refuted"]``): an integer
+      row broken, node FBBT proving the box empty, or a fixed row of the reduced
+      pose violated. None of these reads the continuous start, so ANY start with
+      these integers is refused the same way.
+    * ``failed`` -- keyed by the whole start, bit for bit. The NLP ran and gave
+      no verified point. An NLP's outcome depends on its start (a local solver can
+      fail from one start and succeed from another), so only the identical pose is
+      skipped, and only when the solve did not stop on its wall clock
+      (``TIME_LIMIT`` depends on machine speed, so a repeat might get further).
+
+    Integer values come from :func:`_subnlp_start`, the same normalization
+    ``subnlp`` applies, so a key names exactly the problem ``subnlp`` would pose.
+    """
+
+    def __init__(self, int_mask: np.ndarray, lb: np.ndarray, ub: np.ndarray) -> None:
+        self._int_mask = int_mask
+        self._lb = lb
+        self._ub = ub
+        self._refuted: set[bytes] = set()
+        self._failed: set[bytes] = set()
+        #: Poses skipped because the integers were already refuted / the start already failed.
+        self.skipped_refuted = 0
+        self.skipped_failed = 0
+
+    def _keys(self, x: np.ndarray) -> tuple[bytes, bytes]:
+        x0 = _subnlp_start(x, self._int_mask, self._lb, self._ub)
+        return x0[self._int_mask].tobytes(), x0.tobytes()
+
+    def known_to_fail(self, x: np.ndarray) -> bool:
+        """Whether ``subnlp`` from ``x`` is already known to return ``None``; counts the skip."""
+        int_key, start_key = self._keys(x)
+        if int_key in self._refuted:
+            self.skipped_refuted += 1
+            return True
+        if start_key in self._failed:
+            self.skipped_failed += 1
+            return True
+        return False
+
+    def record(self, x: np.ndarray, outcome: dict) -> None:
+        """Remember a ``subnlp`` call from ``x`` that returned ``None`` with ``outcome``."""
+        int_key, start_key = self._keys(x)
+        if outcome.get("refuted"):
+            self._refuted.add(int_key)
+            return
+        status = outcome.get("nlp_status")
+        if status is not None and status != SolveStatus.TIME_LIMIT:
+            self._failed.add(start_key)
+
+
+def _subnlp_start(
+    x_relax: np.ndarray, int_mask: np.ndarray, lb: np.ndarray, ub: np.ndarray
+) -> np.ndarray:
+    """The start :func:`subnlp` poses from ``x_relax``: integers rounded, then clipped.
+
+    One helper so :class:`_FixingMemo` keys a fixing exactly as ``subnlp`` poses it.
+    ``+ 0.0`` maps ``-0.0`` to ``0.0`` so equal starts have equal bytes.
+    """
+    x0 = np.asarray(x_relax, dtype=np.float64).copy()
+    if np.any(int_mask):
+        x0[int_mask] = np.round(x0[int_mask])
+        x0 = np.clip(x0, lb, ub)
+    return x0 + 0.0
+
+
 def subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -1350,6 +1488,7 @@ def subnlp(
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
     time_budget: Optional[float] = None,
+    outcome: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """SubNLP-style primal heuristic: fix integers, re-solve continuous NLP.
 
@@ -1376,6 +1515,13 @@ def subnlp(
             caller's deadline. Unaccepted by backends that ignore the key (it is
             silently skipped there). An explicit ``max_wall_time`` already in
             ``nlp_options`` takes precedence.
+        outcome: Optional dict this call fills with why it returned what it did
+            (#2143), for a caller that memoizes failed fixings
+            (:class:`_FixingMemo`): ``"refuted"`` is set to ``"integer_rows"``,
+            ``"fbbt"`` or ``"reduced"`` when the integer fixing itself was proved
+            to admit no point (a proof over the fixed box, independent of the
+            start), and ``"nlp_status"`` to the backend's :class:`SolveStatus`
+            when an NLP was solved (``"nlp_raised"`` when it raised).
 
     Returns:
         ``(x, obj)`` if the heuristic produced a usable integer- and
@@ -1392,22 +1538,22 @@ def subnlp(
     int_mask = _get_integer_mask(model)
     lb_orig, ub_orig = _get_variable_bounds(model)
 
-    x0 = np.asarray(x_relax, dtype=np.float64).copy()
+    x0 = _subnlp_start(x_relax, int_mask, lb_orig, ub_orig)
+    if outcome is None:
+        outcome = {}
 
     # Fix integer variables by rounding and clamping bounds to that value.
     # We mutate the model variables' bounds in-place and restore afterwards
     # since NLPEvaluator.variable_bounds reads from the model on each call.
     with model.saved_bounds():
         if np.any(int_mask):
-            x0[int_mask] = np.round(x0[int_mask])
-            x0 = np.clip(x0, lb_orig, ub_orig)
-
             # #1775 G6.2: with the integers fixed, a linear row over integers only
             # is a constant. If the assignment breaks one, no continuous
             # completion exists, so do not solve for one. Measured on the GDP
             # panel's big-M eight_process: integer_local_search spent 4.9 s on 24
             # sub-NLPs, every one breaking a ``sum_k y_k == 1`` row.
             if _refuted_by_integer_rows(model, int_mask, x0, feas_tol):
+                outcome["refuted"] = "integer_rows"
                 return None
 
             # Tighten bounds on integer variables; ``saved_bounds`` restores them.
@@ -1433,6 +1579,7 @@ def subnlp(
         if np.any(int_mask) and evaluator.n_constraints > 0:
             implied = _implied_box(evaluator)
             if implied[4]:
+                outcome["refuted"] = "fbbt"
                 return None
 
         # #2143 (``DISCOPT_SUBNLP_REDUCED``, default OFF): pose the NLP with the
@@ -1444,6 +1591,7 @@ def subnlp(
         if implied is not None and _subnlp_reduced_enabled():
             reduced = _reduce_subnlp(evaluator, implied, x0, feas_tol)
             if isinstance(reduced, str):  # _REDUCED_REFUTED
+                outcome["refuted"] = "reduced"
                 return None
 
         opts = _heuristic_nlp_options(nlp_options)
@@ -1459,7 +1607,9 @@ def subnlp(
         except BaseException:
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
+            outcome["nlp_raised"] = True
             return None
+        outcome["nlp_status"] = nlp_result.status
 
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
@@ -1640,6 +1790,7 @@ def integer_local_search(
     feas_tol: float = 1e-6,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
     seed: int = 0,
+    stats: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Constraint-violation-guided integer local search (1-opt + 2-opt).
 
@@ -1701,6 +1852,9 @@ def integer_local_search(
             within-limit search does.
         feas_tol: Constraint feasibility tolerance.
         seed: RNG seed for reproducible perturbations.
+        stats: Optional dict filled with ``subnlp_calls`` (sub-NLPs actually
+            posed) and ``memo_skipped_refuted`` / ``memo_skipped_failed`` (poses
+            the ``DISCOPT_HEUR_FIXING_SCREEN`` memo skipped, #2143).
 
     Returns:
         ``(x, obj)`` for the best feasible point found, else ``None``.
@@ -1788,6 +1942,41 @@ def integer_local_search(
 
     has_continuous = bool(np.any(~int_mask))
 
+    # #2143 (``DISCOPT_HEUR_FIXING_SCREEN``, default OFF): skip a repair whose
+    # fixing this call already saw refuted, or whose identical start already
+    # failed. The caller charges the budget before calling, skip or not, so the
+    # search's path is the legacy one; only the repeated solve is saved.
+    memo = (
+        _FixingMemo(int_mask, *_get_variable_bounds(model))
+        if _heur_fixing_screen_enabled()
+        else None
+    )
+    n_posed = 0
+
+    def _repair(x: np.ndarray) -> Optional[tuple[np.ndarray, float]]:
+        nonlocal n_posed
+        if memo is not None and memo.known_to_fail(x):
+            return None
+        n_posed += 1
+        outcome: dict = {}
+        cand = subnlp(
+            model,
+            x,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            feas_tol=feas_tol,
+            # #966: cap the repair from whichever deadline the budget is
+            # actually enforcing. ``budget.exhausted()`` is polled BETWEEN
+            # solves, so without this a step launched just under the wall runs
+            # past it.
+            time_budget=_deadline_wall_cap(budget.deadline),
+            outcome=outcome,
+        )
+        if cand is None and memo is not None:
+            memo.record(x, outcome)
+        return cand
+
     def _objective_improve(x_feas: np.ndarray, obj_feas: float) -> tuple[np.ndarray, float]:
         """Descend the OBJECTIVE over feasible integer neighbours from a feasible
         point. The violation descent above only reaches *a* feasible integer
@@ -1830,19 +2019,7 @@ def integer_local_search(
                     if has_continuous:
                         _solves_used += 1
                         budget.charge(NLP_SOLVE)
-                        cand = subnlp(
-                            model,
-                            xt,
-                            backend=backend,
-                            nlp_options=nlp_options,
-                            evaluator=evaluator,
-                            feas_tol=feas_tol,
-                            # #966: cap the repair from whichever deadline the
-                            # budget is actually enforcing. ``budget.exhausted()``
-                            # is polled BETWEEN solves, so without this a descent
-                            # step launched just under the wall runs past it.
-                            time_budget=_deadline_wall_cap(budget.deadline),
-                        )
+                        cand = _repair(xt)
                         if cand is None:
                             continue
                         cx, cobj = np.asarray(cand[0], dtype=np.float64), float(cand[1])
@@ -1972,15 +2149,7 @@ def integer_local_search(
         # integer-consistent points, so anything it gives back is a valid
         # incumbent candidate.
         budget.charge(NLP_SOLVE)
-        repaired = subnlp(
-            model,
-            xc,
-            backend=backend,
-            nlp_options=nlp_options,
-            evaluator=evaluator,
-            feas_tol=feas_tol,
-            time_budget=_deadline_wall_cap(budget.deadline),  # #966
-        )
+        repaired = _repair(xc)
         if repaired is not None:
             x_ok, obj_ok = repaired
             # Turn "a feasible point" into "the locally objective-best feasible
@@ -1997,14 +2166,24 @@ def integer_local_search(
     # ``stopped_on="deadline"`` means the machine's speed cut it short, so the
     # incumbent it returns (and the tree below it) is NOT reproducible; the
     # determinism panel reads this line.
+    skipped_refuted = memo.skipped_refuted if memo is not None else 0
+    skipped_failed = memo.skipped_failed if memo is not None else 0
     logger.debug(
-        "integer_local_search: evals=%d solves=%d limits=%s stopped_on=%s seeds=%d",
+        "integer_local_search: evals=%d solves=%d limits=%s stopped_on=%s seeds=%d "
+        "subnlp_posed=%d memo_skipped=%d+%d",
         budget.spent(EVAL),
         budget.spent(NLP_SOLVE),
         budget.limits,
         budget.stopped_on,
         n_seeds,
+        n_posed,
+        skipped_refuted,
+        skipped_failed,
     )
+    if stats is not None:
+        stats["subnlp_calls"] = n_posed
+        stats["memo_skipped_refuted"] = skipped_refuted
+        stats["memo_skipped_failed"] = skipped_failed
     return best
 
 
