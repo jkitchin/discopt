@@ -492,6 +492,9 @@ class Model:
 #: general-integer models stay below 1e4.
 _MAX_MAGNITUDE = 1e9
 
+#: The reduced model is solved only if it kept at most this share of the rows.
+_MIN_SHRINK = 0.8
+
 #: Cap on the reduction itself, so the pre-pass cannot eat a confirmation's
 #: budget (measured 0.3-2.0 s on MIPcc27 sets of 1.4k-4.8k rows).
 REDUCE_CAP_S = 10.0
@@ -527,6 +530,14 @@ def reduced_infeasible(A, rlo, rhi, lb, ub, held, stop_at, guard=None) -> bool |
         return None  # a coefficient is not exactly representable: no conclusion
     if Ar.shape[0] == 0:
         return None  # everything reduced away: the system is feasible
+    n_rows = int(np.sum(np.isfinite(np.asarray(rlo, float)) | np.isfinite(np.asarray(rhi, float))))
+    if Ar.shape[0] > _MIN_SHRINK * n_rows:
+        # The reduction did little: its model is about the input's size, so a
+        # presolve-free solve of it is no better than the raw one the caller
+        # runs next -- leave that route the whole budget (#2145 review). A
+        # blanket half share instead was measured to starve the effective case
+        # (dijle 2426 -> 2938 at 600 s: its 66-row reduced models need ~13 s).
+        return None
     big = max(
         float(np.max(np.abs(Ar.data), initial=0.0)),
         *(float(np.max(np.abs(v[np.isfinite(v)]), initial=0.0)) for v in (rl, rh, lo, hi)),

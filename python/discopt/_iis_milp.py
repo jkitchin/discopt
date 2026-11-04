@@ -97,9 +97,6 @@ PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
     "fast": (2.0, (10.0, 30.0)),
     "all": (math.inf, None),
 }
-#: Share of a confirmation's remaining budget the exact-reduction route may use
-#: (``_Engine._reduced``); the existing routes run with the rest.
-_REDUCE_SHARE = 0.5
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
@@ -577,10 +574,6 @@ class _Engine:
         stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at
         if self.deadline is not None:
             stop = min(stop, self.deadline)
-        # Half of what is left: an undecided reduction must leave the raw
-        # presolve-free solve and the rational decider time to run (#2145 review).
-        t_now = time.perf_counter()
-        stop = t_now + _REDUCE_SHARE * max(stop - t_now, 0.0)
         held = np.zeros(self.col_lb.size, dtype=bool)
         held[self._held] = True
         rlo, rhi, lb, ub = self._cfg

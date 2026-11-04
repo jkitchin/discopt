@@ -172,32 +172,31 @@ def test_engine_confirms_through_the_reduction_when_presolve_free_cannot(monkeyp
     assert res.complete and not res.fallback
 
 
-def test_the_reduction_route_gets_half_the_remaining_budget(monkeypatch):
+def test_the_route_skips_the_solve_when_the_reduction_did_little(monkeypatch):
+    """#2145 review: an undecided solve of a barely-reduced model ate the whole
+    confirmation budget, starving the raw presolve-free route and the rational
+    decider. When the reduction keeps more than 80% of the rows the route draws
+    no conclusion at once and leaves the budget to them."""
     import time
 
-    import discopt._iis_reduce as red
+    calls = {"n": 0}
+    real = highspy.Highs.run
 
-    seen = {}
+    def counting_run(self):
+        calls["n"] += 1
+        return real(self)
 
-    def capture(A, rlo, rhi, lb, ub, held, stop_at, guard=None):
-        seen["left"] = stop_at - time.perf_counter()
-        return None
-
-    monkeypatch.setattr(red, "reduced_infeasible", capture)
-    eng = _iis_milp._Engine(
-        sp.csr_matrix(np.array([[1.0, 1.0]])),
-        np.array([2.5]),
-        np.array([1e20]),
-        np.zeros(2),
-        np.ones(2),
-        np.array([True, True]),
-        {0: np.array([0])},
-        30.0,
-        confirm_each=False,
+    monkeypatch.setattr(highspy.Highs, "run", counting_run)
+    # Rows the five rules cannot touch: two-variable rows over wide integers.
+    n = 6
+    A = sp.csr_matrix(
+        np.array([[1.0 if c in (r, (r + 1) % n) else 0.0 for c in range(n)] for r in range(n)])
     )
-    eng._configure({0}, set(), {0, 1})
-    eng._reduced(time.perf_counter() + 40.0)
-    assert 0.0 < seen["left"] <= 20.0 + 1e-3  # half of the 40 s left
+    rlo, rhi = np.full(n, 1.0), np.full(n, 1.0)  # x_r + x_{r+1} = 1 around an even cycle
+    lb, ub = np.full(n, -50.0), np.full(n, 50.0)
+    t = time.perf_counter()
+    assert reduced_infeasible(A, rlo, rhi, lb, ub, np.ones(n, bool), t + 30.0) is None
+    assert calls["n"] == 0  # no HiGHS solve of a model the reduction did not shrink
 
 
 def test_a_refuted_presolve_on_claim_is_not_recorded_as_proven(monkeypatch):
