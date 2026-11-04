@@ -1,0 +1,10 @@
+header {"load": [0.55615234375, 0.30126953125, 0.109375], "commit": "dcdac02", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 65
+[run 1/65] L    25fv47                   {'R': ('optimal', 0, 5501.845888286734, '9.834'), 'H': ('optimal', 0, 5501.8458882867235, '4.346'), 'H0': ('optimal', 0, 5501.845888286757, '0.156')}
+[run 2/65] L    adlittle                 {'R': ('optimal', 0, 225494.96316238027, '0.238'), 'H': ('optimal', 0, 225494.96316238042, '0.240'), 'H0': ('optimal', 0, 225494.9631623803, '0.002')}
+[run 3/65] L    afiro                    {'R': ('optimal', 0, -464.75314285714285, '0.112'), 'H': ('optimal', 0, -464.7531428571429, '0.116'), 'H0': ('optimal', 0, -464.75314285714285, '0.001')}
+[run 4/65] L    avgas                    {'R': ('optimal', 0, -7.75, '0.090'), 'H': ('optimal', 0, -7.75, '0.079'), 'H0': ('optimal', 0, -7.75, '0.001')}
+[run 5/65] L    blending                 {'R': ('optimal', 0, -3200.0, '0.082'), 'H': ('optimal', 0, -3200.0, '0.081'), 'H0': ('optimal', 0, -3200.0000000000005, '0.001')}
+[run 6/65] L    chip                     {'R': ('optimal', 0, -900.0, '0.083*'), 'H': ('optimal', 0, -900.0, '0.082*'), 'H0': ('optimal', 0, -900.0, '0.001*')}  (* wall indicative: load over the gate)
+[run 7/65] L    dD2e                     {'R': ('optimal', 0, -3000.0, '0.081*'), 'H': ('optimal', 0, -3000.0, '0.069*'), 'H0': ('optimal', 0, -3000.0, '0.000*')}  (* wall indicative: load over the gate)
+[run 8/65] L    e226                     {'R': ('optimal', 0, -11.638929066370508, '1.084*'), 'H': ('optimal', 0, -11.638929066370547, '0.839*'), 'H0': ('optimal', 0, -11.638929066370522, '0.009*')}  (* wall indicative: load over the gate)
+[run 9/65] L    egout-ac                 {'R': ('optimal', 0, 0.0, '0.200*'), 'H': ('optimal', 0, 0.0, '0.157*'), 'H0': ('optimal', 0, 0.0, '0.001*')}  (* wall indicative: load over the gate)

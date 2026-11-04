@@ -624,6 +624,18 @@ def _write_run(path: Path, hdr: dict, args: dict, rows: list[dict], arms, comple
     tmp.replace(path)
 
 
+#: What a resumed run must share with the run it appends to: the solver, the instance
+#: loader and the manifests. Harness-only commits (reporting, orchestration) may land in
+#: between; each run JSON records its own harness commit in its header.
+CODE_UNDER_TEST = ("python/discopt", "crates", "discopt_benchmarks/scripts/lp_milp_loader.py",
+                   "discopt_benchmarks/data")  # fmt: skip
+
+
+def code_fingerprint(commit: str) -> dict[str, str]:
+    """Git tree/blob hash of each ``CODE_UNDER_TEST`` path at ``commit``."""
+    return {p: _git("rev-parse", f"{commit}:{p}", cwd=REPO) for p in CODE_UNDER_TEST}
+
+
 def resume_rows(path: Path, commit: str, args: dict) -> list[dict]:
     """The rows of an interrupted run, refusing one that measured different code or settings."""
     if not path.exists():
@@ -631,9 +643,17 @@ def resume_rows(path: Path, commit: str, args: dict) -> list[dict]:
     old = json.loads(path.read_text())
     if old.get("complete"):
         raise SystemExit(f"--resume: {path} is a complete run; nothing to resume")
-    if old["header"]["commit"] != commit:
-        raise SystemExit(f"--resume: {path} was measured at {old['header']['commit']}, "
-                         f"HEAD is {commit}; a resumed run must measure one commit")  # fmt: skip
+    old_commit = old["header"]["commit"]
+    if old_commit != commit:
+        dirty = _git("status", "--porcelain", "--", *CODE_UNDER_TEST, cwd=REPO)
+        if dirty:
+            raise SystemExit(f"--resume: uncommitted changes in the code under test:\n{dirty}")
+        a, b = code_fingerprint(old_commit), code_fingerprint(commit)
+        changed = sorted(k for k in a if a[k] != b[k])
+        if changed:
+            raise SystemExit(f"--resume: {path} was measured at {old_commit}; HEAD {commit} "
+                             f"changes the code under test {changed}; a resumed run must "
+                             "measure one solver")  # fmt: skip
     diff = {k: (old["args"].get(k), args.get(k)) for k in RESUME_KEYS
             if old["args"].get(k) != args.get(k)}  # fmt: skip
     if diff:

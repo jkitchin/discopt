@@ -104,3 +104,43 @@ def test_lp_milp_panel_run_takes_h0_subprocess(mp, monkeypatch):
     seen.clear()
     assert mp.main(["run", "--instances", "gr4x6"]) == 0
     assert seen["h0_subprocess"] is True and seen["instances"] == "gr4x6"
+
+
+def _cell(statuses, certs, walls, nodes, wrong=()):
+    return {"status_all": statuses, "certified_all": certs, "wall_med": walls,
+            "nodes_all": nodes, "incorrect": list(wrong)}  # fmt: skip
+
+
+def test_panel_report_summarises_by_panel_and_arm():
+    sys.path.insert(0, str(_SCRIPTS))
+    try:
+        rep = _load("panel_report")
+    finally:
+        sys.path.remove(str(_SCRIPTS))
+    run = {
+        "complete": True,
+        "args": {"arms": "R,H0"},
+        "rows": [
+            {"name": "a", "panel": "M", "oracle_status": "Optimal", "wall_valid": True,
+             "R": _cell(["optimal"] * 3, [True] * 3, 1.0, [10, 20, 30]),
+             "H0": _cell(["optimal"] * 3, [None] * 3, 0.1, [1, 1, 1])},
+            {"name": "b", "panel": "M", "oracle_status": "Optimal", "wall_valid": False,
+             "R": _cell(["optimal", "time_limit", "optimal"], [True, False, True], 20.0,
+                        [5, 9, 7], wrong=["x"]),
+             "H0": _cell(["optimal"] * 3, [None] * 3, 0.3, [2, 2, 2])},
+            {"name": "c", "panel": "INF", "oracle_status": "Infeasible", "wall_valid": True,
+             "R": _cell(["infeasible"] * 3, [True] * 3, 0.5, [0, 0, 0]),
+             "H0": _cell(["Infeasible"] * 3, [None] * 3, 0.01, [0, 0, 0])},
+        ],
+    }  # fmt: skip
+    lines, cells = rep.summarise([run])
+    assert cells == 6
+    by = {(ln["panel"], ln["arm"]): ln for ln in lines}
+    r = by[("M", "R")]
+    assert (r["n"], r["solved"], r["certified"], r["incorrect"]) == (2, 1, 1, 1)
+    assert r["total_wall"] == 21.0 and r["median_solved"] == 1.0
+    assert r["nodes"] == 20 + 7 and r["timing_valid"] == 1
+    assert by[("M", "H0")]["certified"] is None and by[("M", "H0")]["solved"] == 2
+    assert by[("INF", "R")]["solved"] == 1 and by[("INF", "H0")]["solved"] == 1
+    with pytest.raises(SystemExit, match="incomplete"):
+        rep.summarise([{**run, "complete": False}])

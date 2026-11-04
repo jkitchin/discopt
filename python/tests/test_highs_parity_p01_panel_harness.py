@@ -147,12 +147,23 @@ def _args(**kw):
     return base
 
 
-def test_resume_rows_appends_only_to_the_same_run(panel, tmp_path):
+def test_resume_rows_appends_only_to_the_same_run(panel, tmp_path, monkeypatch):
     f = tmp_path / "run.json"
     rows = [_summ("a", "M", 9, 0, True)]
     panel._write_run(f, {"commit": "abc"}, _args(), rows, ["R"], complete=False)
     assert panel.resume_rows(f, "abc", _args()) == rows
-    with pytest.raises(SystemExit, match="one commit"):
+    # A later commit that leaves the code under test alone (a harness-only commit, or a
+    # rebase that carries no solver change) may resume; one that changes it may not.
+    trees = {"abc": "t1", "def": "t1", "ghi": "t2"}
+    monkeypatch.setattr(
+        panel, "code_fingerprint", lambda c: {p: trees[c] for p in panel.CODE_UNDER_TEST}
+    )
+    monkeypatch.setattr(panel, "_git", lambda *a, **k: "")  # no uncommitted changes
+    assert panel.resume_rows(f, "def", _args()) == rows
+    with pytest.raises(SystemExit, match="one solver"):
+        panel.resume_rows(f, "ghi", _args())
+    monkeypatch.setattr(panel, "_git", lambda *a, **k: " M python/discopt/solver.py")
+    with pytest.raises(SystemExit, match="uncommitted changes"):
         panel.resume_rows(f, "def", _args())
     with pytest.raises(SystemExit, match="arguments differ"):
         panel.resume_rows(f, "abc", _args(time_limit=5.0))

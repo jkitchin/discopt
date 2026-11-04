@@ -148,10 +148,17 @@ measured" — it may be scheduled only with an entry experiment. From the routin
 
 ## §2 Branch model
 
-- One long-running branch `claude/happy-hamilton-0vvo3b` from `main`. **Sync**: merge `origin/main`
-  into it after every `main` merge that touches `milp_driver.rs`, `lp/simplex/`,
-  `lp_milp_highs.py` or `milp_highs.py` (check `git log origin/main -- <paths>` at the
-  start of each iteration), and at least weekly. Re-run the standing gates after a sync.
+- One long-running branch `claude/happy-hamilton-0vvo3b` from `main`. **Sync (owner,
+  2026-11-04): rebase onto `origin/main` once a day** to stay current (this replaces the
+  original "merge after every `main` change to the engine paths, at least weekly"). The
+  branch is single-owner, so the rebased branch is pushed with `--force-with-lease`.
+  A rebase changes the code under test, so it is **never** done while a measurement run is
+  in flight (the panel workers re-import `discopt` per solve): it waits for the run to
+  finish, then `maturin develop --release` / `pip install -e .` and the standing gates
+  re-run before the next task. Baseline data is labelled by the commit it measured; after
+  a rebase that commit survives only in the reflog, so a run JSON's
+  `header.commit` is the measurement's identity, not a branch commit. Last rebase:
+  *(none yet; `b0081ab` was a merge of `origin/main`, 2026-11-04)*.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
