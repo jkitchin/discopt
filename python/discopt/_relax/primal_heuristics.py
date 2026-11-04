@@ -680,16 +680,25 @@ def _subnlp_fbbt_box_enabled() -> bool:
     Shares its switch with the ``Restoration_Failed`` constant-row retry in
     :mod:`discopt.solvers.nlp_pounce`. Primal-only: it adds a second solve after a
     legacy solve that found nothing, never changes a bound, and the returned point
-    is verified against the original constraints. ``0`` restores the legacy single
-    solve. (Solving on the box *instead of* the legacy box was measured and lost
-    incumbents: corpus ``heatexch_gen3`` 23 -> 19 of 25 root sub-NLPs feasible,
-    the retired ``DISCOPT_SUBNLP_IMPLIED_BOX`` had the same loss.)
+    is verified against the original constraints. (Solving on the box *instead of*
+    the legacy box was measured and lost incumbents: corpus ``heatexch_gen3`` 23 ->
+    19 of 25 root sub-NLPs feasible, the retired ``DISCOPT_SUBNLP_IMPLIED_BOX`` had
+    the same loss. This legacy-first form keeps all 24 of 25.)
+
+    Default OFF. Its panel (10 GDP instances, hull and big-m, 2 reps, 120 s, plus
+    corpus ``heatexch_gen3``/``contvar``): it gained incumbents on hull ``hda``
+    (4824.32) and ``gdp_col`` (21360.46), where OFF has none, in both reps, and
+    lost no incumbent. But syngas big-m was slower ON in all four interleaved pairs
+    at equal node counts (120.2 vs 116.0 s at 120 s; 130.2/124.1 vs 120.0/120.8 s
+    at 300 s), and that cost it its 120 s certificate in one rep. It also does not
+    give syngas hull an incumbent at 300 s. Graduating it needs that overhead
+    removed; see ``docs/dev/flag-retirement-audit.md``.
     """
-    return os.environ.get("DISCOPT_SUBNLP_FBBT_BOX", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get("DISCOPT_SUBNLP_FBBT_BOX", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 

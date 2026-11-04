@@ -268,7 +268,7 @@ def _constant_row_retry_on_restoration_failure() -> bool:
 
     The second half of ``DISCOPT_SUBNLP_FBBT_BOX`` (see
     :func:`discopt._relax.primal_heuristics._subnlp_fbbt_box_enabled`), which shares
-    its switch. Measured on GDPlib ``syngas`` under hull at bdc54a48: a
+    its switch (default OFF). Measured on GDPlib ``syngas`` under hull at bdc54a48: a
     fixed-configuration sub-NLP on its node-FBBT box has 2056 of 3141 rows over
     fixed columns only, none violated; POUNCE 0.15.0 returns Restoration_Failed
     after 2 iterations, and the same NLP without those rows is OPTIMAL in 86

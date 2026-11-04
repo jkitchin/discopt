@@ -149,3 +149,14 @@ def test_restoration_failure_stands_with_the_flag_off(monkeypatch):
     r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
     assert len(calls) == 1
     assert r.raw_status == _RESTORATION_FAILED and r.status == SolveStatus.ERROR
+
+
+def test_flag_is_default_off(monkeypatch):
+    """Default OFF: its panel measured a syngas big-m slowdown (audit row)."""
+    from discopt._relax.primal_heuristics import _subnlp_fbbt_box_enabled
+
+    monkeypatch.delenv("DISCOPT_SUBNLP_FBBT_BOX", raising=False)
+    assert _subnlp_fbbt_box_enabled() is False
+    assert nlp_pounce._constant_row_retry_on_restoration_failure() is False
+    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", "1")
+    assert _subnlp_fbbt_box_enabled() is True
