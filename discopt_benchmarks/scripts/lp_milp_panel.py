@@ -2,13 +2,24 @@
 
 Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md`` (§6). Subcommands:
 
+``fetch``   clone ERGO-Code/HiGHS at the tag of the installed ``highspy`` into
+            ``ref/HiGHS`` (git-ignored) and record the tag and commit in the manifest's
+            ``source`` block. The L/M/INF panels are screened from its
+            ``check/instances``.
 ``screen``  build a panel manifest: read each instance, validate the loader (raw HiGHS on
             the original file = oracle; raw HiGHS on the converted arrays must reproduce
             it; the ``.nl`` round-trip must load with the right shape). Mismatches are
-            *excluded and listed*, never dropped silently.
+            *excluded and listed*, never dropped silently. ``--kind`` selects the class:
+            ``lp`` (no integers, oracle optimal; panel L), ``milp`` (integers, oracle
+            optimal; panel M), ``inf`` (oracle infeasible or unbounded; panel INF).
 ``run``     solve manifest instances with the requested arms, rounds interleaved per
-            instance. R/H run ``Model.solve`` in a subprocess with
-            ``DISCOPT_LP_MILP_BACKEND=rust|highs``; H0 runs raw highspy in-process.
+            instance with the arm order rotated each round. R/H run ``Model.solve`` in a
+            subprocess with ``DISCOPT_LP_MILP_BACKEND=rust|highs``; H0 runs raw highspy
+            in-process. Every R/H row must carry the route marker of its arm (a row
+            answered by the other engine raises: it would be a measurement of the wrong
+            route). ``--load-gate G`` withholds wall times for any instance whose 1-min
+            load exceeded ``G`` at its start or end; statuses and nodes are still
+            reported.
 ``tiny``    E1: per-call overhead on generated 2-20 variable LP/MILPs, in-process.
 
 Discipline (CLAUDE.md §6-§10): every run ends with an executed-comparison count and
@@ -37,6 +48,12 @@ sys.path.insert(0, str(HERE.parent))
 import lp_milp_loader as L  # noqa: E402, N812
 
 GAP = 1e-4
+HIGHS_REPO = "https://github.com/ERGO-Code/HiGHS"
+REF_DIR = REPO / "ref" / "HiGHS"
+#: The ``DISCOPT_LP_MILP_BACKEND`` value and route marker each subprocess arm must show.
+ARM_BACKEND = {"R": "rust", "H": "highs"}
+#: HiGHS oracle statuses that put an instance on the INF panel.
+INF_STATUSES = ("Infeasible", "Unbounded", "Primal infeasible or unbounded")
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -137,10 +154,71 @@ def solve_arrays(inst: L.LinearInstance, time_limit: float, gap: float = GAP) ->
     }
 
 
-# ----------------------------------------------------------------------------- screen
-def cmd_screen(a) -> int:
-    from discopt.modeling.core import from_nl
+# ----------------------------------------------------------------------------- fetch
+def _highspy_version() -> str:
+    import highspy
 
+    v = getattr(highspy, "__version__", None)
+    if not v:
+        from importlib.metadata import version
+
+        v = version("highspy")
+    return str(v)
+
+
+def _git(*args: str, cwd: Path | None = None) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def cmd_fetch(a) -> int:
+    tag = a.tag or f"v{_highspy_version()}"
+    dest = Path(a.dest)
+    if dest.exists():
+        tags = (
+            _git("tag", "--points-at", "HEAD", cwd=dest).split() if (dest / ".git").exists() else []
+        )
+        if tag not in tags:
+            raise SystemExit(f"{dest} exists with tags {tags}, wanted {tag}; remove it or "
+                             "pass --tag")  # fmt: skip
+        print(f"fetch: {dest} already at {tag}", flush=True)
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        print(f"fetch: cloning {HIGHS_REPO} @ {tag} into {dest}", flush=True)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", tag, HIGHS_REPO, str(dest)], check=True
+        )
+    commit = _git("rev-parse", "HEAD", cwd=dest)
+    inst = dest / "check" / "instances"
+    n_files = sum(1 for q in inst.iterdir() if q.suffix in (".mps", ".lp"))
+    if n_files == 0:
+        raise SystemExit(f"{inst} holds no .mps/.lp files")
+    out = Path(a.manifest)
+    man = json.loads(out.read_text()) if out.exists() else {"members": [], "excluded": []}
+    man["source"] = {
+        "repo": HIGHS_REPO,
+        "tag": tag,
+        "commit": commit,
+        "path": os.path.relpath(inst, REPO),
+        "files": n_files,
+    }
+    out.write_text(json.dumps(man, indent=1) + "\n")
+    print(f"fetch: tag={tag} commit={commit} files={n_files}", flush=True)
+    return 0
+
+
+# ----------------------------------------------------------------------------- screen
+def _kind_reject(kind: str, n_int: int) -> str | None:
+    """Reason an instance is outside the ``--kind`` class before its oracle runs."""
+    if kind == "lp" and n_int > 0:
+        return "has integer columns"
+    if kind == "milp" and n_int == 0:
+        return "no integer columns"
+    return None
+
+
+def cmd_screen(a) -> int:
     _assert_discopt_under_test()
     print("header", json.dumps(_header()), flush=True)
     files = []
@@ -165,15 +243,33 @@ def cmd_screen(a) -> int:
                 continue
             n_int = int(inst.is_int.sum())
             nnz = int(inst.A.nnz)
-            if a.milp_only and n_int == 0:
-                excluded.append({"file": str(f), "reason": "no integer columns"})
-                print(tag, "EXCLUDE no integers", flush=True)
+            why = _kind_reject(a.kind, n_int)
+            if why:
+                excluded.append({"file": str(f), "reason": why})
+                print(tag, "EXCLUDE", why, flush=True)
                 continue
             if nnz > a.max_nnz:
                 excluded.append({"file": str(f), "reason": f"nnz {nnz} > {a.max_nnz}"})
                 print(tag, f"EXCLUDE nnz={nnz}", flush=True)
                 continue
             ref = L.highs_reference(str(f), time_limit=a.time_limit)
+            if a.kind == "inf":
+                if ref["status"] not in INF_STATUSES:
+                    excluded.append({"file": str(f), "reason": f"oracle status {ref['status']}"})
+                    print(tag, "EXCLUDE oracle", ref["status"], flush=True)
+                    continue
+                h0 = solve_arrays(inst, a.time_limit)
+                compared += 1
+                if h0["status"] != ref["status"]:
+                    excluded.append({"file": str(f),
+                                     "reason": f"array mismatch: {h0['status']} vs oracle "
+                                               f"{ref['status']}"})  # fmt: skip
+                    print(tag, "EXCLUDE array mismatch", h0["status"], ref["status"], flush=True)
+                    continue
+                members.append(_roundtrip_member(inst, f, a.panel, td, nnz, n_int, ref, None))
+                print(tag, f"OK n={inst.n} m={inst.m} nnz={nnz} int={n_int} {ref['status']}",
+                      flush=True)  # fmt: skip
+                continue
             if ref["status"] != "Optimal":
                 excluded.append({"file": str(f), "reason": f"oracle status {ref['status']}"})
                 print(tag, "EXCLUDE oracle", ref["status"], flush=True)
@@ -192,32 +288,13 @@ def cmd_screen(a) -> int:
                 )
                 print(tag, "EXCLUDE array mismatch", h0["objective"], ref["objective"], flush=True)
                 continue
-            nl = os.path.join(td, f"{inst.name}.nl")
             try:
-                L.write_nl(inst, nl)
+                row = _roundtrip_member(inst, f, a.panel, td, nnz, n_int, ref, h0["x"])
             except ValueError as e:
                 excluded.append({"file": str(f), "reason": f"nl writer: {e}"})
                 print(tag, "EXCLUDE nl writer:", e, flush=True)
                 continue
-            mdl = from_nl(nl)
-            nv = sum(v.size for v in mdl._variables)
-            if nv != inst.n:
-                raise RuntimeError(f"{inst.name}: .nl round-trip has {nv} vars, expected {inst.n}")
-            viol = L.dense_max_violation(inst, h0["x"])
-            members.append(
-                {
-                    "name": inst.name,
-                    "path": os.path.relpath(f, REPO),
-                    "panel": a.panel,
-                    "n": inst.n,
-                    "m": inst.m,
-                    "nnz": nnz,
-                    "n_int": n_int,
-                    "oracle_objective": ref["objective"],
-                    "oracle_nodes": ref["nodes"],
-                    "oracle_max_viol": viol,
-                }
-            )
+            members.append(row)
             print(tag, f"OK n={inst.n} m={inst.m} nnz={nnz} int={n_int} obj={ref['objective']}",
                   flush=True)  # fmt: skip
     out = Path(a.out)
@@ -226,18 +303,52 @@ def cmd_screen(a) -> int:
     keep_ex = [x for x in old["excluded"] if x.get("panel") != a.panel]
     for x in excluded:
         x["panel"] = a.panel
-    out.write_text(
-        json.dumps({"members": keep + members, "excluded": keep_ex + excluded}, indent=1) + "\n"
-    )
+    old["members"] = keep + members
+    old["excluded"] = keep_ex + excluded
+    out.write_text(json.dumps(old, indent=1) + "\n")
+    for x in excluded:
+        print(f"  excluded [{a.panel}] {os.path.basename(x['file'])}: {x['reason']}", flush=True)
     print(f"screen: panel={a.panel} members={len(members)} excluded={len(excluded)} "
           f"compared={compared}", flush=True)  # fmt: skip
     return 0 if compared > 0 else 1
+
+
+def _roundtrip_member(inst, f, panel, td, nnz, n_int, ref, x_h0) -> dict:
+    """Write the ``.nl``, load it back, check its shape; return the manifest row.
+
+    ``ValueError`` from the ``.nl`` writer (an explicit refusal) propagates to the caller,
+    which excludes the instance with the reason; a shape mismatch is a loader bug and
+    raises ``RuntimeError``.
+    """
+    from discopt.modeling.core import from_nl
+
+    nl = os.path.join(td, f"{inst.name}.nl")
+    L.write_nl(inst, nl)
+    mdl = from_nl(nl)
+    nv = sum(v.size for v in mdl._variables)
+    if nv != inst.n:
+        raise RuntimeError(f"{inst.name}: .nl round-trip has {nv} vars, expected {inst.n}")
+    feasible = ref["status"] == "Optimal"
+    return {
+        "name": inst.name,
+        "path": os.path.relpath(f, REPO),
+        "panel": panel,
+        "n": inst.n,
+        "m": inst.m,
+        "nnz": nnz,
+        "n_int": n_int,
+        "oracle_status": ref["status"],
+        "oracle_objective": ref["objective"] if feasible else None,
+        "oracle_nodes": ref["nodes"],
+        "oracle_max_viol": L.dense_max_violation(inst, x_h0) if feasible else None,
+    }
 
 
 # ----------------------------------------------------------------------------- run
 def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -> dict:
     import discopt.solver as solver_mod
     from discopt.modeling.core import from_nl
+    from discopt.status import TERMINATION_PRESOLVE
 
     _assert_discopt_under_test()
     if arm == "H" and not hasattr(solver_mod, "_solve_milp_highs"):
@@ -269,15 +380,54 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
         "gap_certified": bool(r.gap_certified),
         "nodes": int(r.node_count),
         "wall": wall,
-        "route": stats.get("route/lp_milp_backend"),
+        # The HiGHS route sets this marker at its dispatch point (``lp_milp_highs``); any
+        # other engine leaves it unset. A HiGHS-arm solve the route declined (and passed
+        # on to the Rust engine) therefore reports "rust", and ``check_route`` refuses it.
+        # A solve root presolve answered before the LP/MILP dispatch (an infeasibility
+        # proof, #1618 C-17) ran neither engine and says so: "presolve".
+        "route": "presolve"
+        if r.termination == TERMINATION_PRESOLVE
+        else "highs"
+        if stats.get("route/lp_milp_backend") == 1.0
+        else "rust",
+        "algorithm_route": r.algorithm_route,
         "max_viol": viol,
         "env_backend": os.environ.get("DISCOPT_LP_MILP_BACKEND"),
     }
 
 
+def check_route(name: str, arm: str, res: dict) -> None:
+    """Refuse a subprocess-arm row that was answered by the other engine's route.
+
+    A row whose route marker does not match its arm would be reported as a measurement
+    of the wrong engine (CLAUDE.md §8), so it raises instead of being recorded. A row
+    root presolve answered before the dispatch (route ``"presolve"``) ran *neither*
+    engine; it is kept -- its verdict is still checked against the oracle -- and
+    reported as such, never as a measurement of the arm's engine.
+    """
+    want = ARM_BACKEND[arm]
+    if res.get("env_backend") != want or res.get("route") not in (want, "presolve"):
+        raise RuntimeError(
+            f"{name}: arm {arm} expects route {want!r} (env {want!r}), got route "
+            f"{res.get('route')!r} with env {res.get('env_backend')!r} "
+            f"(algorithm_route {res.get('algorithm_route')!r})"
+        )
+
+
+def arm_order(arms: list[str], rnd: int) -> list[str]:
+    """Round ``rnd``'s arm order: ``arms`` rotated left by ``rnd`` (each arm leads once)."""
+    k = rnd % len(arms)
+    return arms[k:] + arms[:k]
+
+
+def load_ok(gate: float | None, *loads: float) -> bool:
+    """Whether walls may be reported: every sampled 1-min load is at or under the gate."""
+    return gate is None or all(x <= gate for x in loads)
+
+
 def _run_sub(path: str, arm: str, a) -> dict:
     env = dict(os.environ, PYTHONUNBUFFERED="1")
-    env["DISCOPT_LP_MILP_BACKEND"] = {"R": "rust", "H": "highs"}[arm]
+    env["DISCOPT_LP_MILP_BACKEND"] = ARM_BACKEND[arm]
     cmd = [sys.executable, str(HERE), "worker", path, arm, str(a.time_limit), str(a.gap),
            str(a.max_nodes)]  # fmt: skip
     p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3 * a.time_limit + 120)
@@ -285,6 +435,19 @@ def _run_sub(path: str, arm: str, a) -> dict:
     if p.returncode != 0 or len(lines) != 1:
         return {"error": f"rc={p.returncode}", "stderr_tail": p.stderr[-1500:]}
     return json.loads(lines[0][len("RESULT ") :])
+
+
+def _incorrect_inf(res: dict, oracle_status: str) -> list[str]:
+    """INF panel: a returned point or a contradicting verdict is wrong; a refusal is not."""
+    st = str(res.get("status", "")).lower()
+    why = []
+    if st in ("optimal", "feasible"):
+        why.append(f"status {res.get('status')} on an instance HiGHS calls {oracle_status}")
+    if oracle_status == "Infeasible" and st == "unbounded":
+        why.append("unbounded on an infeasible instance")
+    if oracle_status == "Unbounded" and st == "infeasible":
+        why.append("infeasible on an unbounded instance")
+    return why
 
 
 def _incorrect(res: dict, oracle: float, maximize: bool, gap: float) -> list[str]:
@@ -321,15 +484,24 @@ def cmd_run(a) -> int:
         if missing:
             raise SystemExit(f"instances not in manifest: {sorted(missing)}")
     arms = a.arms.split(",")
+    bad = [arm for arm in arms if arm not in (*ARM_BACKEND, "H0")]
+    if bad:
+        raise SystemExit(f"unknown arms {bad}; expected a subset of R,H,H0")
     hdr = _header()
+    hdr["load_gate"] = a.load_gate
     print("header", json.dumps(hdr), "arms", arms, "n", len(mem), flush=True)
     rows, executed, incorrect = [], 0, 0
+    executed_by_panel: dict[str, int] = {}
+    walls_withheld = 0
+    presolve_rows: dict[str, int] = {}
     for i, x in enumerate(mem, 1):
         path = str(REPO / x["path"])
         inst = L.read_instance(path)
+        oracle_status = x.get("oracle_status", "Optimal")
         per = {arm: [] for arm in arms}
+        load_start = os.getloadavg()[0]
         for rnd in range(a.rounds):
-            for arm in arms if rnd % 2 == 0 else arms[::-1]:
+            for arm in arm_order(arms, rnd):
                 if arm == "H0":
                     r = solve_arrays(inst, a.time_limit, a.gap)
                     x_h0 = r.pop("x")
@@ -337,14 +509,25 @@ def cmd_run(a) -> int:
                     r["status"] = {"Optimal": "optimal"}.get(r["status"], r["status"])
                 else:
                     r = _run_sub(path, arm, a)
+                    if "skipped" not in r and "error" not in r:
+                        check_route(x["name"], arm, r)
                 if "skipped" in r or "error" in r:
                     per[arm].append(r)
                     continue
-                r["incorrect"] = _incorrect(r, x["oracle_objective"], inst.maximize, a.gap)
+                if oracle_status == "Optimal":
+                    r["incorrect"] = _incorrect(r, x["oracle_objective"], inst.maximize, a.gap)
+                else:
+                    r["incorrect"] = _incorrect_inf(r, oracle_status)
                 executed += 1
+                executed_by_panel[x["panel"]] = executed_by_panel.get(x["panel"], 0) + 1
                 incorrect += bool(r["incorrect"])
                 per[arm].append(r)
-        summ = {"name": x["name"], "panel": x["panel"], "oracle": x["oracle_objective"]}
+        load_end = os.getloadavg()[0]
+        wall_ok = load_ok(a.load_gate, load_start, load_end)
+        walls_withheld += not wall_ok
+        summ = {"name": x["name"], "panel": x["panel"], "oracle": x["oracle_objective"],
+                "oracle_status": oracle_status, "load": [load_start, load_end],
+                "wall_valid": wall_ok}  # fmt: skip
         for arm, rs in per.items():
             ok = [r for r in rs if "skipped" not in r and "error" not in r]
             if not ok:
@@ -355,26 +538,37 @@ def cmd_run(a) -> int:
             summ[arm] = {
                 **{k: last.get(k) for k in ("status", "objective", "bound", "gap_certified",
                                             "nodes", "route", "max_viol")},
-                "wall_med": statistics.median(walls),
-                "wall_sd": statistics.stdev(walls) if len(walls) > 1 else 0.0,
+                "wall_med": statistics.median(walls) if wall_ok else None,
+                "wall_sd": (statistics.stdev(walls) if len(walls) > 1 else 0.0)
+                if wall_ok else None,
                 "nodes_all": [r.get("nodes") for r in ok],
+                "routes": sorted({str(r.get("route")) for r in ok if "route" in r}),
                 "incorrect": sorted({w for r in ok for w in r["incorrect"]}),
             }  # fmt: skip
         rows.append(summ)
         brief = {arm: (v.get("status"), v.get("nodes"), v.get("objective"),
-                       round(v["wall_med"], 3) if "wall_med" in v else v)
+                       (round(v["wall_med"], 3) if v["wall_med"] is not None else "load>gate")
+                       if "wall_med" in v else v)
                  for arm, v in summ.items() if arm in arms}  # fmt: skip
-        print(f"[run {i}/{len(mem)}] {x['name']:24s} {brief}", flush=True)
+        print(f"[run {i}/{len(mem)}] {x['panel']:4s} {x['name']:24s} {brief}", flush=True)
         for arm in arms:
+            if "presolve" in summ[arm].get("routes", ()):
+                presolve_rows[arm] = presolve_rows.get(arm, 0) + 1
+                print(f"  note {arm}: answered by root presolve, neither engine ran", flush=True)
             if summ[arm].get("incorrect"):
                 print(f"  !!! INCORRECT {arm}: {summ[arm]['incorrect']}", flush=True)
     hdr["load_end"] = os.getloadavg()
     out = {"header": hdr, "args": vars(a), "rows": rows, "executed": executed,
+           "executed_by_panel": executed_by_panel, "walls_withheld": walls_withheld,
+           "presolve_answered": presolve_rows,
            "incorrect_count": incorrect}  # fmt: skip
     if a.out:
         Path(a.out).write_text(json.dumps(out, indent=1, default=str) + "\n")
-    print(f"run: executed={executed} incorrect_count={incorrect} load_end={hdr['load_end']}",
-          flush=True)  # fmt: skip
+    for panel, n in sorted(executed_by_panel.items()):
+        print(f"run: panel={panel} executed={n}", flush=True)
+    print(f"run: presolve_answered={presolve_rows}", flush=True)
+    print(f"run: executed={executed} incorrect_count={incorrect} walls_withheld={walls_withheld}"
+          f"/{len(rows)} load_end={hdr['load_end']}", flush=True)  # fmt: skip
     return 0 if executed > 0 else 1
 
 
@@ -517,12 +711,16 @@ def cmd_tiny(a) -> int:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser("fetch")
+    f.add_argument("--manifest", required=True)
+    f.add_argument("--dest", default=str(REF_DIR))
+    f.add_argument("--tag", default="", help="HiGHS git tag (default: v<installed highspy>)")
     s = sub.add_parser("screen")
     s.add_argument("sources", nargs="+")
     s.add_argument("--panel", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--max-nnz", type=int, default=20000)
-    s.add_argument("--milp-only", action="store_true")
+    s.add_argument("--kind", choices=("any", "lp", "milp", "inf"), default="any")
     s.add_argument("--time-limit", type=float, default=60.0)
     r = sub.add_parser("run")
     r.add_argument("--manifest", required=True)
@@ -534,6 +732,8 @@ def main(argv=None) -> int:
     r.add_argument("--gap", type=float, default=GAP)
     r.add_argument("--max-nodes", type=int, default=100_000_000)
     r.add_argument("--out", default="")
+    r.add_argument("--load-gate", type=float, default=None,
+                   help="withhold walls of an instance whose 1-min load exceeds this")  # fmt: skip
     t = sub.add_parser("tiny")
     t.add_argument("--count", type=int, default=200)
     t.add_argument("--seed", type=int, default=0)
@@ -541,7 +741,8 @@ def main(argv=None) -> int:
     t.add_argument("--time-limit", type=float, default=10.0)
     t.add_argument("--out", default="")
     a = p.parse_args(argv)
-    return {"screen": cmd_screen, "run": cmd_run, "tiny": cmd_tiny}[a.cmd](a)
+    cmds = {"fetch": cmd_fetch, "screen": cmd_screen, "run": cmd_run, "tiny": cmd_tiny}
+    return cmds[a.cmd](a)
 
 
 if __name__ == "__main__":
