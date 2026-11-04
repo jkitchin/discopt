@@ -407,6 +407,60 @@ class _RootLP:
         return out
 
 
+def root_cuts_engine() -> str:
+    """``DISCOPT_NLPBB_ROOT_CUTS_ENGINE``: who solves the root LP and yields the GMI basis.
+
+    ``highs`` (default) or ``rust`` (highs-parity P1.4: the in-house simplex, GMI cuts from
+    ``gomory_cuts_py`` at its vertex). Default-OFF until P1.4's Regime-2 panel shows the
+    Rust arm cert-clean and net-non-inferior; a value other than the two raises.
+    """
+    val = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "highs").strip().lower()
+    if val not in ("highs", "rust"):
+        raise ValueError(f"DISCOPT_NLPBB_ROOT_CUTS_ENGINE={val!r}: expected 'highs' or 'rust'")
+    return val
+
+
+class _RustRootBasis:
+    """The Rust root LP's vertex in standard form ``[A_le I; A_eq 0] z = b``, ``z = [x, s]``,
+    which ``separate_gmi`` hands to ``gomory_cuts_py`` (it recovers the basis at ``z``)."""
+
+    def __init__(self, a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_le, b_le):
+        self.a_std, self.b_std, self.c_std = a_std, b_std, c_std
+        self.lo, self.hi, self.is_int_std, self.z = lo, hi, is_int_std, z
+        self.n, self.a_le, self.b_le = n, a_le, b_le
+
+
+def _solve_lp_rust(root: _RootLP, a_ub, b_ub, time_limit):
+    """``_solve_lp`` on the in-house simplex: same returns, ``h`` a :class:`_RustRootBasis`."""
+    import scipy.sparse as sp
+
+    from discopt.solvers.lp_milp_highs import INF, StdForm
+    from discopt.solvers.lp_std_engine import RustEngine
+
+    n_le, n_eq, n = a_ub.shape[0], root.A_eq.shape[0], root.n
+    a_std = np.zeros((n_le + n_eq, n + n_le))
+    a_std[:n_le, :n] = a_ub
+    a_std[:n_le, n:] = np.eye(n_le)
+    if n_eq:
+        a_std[n_le:, :n] = root.A_eq
+    a_std[np.abs(a_std) <= 1e-13] = 0.0  # the HiGHS path drops the same entries
+    b_std = np.concatenate([b_ub, root.b_eq]) if n_eq else np.asarray(b_ub, float)
+    c_std = np.concatenate([-root.c if root.sense_max else root.c, np.zeros(n_le)])
+    lo = np.concatenate([np.where(np.isfinite(root.lb), root.lb, -INF), np.zeros(n_le)])
+    hi = np.concatenate([np.where(np.isfinite(root.ub), root.ub, INF), np.full(n_le, INF)])
+    sf = StdForm.from_arrays(c_std, sp.csc_matrix(a_std), b_std, lo, hi)
+    raw = RustEngine().solve(
+        sf, time_limit=None if time_limit is None else max(1e-3, float(time_limit)),
+        presolve=None, tight_tolerances=False,
+    )  # fmt: skip
+    if raw.status != "optimal":
+        return None
+    z = np.asarray(raw.x, float)
+    is_int_std = np.concatenate([np.asarray(root.is_int, bool), np.zeros(n_le, bool)])
+    basis = _RustRootBasis(a_std, b_std, c_std, lo, hi, is_int_std, z, n, a_ub, b_ub)
+    return z[:n].copy(), np.abs(np.asarray(raw.y, float))[:n_le], basis
+
+
 def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     """Solve the root LP with HiGHS. Returns (obj_in_model_sense, x, duals, highs).
 
@@ -443,19 +497,25 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     lp.a_matrix_.start_ = np.array(starts, np.int32)
     lp.a_matrix_.index_ = np.array(idx, np.int32)
     lp.a_matrix_.value_ = np.array(vals, float)
-    h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
-    if time_limit is not None:
-        # Floor at a strictly positive value: HiGHS treats <= 0 as "no limit",
-        # which would restore the very overrun this bounds.
-        h.setOptionValue("time_limit", max(1e-3, float(time_limit)))
-    h.passModel(lp)
-    h.run()
-    if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
-        return None, None, None, None
-    sol = h.getSolution()
-    x = np.array(sol.col_value, float)
-    duals = np.abs(np.array(sol.row_dual, float))[:n_le]
+    if root_cuts_engine() == "rust":
+        got = _solve_lp_rust(root, a_ub, b_ub, time_limit)
+        if got is None:
+            return None, None, None, None
+        x, duals, h = got
+    else:
+        h = highspy.Highs()
+        h.setOptionValue("output_flag", False)
+        if time_limit is not None:
+            # Floor at a strictly positive value: HiGHS treats <= 0 as "no limit",
+            # which would restore the very overrun this bounds.
+            h.setOptionValue("time_limit", max(1e-3, float(time_limit)))
+        h.passModel(lp)
+        h.run()
+        if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+            return None, None, None, None
+        sol = h.getSolution()
+        x = np.array(sol.col_value, float)
+        duals = np.abs(np.array(sol.row_dual, float))[:n_le]
     # ``root.c0`` is the objective's constant term (see ``_RootLP.__init__``).
     # Omitting it here is what published a bound offset by that constant.
     obj = float(root.c @ x) + root.c0
@@ -529,7 +589,12 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
     UPPER bound, deviation ``q_r = b_r − a_r·x`` (t = binv_ir). Equality rows
     contribute constants only (absorbed by d0 = x[bv]). GMI over
     ``x_B + Σ t_k v_k = d0`` then substituted back to x-space.
+
+    ``h`` may instead be a :class:`_RustRootBasis` (``DISCOPT_NLPBB_ROOT_CUTS_ENGINE=rust``):
+    see :func:`_separate_gmi_rust`.
     """
+    if isinstance(h, _RustRootBasis):
+        return _separate_gmi_rust(h, x, a_all, b_all, max_cuts)
     import highspy
 
     # ``h``'s rows are [<= rows..., == rows...] and the row loop below pairs
@@ -648,6 +713,52 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
         if nrm < 1e-10 or not np.isfinite(rhs):
             continue
         if maxc > 0 and minc < np.inf and maxc / max(minc, 1e-300) > GMI_DYNAMISM_MAX:
+            continue
+        rhs += GMI_RHS_SAFETY_REL * (1.0 + abs(rhs))  # roundoff safety relaxation
+        if float(alpha @ x - rhs) < CUT_VIOL_TOL:
+            continue
+        cuts.append((alpha, float(rhs)))
+        if len(cuts) >= max_cuts:
+            break
+    return cuts
+
+
+def _separate_gmi_rust(h: _RustRootBasis, x, a_all, b_all, max_cuts):
+    """GMI cuts from the Rust root vertex, in the same x-space ``<=`` form and through the
+    same filters as the HiGHS separator.
+
+    ``gomory_cuts_py`` recovers the basis at the standard-form vertex ``z = [x, s]`` and
+    returns ``coeffs·z >= rhs``. With ``s = b_le - A_le x`` (exact for the ``<=`` rows; the
+    equality rows carry no slack) that is ``(c_x - c_s A_le) x >= rhs - c_s b_le``, i.e. the
+    ``<=`` row ``-(c_x - c_s A_le) x <= -(rhs - c_s b_le)``. Then, as for HiGHS: the
+    norm and dynamism checks, the relative rhs safety relaxation, and the violation test.
+    """
+    from discopt._rust import gomory_cuts_py
+
+    if int(a_all.shape[0]) != int(h.a_le.shape[0]):
+        raise ValueError(
+            f"separate_gmi: row system has {int(a_all.shape[0])} '<=' rows but the Rust "
+            f"basis was built from {int(h.a_le.shape[0])}; refusing a mismatched basis"
+        )
+    out = gomory_cuts_py(
+        np.ascontiguousarray(h.z), np.ascontiguousarray(h.a_std), np.ascontiguousarray(h.b_std),
+        np.ascontiguousarray(h.c_std), np.ascontiguousarray(h.lo), np.ascontiguousarray(h.hi),
+        np.ascontiguousarray(h.is_int_std), max_dynamism=GMI_DYNAMISM_MAX,
+    )  # fmt: skip
+    if out is None:
+        return []
+    coeffs, rhs_all = np.asarray(out[0], float), np.asarray(out[1], float)
+    n = h.n
+    cuts = []
+    for k in range(coeffs.shape[0]):
+        c_x, c_s = coeffs[k, :n], coeffs[k, n:]
+        alpha = -(c_x - c_s @ h.a_le)
+        rhs = -(float(rhs_all[k]) - float(c_s @ h.b_le))
+        nz = np.abs(alpha[alpha != 0.0])
+        nrm = float(np.linalg.norm(alpha))
+        if nrm < 1e-10 or not np.isfinite(rhs) or not np.all(np.isfinite(alpha)):
+            continue
+        if nz.size and float(nz.max() / nz.min()) > GMI_DYNAMISM_MAX:
             continue
         rhs += GMI_RHS_SAFETY_REL * (1.0 + abs(rhs))  # roundoff safety relaxation
         if float(alpha @ x - rhs) < CUT_VIOL_TOL:
