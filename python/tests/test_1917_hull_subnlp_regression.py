@@ -1,4 +1,4 @@
-"""#1917: heuristic sub-NLPs on the node-FBBT box of their fixing.
+"""#1917: heuristic sub-NLPs under hull fail on fixings that have feasible points.
 
 Under ``gdp_method="hull"`` a sub-NLP that fixes an indicator to 0 leaves that
 disjunct's disaggregated copies on their whole box, held at 0 only by the linking
@@ -8,13 +8,13 @@ through eps-perspective rows evaluated at ``yhat ~ eps``. Measured on GDPlib
 incumbent's (known-feasible) configuration: infeasible at ITERATION_LIMIT after
 300 iterations (4.5 s), and still after 3000 (41 s).
 
-``subnlp`` already computes the node-FBBT box to refute a fixing. With
-``DISCOPT_SUBNLP_FBBT_BOX`` it also solves on that box, which pins those columns.
-That leaves rows whose columns are all fixed (2056 of 3141 on syngas, none
-violated), and POUNCE's restoration fails on them at iteration 2. The second half
-of the flag re-solves a ``Restoration_Failed`` NLP without its all-fixed rows when
-every one of them holds, the retry ``Not_Enough_Degrees_Of_Freedom`` already gets.
-On syngas the sub-NLP is then OPTIMAL at 4669.0235 in 86 iterations / 0.21 s.
+``DISCOPT_SUBNLP_FBBT_BOX`` (re-solve a failed sub-NLP on its node-FBBT box, with a
+``Restoration_Failed`` constant-row retry) fixed the toy below and gained hull
+incumbents on GDPlib hda and gdp_col. It was RETIRED in the PR that introduced it,
+because its 120 s panel was not cert-clean; see the row in
+``docs/dev/flag-retirement-audit.md``. These tests keep its fixtures as regression
+cases: the defect is recorded as a strict xfail, so a future fix flips it, and the
+retry's absence is pinned so node NLPs stay unchanged.
 """
 
 from __future__ import annotations
@@ -74,8 +74,7 @@ def _configurations(low, n):
         yield x
 
 
-def _feasible_count(monkeypatch, flag: str, n: int = 3) -> tuple[int, int]:
-    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", flag)
+def _feasible_count(n: int = 3) -> tuple[int, int]:
     low = reformulate_gdp(_chain(n), "hull")
     found = tried = 0
     for x in _configurations(low, n):
@@ -83,19 +82,25 @@ def _feasible_count(monkeypatch, flag: str, n: int = 3) -> tuple[int, int]:
         out = PH.subnlp(low, x)
         if out is not None:
             found += 1
+            # whatever subnlp returns is verified against the original constraints
+            assert np.all(np.isfinite(out[0]))
     return found, tried
 
 
-def test_every_hull_configuration_subnlp_finds_its_point(monkeypatch):
-    found, tried = _feasible_count(monkeypatch, "1")
+@pytest.mark.xfail(
+    strict=True,
+    reason="#1917: hull sub-NLPs fail at yhat ~ eps; DISCOPT_SUBNLP_FBBT_BOX retired",
+)
+def test_every_hull_configuration_subnlp_finds_its_point():
+    found, tried = _feasible_count()
     assert tried == 8
     assert found == tried
 
 
-def test_legacy_box_fails_on_the_same_configurations(monkeypatch):
-    # Guards the premise: on the original box POUNCE stops at
+def test_hull_subnlp_fails_on_some_configurations():
+    # Pins the measured defect: on the original box POUNCE stops at
     # Invalid_Number_Detected (``exp``/``log`` at yhat ~ eps) on these fixings.
-    found, tried = _feasible_count(monkeypatch, "0")
+    found, tried = _feasible_count()
     assert tried == 8
     assert found < tried
 
@@ -115,8 +120,9 @@ def _one_constant_row():
     return _BoundOverrideEvaluator(ev, lb, ub), [(0.0, 0.0), (-np.inf, 0.0)]
 
 
-def _fail_first_solve(monkeypatch):
-    """Make the first POUNCE solve report Restoration_Failed; later ones run."""
+def test_restoration_failure_is_not_retried(monkeypatch):
+    # The retired flag's constant-row retry on Restoration_Failed is gone: a node
+    # NLP that fails restoration is reported as failed, unchanged from before #1917.
     real = nlp_pounce._run_solve
     calls = []
 
@@ -127,61 +133,7 @@ def _fail_first_solve(monkeypatch):
         return real(problem, x0, warm_start, solve_report)
 
     monkeypatch.setattr(nlp_pounce, "_run_solve", fake)
-    return calls
-
-
-def test_restoration_failure_with_constant_rows_is_resolved_inside_the_scope(monkeypatch):
-    calls = _fail_first_solve(monkeypatch)
-    ev, bounds = _one_constant_row()
-    with nlp_pounce.constant_row_retry_on_restoration_failure():
-        r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
-    assert len(calls) == 2
-    assert r.status == SolveStatus.OPTIMAL
-    assert r.x[1] == pytest.approx(2.0, abs=1e-6)
-    assert r.multipliers is not None and r.multipliers.shape == (2,)
-    assert r.multipliers[0] == 0.0
-
-
-@pytest.mark.parametrize("flag", ["0", "1"])
-def test_restoration_failure_stands_outside_the_scope(monkeypatch, flag):
-    # B&B node NLPs and the legacy heuristic solve never enter the scope, so the
-    # flag does not change them: bound-neutral by construction.
-    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", flag)
-    calls = _fail_first_solve(monkeypatch)
     ev, bounds = _one_constant_row()
     r = nlp_pounce.solve_nlp(ev, np.array([1.0, 1.0]), constraint_bounds=bounds)
     assert len(calls) == 1
     assert r.raw_status == _RESTORATION_FAILED and r.status == SolveStatus.ERROR
-
-
-def _failing_backend(raw_status, calls):
-    from discopt.solvers import NLPResult
-
-    def backend(evaluator, x0, options=None):
-        calls.append(nlp_pounce._RESTORATION_RETRY.get())
-        return NLPResult(status=SolveStatus.ERROR, x=None, raw_status=raw_status)
-
-    return backend
-
-
-@pytest.mark.parametrize(
-    "raw_status, expected_calls",
-    [
-        (2, 1),  # converged local infeasibility: no box re-solve
-        (-1, 2),  # ITERATION_LIMIT: box re-solve
-        (-13, 2),  # Invalid_Number_Detected: box re-solve
-    ],
-)
-def test_box_resolve_follows_only_a_nonconverged_legacy_solve(
-    monkeypatch, raw_status, expected_calls
-):
-    monkeypatch.setenv("DISCOPT_SUBNLP_FBBT_BOX", "1")
-    low = reformulate_gdp(_chain(3), "hull")
-    x = next(_configurations(low, 3))
-    calls: list = []
-    assert PH.subnlp(low, x, backend=_failing_backend(raw_status, calls)) is None
-    assert len(calls) == expected_calls
-    # the constant-row retry is scoped to the box re-solve only
-    assert calls[0] is False
-    if expected_calls == 2:
-        assert calls[1] is True

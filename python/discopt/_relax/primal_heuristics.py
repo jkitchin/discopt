@@ -674,83 +674,6 @@ def _subnlp_verify_any_status() -> bool:
     )
 
 
-def _subnlp_fbbt_box_enabled() -> bool:
-    """Whether a failed :func:`subnlp` solve is retried on its node-FBBT box (#1917).
-
-    Shares its switch with the ``Restoration_Failed`` constant-row retry in
-    :mod:`discopt.solvers.nlp_pounce`. Primal-only: it adds a second solve after a
-    legacy solve that found nothing, never changes a bound, and the returned point
-    is verified against the original constraints. (Solving on the box *instead of*
-    the legacy box was measured and lost incumbents: corpus ``heatexch_gen3`` 23 ->
-    19 of 25 root sub-NLPs feasible, the retired ``DISCOPT_SUBNLP_IMPLIED_BOX`` had
-    the same loss. This legacy-first form keeps all 24 of 25.)
-
-    Default OFF. Its panel (10 GDP instances, hull and big-m, 2 reps, 120 s, plus
-    corpus ``heatexch_gen3``/``contvar``): it gained incumbents on hull ``hda``
-    (4824.32) and ``gdp_col`` (21360.46), where OFF has none, in both reps, and
-    lost no incumbent. But syngas big-m was slower ON in all four interleaved pairs
-    at equal node counts (120.2 vs 116.0 s at 120 s; 130.2/124.1 vs 120.0/120.8 s
-    at 300 s), and that cost it its 120 s certificate in one rep. It also does not
-    give syngas hull an incumbent at 300 s. Graduating it needs that overhead
-    removed; see ``docs/dev/flag-retirement-audit.md``.
-    """
-    return os.environ.get("DISCOPT_SUBNLP_FBBT_BOX", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
-def _apply_implied_box(model: Model, implied, x0: np.ndarray) -> Optional[np.ndarray]:
-    """Narrow the continuous columns to the node-FBBT box ``implied``; return clipped ``x0``.
-
-    ``None`` when FBBT narrows no continuous column: the re-solve would be the
-    same NLP.
-
-    #1917: under the hull reformulation an inactive disjunct's disaggregated columns
-    are held at 0 only by their linking rows ``lb*y <= v <= ub*y``, so with ``y``
-    fixed to 0 the interior-point solve approaches ``v = 0`` through
-    eps-perspective rows evaluated at ``yhat ~ eps``. Measured on GDPlib ``syngas``
-    at bdc54a48, on the first root sub-NLP with its integers set to the big-M
-    incumbent's (known-feasible) configuration: ITERATION_LIMIT and infeasible at
-    300 iterations (4.5 s) and still at 3000 (41 s). The node-FBBT box that
-    ``subnlp`` already computes to refute fixes 540 of those columns; on it (with
-    the all-fixed rows dropped, :mod:`discopt.solvers.nlp_pounce`) the same
-    sub-NLP is OPTIMAL at 4669.0235 in 86 iterations / 0.21 s.
-
-    Sound: FBBT removes no point that satisfies the constraints with these integers
-    fixed (it is the box B&B solves that node on), and the bounds are restored by
-    the caller's ``saved_bounds``. Integer columns are already fixed and left as is.
-    """
-    _, _, t_lb, t_ub, _ = implied
-    t_lb = np.asarray(t_lb, dtype=np.float64)
-    t_ub = np.asarray(t_ub, dtype=np.float64)
-    narrowed = False
-    offset = 0
-    for v in model._variables:
-        sz = v.size
-        if not _is_free_integer(v, model):
-            shape = np.shape(v.lb)
-            lo = np.maximum(
-                np.asarray(v.lb, dtype=np.float64), t_lb[offset : offset + sz].reshape(shape)
-            )
-            hi = np.minimum(
-                np.asarray(v.ub, dtype=np.float64), t_ub[offset : offset + sz].reshape(shape)
-            )
-            if np.all(lo <= hi) and (
-                np.any(lo > np.asarray(v.lb)) or np.any(hi < np.asarray(v.ub))
-            ):
-                v.lb = lo
-                v.ub = hi
-                narrowed = True
-        offset += sz
-    if not narrowed:
-        return None
-    lb, ub = _get_variable_bounds(model)
-    return np.clip(x0, lb, ub)
-
-
 def _pump_repair_enabled() -> bool:
     """Whether the pump's feasibility repair runs (#1435). Default ON.
 
@@ -1319,72 +1242,14 @@ def subnlp(
         opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
-        t_start = time.perf_counter()
 
-        found, raw_status = _subnlp_solve_and_verify(
-            backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
-        )
-        # #1917: the legacy solve found nothing. Re-solve once on the node-FBBT box
-        # of this fixing (see :func:`_apply_implied_box`). Only after a failure, so
-        # every point the legacy solve finds is still the point returned. Not after
-        # a solve that *converged* to a locally infeasible point
-        # (``Infeasible_Problem_Detected``): the box addresses an ill-conditioned
-        # solve that never converged, and does not help a fixing whose rows the IPM
-        # already drove to a stationary infeasibility. Measured with the flag ON on
-        # the GDP panel: every box re-solve after status 2 failed (syngas big-m
-        # 16/16, which cost 3-5 s of wall per solve; syngas hull 1/1), and every
-        # rescue followed a non-converged legacy solve (gdp_col hull after
-        # ITERATION_LIMIT; hda hull 2 of 3 after Invalid_Number_Detected).
-        if (
-            found is None
-            and implied is not None
-            and raw_status != _INFEASIBLE_PROBLEM_DETECTED
-            and _subnlp_fbbt_box_enabled()
-        ):
-            if "max_wall_time" in opts:
-                left = float(opts["max_wall_time"]) - (time.perf_counter() - t_start)
-                if left <= 0.0:
-                    return None
-                opts = dict(opts, max_wall_time=left)
-            x_box = _apply_implied_box(model, implied, x0)
-            if x_box is None:
-                return None
-            from discopt.solvers.nlp_pounce import constant_row_retry_on_restoration_failure
+        try:
+            nlp_result = backend(evaluator, x0, options=opts)
+        except BaseException:
+            # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
+            # raise PanicException, which is not a subclass of Exception.
+            return None
 
-            with constant_row_retry_on_restoration_failure():
-                found, _ = _subnlp_solve_and_verify(
-                    backend, evaluator, x_box, opts, int_mask, integer_tol, feas_tol
-                )
-    return found
-
-
-#: Ipopt/POUNCE ``Infeasible_Problem_Detected``: the solve converged to a point of
-#: local infeasibility (as opposed to stopping short of convergence).
-_INFEASIBLE_PROBLEM_DETECTED = 2
-
-
-def _subnlp_solve_and_verify(
-    backend, evaluator, x0, opts, int_mask, integer_tol, feas_tol
-) -> tuple[Optional[tuple[np.ndarray, float]], Optional[int]]:
-    """One :func:`subnlp` solve from ``x0`` and its verification.
-
-    Returns ``(point_or_None, raw_status)``; ``raw_status`` is the backend's raw
-    solver code (``None`` when it raised or reports none).
-    """
-    try:
-        nlp_result = backend(evaluator, x0, options=opts)
-    except BaseException:
-        # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
-        # raise PanicException, which is not a subclass of Exception.
-        return None, None
-    found = _subnlp_verify_result(nlp_result, evaluator, x0, int_mask, integer_tol, feas_tol)
-    return found, getattr(nlp_result, "raw_status", None)
-
-
-def _subnlp_verify_result(
-    nlp_result, evaluator, x0, int_mask, integer_tol, feas_tol
-) -> Optional[tuple[np.ndarray, float]]:
-    """Verify one :func:`subnlp` solve's point; ``None`` if unusable."""
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
     # test at a point that is already constraint-feasible (prob07's true-global
@@ -1423,8 +1288,6 @@ def _subnlp_verify_result(
         if not _is_integer_feasible(x_out, int_mask, tol=integer_tol):
             return None
 
-    # Verified against the evaluator's constraints only: the bounds a fallback
-    # narrowed are a subset of the original box, so a point inside them is inside it.
     if not _check_constraint_feasibility(evaluator, x_out, tol=feas_tol):
         return None
 

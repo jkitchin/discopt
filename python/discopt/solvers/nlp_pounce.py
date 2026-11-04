@@ -10,8 +10,6 @@ from the cyipopt backend are reused unchanged.
 
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
@@ -258,39 +256,6 @@ def _invalid_option_error(opts: dict) -> PounceOptionError:
 #: Ipopt's ``Not_Enough_Degrees_Of_Freedom``: fewer free columns than equality
 #: rows once the fixed columns are removed, refused before iteration 0.
 _NOT_ENOUGH_DEGREES_OF_FREEDOM = -10
-
-#: Ipopt's ``Restoration_Failed``. With many fixed columns the rows over them alone
-#: are constants with an all-zero free Jacobian; restoration's least-squares
-#: subproblem over that degenerate row set fails at iteration ~2 (#1917).
-_RESTORATION_FAILED = -2
-
-
-#: Set only around :func:`discopt._relax.primal_heuristics.subnlp`'s node-FBBT-box
-#: re-solve (#1917), so every other solve -- B&B node NLPs, the legacy heuristic
-#: solve -- keeps its unchanged behaviour on ``Restoration_Failed``.
-_RESTORATION_RETRY: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "discopt_pounce_restoration_retry", default=False
-)
-
-
-@contextlib.contextmanager
-def constant_row_retry_on_restoration_failure():
-    """Within this block, a ``Restoration_Failed`` solve gets the constant-row retry (#1917).
-
-    Measured on GDPlib ``syngas`` under hull at bdc54a48: a fixed-configuration
-    sub-NLP on its node-FBBT box has 2056 of 3141 rows over fixed columns only, none
-    violated; POUNCE 0.15.0 returns Restoration_Failed after 2 iterations, and the
-    same NLP without those rows is OPTIMAL in 86 iterations. The retry runs only
-    after a failed solve and only when every dropped row holds at the fixed point,
-    so the reduced NLP has the same feasible set. Scoped rather than global: only
-    the box re-solve is known to produce that degenerate row set.
-    """
-    token = _RESTORATION_RETRY.set(True)
-    try:
-        yield
-    finally:
-        _RESTORATION_RETRY.reset(token)
-
 
 #: Largest violation (absolute, in the row's own units) at which a row whose
 #: columns are all fixed is accepted as satisfied and dropped by the retry in
@@ -673,9 +638,7 @@ def solve_nlp(
         callbacks, m, cl, cu, kkt_schur_block, ordering, block_structure, warm_start
     )
     status_code = info.get("status", -100)
-    if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM or (
-        status_code == _RESTORATION_FAILED and _RESTORATION_RETRY.get()
-    ):
+    if status_code == _NOT_ENOUGH_DEGREES_OF_FREEDOM:
         dof_retry = _constant_row_retry(callbacks, lb, ub, cl, cu, x0)
         if dof_retry is not None:
             keep, sub = dof_retry
