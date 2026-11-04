@@ -273,7 +273,7 @@ fn extended_mul_enabled() -> bool {
 /// the whole of `cur`. Rays are rounded outward.
 /// Bound magnitude at which [`extended_mul_preimage`] reads a cofactor side as
 /// unbounded (Python's `_numeric.EFFECTIVE_INF`).
-const EXTENDED_MUL_INF: f64 = 1e19;
+const EXTENDED_MUL_INF: f64 = crate::numeric::EFFECTIVE_INF;
 
 fn extended_mul_preimage(t: &Interval, other: &Interval, cur: &Interval) -> Option<Interval> {
     if !(t.lo > 0.0 || t.hi < 0.0) || !(other.lo < 0.0 || other.hi > 0.0) {

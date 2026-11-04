@@ -1963,6 +1963,53 @@ fn solve_milp_node_search(
     );
     tm.initialize();
 
+    // #1917 G3.2: big-M coefficient tightening (HiGHS `HPresolve::rowPresolve`
+    // `strengthenCoefs`; SCIP `consdataTightenCoefs`), default OFF behind
+    // `DISCOPT_RUST_MILP_COEF_TIGHTEN`. It runs on the presolved box, after the
+    // lattice and the tree read the original rows. Every point the tree can
+    // reach lies in that box, where the tightened rows keep the integer
+    // projection exactly and the LP region only shrinks (proof in
+    // `coef_tighten`). Only values change, never the CSC structure, and a
+    // tightened row's slack is never larger than the original's, so the
+    // presolved slack bounds stay valid.
+    let b_tight: Vec<f64>;
+    let b: &[f64] = if crate::bnb::coef_tighten::coef_tighten_enabled() {
+        let mut bt = b.to_vec();
+        let st = crate::bnb::coef_tighten::tighten_big_m_coefficients(
+            &mut csc_w,
+            m,
+            n,
+            ns,
+            &mut bt,
+            &base_l,
+            &base_u,
+            l,
+            u,
+            &is_int_full,
+        );
+        crate::profile::incr(crate::profile::Ctr::MilpCoefTightenRuns);
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenRows,
+            st.rows_tightened.len() as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenCoefs,
+            st.coefs_tightened as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenSkipUnbounded,
+            st.rows_skipped_unbounded as u64,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::MilpCoefTightenSkipPrecision,
+            st.rows_skipped_precision as u64,
+        );
+        b_tight = bt;
+        &b_tight
+    } else {
+        b
+    };
+
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
     // columns; structural columns [0, ns) are untouched, so the tree's
     // structural bounds still apply unchanged.
@@ -2047,15 +2094,23 @@ fn solve_milp_node_search(
     }
 
     // --- Caller-seeded incumbent: validate, then inject before the search ---
-    // Runs on the pre-cut matrix (all rows are original rows here) with the
-    // presolve-tightened bounds (FBBT never cuts a feasible point, so a
-    // genuinely feasible seed survives the tightening). A seed that cannot be
-    // proven feasible is dropped silently — seeding is an optimization and
-    // must never be able to produce a false certificate.
+    // Runs on the pre-cut matrix (original rows, or their coefficient-tightened
+    // form under `DISCOPT_RUST_MILP_COEF_TIGHTEN`, which agrees with the original at
+    // every integral point of the box) with the presolve-tightened bounds (FBBT
+    // never cuts a feasible point, so a genuinely feasible seed survives the
+    // tightening). A seed that cannot be proven feasible is dropped silently —
+    // seeding is an optimization and must never be able to produce a false
+    // certificate. The two counters let a probe tell a refused seed from an
+    // accepted one (CLAUDE.md §6).
     if let Some(seed) = opts.initial_incumbent.as_ref() {
-        if let Some((sx, sobj)) =
-            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
-        {
+        let validated =
+            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w);
+        crate::profile::incr(if validated.is_some() {
+            crate::profile::Ctr::MilpSeedValidated
+        } else {
+            crate::profile::Ctr::MilpSeedRefused
+        });
+        if let Some((sx, sobj)) = validated {
             // A seed is an integer-feasible point like any other, so it goes to
             // the separator first: seeding an incumbent the caller's lazy
             // constraints exclude would prune the tree against a point that is
@@ -2226,6 +2281,30 @@ fn solve_milp_node_search(
     // usable. See `substitute_slacks_to_structural`.
     let (m_base0, n_base0) = (m_w, n_w);
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
+    // #1917 G3.2 step 2: tableau c-MIR, default OFF behind
+    // `DISCOPT_RUST_MILP_TABLEAU_CMIR`. Variable bounds are read once from the
+    // base rows (after coefficient tightening, when that is on), before any cut
+    // is appended. Root separation only.
+    let cmir_on = opts.root_cuts > 0 && crate::lp::tableau_cmir::tableau_cmir_enabled();
+    let cmir_vbs: Vec<Vec<crate::lp::tableau_cmir::VarBound>> = if cmir_on {
+        let v = crate::lp::tableau_cmir::detect_variable_bounds(
+            &csc_w,
+            m_base0,
+            n_base0,
+            ns,
+            &b_w,
+            &l_w,
+            &u_w,
+            &is_int_full,
+        );
+        crate::profile::incr_by(
+            crate::profile::Ctr::SepCmirVbFound,
+            v.iter().map(|x| x.len() as u64).sum(),
+        );
+        v
+    } else {
+        Vec::new()
+    };
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
     if opts.root_cuts > 0 {
@@ -2405,6 +2484,24 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                     1e7,
                 ));
+            }
+            if cmir_on {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepTabCmir);
+                let (cm, _st) = crate::lp::tableau_cmir::separate_tableau_cmir(
+                    &csc_w,
+                    m_w,
+                    n_w,
+                    &l_w,
+                    &u_w,
+                    &b_w,
+                    &root.basis,
+                    &is_int_full,
+                    &root.x,
+                    &cmir_vbs,
+                    opts.simplex.tol,
+                    1e7,
+                );
+                cuts.extend(cm);
             }
             // Rewrite every separated cut over structural columns only, before
             // anything downstream looks at it. Doing it here (rather than at
@@ -3337,7 +3434,37 @@ fn solve_milp_node_search(
         crate::profile::incr(crate::profile::Ctr::MilpBoundContradictedDecert);
         withdraw_certificate(&mut res);
     }
+    // #2136: every gap test, cutoff and the incumbent cap on the bound used the
+    // tree's incumbent VALUE (the node LP objective), while `res.obj` is the
+    // recomputed `cᵀx` of the point returned. They agree up to LP noise on any
+    // healthy solve. When they do not, the gap the tree closed is not the gap
+    // between the returned point and the returned bound, so nothing derived
+    // from it is a certificate. Measured: a clay0203 GDP master with columns
+    // at the ±9.999e19 default box handed in as finite bounds returned
+    // `Optimal` with obj 41907.46 (true optimum 41420.27) and bound -752904:
+    // the node LP reported ≈ -752904 for a vertex whose `cᵀx` is 41907.
+    if has_inc && incumbent_misvalued(res.obj, stats.incumbent_value) {
+        crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
+        withdraw_certificate(&mut res);
+    }
     res
+}
+
+/// Whether the returned point's recomputed objective `obj` disagrees with the
+/// tree's incumbent value `tree_inc` by more than LP noise (#2136).
+///
+/// The allowance is `1e-6 · max(1, |obj|)`, the solver's absolute/relative
+/// objective tolerance. A healthy node LP matches `cᵀx` to ~1e-9 relative, so
+/// this never fires on an honest solve; a disagreement past it means the
+/// tree's gap tests were run against a value the returned point does not
+/// have. Either direction is disqualifying: a point WORSE than recorded means
+/// `Optimal` was declared on a gap that is not closed for the returned point;
+/// a point BETTER than recorded can sit below the reported bound.
+fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
+    if !obj.is_finite() || !tree_inc.is_finite() {
+        return obj.is_finite() != tree_inc.is_finite();
+    }
+    (obj - tree_inc).abs() > 1e-6 * obj.abs().max(1.0)
 }
 
 /// Immutable per-batch context shared by every node evaluation. Holds the
@@ -9479,6 +9606,23 @@ mod tiny_entry_tests {
         assert!(!gate(&unit, 2, &l, &u, &[3.5, 1.0]));
         // ... and the row-scaled spelling does.
         assert!(gate(&dense, 2, &l, &u, &[3.5e5, 1e-6]));
+    }
+
+    #[test]
+    fn incumbent_misvalued_tolerates_lp_noise_only() {
+        // #2136: LP noise (~1e-9 relative) on a healthy solve never fires.
+        assert!(!incumbent_misvalued(41_420.271_951, 41_420.271_951 + 4e-8));
+        assert!(!incumbent_misvalued(0.0, 5e-7));
+        assert!(!incumbent_misvalued(-3.0, -3.0));
+        // The measured clay0203 case: cᵀx = 41907.46, node LP said -752904.
+        assert!(incumbent_misvalued(41_907.46, -752_903.98));
+        // Either direction disqualifies (a better point can sit below the bound).
+        assert!(incumbent_misvalued(10.0, 10.1));
+        assert!(incumbent_misvalued(10.1, 10.0));
+        assert!(incumbent_misvalued(0.0, 2e-6));
+        // A finite point against a non-finite tree value is a disagreement too.
+        assert!(incumbent_misvalued(1.0, f64::NEG_INFINITY));
+        assert!(!incumbent_misvalued(f64::INFINITY, f64::INFINITY));
     }
 
     #[test]

@@ -9,6 +9,16 @@
 //! fixing and [`crate::presolve::duality`]'s is how the latter ended up strictly
 //! weaker than the former (#1409).
 
+/// Bound magnitude at or above which a column side is UNBOUNDED for any activity
+/// or quotient computed from it — Python's `_relax/_numeric.py` `EFFECTIVE_INF`.
+///
+/// It sits below the LP layer's `INF = 1e20` sentinel on purpose: a Python column
+/// declared without bounds carries `DEFAULT_VARIABLE_BOUND = ±9.999e19`
+/// (`python/discopt/constants.py`), an ordinary float that a `>= 1e20` test reads as
+/// finite. A consumer that multiplies or sums such a bound must test it against this
+/// threshold instead (CLAUDE.md, INF note: test the bound, never a product).
+pub const EFFECTIVE_INF: f64 = 1e19;
+
 /// The classic dot-product error factor `γ_k = k·u/(1 − k·u)` (Higham, *Accuracy and
 /// Stability of Numerical Algorithms*, §3.1): a sum of `k` floating-point terms
 /// evaluated in any order differs from the exact sum by at most `γ_k · Σ|terms|`.

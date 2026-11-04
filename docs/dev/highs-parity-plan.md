@@ -107,7 +107,7 @@ Every threshold cites the measurement it comes from; the P0 baselines re-measure
 
 | Role | Panel (TL, tolerance) | HiGHS today | Rust today | **Parity bar** | Basis |
 |---|---|---|---|---|---|
-| R1-LP | L panel, 24 LPs from `ref/HiGHS/check/instances` (20 s) | 24/24 certified, 3.16 s total | 21/24, 116.8 s, geomean R/H 11.9× (`routing-plan.md` §12 "final before/after") | **24/24 certified, `incorrect_count=0`, per-instance geomean wall ratio ≤ 3.0** | the existing `lp_vs_highs_geomean ≤ 3.0` gate, `benchmarks.toml:218` |
+| R1-LP | L panel, 25 LPs from `ref/HiGHS/check/instances` @ v1.15.1 (P0.1; was 24) (20 s) | 24/24 certified, 3.16 s total | 21/24, 116.8 s, geomean R/H 11.9× (`routing-plan.md` §12 "final before/after") | **25/25 certified, `incorrect_count=0`, per-instance geomean wall ratio ≤ 3.0** | the existing `lp_vs_highs_geomean ≤ 3.0` gate, `benchmarks.toml:218` |
 | R1-MILP (small) | M panel, 24 MILPs, `discopt_benchmarks/data/lp_milp/manifest.json` (20 s, gap 1e-4) | 24/24, 5.35 s, 217 nodes | 19/24, 104 s, 610,256 nodes (same entry) | **≥ 23/24 certified, geomean wall ratio ≤ 3.0, 0 incorrect** | one instance of slack because `issue-2173` already favours Rust 0.6× |
 | R1-MILP (MIPLIB-38) | MIPLIB 2017 easy, size-filtered, validated (20 s, `mip_rel_gap` 1e-4) | 38/38, 72 s, 15,417 nodes | 21/38, 400 s, 4.69 M nodes (`milp-competitiveness-plan.md` §4, pre-#2107/#2115) | **≥ 34/38 solved, total wall ≤ 2× HiGHS, 0 incorrect** | §4 of that plan: "within a few instances … wall within ~2×"; D2 (§3) decides what happens short of it |
 | R2a | §76.4 route panel: 26 in-repo diverted instances × spans {0,3,6} + 16 portfolios = 94 (30 s) | 92 optimal, 339.5 s (`performance-plan.md` §76.4) | retired `auto` arm: tied on syn/rsyn with kernel ON (20/1040 s vs 20/1040 s), lost with kernel OFF (22 vs 31) (`solver.py:9922-9931`) | **certified ≥ HiGHS arm's count, total wall ≤ 1.25×, 0 lost certificates** | the 1.25× is the noise floor the §76.4 spans show (20–30 s per span on six rows) |
@@ -148,10 +148,17 @@ measured" — it may be scheduled only with an entry experiment. From the routin
 
 ## §2 Branch model
 
-- One long-running branch `claude/happy-hamilton-0vvo3b` from `main`. **Sync**: merge `origin/main`
-  into it after every `main` merge that touches `milp_driver.rs`, `lp/simplex/`,
-  `lp_milp_highs.py` or `milp_highs.py` (check `git log origin/main -- <paths>` at the
-  start of each iteration), and at least weekly. Re-run the standing gates after a sync.
+- One long-running branch `claude/happy-hamilton-0vvo3b` from `main`. **Sync (owner,
+  2026-11-04): rebase onto `origin/main` once a day** to stay current (this replaces the
+  original "merge after every `main` change to the engine paths, at least weekly"). The
+  branch is single-owner, so the rebased branch is pushed with `--force-with-lease`.
+  A rebase changes the code under test, so it is **never** done while a measurement run is
+  in flight (the panel workers re-import `discopt` per solve): it waits for the run to
+  finish, then `maturin develop --release` / `pip install -e .` and the standing gates
+  re-run before the next task. Baseline data is labelled by the commit it measured; after
+  a rebase that commit survives only in the reflog, so a run JSON's
+  `header.commit` is the measurement's identity, not a branch commit. Last rebase:
+  *(none yet; `b0081ab` was a merge of `origin/main`, 2026-11-04)*.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
@@ -244,7 +251,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
 
 ### Phase 0 — measurement first (no engine work before every baseline exists)
 
-- [ ] **P0.1 — Harness audit and the L-panel manifest.** Scope:
+- [x] **P0.1 — Harness audit and the L-panel manifest.** Scope:
   `discopt_benchmarks/scripts/lp_milp_panel.py`, `lp_milp_loader.py`,
   `discopt_benchmarks/data/lp_milp/manifest.json`. The manifest holds only the 24 M-panel
   members + `i1183`; the L panel's 24 LPs came from `ref/HiGHS/check/instances`, which is
@@ -264,7 +271,19 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   round-trip (`Model.to_mps` → HiGHS) → exclude and list it; if > 4 of 24 are excluded,
   the panel is re-sourced (Netlib `.mps` via HiGHS `readModel`) before P0.3. Regime:
   harness (bound-neutral by construction).
-- [ ] **P0.2 — Rebuild the MIPLIB-38 harness and check it in.** Scope: new
+  **Result (2026-11-04):** `fetch` pins HiGHS `v1.15.1` @ `04024d70` (100 instance
+  files); `screen` gives **L 25 / M 24 / INF 16 = 65** (the plan's 24/24/18 was screened
+  at an older HiGHS tree, §7), every exclusion listed with its reason (1 LP round-trip
+  exclusion, `nan0`: NaN reaches the `.nl` writer — kill not fired). Done run (`--rounds 1
+  --time-limit 5 --load-gate 2`): `executed=195` = 65 × 3, i.e. every member × arm,
+  `incorrect_count=0`, exit 0, walls withheld on 10/65 rows by the gate. Statuses R/H/H0:
+  L 24+1 `feasible` / 25 / 25 optimal; M 16 (+3 `time_limit`, 5 `feasible`) / 24 / 24;
+  INF 16/16/16 correct verdicts. The route check fired on its first real run:
+  `gams10am` is answered by root presolve on **both** arms (neither engine runs), now
+  reported as route `presolve` rather than raised or counted as an engine row.
+  Regression test `python/tests/test_highs_parity_p01_panel_harness.py` (21 tests; 19
+  error before — load marker `check_route` absent — 21 pass after).
+- [x] **P0.2 — Rebuild the MIPLIB-38 harness and check it in.** Scope: new
   `discopt_benchmarks/scripts/miplib_panel.py` (+ `data/miplib/panel.json`). The
   §6 harness of `milp-competitiveness-plan.md` is not on disk (`scratchpad/` has no
   `miplib/`). Rebuild per its §0: MIPLIB 2017 "easy" set fetched from miplib.zib.de
@@ -279,13 +298,27 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   0 oracle mismatches; a 3-instance `run --time-limit 5` prints `executed=9`, exits 0.
   Kill: fewer than 30 instances pass validation → record and run with what validates;
   thresholds in §1.3 scale as `⌈0.9·n⌉`. Regime: harness.
+  **Result (2026-11-04):** the size filter is not recorded anywhere, but the 38 *names* are:
+  `scratchpad/a14/rens_panel.json` (A14's run on this panel) lists exactly 38, and each of
+  its reference optima equals the `miplib2017-v31.solu` `=opt=` value, so the panel is
+  **recovered, not reconstructed** (no size rule had to be guessed). `miplib_panel.py
+  fetch` caches the 38 `.mps.gz` + `.solu` in git-ignored `ref/miplib2017/` (764 KB) and
+  pins 39 sha256s in `data/miplib/panel.json` (a re-fetch verifies them); `screen` →
+  **38 members, 0 oracle mismatches**. `neos-3118745-obra` was *unvalidated* at the 60 s
+  validation limit (raw HiGHS timed out; not a wrong objective) and validated at 900 s
+  (255, 41,713 nodes, 146 s) — it is the panel's hardest instance for HiGHS on this host.
+  `run` delegates to `lp_milp_panel.py run` (P0.1's route marker, counters, load gate,
+  rotation) with the new `--h0-subprocess`, so every arm is a fresh process. Done run
+  (`gr4x6,p0201,neos-911970`, TL 5 s): `executed=9`, `incorrect_count=0`, exit 0.
+  Regression test `python/tests/test_highs_parity_p02_miplib_panel.py` (6 error before,
+  6 pass after). Branch synced with `origin/main` (#2125 `lp/` commits) in this iteration.
 - [ ] **P0.3 — Fresh R1 baselines at HEAD.** Scope: results under
   `docs/dev/data/highs-parity/baseline-<commit>/`. Run P0.1's L/M/INF and P0.2's
   MIPLIB-38, arms R/H/H0, 3 rounds, TL 20 s, load gate < 2 (if the gate never opens, run
   anyway and mark walls *indicative*; nodes/statuses carry). Done: a table per panel
   (solved, certified, total wall, median over solved, nodes, incorrect) written into §6
   with `incorrect_count = 0` on H; the R column replaces the "Rust today" figures in §1.3;
-  `executed` ≥ 3·(24+24+18+38)·3. Kill: `incorrect_count > 0` on **either** arm → that is
+  `executed` ≥ 3·(25+24+16+38)·3 (panel sizes re-screened by P0.1, §7). Kill: `incorrect_count > 0` on **either** arm → that is
   a P0-blocking correctness defect: file it, fix it before any other task (CLAUDE.md
   correctness-first), and re-run. Regime: measurement.
 - [ ] **P0.4 — Master baselines (R2a/R2b/R2c).** Scope: new
@@ -622,8 +655,8 @@ and is re-written by P4.1.**
 
 | Task | State | Result (one line) | Commit |
 |---|---|---|---|
-| P0.1 | [ ] | | |
-| P0.2 | [ ] | | |
+| P0.1 | [x] | L 25 / M 24 / INF 16 manifest at HiGHS v1.15.1; Done run executed 195/195, incorrect 0; route marker, per-panel counter, load gate, rotation added | `69ead3f` |
+| P0.2 | [x] | 38/38 recovered from the A14 artifact, validated against `.solu` (0 mismatches; obra needs > 60 s); Done run executed 9, incorrect 0 | see git log |
 | P0.3 | [ ] | | |
 | P0.4 | [ ] | | |
 | P0.5 | [ ] | | |
@@ -640,9 +673,9 @@ Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 
 | Panel | Arm | solved/certified | total wall | median (solved) | nodes | incorrect | load gate |
 |---|---|---|---|---|---|---|---|
-| L (24) | R / H / H0 | | | | — | | |
+| L (25) | R / H / H0 | | | | — | | |
 | M (24) | R / H / H0 | | | | | | |
-| INF (18) | R / H | | | | — | | |
+| INF (16) | R / H | | | | — | | |
 | MIPLIB-38 | R / H / H0 | | | | | | |
 | UC witness (P0.7) | R @ 20/60/120 s | | | | | | |
 
@@ -660,7 +693,24 @@ instances <names/count>, executed comparisons <n>. Measured: <numbers>. Expected
 decision point raised>. Retraction of: <earlier statement, if any>.
 ```
 
-(empty)
+**2026-11-04 — P0.1: "the L/M/INF panels are 24/24/18 = 66 instances".** Commit
+`2224cef` + P0.1 harness, load ≤ 1.6, instances: all 100 `.mps`/`.lp` files of HiGHS
+`check/instances` at `v1.15.1` (`04024d70`), executed comparisons 195. Measured: L **25**
+(net +1: `perold`, absent from the old tree's file list in the old manifest), M **24**
+(the old `M-HiGHS` 23 + `bound_implied`; no member lost), INF **16** (15 infeasible + 1
+unbounded, `gas11`). Expected: 24/24/18 (routing plan §12, screened at an older HiGHS
+checkout that is no longer on disk; its exclusion list was not recorded, so the 2-instance
+INF difference cannot be attributed). Consequence: threshold replaced — P0.1's Done count
+is 65·3 = 195 (every member × arm, met) instead of 66·3 = 198; P0.3's `executed` bound and
+the §1.3/§6 panel sizes now read 25/24/16. The `M-HiGHS` panel label is renamed `M`.
+
+**2026-11-04 — P0.1: "every R/H row is answered by the arm's engine".** Same run.
+Measured: `gams10am` (INF) is proved infeasible by root presolve (`termination =
+"presolve"`, separable-quadratic bound tightening of an equality row) on **both** the R and
+the H arm, so neither LP engine runs. Consequence: the route marker has a third value,
+`presolve`; such a row keeps its oracle verdict check and is counted
+(`presolve_answered`), but is never attributed to an engine. Any parity statistic over
+INF compares 15 engine rows, not 16.
 
 ---
 
