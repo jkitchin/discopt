@@ -209,6 +209,10 @@ class HighsOutcome:
     wall_time: float = 0.0
     stats: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
+    #: #2151: which candidate refuted THIS solve's own bound in the #1509 check
+    #: (``root-lp``, ``own-integers``, ``rounded-root``), or ``""``. A field rather than
+    #: a label, so a merge of another solve's labels cannot set it.
+    refuted_by: str = ""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2644,8 +2648,12 @@ def solve_milp_std(
         out = _cross_form_infeasible_check(sf, out, kw, t0)
     if out.gap_certified and out.status == "optimal":
         out = _tighten_feasibility_artefact(sf, out, kw, t0)
-    if not out.gap_certified and out.labels.get("milp/refuted_by") == "own-integers":
-        out = _reseed_refuted(sf, out, kw, t0, n_struct)
+    if (
+        not out.gap_certified
+        and out.refuted_by == "own-integers"
+        and _refuted_tight_resolve_enabled()
+    ):
+        out = _tight_resolve_refuted(sf, out, kw)
     if not out.gap_certified and out.status != "unbounded" and _coef_tighten_enabled():
         out = _coefficient_tightening_rescue(sf, out, kw, t0)
     return out
@@ -2974,88 +2982,138 @@ def _tighten_feasibility_artefact(
     return tight
 
 
-def _reseed_refuted(
-    sf: StdForm,
-    out: HighsOutcome,
-    kw: dict[str, Any],
-    t0: float,
-    n_struct: Optional[int],
-) -> HighsOutcome:
-    """#2151: one certified re-solve, seeded with the point that refuted HiGHS's bound.
+#: #2151: ``mip_feasibility_tolerance`` of the re-solve after a refutation over the
+#: incumbent's own integers. Measured on the issue's 2-32-32-1 ``relu_bigm`` network:
+#: at 1e-6, 1e-7 and 1e-8 HiGHS certifies the same bound 1.09e-6 above a feasible
+#: point; at 1e-9 (and 1e-10) its bound sits 1.4e-14 (5.7e-14) BELOW that point.
+REFUTED_TIGHT_FEAS_TOL = 1e-9
 
-    Runs only when the #1509 refutation's best point is the LP over HiGHS's OWN
-    incumbent's integers (label ``milp/refuted_by == "own-integers"``). HiGHS then had
-    the right integer assignment, but its continuous part was not optimal for it, and its
-    tree bound sat on that suboptimal objective. Measured on the issue's 2-32-32-1
-    ``relu_bigm`` network: HiGHS reported ``kOptimal`` with objective and
-    ``mip_dual_bound`` both -46.6583412166 and ``mip_gap`` 0. The LP over the same
-    integers gives -46.6583423116 with row residual 1.5e-16, so the bound is genuinely
-    1.09e-6 above a feasible point, not refuted by row slack. The cause is not the stop
-    rule: with ``mip_rel_gap = 0`` and ``mip_abs_gap = 1e-9`` the same bound comes back.
-    It is not ``mip_feasibility_tolerance`` either at 1e-7 or 1e-8 (1e-9 does clear it).
-    Started from the verified point, HiGHS certifies -46.6583423116 with bound
-    -46.6583423557, and that run passes every route check.
+#: #2151: the yardstick the tight re-solve's bound is held to against every verified
+#: point in hand. It is far tighter than the 1e-6 refutation yardstick, which is as
+#: wide as the 1.09e-6 false bound the re-solve exists to replace. Measured
+#: bound-to-point margins on the issue's network: -1.4e-14 at 1e-9, -5.7e-14 at 1e-10.
+REFUTED_ADOPT_ABS = 1e-9
+REFUTED_ADOPT_REL = 1e-12
 
-    The re-solve is the whole certified pipeline (:func:`_certified_milp`: the #1509
-    refutation of its own, the #1634 presolve-free cross-solve). Its result replaces
-    ``out`` only if it is a certified ``optimal`` and no verified point in hand -- the
-    refuting point ``out`` publishes, and the re-solve's own incumbent -- lies below its
-    bound by more than the refutation yardstick. Otherwise ``out`` is returned unchanged,
-    so this never withdraws anything. A refutation by a DIFFERENT integer assignment (the
-    #1509 class itself: the root LP point, or its rounding) does not run it. There the
-    tree pruned a branch, and a seeded re-run of the same tree is no new evidence.
+
+def _refuted_tight_resolve_enabled() -> bool:
+    """``DISCOPT_MILP_REFUTED_TIGHT_RESOLVE`` (#2151, default OFF; ``=1`` enables
+    :func:`_tight_resolve_refuted`).
+
+    Default-off per CLAUDE.md §5. The re-solve turns results that were uncertified
+    into certified ones, which is a certification change. It graduates only when a
+    corpus-wide flag ON vs OFF panel is cert-clean (no bound above a reference
+    optimum, ``incorrect_count = 0``) and net-positive (it certifies instances that
+    were uncertified). Its row is in ``docs/dev/flag-retirement-audit.md``.
+    """
+    return os.environ.get("DISCOPT_MILP_REFUTED_TIGHT_RESOLVE", "0") == "1"
+
+
+def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -> HighsOutcome:
+    """#2151: one certified re-solve at :data:`REFUTED_TIGHT_FEAS_TOL`, after HiGHS's
+    bound was refuted by the LP over its OWN incumbent's integers.
+
+    Runs only when ``out.refuted_by == "own-integers"``. That field is set by the
+    primary's own #1509 check and never merged from another solve. HiGHS then had the
+    right integer assignment, but its continuous part was not optimal for it, and its
+    tree bound sat on that suboptimal objective. Measured on the issue's network:
+    HiGHS reported ``kOptimal`` with objective = ``mip_dual_bound`` = -46.6583412166
+    (``mip_gap`` 0). The LP over the same integers gives -46.6583423116 with row
+    residual 1.5e-16, so the bound is 1.09e-6 above a feasible point. The stop rule is
+    not the cause (``mip_rel_gap = 0`` and ``mip_abs_gap = 1e-9`` return the same
+    bound), and neither is ``mip_feasibility_tolerance`` at 1e-7 or 1e-8. At 1e-9,
+    HiGHS certifies a bound 1.4e-14 below the point.
+
+    The re-solve is the whole certified pipeline (:func:`_certified_milp`: its own #1509
+    refutation, the #1634 presolve-free cross-solve). It is COLD (no start), so that
+    the tree it certifies is independent of the refuting point. It is also capped like
+    the #1634 cross-solve, at ``PRESOLVE_CROSS_BUDGET_FACTOR`` times the primary's wall
+    time. It is adopted only if:
+    - it is a certified ``optimal``; and
+    - its bound lies below every verified point in hand (the point ``out`` publishes
+      and the re-solve's own incumbent) within
+      ``REFUTED_ADOPT_ABS + REFUTED_ADOPT_REL |bound|``.
+
+    A re-solve at the primary's 1e-6 tolerance is not enough: it repeats the tree that
+    was just refuted, and the 1e-6 yardstick cannot see a bound as wrong as the one
+    being replaced. On adoption the better of the two verified incumbents is
+    published, and the gap is re-tested on it. Otherwise ``out`` is returned unchanged,
+    so this never withdraws anything. A refutation by a DIFFERENT integer assignment
+    (the #1509 class itself) does not run it, because there the tree pruned a branch.
     """
     if out.x is None or out.objective is None or not sf.int_idx.size:
         return out
-    kw2 = dict(kw)
+    cap = max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time))
     if kw["time_limit"] is not None:
-        kw2["time_limit"] = float(kw["time_limit"]) - (time.monotonic() - t0)
-        if kw2["time_limit"] <= 0.0:
-            out.stats["milp/refuted_reseed_skipped"] = 1.0
+        cap = min(cap, float(kw["time_limit"]) - float(out.wall_time))
+        if cap <= 0.0:
+            out.stats["milp/refuted_tight_resolve_skipped"] = 1.0
             return out
-    ns = sf.n if n_struct is None else int(n_struct)
-    kw2["initial_point"] = np.asarray(out.x, dtype=np.float64)[:ns]
+    out.stats["milp/refuted_tight_resolve_budget"] = cap
+    kw2 = dict(kw, initial_point=None, time_limit=cap, feasibility_tolerance=REFUTED_TIGHT_FEAS_TOL)
     again = _certified_milp(sf, kw2)
-    out.stats["milp/refuted_reseed_ran"] = 1.0
-    out.stats["milp/refuted_reseed_time"] = float(again.wall_time)
+    out.stats["milp/refuted_tight_resolve_ran"] = 1.0
+    out.stats["milp/refuted_tight_resolve_time"] = float(again.wall_time)
     why = None
-    b = float("nan")
+    best = (np.asarray(out.x, dtype=np.float64), float(out.objective))
     if not (again.gap_certified and again.status == "optimal" and again.bound is not None):
-        why = f"re-solve status {again.status}"
+        why = f"tight re-solve status {again.status}"
     else:
         b = float(again.bound)
-        pts = [float(out.objective)] + [p[1] for p in (_verified_mip_point(sf, again.x),) if p]
-        if any(b - p > CERT_ABS + CERT_REL * abs(b) for p in pts):
-            why = f"bound {b:.12g} is above a verified point's objective {min(pts):.12g}"
+        thr = REFUTED_ADOPT_ABS + REFUTED_ADOPT_REL * abs(b)
+        own = _verified_mip_point(sf, again.x)
+        for p in [best] + ([own] if own is not None else []):
+            if b - p[1] > thr:
+                why = f"tight bound {b:.12g} is above a verified point's objective {p[1]:.12g}"
+                break
+        if own is not None and own[1] < best[1]:
+            best = own
+        if why is None and not _gap_closed(best[1], min(b, best[1]), kw):
+            why = f"tight bound {b:.12g} does not close the gap to {best[1]:.12g}"
     if why is not None:
-        out.labels["milp/refuted_reseed_declined"] = why
+        out.labels["milp/refuted_tight_resolve_declined"] = why
         return out
-    again.stats = {**out.stats, **again.stats, "milp/refuted_reseed_adopted": 1.0}
-    # The primary's decline and refutation are superseded: only the re-solve's own
-    # verdict may label the result (as in the #1654 rescue). The refutation stays on
-    # record under its own key.
-    primary = {
-        k: v
-        for k, v in out.labels.items()
-        if k not in ("milp/certificate", "milp/highs_certificate", "milp/refuted_by")
-    }
+    # The primary's refutation is history now: its stats and labels are kept under a
+    # prefix, so nothing on the adopted result reads as a refuted certificate.
+    old_stats = _as_history(out.stats, ())
+    old_labels = _as_history(out.labels, _DECLINE_LABELS)
+    again.stats = {**old_stats, **again.stats, "milp/refuted_tight_resolve_adopted": 1.0}
     again.labels = {
-        **primary,
+        **old_labels,
         **again.labels,
-        "milp/primary_refuted_by": out.labels.get("milp/refuted_by", ""),
         "milp/bound_provenance": f"{again.labels.get('milp/bound_provenance', 'highs-fp')}, "
-        "re-solved from the refuting point (#2151)",
+        f"mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} after a refutation (#2151)",
     }
+    again.x, again.objective = best
+    again.bound = min(float(again.bound), best[1])  # type: ignore[arg-type]
     again.node_count += out.node_count
     again.iterations += out.iterations
-    again.wall_time = time.monotonic() - t0
+    again.wall_time += out.wall_time
     logger.info(
-        "HiGHS MILP route: re-solved from the point that refuted the bound; certified "
-        "%.12g with bound %.12g (#2151)",
-        float(again.objective) if again.objective is not None else float("nan"),
-        b,
+        "HiGHS MILP route: re-solved at mip_feasibility_tolerance=%g after the refutation; "
+        "certified %.12g with bound %.12g (#2151)",
+        REFUTED_TIGHT_FEAS_TOL,
+        best[1],
+        again.bound,
     )
     return again
+
+
+#: Labels that mark a result as declined; on adoption they are moved to history.
+_DECLINE_LABELS = ("milp/certificate", "milp/highs_certificate", "milp/bound_provenance")
+
+
+def _as_history(d: dict[str, Any], also: tuple[str, ...]) -> dict[str, Any]:
+    """``d`` with every ``milp/*refut*`` key, and each key in ``also``, moved under
+    ``milp/before_tight_resolve/`` (#2151)."""
+    return {
+        (
+            "milp/before_tight_resolve/" + k[5:]
+            if k.startswith("milp/") and ("refut" in k or k in also)
+            else k
+        ): v
+        for k, v in d.items()
+    }
 
 
 def _solve_milp_scaled(sf: StdForm, *, presolve: bool = True, **kw: Any) -> HighsOutcome:
@@ -3343,8 +3401,9 @@ def _judge_presolve_cross(
     roots = [b for b in (out.root_bound, cross.root_bound) if b is not None]
     bound = min(max(roots), obj) if roots else None
     stats = {**cross.stats, **out.stats, "milp/presolve_certificate_refuted": 1.0}
+    # #2151: the cross-solve's own refutation provenance does not describe this result.
     labels = {
-        **cross.labels,
+        **{k: v for k, v in cross.labels.items() if k != "milp/refuted_by"},
         **out.labels,
         "milp/certificate": "declined",
         "milp/bound_provenance": "root-ns" if bound is not None else "none",
@@ -4031,6 +4090,8 @@ def _solve_milp_std(
         stats["milp/certificate_refuted"] = 1.0
         labels["milp/highs_certificate"] = "refuted"
         labels["milp/refuted_by"] = kinds[i_best]
+        # #2151: the trigger reads this field, which no merge copies from another solve.
+        out.refuted_by = kinds[i_best]
         was = out.bound
         if out.objective is None or best < out.objective:
             out.x, out.objective = best_x, best
