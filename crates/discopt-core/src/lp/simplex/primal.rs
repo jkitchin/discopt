@@ -2743,6 +2743,7 @@ impl<'a> Simplex<'a> {
             };
             let mut alpha = self.column(j, art_sign);
             if self.lu.ftran(&mut alpha).is_err() {
+                crate::profile::incr(crate::profile::Ctr::PrimalExitSubtolFtranFail);
                 return Err(LpStatus::Numerical);
             }
             let mut t = room;
@@ -2801,6 +2802,7 @@ impl<'a> Simplex<'a> {
             *slot = r.to_f64();
         }
         if dy.iter().any(|v| *v != 0.0) && self.lu.btran(&mut dy).is_err() {
+            crate::profile::incr(crate::profile::Ctr::PrimalExitConfirmBtranFail);
             return Err(LpStatus::Numerical);
         }
         if !dy.iter().all(|v| v.is_finite()) {
@@ -2865,9 +2867,10 @@ impl<'a> Simplex<'a> {
         // Maintain x_B incrementally across pivots (rank-1 update per step)
         // instead of recomputing it by a full ftran each iteration; refreshed
         // exactly on every refactorization to bound floating-point drift.
-        let mut xb = self
-            .basic_values(art_sign)
-            .map_err(|_| LpStatus::Numerical)?;
+        let mut xb = self.basic_values(art_sign).map_err(|_| {
+            crate::profile::incr(crate::profile::Ctr::PrimalExitXbInitFail);
+            LpStatus::Numerical
+        })?;
         // EXPAND anti-degeneracy (Gill et al.): the Harris ratio-test feasibility
         // tolerance grows slowly from δ_min to δ_max, and a guaranteed minimum step
         // keeps every pivot strictly progressing — breaking the degenerate zero-step
@@ -2919,6 +2922,7 @@ impl<'a> Simplex<'a> {
             {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::PriceBtran);
                 if self.lu.btran(&mut y).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::PrimalExitPriceBtranFail);
                     return Err(LpStatus::Numerical);
                 }
             }
@@ -3019,6 +3023,7 @@ impl<'a> Simplex<'a> {
             {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::AlphaFtran);
                 if self.lu.ftran(&mut alpha).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::PrimalExitAlphaFtranFail);
                     return Err(LpStatus::Numerical);
                 }
             }
@@ -3201,7 +3206,10 @@ impl<'a> Simplex<'a> {
                         // the blocker's slack and |α_i| > 0 are both finite.
                         t_max = t_true.min(cap);
                     }
-                    _ => return Err(LpStatus::Numerical),
+                    _ => {
+                        crate::profile::incr(crate::profile::Ctr::PrimalExitRayNoRescue);
+                        return Err(LpStatus::Numerical);
+                    }
                 }
             }
             if t_max <= self.tol {
@@ -3328,11 +3336,13 @@ impl<'a> Simplex<'a> {
                         crate::profile::incr(crate::profile::Ctr::Refactorizations);
                         let _t = crate::profile::Timer::new(crate::profile::Phase::Refactorize);
                         if self.refactorize(art_sign).is_err() {
+                            crate::profile::incr(crate::profile::Ctr::PrimalExitRefacFail);
                             return Err(LpStatus::Numerical);
                         }
-                        xb = self
-                            .basic_values(art_sign)
-                            .map_err(|_| LpStatus::Numerical)?;
+                        xb = self.basic_values(art_sign).map_err(|_| {
+                            crate::profile::incr(crate::profile::Ctr::PrimalExitXbAfterRefacFail);
+                            LpStatus::Numerical
+                        })?;
                         updates = 0;
                         since_xb_refresh = 0;
                         refac_work_budget = self.lu.factor_nnz();
@@ -3345,9 +3355,10 @@ impl<'a> Simplex<'a> {
                         // between refactorizations costs one extra ftran per
                         // `xb_refresh_every` pivots and cannot change the answer —
                         // it only replaces an estimate with the exact value.
-                        xb = self
-                            .basic_values(art_sign)
-                            .map_err(|_| LpStatus::Numerical)?;
+                        xb = self.basic_values(art_sign).map_err(|_| {
+                            crate::profile::incr(crate::profile::Ctr::PrimalExitXbRefreshFail);
+                            LpStatus::Numerical
+                        })?;
                         since_xb_refresh = 0;
                         crate::profile::incr(crate::profile::Ctr::XbMidRefresh);
                     } else {
