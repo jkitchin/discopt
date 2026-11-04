@@ -125,7 +125,7 @@ def test_relu_refused_on_trainable_path():
 def test_unknown_activation_raises():
     m = Model()
     with pytest.raises(ValueError, match=r"Unknown activation"):
-        TrainableNetwork(m, [1, 3, 1], activation="gelu", name="g")
+        TrainableNetwork(m, [1, 3, 1], activation="mish", name="g")
 
 
 # ── test 3: end-to-end neural-DAE training (smoke) ──────────────────────────

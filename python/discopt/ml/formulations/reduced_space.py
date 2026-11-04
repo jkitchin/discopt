@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
+from discopt.ml.activations import symbolic
 from discopt.ml.bounds import propagate_bounds, scaled_output_bounds
 from discopt.ml.formulations.full_space import _family_name
 from discopt.ml.network import Activation, NetworkDefinition
@@ -14,13 +15,6 @@ from discopt.ml.scaling import OffsetScaling
 
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
-
-_ACTIVATION_FN = {
-    Activation.LINEAR: lambda x: x,
-    Activation.SIGMOID: dm.sigmoid,
-    Activation.TANH: dm.tanh,
-    Activation.SOFTPLUS: dm.softplus,
-}
 
 
 class ReducedSpaceFormulation:
@@ -122,10 +116,8 @@ class ReducedSpaceFormulation:
             zhat = dm.sum(W.T * prev, axis=1) + b
             if layer.activation == Activation.RELU:
                 new_expr = dm.maximum(zhat, 0)
-            elif layer.activation in _ACTIVATION_FN:
-                new_expr = _ACTIVATION_FN[layer.activation](zhat)
             else:
-                raise ValueError(f"Unsupported activation: {layer.activation}")
+                new_expr = symbolic(layer.activation, zhat, layer.beta)
 
             if k == n_layers - 1:
                 # Defer the last layer to the output constraints below.

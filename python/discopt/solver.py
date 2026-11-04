@@ -764,6 +764,20 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _warn_gdp_config_raised(site: str) -> None:
+    """Report a raising GDP disjunct-configuration constructor at WARNING, with traceback.
+
+    The constructor is a primal heuristic: a crash in it must not kill a solve whose
+    bound is still certifiable, so every call site catches and continues. It used to
+    log at DEBUG, which hid the failure entirely (CLAUDE.md §7) -- a raising
+    constructor read exactly like one that searched and found nothing. Call only
+    from inside an ``except`` block.
+    """
+    logger.warning(
+        "GDP config subNLP (%s) raised; continuing without its incumbent", site, exc_info=True
+    )
+
+
 def _gdp_config_primal_enabled() -> bool:
     """Whether the #823/#993 disjunct-configuration primal is on (**default ON**
     since the §5 graduation panel; opt out with ``DISCOPT_GDP_CONFIG_PRIMAL=0``).
@@ -2033,8 +2047,8 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     ):
                         _cf_n += 1
                         yield np.asarray(_cf_x, dtype=np.float64)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug("native seed one-hot config raised: %s", exc)
+                except Exception:
+                    _warn_gdp_config_raised("native seed")
                 finally:
                     logger.info("GDP config subNLP: %d feasible point(s)", _cf_n)
             if xr is not None and time.perf_counter() < deadline:
@@ -20898,8 +20912,8 @@ def solve_model(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:
-                    logger.debug("one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("spatial deferred")
                     _gdd_results = []
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
@@ -22428,8 +22442,8 @@ def solve_model(
                     deadline=_cfg_until,
                     stats=_cfg_stats,
                 )
-            except Exception as _e:
-                logger.debug("one_hot_config_subnlp raised: %s", _e)
+            except Exception:
+                _warn_gdp_config_raised("spatial root")
                 _cfg_results = []
             _gdp_cfg_deferred = _gdp_config_hold_back(
                 _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
@@ -28344,8 +28358,8 @@ def _solve_nlp_bb(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:  # pragma: no cover - defensive
-                    logger.debug("nlp-bb one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("nlp-bb deferred")
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
                 for _gdd_x, _ in _gdd_found:
@@ -28759,8 +28773,8 @@ def _solve_nlp_bb(
                             deadline=_cfg_until,
                             stats=_cfg_stats,
                         )
-                    except Exception as _e:  # pragma: no cover - defensive
-                        logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
+                    except Exception:
+                        _warn_gdp_config_raised("nlp-bb root")
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
@@ -35473,6 +35487,46 @@ def _solve_qp_batch_by_deadline(solve_qp_batch, problems: list, deadline: float)
 _NLP_NOT_STARTED_STATUS = -4
 
 
+_POUNCE_PARALLEL_EVAL_ENV = "POUNCE_NL_PARALLEL_EVAL"
+
+
+@contextlib.contextmanager
+def _serial_tape_eval_in_wave():
+    """Keep pounce's tape evaluations serial while a node wave runs (#1917).
+
+    A wave (``pounce.solve_nlp_batch``) runs its instances on the global Rayon
+    pool, each calling back into Python for its derivatives. On a large tape
+    (Jacobian >= 4096 nonzeros, >= 4096 rows, or >= 1024 Hessian pairs) pounce
+    evaluates those with a Rayon ``par_iter`` *inside* ``NlProblem``, holding
+    the GIL and the problem's ``RefCell`` borrow. A worker waiting in that
+    ``par_iter`` work-steals another wave instance, whose callback then reaches
+    the same shared tape while it is borrowed: ``PanicException: RefCell already
+    borrowed`` -> status -199 -> the node sentinel. Measured on the syngas hull
+    tape (1247 x 3141, a 48-instance wave of one problem, 6 interleaved runs per
+    arm, load ~13): unset, 13 of 48 instances panicked in 4 of 6 runs; at ``0``,
+    no panic in 6 of 6, and the wave took 13.2 +- 1.6 s against 12.6 +- 1.0 s.
+
+    The inner ``par_iter`` buys nothing here -- the wave already keeps the pool
+    busy with whole instances -- and pounce documents the serial and parallel
+    walks as bit-identical (``nl_reader.rs``, ``hess_flat_parallel``), so this
+    changes no number, only which thread computes it. pounce reads the variable
+    per evaluation; it is set only for the wave, while no other discopt thread
+    is evaluating, and restored afterwards. A value the user already set is
+    left alone: it is pounce's own measurement lever.
+
+    The real fix is upstream (pounce should not hold the GIL and a borrow across
+    a nested ``par_iter``); this keeps discopt's waves off that path meanwhile.
+    """
+    if _POUNCE_PARALLEL_EVAL_ENV in os.environ:
+        yield
+        return
+    os.environ[_POUNCE_PARALLEL_EVAL_ENV] = "0"
+    try:
+        yield
+    finally:
+        os.environ.pop(_POUNCE_PARALLEL_EVAL_ENV, None)
+
+
 def _solve_nlp_batch_by_deadline(
     solve_nlp_batch, problems: list, x0s: list, options: dict, deadline: float, **kw
 ) -> list:
@@ -35500,11 +35554,12 @@ def _solve_nlp_batch_by_deadline(
             )
             break
         chunk_opts = {**options, "max_wall_time": min(cap, left)}
-        out.extend(
-            solve_nlp_batch(
-                problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+        with _serial_tape_eval_in_wave():
+            out.extend(
+                solve_nlp_batch(
+                    problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+                )
             )
-        )
     return out
 
 

@@ -26,18 +26,20 @@ Design invariants (see ``docs/dev/hybrid-ml-implementation-plan.md`` §0.3):
 - Layers are emitted in *matrix* form (array-shaped weight ``Variable`` objects and
   ``@``), not per-neuron scalar loops.
 - Only **smooth** activations are allowed on the trainable path (LINEAR, TANH,
-  SIGMOID, SOFTPLUS); RELU is refused loudly because a gradient-based NLP solver
-  cannot handle its kink.
+  SIGMOID, SOFTPLUS, SQUAREPLUS, SWISH, GELU — the last four with an optional
+  sharpness ``beta``, see :mod:`discopt.ml.activations`); RELU is refused
+  loudly because a gradient-based NLP solver cannot handle its kink.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable, Union
+from typing import TYPE_CHECKING, Union
 
 import numpy as np
 
 import discopt.modeling as dm
+from discopt.ml.activations import PARAMETERIZED_ACTIVATIONS, check_beta, symbolic
 from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 from discopt.modeling.core import Model, Variable
 
@@ -47,13 +49,19 @@ if TYPE_CHECKING:
 
 # ── activation dispatch ────────────────────────────────────────────────────
 
-# Smooth activations only: each maps to a native, relaxable modeling intrinsic.
-_SYMBOLIC_ACTIVATIONS: dict[Activation, Callable] = {
-    Activation.LINEAR: lambda z: z,
-    Activation.TANH: dm.tanh,
-    Activation.SIGMOID: dm.sigmoid,
-    Activation.SOFTPLUS: dm.softplus,
-}
+# Smooth activations only: each is built from native, relaxable modeling
+# intrinsics by `discopt.ml.activations.symbolic`.
+_SYMBOLIC_ACTIVATIONS: frozenset[Activation] = frozenset(
+    {
+        Activation.LINEAR,
+        Activation.TANH,
+        Activation.SIGMOID,
+        Activation.SOFTPLUS,
+        Activation.SQUAREPLUS,
+        Activation.SWISH,
+        Activation.GELU,
+    }
+)
 
 
 def _resolve_activation(activation: Union[str, Activation]) -> Activation:
@@ -108,6 +116,9 @@ class TrainableDense:
     activation : str or Activation
         Smooth activation applied after the affine map (default ``"tanh"``).
         RELU is refused (see module docstring).
+    beta : float
+        Sharpness of a SOFTPLUS / SQUAREPLUS / SWISH / GELU activation
+        (default ``1.0``); refused (``!= 1``) for any other activation.
     weight_bounds : tuple of float
         ``(lb, ub)`` box on every weight and bias (default ``(-8.0, 8.0)``).
     name : str
@@ -122,6 +133,7 @@ class TrainableDense:
         n_out: int,
         *,
         activation: Union[str, Activation] = "tanh",
+        beta: float = 1.0,
         weight_bounds: tuple[float, float] = (-8.0, 8.0),
         name: str,
     ) -> None:
@@ -131,6 +143,7 @@ class TrainableDense:
         self.n_in = int(n_in)
         self.n_out = int(n_out)
         self.activation = _resolve_activation(activation)
+        self.beta = check_beta(self.activation, beta)
         self.weight_bounds = (float(weight_bounds[0]), float(weight_bounds[1]))
         self.name = name
 
@@ -191,7 +204,7 @@ class TrainableDense:
         if not inputs:
             raise ValueError(f"Layer '{self.name}' called with no inputs.")
         z = self._affine(inputs)
-        return _SYMBOLIC_ACTIVATIONS[self.activation](z)
+        return symbolic(self.activation, z, self.beta)
 
 
 # ── network ────────────────────────────────────────────────────────────────
@@ -212,6 +225,10 @@ class TrainableNetwork:
         overrides ``output_activation``.
     output_activation : str or Activation
         Activation for the final layer (default ``"linear"``).
+    beta : float or sequence of float
+        Sharpness of the SOFTPLUS / SQUAREPLUS / SWISH / GELU layers (default
+        ``1.0``). A scalar applies to every layer whose activation takes a
+        ``beta`` (others keep 1); a sequence gives one value per layer.
     weight_bounds : tuple of float
         Box on every weight/bias (default ``(-8.0, 8.0)``).
     name : str
@@ -234,6 +251,7 @@ class TrainableNetwork:
         *,
         activation: Union[str, Activation, Sequence[Union[str, Activation]]] = "tanh",
         output_activation: Union[str, Activation] = "linear",
+        beta: Union[float, Sequence[float]] = 1.0,
         weight_bounds: tuple[float, float] = (-8.0, 8.0),
         name: str,
     ) -> None:
@@ -254,6 +272,21 @@ class TrainableNetwork:
                     f"(one per layer), got {len(acts)}"
                 )
 
+        # A scalar beta applies to every layer whose activation takes one
+        # (the linear output layer keeps 1); a sequence is per-layer.
+        if isinstance(beta, (int, float, np.floating, np.integer)):
+            betas = [
+                float(beta) if _resolve_activation(a) in PARAMETERIZED_ACTIVATIONS else 1.0
+                for a in acts
+            ]
+        else:
+            betas = [float(bt) for bt in beta]
+            if len(betas) != n_layers:
+                raise ValueError(
+                    f"per-layer beta sequence must have length {n_layers} "
+                    f"(one per layer), got {len(betas)}"
+                )
+
         self.model = model
         self.sizes = sizes
         self.name = name
@@ -264,6 +297,7 @@ class TrainableNetwork:
                 sizes[i],
                 sizes[i + 1],
                 activation=acts[i],
+                beta=betas[i],
                 weight_bounds=weight_bounds,
                 name=f"{name}_L{i}",
             )
@@ -373,7 +407,10 @@ class TrainableNetwork:
             A frozen network whose ``forward()`` matches this symbolic net.
         """
         arrays = self._weight_arrays(values)
-        layers = [DenseLayer(W, b, layer.activation) for (W, b), layer in zip(arrays, self.layers)]
+        layers = [
+            DenseLayer(W, b, layer.activation, beta=layer.beta)
+            for (W, b), layer in zip(arrays, self.layers)
+        ]
         return NetworkDefinition(layers, input_bounds=input_bounds)
 
     @classmethod
@@ -399,6 +436,7 @@ class TrainableNetwork:
             model,
             sizes,
             activation=acts,
+            beta=[ly.beta for ly in definition.layers],
             weight_bounds=weight_bounds,
             name=name,
         )

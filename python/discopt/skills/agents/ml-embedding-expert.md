@@ -14,7 +14,7 @@ The package was named `discopt.nn` before the 0.9.0 rename (issue #1219). The de
 - **Frozen** — a *trained* predictor becomes constraints and you optimize *over* it; its weights are constants. This is `NetworkDefinition` / `TreeEnsembleDefinition` + `NNFormulation` / `TreeFormulation`, or the `add_predictor()` dispatcher.
 - **Trainable** — the surrogate's weights are decision `Variable` objects, so it is *trained* jointly with a physics model (e.g. a neural rate law inside a collocation DAE). This is `trainable.py` (`TrainableNetwork`, `TrainableDense`, `TrainableKernelExpansion`, `train()`) and `surrogate.py`, used mainly through `discopt.dae.fit`. `TrainableNetwork.freeze()` / `from_definition()` bridge the two: train, freeze, then optimize.
 
-Note that only two of the four encodings are MIP: `relu_bigm.py` and `formulations/tree_ensemble.py` emit binaries and big-M constraints, while `full_space.py` emits smooth activation equalities and `reduced_space.py` emits nested expressions with zero binaries.
+Note that not every encoding is a MIP: `relu_bigm.py`, `relu_partition.py` (the `relu_partition` and `relu_extended` strategies) and `formulations/tree_ensemble.py` emit binaries, while `full_space.py` emits smooth activation equalities and `reduced_space.py` emits nested expressions with zero binaries.
 
 ## Your Expertise
 
@@ -24,7 +24,7 @@ Note that only two of the four encodings are MIP: `relu_bigm.py` and `formulatio
   - **Reduced-space**: activations recursively evaluated as a nested expression (no aux variables, no binaries). Smallest model but poor convexity — spatial B&B has a harder time.
   - **Tree ensemble**: Mišić-style per-leaf encoding — one binary per leaf, split indicators, and a convexity constraint per tree. Applies to single `DecisionTree`s and to ensembles (random forest, GBM).
 - **Interval bound propagation** for pre-activations: pass `input_bounds=(lb, ub)` through `LayerBounds.propagate_bounds`. Tight pre-activation bounds tighten each ReLU's big-M and often enable constraint elimination (always-on / always-off neurons).
-- **Supported predictors**: feedforward dense networks with linear / ReLU / sigmoid / tanh / softplus activations; CART decision trees and tree ensembles (random forest, gradient-boosted) via `tree.py`; arbitrary trainable surrogates via the `Surrogate` protocol. Not yet supported: conv, recurrent, attention.
+- **Supported predictors**: feedforward dense networks with linear / ReLU / sigmoid / tanh / softplus / squareplus / Swish (SiLU) / GELU activations (the last four take a sharpness `DenseLayer.beta`, `f(z) = g(beta z)/beta`; Swish and GELU are non-monotone, and `discopt/ml/activations.py` gives their interval image, with the interior minimum); CART decision trees and tree ensembles (random forest, gradient-boosted) via `tree.py`; arbitrary trainable surrogates via the `Surrogate` protocol. Not yet supported: conv, recurrent, attention.
 - **Readers**: `readers/onnx_reader.py` (ONNX `.onnx` → `NetworkDefinition`), `readers/sklearn_reader.py` (`MLPRegressor`/`MLPClassifier`, `DecisionTree*`, and ensembles → `NetworkDefinition` / `TreeEnsembleDefinition`), `readers/torch_reader.py` (`torch.nn.Sequential` → `NetworkDefinition`). Each converts weights, biases, activations and split structure to discopt's own representation.
 - **Input/output scaling**: trained networks often assume scaled inputs. `discopt.ml.scaling` provides `OffsetScaling` — affine input/output transforms (`x_scaled = (x - x_offset) / x_factor`, `y = y_factor * net_out + y_offset`) that plug into the formulation.
 
@@ -59,7 +59,7 @@ m = dm.Model("ml_opt")
 f = NNFormulation(
     m,
     net,
-    strategy="relu_bigm",  # or "full_space", "reduced_space"
+    strategy="relu_bigm",  # or "relu_partition", "relu_extended", "full_space", "reduced_space"
     scaling=OffsetScaling(  # optional
         x_offset=mu_x,
         x_factor=sd_x,
@@ -127,6 +127,7 @@ net = surrogate.freeze(result)  # -> NetworkDefinition, back to the frozen path
 - `python/discopt/ml/formulations/base.py` — `NNFormulation` / `TreeFormulation` dispatch + shared helpers.
 - `python/discopt/ml/formulations/full_space.py` — smooth activations, one constraint per neuron.
 - `python/discopt/ml/formulations/relu_bigm.py` — ReLU with binaries and big-M.
+- `python/discopt/ml/formulations/relu_partition.py` — stronger ReLU MILPs (#2134): `relu_partition` (Tsay et al. 2021, `n_partitions` between big-M at P=1 and the hull), `relu_extended` (Anderson et al. 2020 per-neuron convex hull), and `AndersonCutSeparator`, the ideal-cut `cut_callback` that `NNFormulation(..., ideal_cuts=True).cut_callback` returns.
 - `python/discopt/ml/formulations/reduced_space.py` — nested expressions, no binaries.
 - `python/discopt/ml/formulations/tree_ensemble.py` — tree/ensemble per-leaf encoding.
 - `python/discopt/ml/readers/` — ONNX, scikit-learn and PyTorch importers.
@@ -156,7 +157,7 @@ module paths.)
 
 ## Common Questions You Handle
 
-- **"Which formulation should I pick?"** Start with `relu_bigm` if the network uses ReLU — it's the most-tested path and often solvable as a MILP. For smooth activations (sigmoid, tanh), use `full_space` — the resulting NLP is smooth and solvable via NLP-BB. Reserve `reduced_space` for very small networks (< 50 neurons total) where the recursive expression doesn't blow up.
+- **"Which formulation should I pick?"** Start with `relu_bigm` if the network uses ReLU — it's the most-tested path and often solvable as a MILP. If its LP relaxation is weak (large root gap), try `relu_partition` (`n_partitions=2`–`4`) or `relu_extended`: same feasible set, LP bound ordered big-M ≤ partition ≤ extended, at the cost of more variables. Partitions that don't nest are not ordered among themselves. `ideal_cuts=True` + `m.solve(cut_callback=nn.cut_callback)` reaches the hull bound in the original space but moves the solve off HiGHS onto discopt's spatial B&B. For smooth activations (sigmoid, tanh), use `full_space` — the resulting NLP is smooth and solvable via NLP-BB. Reserve `reduced_space` for very small networks (< 50 neurons total) where the recursive expression doesn't blow up.
 - **"ReLU big-M is loose / slow."** Tight input bounds are the single biggest lever. `LayerBounds.propagate_bounds` pre-computes per-neuron pre-activation intervals; use them to set big-M per neuron (not a global constant). Already-dead neurons become linear constraints — no binary at all.
 - **"Why are the NN outputs wrong in the optimizer but right in Keras/PyTorch?"** Check input/output scaling. Trained networks almost always expect normalized inputs; if you skip the scaling layer, the network runs on raw-scale inputs and produces garbage. Pass `scaling=OffsetScaling(x_offset=..., x_factor=..., y_offset=..., y_factor=...)` to the formulation (it is a formulation argument, not a `NetworkDefinition` field).
 - **"Can I use a Conv / LSTM / transformer?"** Not out of the box. Feedforward dense + ReLU / sigmoid / tanh + tree ensembles are the supported paths. Convolutional layers require unfolding to dense equivalents (valid for small images).

@@ -9,13 +9,28 @@ import numpy as np
 
 
 class Activation(Enum):
-    """Supported activation functions."""
+    """Supported activation functions.
+
+    SOFTPLUS, SQUAREPLUS, SWISH and GELU take a sharpness parameter ``beta``
+    (``DenseLayer.beta``); see :mod:`discopt.ml.activations` for the formulas.
+    SWISH (a.k.a. SiLU) and GELU are not monotone.
+    """
 
     LINEAR = "linear"
     RELU = "relu"
     SIGMOID = "sigmoid"
     TANH = "tanh"
     SOFTPLUS = "softplus"
+    SQUAREPLUS = "squareplus"
+    SWISH = "swish"
+    GELU = "gelu"
+
+    @classmethod
+    def _missing_(cls, value):
+        # "silu" is the PyTorch name for Swish at beta = 1.
+        if isinstance(value, str) and value.lower() == "silu":
+            return cls.SWISH
+        return None
 
 
 @dataclass
@@ -31,11 +46,17 @@ class DenseLayer:
     activation : Activation or str
         Activation function applied after the affine transform. A plain string
         (``"tanh"``, ``"relu"``, ...) is accepted and normalised to the enum.
+    beta : float, default 1.0
+        Sharpness of a SOFTPLUS / SQUAREPLUS / SWISH / GELU activation:
+        ``f_beta(z) = g(beta * z) / beta`` (e.g. softplus becomes
+        ``log(1 + exp(beta z)) / beta``, matching ``torch.nn.Softplus(beta)``).
+        Any other activation refuses ``beta != 1``.
     """
 
     weights: np.ndarray
     biases: np.ndarray
     activation: Activation
+    beta: float = 1.0
 
     def __post_init__(self) -> None:
         # Normalise a string activation to the enum. Without this,
@@ -55,6 +76,9 @@ class DenseLayer:
                     f"Unknown activation {self.activation!r}; expected one of {valid} "
                     f"or an Activation member."
                 ) from None
+        from discopt.ml.activations import check_beta
+
+        self.beta = check_beta(self.activation, self.beta)
         if self.weights.ndim != 2:
             raise ValueError(f"weights must be 2-D, got shape {self.weights.shape}")
         if self.biases.ndim != 1:
@@ -122,17 +146,10 @@ class NetworkDefinition:
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """Evaluate the network on input ``x`` using numpy (for testing)."""
-        from typing import Callable
+        from discopt.ml.activations import evaluate
 
-        _activations: dict[Activation, Callable[[np.ndarray], np.ndarray]] = {
-            Activation.LINEAR: lambda z: z,
-            Activation.RELU: lambda z: np.maximum(z, 0),
-            Activation.SIGMOID: lambda z: 1.0 / (1.0 + np.exp(-z)),
-            Activation.TANH: np.tanh,
-            Activation.SOFTPLUS: lambda z: np.logaddexp(z, 0),
-        }
         h = np.asarray(x, dtype=np.float64)
         for layer in self.layers:
             h = h @ layer.weights + layer.biases
-            h = _activations[layer.activation](h)
+            h = evaluate(layer.activation, h, layer.beta)
         return h
