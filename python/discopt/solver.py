@@ -22656,20 +22656,28 @@ def solve_model(
                             _DEADLINE_NODE_FLOOR_S,
                             min(3.0, _fp_stage_deadline - time.perf_counter()),
                         )
-                        _root_relax = _solve_root_node_multistart(
-                            _active_evaluator,
-                            np.array(batch_lb[best_root_idx]),
-                            np.array(batch_ub[best_root_idx]),
-                            _active_cb,
-                            _relax_opts,
-                            nlp_solver,
-                            n_random=0,
-                            # #1153: the SEED is the expensive half of this stage
-                            # (3.27 s of the measured 6.4 s). Leaving it on the
-                            # global deadline is what made the first attempt inert.
-                            deadline=_fp_stage_deadline,
-                            observe_cost=_observe_heur_nlp,
-                        )
+                        # #2143: this NLP only seeds the pump below (a primal
+                        # heuristic), so it is hard-stopped at the solve's deadline
+                        # like the pump's own NLPs. Measured on syngas hull: one of
+                        # its starts ran from 86 s to 160 s of a 120 s solve.
+                        from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
+
+                        with stop_at_solve_deadline():
+                            _root_relax = _solve_root_node_multistart(
+                                _active_evaluator,
+                                np.array(batch_lb[best_root_idx]),
+                                np.array(batch_ub[best_root_idx]),
+                                _active_cb,
+                                _relax_opts,
+                                nlp_solver,
+                                n_random=0,
+                                # #1153: the SEED is the expensive half of this stage
+                                # (3.27 s of the measured 6.4 s). Leaving it on the
+                                # global deadline is what made the first attempt
+                                # inert.
+                                deadline=_fp_stage_deadline,
+                                observe_cost=_observe_heur_nlp,
+                            )
                         if (
                             _root_relax is not None
                             and _root_relax.x is not None

@@ -14472,3 +14472,86 @@ an alternative.
   Its single repair then ran 19-21 s from ~5 s before the deadline: the solve ended
   at 128-145 s of 120. This is pre-existing (the stage was simply not reached before)
   and wants a cost-aware entry gate for the repair.
+
+## 106. #2143 stage 3: deadline adherence, the root presolve stop, the in-root LOA proposer (2026-11-04)
+
+Probes and data: `scratchpad/stage3/` of the session. Box: 4 cores, nothing else of
+ours running unless stated; load is recorded beside every timing.
+
+### 106.1 A root heuristic's sub-solve stops at the solve's deadline (default ON)
+
+**Reproduced first.** GDPlib `syngas`, `gdp_method="hull"`, 120 s, the three stage-2
+flags ON, every heuristic, NLP and QP entry point wrapped and timed
+(`probe_overrun.py`, load 0.2-0.8). Four runs ended at **127.0, 124.1, 160.1 and
+123.6 s**. Two different sub-solves outlived the deadline:
+
+- **A POUNCE NLP that ignores its own `max_wall_time`.** The pump's seed multistart
+  ran one start from 86.0 s with `max_wall_time=30` that returned `OPTIMAL` at 159.8 s:
+  1,984 iterations, 21,587 of its callbacks after its cap. A pump fix-and-solve capped
+  at 3.0 s ran 7.95 s (116.0 -> 123.9 s, status 2) and 9.6 s in another run. Callback
+  gaps were at most 0.14 s, so this is not one expensive iteration. POUNCE keeps
+  iterating past the cap.
+- **One QP of the pump's repair.** It ran from 105.95 s to 123.48 s. pounce 0.15.0's
+  `project_to_feasible` takes no time limit and calls back into Python only between
+  QPs, so `_DeadlineCallbacks` could not stop it. The stage-2 write-up (§105) had
+  attributed the overrun to this QP. That is confirmed for that run shape. Offline,
+  an earlier pump's repair on the same model took 10 QPs of 1.1-1.9 s each
+  (`probe_repair_qp.py`, 12.4 s in all), so the cost of one QP varies by an order of
+  magnitude with the rounding.
+
+**Fix.**
+
+- `solvers/_nlp_hard_stop.py`: every public primal heuristic in `primal_heuristics.py`
+  (and the pump's seed multistart in `solver.py`) arms a hard stop at the live
+  solve's ROLE-1 deadline (`solver_tuning.ROLE1_DEADLINE`).
+  - `nlp_pounce.solve_nlp` and `nlp_ipopt.solve_nlp` then hand the solver an
+    `intermediate` hook. It returns `False` once that deadline passes, which ends the
+    solve with `User_Requested_Stop`, reported as `TIME_LIMIT`.
+  - A solve due after the deadline is not started.
+  - Only the user's `time_limit` is used, never a stage's or a heuristic's own earlier
+    deadline. So the stop truncates only work past the solve's deadline.
+  - Node NLPs are never armed.
+- `_project_to_feasible_until`: pounce's projection loop, step for step, with
+  `time_limit = deadline - now` on each QP. While the deadline does not bind its point
+  is bit-identical to pounce's (`test_2143_deadline_adherence`, 4 starts). Without a
+  deadline the repair still calls pounce.
+
+**After** (same probe and flags, load 0.06-0.72): **120.16 s**. The repair QP
+started at 118.73 s and stopped at 120.13 s, and the post-deadline ILS solve was not
+started.
+
+**Bound-neutral regime.** Code-version A/B (`ab_code_panel.py`): HEAD exported
+(no `_nlp_hard_stop`, asserted absent) against the worktree (asserted present). It
+covers the 76 in-repo `.nl` plus `ex_633`, `eight_process`, `nonconvex_hen`,
+`clay0203`, `small_batch` hull and `eight_process` big-M, at 60 s with jobs=2, load
+2.0-3.6.
+
+- 80 pairs, 62 where neither arm's deadline bound (optimal/infeasible in under 45 s):
+  **60 exactly equal** in node count and objective. Every GDP cell is identical
+  (ex_633 75 nodes, eight_process 59 / 27, nonconvex_hen 13, clay0203 111,
+  small_batch 3).
+- The two others are `cvxnonsep_nsig30` / `psig30`, with identical objectives and
+  node counts 4368 / 4157 and 3640 / 3894. A rerun of both arms twice each, at jobs=1
+  and load about 2.1, gave:
+  - base `nsig30` 4198 and 4401, new 4386 and 4190;
+  - base `psig30` 4102 and 4102, new 4288 and 4330.
+
+  Base against itself already spans 3640-4102 and 4198-4401. The spread is run-to-run
+  noise, not the change.
+- The one status change is `ex8_5_3`: optimal at 57.6 s (base) against feasible at
+  60.1 s (new), a cell where the deadline binds.
+
+Kept residuals: an in-flight factorization or IPM iteration is not interrupted
+(pounce: "expiry can overshoot by one such operation").
+
+**Not changed here, and why.** Two budget defects do not outlive the deadline, but
+they spend most of `syngas` hull's root:
+
+- `_solve_root_node_multistart` replaces the caller's per-start cap with the whole
+  time left for every start after the first. Its comment says "shrink". The pump
+  seed's `min(3.0, ...)` thus became 30 s, and two starts took 24 + 22 s.
+- POUNCE overruns `max_wall_time` well before the deadline.
+
+Honouring either changes which incumbents are found where the deadline does not
+bind, so it is §5 bound-changing work. It is not part of a deadline fix, and is
+recorded as a lead.
