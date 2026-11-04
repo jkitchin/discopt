@@ -141,7 +141,8 @@ timed_phases!(
     // #2107: the aggregated c-MIR separator in the root cut loop.
     SepCmir,
     SepGomory,
-    SepCmir,
+    // #1917 G3.2 step 2: the tableau c-MIR separator (`DISCOPT_RUST_MILP_TABLEAU_CMIR`).
+    SepTabCmir,
     Augment,
     DiveRepair,
     // A12/RINS: wall time inside the sub-MILP improvement heuristic.

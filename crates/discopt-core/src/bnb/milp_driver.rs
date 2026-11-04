@@ -2415,7 +2415,7 @@ fn solve_milp_node_search(
                 ));
             }
             if cmir_on {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepTabCmir);
                 let (cm, _st) = crate::lp::tableau_cmir::separate_tableau_cmir(
                     &csc_w,
                     m_w,
