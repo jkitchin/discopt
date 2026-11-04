@@ -1,0 +1,3306 @@
+{
+ "mipcc": {
+  "path": "/root/Dropbox/projects/discopt-minlp-benchmark/mipcc27",
+  "found": false
+ },
+ "rows": [
+  {
+   "model": "04664f0bd22a2f5c",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 27,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014485853998849052,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 27,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.027033947000745684,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "078109be21de54d6",
+   "tests": [
+    "python/tests/test_iis.py::test_integer_domain_conflict (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [
+      [
+       "x0",
+       []
+      ]
+     ],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01761674800036417,
+     "n": 1,
+     "m": 2,
+     "n_int": 1
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [
+      [
+       "x0",
+       []
+      ]
+     ],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014595046000977163,
+     "n": 1,
+     "m": 2,
+     "n_int": 1
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "0ee55d743a7f1d4f",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.023824077999961446,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.020296100999985356,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "12126958712d331e",
+   "tests": [
+    "python/tests/test_iis_portfolio.py::test_portfolio_member_error_is_reraised (call)"
+   ],
+   "reps": [
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    },
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    }
+   ],
+   "deterministic": false
+  },
+  {
+   "model": "1d578861f93b5b71",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02833982900119736,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.023505879000367713,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "1ec8e0a9f8f1c72c",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.1578001640009461,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.16281005400014692,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "220b33f80c96d93b",
+   "tests": [
+    "python/tests/test_iis.py::test_result_len_and_bool_and_summary (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014871954001137055,
+     "n": 1,
+     "m": 2,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014473539000391611,
+     "n": 1,
+     "m": 2,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "31829ea29cfbd56b",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.018447203998221084,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0155693569995492,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "34db13325e1b7e9b",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02085498399901553,
+     "n": 4,
+     "m": 5,
+     "n_int": 1
+    },
+    {
+     "constraints": [
+      0,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.020915495000735973,
+     "n": 4,
+     "m": 5,
+     "n_int": 1
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "35c8baf4d55c124b",
+   "tests": [
+    "python/tests/test_iis.py::test_iis_is_infeasible_and_irreducible (call)",
+    "python/tests/test_iis_probe_errors.py::test_probe_exception_propagates_and_model_is_restored[1] (call)",
+    "python/tests/test_iis_probe_errors.py::test_probe_exception_propagates_and_model_is_restored[2] (call)",
+    "python/tests/test_iis_probe_errors.py::test_returned_non_proof_status_is_still_inconclusive (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01409664899983909,
+     "n": 1,
+     "m": 3,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.013101497999741696,
+     "n": 1,
+     "m": 3,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "3797e88c3c90df5d",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.019588170000133687,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017542895000588032,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "3e102933220b85bf",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "upper",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017837898998550372,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      1,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "upper",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0321345400006976,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "3e38f4b1b3752c67",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "upper",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.019261477998952614,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      2,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "upper",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.018218717999843648,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "3e427344ac4791fe",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.015171617998930742,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.029526785998314153,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "41296b0c340cf210",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_lp_feasible_mip_infeasible_keeps_only_needed_integrality (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [],
+     "integrality": [
+      [
+       "x0",
+       []
+      ]
+     ],
+     "n_solves": 7,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017272283999773208,
+     "n": 2,
+     "m": 2,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [],
+     "integrality": [
+      [
+       "x0",
+       []
+      ]
+     ],
+     "n_solves": 7,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01512032100072247,
+     "n": 2,
+     "m": 2,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "41cbd21c9741c633",
+   "tests": [
+    "python/tests/test_iis.py::test_include_bounds_false_skips_bound_members (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 10,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.013576389001173084,
+     "n": 1,
+     "m": 1,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 10,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.011126768000394804,
+     "n": 1,
+     "m": 1,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "462ed5f6fbe75fe6",
+   "tests": [
+    "python/tests/test_iis_deadline.py::test_default_path_honours_the_budget (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      3
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.013861780000297586,
+     "n": 4,
+     "m": 4,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      3
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.012827754999307217,
+     "n": 4,
+     "m": 4,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "48e0e041c2552b34",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.019736350999664865,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.019507220000377856,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "51b999a5213eafad",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0180185099998198,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.022411603000364266,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "615233bf341b8552",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01702757499879226,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.027514911998878233,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "645858197f60fc12",
+   "tests": [
+    "python/tests/test_issue_1723_iis_probe_warnings.py::test_issue_repro_vector_variable_no_warning (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.015186900998742203,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.010377746000813204,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "6a0d46c6d5944d92",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 17,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.019321820000186563,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      3
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 17,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014377011000760831,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "6a9fd6661d63f667",
+   "tests": [
+    "python/tests/test_iis.py::test_raises_on_feasible_model (call)"
+   ],
+   "reps": [
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    },
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    }
+   ],
+   "deterministic": false
+  },
+  {
+   "model": "6dc1c72a601335ff",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02598607800064201,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      0,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014727814001162187,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "6e890b49289ca18d",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.020512274999418878,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.020124697999563068,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "705eb3ad205c86f3",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x2",
+       []
+      ],
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02286650399946666,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      0,
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x2",
+       []
+      ],
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01911368499895616,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "70d0d874e1d1c3b9",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_default_confirmation_is_final_and_the_output_is_two_config_infeasible (call)",
+    "python/tests/test_iis_integrality.py::test_solution_format_example (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 14,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01139486499960185,
+     "n": 2,
+     "m": 3,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 14,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017267237999476492,
+     "n": 2,
+     "m": 3,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "70d3b384092a1047",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01458207599898742,
+     "n": 4,
+     "m": 5,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 20,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.016327095001543057,
+     "n": 4,
+     "m": 5,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "782f38f89aa5dfe1",
+   "tests": [
+    "python/tests/test_issue_1723_iis_probe_warnings.py::test_plain_solve_still_warns_after_compute_iis (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.015507279000303242,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01244323799983249,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "81902b995a8c324d",
+   "tests": [
+    "python/tests/test_issue_1618_remainder.py::test_c17_iis_names_bound_elements (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ],
+      [
+       "x1",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.016961891000391915,
+     "n": 3,
+     "m": 1,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ],
+      [
+       "x1",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.011245828000028268,
+     "n": 3,
+     "m": 1,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "82884eb8832ff97a",
+   "tests": [
+    "python/tests/test_iis_deadline.py::test_default_path_honours_the_budget (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      41
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 29,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.024788690001514624,
+     "n": 42,
+     "m": 42,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      41
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 29,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02092310400075803,
+     "n": 42,
+     "m": 42,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "867f6ad726860468",
+   "tests": [
+    "python/tests/test_iis_probe_errors.py::test_vector_bound_with_some_infinite_elements_is_a_candidate (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 13,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01012732300114294,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 13,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.010083315999509068,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "8ae113541fbf1583",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_relaxed_binary_bounds_become_members (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014284677001342061,
+     "n": 1,
+     "m": 1,
+     "n_int": 1
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 11,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.010216833999947994,
+     "n": 1,
+     "m": 1,
+     "n_int": 1
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "97083706a8966d15",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      2,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.12345792199994321,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      0,
+      2,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.09650011799931235,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "98fca78d1c93a377",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02017034600066836,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "upper",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 25,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.030695048999405117,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "9c781214bca95cc5",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01938866999989841,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      1,
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.015816211000128533,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "9f677a19a4ef56db",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.013463235000017448,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01651683099953516,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "9fb29f954e045f93",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.023730573000648292,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0166005060000316,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "a099b98cf4796db1",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.021580929000265314,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.023429914999724133,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "a42bb9ea75053e4c",
+   "tests": [
+    "python/tests/test_iis_portfolio.py::test_all_members_timing_out_reports_each_members_reason (call)",
+    "python/tests/test_iis_portfolio.py::test_member_refuses_a_different_discopt (call)",
+    "python/tests/test_iis_portfolio.py::test_order_changes_which_iis_is_found (call)",
+    "python/tests/test_iis_portfolio.py::test_portfolio_argument_validation (call)",
+    "python/tests/test_iis_portfolio.py::test_portfolio_respects_total_time_limit (call)",
+    "python/tests/test_iis_portfolio.py::test_portfolio_returns_smallest_complete_member (call)",
+    "python/tests/test_iis_portfolio.py::test_portfolio_tie_goes_to_earlier_order (call)",
+    "python/tests/test_iis_portfolio.py::test_portfolio_with_fewer_workers_than_orders_runs_all (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2,
+      3,
+      4
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 17,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02629246099968441,
+     "n": 3,
+     "m": 5,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      2,
+      3,
+      4
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 17,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014055569999982254,
+     "n": 3,
+     "m": 5,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "ae2d29e43e77a80c",
+   "tests": [
+    "python/tests/test_iis_deadline.py::test_budget_returns_a_confirmed_anytime_subsystem[each] (call)",
+    "python/tests/test_iis_deadline.py::test_budget_returns_a_confirmed_anytime_subsystem[final] (call)",
+    "python/tests/test_iis_deadline.py::test_no_time_to_prove_infeasibility_raises (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      61
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 31,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.04490622400044231,
+     "n": 62,
+     "m": 62,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      61
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 31,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.04476368599898706,
+     "n": 62,
+     "m": 62,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "b26b1eb7717aaf11",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02674246200149355,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02269110700035526,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "b42ca31ab8f97d54",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014226008001060109,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.018145275998904253,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "b5d4acf5ee10069d",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.021548499998971238,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 24,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02451615199970547,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "c2361b4f1dee29af",
+   "tests": [
+    "python/tests/test_issue_1723_iis_probe_warnings.py::test_user_declared_free_variable_is_still_reported (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 13,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.015199407000181964,
+     "n": 3,
+     "m": 3,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 13,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01406507699903159,
+     "n": 3,
+     "m": 3,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "c2568609ac8d8da2",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.027034394999645883,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 21,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017514307999590528,
+     "n": 4,
+     "m": 5,
+     "n_int": 2
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "c6f797d7d6aed7a5",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02213072400081728,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 26,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0228515230010089,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "d5bac80dadfd081c",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.018024276001597173,
+     "n": 4,
+     "m": 5,
+     "n_int": 1
+    },
+    {
+     "constraints": [
+      1
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014372531000844901,
+     "n": 4,
+     "m": 5,
+     "n_int": 1
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "d7446f8a07b0ea37",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x0",
+       []
+      ],
+      [
+       "x2",
+       []
+      ],
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.06237262399918109,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      2,
+      3
+     ],
+     "bounds": [
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [
+      [
+       "x0",
+       []
+      ],
+      [
+       "x2",
+       []
+      ],
+      [
+       "x3",
+       []
+      ]
+     ],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.0724130230009905,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "dfd8ca2d040b220b",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_feasible_model_raises (call)"
+   ],
+   "reps": [
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    },
+    {
+     "error": "rc=1: ValueError: compute_iis: the model is feasible \u2014 there is no infeasibility to explain."
+    }
+   ],
+   "deterministic": false
+  },
+  {
+   "model": "e5474cec3b8fe883",
+   "tests": [
+    "python/tests/test_issue_1723_iis_probe_warnings.py::test_bound_driven_iis_no_warning_and_bounds_restored (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.01189838500067708,
+     "n": 4,
+     "m": 1,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 16,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.014253586999984691,
+     "n": 4,
+     "m": 1,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "e5580a1c8b69a9ae",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.021914160000960692,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.017962932000955334,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "e71ca9d8c5e23b5d",
+   "tests": [
+    "python/tests/test_iis.py::test_isolates_two_constraint_conflict_from_red_herrings (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 14,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.012805754000510206,
+     "n": 2,
+     "m": 4,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [],
+     "integrality": [],
+     "n_solves": 14,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.013274390001242864,
+     "n": 2,
+     "m": 4,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "f55c50e7d60f1f69",
+   "tests": [
+    "python/tests/test_iis.py::test_finds_bound_vs_constraint_conflict (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.012079414000254474,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    },
+    {
+     "constraints": [
+      0
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 12,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.012811239999791724,
+     "n": 2,
+     "m": 2,
+     "n_int": 0
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "f7de0d662dc894de",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.022891345999596524,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    },
+    {
+     "constraints": [
+      1,
+      2
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 22,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.020476437000979786,
+     "n": 4,
+     "m": 5,
+     "n_int": 3
+    }
+   ],
+   "deterministic": true
+  },
+  {
+   "model": "f819cc464ba6f802",
+   "tests": [
+    "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "reps": [
+    {
+     "constraints": [
+      1,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.02033926399963093,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    },
+    {
+     "constraints": [
+      1,
+      3,
+      4
+     ],
+     "bounds": [
+      [
+       "x0",
+       "lower",
+       []
+      ],
+      [
+       "x3",
+       "lower",
+       []
+      ]
+     ],
+     "integrality": [],
+     "n_solves": 23,
+     "proven_irreducible": true,
+     "complete": true,
+     "confirm_fallback": false,
+     "wall": 0.018531213001551805,
+     "n": 4,
+     "m": 5,
+     "n_int": 4
+    }
+   ],
+   "deterministic": true
+  }
+ ],
+ "ran": 53,
+ "deterministic": 53,
+ "errors": 6
+}

@@ -444,7 +444,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   hold the route's point to 1e-6 row-scaled. Measurement note: `_lp_dual`'s returned
   value excludes the slack form's `obj_const` (100/100 sampled LPs differ by exactly it);
   the fixtures store the row form's objective, constant included.
-- [ ] **P0.6 — IIS baseline.** Scope: new `discopt_benchmarks/scripts/iis_parity_panel.py`.
+- [x] **P0.6 — IIS baseline.** Scope: new `discopt_benchmarks/scripts/iis_parity_panel.py`.
   Run `compute_iis(include_integrality=True)` on every IIS-exercising test model in
   `python/tests/` (grep `compute_iis`/`milp_iis`) and the MIPcc27 smallset **if** on disk
   (else record its absence), storing element sets, `n_solves`, `proven_irreducible`,
@@ -452,6 +452,19 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (determinism check, counter printed). Kill: non-deterministic sets between two HiGHS
   runs on the same fixture → record; that fixture's parity bar becomes "within the
   observed HiGHS spread" and is listed. Regime: measurement.
+  **Result (2026-11-04):** `discopt_benchmarks/scripts/iis_parity_panel.py` (`capture`,
+  `run`). The 14 IIS-exercising test files handed `compute_iis` 75 models: 1 non-linear (no
+  MPS, skipped), 56 distinct linear models, of which 3 are feasible (those tests check the
+  refusal) and are listed as excluded. **53 fixtures** in
+  `python/tests/data/highs_parity/iis/` (244 KB, MPS + `expected.json`), 38 with
+  integers, 7 whose IIS keeps integrality elements. Two fresh-process runs each:
+  **deterministic 53/53** (identical constraint/bound/integrality sets), all
+  `proven_irreducible` and `complete`, 0 confirm fallbacks, 1,058 solves, 1.30 s total
+  (max 0.16 s, n ≤ 62). MIPcc27 smallset: **absent on this host** (`~/Dropbox/…` does not
+  exist), recorded in the run JSON; the panel is therefore all small test models, and
+  the plan's "wall ≤ 2×" bar for R5 will be judged at sub-second scale. Kill not fired.
+  `test_highs_parity_p06_iis_baseline.py` pins every set exactly (54 tests, 1.5 s); data
+  `docs/dev/data/highs-parity/iis-3e5dbfa3/`.
 - [ ] **P0.7 — Entry experiment for M-1671: the UC witness on the Rust driver.** Scope:
   `scripts`-free: run `test_1667_…::test_unit_commitment_returns_within_its_time_limit`'s
   `UC_SCRIPT` with `DISCOPT_LP_MILP_BACKEND=rust` at `time_limit` 20/60/120 s, 3 reps,
@@ -761,7 +774,7 @@ and is re-written by P4.1.**
 | P0.3 | [x] | 927 executed, 0 incorrect; walls indicative (gate open on 41/103 rows); R/H geomean 1.41 (L) / 1.73 (M) / 1.78 (MIPLIB) but H/H0 = 110× on L | see git log |
 | P0.4 | [x] | kill fired: false HiGHS master optimum (#2146), fixed; post-fix 3103 masters, 6206 compared, 0 contradictions; Rust SGM 0.08× HiGHS on decomposition masters; route 91–92/94 | `6351f589` + see git log |
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
-| P0.6 | [ ] | | |
+| P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [ ] | | |
 | P1.1–P1.4 | [ ] | | |
 | P2.1–P2.6 / D1 | [ ] | | |
