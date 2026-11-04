@@ -628,7 +628,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     is possible from this change; the probe fires (3 rescue calls, all Rust-decisive,
     under `test_issue_1611_remainder.py`). Regression files #1537/#1611/#1869 pass (56).
     Test `test_highs_parity_p12_rust_first_rescue.py` (5; all fail before).
-- [ ] **P1.3 — R4: Rust dual first in `_lp_dual`.** Scope: `convex_node_bound.py:215-260`.
+- [x] **P1.3 — R4: Rust dual first in `_lp_dual`.** **KILLED 2026-11-04 (see result).** Scope: `convex_node_bound.py:215-260`.
   Reorder to `_simplex_dual` → HiGHS → row-equilibrated HiGHS; `_simplex_dual` gains the
   slack-form `sf` input so all three solve the same LP. Done: on the P0.5 R4 fixtures,
   `certify_lp_dual(y_rust)` ≥ `certify_lp_dual(y_highs)` − (CERT_ABS + CERT_REL·|v|) on
@@ -637,6 +637,17 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   `main` on every instance; `test_2067*` passes. Kill: ≥ 1 fixture where the Rust dual
   loses a bound HiGHS found → keep HiGHS first *for that LP class* (state the class),
   record in §7, attach the LP to P2.1. Regime: bound-neutral with the §1.4 R4 exception.
+  **Result (2026-11-04): kill fired at the entry experiment; no code shipped.** P0.5's 60
+  R4 node LPs, each solved by both engines of the P1.1 seam (presolve off, as `_lp_dual`
+  does) and both duals certified by `certify_lp_dual` on the same slack form
+  (`p13-r4-dual/`): **0 bounds lost, 55 within tolerance, but 3 looser than the bar** —
+  Rust's certified bound is 1.0–1.25e-6 below HiGHS's at |v| ≈ 1.5e-6, against a
+  tolerance of CERT_ABS + CERT_REL·|v| ≈ 1.0e-6. All 3 are node LPs of the translated
+  `clay0303hfsg` (`test_1537_invariance` `shift` cell). Rust is also **strictly tighter on
+  2** LPs, so the reorder is not bound-neutral in either direction. One instance does not
+  define a general LP class to carve out (CLAUDE.md §2), so R4 **stays HiGHS-first**
+  (`_lp_dual` unchanged; the Rust simplex remains its third source). The 3 LPs join
+  P2.1's profile list; re-open after P2 improves the Rust dual (P2.2–P2.5).
 - [ ] **P1.4 — R3: root-cut LP and GMI on the Rust simplex (flagged).** Scope:
   `_root_cuts.py` `_solve_lp` (`:410`), `separate_gmi` (`:532`), new
   `DISCOPT_NLPBB_ROOT_CUTS_ENGINE={highs,rust}` (default `highs`), Rust: a binding that
@@ -893,7 +904,7 @@ and is re-written by P4.1.**
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
-| P1.1–P1.4 | P1.1–P1.2 [x] | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first | see git log |
+| P1.1–P1.4 | P1.1–P1.3 [x] (P1.3 killed) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs | see git log |
 | P2.1–P2.6 / D1 | [ ] | | |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
@@ -972,6 +983,13 @@ feasible to ~3e-16 relative); #1869 free-column 24/85 differ (Rust: no certified
 23, a looser one on 1; 22 are nvs16 LPs boxed at 1.6e9). Expected: identical verdicts.
 Consequence: #1537 and #1869 stay HiGHS-first (P1.2 kill); only the #1611 rescue (3/3
 identical) is Rust-first. The 24 #1869 LPs and the nvs0 arbitration LP are P2.1 inputs.
+
+
+**2026-11-04 — P1.3: "the Rust dual certifies at least HiGHS's bound on every R4 LP".**
+Commit `d9a6009a`, P0.5's 60 R4 fixtures, compared 60. Measured: 0 lost, 55 within
+CERT_ABS + CERT_REL·|v|, 3 looser by 1.0–1.25e-6 (translated `clay0303hfsg`), 2 strictly
+tighter. Expected: none looser. Consequence: P1.3 killed, R4 stays HiGHS-first, the 3 LPs
+go to P2.1.
 
 ---
 

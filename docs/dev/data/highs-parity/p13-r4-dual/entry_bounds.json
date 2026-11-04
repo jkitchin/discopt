@@ -1,0 +1,782 @@
+[
+ {
+  "file": "R4__syn05m_nlpbb__000.npz",
+  "instance": "syn05m@nlpbb",
+  "highs": [
+   -838.2581711642797,
+   "declared-box"
+  ],
+  "rust": [
+   -838.2581711642831,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__tls2_nlpbb__001.npz",
+  "instance": "tls2@nlpbb",
+  "highs": [
+   2.5325299648919866,
+   "declared-box"
+  ],
+  "rust": [
+   2.5325299648919883,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__clay0303hfsg_nlpbb__002.npz",
+  "instance": "clay0303hfsg@nlpbb",
+  "highs": [
+   -1e-12,
+   "declared-box"
+  ],
+  "rust": [
+   -1.5430088772669688e-10,
+   "ns-scaled-dual"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30_nlpbb__003.npz",
+  "instance": "cvxnonsep_nsig30@nlpbb",
+  "highs": [
+   130.4799729999062,
+   "declared-box"
+  ],
+  "rust": [
+   130.47997299802682,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30__004.npz",
+  "instance": "cvxnonsep_nsig30",
+  "highs": [
+   130.4799730406753,
+   "declared-box"
+  ],
+  "rust": [
+   130.47997304408545,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30_nlpbb__005.npz",
+  "instance": "cvxnonsep_psig30@nlpbb",
+  "highs": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "rust": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig40r_nlpbb__006.npz",
+  "instance": "cvxnonsep_psig40r@nlpbb",
+  "highs": [
+   86.53908372609827,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   86.53908372609787,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30__007.npz",
+  "instance": "cvxnonsep_psig30",
+  "highs": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "rust": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__ex1223a_nlpbb__008.npz",
+  "instance": "ex1223a@nlpbb",
+  "highs": [
+   4.487460805258344,
+   "declared-box"
+  ],
+  "rust": [
+   4.48746080525833,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__009.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+  "highs": [
+   -1.5497207641601562e-06,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   -2.8024457595568125e-06,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "WORSE"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__010.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+  "highs": [
+   130.4799729999062,
+   "declared-box"
+  ],
+  "rust": [
+   130.47997299802682,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__011.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-rows] (call)",
+  "highs": [
+   130.4799730045408,
+   "declared-box"
+  ],
+  "rust": [
+   130.47997300744785,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__012.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-shift] (call)",
+  "highs": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "rust": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__013.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-rows] (call)",
+  "highs": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "rust": [
+   78.74479733393382,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__014.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+  "highs": [
+   86.52672694499438,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   86.52672694493884,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_flay__015.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+  "highs": [
+   30.983866743466024,
+   "declared-box"
+  ],
+  "rust": [
+   30.983866743466024,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_m3_n__016.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[m3.nl-shift] (call)",
+  "highs": [
+   -1.88854755833745e-07,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   -1.88854755833745e-07,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_issue_1611_remainder_py__test_d30_lazy_ben__017.npz",
+  "instance": "python/tests/test_issue_1611_remainder.py::test_d30_lazy_benders_master_certifies (call)",
+  "highs": [
+   118.096276923927,
+   "declared-box"
+  ],
+  "rust": [
+   118.096276923927,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__portfol_roundlot__018.npz",
+  "instance": "portfol_roundlot",
+  "highs": [
+   0.028290212371098848,
+   "declared-box"
+  ],
+  "rust": [
+   0.028290212371098848,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__portfol_roundlot_nlpbb__019.npz",
+  "instance": "portfol_roundlot@nlpbb",
+  "highs": [
+   0.028290212371098848,
+   "declared-box"
+  ],
+  "rust": [
+   0.028290212371098848,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__fac2_nlpbb__020.npz",
+  "instance": "fac2@nlpbb",
+  "highs": [
+   255334502.65374553,
+   "declared-box"
+  ],
+  "rust": [
+   255334502.65374577,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__flay02m_nlpbb__021.npz",
+  "instance": "flay02m@nlpbb",
+  "highs": [
+   30.821227060510072,
+   "declared-box"
+  ],
+  "rust": [
+   30.821227060510044,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__flay03m_nlpbb__022.npz",
+  "instance": "flay03m@nlpbb",
+  "highs": [
+   30.983866756227265,
+   "declared-box"
+  ],
+  "rust": [
+   30.983866756227265,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__nvs03_nlpbb__023.npz",
+  "instance": "nvs03@nlpbb",
+  "highs": [
+   8.152139989231983,
+   "declared-box"
+  ],
+  "rust": [
+   8.15213998923198,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__m3_nlpbb__024.npz",
+  "instance": "m3@nlpbb",
+  "highs": [
+   -3.342952087362342e-12,
+   "ns-scaled-dual"
+  ],
+  "rust": [
+   -1.7244421881965682e-12,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__syn05m_nlpbb__025.npz",
+  "instance": "syn05m@nlpbb",
+  "highs": [
+   -837.7324008988678,
+   "declared-box"
+  ],
+  "rust": [
+   -837.7324008988678,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__tls2_nlpbb__026.npz",
+  "instance": "tls2@nlpbb",
+  "highs": [
+   2.6875618716468126,
+   "ns-fbbt-box"
+  ],
+  "rust": [
+   2.687561901541868,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__clay0303hfsg_nlpbb__027.npz",
+  "instance": "clay0303hfsg@nlpbb",
+  "highs": [
+   -1e-12,
+   "declared-box"
+  ],
+  "rust": [
+   -1.5430088772669688e-10,
+   "ns-scaled-dual"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30_nlpbb__028.npz",
+  "instance": "cvxnonsep_nsig30@nlpbb",
+  "highs": [
+   130.5009281476965,
+   "declared-box"
+  ],
+  "rust": [
+   130.5009281458775,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30__029.npz",
+  "instance": "cvxnonsep_nsig30",
+  "highs": [
+   130.50092817875665,
+   "declared-box"
+  ],
+  "rust": [
+   130.50092818645953,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30_nlpbb__030.npz",
+  "instance": "cvxnonsep_psig30@nlpbb",
+  "highs": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "rust": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig40r_nlpbb__031.npz",
+  "instance": "cvxnonsep_psig40r@nlpbb",
+  "highs": [
+   86.53908614701656,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   86.53908614701615,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30__032.npz",
+  "instance": "cvxnonsep_psig30",
+  "highs": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "rust": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__ex1223a_nlpbb__033.npz",
+  "instance": "ex1223a@nlpbb",
+  "highs": [
+   4.5795824024245775,
+   "declared-box"
+  ],
+  "rust": [
+   4.5795824024245615,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__034.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+  "highs": [
+   -1.5497207641601562e-06,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   -2.8024457595568125e-06,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "WORSE"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__035.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+  "highs": [
+   130.5009281476965,
+   "declared-box"
+  ],
+  "rust": [
+   130.5009281458775,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__036.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-rows] (call)",
+  "highs": [
+   130.50092814578213,
+   "declared-box"
+  ],
+  "rust": [
+   130.5009281487323,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__037.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-shift] (call)",
+  "highs": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "rust": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__038.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-rows] (call)",
+  "highs": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "rust": [
+   78.85984233914456,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__039.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+  "highs": [
+   86.57698147509169,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   86.57698147504088,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_flay__040.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+  "highs": [
+   30.9838667455615,
+   "declared-box"
+  ],
+  "rust": [
+   30.9838667455615,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_m3_n__041.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[m3.nl-shift] (call)",
+  "highs": [
+   1.909649625316488,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   1.9096496309347033,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_issue_1611_remainder_py__test_d30_lazy_ben__042.npz",
+  "instance": "python/tests/test_issue_1611_remainder.py::test_d30_lazy_benders_master_certifies (call)",
+  "highs": [
+   122.71868994802419,
+   "declared-box"
+  ],
+  "rust": [
+   122.71868994802419,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__portfol_roundlot__043.npz",
+  "instance": "portfol_roundlot",
+  "highs": [
+   0.02829023039150842,
+   "declared-box"
+  ],
+  "rust": [
+   0.0282902303915084,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__portfol_roundlot_nlpbb__044.npz",
+  "instance": "portfol_roundlot@nlpbb",
+  "highs": [
+   0.02829023039150842,
+   "declared-box"
+  ],
+  "rust": [
+   0.0282902303915084,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__fac2_nlpbb__045.npz",
+  "instance": "fac2@nlpbb",
+  "highs": [
+   255339465.70617837,
+   "ns-fbbt-box"
+  ],
+  "rust": [
+   255339465.70617837,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__flay02m_nlpbb__046.npz",
+  "instance": "flay02m@nlpbb",
+  "highs": [
+   30.950935911780363,
+   "declared-box"
+  ],
+  "rust": [
+   30.95093588506628,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__flay03m_nlpbb__047.npz",
+  "instance": "flay03m@nlpbb",
+  "highs": [
+   30.9838667583149,
+   "declared-box"
+  ],
+  "rust": [
+   30.9838667583149,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__nvs03_nlpbb__048.npz",
+  "instance": "nvs03@nlpbb",
+  "highs": [
+   15.999999999966917,
+   "declared-box"
+  ],
+  "rust": [
+   15.999999999966917,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__m3_nlpbb__049.npz",
+  "instance": "m3@nlpbb",
+  "highs": [
+   4.924918710936735,
+   "declared-box"
+  ],
+  "rust": [
+   4.924918715167743,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__syn05m_nlpbb__050.npz",
+  "instance": "syn05m@nlpbb",
+  "highs": [
+   -837.4448653293218,
+   "declared-box"
+  ],
+  "rust": [
+   -837.4448653299258,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__tls2_nlpbb__051.npz",
+  "instance": "tls2@nlpbb",
+  "highs": [
+   2.5412297534877193,
+   "declared-box"
+  ],
+  "rust": [
+   2.541229753487717,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__clay0303hfsg_nlpbb__052.npz",
+  "instance": "clay0303hfsg@nlpbb",
+  "highs": [
+   -5.8818385480978e-10,
+   "declared-box"
+  ],
+  "rust": [
+   -1.1927192462192426e-09,
+   "ns-fbbt-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30_nlpbb__053.npz",
+  "instance": "cvxnonsep_nsig30@nlpbb",
+  "highs": [
+   130.5106870095279,
+   "declared-box"
+  ],
+  "rust": [
+   130.51068700640405,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_nsig30__054.npz",
+  "instance": "cvxnonsep_nsig30",
+  "highs": [
+   130.5106870773128,
+   "declared-box"
+  ],
+  "rust": [
+   130.5106870841805,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30_nlpbb__055.npz",
+  "instance": "cvxnonsep_psig30@nlpbb",
+  "highs": [
+   78.81167630709828,
+   "declared-box"
+  ],
+  "rust": [
+   78.81167630709828,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__cvxnonsep_psig30__056.npz",
+  "instance": "cvxnonsep_psig30",
+  "highs": [
+   78.81167630709828,
+   "declared-box"
+  ],
+  "rust": [
+   78.81167630709828,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__ex1223a_nlpbb__057.npz",
+  "instance": "ex1223a@nlpbb",
+  "highs": [
+   4.487460805258301,
+   "declared-box"
+  ],
+  "rust": [
+   4.487460805258301,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__058.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+  "highs": [
+   -1.5497207641601562e-06,
+   "ns-exact-dual-correction"
+  ],
+  "rust": [
+   -2.569909567343917e-06,
+   "ns-exact-dual-correction"
+  ],
+  "verdict": "WORSE"
+ },
+ {
+  "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__059.npz",
+  "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+  "highs": [
+   130.5106870095279,
+   "declared-box"
+  ],
+  "rust": [
+   130.51068700640405,
+   "declared-box"
+  ],
+  "verdict": "ok"
+ }
+]
