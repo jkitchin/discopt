@@ -45,6 +45,7 @@ f(ub))``.  :func:`activation_interval` implements that case.
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 import numpy as np
 from scipy.special import erf as _np_erf
@@ -119,7 +120,7 @@ def _g_gelu(u):
     return np.where(np.isneginf(u), 0.0, out)
 
 
-_G = {
+_G: dict[Activation, Callable[[np.ndarray], np.ndarray]] = {
     Activation.SOFTPLUS: _g_softplus,
     Activation.SQUAREPLUS: _g_squareplus,
     Activation.SWISH: _g_swish,
@@ -179,21 +180,25 @@ def activation_minimizer(activation: Activation, beta: float = 1.0) -> tuple[flo
 def evaluate(activation: Activation, z, beta: float = 1.0) -> np.ndarray:
     """Evaluate ``activation`` (sharpness ``beta``) elementwise with numpy."""
     b = check_beta(activation, beta)
-    z = np.asarray(z, dtype=np.float64)
+    za: np.ndarray = np.asarray(z, dtype=np.float64)
+    out: np.ndarray
     if activation == Activation.LINEAR:
-        return z
-    if activation == Activation.RELU:
-        return np.maximum(z, 0.0)
-    if activation == Activation.SIGMOID:
-        return _expit(z)
-    if activation == Activation.TANH:
-        return np.tanh(z)
-    if activation in _G:
+        out = za
+    elif activation == Activation.RELU:
+        out = np.maximum(za, 0.0)
+    elif activation == Activation.SIGMOID:
+        out = _expit(za)
+    elif activation == Activation.TANH:
+        out = np.tanh(za)
+    elif activation in _G:
         if b == 1.0:
-            return _G[activation](z)
-        with np.errstate(over="ignore"):
-            return _G[activation](b * z) / b
-    raise ValueError(f"Unknown activation: {activation}")
+            out = _G[activation](za)
+        else:
+            with np.errstate(over="ignore"):
+                out = _G[activation](b * za) / b
+    else:
+        raise ValueError(f"Unknown activation: {activation}")
+    return out
 
 
 def activation_interval(
