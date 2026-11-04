@@ -1385,6 +1385,74 @@ def _milp_iis_arrays(
                 pending[key(batch[0])] = x
             i += 1
 
+    def batch_filter_columns(cols: list) -> None:
+        """The integrality phase with each column's finite bounds removed
+        together with its integrality ("relax the column").
+
+        Relaxing an integrality alone turns the column's bounds into counted
+        elements, so mid-phase the subsystem grows and no anytime answer can
+        follow the progress: on MIPcc27's dijle at 3600 s the filter had
+        certified Gurobi's 825 rows and 375 of its 376 integralities, yet the
+        answer stayed at 3961 because every set on the way counted more. Here a
+        column that loses its integrality usually loses its bounds in the same
+        probe (up to three elements fewer). When the joint removal is refuted
+        for a single column, the integrality alone is tried (the previous
+        step), so nothing the old phase dropped is kept; its bounds then stay
+        for the bound phase. Same adaptive batching as :func:`batch_filter`.
+        """
+        nonlocal proven
+
+        def relax(j) -> list:
+            ints_active.discard(j)
+            gone = [jb for jb in ((j, "lower"), (j, "upper")) if jb in bounds]
+            for jb in gone:
+                bounds.discard(jb)
+            return gone
+
+        i, size = 0, 1
+        while i < len(cols):
+            batch = cols[i : i + size]
+            removed = {j: relax(j) for j in batch}
+            try:
+                res, x = eng.probe(cons, bounds, ints_active)
+            except _OutOfTime:
+                for j, gone in removed.items():  # undecided: back into the subsystem
+                    ints_active.add(j)
+                    bounds.update(gone)
+                raise
+            if res is True:
+                i += len(batch)
+                size = min(2 * size, cap)
+                roll()
+                continue
+            for j, gone in removed.items():
+                ints_active.add(j)
+                bounds.update(gone)
+            if len(batch) > 1:
+                size = max(1, len(batch) // 2)
+                continue
+            # One column: its bounds may be what is needed -- try the
+            # integrality alone, as the previous phase did.
+            j = batch[0]
+            if removed[j]:
+                ints_active.discard(j)
+                try:
+                    res, x = eng.probe(cons, bounds, ints_active)
+                except _OutOfTime:
+                    ints_active.add(j)
+                    raise
+                if res is True:
+                    i += 1
+                    roll()
+                    continue
+                ints_active.add(j)
+            if res is None:
+                proven = False
+            else:
+                assert x is not None
+                pending[("integrality", j)] = x
+            i += 1
+
     def phase_integrality() -> None:
         # Guieu & Chinneck: if the LP relaxation is infeasible, all integrality
         # goes in one probe.
@@ -1393,7 +1461,10 @@ def _milp_iis_arrays(
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
+        elif include_bounds:
+            batch_filter_columns(_ord(sorted(ints_active)))
         else:
+            # Bounds are not elements: they always apply, only integrality goes.
             batch_filter(_ord(sorted(ints_active)), ints_active, lambda j: ("integrality", j))
 
     def phase_constraints() -> None:
