@@ -88,7 +88,20 @@ def test_big_m_set_presolve_off_cannot_confirm_is_decided_exactly():
         assert res.complete and res.proven_irreducible and not res.fallback
         assert (len(res.constraints), len(res.bounds), len(res.integrality)) == (6, 4, 2)
         assert len(res.certificates) == 12
-        assert res.n_exact_confirmed >= 1 and res.n_exact_refuted == 0
+        # Decided by an exact second route: the reduction (tried first) or the
+        # rational decider (below, with the reduction off).
+        assert res.n_exact_confirmed + res.n_reduced_confirmed >= 1
+        assert res.n_exact_refuted == 0
+
+
+def test_big_m_set_is_decided_by_the_rational_decider_without_the_reduction(monkeypatch):
+    from discopt import _iis_milp
+
+    monkeypatch.setattr(_iis_milp._Engine, "_reduced", lambda self, stop_at: None)
+    res = milp_iis(_kedron_like(), total_time_limit=60.0)
+    assert res.complete and res.proven_irreducible and not res.fallback
+    assert (len(res.constraints), len(res.bounds), len(res.integrality)) == (6, 4, 2)
+    assert res.n_exact_confirmed >= 1 and res.n_exact_refuted == 0 and res.n_reduced_confirmed == 0
 
 
 def _brute(A, rlo, rhi, lb, ub, held):

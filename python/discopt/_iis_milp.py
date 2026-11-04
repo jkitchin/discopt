@@ -63,10 +63,49 @@ _BASE_CONFIRM_FRACTION = 0.25
 #: slowest presolve-free base proof measured on MIPcc27's smallset is 107 s
 #: (neos-1461051; dives 65 s, every other instance <= 12 s).
 _BASE_CONFIRM_CAP_S = 300.0
+#: Rolling checkpoints (anytime answers inside a phase): a presolve-free
+#: confirmation is attempted after a successful deletion once the subsystem has
+#: shrunk by this factor since the last attempt ...
+_ROLL_SHRINK = 0.9
+#: ... while all attempts together have used at most this share of the elapsed
+#: time (0.10 starved them: on MIPcc27's dijle one confirmation of a row-phase set
+#: costs 15-26 s while a probe costs 32 ms, so a 10% share early in the run never
+#: paid for one -- iis_generalint_strategy.md R2) ...
+_ROLL_SHARE = 0.25
+#: ... each with at least this much, 4x the slowest successful confirmation so
+#: far, and whatever the share leaves unspent (never more than checkpoint 0's
+#: saturated budget). Measured on MIPcc27
+#: (exp14, 300 s): intermediate sets confirm presolve-free in 0.1-2.5 s early in
+#: a phase (dijle's down to 1417 of 3136 held integralities, all <= 0.6 s) and not
+#: in 10 s late in it; the final sets of dijle / dingo / dives not in 90 s.
+#: Falsified on the way: those integrality-phase sets are not smaller answers --
+#: each relaxed integrality turns its two bounds into elements (dijle's 1417-held
+#: set counts 8001 against the base set's 6282) -- hence the size gate in
+#: ``roll``.
+_ROLL_MIN_S = 2.0
+#: How long a portfolio keeps its other members running once one completes at
+#: elapsed time t: ``(grace, (lo, hi))`` gives ``clamp((grace - 1) * t, lo, hi)``
+#: extra seconds, ``(inf, None)`` waits for every member.
+#:
+#: ``"fast"`` (the default) trades a few elements for minutes. On MIPcc27 every
+#: later member that beat the first finisher did so within 31 s of it on the
+#: 6-order sweep; at 600 s the clamped wait exited 100-200 s earlier on
+#: neos859080 / mod008inf / hole10 / jjliu_clique with the same sizes, except
+#: jjliu_clique 277 vs 266 (its ICB member completed ~90 s after ICB-r).
+#: ``"all"`` is for the smallest set regardless of time.
+PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
+    "fast": (2.0, (10.0, 30.0)),
+    "all": (math.inf, None),
+}
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
 _GRACE_S = 0.5
+
+
+class _Refuted(Exception):
+    """A presolve-free confirmation found an exact-integer point for a set the
+    filter holds as proven: an earlier verdict was wrong, redo per probe."""
 
 
 class _OutOfTime(Exception):
@@ -99,6 +138,8 @@ class MilpIIS:
     ladder_size: Optional[int] = None  # elements left by the oracle ladder (None: not run)
     ladder_calls: int = 0  # oracle calls the ladder made
     ladder_rejected: bool = False  # ladder's set not confirmed: its drops were discarded
+    n_rolling: int = 0  # rolling checkpoints confirmed during the filter (anytime answers)
+    n_reduced_confirmed: int = 0  # confirmations decided via the exact reduction
     n_exact_confirmed: int = 0
     n_exact_refuted: int = 0
     order: str = "ICB"  # phase order (and "-r": reversed element order) that produced it
@@ -146,12 +187,24 @@ class _Engine:
         # (two solves), sized from recently observed solve times.
         self.reserve_confirm = reserve_confirm
         self._recent: deque[float] = deque(maxlen=20)  # wall seconds of recent solves
+        # Slowest successful two-route confirmation so far (seconds). Sizes the
+        # reserve for the final confirmation and the rolling budgets: on general-
+        # integer models confirmations cost 100-1000x a probe, so probe times
+        # alone under-reserved them (dijle: final confirmation left 1.7 s).
+        self.confirm_ref = 0.0
+        # The last set a presolve-on solve proved infeasible (cons, bounds, ints).
+        # The filter's current set is that set whenever the last batch it could
+        # not drop was put back, so its final confirmation needs only the
+        # presolve-free route (:meth:`proven_on`).
+        self._proven_on: Optional[tuple[frozenset, frozenset, frozenset]] = None
         self._stop = math.inf
         self.n_interrupted = 0
         self.n_repairs = 0
         self.n_exact = 0  # exact (rational) decisions attempted as the second route
         self.n_presolve = 0  # presolve-only solves (ladder rung 0)
         self.n_exact_confirmed = 0  # ... that proved the set infeasible
+        self.n_reduced = 0  # second-route attempts through the exact reduction
+        self.n_reduced_confirmed = 0  # ... that proved the set infeasible
         self.n_exact_refuted = 0  # ... that found it feasible
         self.n_artifacts = 0
         # Held-integer columns and their declared box in the current configuration.
@@ -244,18 +297,27 @@ class _Engine:
     def _solve(self, presolve: str, stop_at: Optional[float] = None):
         """Solve the configured probe from scratch; returns the HiGHS model status.
 
-        The run's budget is the per-probe limit, cut to ``self.deadline`` and
-        ``stop_at``; raises :class:`_OutOfTime` when that leaves nothing.
+        The run's budget is the per-probe limit, cut to ``self.deadline``; a
+        caller-given ``stop_at`` is its own budget and replaces the per-probe
+        limit (still cut to the deadline). Raises :class:`_OutOfTime` when that
+        leaves nothing.
+
+        Why ``stop_at`` replaces rather than cuts: only confirmations pass it
+        (checkpoint 0, the ladder's set, and the exact-witness repairs inside
+        them), each with a budget sized for that solve. Cut to the 30 s probe
+        limit, checkpoint 0 gave up on MIPcc27's dives and neos-1461051, whose
+        full models need 63 s and 90 s presolve-off: nothing was ever
+        confirmed, and both runs ended in TimeoutError with no answer.
         """
         h = self.h
         now = time.perf_counter()
-        stop = now + float(self.probe_tl)
+        stop = now + float(self.probe_tl) if stop_at is None else math.inf
         hard = self.deadline
         if hard is not None and self.reserve_confirm:
             # Two confirmation solves, each about as long as recent ones, with a
             # 25% margin. (Each may still overrun its own budget by up to
             # ``_GRACE_S`` before the guard stops it.)
-            hard -= 2.5 * max(self._recent, default=0.0)
+            hard -= max(2.5 * max(self._recent, default=0.0), 2.0 * self.confirm_ref)
         for lim in (hard, stop_at):
             if lim is not None:
                 stop = min(stop, lim)
@@ -375,6 +437,7 @@ class _Engine:
         if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
             return None, None
         if ms == MS.kInfeasible and not self.confirm_each:
+            self._record_proven(active_cons, active_bounds, active_int)
             return True, None
         # An infeasibility claim is what lets the filter DROP an element, so it
         # stands only when a presolve-free solve agrees -- the #1634 policy of
@@ -385,6 +448,8 @@ class _Engine:
         self.n_cross_checks += 1
         ms2 = self._solve("off")
         if ms2 == MS.kInfeasible:
+            if ms == MS.kInfeasible:  # the presolve-on proof stands: on record
+                self._record_proven(active_cons, active_bounds, active_int)
             return True, None
         if ms2 == MS.kOptimal:
             x = self._witness()
@@ -430,6 +495,23 @@ class _Engine:
             h.setOptionValue("mip_max_nodes", self._default_max_nodes)
         return bool(st == self.hs.HighsModelStatus.kInfeasible)
 
+    def _record_proven(self, active_cons, active_bounds, active_int) -> None:
+        """Record this exact set's presolve-on ``Infeasible`` -- only when the
+        probe returns it as proven, never a claim a cross-check then refuted."""
+        self._proven_on = (
+            frozenset(active_cons),
+            frozenset(active_bounds),
+            frozenset(active_int),
+        )
+
+    def proven_on(self, active_cons, active_bounds, active_int) -> bool:
+        """Whether this exact set's presolve-on ``Infeasible`` is on record."""
+        return self._proven_on == (
+            frozenset(active_cons),
+            frozenset(active_bounds),
+            frozenset(active_int),
+        )
+
     def confirm_infeasible(
         self,
         active_cons: set[int],
@@ -455,6 +537,12 @@ class _Engine:
                     self.n_exact += 1
                     self.n_exact_confirmed += 1
                     continue
+                if self._reduced(stop_at) is True:
+                    # Exact reduction + presolve-free HiGHS on the reduced model
+                    # (:mod:`discopt._iis_reduce`): decides in 0.3-11 s the
+                    # general-integer sets the raw presolve-free solve could not
+                    # in 60-300 s (MIPcc27 dijle / dingo / dives).
+                    continue
             st = self._solve(p, stop_at)
             if st == MS.kOptimal and self._witness(stop_at) is not None:
                 return False
@@ -475,6 +563,34 @@ class _Engine:
                     ok = True
             all_infeasible &= ok
         return True if all_infeasible else None
+
+    def _reduced(self, stop_at: Optional[float]) -> Optional[bool]:
+        """The configured set through :func:`discopt._iis_reduce.reduced_infeasible`:
+        True when proven infeasible, else None (no conclusion either way). Its
+        budget is ``stop_at`` (or one probe's limit without one), cut to the
+        deadline, with the engine's wall-clock guard on the HiGHS run."""
+        from discopt._iis_reduce import reduced_infeasible
+
+        stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at
+        if self.deadline is not None:
+            stop = min(stop, self.deadline)
+        held = np.zeros(self.col_lb.size, dtype=bool)
+        held[self._held] = True
+        rlo, rhi, lb, ub = self._cfg
+
+        def guard(h, s) -> None:
+            def _g(event) -> None:
+                event.interrupt(time.perf_counter() > s + _GRACE_S)
+
+            h.cbMipInterrupt.subscribe(_g)
+            h.cbSimplexInterrupt.subscribe(_g)
+            h.cbIpmInterrupt.subscribe(_g)
+
+        self.n_reduced += 1
+        verdict = reduced_infeasible(self.A, rlo, rhi, lb, ub, held, stop, guard)
+        if verdict is True:
+            self.n_reduced_confirmed += 1
+        return verdict
 
     def _exact(self, stop_at: Optional[float]) -> Optional[bool]:
         """Exact decision of the configured set (:mod:`discopt._iis_exact`):
@@ -900,8 +1016,13 @@ def milp_iis(
     order: str = "ICB",
     portfolio: Optional[Sequence[str]] = None,
     workers: Optional[int] = None,
+    portfolio_wait: str = "fast",
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
+
+    ``portfolio_wait`` (portfolio runs only): ``"fast"`` stops the other members
+    shortly after one completes, ``"all"`` waits for every member (the smallest
+    set, at up to the whole budget); see :data:`PORTFOLIO_WAITS`.
 
     ``max_batch`` caps the adaptive deletion batch (see :func:`_batch_filter`);
     ``None`` lets it grow without limit, ``1`` is the classic one-at-a-time
@@ -995,6 +1116,61 @@ def milp_iis(
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
     arrays = (A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)
+    if portfolio_wait not in PORTFOLIO_WAITS:
+        raise ValueError(
+            f"portfolio_wait must be one of {sorted(PORTFOLIO_WAITS)}, got {portfolio_wait!r}"
+        )
+    grace, grace_window = PORTFOLIO_WAITS[portfolio_wait] if portfolio else (math.inf, None)
+    return milp_iis_arrays(
+        arrays,
+        include_bounds=include_bounds,
+        time_limit=time_limit,
+        cert_tol=cert_tol,
+        max_batch=max_batch,
+        confirm=confirm,
+        total_time_limit=total_time_limit,
+        sat_candidate=sat_candidate,
+        order=order,
+        portfolio=portfolio,
+        workers=workers,
+        t_start=t_start,
+        grace=grace,
+        grace_window=grace_window,
+    )
+
+
+def milp_iis_arrays(
+    arrays: tuple,
+    *,
+    include_bounds: bool = True,
+    time_limit: float = 30.0,
+    cert_tol: float = 1e-6,
+    max_batch: Optional[int] = None,
+    confirm: str = "final",
+    total_time_limit: Optional[float] = None,
+    sat_candidate: bool = True,
+    order: str = "ICB",
+    portfolio: Optional[Sequence[str]] = None,
+    workers: Optional[int] = None,
+    t_start: Optional[float] = None,
+    grace: float = math.inf,
+    grace_window: Optional[tuple[float, float]] = None,
+) -> MilpIIS:
+    """:func:`milp_iis` on a model already in matrix form, for callers that have
+    no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
+
+    ``arrays`` is ``(A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)``:
+    a CSR matrix; row bounds with ``±_INF`` (1e20) for "none"; ``row_groups``
+    mapping each constraint element's id to the rows it owns (one IIS element
+    per key); column bounds with the same sentinel; and the integrality mask.
+    Element ids in the result are the ``row_groups`` keys and column indices.
+    ``t_start`` (``time.perf_counter()``) is when the budget began, so time the
+    caller spent before the call counts against ``total_time_limit``.
+    ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
+    the default waits for every member.
+    """
+    if t_start is None:
+        t_start = time.perf_counter()
     kwargs: dict[str, Any] = dict(
         include_bounds=include_bounds,
         time_limit=time_limit,
@@ -1006,7 +1182,18 @@ def milp_iis(
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
-        return _portfolio_iis(arrays, kwargs, portfolio, workers, t_start, total_time_limit)
+        return _portfolio_iis(
+            arrays,
+            kwargs,
+            portfolio,
+            workers,
+            t_start,
+            total_time_limit,
+            grace=grace,
+            grace_window=grace_window,
+        )
+    if grace != math.inf or grace_window is not None:
+        raise ValueError("grace= / grace_window= need portfolio=")
     return _milp_iis_arrays(
         arrays, **kwargs, order=order, total_time_limit=total_time_limit, t_start=t_start
     )
@@ -1189,6 +1376,7 @@ def _milp_iis_arrays(
             if res is True:
                 i += len(batch)
                 size = min(2 * size, cap)
+                roll()
                 continue
             for e in batch:
                 active.add(e)
@@ -1203,6 +1391,74 @@ def _milp_iis_arrays(
                 pending[key(batch[0])] = x
             i += 1
 
+    def batch_filter_columns(cols: list) -> None:
+        """The integrality phase with each column's finite bounds removed
+        together with its integrality ("relax the column").
+
+        Relaxing an integrality alone turns the column's bounds into counted
+        elements, so mid-phase the subsystem grows and no anytime answer can
+        follow the progress: on MIPcc27's dijle at 3600 s the filter had
+        certified Gurobi's 825 rows and 375 of its 376 integralities, yet the
+        answer stayed at 3961 because every set on the way counted more. Here a
+        column that loses its integrality usually loses its bounds in the same
+        probe (up to three elements fewer). When the joint removal is refuted
+        for a single column, the integrality alone is tried (the previous
+        step), so nothing the old phase dropped is kept; its bounds then stay
+        for the bound phase. Same adaptive batching as :func:`batch_filter`.
+        """
+        nonlocal proven
+
+        def relax(j) -> list:
+            ints_active.discard(j)
+            gone = [jb for jb in ((j, "lower"), (j, "upper")) if jb in bounds]
+            for jb in gone:
+                bounds.discard(jb)
+            return gone
+
+        i, size = 0, 1
+        while i < len(cols):
+            batch = cols[i : i + size]
+            removed = {j: relax(j) for j in batch}
+            try:
+                res, x = eng.probe(cons, bounds, ints_active)
+            except _OutOfTime:
+                for j, gone in removed.items():  # undecided: back into the subsystem
+                    ints_active.add(j)
+                    bounds.update(gone)
+                raise
+            if res is True:
+                i += len(batch)
+                size = min(2 * size, cap)
+                roll()
+                continue
+            for j, gone in removed.items():
+                ints_active.add(j)
+                bounds.update(gone)
+            if len(batch) > 1:
+                size = max(1, len(batch) // 2)
+                continue
+            # One column: its bounds may be what is needed -- try the
+            # integrality alone, as the previous phase did.
+            j = batch[0]
+            if removed[j]:
+                ints_active.discard(j)
+                try:
+                    res, x = eng.probe(cons, bounds, ints_active)
+                except _OutOfTime:
+                    ints_active.add(j)
+                    raise
+                if res is True:
+                    i += 1
+                    roll()
+                    continue
+                ints_active.add(j)
+            if res is None:
+                proven = False
+            else:
+                assert x is not None
+                pending[("integrality", j)] = x
+            i += 1
+
     def phase_integrality() -> None:
         # Guieu & Chinneck: if the LP relaxation is infeasible, all integrality
         # goes in one probe.
@@ -1211,7 +1467,10 @@ def _milp_iis_arrays(
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
+        elif include_bounds:
+            batch_filter_columns(_ord(sorted(ints_active)))
         else:
+            # Bounds are not elements: they always apply, only integrality goes.
             batch_filter(_ord(sorted(ints_active)), ints_active, lambda j: ("integrality", j))
 
     def phase_constraints() -> None:
@@ -1281,6 +1540,7 @@ def _milp_iis_arrays(
         # eat the filter's budget.
         base_stop = min(deadline, time.perf_counter() + base_budget)
         n_recent = len(eng._recent)
+        t_ck0 = time.perf_counter()
         try:
             verdict0 = eng.confirm_infeasible(
                 cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
@@ -1294,8 +1554,70 @@ def _milp_iis_arrays(
             eng._recent.pop()
         if verdict0 is True:
             checkpoint = (set(cons), set(bounds), set(ints_active))
+            eng.confirm_ref = max(eng.confirm_ref, time.perf_counter() - t_ck0)
         elif verdict0 is False:
             return redo_each()
+
+    def reported_size(c, b, i) -> int:
+        """Size as the result reports it (and the competition counts it): rows,
+        held integralities, and the bounds of columns NOT held integer -- a held
+        column's box is not an element. Relaxing an integrality therefore turns
+        its finite bounds into elements: mid-way through the integrality phase
+        the subsystem is usually LARGER than the base set (dijle: 8001 vs 6282)."""
+        return len(c) + len(i) + sum(1 for jb in b if jb[0] not in i)
+
+    roll_ref = reported_size(cons, bounds, ints_active)  # at the last attempt / checkpoint
+    roll_spent = 0.0  # seconds all rolling attempts used
+    roll_last_ok = 0.0  # duration of the last successful one
+    n_rolling = 0  # successful rolling checkpoints
+
+    def roll() -> None:
+        """A rolling checkpoint: confirm the current subsystem presolve-free and
+        keep it as the anytime answer. The filter holds the last set a
+        presolve-on probe proved, so only the second route runs. Without these
+        a run stopped mid-phase fell back to the last phase-end checkpoint --
+        inside the first phase, checkpoint 0 (the base set). Only a set smaller
+        than the current anytime answer, as :func:`reported_size` counts it, is
+        attempted, so the integrality phase (where the count grows) rarely
+        triggers one; the row and bound phases do."""
+        nonlocal checkpoint, roll_ref, roll_spent, roll_last_ok, n_rolling
+        if confirm != "final" or deadline is None:
+            return
+        size = reported_size(cons, bounds, ints_active)
+        if size > _ROLL_SHRINK * roll_ref:
+            return  # not 10% smaller than the last attempt: not worth a solve
+        if checkpoint is not None and size >= reported_size(*checkpoint):
+            return
+        now = time.perf_counter()
+        if roll_spent > _ROLL_SHARE * (now - t_start):
+            return
+        if not eng.proven_on(cons, bounds, ints_active):
+            return
+        roll_ref = size
+        unspent = _ROLL_SHARE * (now - t_start) - roll_spent
+        budget = min(base_budget, max(_ROLL_MIN_S, 4.0 * eng.confirm_ref, unspent))
+        n_recent = len(eng._recent)
+        try:
+            verdict = eng.confirm_infeasible(
+                cons,
+                bounds,
+                ints_active,
+                stop_at=min(deadline, now + budget),
+                presolve=("off",),
+            )
+        except _OutOfTime:
+            verdict = None
+        finally:
+            while len(eng._recent) > n_recent:  # not a filtering probe (see checkpoint 0)
+                eng._recent.pop()
+            roll_spent += time.perf_counter() - now
+        if verdict is True:
+            checkpoint = (set(cons), set(bounds), set(ints_active))
+            roll_last_ok = time.perf_counter() - now
+            eng.confirm_ref = max(eng.confirm_ref, roll_last_ok)
+            n_rolling += 1
+        elif verdict is False:
+            raise _Refuted
 
     ladder_calls = 0
     ladder_size: Optional[int] = None
@@ -1403,21 +1725,85 @@ def _milp_iis_arrays(
         for k, phase in enumerate(phases):
             phase()
             if confirm == "final" and k < len(phases) - 1:
-                verdict = eng.confirm_infeasible(cons, bounds, ints_active)
+                if checkpoint is not None and reported_size(
+                    cons, bounds, ints_active
+                ) >= reported_size(*checkpoint):
+                    # Not smaller than the anytime answer (after the integrality
+                    # phase it is usually larger): nothing to gain from it.
+                    continue
+                # Its own budget, like checkpoint 0's: cut to the 30 s probe
+                # limit it failed on dijle's 825-row set (needs 15-40 s), and
+                # only the presolve-free route when presolve-on is on record.
+                t_pe = time.perf_counter()
+                n_recent_pe = len(eng._recent)
+                try:
+                    verdict = eng.confirm_infeasible(
+                        cons,
+                        bounds,
+                        ints_active,
+                        stop_at=None if deadline is None else min(deadline, t_pe + base_budget),
+                        presolve=("off",)
+                        if eng.proven_on(cons, bounds, ints_active)
+                        else ("choose", "off"),
+                    )
+                except _OutOfTime:
+                    # Out of THIS confirmation's budget: undecided, like roll()'s
+                    # and checkpoint 0's. Only the overall deadline ends the
+                    # filter -- before, a phase-end confirmation that used up its
+                    # own budget skipped every remaining phase (#2145 review).
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        raise
+                    verdict = None
+                finally:
+                    while len(eng._recent) > n_recent_pe:  # not a filtering probe
+                        eng._recent.pop()
                 if verdict is False:
                     return redo_each()
                 if verdict is True:
                     checkpoint = (set(cons), set(bounds), set(ints_active))
+                    eng.confirm_ref = max(eng.confirm_ref, time.perf_counter() - t_pe)
     except _OutOfTime:
         complete = False
         proven = False
+    except _Refuted:
+        return redo_each()
 
     if confirm == "final":
         eng.reserve_confirm = False  # the reserve is for this confirmation
-        try:
-            verdict = eng.confirm_infeasible(cons, bounds, ints_active)
-        except _OutOfTime:
-            verdict = None
+        # The set's presolve-on proof is usually on record already (the last
+        # batch the filter could not drop was put back), so only the
+        # presolve-free route runs; and it may use the reserve up to the
+        # deadline instead of one probe's limit. Measured (MIPcc27, 600 s): this
+        # did NOT rescue dijle / dingo / dives -- with 80-92 s instead of 30 s
+        # their final sets still did not confirm presolve-free (the hypothesis
+        # that the 30 s cap was the cause was falsified). It removes a solve
+        # that repeated a proof on record and gives the reserve its purpose;
+        # anytime progress on that class comes from rolling checkpoints (``roll``).
+        #
+        # An unfinished run answers with the SMALLEST confirmed set, not the
+        # latest: mid-way through the integrality phase the current set counts
+        # more elements than the base set (relaxed integralities turn bounds
+        # into elements). Confirming it anyway made dijle answer 8005 instead of
+        # checkpoint 0's 6282 at 300 s, once this confirmation began to succeed.
+        if (
+            not complete
+            and checkpoint is not None
+            and reported_size(cons, bounds, ints_active) >= reported_size(*checkpoint)
+        ):
+            verdict = None  # not worth confirming: the checkpoint is the answer
+        else:
+            try:
+                verdict = eng.confirm_infeasible(
+                    cons,
+                    bounds,
+                    ints_active,
+                    stop_at=deadline,
+                    presolve=("off",)
+                    if eng.proven_on(cons, bounds, ints_active)
+                    else ("choose", "off"),
+                )
+            except _OutOfTime:
+                verdict = None
         if verdict is False and complete:
             return redo_each()
         if verdict is not True:
@@ -1461,6 +1847,8 @@ def _milp_iis_arrays(
         ladder_size=ladder_size,
         ladder_calls=ladder_calls,
         ladder_rejected=ladder_rejected,
+        n_rolling=n_rolling,
+        n_reduced_confirmed=eng.n_reduced_confirmed,
         n_exact_confirmed=eng.n_exact_confirmed,
         n_exact_refuted=eng.n_exact_refuted,
     )
@@ -1551,6 +1939,18 @@ def _portfolio_child() -> None:
         pickle.dump(out, f)
 
 
+def _grace_extra(
+    t_done: float, grace: float, window: Optional[tuple[float, float]] = None
+) -> float:
+    """Seconds the other portfolio members may keep running after the first one
+    completes at elapsed time ``t_done``: ``(grace - 1) * t_done``, clamped to
+    ``window`` when given (see :func:`_portfolio_iis`)."""
+    extra = (grace - 1.0) * t_done
+    if window is not None:
+        extra = min(max(extra, float(window[0])), float(window[1]))
+    return extra
+
+
 def _portfolio_iis(
     arrays: tuple,
     kwargs: dict,
@@ -1559,6 +1959,7 @@ def _portfolio_iis(
     t_start: float,
     total_time_limit: Optional[float],
     grace: float = math.inf,
+    grace_window: Optional[tuple[float, float]] = None,
 ) -> MilpIIS:
     """Run one deletion filter per order in ``portfolio``, each in its own process,
     against one shared budget, and return the smallest complete result.
@@ -1577,6 +1978,12 @@ def _portfolio_iis(
     ``grace``: once the first member completes at elapsed time ``t``, the others
     may run until ``grace * t`` (and never past the budget); then they are
     terminated and recorded as ``"abandoned"``. ``inf`` waits for every member.
+    ``grace_window=(lo, hi)`` clamps the extra wait ``(grace - 1) * t`` to
+    ``[lo, hi]`` seconds: on MIPcc27's 6-order sweep every later member that beat
+    the first finisher did so within 31 s of it, whatever ``t`` was, so a
+    proportional wait cut off improvements on fast instances (bell3ainf: first
+    at 4 s, Gurobi's size at 17 s) and idled for minutes on slow ones
+    (neos859080: complete at ~285 s, waited to ~570 s).
     """
     import os
     import pickle
@@ -1598,6 +2005,10 @@ def _portfolio_iis(
         raise ValueError(f"workers must be >= 1, got {workers}")
     if not grace >= 1.0:
         raise ValueError(f"grace must be >= 1, got {grace}")
+    if grace_window is not None:
+        lo_w, hi_w = (float(v) for v in grace_window)
+        if not (0.0 <= lo_w <= hi_w) or not math.isfinite(grace):
+            raise ValueError(f"grace_window needs 0 <= lo <= hi and a finite grace: {grace_window}")
 
     # perf_counter is per-process; members get an absolute wall-clock deadline.
     wall0 = time.time() - (time.perf_counter() - t_start)
@@ -1681,7 +2092,8 @@ def _portfolio_iis(
                         outcome="ok", size=_iis_size(payload), complete=payload.complete
                     )
                     if payload.complete and math.isfinite(grace):
-                        grace_end = wall0 + grace * (time.time() - wall0)
+                        t_done = time.time() - wall0
+                        grace_end = wall0 + t_done + _grace_extra(t_done, grace, grace_window)
                         cutoff = grace_end if cutoff is None else min(cutoff, grace_end)
         finally:
             for i, (proc, t0, _, err) in running.items():
