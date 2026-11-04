@@ -31,6 +31,7 @@ def add_predictor(
     method: str = "auto",
     prefix: str = "pred",
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
+    **nn_options: object,
 ) -> tuple[Variable, Union[NNFormulation, TreeFormulation, LinearTreeFormulation]]:
     """Embed a trained ML model as constraints in a discopt Model.
 
@@ -60,8 +61,9 @@ def add_predictor(
         - A file path (str or Path) to an ONNX model
     method : str
         Formulation method. ``"auto"`` selects based on the model type.
-        For neural networks: ``"relu_bigm"``, ``"full_space"``, or
-        ``"reduced_space"``. Tree ensembles always use MILP encoding.
+        For neural networks: ``"relu_bigm"``, ``"relu_partition"``,
+        ``"relu_extended"``, ``"full_space"``, or ``"reduced_space"``.
+        Tree ensembles always use MILP encoding.
         Linear model decision trees: ``"hull"`` (default) or ``"bigm"``.
     prefix : str
         Name prefix for created variables and constraints.
@@ -70,6 +72,10 @@ def add_predictor(
         tree formulations. Overrides bounds already set on the predictor.
         If ``None`` and the predictor carries no bounds, the bounds are
         harvested from ``inputs`` (see above).
+    **nn_options
+        Neural networks only: forwarded to :class:`NNFormulation`
+        (``n_partitions``, ``partition_strategy``, ``ideal_cuts``). Passing one
+        for a tree predictor raises ``TypeError``.
 
     Returns
     -------
@@ -109,10 +115,22 @@ def add_predictor(
             has_relu = any(layer.activation == Activation.RELU for layer in definition.layers)
             method = "relu_bigm" if has_relu else "full_space"
 
-        form = NNFormulation(model, definition, strategy=method, prefix=prefix)
+        form = NNFormulation(
+            model,
+            definition,
+            strategy=method,
+            prefix=prefix,
+            **nn_options,  # type: ignore[arg-type]
+        )
         form.formulate()
         _link_inputs(model, inputs, form.inputs, prefix)
         return form.outputs, form
+
+    if nn_options:
+        raise TypeError(
+            f"{sorted(nn_options)} apply only to neural-network predictors, not "
+            f"{type(definition).__name__}"
+        )
 
     if isinstance(definition, LinearTreeDefinition):
         if input_bounds is not None:

@@ -46,6 +46,7 @@ from discopt.solvers.lp_pounce import (
     _build_certificate,
     _certify_unbounded_ray,
     _interior_start,
+    _jac_triplets,
     _phase1_min_violation,
     _phase1_verdict,
     _simplex_feasibility_verdict,
@@ -76,8 +77,7 @@ class _QPCallbacks:
         # -> 2.13 GB from 144 to 484 variables and 1,024 variables were OOM-killed
         # at 15 GB. An exact zero contributes nothing to the Jacobian or the
         # Hessian, so omitting it changes no value the solver sees.
-        self._jac_rows, self._jac_cols = np.nonzero(A)
-        self._jac_flat = A[self._jac_rows, self._jac_cols].astype(np.float64)
+        self._jac_rows, self._jac_cols, self._jac_flat = _jac_triplets(A)
         self._hess_rows, self._hess_cols = np.nonzero(np.tril(Q))
         self._hess_vals = Q[self._hess_rows, self._hess_cols].astype(np.float64)
 
@@ -146,8 +146,8 @@ def solve_qp(
             "supported (MIQPs go through HiGHS or the B&B path)."
         )
 
-    # This callback path is dense by design (``_stack_constraints`` densifies A
-    # too); a sparse ``Q`` is densified the same way rather than through
+    # ``Q`` is dense on this callback path (``A`` is CSR from ``_stack_constraints``
+    # since #1917); a sparse ``Q`` is densified through ``_to_dense`` rather than
     # ``np.asarray``, which would wrap it in a 0-d object array.
     Q_arr = _to_dense(Q)
     c_arr = np.asarray(c, dtype=np.float64).ravel()

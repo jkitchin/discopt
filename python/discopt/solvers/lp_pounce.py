@@ -279,14 +279,14 @@ def _certify_unbounded_ray(
     if not np.any(d_lo < 0.0) and not np.any(d_hi > 0.0):
         return False  # compact box: the only recession direction is d = 0
 
-    rows = [A]
+    rows: list = [sp.csr_matrix(A, dtype=np.float64)]
     row_lo = [np.where(cl > -_INF, 0.0, -_INF)]
     row_hi = [np.where(cu < _INF, 0.0, _INF)]
     if Q is not None:
-        rows.append(np.asarray(Q, dtype=np.float64).reshape(n, n))
+        rows.append(sp.csr_matrix(_to_dense(Q).reshape(n, n)))
         row_lo.append(np.zeros(n))
         row_hi.append(np.zeros(n))
-    A_ray = np.vstack(rows) if rows[0].shape[0] or len(rows) > 1 else np.empty((0, n))
+    A_ray = sp.vstack(rows, format="csr", dtype=np.float64)
     cl_ray = np.concatenate(row_lo)
     cu_ray = np.concatenate(row_hi)
 
@@ -357,7 +357,7 @@ def _ray_verified_exactly(d, c, A_ray, cl_ray, cu_ray, d_lo, d_hi) -> bool:
     # exact step runs. Zeroing it drops the slack from the support, so the exact
     # step then demands ``(A d')_i = 0`` exactly — stricter, never looser.
     if m:
-        s = np.where(np.abs(s) <= RAY_REL * (np.abs(A_ray) @ np.abs(d)), 0.0, s)
+        s = np.where(np.abs(s) <= RAY_REL * (_abs_matrix(A_ray) @ np.abs(d)), 0.0, s)
     sf = _ray_std_form(c, A_ray, cl_ray, cu_ray, d_lo, d_hi)
     return primal_ray_verified(np.concatenate([d, s]), sf)
 
@@ -375,7 +375,8 @@ def _ray_std_form(c, A_ray, cl_ray, cu_ray, d_lo, d_hi):
     xu = np.where(d_hi > 0.0, INF, 0.0)
     s_lo = np.where(cl_ray > -_INF, 0.0, -INF)
     s_hi = np.where(cu_ray < _INF, 0.0, INF)
-    A_std = sp.hstack([sp.csc_matrix(A_ray.reshape(m, n)), -sp.identity(m, format="csc")])
+    A_ray_csc = sp.csc_matrix(A_ray) if sp.issparse(A_ray) else sp.csc_matrix(A_ray.reshape(m, n))
+    A_std = sp.hstack([A_ray_csc, -sp.identity(m, format="csc")])
     return StdForm.from_arrays(
         np.concatenate([np.asarray(c, dtype=np.float64), np.zeros(m)]),
         A_std,
@@ -483,20 +484,19 @@ _LP_STATUS_MAP = {
 class _LPCallbacks:
     """cyipopt/POUNCE callback object for ``min c^T x`` with linear rows.
 
-    ``A`` is the dense stacked constraint matrix (inequalities then
-    equalities); its values and structure are constant in ``x``. The Hessian
-    of the Lagrangian is identically zero.
+    ``A`` is the stacked constraint matrix (inequalities then equalities, CSR
+    from :func:`_stack_constraints`); its values and structure are constant in
+    ``x``. The Hessian of the Lagrangian is identically zero.
     """
 
-    def __init__(self, c: np.ndarray, A: np.ndarray) -> None:
+    def __init__(self, c: np.ndarray, A: Union[np.ndarray, sp.spmatrix]) -> None:
         self._c = c
         self._A = A
         self._m, self._n = A.shape
         # Constant Jacobian: only its exact structural nonzeros, row-major. The
         # dense ``m x n`` structure this used to declare made POUNCE factor a dense
         # KKT system (the qp_pounce._QPCallbacks note has the measurement).
-        self._jac_rows, self._jac_cols = np.nonzero(A)
-        self._jac_flat = A[self._jac_rows, self._jac_cols].astype(np.float64)
+        self._jac_rows, self._jac_cols, self._jac_flat = _jac_triplets(A)
 
     def objective(self, x: np.ndarray) -> float:
         return float(self._c @ x)
@@ -521,6 +521,42 @@ class _LPCallbacks:
         return np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp)
 
 
+def _jac_triplets(
+    A: Union[np.ndarray, sp.spmatrix],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Row-major ``(rows, cols, values)`` of ``A``'s exact nonzeros.
+
+    The same triplets ``np.nonzero`` gives on the dense matrix: duplicates are
+    summed, explicit zeros dropped, and entries ordered by row then column.
+    """
+    if sp.issparse(A):
+        csr = sp.csr_matrix(A, dtype=np.float64, copy=True)
+        csr.sum_duplicates()
+        csr.eliminate_zeros()
+        csr.sort_indices()
+        coo = csr.tocoo()
+        return coo.row.astype(np.intp), coo.col.astype(np.intp), coo.data.astype(np.float64)
+    dense = np.asarray(A, dtype=np.float64)
+    rows, cols = np.nonzero(dense)
+    return rows, cols, dense[rows, cols]
+
+
+def _abs_matrix(A: Union[np.ndarray, sp.spmatrix]) -> Union[np.ndarray, sp.spmatrix]:
+    """Entrywise ``|A|`` without densifying a sparse ``A``."""
+    return abs(A) if sp.issparse(A) else np.abs(A)
+
+
+def _as_csr(A: Union[np.ndarray, sp.spmatrix], m: int, n: int) -> sp.csr_matrix:
+    """``A`` as an ``m x n`` CSR matrix (a dense input is reshaped as before)."""
+    if sp.issparse(A):
+        out = sp.csr_matrix(A, dtype=np.float64)
+    else:
+        out = sp.csr_matrix(np.asarray(A, dtype=np.float64).reshape(m, n))
+    if out.shape != (m, n):
+        raise ValueError(f"constraint matrix has shape {out.shape}, expected {(m, n)}")
+    return out
+
+
 def _to_dense(A: Union[np.ndarray, sp.spmatrix]) -> np.ndarray:
     if sp.issparse(A):
         return np.asarray(cast(sp.spmatrix, A).todense(), dtype=np.float64)
@@ -533,34 +569,41 @@ def _stack_constraints(
     A_eq: Optional[Union[np.ndarray, sp.spmatrix]],
     b_eq: Optional[np.ndarray],
     n: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
     """Stack inequality and equality rows into (A, cl, cu).
 
     Inequalities ``A_ub x <= b_ub`` become rows with ``cl=-inf, cu=b_ub``;
     equalities ``A_eq x == b_eq`` become rows with ``cl=cu=b_eq``.
+
+    ``A`` is CSR whatever the inputs were (#1917). The stack used to be dense:
+    the convexity classifier's ``LinearContext.affine_range`` passes the whole
+    linear system of the model, and on the hull of GDPlib biofuel (~15k rows)
+    one ``np.vstack`` took the solve from 2.4 GB to 15.3 GB peak RSS and an OOM
+    kill. Every consumer in this module and in ``qp_pounce`` works on CSR.
     """
-    parts_A: list[np.ndarray] = []
+    parts_A: list[sp.csr_matrix] = []
     parts_cl: list[np.ndarray] = []
     parts_cu: list[np.ndarray] = []
 
     if A_ub is not None and b_ub is not None:
         b = np.asarray(b_ub, dtype=np.float64).ravel()
-        parts_A.append(_to_dense(A_ub))
+        parts_A.append(_as_csr(A_ub, len(b), n))
         parts_cl.append(np.full(len(b), -_INF))
         parts_cu.append(b)
     if A_eq is not None and b_eq is not None:
         b = np.asarray(b_eq, dtype=np.float64).ravel()
-        parts_A.append(_to_dense(A_eq))
+        parts_A.append(_as_csr(A_eq, len(b), n))
         parts_cl.append(b.copy())
         parts_cu.append(b.copy())
 
     if not parts_A:
         return (
-            np.empty((0, n), dtype=np.float64),
+            sp.csr_matrix((0, n), dtype=np.float64),
             np.empty(0, dtype=np.float64),
             np.empty(0, dtype=np.float64),
         )
-    return np.vstack(parts_A), np.concatenate(parts_cl), np.concatenate(parts_cu)
+    A = sp.csr_matrix(sp.vstack(parts_A, format="csr", dtype=np.float64))
+    return A, np.concatenate(parts_cl), np.concatenate(parts_cu)
 
 
 def solve_lp(
@@ -1033,7 +1076,8 @@ def _simplex_feasibility_verdict(
     if not SIMPLEX_AVAILABLE:
         return PHASE1_UNDECIDED
 
-    A = np.asarray(A, dtype=np.float64)
+    # CSR, never ``np.asarray``: on a sparse ``A`` that is a 0-d object array.
+    A = sp.csr_matrix(A, dtype=np.float64)
     cl = np.asarray(cl, dtype=np.float64).ravel()
     cu = np.asarray(cu, dtype=np.float64).ravel()
     lb = np.asarray(lb, dtype=np.float64).ravel()
@@ -1042,28 +1086,37 @@ def _simplex_feasibility_verdict(
 
     # Split the two-sided rows into the engine's one-sided form. An equality row
     # goes to A_eq rather than as two inequalities: same feasible set, half the
-    # rows, and a better-conditioned basis.
-    eq_rows, eq_rhs, ub_rows, ub_rhs = [], [], [], []
+    # rows, and a better-conditioned basis. Rows are taken as sparse slices in
+    # the order the per-row split produces them.
+    eq_idx: list[int] = []
+    eq_rhs: list[float] = []
+    ub_idx: list[int] = []
+    ub_sign: list[float] = []
+    ub_rhs: list[float] = []
     for i in range(m):
         lo, hi = cl[i], cu[i]
         if lo == hi and abs(lo) < _INF:
-            eq_rows.append(A[i])
+            eq_idx.append(i)
             eq_rhs.append(lo)
             continue
         if hi < _INF:
-            ub_rows.append(A[i])
+            ub_idx.append(i)
+            ub_sign.append(1.0)
             ub_rhs.append(hi)
         if lo > -_INF:
-            ub_rows.append(-A[i])
+            ub_idx.append(i)
+            ub_sign.append(-1.0)
             ub_rhs.append(-lo)
+    A_ub_o = sp.csr_matrix(sp.diags(np.asarray(ub_sign)) @ A[ub_idx]) if ub_idx else None
+    A_eq_o = sp.csr_matrix(A[eq_idx]) if eq_idx else None
 
     try:
         res = _simplex_solve_lp(
             np.zeros(n, dtype=np.float64),
-            np.asarray(ub_rows, dtype=np.float64).reshape(len(ub_rows), n) if ub_rows else None,
-            np.asarray(ub_rhs, dtype=np.float64) if ub_rows else None,
-            np.asarray(eq_rows, dtype=np.float64).reshape(len(eq_rows), n) if eq_rows else None,
-            np.asarray(eq_rhs, dtype=np.float64) if eq_rows else None,
+            A_ub_o,
+            np.asarray(ub_rhs, dtype=np.float64) if ub_idx else None,
+            A_eq_o,
+            np.asarray(eq_rhs, dtype=np.float64) if eq_idx else None,
             list(zip(lb.tolist(), ub.tolist())),
             max_iter=_FEASIBILITY_ORACLE_MAX_ITER,
         )
@@ -1101,8 +1154,8 @@ def _point_satisfies(
     """
     if not np.all(np.isfinite(x)):
         return False
-    row = A @ x
-    scale = np.abs(A) @ np.abs(x)
+    row = np.asarray(A @ x, dtype=np.float64).ravel()
+    scale = np.asarray(_abs_matrix(A) @ np.abs(x), dtype=np.float64).ravel()
     allow = tol + 1e-9 * scale
     if np.any(row > np.where(cu < _INF, cu, np.inf) + allow):
         return False
@@ -1245,9 +1298,11 @@ def _phase1_min_violation(
     or ``None`` if even the (well-posed) Phase-1 solve did not reach optimality.
     """
     m, n = A.shape
-    eye = np.eye(m, dtype=np.float64)
-    # [A | -I] bounded above by cu;  [A | +I] bounded below by cl.
-    A2 = np.vstack([np.hstack([A, -eye]), np.hstack([A, eye])])
+    A = sp.csr_matrix(A, dtype=np.float64)
+    eye = sp.identity(m, dtype=np.float64, format="csr")
+    # [A | -I] bounded above by cu;  [A | +I] bounded below by cl. Sparse: the
+    # dense ``m x m`` identity alone is 1.8 GB at m = 15k (#1917).
+    A2 = sp.csr_matrix(sp.bmat([[A, -eye], [A, eye]], format="csr"))
     cl2 = np.concatenate([np.full(m, -_INF), cl])
     cu2 = np.concatenate([cu, np.full(m, _INF)])
     c2 = np.concatenate([np.zeros(n), np.ones(m)])
@@ -1263,6 +1318,6 @@ def _phase1_min_violation(
         slacks = np.clip(sol[n:], 0.0, None)
         # |A|·|x| over the ORIGINAL rows at the Phase-1 point: the magnitude of the
         # arithmetic whose rounding error the slacks are measured against (#1319).
-        row_activity = np.abs(A) @ np.abs(sol[:n])
+        row_activity = np.asarray(_abs_matrix(A) @ np.abs(sol[:n]), dtype=np.float64).ravel()
         return Phase1Solution(slacks=slacks, row_activity=row_activity)
     return None
