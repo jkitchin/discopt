@@ -1,5 +1,7 @@
 """#2151: a HiGHS ``kOptimal`` refuted by the LP over its OWN integers is re-solved
-at a tight feasibility tolerance (``DISCOPT_MILP_REFUTED_TIGHT_RESOLVE=1``).
+at a tight feasibility tolerance (``DISCOPT_MILP_REFUTED_TIGHT_RESOLVE``, default ON;
+``=0`` opts out). A verified point better than HiGHS's incumbent by less than the
+refutation yardstick is published, with the bound held at or below it.
 
 On a 2-32-32-1 ``relu_bigm`` network, HiGHS reported ``kOptimal`` with objective and
 ``mip_dual_bound`` both ``-46.6583412166`` (``mip_gap`` 0). The #1509 refutation guard
@@ -36,9 +38,14 @@ FLAG = "DISCOPT_MILP_REFUTED_TIGHT_RESOLVE"
 TRUE_OBJ = -46.65834231157295
 
 
-def _model() -> dm.Model:
+def _model(perm: str | None = None) -> dm.Model:
     d = json.loads(DATA.read_text())
     layers = [(np.array(lay["W"]), np.array(lay["b"])) for lay in d["layers"]]
+    if perm is not None:
+        pq = json.loads((DATA.parent / "perms.json").read_text())[perm]
+        p, q = np.array(pq["p"]), np.array(pq["q"])
+        (W1, b1), (W2, b2), (W3, b3) = layers
+        layers = [(W1[:, p], b1[p]), (W2[p][:, q], b2[q]), (W3[q], b3)]
     net = NetworkDefinition(
         [DenseLayer(W, b, Activation.RELU) for W, b in layers[:-1]]
         + [DenseLayer(*layers[-1], Activation.LINEAR)],
@@ -65,10 +72,10 @@ def _spy(monkeypatch) -> list[HighsOutcome]:
     return seen
 
 
-def test_issue_2151_network_certifies_with_the_flag(monkeypatch):
+def test_issue_2151_network_certifies_by_default(monkeypatch):
     """The issue's reproducer: ``optimal``, bound at or below the true point.
     Without the fix: ``feasible``, bound -510.17, gap 0.9085."""
-    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.delenv(FLAG, raising=False)
     seen = _spy(monkeypatch)
     r = _model().solve(time_limit=120, threads=1, deterministic=True)
     # The probe fired: the refutation reproduced and the tight re-solve ran.
@@ -82,15 +89,29 @@ def test_issue_2151_network_certifies_with_the_flag(monkeypatch):
     assert r.gap is not None and r.gap <= 1e-4
 
 
-def test_issue_2151_network_default_off_is_unchanged(monkeypatch):
-    """Default OFF (CLAUDE.md §5): the refuted result is published as before."""
-    monkeypatch.delenv(FLAG, raising=False)
+def test_issue_2151_network_opt_out_restores_the_old_route(monkeypatch):
+    """``=0`` (the CLAUDE.md §5 opt-out): the refuted result is published as before."""
+    monkeypatch.setenv(FLAG, "0")
     seen = _spy(monkeypatch)
     r = _model().solve(time_limit=120, threads=1, deterministic=True)
     assert not seen
     assert r.status == "feasible"
     assert r.objective == pytest.approx(TRUE_OBJ, abs=1e-9)
     assert r.bound is not None and r.bound <= TRUE_OBJ
+
+
+@pytest.mark.parametrize("perm", ["r1", "r3"])
+def test_permuted_network_bound_never_above_the_objective(perm):
+    """Neuron permutations of the issue's net (the same function). Before #2151, HiGHS
+    certified r1 at -46.65834203738 and r3 at -46.65834223610, while the LP over its
+    own integers gave -46.6583423116. That is better by 2.7e-7 (7.5e-8), inside the
+    refutation yardstick, so the point was dropped. The #1537 E repair then published
+    it under the old bound: on r1 the bound sat 2.7e-7 ABOVE the objective."""
+    r = _model(perm).solve(time_limit=120, threads=1, deterministic=True)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(TRUE_OBJ, abs=1e-9)
+    assert r.bound is not None and r.bound <= r.objective
+    assert r.bound <= TRUE_OBJ + 1e-9
 
 
 def _sf() -> StdForm:
@@ -276,7 +297,7 @@ def test_tight_resolve_not_run_for_a_different_integer_refutation(monkeypatch):
     refutes it at -30, and the root bound (-31.5) leaves the gap open."""
     import highspy
 
-    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.delenv(FLAG, raising=False)
     calls = []
     monkeypatch.setattr(
         lp_milp_highs, "_tight_resolve_refuted", lambda *a, **k: calls.append(a) or a[1]

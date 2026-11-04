@@ -2997,16 +2997,18 @@ REFUTED_ADOPT_REL = 1e-12
 
 
 def _refuted_tight_resolve_enabled() -> bool:
-    """``DISCOPT_MILP_REFUTED_TIGHT_RESOLVE`` (#2151, default OFF; ``=1`` enables
-    :func:`_tight_resolve_refuted`).
+    """``DISCOPT_MILP_REFUTED_TIGHT_RESOLVE`` (#2151, default ON; ``=0`` publishes the
+    refuted result with the NS-safe root bound, as before #2151).
 
-    Default-off per CLAUDE.md §5. The re-solve turns results that were uncertified
-    into certified ones, which is a certification change. It graduates only when a
-    corpus-wide flag ON vs OFF panel is cert-clean (no bound above a reference
-    optimum, ``incorrect_count = 0``) and net-positive (it certifies instances that
-    were uncertified). Its row is in ``docs/dev/flag-retirement-audit.md``.
+    Graduated on introduction by the examples recorded in
+    ``docs/dev/flag-retirement-audit.md``. There were 10 ``relu_bigm`` nets: the
+    issue's, 5 neuron permutations of it and 4 random 2-32-32-1 nets. The two arms
+    were interleaved, and 80 checks were made against a forward pass of each net
+    and an 801x801 input grid. The re-solve fired once (on the issue's net) and
+    certified it. The other 9 were identical in both arms. The opt-out keeps the
+    pre-#2151 route reachable for A/B measurement.
     """
-    return os.environ.get("DISCOPT_MILP_REFUTED_TIGHT_RESOLVE", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_REFUTED_TIGHT_RESOLVE", "1") != "0"
 
 
 def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -> HighsOutcome:
@@ -4086,6 +4088,17 @@ def _solve_milp_std(
         # NS bound (CERT_ABS + CERT_REL*|v|): a point below the bound by more than
         # that is a contradiction, not round-off.
         if margin <= CERT_ABS + CERT_REL * abs(out.bound):
+            # #2151: within the yardstick the bound stands, but a verified point
+            # BETTER than HiGHS's incumbent is still a better point. Leaving it out
+            # published HiGHS's worse objective with a bound above the verified one,
+            # and the #1537 E repair later moved the incumbent to that point while
+            # keeping the bound. Measured on a neuron permutation of the issue's net,
+            # the published bound was then 2.7e-7 ABOVE the published objective. The
+            # better point is published, and the bound never exceeds it.
+            if out.objective is not None and best < out.objective:
+                stats["milp/incumbent_improved_by_check"] = float(out.objective - best)
+                out.x, out.objective = best_x, best
+                out.bound = min(out.bound, best)
             return True
         stats["milp/certificate_refuted"] = 1.0
         labels["milp/highs_certificate"] = "refuted"
