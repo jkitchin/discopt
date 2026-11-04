@@ -96,7 +96,8 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # says where it ran and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_LP_DUAL_REBUILD": ("big-m", "hull"),
     # #2142 item 3: SCIP's branching-point clamp / midpull trigger in the native
-    # spatial kernel. Acts at solve time only (lowering identical): solve ``--all``
+    # spatial kernel. RETIRED by its panel (docs/dev/data/2142-branching/); kept so
+    # --report re-derives it. Acts at solve time only (lowering identical): solve ``--all``
     # with ``--max-nodes N --deterministic``; ``SpatialSplitMoved`` says where a
     # split point moved, and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_SPATIAL_BRANCH_CLAMP": ("big-m", "hull"),

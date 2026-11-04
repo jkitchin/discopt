@@ -58,7 +58,6 @@ use std::time::{Duration, Instant};
     node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
     int_fix_probe=false, spatial_score=false, spatial_pscost_weight=0.0,
     spatial_midpull=0.0, undecided_unpropagated_retry=false, max_open_nodes=None,
-    spatial_midpull_reldomtrig=0.0, spatial_clamp=0.0,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -129,9 +128,6 @@ pub fn solve_spatial_tree_py<'py>(
     undecided_unpropagated_retry: bool,
     // #2092: the frontier memory budget in open nodes; `None` never binds.
     max_open_nodes: Option<usize>,
-    // #2142: SCIP's `branching/midpullreldomtrig` and `branching/clamp`.
-    spatial_midpull_reldomtrig: f64,
-    spatial_clamp: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     let spec = build_spec(
         n_cols,
@@ -236,14 +232,6 @@ pub fn solve_spatial_tree_py<'py>(
     if !(0.0..=1.0).contains(&spatial_midpull) {
         return Err(PyValueError::new_err("spatial_midpull must be in [0, 1]"));
     }
-    if !(0.0..=1.0).contains(&spatial_midpull_reldomtrig) {
-        return Err(PyValueError::new_err(
-            "spatial_midpull_reldomtrig must be in [0, 1]",
-        ));
-    }
-    if !(0.0..=0.5).contains(&spatial_clamp) {
-        return Err(PyValueError::new_err("spatial_clamp must be in [0, 0.5]"));
-    }
     let cfg = SpatialTreeConfig {
         max_nodes,
         deadline,
@@ -271,8 +259,6 @@ pub fn solve_spatial_tree_py<'py>(
         spatial_score,
         spatial_pscost_weight,
         spatial_midpull,
-        spatial_midpull_reldomtrig,
-        spatial_clamp,
         undecided_unpropagated_retry,
         max_open_nodes: max_open_nodes.unwrap_or(usize::MAX),
     };

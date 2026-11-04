@@ -108,9 +108,11 @@ _FLAGS = {
         "show": ("DualRebuilds", "DualRebuildOptimal"),
     },
     # #2142 item 3: SCIP's branching-point rule in the native spatial kernel
-    # (``spatial_clamp`` / ``spatial_midpull_reldomtrig``). Only a spatial split
-    # whose point the rule moved can change the search, so ``SpatialSplitMoved``
-    # ON is where it ran; OFF it must be 0.
+    # (``spatial_clamp`` / ``spatial_midpull_reldomtrig``). RETIRED by its panel
+    # (docs/dev/data/2142-branching/, performance-plan §107); the build no longer
+    # has the SpatialSplit* counters. Kept so ``--rows`` re-derives the verdict.
+    # Only a spatial split whose point the rule moved can change the search, so
+    # ``SpatialSplitMoved`` ON is where it ran; OFF it must be 0.
     "DISCOPT_SPATIAL_BRANCH_CLAMP": {
         "fired": lambda off, on: on["SpatialSplitMoved"],
         "ran": lambda off, on: on["SpatialSplitMoved"] > 0,

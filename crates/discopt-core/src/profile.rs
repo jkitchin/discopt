@@ -706,12 +706,6 @@ counters!(
     // argument. Both are needed: the ratio is meaningless without its denominator.
     SepGomoryCutsEmitted,
     SepGomoryCutNnz,
-    // #2142: the native spatial tree's spatial splits (`SpatialSplits`), and those
-    // whose point `spatial_clamp` / `spatial_midpull_reldomtrig` moved off the
-    // #1970 rule's (`SpatialSplitMoved`). Zero `Moved` with the knobs on means the
-    // knobs never changed a decision (CLAUDE.md §6).
-    SpatialSplits,
-    SpatialSplitMoved,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,
