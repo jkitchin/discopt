@@ -18,6 +18,7 @@ import numpy as np
 
 from discopt import _timing
 from discopt.modeling.core import Model
+from discopt.solver_tuning import subsolve_wall_options
 from discopt.solvers import NLPResult, PounceOptionError, SolveStatus
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -431,6 +432,10 @@ def solve_nlp(
 
     opts = dict(options) if options else {}
     opts.setdefault("print_level", 0)
+    # #2120: under ``deterministic`` a per-solve ``max_wall_time`` is a role-2 cap
+    # (POUNCE times it in Rust, beyond any Python-side guard); swap it for the
+    # role-1 remainder. A no-op otherwise.
+    subsolve_wall_options(opts)
     # NEITHER of the two shared POUNCE requests is seeded here, and both omissions
     # are measured rather than assumed (#945):
     #

@@ -1602,8 +1602,12 @@ class SolverTuning:
 
     * the phase-entry gates (``_deadline_exhausted()`` / ``_remaining_budget() >
       x``), which decide whether an optional preprocessing phase *starts* at all;
-    * the two POUNCE funnels' ``max_wall_time = min(30.0, caller_limit)`` stall
-      backstop.
+    * the per-NLP ``max_wall_time`` caps (the POUNCE funnels' ``min(30.0,
+      caller_limit)`` stall backstop, the multistart's 3 s per start) **when there
+      is no role-1 deadline**. With one, #2120 replaces each cap with the role-1
+      remainder (``subsolve_wall_seconds``) at the NLP backend boundary. A cap
+      POUNCE times in Rust had been deciding the incumbent on a stalled CI runner,
+      at 3 s against a 600 s ``time_limit``.
 
     So the guarantee is: **a solve reproduces when the role-1 budget never binds**
     — i.e. it terminates on work (``max_nodes``/gap) with real slack against
@@ -2456,6 +2460,87 @@ def enter_scope(tuning: SolverTuning | None):
 
 def reset_current(token) -> None:
     _current.reset(token)
+
+
+#: The ROLE-1 deadline (``perf_counter`` epoch) of the innermost live
+#: ``solve_model``, or ``None`` outside a solve / for an uncapped one (#1371).
+#:
+#: Defined here rather than in ``solver.py`` so a sub-solver backend can read it
+#: without importing the orchestrator (#2120): ``solver._ROLE1_DEADLINE`` is this
+#: same object, and ``solve_model`` is still the only writer. A ``ContextVar`` so two
+#: concurrent solves never read each other's wall (see the note at its use in
+#: ``solver.py``). ``perf_counter``, not ``monotonic``.
+ROLE1_DEADLINE: ContextVar[Optional[float]] = ContextVar("_ROLE1_DEADLINE", default=None)
+
+
+def deterministic_active() -> bool:
+    """Whether ``deterministic`` is on for the active scope.
+
+    Cheap on the hot path: outside a solve scope it reads the one env var rather
+    than building a whole env-resolved :class:`SolverTuning` per NLP call.
+    """
+    active = _current.get()
+    if active is not None:
+        return bool(active.deterministic)
+    return _env_flag("DISCOPT_DETERMINISTIC", default=False)
+
+
+#: Smallest wall a sub-solve is handed when the role-1 deadline has (nearly) run
+#: out. Only reachable when role-1 *binds*, where ``deterministic`` promises nothing.
+_SUBSOLVE_WALL_FLOOR_S = 1e-3
+
+
+def subsolve_wall_seconds(seconds: Optional[float]) -> Optional[float]:
+    """The wall clock a single sub-solve (one NLP) may run for (#2120).
+
+    Off ``deterministic``, ``seconds`` is returned unchanged. Under
+    ``deterministic`` the caller's per-solve cap is a **role-2** budget: "a fixed
+    number of seconds handed to a stage" (the field docstring). That covers the
+    3 s per-start cap in ``continuous_multistart``, the 30 s per-node cap and the
+    4 s seed-relaxation cap. Such a cap is replaced by the ROLE-1 remainder, so the
+    sub-solve still stops at the user's ``time_limit`` and can never overrun it.
+
+    With no role-1 deadline (an uncapped solve, or a backend called outside
+    ``solve_model``) the caller's cap is returned **unchanged**. There it is the
+    only stall backstop left, and removing it would let one stalled NLP run without
+    any bound. A deterministic solve without a ``time_limit`` therefore still
+    reproduces only while no per-solve cap binds; give it a ``time_limit`` to get
+    the stronger guarantee.
+
+    Why it has to happen at the sub-solve and not at the stage: the stage deadlines
+    were already routed through ``solver._role2_deadline``, but each NLP inside the
+    stage was still handed ``max_wall_time=min(3.0, remaining)``, and POUNCE times
+    that itself, in Rust. On a stalled CI runner one such cap bound, the NLP returned
+    a different point, and the incumbent moved by ~1e-8 at an identical node count
+    (#2120). Measured locally by shrinking every 3 s cap to 2 ms: the
+    ``test_1513`` dispersion solve returned ``1.0717967670184763``, bit-identical to
+    the value CI's coverage lane reported in run 41264123265, instead of the
+    reproducible ``1.071796754113688``.
+    """
+    if not deterministic_active():
+        return seconds
+    deadline = ROLE1_DEADLINE.get()
+    if deadline is None or not math.isfinite(deadline):
+        return seconds
+    import time
+
+    return max(_SUBSOLVE_WALL_FLOOR_S, deadline - time.perf_counter())
+
+
+def subsolve_wall_options(options: dict, key: str = "max_wall_time") -> dict:
+    """:func:`subsolve_wall_seconds` applied to an options dict, **in place**.
+
+    Under ``deterministic`` the ``key`` entry becomes the role-1 remainder (kept as
+    it is when there is no role-1 deadline). A dict without ``key``, or with
+    ``None`` there, is left alone: the backend's built-in wall default, if any, is
+    the backend's concern. Returns ``options`` for chaining.
+    """
+    if options.get(key) is None or not deterministic_active():
+        return options
+    wall = subsolve_wall_seconds(float(options[key]))
+    if wall is not None:
+        options[key] = wall
+    return options
 
 
 #: The role-1 budget at which every role-2 sub-budget saturates (#1153).

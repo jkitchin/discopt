@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
+from discopt.ml.activations import symbolic
 from discopt.ml.bounds import propagate_bounds, scaled_output_bounds
 from discopt.ml.network import Activation, NetworkDefinition
 from discopt.ml.scaling import OffsetScaling
@@ -14,12 +15,14 @@ from discopt.ml.scaling import OffsetScaling
 if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
 
-_SMOOTH_ACTIVATIONS = {Activation.LINEAR, Activation.SIGMOID, Activation.TANH, Activation.SOFTPLUS}
-
-_ACTIVATION_FN = {
-    Activation.SIGMOID: dm.sigmoid,
-    Activation.TANH: dm.tanh,
-    Activation.SOFTPLUS: dm.softplus,
+_SMOOTH_ACTIVATIONS = {
+    Activation.LINEAR,
+    Activation.SIGMOID,
+    Activation.TANH,
+    Activation.SOFTPLUS,
+    Activation.SQUAREPLUS,
+    Activation.SWISH,
+    Activation.GELU,
 }
 
 
@@ -45,7 +48,8 @@ class FullSpaceFormulation:
     - ``zhat`` (pre-activation) variables with affine constraints
     - ``z`` (post-activation) variables with activation constraints
 
-    Supports LINEAR, SIGMOID, TANH, SOFTPLUS activations only.
+    Supports the smooth activations (LINEAR, SIGMOID, TANH, SOFTPLUS,
+    SQUAREPLUS, SWISH, GELU, with any ``beta``) only.
     For ReLU, use :class:`ReluBigMFormulation`.
     """
 
@@ -178,10 +182,12 @@ class FullSpaceFormulation:
                     lb=z_lb if z_lb is not None else -1e20,
                     ub=z_ub if z_ub is not None else 1e20,
                 )
-                act_fn = _ACTIVATION_FN[layer.activation]
-                # Every activation in `_ACTIVATION_FN` is elementwise over an
-                # array body, so the whole layer is one constraint.
-                m.subject_to(z == act_fn(zhat), name=_family_name(f"{pfx}_act_{k}", n_out))
+                # Every smooth activation is elementwise over an array body, so
+                # the whole layer is one constraint.
+                m.subject_to(
+                    z == symbolic(layer.activation, zhat, layer.beta),
+                    name=_family_name(f"{pfx}_act_{k}", n_out),
+                )
 
             prev_z = z
 

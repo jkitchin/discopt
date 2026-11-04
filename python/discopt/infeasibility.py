@@ -303,8 +303,9 @@ def compute_iis(
         ``total_time_limit``, and return the smallest complete result (else the
         smallest anytime one). An order is a permutation of ``"ICB"`` --
         integrality, constraints, bounds phases -- with optional flags after a
-        ``"-"``: ``r`` visits elements in reverse, ``n`` skips the SAT core
-        candidate on a pure-binary model (``"CIB-r"``, ``"ICB-n"``);
+        ``"-"``: ``r`` visits elements in reverse, ``n`` skips the candidate
+        stages -- the SAT core on pure-binary models and the mod-2 (parity)
+        certificate on integer equality systems (``"CIB-r"``, ``"ICB-n"``);
         :data:`discopt._iis_milp.DEFAULT_PORTFOLIO` is
         a measured default. Which IIS a filter finds depends on its order, so a
         portfolio buys size (and, when orders differ in speed, time) with cores.

@@ -420,6 +420,22 @@ pub(super) fn optimal_fails_original_audit(
     sol.status == LpStatus::Optimal && point_fails_original_audit(&sol.x, cols, m, n, b, l, u)
 }
 
+/// #2125: whether `x` (length `n`, original space) passes [`audit_feasibility`]
+/// against the ORIGINAL LP. Unlike [`point_fails_original_audit`] it does not count
+/// toward the #1935 `ScaledOptimalOriginalAuditFail` counter, which measures the
+/// scaled path alone.
+pub(super) fn point_passes_original_audit(
+    x: &[f64],
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    x.len() == n && audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
+}
+
 /// #1945: [`optimal_fails_original_audit`] on a bare point `x` already mapped to the
 /// ORIGINAL space, for a caller that keeps its solution in solve coordinates
 /// ([`super::scaled_problem::ScaledProblem::verify`]) and unscales only a copy.
@@ -440,6 +456,46 @@ pub(super) fn point_fails_original_audit(
         crate::profile::incr(crate::profile::Ctr::ScaledOptimalOriginalAuditFail);
     }
     fails
+}
+
+/// Whether the #2125 huge-bound routes are on, read once from
+/// `DISCOPT_LP_HUGE_BOUND_RELAX`. Default **on**; `0`/`false`/`off` is the opt-out.
+///
+/// It gates all of #2125 together: the row audit's singleton absorption
+/// ([`singleton_absorbs`]), and, on cold CSC solves, the relax-and-verify rounds,
+/// the dual cleanup and the active-bound fix
+/// (`dual::solve_huge_box_relaxed`). With it off, the engine is the pre-#2125 one
+/// byte for byte.
+///
+/// **Why it is the default, and what would change that.** It turns `ERROR` into
+/// a certified answer on LPs with a finite bound in `[1e10, 1e20)`. On the GDPlib
+/// `batch_processing` mbigm LPs at `u >= 3e16`, it agreed with HiGHS on 40/40
+/// where main agreed on 7-8/40. On the in-repo corpus it reaches 6 instances,
+/// only through relaxation-lifted columns, and changes no certified result. It is
+/// not graduated by a §5 panel. A panel showing a node-count or wall regression
+/// on that class (e.g. `4stufen`, whose 3-node bound loosens 20712 -> 19947)
+/// would be the reason to make it default-off.
+///
+/// An unrecognized value is refused loudly, as for `DISCOPT_LP_DUAL_STALL_BAIL`:
+/// a typo in an A/B arm must not quietly measure one arm twice.
+pub(crate) fn huge_bound_relax_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_HUGE_BOUND_RELAX").unwrap_or_default();
+        parse_huge_bound_relax(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`huge_bound_relax_enabled`] (unset = on).
+pub(crate) fn parse_huge_bound_relax(raw: &str) -> Result<bool, String> {
+    match raw.trim() {
+        "" | "1" | "true" | "True" | "on" | "ON" => Ok(true),
+        "0" | "false" | "False" | "off" | "OFF" => Ok(false),
+        other => Err(format!(
+            "DISCOPT_LP_HUGE_BOUND_RELAX={other:?} is not a recognized value. \
+             Use 1/true/on (the default), or 0/false/off for the pre-#2125 path."
+        )),
+    }
 }
 
 /// The final audit's feasibility tolerance: relative to `1 + |bound|` on a finite
@@ -542,10 +598,22 @@ fn audit_feasibility(
     let mut ax = vec![0.0f64; m];
     let mut comp = vec![0.0f64; m];
     let mut grain = vec![f64::INFINITY; m];
+    // #2125: per row, the coarsest-grained SINGLETON column (one nonzero, so it is
+    // in this row only) — `(j, A_ij, |A_ij|·ulp(x_j))`. See `singleton_absorbs`.
+    let mut single: Vec<Option<(usize, f64, f64)>> = vec![None; m];
+    // `DISCOPT_LP_HUGE_BOUND_RELAX=0` keeps the pre-#2125 audit: no absorber.
+    let absorb = huge_bound_relax_enabled();
     for j in 0..n {
         let xj = x[j];
         let gj = 2.0 * f64::EPSILON * xj.abs();
         let (rows, vals) = cols.col(j);
+        if absorb && rows.len() == 1 && vals[0] != 0.0 {
+            let sg = vals[0].abs() * gj;
+            let i = rows[0];
+            if single[i].is_none_or(|(_, _, g)| sg > g) {
+                single[i] = Some((j, vals[0], sg));
+            }
+        }
         for (k, &i) in rows.iter().enumerate() {
             let aij = vals[k];
             let g = aij.abs() * gj;
@@ -569,11 +637,57 @@ fn audit_feasibility(
     }
     for i in 0..m {
         let activity = ax[i] + comp[i];
-        if (activity - b[i]).abs() > FEAS * (1.0 + b[i].abs()) + row_residual_floor(grain[i]) {
+        let resid = activity - b[i];
+        if resid.abs() > FEAS * (1.0 + b[i].abs()) + row_residual_floor(grain[i]) {
+            if single[i].is_some_and(|(j, a, sg)| singleton_absorbs(resid, a, sg, x[j], l[j], u[j]))
+            {
+                crate::profile::incr(crate::profile::Ctr::AuditRowsSingletonAbsorbed);
+                continue;
+            }
             return Feasibility::Rows;
         }
     }
     Feasibility::Ok
+}
+
+/// Whether a row's residual `resid` is absorbed by one of its **singleton**
+/// columns `j` (`A_ij = a`, at `x_j`, box `[l_j, u_j]`, grain `sg = |a|·ulp(x_j)`):
+/// the residual is within that column's own representability, and moving the
+/// column by `−resid / a` to zero it keeps it inside its box (#2125).
+///
+/// **Why the row's minimum grain is not enough.** [`row_residual_floor`] asks
+/// whether *some* column in the row can resolve the residual on the `f64` grid,
+/// and takes the finest. That is right for a column that lives in this row alone,
+/// and wrong for one that does not: moving a column shared with other rows breaks
+/// those rows. The case it misses is the commonest one in the standard form. A
+/// `≤` row `a·x_k + Σ (moderate) + s = b` whose structural `x_k` sits at a large
+/// bound (`1e11` and up, measured) puts its slack `s` basic at `~|a·x_k|`, and the
+/// exact vertex value of `s` is not an `f64`: its nearest neighbour leaves a
+/// residual of up to `ulp(s)/2`, which passes `1e-6·(1 + |b|)` once
+/// `|s| > ~1e10`. The moderate columns set the row's minimum grain to `~1e-15`, so
+/// the floor forgave nothing and a sound optimum came back `Numerical` (#2125:
+/// ERROR from `~1e11` on a multi-row LP, where the 2-column #937 fixture had every
+/// column huge and so a large minimum grain).
+///
+/// **Why this is sound.** The slack absorbs the residual exactly in real
+/// arithmetic, touches no other row (it has no other nonzero), and stays in its
+/// box (checked, under the audit's own bound tolerance). So the reported point is
+/// within `|resid / a| ≤ 4ε·|x_j|` — a few ulps, in ONE coordinate — of a point
+/// satisfying every row the audit checks. That is the representability argument
+/// #937's floor already makes, applied to the column that can actually move.
+///
+/// **What it still refuses.** It never forgives more than two ulps of the
+/// absorbing column, so drift (a relative error far above `ε`) is rejected as
+/// before. And #1335's infeasible witness is untouched: its slacks sit at `0`,
+/// whose grain is `0`, so nothing is forgiven there.
+#[inline]
+fn singleton_absorbs(resid: f64, a: f64, sg: f64, xj: f64, lj: f64, uj: f64) -> bool {
+    if resid.abs() > row_residual_floor(sg) {
+        return false;
+    }
+    let moved = xj - resid / a;
+    (lj <= -INF || moved >= lj - AUDIT_FEAS * (1.0 + lj.abs().min(INF)))
+        && (uj >= INF || moved <= uj + AUDIT_FEAS * (1.0 + uj.abs().min(INF)))
 }
 
 /// Floor on a row residual that no representable `x` can beat: the finest step
@@ -709,10 +823,45 @@ pub(super) fn subtol_scan(
     y: &[f64],
     floor: f64,
 ) -> (Vec<SubtolCand>, Vec<SubtolCand>) {
+    subtol_scan_with(
+        cols,
+        n_real,
+        cost,
+        lb,
+        ub,
+        stat,
+        y,
+        floor,
+        subtol_noise_global_enabled(),
+    )
+}
+
+/// [`subtol_scan`] with the #2115 noise scale passed explicitly (`global`), so a
+/// test can exercise both arms in one process.
+#[allow(clippy::too_many_arguments)]
+fn subtol_scan_with(
+    cols: &SparseCols,
+    n_real: usize,
+    cost: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    stat: &[i8],
+    y: &[f64],
+    floor: f64,
+    global: bool,
+) -> (Vec<SubtolCand>, Vec<SubtolCand>) {
     let (mut out, mut suspects) = (Vec::new(), Vec::new());
     if !(floor.is_finite() && floor > 0.0) {
         return (out, suspects);
     }
+    // #2115: the scale `y` is known to. Its error comes from solving `Bᵀy = c_B`
+    // and is relative to `‖y‖∞` (times the basis conditioning), not to whichever
+    // entries a column happens to touch.
+    let ymax = if global {
+        y.iter().fold(0.0f64, |a, v| a.max(v.abs()))
+    } else {
+        0.0
+    };
     for j in 0..n_real {
         if stat[j] == BASIC {
             continue;
@@ -739,13 +888,60 @@ pub(super) fn subtol_scan(
         if dj.abs() * room <= floor {
             continue;
         }
-        if dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + mag) {
+        // The local terms `mag = Σ|a_ij·y_i|` alone under-state the noise when the
+        // rows a column touches carry `y_i` that are themselves rounding residue
+        // of a much larger `y`: a single-entry slack has `d_j = −a·y_i`, always
+        // "relative size 1" locally, however small `y_i` is. Measured on the
+        // MINLPLib `m6` final OA master (#2115): `d_j` of −4e-16..−8e-15 on open
+        // slacks (‖y‖∞ = 12..192) were taken as real; their room is infinite, so
+        // the primal entered one, the unblocked ray had `cᵀd = 0` exactly and was
+        // rightly refused, and the dual's correct `Optimal` came back `Numerical`
+        // (`WarmSubtolRepairFailed`) on 8 node LPs. `‖a_j‖₁·‖y‖∞` is the scale of
+        // `y`'s error as it reaches `d_j`. Such a column is not dropped: it becomes
+        // a suspect, settled by the NS bound and dual refinement (#1953) like any
+        // other, so a genuine sub-`tol` reduced cost still enters.
+        let mut scale = mag;
+        if ymax > 0.0 {
+            let a1: f64 = cols.col(j).1.iter().map(|a| a.abs()).sum();
+            scale = scale.max(a1 * ymax);
+        }
+        if dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + scale) {
             suspects.push((j, dj, room)); // possibly rounding; verify before use
         } else {
             out.push((j, dj, room));
         }
     }
     (out, suspects)
+}
+
+/// Whether [`subtol_scan`]'s noise test measures a reduced cost against the
+/// scale of `y`'s error, `‖a_j‖₁·‖y‖∞`, as well as against its own terms
+/// (`DISCOPT_SUBTOL_NOISE_GLOBAL`, read once; #2115). **Default ON**; `=0`
+/// restores the local-terms-only test exactly. See the comment at its use.
+///
+/// Graduated 2026-11-03 **by owner decision as a verdict fix**, not on §5's
+/// net-positive bar, which its panel did not meet. Panel
+/// (`discopt_benchmarks/scripts/issue2115_graduation_panel.py --flag
+/// DISCOPT_SUBTOL_NOISE_GLOBAL`, 91 instances, 60 s, default route, `pyscipopt`
+/// blocked; data `docs/dev/data/2115-ns-project/`): *cert-clean* -- 951 checks,
+/// 0 violations, no bound looser where it ran; noise-driven sub-`tol` pivots
+/// suppressed 22 times on 4 instances, false `Numerical` verdicts on the `m6` /
+/// `m7` masters 13 -> 0 and 6 -> 0. *Outcome-neutral* -- certified 64 -> 64, wall
+/// flat. The case for shipping it anyway: OFF throws away a dual simplex's
+/// correct `Optimal` for a `Numerical` built on a pivot whose reduced cost is
+/// rounding residue (on `ex14_1_7` that pivot made the objective worse and its
+/// LP then failed the audit); ON settles such a column through the #1953
+/// verification instead, and a genuine sub-`tol` reduced cost still enters.
+fn subtol_noise_global_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_SUBTOL_NOISE_GLOBAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
 }
 
 /// Whether the suspects of [`subtol_scan`] can matter at objective `obj`: true
@@ -3435,6 +3631,72 @@ impl<'a> Simplex<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #2115: a reduced cost that is rounding residue of `y` must not pass the
+    /// sub-`tol` noise test as real. Shape of the `m6` master's failure: an open
+    /// `c = 0` slack (`[0, ∞)`, one entry) on a row whose `y_i` is 1e-15 of
+    /// residue while `‖y‖∞ = 12`. Locally `d_j = −y_i` is "relative size 1", so
+    /// the local-terms test calls it a candidate (premise; FAILS if that ever
+    /// changes and the test stops exercising the defect); measured against
+    /// `‖a_j‖₁·‖y‖∞` it is a suspect, routed to verification instead. A genuine
+    /// sub-`tol` reduced cost of the #1595 shape (`d_y = −1/7.5e9` on the row that
+    /// IS `‖y‖∞`) must stay a candidate under both arms.
+    #[test]
+    fn subtol_noise_is_measured_against_y_scale_2115() {
+        // col0: row0 (+1), [0, 1], c = 1 (gives row0 a large dual);
+        // col1: row1 (+1), [0, ∞), c = 0 (the open slack).
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 1], vec![1.0, 1.0]);
+        let cost = vec![1.0, 0.0];
+        let lb = vec![0.0, 0.0];
+        let ub = vec![1.0, INF];
+        let stat = vec![AT_LOWER, AT_LOWER];
+        let y = vec![12.0, 1e-15];
+        let floor = subtol_impact_floor(0.0);
+        let mut checks = 0usize;
+        let (cand, susp) = subtol_scan_with(&sp, 2, &cost, &lb, &ub, &stat, &y, floor, false);
+        assert!(
+            cand.iter().any(|c| c.0 == 1),
+            "premise: local test takes the residue"
+        );
+        checks += 1;
+        assert!(susp.iter().all(|c| c.0 != 1));
+        checks += 1;
+        let (cand, susp) = subtol_scan_with(&sp, 2, &cost, &lb, &ub, &stat, &y, floor, true);
+        assert!(
+            cand.iter().all(|c| c.0 != 1),
+            "residue must not be a candidate"
+        );
+        checks += 1;
+        assert!(
+            susp.iter().any(|c| c.0 == 1),
+            "residue must be a suspect (verified)"
+        );
+        checks += 1;
+
+        // #1595 shape: min −x  s.t.  7.5e9·x − y = 0 row, the open column's dual
+        // is the largest one, so its d_y is real at both scales.
+        let sp2 = SparseCols::from_csc(vec![0, 1], vec![0], vec![-1.0]);
+        let yr = vec![1.0 / 7.5e9];
+        for global in [false, true] {
+            let (cand, _) = subtol_scan_with(
+                &sp2,
+                1,
+                &[0.0],
+                &[0.0],
+                &[INF],
+                &[AT_LOWER],
+                &[-yr[0]],
+                subtol_impact_floor(1.0),
+                global,
+            );
+            assert!(
+                cand.iter().any(|c| c.0 == 0),
+                "genuine sub-tol d_j lost (global={global})"
+            );
+            checks += 1;
+        }
+        assert_eq!(checks, 6);
+    }
     use super::*;
 
     /// #A0'.1: a nonbasic row singleton at a NONZERO bound is a valid basis
@@ -4940,6 +5202,63 @@ mod tests {
         checked += 1;
 
         assert_eq!(checked, 6, "floor probe must have run every property");
+    }
+
+    /// #2125: a row slack basic at `~2u` absorbs the residual its own rounding
+    /// leaves, even when the row also holds moderate columns.
+    ///
+    /// Row 0 `−2·x₀ + x₁ + s = 0.5` with `x₀ = u` (a structural at its huge bound),
+    /// `x₁ = 0.3` (moderate, shared with row 1 `x₁ + t = 1`, so it may not move)
+    /// and the slack `s = fl(2u + 0.2)`. The vertex is exact in the reals; in
+    /// `f64` row 0's residual is `s`'s rounding, up to `ulp(2u)/2`, which exceeds
+    /// `1e-6·1.5` from `u ≈ 1e11` on. The #1335 minimum grain is set by `x₁`
+    /// (`~1e-16`), so pre-fix the audit returned `Rows` — `Numerical` on a sound
+    /// optimum. Pinned across `[1e10, 1e19]`: the rounded vertex certifies, and the
+    /// same point with `s` a thousand ulps off (drift, not representability) is
+    /// still refused.
+    #[test]
+    fn slack_absorbs_its_own_rounding_on_a_mixed_row_2125() {
+        // Columns: x0, x1, s, t. Rows: 0 = {x0:-2, x1:1, s:1}, 1 = {x1:1, t:1}.
+        let cols = SparseCols::from_csc(
+            vec![0, 1, 3, 4, 5],
+            vec![0, 0, 1, 0, 1],
+            vec![-2.0, 1.0, 1.0, 1.0, 1.0],
+        );
+        let b = [0.5, 1.0];
+        let l = [-5.0, -5.0, 0.0, 0.0];
+        let mut unforgiven_pre_fix = 0usize;
+        let mut checked = 0usize;
+        for u in [1e10, 1e11, 1e13, 1e15, 1e16, 1e17, 1e19] {
+            let s = 2.0 * u + 0.2; // rounded to the nearest f64
+            let x = [u, 0.3, s, 0.7];
+            let ub = [u, 5.0, INF, INF];
+            // Exact (Sterbenz): the residual the fixture really leaves. Count the
+            // magnitudes where it beats both the absolute term and the row's
+            // minimum-grain floor, i.e. where the pre-fix audit refused the vertex.
+            let resid = (s - 2.0 * u) - 0.2;
+            if resid.abs() > 1e-6 * 1.5 + row_residual_floor(2.0 * f64::EPSILON * 0.3) {
+                unforgiven_pre_fix += 1;
+            }
+            assert_eq!(
+                audit_feasibility(&cols, 2, 4, &b, &l, &ub, &x),
+                Feasibility::Ok,
+                "u={u:e}: the rounded vertex must certify (residual {resid:e})"
+            );
+            checked += 1;
+            let drifted = [u, 0.3, s + 1000.0 * 2.0 * f64::EPSILON * s, 0.7];
+            assert_eq!(
+                audit_feasibility(&cols, 2, 4, &b, &l, &ub, &drifted),
+                Feasibility::Rows,
+                "u={u:e}: a thousand ulps of drift must still be refused"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 14, "probe must have run every point");
+        // The fixture exercises the defect, not just the happy path.
+        assert!(
+            unforgiven_pre_fix >= 5,
+            "only {unforgiven_pre_fix} points needed the fix"
+        );
     }
 
     /// #1953: an exact sub-noise reduced cost on a wide box is a real descent.

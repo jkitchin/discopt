@@ -111,8 +111,10 @@ def test_options_discopt_cannot_honour_are_reported():
     gmo = SimpleNamespace(gmoOptFile=lambda h: 1)
     notes = link._unhonored_gams_options(gev, None, gmo, None)
     joined = "\n".join(notes)
-    for word in ("iterlim=50", "domlim", "cutoff=7.5", "cheat", "optfile"):
+    for word in ("iterlim=50", "domlim", "cutoff=7.5", "cheat"):
         assert word in joined, (word, notes)
+    # An option file is read now (``discopt.opt``), not reported as ignored.
+    assert "optfile" not in joined
     assert all(n.startswith("*** discopt:") for n in notes)
 
 

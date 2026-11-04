@@ -75,6 +75,7 @@ from discopt.modeling.core import (
     objective_sense_sign,
 )
 from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
+from discopt.solver_tuning import ROLE1_DEADLINE as _ROLE1_DEADLINE_VAR
 from discopt.solver_tuning import _env_flag
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
@@ -82,6 +83,7 @@ from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_shar
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import saturate_role2 as _role2_saturate
 from discopt.solver_tuning import set_current as _set_tuning
+from discopt.solver_tuning import subsolve_wall_seconds as _subsolve_wall_seconds
 from discopt.solvers import (
     POUNCE_BOUND_RELAX_FACTOR,
     PounceOptionError,
@@ -760,6 +762,20 @@ def _apply_convex_node_safe_bounds(
 def _obbt_topk_enabled() -> bool:
     """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _warn_gdp_config_raised(site: str) -> None:
+    """Report a raising GDP disjunct-configuration constructor at WARNING, with traceback.
+
+    The constructor is a primal heuristic: a crash in it must not kill a solve whose
+    bound is still certifiable, so every call site catches and continues. It used to
+    log at DEBUG, which hid the failure entirely (CLAUDE.md §7) -- a raising
+    constructor read exactly like one that searched and found nothing. Call only
+    from inside an ``except`` block.
+    """
+    logger.warning(
+        "GDP config subNLP (%s) raised; continuing without its incumbent", site, exc_info=True
+    )
 
 
 def _gdp_config_primal_enabled() -> bool:
@@ -2031,8 +2047,8 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     ):
                         _cf_n += 1
                         yield np.asarray(_cf_x, dtype=np.float64)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug("native seed one-hot config raised: %s", exc)
+                except Exception:
+                    _warn_gdp_config_raised("native seed")
                 finally:
                     logger.info("GDP config subNLP: %d feasible point(s)", _cf_n)
             if xr is not None and time.perf_counter() < deadline:
@@ -11251,9 +11267,10 @@ _IPX_CHEAP_FIRST_IN_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar
 #: a ``monotonic`` epoch and every deadline in this module is ``perf_counter``.
 #: Mixing the two compares timestamps from different clocks, which would be a
 #: second bug wearing the first one's clothes.
-_ROLE1_DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
-    "_ROLE1_DEADLINE", default=None
-)
+#:
+#: The object itself lives in :mod:`discopt.solver_tuning` (#2120) so the NLP
+#: backends can bound one sub-solve by it without importing this module.
+_ROLE1_DEADLINE: contextvars.ContextVar[Optional[float]] = _ROLE1_DEADLINE_VAR
 
 
 def _role1_deadline() -> Optional[float]:
@@ -11982,6 +11999,31 @@ def _kernel_int_probe_enabled() -> bool:
 _FRONTIER_MEMORY_MB_DEFAULT = 2048
 
 
+#: A per-solve override of ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092), set by
+#: :func:`frontier_memory_override`. A context variable, not ``os.environ``: the
+#: GAMS link's warm daemon serves many solves from one process, so an environment
+#: write for one job would leak into every later one.
+_FRONTIER_MEMORY_MB_OVERRIDE: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "discopt_frontier_memory_mb", default=None
+)
+
+
+@contextlib.contextmanager
+def frontier_memory_override(mb: Optional[int]):
+    """Use ``mb`` MiB (``0`` = no budget) as the frontier memory budget inside the
+    block, in place of ``DISCOPT_FRONTIER_MEMORY_MB``; ``None`` changes nothing."""
+    if mb is None:
+        yield
+        return
+    if isinstance(mb, bool) or not isinstance(mb, int) or mb < 0:
+        raise ValueError(f"frontier memory budget must be an integer >= 0 (MiB), got {mb!r}")
+    token = _FRONTIER_MEMORY_MB_OVERRIDE.set(mb)
+    try:
+        yield
+    finally:
+        _FRONTIER_MEMORY_MB_OVERRIDE.reset(token)
+
+
 def _frontier_memory_bytes() -> Optional[int]:
     """The open-frontier memory budget, from ``DISCOPT_FRONTIER_MEMORY_MB`` (#2092).
 
@@ -11999,8 +12041,12 @@ def _frontier_memory_bytes() -> Optional[int]:
     A memory guard, like ``time_limit``, not solver math: it changes nothing on a
     run whose frontier stays under the budget, and a run that reaches it would
     otherwise keep allocating. Raise it on a machine with more memory, or set
-    ``0`` to restore the unbounded behaviour.
+    ``0`` to restore the unbounded behaviour. Inside :func:`frontier_memory_override`
+    (the GAMS option file's ``frontier_memory_mb``) the override wins.
     """
+    override = _FRONTIER_MEMORY_MB_OVERRIDE.get()
+    if override is not None:
+        return None if override == 0 else override << 20
     raw = os.environ.get("DISCOPT_FRONTIER_MEMORY_MB", "").strip()
     if not raw:
         mb = _FRONTIER_MEMORY_MB_DEFAULT
@@ -20866,8 +20912,8 @@ def solve_model(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:
-                    logger.debug("one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("spatial deferred")
                     _gdd_results = []
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
@@ -22396,8 +22442,8 @@ def solve_model(
                     deadline=_cfg_until,
                     stats=_cfg_stats,
                 )
-            except Exception as _e:
-                logger.debug("one_hot_config_subnlp raised: %s", _e)
+            except Exception:
+                _warn_gdp_config_raised("spatial root")
                 _cfg_results = []
             _gdp_cfg_deferred = _gdp_config_hold_back(
                 _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
@@ -28312,8 +28358,8 @@ def _solve_nlp_bb(
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
-                except Exception as _e:  # pragma: no cover - defensive
-                    logger.debug("nlp-bb one_hot_config_subnlp (deferred) raised: %s", _e)
+                except Exception:
+                    _warn_gdp_config_raised("nlp-bb deferred")
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
                 _gdd_improved = 0
                 for _gdd_x, _ in _gdd_found:
@@ -28727,8 +28773,8 @@ def _solve_nlp_bb(
                             deadline=_cfg_until,
                             stats=_cfg_stats,
                         )
-                    except Exception as _e:  # pragma: no cover - defensive
-                        logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
+                    except Exception:
+                        _warn_gdp_config_raised("nlp-bb root")
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
@@ -30280,7 +30326,10 @@ def _solve_node_nlp_pounce(
     # first-attempt result, and a node whose NLP failed stays OPEN at its inherited
     # parent bound — a valid global lower bound — so the dual bound is untouched.
     _t_node_entry = time.perf_counter()
-    _retry_deadline = _t_node_entry + max(_DEADLINE_NODE_FLOOR_S, float(caller_limit))
+    # #2120: ``caller_limit`` is capped at a fixed 30 s, a role-2 budget; under
+    # ``deterministic`` whether the alternative starts run may not depend on it.
+    _retry_wall = _subsolve_wall_seconds(max(_DEADLINE_NODE_FLOOR_S, float(caller_limit)))
+    _retry_deadline = _t_node_entry + (math.inf if _retry_wall is None else _retry_wall)
 
     def _known_failure(start: np.ndarray):
         if failed_starts is None:
@@ -35438,6 +35487,46 @@ def _solve_qp_batch_by_deadline(solve_qp_batch, problems: list, deadline: float)
 _NLP_NOT_STARTED_STATUS = -4
 
 
+_POUNCE_PARALLEL_EVAL_ENV = "POUNCE_NL_PARALLEL_EVAL"
+
+
+@contextlib.contextmanager
+def _serial_tape_eval_in_wave():
+    """Keep pounce's tape evaluations serial while a node wave runs (#1917).
+
+    A wave (``pounce.solve_nlp_batch``) runs its instances on the global Rayon
+    pool, each calling back into Python for its derivatives. On a large tape
+    (Jacobian >= 4096 nonzeros, >= 4096 rows, or >= 1024 Hessian pairs) pounce
+    evaluates those with a Rayon ``par_iter`` *inside* ``NlProblem``, holding
+    the GIL and the problem's ``RefCell`` borrow. A worker waiting in that
+    ``par_iter`` work-steals another wave instance, whose callback then reaches
+    the same shared tape while it is borrowed: ``PanicException: RefCell already
+    borrowed`` -> status -199 -> the node sentinel. Measured on the syngas hull
+    tape (1247 x 3141, a 48-instance wave of one problem, 6 interleaved runs per
+    arm, load ~13): unset, 13 of 48 instances panicked in 4 of 6 runs; at ``0``,
+    no panic in 6 of 6, and the wave took 13.2 +- 1.6 s against 12.6 +- 1.0 s.
+
+    The inner ``par_iter`` buys nothing here -- the wave already keeps the pool
+    busy with whole instances -- and pounce documents the serial and parallel
+    walks as bit-identical (``nl_reader.rs``, ``hess_flat_parallel``), so this
+    changes no number, only which thread computes it. pounce reads the variable
+    per evaluation; it is set only for the wave, while no other discopt thread
+    is evaluating, and restored afterwards. A value the user already set is
+    left alone: it is pounce's own measurement lever.
+
+    The real fix is upstream (pounce should not hold the GIL and a borrow across
+    a nested ``par_iter``); this keeps discopt's waves off that path meanwhile.
+    """
+    if _POUNCE_PARALLEL_EVAL_ENV in os.environ:
+        yield
+        return
+    os.environ[_POUNCE_PARALLEL_EVAL_ENV] = "0"
+    try:
+        yield
+    finally:
+        os.environ.pop(_POUNCE_PARALLEL_EVAL_ENV, None)
+
+
 def _solve_nlp_batch_by_deadline(
     solve_nlp_batch, problems: list, x0s: list, options: dict, deadline: float, **kw
 ) -> list:
@@ -35450,7 +35539,10 @@ def _solve_nlp_batch_by_deadline(
     starts once nothing is; an unstarted problem returns ``(x0, {"status": -4})``,
     the time-out status. Same idea as :func:`_solve_qp_batch_by_deadline`.
     """
-    cap = float(options.get("max_wall_time", 30.0))
+    # #2120: the per-instance cap is role-2; under ``deterministic`` only ``deadline``
+    # (role-1) bounds an instance.
+    _cap = _subsolve_wall_seconds(float(options.get("max_wall_time", 30.0)))
+    cap = math.inf if _cap is None else float(_cap)
     out: list = []
     width = _qp_batch_pool_width()
     for lo in range(0, len(problems), width):
@@ -35462,11 +35554,12 @@ def _solve_nlp_batch_by_deadline(
             )
             break
         chunk_opts = {**options, "max_wall_time": min(cap, left)}
-        out.extend(
-            solve_nlp_batch(
-                problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+        with _serial_tape_eval_in_wave():
+            out.extend(
+                solve_nlp_batch(
+                    problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+                )
             )
-        )
     return out
 
 

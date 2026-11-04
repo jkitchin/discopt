@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **The GAMS link reads a `discopt.opt` option file.** With `optfile = 1`, the link
+  reads GAMS's usual solver option file and accepts three keys: `tol` and
+  `constr_viol_tol`, forwarded to every POUNCE NLP the solve runs (as
+  `Model.solve(pounce_options=...)`), and `frontier_memory_mb`, the open-frontier memory
+  budget for that solve only. An unknown key, a bad value, a repeated key or a missing
+  file ends the job as `9 Setup Failure` with the offending line in the log, rather
+  than solving at defaults the job did not ask for. Previously the link logged that
+  `optfile` was ignored. See `docs/gams_solver_link.md`. Checked by
+  `python/tests/test_gams_option_file.py`.
 - **The browser page explains infeasibility.** A new seventh example, an infeasible
   two-mill blending LP, calls `compute_iis()`. Any `IISResult` a script leaves in a
   top-level variable is now drawn below the output: a summary (member counts, model
@@ -42,6 +51,41 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The in-house simplex certifies LPs with huge-but-finite bounds (#2125).** A bounded,
+  feasible multi-row LP with a finite variable bound in `[1e10, 1e20)` used to return
+  `SolveStatus.ERROR` from `lp_simplex.solve_lp`. Measured on the issue's GDPlib
+  `batch_processing` mbigm LPs at `u >= 3e16`: 7-8 of 40 agreed with HiGHS before, and
+  40 of 40 now. On a seeded multi-row sweep it was 72 of 192, and is now 192 of 192.
+  Three fixes, each held to the original LP's audit:
+  - the row audit lets a row's own slack absorb its rounding;
+  - a cold solve drops the huge sides and verifies the relaxation's answer;
+  - an active huge bound is fixed and certified from duals.
+
+  One case is still refused rather than certified: a vertex whose huge interior value
+  sits in a binding row. `DISCOPT_LP_HUGE_BOUND_RELAX=0` restores the previous engine
+  (bit-identical on 257 LPs measured); an unrecognized value is an error.
+
+- **The in-house MILP driver bounds nodes of translation-invariant masters
+  (#2115).** Its node bound (Neumaier-Shcherbina from the node dual) was `-inf`
+  whenever an open column -- a free variable arrives split `x+ - x-` -- had a
+  reduced cost zero only up to rounding. On MINLPLib `m6`'s final OA master (42 of
+  86 columns free) it abstained on 3194 of ~29k nodes, so without `pyscipopt` the
+  #2069 confirmation could not close the master and `m6` ended `feasible` at 60 s
+  (bound 62.83, optimum 82.2569). A new last rung of the ladder
+  (`lp/simplex/project.rs`) builds an enclosure of a nearby dual whose reduced
+  costs on those columns are exactly zero and evaluates the bound rigorously over
+  it. `m6` now certifies in 14.8 s and `m7` in 44 s with SCIP blocked; panel of 91
+  instances cert-clean, certified 63 -> 64. Opt-out for A/B only:
+  `DISCOPT_NS_PROJECT=0`.
+- **Rounding residue of `y` no longer passes as a real sub-`tol` reduced cost
+  (#2115 follow-up).** The #1595 re-pricing judged `d_j` only against its own
+  terms, so a single-entry open slack (`d_j = -a y_i`) always looked real however
+  small `y_i` was; the simplex entered it, refused the resulting `c^T d = 0` ray,
+  and returned `Numerical` for an LP its dual had solved (13 LPs on `m6`'s
+  master, 6 on `m7`'s). The noise test now also uses `||a_j||_1 ||y||_inf`, and
+  such columns go through the #1953 suspect verification. Panel cert-clean and
+  outcome-neutral; shipped as a verdict fix. Opt-out:
+  `DISCOPT_SUBTOL_NOISE_GLOBAL=0`.
 - **A convex node's NLP objective is no longer imported as its lower bound
   (#2067).** NLP-B&B (and the spatial loop's convex mode) used the objective of
   the node NLP's approximate minimiser as the node bound; it sits above the
@@ -79,6 +123,27 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The `pounce-solver` floor is now 0.15 (was 0.14)**, for both the core
+  dependency and the `pounce` extra. POUNCE 0.15.0 adds a declared-complementarity
+  driver, caps the slack-row inertia perturbation (`perturb_slack_max_rows`,
+  default 1000; models with at most 1000 inequality rows solve exactly as before),
+  and fixes a convex infeasibility test that could report a feasible LP infeasible
+  off an approximate Farkas ray. It still has no in-memory solve report, so
+  `_pounce_report.py` keeps its temporary-file route. CI already installs POUNCE
+  from git `main`, so the CI lanes do not change. The Pyodide wheel in
+  `crates/discopt-wasm/web/wheels/` is still 0.14.0; it is built in the POUNCE
+  repository and is updated separately.
+- **The open branch-and-bound frontier has a memory budget, on by default (#2092).**
+  `DISCOPT_FRONTIER_MEMORY_MB` (default 2048 MiB; `0` = no budget) becomes an open-node
+  cap for the native spatial kernel and the Python-tree loops. A search whose gap never
+  closes keeps every frontier node live, and on 1-hour runs that reached 28–42 GiB. A
+  solve with no `max_nodes` can therefore now end with `node_limit` once its frontier
+  reaches the budget (never before 1,000 open nodes), with the incumbent and a valid
+  bound; it stops, it never prunes. Raise the budget on a machine with more memory, or
+  set `0` for the old unbounded behaviour. The same release cuts what each open node
+  stores (measured: about 37% less frontier growth in the native kernel, 48% less per
+  open node in the Python tree): sibling nodes share their parent's box, and in the
+  Python tree also the parent solution and basis.
 - **`.nl` complementarity rows with flag 3 (both bounds) or flag 0 (free
   variable) are now imported (#2058)** as a box MCP and as `body == 0`
   respectively, instead of refused. Flags 1/2 are unchanged.

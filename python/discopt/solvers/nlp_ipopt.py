@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from discopt.modeling.core import Model
+from discopt.solver_tuning import subsolve_wall_options
 from discopt.solvers import NLPResult, SolveStatus
 
 logger = logging.getLogger(__name__)
@@ -449,6 +450,8 @@ def solve_nlp(
         )
 
     opts = dict(options) if options else {}
+    # #2120: role-2 per-solve wall cap -> role-1 remainder under ``deterministic``.
+    subsolve_wall_options(opts)
     opts.setdefault("print_level", 0)
 
     n = evaluator.n_variables

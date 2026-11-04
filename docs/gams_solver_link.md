@@ -224,9 +224,36 @@ Forwarded options: `reslim` (time limit), `optcr` (relative gap), `optca`
 resolution: the gap counts as closed when `|PB − DB| ≤ 1e-9·max(1, |PB|, |DB|)`
 or the `optcr` test holds. A literal zero could never certify an optimum at
 exactly 0, because a rigorous dual bound carries a small safety margin and the
-relative gap is undefined there. `iterlim`, `domlim`, `cutoff`, `cheat` and an
-option file (`optfile`) are not honoured; when set, the link says so in the log
-and listing instead of ignoring them silently.
+relative gap is undefined there. `iterlim`, `domlim`, `cutoff` and `cheat` are
+not honoured; when set, the link says so in the log and listing instead of
+ignoring them silently.
+
+### Option file (`discopt.opt`)
+
+With `m.optfile = 1` (or `option optfile = 1;`), the link reads GAMS's usual
+solver option file, `discopt.opt` in the working directory (`discopt.op2` for
+`optfile = 2`, and so on). The format is GAMS's: one `key value` or
+`key = value` per line, case-insensitive keys, `*` in column 1 for a comment.
+
+| Key | Meaning |
+|---|---|
+| `tol` | POUNCE NLP convergence tolerance, for every NLP the solve runs (node NLPs, incumbent polishing). Same as `Model.solve(pounce_options={"tol": ...})`. |
+| `constr_viol_tol` | POUNCE's absolute constraint-violation tolerance (discopt's default `1e-8`). |
+| `frontier_memory_mb` | Memory budget for the open branch-and-bound frontier, in MiB, for this solve only (default 2048, `0` = no budget). Same as `DISCOPT_FRONTIER_MEMORY_MB`. Reaching it ends the search like `nodlim` does, with the incumbent and a valid bound. |
+
+```text
+* discopt.opt: tighter NLP tolerances, and room for a large tree
+tol              1e-9
+constr_viol_tol  1e-9
+frontier_memory_mb 30000
+```
+
+Any other key, a bad value, a key set twice, or a missing file is refused. The
+job then ends with solve status `9 Setup Failure` / model status
+`14 No Solution Returned` and the offending line in the log, rather than running
+at defaults the job did not ask for. Options GAMS already has (`reslim`,
+`optcr`, `optca`, `nodlim`, `threads`) are set the GAMS way, not in the file.
+The log names what the file set.
 
 The solution written back includes every variable level, the equation levels
 computed from them, the dual bound as `objest` (whenever it is valid, even with

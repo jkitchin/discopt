@@ -717,10 +717,79 @@ fn ns_node_bound_enabled() -> bool {
     })
 }
 
+/// Whether the node NS bound may fall back to the #2115 exact dual projection
+/// (`DISCOPT_NS_PROJECT`, read once). **Default ON** since the #2115 graduation
+/// panel; `=0` opts out and restores the pre-#2115 ladder exactly. See
+/// [`node_ns_bound_projected`].
+///
+/// Graduated on the CLAUDE.md §5 panel
+/// (`discopt_benchmarks/scripts/issue2115_graduation_panel.py`: the
+/// 74-instance in-repo corpus plus 17 MINLPLib layout / OA-master instances, 60 s,
+/// default route, `pyscipopt` blocked as in the default install, arms interleaved;
+/// data `docs/dev/data/2115-ns-project/`). *Cert-clean*: 952 executed checks, no
+/// bound past a reference optimum or its incumbent, no certification lost, every
+/// incumbent through the false-primal screen. *Net-positive*: certified 63 -> 64
+/// (`m6`: `feasible` at 60 s, bound 62.83, -> `optimal` in 14.8 s), wall on the 7
+/// instances where it ran 223.6 s -> 161.6 s (`m7` 55.6 -> 44.3 s, `slay07m`
+/// 28.8 -> 25.2 s), node abstentions there 11 143 -> 7; corpus nodes -1.9 %.
+fn ns_project_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_NS_PROJECT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// #2115: the NS bound from `y` projected so that every open column whose reduced
+/// cost rides its open side by rounding noise has reduced cost **exactly** zero
+/// (`crate::lp::simplex::project`), evaluated rigorously over the projection's
+/// enclosure. The last resort of the `ns` ladder in [`node_ns_bound`]: the plain
+/// bound and the sign-and-scale repair have both abstained.
+///
+/// The class it targets is a translation-invariant master: free (split `x⁺ − x⁻`)
+/// or one-sided-open structural columns with zero cost whose reduced cost is zero
+/// only up to rounding. Scaling `y` cannot repair a `c_j = 0` column with the wrong
+/// noise sign, and a free column needs `r_j = 0` exactly, which scaling cannot
+/// produce. Valid for any `y`: weak duality holds for the exact `y*`, and the
+/// evaluation is a lower bound over every point of its enclosure.
+fn node_ns_bound_projected(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> {
+    use crate::lp::simplex::project::{ns_bound_enclosed, project_dual_closed, ProjectFail};
+    if !ns_project_enabled() {
+        return None;
+    }
+    let (m, n) = (ctx.m_w, ctx.n_w);
+    let pd = match project_dual_closed(y, ctx.c_w, ctx.csc_rc, m, n, l, |j| u[j] >= INF) {
+        Ok(pd) => pd,
+        Err(ProjectFail::Nothing) => return None,
+        Err(ProjectFail::Singular) => {
+            crate::profile::incr(crate::profile::Ctr::NodeNsProjectTry);
+            crate::profile::incr(crate::profile::Ctr::NodeNsProjectSingular);
+            return None;
+        }
+        Err(ProjectFail::TooLarge) => {
+            crate::profile::incr(crate::profile::Ctr::NodeNsProjectTry);
+            return None;
+        }
+    };
+    crate::profile::incr(crate::profile::Ctr::NodeNsProjectTry);
+    let g = ns_bound_enclosed(&pd, ctx.c_w, ctx.csc_rc, m, n, ctx.b_w, l, u);
+    if g.is_some() {
+        crate::profile::incr(crate::profile::Ctr::NodeNsProjectRescue);
+    }
+    g
+}
+
 /// #1953: the NS safe bound for a node from its unscaled dual `y`, or `None`.
 ///
-/// Each stage tries `y` and then its open-column repair
-/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step).
+/// Each stage tries `y`, then its open-column repair
+/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step), then the
+/// #2115 exact dual projection ([`node_ns_bound_projected`]), which handles the
+/// open columns the repair cannot (a free pair, or a `c_j = 0` column whose
+/// reduced cost is noise of the wrong sign).
 ///
 /// First over the node box. NS abstains when an open column's reduced-cost
 /// enclosure straddles zero (#1956) -- a basic surplus or cut slack, whose
@@ -741,10 +810,12 @@ fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> 
     let (cp, ri, vals) = ctx.csc_rc.raw();
     // NS from `y`, then from its open-column repair over the same box.
     let ns = |l: &[f64], u: &[f64]| {
-        ns_safe_bound_csc(y, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u).or_else(|| {
-            let y2 = scaled_dual_for_open_columns_csc(y, ctx.c_w, cp, ri, vals, ctx.n_w, l, u)?;
-            ns_safe_bound_csc(&y2, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
-        })
+        ns_safe_bound_csc(y, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
+            .or_else(|| {
+                let y2 = scaled_dual_for_open_columns_csc(y, ctx.c_w, cp, ri, vals, ctx.n_w, l, u)?;
+                ns_safe_bound_csc(&y2, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
+            })
+            .or_else(|| node_ns_bound_projected(ctx, y, l, u))
     };
     if let Some(g) = ns(l, u) {
         return Some(g);
