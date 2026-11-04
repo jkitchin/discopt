@@ -695,7 +695,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
 
 ### Phase 2 — the LP engine (R1-LP)
 
-- [ ] **P2.1 — Attribution of the L-panel losses.** Scope: `scratchpad`-style profile under
+- [x] **P2.1 — Attribution of the L-panel losses.** Scope: `scratchpad`-style profile under
   `docs/dev/data/highs-parity/p2.1/`. On the 3 R failures (25fv47, shell, standmps per
   P0.3's refresh) and the 10 largest R/H wall ratios: `samply`/`perf` on the Rust route,
   split into Python marshalling (`_highs_std_form`, `_solve_milp_simplex`), cold
@@ -706,6 +706,57 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   of those tasks re-written here from the data**. Kill: none (measurement) — but if
   > 50 % of the loss is Python marshalling, insert a bound-neutral marshalling task
   before P2.2 and record it.
+  **Result (2026-11-04): the loss is Python, not the simplex — the >50 % clause fired.**
+  Script `discopt_benchmarks/scripts/lp_route_profile.py` (each Rust LP call timed from
+  Python, its `DISCOPT_PROFILE` phase dump parsed), per-function split by `cProfile`;
+  data `docs/dev/data/highs-parity/p2.1/`. The 13 rows (`perold` + the 12 largest R/H
+  wall ratios of P0.3; the plan's "3 R failures" were pre-P0.3 names):
+
+  | instance | Rust route wall (s) | raw HiGHS | iters Rust / HiGHS | python (bucket) | Rust LP phases | root presolve, R only (s) | cert re-check R / H (s) | declared-box tightening R / H (s) |
+  |---|---|---|---|---|---|---|---|---|
+  | `scrs8` | 7.01 | 13 ms | 902 / 361 | **99%** | 1% | 4.84 | 1.93 / 2.08 | 1.09 / 1.12 |
+  | `stair` | 5.39 | 14 ms | 1293 / 291 | **99%** | 1% | 3.93 | 0.92 / 0.95 | 0.61 / 0.61 |
+  | `etamacro` | 2.18 | 9 ms | 1518 / 419 | **97%** | 3% | 1.36 | 1.12 / 1.11 | 0.54 / 0.54 |
+  | `perold` | 9.31 | 57 ms | 3684 / 1149 | **96%** | 4% | 4.73 | 0.00 / 1.39 | 1.00 / 0.89 |
+  | `25fv47` | 9.87 | 160 ms | 5123 / 2583 | **93%** | 7% | 4.75 | 4.97 / 5.00 | 2.56 / 2.46 |
+  | `standgub` | 2.38 | 4 ms | 118 / 34 | **100%** | 0% | 1.12 | 1.52 / 1.58 | 0.76 / 0.73 |
+  | `standata` | 2.05 | 4 ms | 118 / 34 | **100%** | 0% | 0.86 | 1.37 / 1.60 | 0.78 / 0.78 |
+  | `standmps` | 2.33 | 5 ms | 401 / 163 | **99%** | 1% | 0.87 | 1.78 / 1.66 | 0.95 / 0.95 |
+  | `shell` | 3.34 | 14 ms | 1127 / 325 | **99%** | 1% | 0.94 | 1.24 / 1.17 | 0.79 / 0.81 |
+  | `e226` | 1.11 | 8 ms | 549 / 335 | **98%** | 2% | 0.16 | 1.21 / 1.22 | 0.49 / 0.51 |
+  | `egout-ac` | 0.36 | 1 ms | 50 / 0 | **99%** | 1% | 0.01 | 0.13 / 0.13 | 0.11 / 0.10 |
+  | `dD2e` | 0.25 | 0 ms | 2 / 0 | **99%** | 1% | 0.00 | 0.00 / 0.00 | 0.01 / 0.01 |
+  | `avgas` | 0.31 | 0 ms | 9 / 6 | **100%** | 0% | 0.00 | 0.02 / 0.02 | 0.01 / 0.01 |
+
+  - **Every row's bucket is `python`, 93–100 % of the route's wall.** The Rust simplex
+    (all its phases) is 0–7 %; it takes 2–4× HiGHS's iterations, which matters only once
+    the Python overhead is gone.
+  - Three pieces make up most of the Python time (columns above): **root presolve**,
+    which the Rust route runs and the HiGHS route skips (`_highs_takes_pure_lp_milp`), up
+    to 4.8 s; the **post-solve certificate re-check** `_withhold_unverified_certificate`,
+    which rebuilds a generic affine evaluator expression by expression (`affine_of` /
+    `_combine`: 491 rows, 9,461 combines on `scrs8`), up to 5.0 s **on both routes**; and
+    the **declared-box nonlinear tightening** `_declared_box_tightening`, up to 2.6 s on
+    a purely linear model, **on both routes**. The last two are also most of the HiGHS
+    route's own overhead: the "H/H0 = 110×" of P0.3 (raw HiGHS 4–160 ms against a route
+    wall of 1–4 s).
+  - **Re-ranked P2 by expected gain (from this data):** **P2.0 (new, below) first** —
+    every L row is ≥ 93 % Python; then P2.2 (cold-start basis: Rust needs 2–4× HiGHS's
+    iterations) > P2.5 (degeneracy, same symptom) > P2.3 (hypersparse; FTRAN/BTRAN are
+    ≤ 3 % of wall here) > P2.4 (LP presolve; the route already presolves in Python).
+- [ ] **P2.0 — Python overhead on the pure LP/MILP route (bound-neutral; inserted by
+  P2.1).** Scope: `solver.py` (`_highs_takes_pure_lp_milp`, the Rust LP/MILP dispatch,
+  `_declared_box_tightening`), `modeling/core.py` (`_withhold_unverified_certificate`),
+  `_affine_evaluator.py`. (i) The Rust LP route skips root presolve exactly when the HiGHS
+  route does. (ii) The post-solve certificate re-check builds its evaluator for a model
+  that is already linear from the standard-form arrays the route used (or reuses them),
+  not by recombining expressions. (iii) `_declared_box_tightening` returns at once on a
+  model with no nonlinear term. Done: L/M/INF panels R and H arms, statuses,
+  certificates and objectives **identical** to P0.3 on every instance (counter printed),
+  and both routes' wall on the 13 rows above reduced by ≥ 50 % (median); the #1229 /
+  #1537 / #1611 / #1869 files and the route tests pass. Kill: any changed status,
+  certificate or bound → root-cause; a piece that cannot be made bound-neutral is dropped
+  from the task and recorded. Regime: bound-neutral (H arm exact; R arm exact).
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
@@ -931,7 +982,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | [ ] | | |
+| P2.1–P2.6 / D1 | P2.1 [x] | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening); P2.0 inserted first | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |

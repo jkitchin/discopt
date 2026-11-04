@@ -1,0 +1,14 @@
+[1/13] scrs8      wall   7.01s (HiGHS 0.013s) iters 902.0 vs 361 calls 1 -> python python=99% pricing=0% rust_other=0% refactor=0% ftran=0% update=0% dual_other=0%
+[2/13] stair      wall   5.39s (HiGHS 0.014s) iters 1293.0 vs 291 calls 1 -> python python=99% refactor=0% pricing=0% ftran=0% update=0% rust_other=0% dual_other=0%
+[3/13] etamacro   wall   2.18s (HiGHS 0.009s) iters 1518.0 vs 419 calls 1 -> python python=97% pricing=1% refactor=1% rust_other=0% ftran=0% update=0% dual_other=0%
+[4/13] perold     wall   9.31s (HiGHS 0.057s) iters 3684.0 vs 1149 calls 1 -> python python=96% refactor=1% pricing=1% update=0% ftran=0% rust_other=0% dual_other=0%
+[5/13] 25fv47     wall   9.87s (HiGHS 0.160s) iters 5123.0 vs 2583 calls 1 -> python python=93% pricing=3% refactor=2% rust_other=1% ftran=1% update=1% dual_other=0%
+[6/13] standgub   wall   2.38s (HiGHS 0.004s) iters 118.0 vs 34 calls 1 -> python python=100% rust_other=0% pricing=0% ftran=0% refactor=0% update=0% dual_other=0%
+[7/13] standata   wall   2.05s (HiGHS 0.004s) iters 118.0 vs 34 calls 1 -> python python=100% rust_other=0% pricing=0% refactor=0% ftran=0% update=0% dual_other=0%
+[8/13] standmps   wall   2.33s (HiGHS 0.005s) iters 401.0 vs 163 calls 1 -> python python=99% pricing=0% rust_other=0% refactor=0% ftran=0% update=0% dual_other=0%
+[9/13] shell      wall   3.34s (HiGHS 0.014s) iters 1127.0 vs 325 calls 1 -> python python=99% pricing=1% rust_other=0% refactor=0% ftran=0% update=0% dual_other=0%
+[10/13] e226       wall   1.11s (HiGHS 0.008s) iters 549.0 vs 335 calls 1 -> python python=98% pricing=0% refactor=0% rust_other=0% update=0% ftran=0% dual_other=0%
+[11/13] egout-ac   wall   0.36s (HiGHS 0.001s) iters 50.0 vs 0 calls 1 -> python python=99% rust_other=0% pricing=0% update=0% ftran=0% refactor=0% dual_other=0%
+[12/13] dD2e       wall   0.25s (HiGHS 0.000s) iters 2.0 vs 0 calls 1 -> python python=99% rust_other=1% pricing=0% ftran=0% update=0% refactor=0% dual_other=0%
+[13/13] avgas      wall   0.31s (HiGHS 0.000s) iters 9.0 vs 6 calls 1 -> python python=100% rust_other=0% update=0% pricing=0% ftran=0% refactor=0% dual_other=0%
+profiled=13
