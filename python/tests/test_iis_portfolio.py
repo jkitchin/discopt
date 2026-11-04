@@ -366,3 +366,36 @@ def test_portfolio_wait_is_validated():
         compute_iis(
             _two_iis_model(), include_integrality=True, portfolio=("ICB",), portfolio_wait="slow"
         )
+
+
+def test_flag_i_selects_the_integrality_alone_phase():
+    from discopt._iis_milp import _relaxes_columns
+
+    assert _relaxes_columns("ICB") and _relaxes_columns("CIB-rl")
+    assert not _relaxes_columns("ICB-i") and not _relaxes_columns("CIB-ri")
+    assert "ICB-i" in DEFAULT_PORTFOLIO and "ICB" in DEFAULT_PORTFOLIO
+    with pytest.raises(ValueError, match="order"):
+        _relaxes_columns("ICB-ii")
+
+
+def test_column_relaxation_drops_bounds_with_integrality_and_ICB_i_does_not():
+    """x0 + x1 + x2 = 1.5 over binaries plus integer columns in no row: the
+    column phase drops each irrelevant column's integrality AND bounds in the
+    same probe; integrality alone leaves the bounds to the bound phase. Both
+    finish at the same irreducible set."""
+    from discopt._iis_milp import milp_iis
+
+    m = dm.Model("cols")
+    x = m.binary("x", shape=(3,))
+    m.subject_to(x[0] + x[1] + x[2] == 1.5, name="half")
+    m.integer("y", shape=(8,), lb=0, ub=3)
+    m.minimize(0 * x[0])
+    a = milp_iis(m, order="ICB", sat_candidate=False)
+    b = milp_iis(m, order="ICB-i", sat_candidate=False)
+    assert (a.constraints, a.bounds, sorted(a.integrality)) == (
+        b.constraints,
+        b.bounds,
+        sorted(b.integrality),
+    )
+    assert sorted(a.integrality) == [0, 1, 2] and a.bounds == []
+    assert a.n_solves < b.n_solves  # bounds went with the integralities, not one by one
