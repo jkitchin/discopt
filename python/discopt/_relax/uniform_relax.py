@@ -439,6 +439,12 @@ class UniformRelaxation:
     # Exposed so the native-kernel producer (#764) can emit the box-independent term
     # descriptor (e.g. ``sqrt``) whose envelope the Rust kernel regenerates per box.
     univariate_atom_specs: list = dataclasses.field(default_factory=list)
+    # #2142: ``(w, var_idx, coeff, const, p)`` for every product factor
+    # ``w = (coeff*x_var + const)**p`` with a NEGATIVE integer ``p`` (the hull
+    # eps-perspective's ``1/yhat``) that ``_factor_value`` gave its full 4-row
+    # ``_emit_1d`` envelope. The native-kernel producer emits one ``AffinePow`` term
+    # per entry; the Rust kernel regenerates the same 4 rows per box.
+    affine_pow_kernel_specs: list = dataclasses.field(default_factory=list)
     # Affine-form product envelopes `w = A*B` emitted by `_emit_mccormick` — entries
     # `(w, dict(A.coeffs), A.const, dict(B.coeffs), B.const)`. Exposed so the
     # native-kernel producer (#764) can emit a `BlfTerm` per product (bilinear and the
@@ -458,6 +464,10 @@ class UniformRelaxation:
     # Each is valid in every sub-box of the build box and in no larger box. Every
     # entry is also in ``nonenvelope_rows``.
     root_box_rows: list = dataclasses.field(default_factory=list)
+    # #2142: indices of the vacuous ``0 <= 0`` rows a ``keep_row_shape=True`` build
+    # kept in place of rows ``add_row`` / ``_emit_mccormick`` dropped. Always empty
+    # for the default build.
+    shape_placeholder_rows: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -992,6 +1002,7 @@ class _Builder:
         flat_ub: np.ndarray,
         analysis: "Optional[_ModelAnalysisCache]" = None,
         track_aux_exprs: bool = False,
+        keep_row_shape: bool = False,
         skip_convex_lift: bool = False,
         abort_deadline: Optional[float] = None,
     ):
@@ -1085,6 +1096,7 @@ class _Builder:
         # ``(w, var_idx, coeff, const, p)``. GRADUATED default-ON (#1351);
         # ``DISCOPT_AFFINE_POWER_PARTITION=0`` restores the legacy unrefined path.
         self.affine_power_atom_specs: list[tuple[int, int, float, float, int]] = []
+        self.affine_pow_kernel_specs: list[tuple[int, int, float, float, int]] = []
         # #1351 defect 2: how many atoms the LAST partition-refinement pass found
         # attached to a PARTITIONED variable. ``0`` means that pass was structurally
         # inert -- refining the partition further cannot change a single row, so the
@@ -1111,6 +1123,17 @@ class _Builder:
         # value and verify no row cuts the lifted feasible point. Opt-in (each
         # entry costs a reconstruct) so the production build stays lean.
         self.track_aux_exprs = track_aux_exprs
+        # #2142: keep a vacuous ``0 <= 0`` row (no columns) wherever ``add_row``
+        # drops a non-finite / ``_BIG`` row and wherever ``_emit_mccormick`` skips
+        # one, so the row INDEX of everything after it does not depend on how large
+        # the box is. Only the native-kernel producer asks for this: it compares
+        # two builds row-for-row, and the kernel drops the same rows per box (it
+        # mirrors the ``_BIG`` rule). The LP is unchanged -- a vacuous row is no
+        # constraint. Other skips (``_emit_1d`` declining outright, a tangent
+        # whose ``f'`` fails ``_finite``) still change the row count; the producer
+        # declines on that as before. Indices land in ``shape_placeholder_rows``.
+        self.keep_row_shape = keep_row_shape
+        self.shape_placeholder_rows: list[int] = []
         self.aux_expr: dict[int, object] = {}
 
     # -- columns / rows ----------------------------------------------------- #
@@ -1197,11 +1220,19 @@ class _Builder:
         else:
             self.multilinear_map[key] = col
 
+    def skip_row(self) -> None:
+        """A row is dropped: under ``keep_row_shape`` hold its index (#2142)."""
+        if self.keep_row_shape:
+            self.shape_placeholder_rows.append(len(self.rows))
+            self.rows.append(({}, 0.0))
+
     def add_row(self, coeffs: dict[int, float], rhs: float) -> None:
         # Drop rows whose payload is not finite/usable — the interval floor stands.
         if not math.isfinite(rhs) or abs(rhs) >= _BIG:
+            self.skip_row()
             return
         if any(not (math.isfinite(c) and abs(c) < _BIG) for c in coeffs.values()):
+            self.skip_row()
             return
         self.rows.append(({j: float(c) for j, c in coeffs.items() if c != 0.0}, float(rhs)))
 
@@ -3284,6 +3315,7 @@ def _emit_mccormick(ctx: _Builder, w: int, la: LinForm, ba, lb_: LinForm, bb) ->
         (bH, aL, -aL * bH, -1.0),  # w <= aL*b + bH*a - aL*bH
     ):
         if not _finite(coef_a, coef_b, cc):
+            ctx.skip_row()
             continue
         # E = coef_a*a + coef_b*b + cc.  sign=+1 => w >= E (under); sign=-1 => w <= E
         # (over).  As a `<=` row:  (-sign)*w + sign*E <= 0.
@@ -3328,7 +3360,16 @@ def _factor_value(
     curv = _pow_curv(e, bb[0], bb[1])
     f = lambda t: float(t) ** e  # noqa: E731
     fp = lambda t: e * (float(t) ** (e - 1.0))  # noqa: E731
-    _emit_1d(ctx, aux, lb_base, bb[0], bb[1], f, fp, curv)
+    tight = _emit_1d(ctx, aux, lb_base, bb[0], bb[1], f, fp, curv)
+    # #2142: a NEGATIVE integer power of an affine single-original base (the hull
+    # eps-perspective's ``1/yhat``) is recorded for the native kernel, which
+    # regenerates the 4-row envelope per box (``EnvTerm::AffinePow``). Positive
+    # powers of a scaled/shifted base are deliberately not registered: they would
+    # route further models to the kernel, which #2142 did not measure.
+    if tight and float(e).is_integer() and int(e) < 0:
+        aff = ctx.affine_single_original(lb_base)
+        if aff is not None:
+            ctx.affine_pow_kernel_specs.append((aux, aff[0], aff[1], aff[2], int(e)))
     # A bare-original integer power factor ``x_i**e`` is itself a lifted monomial.
     bi = ctx.single_orig_col(lb_base)
     if bi is not None and float(e).is_integer() and int(e) >= 2:
@@ -5008,6 +5049,7 @@ def build_uniform_relaxation(
     disc_state: object = None,
     build_deadline: Optional[float] = None,
     abort_deadline: Optional[float] = None,
+    keep_row_shape: bool = False,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -5061,6 +5103,14 @@ def build_uniform_relaxation(
         carry the BUILD box, so they are valid in every sub-box of it and in no
         larger one; they are listed in ``UniformRelaxation.root_box_rows``. The
         native-kernel producer is the only caller (#1944).
+    keep_row_shape : bool, default False
+        #2142: hold a vacuous ``0 <= 0`` row in place of every row ``add_row``
+        drops (non-finite or ``>= _BIG`` payload) and every McCormick row
+        ``_emit_mccormick`` skips, recording the indices in
+        ``shape_placeholder_rows``. The LP is unchanged; only row indices are.
+        The native-kernel producer is the only caller: it compares two builds of
+        the same model at different boxes row-for-row. Default ``False`` is
+        byte-identical to before.
 
     Returns
     -------
@@ -5099,6 +5149,7 @@ def build_uniform_relaxation(
         analysis,
         skip_convex_lift=skip_convex_lift,
         abort_deadline=abort_deadline,
+        keep_row_shape=keep_row_shape,
     )
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
@@ -5344,9 +5395,11 @@ def build_uniform_relaxation(
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),
         univariate_atom_specs=list(ctx.univariate_atom_specs),
+        affine_pow_kernel_specs=list(ctx.affine_pow_kernel_specs),
         bilinear_linform_specs=list(ctx.bilinear_linform_specs),
         nonenvelope_rows=list(ctx.nonenvelope_rows),
         root_box_rows=list(ctx.root_box_rows),
+        shape_placeholder_rows=list(ctx.shape_placeholder_rows),
     )
 
 

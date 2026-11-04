@@ -16,11 +16,12 @@ and neither dominates. What stays pinned here:
 * the differential battery (no feasible point cut, no infeasible point admitted) on
   two nonlinear-equality shapes under hull;
 * hull solves of those shapes agree with big-M;
-* GDPlib ``cstr`` under hull is still declined by the native spatial kernel on the
-  default route: the 1/yhat products make the probe-box and real-box relaxations
-  differ in shape. Marked strict ``xfail`` (#2142) so a fix of that gap announces
-  itself. (The retired ``DISCOPT_HULL_LIFTED_PERSPECTIVE`` reached the kernel here
-  but failed its §5 panel; see the audit.)
+* GDPlib ``cstr`` under hull reaches the native spatial kernel on the default route
+  (#2142: the 1/yhat products used to make the probe-box and real-box relaxations
+  differ in shape; the producer now keeps row placeholders and the kernel has an
+  ``AffinePow`` term). The kernel solves the same relaxation, so cstr-hull's bound
+  does not move. (The retired ``DISCOPT_HULL_LIFTED_PERSPECTIVE`` reached the kernel
+  here by changing the rows and failed its §5 panel; see the audit.)
 """
 
 from __future__ import annotations
@@ -123,8 +124,20 @@ def test_hull_solve_agrees_with_big_m():
     assert r.objective == pytest.approx(ref.objective, abs=1e-5)
 
 
-def _cstr_hull_kernel_specs(monkeypatch, time_limit):
-    """Solve GDPlib cstr under hull and return every spec the kernel producer built."""
+class _ReachedProducer(Exception):
+    """Raised by the spy at the first producer call: the route is decided there."""
+
+
+def _cstr_hull_first_kernel_spec(monkeypatch):
+    """Solve GDPlib cstr under hull up to the solver's FIRST native-kernel spec build
+    and return that spec (``None`` = declined). The solve stops there: what happens
+    after is the kernel's search (or the Python tree's), not the routing under test.
+
+    The time limit is only a backstop. It used to be 5 s, which on this model ends
+    the solve before the producer is ever asked (measured 2026-11-04: no call at
+    5 s), so the strict xfail this replaced passed on the missing call as well as
+    on the decline.
+    """
     pytest.importorskip("pyomo")
     cstr = pytest.importorskip("gdplib.cstr")
     import discopt._relax.spatial_producer as sp
@@ -135,25 +148,26 @@ def _cstr_hull_kernel_specs(monkeypatch, time_limit):
     specs = []
 
     def spy(*a, **k):
-        out = orig(*a, **k)
-        specs.append(out)
-        return out
+        specs.append(orig(*a, **k))
+        raise _ReachedProducer
 
     monkeypatch.setattr(sp, "build_spatial_kernel_spec", spy)
     for name in dir(solver):
         if getattr(solver, name, None) is orig:
             monkeypatch.setattr(solver, name, spy)
     model = convert_pyomo_gdp(cstr.build_model()).model
-    model.solve(gdp_method="hull", time_limit=time_limit)
-    return specs
+    with pytest.raises(_ReachedProducer):
+        model.solve(gdp_method="hull", time_limit=300)
+    assert len(specs) == 1
+    return specs[0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#2142: the eps-perspective rows of cstr's rate law make the probe-box and "
-    "real-box relaxations differ in shape, so the native spatial kernel declines it",
-)
+@pytest.mark.slow  # ~13 s locally (presolve before the producer); ~3x that on CI
 def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
-    specs = _cstr_hull_kernel_specs(monkeypatch, 5)
-    assert specs, "the spec producer was never called"
-    assert specs[0] is not None, "the native kernel declined cstr under hull"
+    """#2142: on the real box the eps-perspective's ``yc**-1`` chains reach ``_BIG``
+    and ``_emit_mccormick`` drops 44 rows the probe box keeps; the producer now
+    holds placeholders for them and hands the ``yc**-1`` atoms to the kernel as
+    ``AffinePow`` terms, so the spec is accepted."""
+    spec = _cstr_hull_first_kernel_spec(monkeypatch)
+    assert spec is not None, "the native kernel declined cstr under hull"
+    assert int((spec["term_kind"] == 4).sum()) == 20
