@@ -50,7 +50,7 @@ import scipy.sparse as sp
 
 from discopt.solvers import MILPResult, SolveStatus
 from discopt.solvers.lp_milp_highs import MILP_PRESOLVE_RULE_OFF
-from discopt.solvers.milp_simplex import _INF, BoundList, _marshal_col_bounds
+from discopt.solvers.milp_simplex import _INF, BoundList, _marshal_col_bounds, _open_default_box
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,31 @@ def _require_highspy():
             "milp_solver='highs' needs the optional HiGHS backend: pip install highspy"
         ) from err
     return highspy
+
+
+def _hand_highs_col_bounds(bounds: Optional[BoundList], n: int) -> tuple[np.ndarray, np.ndarray]:
+    """The column bounds HiGHS is given: the declared ones with the default box opened.
+
+    ``DEFAULT_VARIABLE_BOUND = 9.999e19`` is the box of a column declared with no
+    bound and *means* no bound, but it is below both discopt's ``1e20`` sentinel and
+    HiGHS's own infinity, so it reached HiGHS as a finite bound. HiGHS computing at that
+    scale certified a FALSE optimum: on the clay0203 GDP master
+    (``python/tests/data/milp_default_box_clay0203_master.npz``, 6 of 30 columns at the
+    default box) ``solve_milp`` returned OPTIMAL with bound 41573.26 -- the primary solve
+    41595.42, the #1634 presolve-free cross-solve 41573.26, so the cross-check passed a
+    false bound -- against a true optimum of 41420.272 that the Rust engine, SCIP and
+    HiGHS over the opened box all reach (found by the highs-parity P0.4 master replay).
+    The Rust adapter has opened the box since the same instance's Rust false optimum
+    (:func:`~discopt.solvers.milp_simplex._open_default_box`); this is the same map.
+
+    Opening a side only relaxes the master, so every bound HiGHS returns stays valid
+    for the declared master and an infeasibility proof stays a proof; every point is
+    still verified against the DECLARED arrays (:func:`_verified_objective`). This
+    replaces #1917's narrower fix, which re-solved over the opened box only when the
+    presolve-free cross-solve failed to confirm and so missed a confirmed false bound.
+    """
+    lb, ub = _marshal_col_bounds(bounds, n)
+    return _open_default_box(lb, ub)
 
 
 def _to_highs_inf(arr: np.ndarray, highspy) -> np.ndarray:
@@ -615,7 +640,7 @@ def _solve_milp_once(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
-    lb, ub = _marshal_col_bounds(bounds, n)
+    lb, ub = _hand_highs_col_bounds(bounds, n)
     h = highspy.Highs()
     small_tol, large_tol = _highs_matrix_window(h, highspy)
     a_csc, row_lower, row_upper = _stack_rows(
@@ -767,28 +792,6 @@ def _verified_objective(kw: dict, x: Optional[np.ndarray]) -> Optional[float]:
     return float(c_arr @ x)
 
 
-def _default_box_opened(kw: dict) -> Optional[list[tuple[float, float]]]:
-    """``kw``'s column bounds with every default-box side opened, or ``None`` if
-    there is none.
-
-    A side at ``DEFAULT_VARIABLE_BOUND`` magnitude (``constants.py``: the box of a
-    column declared with no bound, *read* as no bound) and still below the ``1e20``
-    sentinel becomes ``+-_INF``; every other side is kept. The result describes a
-    relaxation of the master ``kw`` poses.
-    """
-    from discopt.constants import DEFAULT_VARIABLE_BOUND
-
-    c = np.asarray(kw["c"], dtype=np.float64).ravel()
-    lb, ub = _marshal_col_bounds(kw["bounds"], c.shape[0])
-    lo = (lb <= -DEFAULT_VARIABLE_BOUND) & (lb > -_INF)
-    hi = (ub >= DEFAULT_VARIABLE_BOUND) & (ub < _INF)
-    if not (np.any(lo) or np.any(hi)):
-        return None
-    lb = np.where(lo, -_INF, lb)
-    ub = np.where(hi, _INF, ub)
-    return list(zip(lb.tolist(), ub.tolist()))
-
-
 def _cross_check_presolve(
     primary: MILPResult, kw: dict, time_limit: Optional[float], t0: float
 ) -> MILPResult:
@@ -845,32 +848,6 @@ def _cross_check_presolve(
     diag.update(ran=True, cross_status=cross.status.value, cross_bound=cross.bound)
     primary.node_count += cross.node_count
     primary.iterations += cross.iterations
-    unconfirmed = cross.status != SolveStatus.INFEASIBLE if infeasible else cross.bound is None
-    relaxed_bounds = _default_box_opened(kw) if unconfirmed else None
-    if relaxed_bounds is not None:
-        left = None if time_limit is None else float(time_limit) - (time.time() - t0)
-        if left is None or left > 0.0:
-            # #1917: the presolve-free solve over the declared default box (the
-            # ``+-9.999e19`` sides of columns declared with no bound) is HiGHS
-            # computing at that scale, where it can call a feasible master
-            # infeasible: measured on GDPlib med_term_purchasing's master, presolve
-            # on OPTIMAL at -6797.54 in ~1 s, presolve off INFEASIBLE in 0.00 s,
-            # and every HiGHS master's bound was withdrawn. The same solve with
-            # those sides opened is a RELAXATION of the declared master, so its
-            # bound is a valid bound and its infeasibility proves the declared
-            # master empty; its points are verified against the declared arrays
-            # below, like any other. Nothing weaker than that is taken from it.
-            relaxed = _solve_milp_once(
-                time_limit=left, presolve=False, **{**kw, "bounds": relaxed_bounds}
-            )
-            diag.update(
-                default_box_opened=True,
-                relaxed_status=relaxed.status.value,
-                relaxed_bound=relaxed.bound,
-            )
-            primary.node_count += relaxed.node_count
-            primary.iterations += relaxed.iterations
-            cross = relaxed
     primary.wall_time = time.time() - t0
 
     points = []
@@ -1558,7 +1535,7 @@ def solve_milp_with_lazy_cuts(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
-    lb, ub = _marshal_col_bounds(bounds, n)
+    lb, ub = _hand_highs_col_bounds(bounds, n)
     h = highspy.Highs()
     small_tol, large_tol = _highs_matrix_window(h, highspy)
     a_csc, row_lower, row_upper = _stack_rows(
