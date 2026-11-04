@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="132" time="86.719" timestamp="2026-11-04T13:58:35.354469+00:00" hostname="vm"><testcase classname="python.tests.test_benders" name="test_two_stage_milp_optimum" time="0.102" /><testcase classname="python.tests.test_benders" name="test_maximize" time="0.068" /><testcase classname="python.tests.test_benders" name="test_annotated_continuous_lp" time="0.014" /><testcase classname="python.tests.test_benders" name="test_infeasible" time="0.070" /><testcase classname="python.tests.test_benders" name="test_dispatch_via_model_solve" time="0.360" /><testcase classname="python.tests.test_benders" name="test_requires_first_stage_variable" time="0.001" /><testcase classname="python.tests.test_benders" name="test_integer_recourse_rejected" time="0.001" /><testcase classname="python.tests.test_benders" name="test_nonlinear_recourse_dispatches_to_gbd" time="0.115" /><testcase classname="python.tests.test_benders" name="test_multidim_index_is_supported" time="0.072" /><testcase classname="python.tests.test_benders" name="test_multidim_extraction_names_the_right_columns" time="0.002" /><testcase classname="python.tests.test_benders" name="test_matches_monolithic_random" time="1.498" /><testcase classname="python.tests.test_benders" name="test_pounce_only_no_highspy" time="0.012"><failure message="discopt.solvers.milp_highs.HighsBackendUnavailable: milp_solver='highs' needs the optional HiGHS backend: pip install highspy">name = 'highspy'
+args = ({'__name__': 'discopt.solvers.milp_highs', '__doc__': 'HiGHS matrix-form MILP backend for the OA / GDP-LOA **master**...pt.solvers', '__loader__': &lt;_frozen_importlib_external.SourceFileLoader object at 0x7f3ebbd10110&gt;, ...}, None, None, 0)
+kwargs = {}
+
+    def _no_highspy(name, *args, **kwargs):
+        if name == "highspy" or name.startswith("highspy."):
+&gt;           raise ImportError("simulated: highspy unavailable")
+E           ImportError: simulated: highspy unavailable
+
+python/tests/test_benders.py:237: ImportError
+
+The above exception was the direct cause of the following exception:
+
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7f3ec0475ba0&gt;
+
+    def test_pounce_only_no_highspy(monkeypatch):
+        """Benders solves correctly with the ``highspy`` package unavailable."""
+        import builtins
+    
+        real_import = builtins.__import__
+    
+        def _no_highspy(name, *args, **kwargs):
+            if name == "highspy" or name.startswith("highspy."):
+                raise ImportError("simulated: highspy unavailable")
+            return real_import(name, *args, **kwargs)
+    
+        monkeypatch.setattr(builtins, "__import__", _no_highspy)
+        for mod in [m for m in list(__import__("sys").modules) if "highs" in m]:
+            monkeypatch.delitem(__import__("sys").modules, mod, raising=False)
+    
+&gt;       r = _two_stage_milp().solve(decomposition="benders", time_limit=30)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+python/tests/test_benders.py:244: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+python/discopt/modeling/core.py:6091: in wrapper
+    return fn(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/modeling/core.py:6213: in wrapper
+    result = fn(model, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/modeling/core.py:11161: in solve
+    result = solve_model(
+python/discopt/modeling/core.py:6213: in wrapper
+    result = fn(model, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13902: in wrapper
+    result = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13865: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13697: in wrapper
+    result = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13323: in wrapper
+    return fn(model, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13279: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13026: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13238: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13060: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:13167: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/debug/__init__.py:100: in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+python/discopt/solver.py:16352: in solve_model
+    return solve_benders(
+python/discopt/solvers/lp_backend.py:294: in wrapper
+    res = fn(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^
+python/discopt/decomposition/benders/solver.py:559: in solve_benders
+    init = _solve_master(with_eta=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/decomposition/benders/solver.py:387: in _solve_master
+    res = milp(
+python/discopt/solvers/milp_highs.py:466: in solve_milp
+    primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+python/discopt/solvers/milp_highs.py:613: in _solve_milp_once
+    highspy = _require_highspy()
+              ^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_highspy():
+        try:
+            import highspy
+        except ImportError as err:  # pragma: no cover - exercised via the selector
+&gt;           raise HighsBackendUnavailable(
+                "milp_solver='highs' needs the optional HiGHS backend: pip install highspy"
+            ) from err
+E           discopt.solvers.milp_highs.HighsBackendUnavailable: milp_solver='highs' needs the optional HiGHS backend: pip install highspy
+
+python/discopt/solvers/milp_highs.py:99: HighsBackendUnavailable</failure></testcase><testcase classname="python.tests.test_benders" name="test_multicut_matches_single_cut_optimum" time="0.101" /><testcase classname="python.tests.test_benders" name="test_multicut_backend_determinism" time="0.089" /><testcase classname="python.tests.test_benders" name="test_inout_stabilization_matches_optimum" time="0.086" /><testcase classname="python.tests.test_benders_soundness" name="test_bound_never_exceeds_true_optimum" time="1.597" /><testcase classname="python.tests.test_benders_soundness" name="test_no_false_optimal_certification" time="0.811" /><testcase classname="python.tests.test_benders_soundness" name="test_bound_active_recourse_is_sound[10.0]" time="0.081" /><testcase classname="python.tests.test_benders_soundness" name="test_bound_active_recourse_is_sound[1000.0]" time="0.053" /><testcase classname="python.tests.test_benders_soundness" name="test_bound_active_recourse_is_sound[1000000.0]" time="0.077" /><testcase classname="python.tests.test_benders_soundness" name="test_equality_coupling_suboptimal_primal_is_sound" time="0.082" /><testcase classname="python.tests.test_benders_soundness" name="test_unbounded_recourse_var_with_feasibility_cuts_is_sound" time="0.097" /><testcase classname="python.tests.test_benders_soundness" name="test_bound_is_valid_for_maximize" time="0.053" /><testcase classname="python.tests.test_benders_soundness" name="test_c3_unbounded_recourse_reported" time="0.030" /><testcase classname="python.tests.test_benders_soundness" name="test_dcs1_unbounded_recourse_withholds_bound" time="0.030" /><testcase classname="python.tests.test_benders_soundness" name="test_dcs1_bounded_recourse_below_eta_floor_withholds_bound" time="0.079" /><testcase classname="python.tests.test_benders_soundness" name="test_c4_progress_guard_no_spin" time="0.055" /><testcase classname="python.tests.test_gbd" name="test_quadratic_recourse_optimum" time="0.072" /><testcase classname="python.tests.test_gbd" name="test_dispatch_via_model_solve" time="0.073" /><testcase classname="python.tests.test_gbd" name="test_infeasible_recourse_uses_nogood_cut" time="0.112" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[0]" time="0.403" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[1]" time="0.301" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[2]" time="0.289" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[3]" time="0.311" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[5]" time="0.232" /><testcase classname="python.tests.test_gbd" name="test_matches_monolithic_convex[7]" time="0.302" /><testcase classname="python.tests.test_gbd" name="test_gbd_soundness_fuzz_vs_monolithic" time="10.384" /><testcase classname="python.tests.test_gbd" name="test_project_mu_sign_convention" time="0.507" /><testcase classname="python.tests.test_gbd" name="test_lagrangian_anchor_sound_under_inexact_recourse" time="0.103" /><testcase classname="python.tests.test_gbd" name="test_nonconvex_reports_no_bound" time="0.051" /><testcase classname="python.tests.test_gbd" name="test_maximize_concave" time="0.069" /><testcase classname="python.tests.test_gbd" name="test_requires_recourse_variable" time="0.001" /><testcase classname="python.tests.test_gbd" name="test_integer_recourse_rejected" time="0.001" /><testcase classname="python.tests.test_gbd" name="test_integer_first_stage_feasible_recourse" time="0.076" /><testcase classname="python.tests.test_gbd" name="test_integer_first_stage_infeasible_recourse_clean_error" time="0.053" /><testcase classname="python.tests.test_gbd" name="test_master_only_nonlinear_constraint" time="0.117" /><testcase classname="python.tests.test_gbd" name="test_free_recourse_variable" time="0.077" /><testcase classname="python.tests.test_gbd" name="test_linear_objective_nonlinear_constraint" time="0.142" /><testcase classname="python.tests.test_gbd" name="test_c1_transient_nlp_failure_retries" time="0.131" /><testcase classname="python.tests.test_gbd" name="test_c1_persistent_failure_never_certifies" time="0.030" /><testcase classname="python.tests.test_gbd" name="test_c1_recourse_failure_at_optimum_not_excluded" time="0.032" /><testcase classname="python.tests.test_gbd" name="test_c2_master_only_nonlinear_nonbinary_rejected" time="0.002" /><testcase classname="python.tests.test_gbd" name="test_gbd_master_satisfies_its_own_cuts_at_scale" time="0.107" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_degenerate_recourse_still_certifies" time="0.104" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_degenerate_recourse_converges_without_exhausting_the_budget" time="0.103" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_bound_relaxed_arm_unchanged" time="0.102" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_cut_soundness_panel[0]" time="0.335" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_cut_soundness_panel[1]" time="0.300" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_cut_soundness_panel[2]" time="0.175" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_cut_soundness_panel[3]" time="0.176" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_nonbinary_first_stage_explains_the_lost_certificate" time="0.109" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_nonbinary_first_stage_certifies_with_the_full_budget" time="0.197" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_floor_is_sound_with_unbounded_recourse_variables[unbounded_above]" time="0.411" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_lshaped_floor_is_sound_with_unbounded_recourse_variables[free]" time="0.157" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_stationary_tolerance_stays_below_the_nlp_dual_tolerance" time="0.001" /><testcase classname="python.tests.test_946_gbd_degenerate_multiplier" name="test_box_min_linear_closed_form" time="0.001" /><testcase classname="python.tests.test_986_decomposition_master_engine" name="test_benders_master_is_not_routed_by_nlp_solver" time="0.201" /><testcase classname="python.tests.test_986_decomposition_master_engine" name="test_lagrangian_master_is_not_routed_by_nlp_solver" time="0.067" /><testcase classname="python.tests.test_986_decomposition_master_engine" name="test_lagrangian_node_bounder_is_not_routed_by_nlp_solver" time="0.002" /><testcase classname="python.tests.test_986_decomposition_master_engine" name="test_benders_bound_never_exceeds_the_incumbent_it_certifies" time="2.505" /><testcase classname="python.tests.test_986_decomposition_master_engine" name="test_benders_gate_structured_recourse_still_reaches_optimal" time="1.662" /><testcase classname="python.tests.test_1611_benders_purge_certificate" name="test_single_cut_benders_certificate_matches_reported_bound[20]" time="3.829" /><testcase classname="python.tests.test_1611_benders_purge_certificate" name="test_single_cut_benders_certificate_matches_reported_bound[1000000]" time="3.528" /><testcase classname="python.tests.test_1611_benders_purge_certificate" name="test_limit_hit_master_incumbent_is_never_kept_as_bound" time="3.816" /><testcase classname="python.tests.test_1611_lagrangian" name="test_level_bundle_bound_matches_kelley" time="14.051" /><testcase classname="python.tests.test_1611_lagrangian" name="test_requested_lagrangian_is_not_replaced_by_bnb_fallback" time="9.463"><failure message="assert 323.6666666666671 == 331.6 ± 1&#10;  &#10;  comparison failed&#10;  Obtained: 323.6666666666671&#10;  Expected: 331.6 ± 1">def test_requested_lagrangian_is_not_replaced_by_bnb_fallback():
+        # max_nodes caps the Kelley iterations. 100, not 60: the masters moved to HiGHS
+        # (#1614 D-27), which breaks ties between optimal subproblem vertices differently
+        # from the in-house simplex, so Kelley's trajectory changes. Measured: both
+        # engines converge to 331.6; HiGHS reaches it between 60 and 70 iterations
+        # (330.40 at 60), the simplex by 60.
+        r = _gap().solve(decomposition="lagrangian", lagrangian_method="kelley", max_nodes=100)
+        # Pre-fix: status "optimal", bound_source "bnb_tree", node_count 484 &gt; max_nodes.
+        assert r.bound_source != "bnb_tree"
+        assert r.status != "optimal" or r.gap_certified
+        assert r.bound is not None
+        assert r.bound &lt;= _Z_IP + 1e-6
+&gt;       assert r.bound == pytest.approx(331.6, abs=1.0)
+E       assert 323.6666666666671 == 331.6 ± 1
+E         
+E         comparison failed
+E         Obtained: 323.6666666666671
+E         Expected: 331.6 ± 1
+
+python/tests/test_1611_lagrangian.py:67: AssertionError</failure></testcase><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_every_spelling_extracts_the_same_rows" time="0.016" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_benders_routes_linear_spellings_to_classical_benders[terms-terms]" time="0.175" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_benders_routes_linear_spellings_to_classical_benders[slice-terms]" time="0.189" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_benders_routes_linear_spellings_to_classical_benders[terms-sum(c*x)]" time="0.198" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_benders_routes_linear_spellings_to_classical_benders[terms-c@x]" time="0.160" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_benders_routes_linear_spellings_to_classical_benders[slice-c@x]" time="0.168" /><testcase classname="python.tests.test_1657_benders_array_sum_linearity" name="test_nonlinear_model_still_goes_to_gbd_and_says_why" time="0.175" /><testcase classname="python.tests.test_decomposition_solve_equivalence" name="test_benders_reproduces_monolithic_optimum" time="0.101" /><testcase classname="python.tests.test_decomposition_solve_equivalence" name="test_forced_none_matches_monolith" time="0.044" /><testcase classname="python.tests.test_decomposition_solve_equivalence" name="test_auto_dispatches_and_matches_monolithic" time="0.096" /><testcase classname="python.tests.test_decomposition_solve_equivalence" name="test_auto_falls_through_on_unstructured_model" time="0.015" /><testcase classname="python.tests.test_decomposition_solve_equivalence" name="test_auto_records_telemetry_when_enabled" time="0.076" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb1_bound_active_degenerate" time="0.078" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb2_recourse_pinned_at_own_bound" time="0.090" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb3_facility_with_feasibility_cut" time="0.105" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb4_continuous_two_stage" time="0.024" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb5_covering_with_lp_ip_gap" time="0.117" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb6_maximize_with_binding_coupling" time="0.094" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_cb7_globally_infeasible" time="0.007" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb1_quadratic_recourse" time="0.227" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb2_recourse_pinned_at_box_bound" time="0.126" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb3_tight_nonlinear_active_constraint" time="0.183" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb4_linear_equality_in_recourse" time="0.134" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb5_infeasible_recourse_no_good_cut" time="0.166" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb6_multibinary_nonlinear_coupling" time="0.314" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb7_maximize_concave" time="0.192" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_gb8_nonconvex_withholds_bound" time="0.136" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[0]" time="0.383" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[1]" time="0.226" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[2]" time="0.417" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[3]" time="0.419" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[4]" time="0.321" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[5]" time="0.315" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[6]" time="0.215" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_multicut_sound_and_deterministic[7]" time="0.368" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-0]" time="1.053" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-1]" time="0.607" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-2]" time="0.162" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-3]" time="2.023" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-4]" time="1.953" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[subgradient-5]" time="1.775" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-0]" time="0.611" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-1]" time="0.291" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-2]" time="0.378" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-3]" time="0.837" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-4]" time="0.803" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[bundle-5]" time="1.043" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-0]" time="0.498" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-1]" time="0.233" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-2]" time="0.215" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-3]" time="0.386" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-4]" time="1.843" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_rand_lagrangian_dual_is_valid_lower_bound[kelley-5]" time="1.831" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_c1_flaky_nlp_never_certifies_wrong[0.3]" time="0.072" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_c1_flaky_nlp_never_certifies_wrong[0.6]" time="0.080" /><testcase classname="python.tests.test_decomposition_adversarial" name="test_c1_flaky_nlp_never_certifies_wrong[0.9]" time="0.066" /></testsuite></testsuites>

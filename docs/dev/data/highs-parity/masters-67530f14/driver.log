@@ -5,3 +5,9 @@ end capture-decomp rc=0 2026-11-04T13:46:23Z
 start capture-gdp 2026-11-04T13:46:23Z
 end capture-gdp rc=1 2026-11-04T13:46:31Z
 start replay 2026-11-04T13:46:31Z
+end replay rc=1 2026-11-04T13:52:49Z
+start route 2026-11-04T13:52:49Z
+end route rc=0 2026-11-04T13:58:34Z
+start decomp-e2e 2026-11-04T13:58:34Z
+end decomp-e2e rc=0 2026-11-04T14:00:31Z
+DRIVER_DONE 2026-11-04T14:00:31Z

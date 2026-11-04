@@ -332,10 +332,22 @@ def cross_check(rec: dict, gap: float) -> list[str]:
 
     * a verified incumbent strictly below some engine's bound (that bound is false, or
       the incumbent is wrong -- either way the certificates contradict);
-    * both engines ``optimal`` with objectives farther apart than the gap allows.
+    * both engines ``optimal`` with objectives farther apart than the gap allows;
+    * an engine claiming ``infeasible`` (or ``unbounded``) while another returned a point
+      this script verified feasible (resp. a finite bound).
     """
     why = []
     incs = [(e, rec[e]["obj"]) for e in ENGINES if rec[e].get("verified")]
+    for e in ENGINES:
+        st = rec[e].get("status", "").lower()
+        if "infeasible" in st:
+            why += [f"{e} infeasible, {ei} verified a feasible point ({inc})" for ei, inc in incs]
+        if "unbounded" in st:
+            why += [
+                f"{e} unbounded, {f} bound {rec[f]['bound']}"
+                for f in ENGINES
+                if rec[f].get("bound") is not None
+            ]
     bounds = [(e, rec[e]["bound"]) for e in ENGINES if rec[e].get("bound") is not None]
     for ei, inc in incs:
         for eb, b in bounds:
@@ -362,6 +374,7 @@ def cmd_replay(a) -> int:
         kw.pop("time_limit", None)
         gap = float(kw.get("gap_tolerance", GAP))
         rec = {
+            "gap": gap,
             "master": os.path.basename(f)[:-4],
             "n": int(len(kw["c"])),
             "int": int(np.sum(kw.get("integrality", 0))),
@@ -434,6 +447,26 @@ def cmd_replay(a) -> int:
         flush=True,
     )
     return 0 if compared and not contradictions and not raised else 1
+
+
+def cmd_recheck(a) -> int:
+    """Re-apply :func:`cross_check` to a finished ``replay`` JSON (no solve)."""
+    run = json.loads(Path(a.json).read_text())
+    compared = contradictions = 0
+    for rec in run["rows"]:
+        if not all("bound" in rec.get(e, {}) for e in ENGINES):
+            continue
+        gap = float(rec.get("gap", GAP))
+        why = cross_check(rec, gap)
+        compared += len(ENGINES)
+        contradictions += bool(why)
+        for w in why:
+            print(f"CONTRADICTION {rec['master']}: {w}", flush=True)
+    print(
+        f"recheck: masters={len(run['rows'])} compared={compared} contradictions={contradictions}",
+        flush=True,
+    )
+    return 0 if compared and not contradictions else 1
 
 
 # ----------------------------------------------------------------------------- route
@@ -655,6 +688,8 @@ def main(argv=None) -> int:
     ro.add_argument("--out", required=True)
     ro.add_argument("--spans", default="0,3,6")
     ro.add_argument("--time-limit", type=float, default=30.0)
+    rc = sub.add_parser("recheck")
+    rc.add_argument("json")
     d = sub.add_parser("decomp-e2e")
     d.add_argument("--out", required=True)
     a = p.parse_args(argv)
@@ -663,6 +698,7 @@ def main(argv=None) -> int:
         "capture-decomp": cmd_capture_decomp,
         "capture-gdp": cmd_capture_gdp,
         "replay": cmd_replay,
+        "recheck": cmd_recheck,
         "route": cmd_route,
         "decomp-e2e": cmd_decomp_e2e,
     }[a.cmd](a)

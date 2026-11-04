@@ -104,6 +104,22 @@ def test_cross_check(mp):
         {"status": "SolveStatus.OPTIMAL", "obj": 11.0, "bound": 9.0, "verified": False},
     )
     assert any("both optimal" in w for w in mp.cross_check(far, 1e-4))
+    # One engine proves infeasible while the other returns a point the script verified.
+    split = _rec(
+        {"status": "SolveStatus.INFEASIBLE", "obj": None, "bound": None, "verified": False},
+        {"status": "SolveStatus.OPTIMAL", "obj": 3.0, "bound": 3.0, "verified": True},
+    )
+    assert any("infeasible" in w for w in mp.cross_check(split, 1e-4))
+    both_inf = _rec(
+        {"status": "SolveStatus.INFEASIBLE", "obj": None, "bound": None, "verified": False},
+        {"status": "SolveStatus.INFEASIBLE", "obj": None, "bound": None, "verified": False},
+    )
+    assert mp.cross_check(both_inf, 1e-4) == []
+    unb = _rec(
+        {"status": "SolveStatus.UNBOUNDED", "obj": None, "bound": None, "verified": False},
+        {"status": "SolveStatus.OPTIMAL", "obj": 3.0, "bound": 3.0, "verified": True},
+    )
+    assert any("unbounded" in w for w in mp.cross_check(unb, 1e-4))
 
 
 def test_decomp_master_env_forces_the_engine(monkeypatch):
