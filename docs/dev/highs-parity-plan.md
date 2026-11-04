@@ -794,6 +794,12 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     is a different session, not an interleaved control; the interleaved evidence is the
     two A/Bs ((i) and (ii) each against its own off arm). H's 0.477 is close to the bar,
     so (iii) is still done before P2.0 is checked off.
+  - **Retracted 2026-11-04 (§11): the H figure above.** Re-measured with P0.3's own
+    protocol -- 13 rows, R+H, **3 rounds**, `--load-gate 2.0`
+    (`p2.0/p20_done_13rows.json`): 26/26 verdicts identical to P0.3; median per-row wall
+    ratio **R 0.351** (passes) but **H 0.600** (does **not** pass the ≥ 50 % bar; per-row
+    0.47–1.05, the three ~0.08 s rows unchanged). The 1-round 0.477 was an optimistic
+    draw. P2.0 stays open on the H arm.
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
