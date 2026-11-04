@@ -90,6 +90,12 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # solve time (lowering identical), so solve ``--all``.
     "DISCOPT_GDP_CONFIG_FEAS_SAMPLE": ("hull", "big-m"),
 }
+#: Solve-time flags whose solver reports how often they acted: the
+#: ``solver_stats`` key ``gdp_baseline.py --worker`` records. ``--report`` counts the
+#: ON solves where it is non-zero, and fails if an OFF solve reports it.
+_FIRE_STATS: dict[str, str] = {
+    "DISCOPT_GDP_CONFIG_FEAS_SAMPLE": "gdp_config/feas_sampled",
+}
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
 _SOLVE_TIME_METHODS = frozenset({"enumerate"})
@@ -386,6 +392,28 @@ def report(args) -> int:
             f"{_f(w_off):>9s} {_f(w_on):>9s} {_f(med('node_count', arms['off'])):>9s} "
             f"{_f(med('node_count', arms['on'])):>9s}  {verdicts}"
         )
+    # A solve-time flag has no lowering to fingerprint, so the fire phase marks every
+    # instance; whether the flag acted is read from the solve's own counter where the
+    # solver reports one (CLAUDE.md section 6: count where the probe fired).
+    stat_key = _FIRE_STATS.get(args.flag)
+    if stat_key is not None:
+        on_rows = [r for r in solve if r["arm"] == "on"]
+        acted = sorted(
+            {
+                (r["instance"], r["method"])
+                for r in on_rows
+                if (r.get("stats") or {}).get(stat_key, 0) > 0
+            }
+        )
+        n_acted = sum((r.get("stats") or {}).get(stat_key, 0) > 0 for r in on_rows)
+        leaked = [r for r in solve if r["arm"] == "off" and (r.get("stats") or {}).get(stat_key)]
+        print(
+            f"\nacted ({stat_key} > 0): {n_acted} of {len(on_rows)} ON solves, "
+            f"{len(acted)} cells: {acted}"
+        )
+        if leaked:
+            print(f"   ERROR: {len(leaked)} OFF solves report {stat_key} > 0")
+            return 1
     shift = 10.0
     sgm = lambda ws: math.exp(statistics.fmean(math.log(w + shift) for w in ws)) - shift  # noqa: E731
     print(f"\nexecuted solves: {checks}")

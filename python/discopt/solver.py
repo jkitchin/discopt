@@ -20188,6 +20188,9 @@ def solve_model(
     # --- SubNLP primal heuristic state ---
     _subnlp_backend_fn = None
     _subnlp_calls = 0
+    # #2144: feasibility-first samples solved by the GDP configuration constructor
+    # (root + deferred), surfaced in solver_stats so a panel can see the flag fire.
+    _gdp_feas_sampled = [0]
     _subnlp_feasible = 0
     _subnlp_incumbent_updates = 0
     # Best incumbent value the integer-neighbourhood box search has already been
@@ -20911,11 +20914,13 @@ def solve_model(
                         evaluator=evaluator,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
+                        sample_stream=1,
                     )
                 except Exception:
                     _warn_gdp_config_raised("spatial deferred")
                     _gdd_results = []
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
+                _gdp_feas_sampled[0] += int(_gdd_stats.get("sampled", 0))
                 _gdd_improved = 0
                 for _x_gd, _obj_gd in _gdd_results:
                     _subnlp_feasible += 1
@@ -22458,8 +22463,10 @@ def solve_model(
             # found nothing" and "the gate never opened" — the §6 vacuity trap,
             # where an instrument that measured nothing reads as a clean result.
             logger.info(
-                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                "GDP config subNLP: %d sub-NLP solve(s) (%d feasibility-first samples), "
+                "%d feasible point(s)",
                 int(_cfg_stats.get("attempted", 0)),
+                int(_cfg_stats.get("sampled", 0)),
                 len(_cfg_results),
             )
             # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
@@ -22468,6 +22475,7 @@ def solve_model(
             # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
             # running, which is the exact reading that named this issue.
             _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+            _gdp_feas_sampled[0] += int(_cfg_stats.get("sampled", 0))
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
@@ -24899,6 +24907,8 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    if _gdp_feas_sampled[0]:
+        _solver_stats["gdp_config/feas_sampled"] = float(_gdp_feas_sampled[0])
     if _model_is_convex and _sp_safe_bound_on:
         _solver_stats["spatial/convex_safe_bound_nodes"] = float(_sp_safe_counts[0])
         _solver_stats["spatial/convex_safe_bound_abstained"] = float(_sp_safe_counts[1])
@@ -28222,6 +28232,9 @@ def _solve_nlp_bb(
     # one call per sub-NLP the constructor solved, one ``feasible`` per point it
     # returned, one ``incumbent_update`` per point actually injected here.
     _subnlp_calls = 0
+    # #2144: feasibility-first samples solved by the GDP configuration constructor
+    # (root + deferred), surfaced in solver_stats so a panel can see the flag fire.
+    _gdp_feas_sampled = [0]
     _subnlp_feasible = 0
     _subnlp_incumbent_updates = 0
 
@@ -28357,10 +28370,12 @@ def _solve_nlp_bb(
                         evaluator=evaluator,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
+                        sample_stream=1,
                     )
                 except Exception:
                     _warn_gdp_config_raised("nlp-bb deferred")
                 _subnlp_calls += int(_gdd_stats.get("attempted", 0))
+                _gdp_feas_sampled[0] += int(_gdd_stats.get("sampled", 0))
                 _gdd_improved = 0
                 for _gdd_x, _ in _gdd_found:
                     _subnlp_feasible += 1
@@ -28779,14 +28794,17 @@ def _solve_nlp_bb(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
                     logger.info(
-                        "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                        "GDP config subNLP: %d sub-NLP solve(s) (%d feasibility-first "
+                        "samples), %d feasible point(s)",
                         int(_cfg_stats.get("attempted", 0)),
+                        int(_cfg_stats.get("sampled", 0)),
                         len(_cfg_found),
                     )
                     # #1062: attempts, not feasible points -- see the spatial call
                     # site. This path is the one every convexity-certified MINLP
                     # takes, so it is where ``subnlp_calls=0`` was read from.
                     _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+                    _gdp_feas_sampled[0] += int(_cfg_stats.get("sampled", 0))
                     for _cfg_x, _ in _cfg_found:
                         _subnlp_feasible += 1
                         # Re-verified here by this path's own standard, exactly as
@@ -30050,6 +30068,9 @@ def _solve_nlp_bb(
         if _incumbent_extension_taken > 0.0
         else None
     )
+    if _gdp_feas_sampled[0]:
+        _ext_stats = dict(_ext_stats or {})
+        _ext_stats["gdp_config/feas_sampled"] = float(_gdp_feas_sampled[0])
     # #2067: counted so a run in which the safe-bound arm never fired is visible as
     # such (CLAUDE.md §6).
     if _model_is_convex and _safe_bound_on:
