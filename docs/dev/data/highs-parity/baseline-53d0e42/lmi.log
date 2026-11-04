@@ -1,0 +1,1 @@
+header {"load": [0.64599609375, 1.8740234375, 3.24169921875], "commit": "53d0e42", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 65
