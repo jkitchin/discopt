@@ -1,0 +1,13 @@
+[run 1/11] cvxnonsep_nsig30@default: highs cert=[True, True, True] nodes=[5810, 5899, 5810] bound=[130.61841392487696] wall=39.37304744999983  rust cert=[True, True, True] nodes=[5810, 5635, 5635] bound=[130.61841392487696] wall=40.039306852000664
+[run 2/11] portfol_roundlot@default: highs cert=[True, True, True] nodes=[198001, 198001, 198001] bound=[0.028290211931876332] wall=18.42068604799988  rust cert=[True, True, True] nodes=[198001, 198001, 198001] bound=[0.028290211931876332] wall=18.61736496499998
+[run 3/11] clay0303hfsg@nlpbb: highs cert=[True, True, True] nodes=[307, 307, 307] bound=[26669.10955160334] wall=33.616576484999314  rust cert=[True, True, True] nodes=[307, 307, 307] bound=[26669.10955160334] wall=33.61188496000068
+[run 4/11] cvxnonsep_nsig30@nlpbb: highs cert=[True, True, True] nodes=[165, 165, 165] bound=[130.61841392487696] wall=4.3456901010004  rust cert=[True, True, True] nodes=[165, 165, 165] bound=[130.61841392487696] wall=4.600617276999401
+[run 5/11] cvxnonsep_psig40r@nlpbb: highs cert=[True, True, True] nodes=[3, 3, 3] bound=[86.53912379936298] wall=1.3453854439994757  rust cert=[True, True, True] nodes=[3, 3, 3] bound=[86.54195788595828] wall=2.528465759000028
+[run 6/11] flay02m@nlpbb: highs cert=[True, True, True] nodes=[7, 7, 7] bound=[37.94733186412596] wall=5.161577115  rust cert=[True, True, True] nodes=[7, 7, 7] bound=[37.94733175370802] wall=3.2277975280003375
+[run 7/11] flay03m@nlpbb: highs cert=[True, True, True] nodes=[123, 123, 123] bound=[48.98979477939307] wall=21.15977750300044  rust cert=[True, True, True] nodes=[123, 123, 123] bound=[48.98979477939307] wall=20.97318942200036
+[run 8/11] m3@nlpbb: highs cert=[True, True, True] nodes=[47, 47, 47] bound=[37.79999967002439] wall=12.142156385000817  rust cert=[True, True, True] nodes=[47, 47, 47] bound=[37.79999967002439] wall=14.172735088000081
+[run 9/11] portfol_roundlot@nlpbb: highs cert=[False, False, False] nodes=[4621, 5077, 4691] bound=[0.028290214534392788] wall=60.39659948899953  rust cert=[False, False, False] nodes=[4609, 4609, 4579] bound=[0.028290214463147403] wall=60.344911666999906
+[run 10/11] syn05m@nlpbb: highs cert=[True, True, True] nodes=[5, 5, 5] bound=[837.7324566952958] wall=2.1463585060000696  rust cert=[True, True, True] nodes=[9, 9, 9] bound=[837.7324048351225] wall=2.1714168729995436
+[run 11/11] tls2@nlpbb: highs cert=[True, True, True] nodes=[137, 137, 137] bound=[5.299998533326574] wall=48.25171409500035  rust cert=[True, True, True] nodes=[189, 181, 181] bound=[5.29999999999368] wall=65.37875766700017
+run: rows=11 executed=66 checks=414 violations=0 errors=0
+elapsed 1567s

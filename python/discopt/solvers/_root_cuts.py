@@ -410,11 +410,24 @@ class _RootLP:
 def root_cuts_engine() -> str:
     """``DISCOPT_NLPBB_ROOT_CUTS_ENGINE``: who solves the root LP and yields the GMI basis.
 
-    ``highs`` (default) or ``rust`` (highs-parity P1.4: the in-house simplex, GMI cuts from
-    ``gomory_cuts_py`` at its vertex). Default-OFF until P1.4's Regime-2 panel shows the
-    Rust arm cert-clean and net-non-inferior; a value other than the two raises.
+    ``highs`` or ``rust`` (highs-parity P1.4: the in-house simplex, GMI cuts from
+    ``gomory_cuts_py`` at its vertex). Unset: ``highs`` when ``highspy`` imports, else
+    ``rust`` -- an install without HiGHS used to get NO root cuts here (#1514).
+
+    Kept a documented opt-out, not the default, on P1.4's panel (11 instance-configurations
+    where the stage fires, 3 reps, 60 s): cert-clean (414 checks, 0 violations, identical
+    certified set), bounds tighter-or-equal on 11/11, nodes 0.999x, but wall 1.078x against
+    the 1.05x bar (``tls2`` 48.3 -> 65.4 s). It becomes the default when the Rust root LP
+    is no slower (P2) or HiGHS stops being installed (P6). Other values raise.
     """
-    val = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "highs").strip().lower()
+    raw = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_ENGINE")
+    if raw is None:
+        try:
+            import highspy  # noqa: F401
+        except ImportError:
+            return "rust"
+        return "highs"
+    val = raw.strip().lower()
     if val not in ("highs", "rust"):
         raise ValueError(f"DISCOPT_NLPBB_ROOT_CUTS_ENGINE={val!r}: expected 'highs' or 'rust'")
     return val
@@ -470,11 +483,18 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     on the limit returns a non-optimal status and is reported as a declined LP
     (all-``None``), exactly as any other non-optimal status already was.
     """
+    a_ub = np.vstack([root.A_le] + ([np.array(cuts_a)] if cuts_a else []))
+    b_ub = np.concatenate([root.b_le] + ([np.array(cuts_b)] if cuts_b else []))
+    if root_cuts_engine() == "rust":
+        # No highspy needed on this arm (an install without it runs here, P1.4).
+        got = _solve_lp_rust(root, a_ub, b_ub, time_limit)
+        if got is None:
+            return None, None, None, None
+        x, duals, h = got
+        return _finish_root_lp(root, x, duals, h)
     import highspy
 
     inf = highspy.kHighsInf
-    a_ub = np.vstack([root.A_le] + ([np.array(cuts_a)] if cuts_a else []))
-    b_ub = np.concatenate([root.b_le] + ([np.array(cuts_b)] if cuts_b else []))
     n_le = a_ub.shape[0]
     n_eq = root.A_eq.shape[0]
     lp = highspy.HighsLp()
@@ -497,25 +517,24 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     lp.a_matrix_.start_ = np.array(starts, np.int32)
     lp.a_matrix_.index_ = np.array(idx, np.int32)
     lp.a_matrix_.value_ = np.array(vals, float)
-    if root_cuts_engine() == "rust":
-        got = _solve_lp_rust(root, a_ub, b_ub, time_limit)
-        if got is None:
-            return None, None, None, None
-        x, duals, h = got
-    else:
-        h = highspy.Highs()
-        h.setOptionValue("output_flag", False)
-        if time_limit is not None:
-            # Floor at a strictly positive value: HiGHS treats <= 0 as "no limit",
-            # which would restore the very overrun this bounds.
-            h.setOptionValue("time_limit", max(1e-3, float(time_limit)))
-        h.passModel(lp)
-        h.run()
-        if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
-            return None, None, None, None
-        sol = h.getSolution()
-        x = np.array(sol.col_value, float)
-        duals = np.abs(np.array(sol.row_dual, float))[:n_le]
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    if time_limit is not None:
+        # Floor at a strictly positive value: HiGHS treats <= 0 as "no limit",
+        # which would restore the very overrun this bounds.
+        h.setOptionValue("time_limit", max(1e-3, float(time_limit)))
+    h.passModel(lp)
+    h.run()
+    if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+        return None, None, None, None
+    sol = h.getSolution()
+    x = np.array(sol.col_value, float)
+    duals = np.abs(np.array(sol.row_dual, float))[:n_le]
+    return _finish_root_lp(root, x, duals, h)
+
+
+def _finish_root_lp(root: _RootLP, x, duals, h):
+    """The root LP's objective, cross-checked against the evaluator (both engines)."""
     # ``root.c0`` is the objective's constant term (see ``_RootLP.__init__``).
     # Omitting it here is what published a bound offset by that constant.
     obj = float(root.c @ x) + root.c0
@@ -822,7 +841,9 @@ def generate_root_cuts(
     ``lb``/``ub`` are the FBBT-tightened root bounds; ``is_int``/``is_bin``
     are flat masks. Raises :class:`RootCutsNotApplicable` on structural
     inapplicability (nonlinear objective) and ``ImportError`` for a missing
-    highspy — the caller catches exactly those and degrades to no-op (#1514).
+    highspy when ``DISCOPT_NLPBB_ROOT_CUTS_ENGINE=highs`` is forced — the caller
+    catches exactly those and degrades to no-op (#1514). Unset, a missing highspy
+    selects the Rust engine instead (P1.4).
 
     The returned ``cuts`` are only those BINDING at the final LP optimum (they
     are the ones carrying the bound); the rest served their purpose inside the

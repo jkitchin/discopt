@@ -648,7 +648,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   define a general LP class to carve out (CLAUDE.md §2), so R4 **stays HiGHS-first**
   (`_lp_dual` unchanged; the Rust simplex remains its third source). The 3 LPs join
   P2.1's profile list; re-open after P2 improves the Rust dual (P2.2–P2.5).
-- [ ] **P1.4 — R3: root-cut LP and GMI on the Rust simplex (flagged).** Scope:
+- [x] **P1.4 — R3: root-cut LP and GMI on the Rust simplex (flagged).** Scope:
   `_root_cuts.py` `_solve_lp` (`:410`), `separate_gmi` (`:532`), new
   `DISCOPT_NLPBB_ROOT_CUTS_ENGINE={highs,rust}` (default `highs`), Rust: a binding that
   solves the root LP cold, returns `x`, duals, basis and the GMI cuts via
@@ -666,6 +666,32 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (a better cold-start basis may fix it). Panel cert-clean but not non-inferior → flag
   stays OFF as state 3 ("HiGHS-less installs get this; HiGHS installs keep HiGHS cuts")
   until P6 forces the question. Regime: bound-changing.
+  **Result (2026-11-04): cert-clean, not non-inferior → state 3.** `gomory_cuts_py` takes
+  the standard-form vertex `z = [x, s]` and returns `coeffs·z ≥ rhs`; with `s = b_le −
+  A_le x` that is projected exactly to the x-space `≤` row the HiGHS separator emits, then
+  filtered identically (norm, dynamism 1e6, rhs safety 1e-9 relative, violation 1e-6).
+  - **Entry** (P0.5's 30 R3 fixtures, one GMI round per engine, gain re-measured by a
+    HiGHS re-solve with the cuts): on the 14 fixtures where HiGHS's round gains, the Rust
+    round closes ≥ 90 % of it on **13 (92.9 %)**; the miss is `syn05m` (3.98 vs 25.02);
+    Rust gains more on `m3` (0.25 vs 0) and `flay02m` (0.033 vs 0.0007).
+  - **Population:** the §21 panel's 153 instances no longer describe where the stage
+    runs: P0.5's capture shows it fires on **2** corpus instances by default (the convex
+    kernel/route answer the rest first) and 9 with them off (`@nlpbb`). Panel = those 11
+    instance-configurations (`p14-root-cuts/population.json`), 3 reps, 60 s, arms in
+    their own subprocesses, interleaved; script `root_cuts_engine_panel.py`.
+  - **Panel:** 66 executed, **414 bound/feasibility checks, 0 violations**, identical
+    certified set (10 certified in both, `portfol_roundlot@nlpbb` uncertified in both).
+    Bounds tighter-or-equal (1e-6 rel) on **11/11**, never looser; total nodes **0.999×**
+    (209,296 → 209,087); total wall **1.078×** (246.4 → 265.7 s), above the 1.05× bar,
+    almost all `tls2@nlpbb` (48.3 → 65.4 s, 137 → 181–189 nodes).
+  - **Outcome (the task's state-3 clause):** `DISCOPT_NLPBB_ROOT_CUTS_ENGINE` stays
+    `highs` on HiGHS installs; **unset with no highspy it now selects `rust`**: such an
+    install used to get no root cuts at all (#1514). Audit row added. The 781 file's
+    exact-enumeration soundness test passes on the Rust arm (0 unsound cuts); its two
+    HiGHS-plumbing tests (`…deadline_reaches_highs…`, the total-stall-rounds count) are
+    HiGHS-arm properties: the Rust deadline is pinned in
+    `test_highs_parity_p14_root_cuts_engine.py`, and the stall test's arithmetic assumes
+    non-improving rounds come last (Rust: 66 rounds, 63 improving, one mid-run).
 
 ### Phase 2 — the LP engine (R1-LP)
 
@@ -904,7 +930,7 @@ and is re-written by P4.1.**
 | P0.5 | [x] | 268 fixtures + 5 hard (R3 30 with cuts, R4 60, R6 178), 1.31 MB, HiGHS reproduces all 268 to 1e-9 | see git log |
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
-| P1.1–P1.4 | P1.1–P1.3 [x] (P1.3 killed) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs | see git log |
+| P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
 | P2.1–P2.6 / D1 | [ ] | | |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
