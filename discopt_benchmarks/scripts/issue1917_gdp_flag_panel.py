@@ -89,6 +89,14 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2143: acts on the heuristics' sub-NLPs at solve time (lowering identical):
     # solve ``--all``. big-m is in the panel because FBBT pins columns there too.
     "DISCOPT_SUBNLP_REDUCED": ("hull", "big-m"),
+    # #2143 stage 2: both act on root primal heuristics at solve time (lowering
+    # identical), so solve ``--all``. The memo/pump screen fires under either
+    # lowering; the warm-start reorder fires only on a model with a start (GDPlib
+    # instances carry none), so its GDP panel is a no-channel control; its real
+    # panel needs instances solved from a start (MINLPLib ``.gms`` with ``x.l``
+    # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
+    "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
+    "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

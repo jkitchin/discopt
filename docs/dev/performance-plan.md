@@ -14386,3 +14386,89 @@ mechanism.
 net-positive bar, recorded in the flag audit. The rationale: OFF discards a correct
 `Optimal` for a `Numerical` built on a pivot whose reduced cost is rounding residue.
 ON settles that column through the existing verification instead.
+
+## 105. #2143 stage 2: root heuristic budget hygiene; the in-root LOA proposer is falsified at 120 s (2026-11-04)
+
+**Context.** GDPlib `syngas` under `gdp_method="hull"` ends its 120 s with no incumbent.
+The #2143 diagnosis showed the `DISCOPT_SUBNLP_REDUCED` sub-NLP is not the gap: no root
+heuristic proposes a feasible disjunct configuration, and much of the budget goes to
+heuristics re-solving fixings already shown to fail. Probes and data for this section:
+`scratchpad/stage2/` of the session (`probe_memo_kill.py`, `probe_pump_kill.py`,
+`probe_tierb_entry.py`, `probe_loa_entry.py`, `e2e.py`). All runs: one probe at a time,
+`OMP_NUM_THREADS=1`, on a 4-core box shared with another session's panel (load1 1.5-2.9
+for the probes, 3.6-8.7 for the end-to-end pairs).
+
+**What shipped, default OFF** (rows in `flag-retirement-audit.md`):
+
+- `DISCOPT_HEUR_FIXING_SCREEN`. ILS keeps a per-call memo of failed fixings. A fixing
+  refuted by a box proof is skipped from any start. A bit-identical start that failed
+  on any status except `TIME_LIMIT` is skipped too. The budget is charged as if the
+  solve ran. The pump also screens each round with `subnlp`'s two refutations before
+  its NLP and repair.
+  - Kill experiments, legacy arm: 976 ILS sub-NLPs, of which 357 are refuted repeats
+    and 43 identical-start repeats. **None** of them later succeeded. Pump: 46
+    candidates, 9 screened, **0** of the screened verified.
+  - Converged failures are memoized by the whole start, not by the integers alone. A
+    local NLP's failure depends on its start, so an integer-keyed memo would skip
+    starts it has no evidence about. The sweep saw only 2 repeats of that kind
+    (`ex1225`, same integers after a converged failure, different start), and neither
+    succeeded. That is too few to justify the wider key.
+  - Effect on `syngas` LOA: ILS 5.3 s -> 0.56 s, with 23 of 24 poses skipped. LOA
+    certifies 4669.0235 in 46.6 s ON vs 83.1 s OFF. The LOA trajectory changed, 2
+    vs 3 iterations.
+  - Effect on `syngas` hull: the root pump took 0.25 s instead of 29.1 s.
+- `DISCOPT_ROOT_WARMSTART_FIRST`. The root warm-start `subnlp` is posed before the
+  other root heuristics. On `syngas` hull warm-started from the big-M optimum, the
+  incumbent 4669.0235 appeared at 50.1 s. The diagnosis had no incumbent at 120 s.
+  The run ends `feasible`: bound 4347.80 after 3 nodes.
+
+**End-to-end** (`gdp_baseline.py --worker` scored by `gdp_baseline.score`, all three
+#2143 flags ON vs all OFF, interleaved, 2 reps, 120 s):
+
+| instance | arm | rep 0 | rep 1 |
+|---|---|---|---|
+| `syngas` hull | OFF | no incumbent, bound 4347.80, 3 nodes, 120.1 s | same, 120.2 s |
+| `syngas` hull | ON | no incumbent, bound 4347.80, 3 nodes, 121.7 s | same, **144.8 s** |
+| `ex_633_trespalacios` hull | OFF | optimal 4.4603676, 75 nodes, 33.3 s | 75 nodes, 33.1 s |
+| `ex_633_trespalacios` hull | ON | optimal 4.4603676, 75 nodes, 29.6 s | 75 nodes, 28.3 s |
+| `modprodnet` hull | OFF | feasible 3592.924, bound 3594.53858, 57 nodes | 77 nodes |
+| `modprodnet` hull | ON | feasible 3592.924, bound 3594.53858, 57 nodes | 69 nodes |
+
+- Every incumbent passed the worker's Pyomo re-check: max relative violation 0.0 /
+  2.1e-25.
+- **No cell gained or lost an incumbent or a certificate.**
+- The 144.8 s is the overrun below, not solver math.
+
+**Falsified: Tier B, an LOA configuration proposer as a root heuristic.** Entry
+experiment (probe-level prototype, no product code): when the root configuration wave
+returns nothing, run `gdp.algorithms.loa.LOA` on the source GDP for the rest of the
+budget. Its first verified point would be mapped to the lowered model
+(`complete_initial_point`) and posed through `subnlp`.
+
+- Standalone LOA, with the memo, needs ~44 s to its first feasible subproblem:
+  - convexity pass 9.5 s;
+  - seed cuts 4.3 s;
+  - iterations 16.7 s and 13.2 s.
+- Inside the hull solve the wave ends at 61.7 / 62.5 s (2 reps). LOA then gets 55.3 /
+  54.5 s. Both reps reached iteration 3, the optimal configuration (master bound
+  4668.809), at 117.0 s, but its subproblem did not finish.
+- **No incumbent in either rep.**
+- The in-root LOA runs a smaller default subproblem cap (0.1 x 55 s against 12 s
+  standalone) and takes 3 iterations, against 2 standalone.
+
+Per the entry discipline Tier B was not built. What stands in its way is the time the
+hull root spends before any heuristic runs. That makes A3 below the prerequisite, not
+an alternative.
+
+**Leads, not results:**
+
+- **A3**: the root presolve cap. 30 s of `syngas` hull's 120 s goes to
+  `run_root_presolve` before the root LP, which bounds 4347.80 in every presolve
+  variant. This is bound-changing, so it needs its own §5 panel. It is also what would
+  give an in-root LOA proposer room (~83 s instead of ~55 s).
+- **Pump repair overrun.** `_repair_to_feasible`'s pounce QP is checked against the
+  deadline only between QPs. On `syngas` hull with the flags ON, the
+  NLP-relaxation-seeded second pump gets the time the first pump no longer wastes.
+  Its single repair then ran 19-21 s from ~5 s before the deadline: the solve ended
+  at 128-145 s of 120. This is pre-existing (the stage was simply not reached before)
+  and wants a cost-aware entry gate for the repair.

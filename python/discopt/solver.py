@@ -978,6 +978,37 @@ def _gdp_config_first_enabled() -> bool:
     )
 
 
+def _root_warm_start_first_enabled() -> bool:
+    """Whether the root poses its warm-start sub-NLP first (#2143).
+
+    ``DISCOPT_ROOT_WARMSTART_FIRST``.
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    The root already poses ONE ``subnlp`` from the modeler's start (GAMS ``x.l``
+    values, else the caller's ``initial_solution`` completed across the lowering),
+    but only after the disjunct-configuration constructor, both feasibility pumps,
+    integer local search and diving -- whatever those leave of the budget. ON poses
+    the same sub-NLP, with the same budget, before all of them, and the late site
+    then does not pose it again. Nothing else changes, and a model without a start
+    is untouched.
+
+    Measured on GDPlib ``syngas`` under hull (#2143 diagnosis), warm-started from the
+    big-M optimum: no incumbent at 120 s, although ``subnlp`` from that completed
+    start returns 4669.0235 in 1.5 s; the root heuristics ahead of it spent the
+    budget. **Kill criterion**: a panel instance with a start whose incumbent or
+    certificate is lost (the earlier incumbent changes what the stages after it
+    prune or improve).
+    """
+    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
     """Deadline for the #823 constructor: a bounded share of what is left.
 
@@ -20174,6 +20205,8 @@ def solve_model(
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
     _gdp_cfg_ran = False  # #1760: the root disjunct-configuration constructor runs once
+    # #2143: the root warm-start sub-NLP has been posed (it runs at most once).
+    _ws_subnlp_done = False
     # #1775 G6.2: the held-back rest of that constructor's grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` -- {"seed", "remaining", "ready_at"} -- else None.
     _gdp_cfg_deferred: Optional[dict] = None
@@ -22475,6 +22508,71 @@ def solve_model(
                         _subnlp_incumbent_updates += 1
                         logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
 
+        def _root_warm_start_subnlp() -> None:
+            """ONE root ``subnlp`` from the modeler's start, if there is one.
+
+            The start is the GAMS ``x.l`` point (``_gams_initial_seed``), else the
+            caller's ``initial_solution`` when the root multistart did not already
+            start from it. Posed at most once per solve (``_ws_subnlp_done``): at the
+            SubNLP site below, or first of all the root heuristics under
+            ``DISCOPT_ROOT_WARMSTART_FIRST`` (#2143).
+            """
+            nonlocal _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
+            nonlocal _ws_subnlp_done
+            from discopt._relax.primal_heuristics import subnlp as _ws_subnlp
+
+            _ws_subnlp_done = True
+            _gseed = _gams_initial_seed(model, lb, ub)
+            if (
+                _gseed is None
+                and initial_point is not None
+                and not _ws_root_nlp_started
+                and np.size(initial_point) == np.size(lb)
+            ):
+                _gseed = np.clip(np.asarray(initial_point, dtype=np.float64), lb, ub)
+            if _gseed is None:
+                return
+            _subnlp_calls += 1
+            _t_sn_g = time.perf_counter()
+            try:
+                _sn = _ws_subnlp(
+                    model,
+                    _gseed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    # Single root attempt (no loop): give it a fair budget
+                    # so it can converge to a feasible incumbent even if
+                    # preprocessing already consumed the deadline.
+                    time_budget=_role2_budget(min(3.0, float(time_limit))),
+                )
+            except Exception as _e:
+                logger.debug("subnlp (gams seed) raised: %s", _e)
+                _sn = None
+            _observe_heur_nlp(time.perf_counter() - _t_sn_g)
+            if _sn is not None:
+                _x_sn, _obj_sn = _sn
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
+
+        # #2143 (``DISCOPT_ROOT_WARMSTART_FIRST``, default OFF): the warm-start
+        # sub-NLP the SubNLP site below poses late, posed before every other root
+        # heuristic. The gates are that site's own.
+        if (
+            iteration == 0
+            and not _ws_subnlp_done
+            and _root_warm_start_first_enabled()
+            and _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _subnlp_calls < subnlp_max_calls
+            and not _root_optimum_proven()
+            and _root_heur_nlp_entry_ok(evaluator)
+        ):
+            _root_warm_start_subnlp()
+
         if _gdp_config_first_enabled():
             _root_gdp_config_primal()
 
@@ -22793,43 +22891,11 @@ def solve_model(
             # (it does not run when the LP relaxer supplies the root bound).
             if (
                 iteration == 0
+                and not _ws_subnlp_done
                 and _subnlp_calls < subnlp_max_calls
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
-                _gseed = _gams_initial_seed(model, lb, ub)
-                if (
-                    _gseed is None
-                    and initial_point is not None
-                    and not _ws_root_nlp_started
-                    and np.size(initial_point) == np.size(lb)
-                ):
-                    _gseed = np.clip(np.asarray(initial_point, dtype=np.float64), lb, ub)
-                if _gseed is not None:
-                    _subnlp_calls += 1
-                    _t_sn_g = time.perf_counter()
-                    try:
-                        _sn = _subnlp(
-                            model,
-                            _gseed,
-                            backend=_subnlp_backend_fn,
-                            nlp_options=subnlp_options,
-                            evaluator=evaluator,
-                            # Single root attempt (no loop): give it a fair budget
-                            # so it can converge to a feasible incumbent even if
-                            # preprocessing already consumed the deadline.
-                            time_budget=_role2_budget(min(3.0, float(time_limit))),
-                        )
-                    except Exception as _e:
-                        logger.debug("subnlp (gams seed) raised: %s", _e)
-                        _sn = None
-                    _observe_heur_nlp(time.perf_counter() - _t_sn_g)
-                    if _sn is not None:
-                        _x_sn, _obj_sn = _sn
-                        _subnlp_feasible += 1
-                        if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                            if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
-                                _subnlp_incumbent_updates += 1
-                                logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
+                _root_warm_start_subnlp()
 
             _cands_sn = [
                 (i, float(result_lbs[i]))
