@@ -6,3 +6,9 @@ header {"load": [2.0224609375, 2.20556640625, 2.58984375], "commit": "ff2029a", 
 [run 5/38] MIPLIB mik-250-20-75-5          {'R': ('feasible', 17075, -25062.999999999956, 'load>gate'), 'H': ('optimal', 159, -51532.0, 'load>gate'), 'H0': ('optimal', 71, -51532.00000000009, 'load>gate')}
 [run 6/38] MIPLIB neos-911970              {'R': ('feasible', 7, 226.5099999999999, 'load>gate'), 'H': ('optimal', 1077, 54.760000000209644, 'load>gate'), 'H0': ('optimal', 1370, 54.76000000000019, 'load>gate')}
 [run 7/38] MIPLIB mik-250-20-75-3          {'R': ('feasible', 13663, -39298.999999999985, 'load>gate'), 'H': ('optimal', 433, -52242.0, 'load>gate'), 'H0': ('optimal', 455, -52242.00000000018, 'load>gate')}
+[run 8/38] MIPLIB fiber                    {'R': ('feasible', 2751, 628445.84, 'load>gate'), 'H': ('optimal', 7, 405935.18, 'load>gate'), 'H0': ('optimal', 9, 405935.17999999196, 'load>gate')}
+[run 9/38] MIPLIB khb05250                 {'R': ('feasible', 1595, 111632934.0000011, 'load>gate'), 'H': ('optimal', 1, 106940226.0, 'load>gate'), 'H0': ('optimal', 1, 106940226.0, 'load>gate')}
+[run 10/38] MIPLIB nexp-50-20-1-1           {'R': ('feasible', 13173, 48.0, 'load>gate'), 'H': ('optimal', 1, 29.0, 'load>gate'), 'H0': ('optimal', 1, 29.0, 'load>gate')}
+[run 11/38] MIPLIB mik-250-20-75-2          {'R': ('feasible', 13047, -29920.99999999997, 'load>gate'), 'H': ('optimal', 91, -50767.999999997235, 'load>gate'), 'H0': ('optimal', 89, -50768.00000057641, 'load>gate')}
+[run 12/38] MIPLIB 22433                    {'R': ('optimal', 149, 21476.999999999996, 'load>gate'), 'H': ('optimal', 4, 21477.0, 'load>gate'), 'H0': ('optimal', 1, 21477.0, 'load>gate')}
+[run 13/38] MIPLIB nexp-50-20-4-2           {'R': ('feasible', 2295, 80.0, 'load>gate'), 'H': ('optimal', 1, 71.0, 'load>gate'), 'H0': ('optimal', 1, 71.0, 'load>gate')}

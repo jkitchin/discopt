@@ -116,3 +116,48 @@ def test_kind_filter(panel):
     assert panel._kind_reject("milp", 2) is None
     assert panel._kind_reject("inf", 2) is None
     assert panel._kind_reject("any", 0) is None
+
+
+# P0.3: the run JSON is written after every instance and an interrupted run can resume
+# (a container restart killed the first MIPLIB-38 baseline 13/38 in, losing every row).
+def _summ(name, panel, executed, wrong, wall_ok, routes=("rust",)):
+    return {"name": name, "panel": panel, "executed": executed, "incorrect_solves": wrong,
+            "wall_valid": wall_ok, "R": {"routes": list(routes)}}  # fmt: skip
+
+
+def test_tally_recomputes_totals_from_rows(panel):
+    rows = [
+        _summ("a", "L", 9, 0, True),
+        _summ("b", "L", 9, 1, False),
+        _summ("c", "INF", 9, 0, True, routes=("presolve",)),
+    ]
+    t = panel.tally(rows, ["R", "H", "H0"])
+    assert t["executed"] == 27
+    assert t["incorrect_count"] == 1
+    assert t["executed_by_panel"] == {"L": 18, "INF": 9}
+    assert t["walls_withheld"] == 1
+    assert t["presolve_answered"] == {"R": 1}
+
+
+def _args(**kw):
+    base = {k: None for k in ("manifest", "panel", "instances", "arms", "rounds",
+                              "time_limit", "gap", "max_nodes", "h0_subprocess",
+                              "load_gate")}  # fmt: skip
+    base.update({"arms": "R,H,H0", "rounds": 3, "time_limit": 20.0, **kw})
+    return base
+
+
+def test_resume_rows_appends_only_to_the_same_run(panel, tmp_path):
+    f = tmp_path / "run.json"
+    rows = [_summ("a", "M", 9, 0, True)]
+    panel._write_run(f, {"commit": "abc"}, _args(), rows, ["R"], complete=False)
+    assert panel.resume_rows(f, "abc", _args()) == rows
+    with pytest.raises(SystemExit, match="one commit"):
+        panel.resume_rows(f, "def", _args())
+    with pytest.raises(SystemExit, match="arguments differ"):
+        panel.resume_rows(f, "abc", _args(time_limit=5.0))
+    panel._write_run(f, {"commit": "abc"}, _args(), rows, ["R"], complete=True)
+    with pytest.raises(SystemExit, match="complete run"):
+        panel.resume_rows(f, "abc", _args())
+    with pytest.raises(SystemExit, match="does not exist"):
+        panel.resume_rows(tmp_path / "missing.json", "abc", _args())

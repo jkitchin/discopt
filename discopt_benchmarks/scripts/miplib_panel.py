@@ -225,6 +225,8 @@ def cmd_run(a, rest: list[str]) -> int:
         argv += ["--load-gate", str(a.load_gate)]
     if a.out:
         argv += ["--out", a.out]
+    if a.resume:
+        argv += ["--resume"]
     return P.main(argv + rest)
 
 
@@ -246,6 +248,7 @@ def main(argv=None) -> int:
     r.add_argument("--instances", default="")
     r.add_argument("--load-gate", type=float, default=None)
     r.add_argument("--out", default="")
+    r.add_argument("--resume", action="store_true")
     a, rest = p.parse_known_args(argv)
     if a.cmd == "run":
         return cmd_run(a, rest)

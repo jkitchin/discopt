@@ -502,15 +502,19 @@ def cmd_run(a) -> int:
     hdr = _header()
     hdr["load_gate"] = a.load_gate
     print("header", json.dumps(hdr), "arms", arms, "n", len(mem), flush=True)
-    rows, executed, incorrect = [], 0, 0
-    executed_by_panel: dict[str, int] = {}
-    walls_withheld = 0
-    presolve_rows: dict[str, int] = {}
+    rows: list[dict] = []
+    if a.resume:
+        rows = resume_rows(Path(a.out), hdr["commit"], vars(a))
+        print(f"resume: {len(rows)} instance rows already in {a.out}", flush=True)
+    done = {r["name"] for r in rows}
     for i, x in enumerate(mem, 1):
+        if x["name"] in done:
+            continue
         path = str(REPO / x["path"])
         inst = L.read_instance(path)
         oracle_status = x.get("oracle_status", "Optimal")
-        per = {arm: [] for arm in arms}
+        per: dict[str, list] = {arm: [] for arm in arms}
+        n_exec = n_wrong = 0
         load_start = os.getloadavg()[0]
         for rnd in range(a.rounds):
             for arm in arm_order(arms, rnd):
@@ -531,16 +535,15 @@ def cmd_run(a) -> int:
                     r["incorrect"] = _incorrect(r, x["oracle_objective"], inst.maximize, a.gap)
                 else:
                     r["incorrect"] = _incorrect_inf(r, oracle_status)
-                executed += 1
-                executed_by_panel[x["panel"]] = executed_by_panel.get(x["panel"], 0) + 1
-                incorrect += bool(r["incorrect"])
+                n_exec += 1
+                n_wrong += bool(r["incorrect"])
                 per[arm].append(r)
         load_end = os.getloadavg()[0]
         wall_ok = load_ok(a.load_gate, load_start, load_end)
-        walls_withheld += not wall_ok
         summ = {"name": x["name"], "panel": x["panel"], "oracle": x["oracle_objective"],
                 "oracle_status": oracle_status, "load": [load_start, load_end],
-                "wall_valid": wall_ok}  # fmt: skip
+                "wall_valid": wall_ok, "executed": n_exec,
+                "incorrect_solves": n_wrong}  # fmt: skip
         for arm, rs in per.items():
             ok = [r for r in rs if "skipped" not in r and "error" not in r]
             if not ok:
@@ -566,23 +569,69 @@ def cmd_run(a) -> int:
         print(f"[run {i}/{len(mem)}] {x['panel']:4s} {x['name']:24s} {brief}", flush=True)
         for arm in arms:
             if "presolve" in summ[arm].get("routes", ()):
-                presolve_rows[arm] = presolve_rows.get(arm, 0) + 1
                 print(f"  note {arm}: answered by root presolve, neither engine ran", flush=True)
             if summ[arm].get("incorrect"):
                 print(f"  !!! INCORRECT {arm}: {summ[arm]['incorrect']}", flush=True)
+        if a.out:  # after every instance, so a killed run loses at most one (CLAUDE.md §10)
+            _write_run(Path(a.out), hdr, vars(a), rows, arms, complete=False)
     hdr["load_end"] = os.getloadavg()
-    out = {"header": hdr, "args": vars(a), "rows": rows, "executed": executed,
-           "executed_by_panel": executed_by_panel, "walls_withheld": walls_withheld,
-           "presolve_answered": presolve_rows,
-           "incorrect_count": incorrect}  # fmt: skip
+    t = tally(rows, arms)
     if a.out:
-        Path(a.out).write_text(json.dumps(out, indent=1, default=str) + "\n")
-    for panel, n in sorted(executed_by_panel.items()):
+        _write_run(Path(a.out), hdr, vars(a), rows, arms, complete=True)
+    for panel, n in sorted(t["executed_by_panel"].items()):
         print(f"run: panel={panel} executed={n}", flush=True)
-    print(f"run: presolve_answered={presolve_rows}", flush=True)
-    print(f"run: executed={executed} incorrect_count={incorrect} walls_withheld={walls_withheld}"
-          f"/{len(rows)} load_end={hdr['load_end']}", flush=True)  # fmt: skip
-    return 0 if executed > 0 else 1
+    print(f"run: presolve_answered={t['presolve_answered']}", flush=True)
+    print(f"run: executed={t['executed']} incorrect_count={t['incorrect_count']} "
+          f"walls_withheld={t['walls_withheld']}/{len(rows)} load_end={hdr['load_end']}",
+          flush=True)  # fmt: skip
+    return 0 if t["executed"] > 0 else 1
+
+
+#: ``run`` arguments that must match for ``--resume`` to append to an earlier run.
+RESUME_KEYS = ("manifest", "panel", "instances", "arms", "rounds", "time_limit", "gap",
+               "max_nodes", "h0_subprocess", "load_gate")  # fmt: skip
+
+
+def tally(rows: list[dict], arms: list[str]) -> dict:
+    """Run totals, recomputed from the per-instance rows (so a resumed run counts the same)."""
+    by_panel: dict[str, int] = {}
+    presolve: dict[str, int] = {}
+    for r in rows:
+        by_panel[r["panel"]] = by_panel.get(r["panel"], 0) + r["executed"]
+        for arm in arms:
+            if "presolve" in r.get(arm, {}).get("routes", ()):
+                presolve[arm] = presolve.get(arm, 0) + 1
+    return {
+        "executed": sum(r["executed"] for r in rows),
+        "incorrect_count": sum(r["incorrect_solves"] for r in rows),
+        "executed_by_panel": by_panel,
+        "walls_withheld": sum(not r["wall_valid"] for r in rows),
+        "presolve_answered": presolve,
+    }
+
+
+def _write_run(path: Path, hdr: dict, args: dict, rows: list[dict], arms, complete: bool):
+    out = {"header": hdr, "args": args, "complete": complete, "rows": rows, **tally(rows, arms)}
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(out, indent=1, default=str) + "\n")
+    tmp.replace(path)
+
+
+def resume_rows(path: Path, commit: str, args: dict) -> list[dict]:
+    """The rows of an interrupted run, refusing one that measured different code or settings."""
+    if not path.exists():
+        raise SystemExit(f"--resume: {path} does not exist")
+    old = json.loads(path.read_text())
+    if old.get("complete"):
+        raise SystemExit(f"--resume: {path} is a complete run; nothing to resume")
+    if old["header"]["commit"] != commit:
+        raise SystemExit(f"--resume: {path} was measured at {old['header']['commit']}, "
+                         f"HEAD is {commit}; a resumed run must measure one commit")  # fmt: skip
+    diff = {k: (old["args"].get(k), args.get(k)) for k in RESUME_KEYS
+            if old["args"].get(k) != args.get(k)}  # fmt: skip
+    if diff:
+        raise SystemExit(f"--resume: run arguments differ from {path}: {diff}")
+    return old["rows"]
 
 
 # ----------------------------------------------------------------------------- tiny
@@ -745,6 +794,11 @@ def main(argv=None) -> int:
     r.add_argument("--gap", type=float, default=GAP)
     r.add_argument("--max-nodes", type=int, default=100_000_000)
     r.add_argument("--out", default="")
+    r.add_argument(
+        "--resume",
+        action="store_true",
+        help="append to an interrupted --out run (same commit and arguments)",
+    )
     r.add_argument(
         "--h0-subprocess",
         action="store_true",
