@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 import discopt.modeling as dm
-from discopt.ml.bounds import propagate_bounds, scaled_output_bounds
+from discopt.ml.bounds import LayerBounds, propagate_bounds, scaled_output_bounds
 from discopt.ml.formulations.full_space import _family_name
 from discopt.ml.network import Activation, NetworkDefinition
 from discopt.ml.scaling import OffsetScaling
@@ -29,6 +30,37 @@ _SMOOTH_FN = {
     Activation.TANH: dm.tanh,
     Activation.SOFTPLUS: dm.softplus,
 }
+
+
+@dataclass
+class ReluLayerRecord:
+    """One embedded ReLU layer, as the ideal-cut separator needs it.
+
+    ``binaries[j]`` is the indicator of neuron ``j`` (``None`` for a stable
+    neuron, which has none). ``in_lb``/``in_ub`` is the box of ``x`` the layer
+    reads; every Anderson cut is derived from it, and it is a *global* box (the
+    bounds the variables carry), so the cuts are globally valid.
+    """
+
+    layer_index: int
+    z: Variable
+    x: Variable
+    weights: np.ndarray
+    biases: np.ndarray
+    in_lb: np.ndarray
+    in_ub: np.ndarray
+    pre_lb: np.ndarray
+    pre_ub: np.ndarray
+    binaries: list
+
+
+def _find_binaries(m: Model, pfx: str, k: int, bounds: LayerBounds) -> list:
+    """Look up the per-neuron indicators ``{pfx}_q_{k}_{j}`` just created."""
+    by_name = {v.name: v for v in m._variables}
+    out = []
+    for j in range(len(bounds.pre_lb)):
+        out.append(by_name.get(f"{pfx}_q_{k}_{j}"))
+    return out
 
 
 class ReluBigMFormulation:
@@ -93,9 +125,13 @@ class ReluBigMFormulation:
                 name=_family_name(f"{pfx}_scale_in", net.input_size),
             )
             prev_z = scaled_in
+            in_lo, in_hi = s_lo, s_hi
         else:
             layer_bounds = propagate_bounds(net)
             prev_z = inputs
+            in_lo = np.asarray(lb, dtype=np.float64)
+            in_hi = np.asarray(ub, dtype=np.float64)
+        self.layer_bounds = layer_bounds
 
         for k, layer in enumerate(net.layers):
             n_out = layer.n_outputs
@@ -123,7 +159,7 @@ class ReluBigMFormulation:
             )
 
             if layer.activation == Activation.RELU:
-                z = self._add_relu_constraints(m, zhat, bounds.pre_lb, bounds.pre_ub, k, n_out, pfx)
+                z = self._relu_layer(m, zhat, prev_z, W, b, in_lo, in_hi, bounds, k)
             elif layer.activation == Activation.LINEAR:
                 z = zhat
             else:
@@ -138,6 +174,9 @@ class ReluBigMFormulation:
                 m.subject_to(z == act_fn(zhat), name=_family_name(f"{pfx}_act_{k}", n_out))
 
             prev_z = z
+            # The box the next layer consumes: this layer's post-activation
+            # interval bounds, which are exactly the bounds `z` carries.
+            in_lo, in_hi = bounds.post_lb, bounds.post_ub
 
         # Handle output scaling
         if self._scaling is not None:
@@ -155,6 +194,61 @@ class ReluBigMFormulation:
             outputs = prev_z
 
         return inputs, outputs
+
+    def _relu_layer(
+        self,
+        m: Model,
+        zhat: Variable,
+        prev_z: Variable,
+        W: np.ndarray,
+        b: np.ndarray,
+        in_lb: np.ndarray,
+        in_ub: np.ndarray,
+        bounds: LayerBounds,
+        k: int,
+    ) -> Variable:
+        """Encode one ReLU layer; returns its post-activation variable.
+
+        The hook subclasses override to change the per-neuron encoding
+        (:mod:`discopt.ml.formulations.relu_partition`). ``prev_z`` is the
+        layer's input variable, ``in_lb``/``in_ub`` the box it lives in (the
+        bounds ``prev_z`` carries), ``W``/``b`` the layer's affine map. Big-M
+        needs only the pre-activation bounds.
+        """
+        z = self._add_relu_constraints(
+            m, zhat, bounds.pre_lb, bounds.pre_ub, k, zhat.shape[0], self._prefix
+        )
+        self._record_relu_layer(k, z, prev_z, W, b, in_lb, in_ub, bounds)
+        return z
+
+    def _record_relu_layer(
+        self,
+        k: int,
+        z: Variable,
+        prev_z: Variable,
+        W: np.ndarray,
+        b: np.ndarray,
+        in_lb: np.ndarray,
+        in_ub: np.ndarray,
+        bounds: LayerBounds,
+    ) -> None:
+        """Remember a ReLU layer's handles for the Anderson cut separator."""
+        if not hasattr(self, "relu_layers"):
+            self.relu_layers: list[ReluLayerRecord] = []
+        self.relu_layers.append(
+            ReluLayerRecord(
+                layer_index=k,
+                z=z,
+                x=prev_z,
+                weights=W,
+                biases=b,
+                in_lb=np.asarray(in_lb, dtype=np.float64),
+                in_ub=np.asarray(in_ub, dtype=np.float64),
+                pre_lb=np.asarray(bounds.pre_lb, dtype=np.float64),
+                pre_ub=np.asarray(bounds.pre_ub, dtype=np.float64),
+                binaries=_find_binaries(self._model, self._prefix, k, bounds),
+            )
+        )
 
     @staticmethod
     def _add_relu_constraints(

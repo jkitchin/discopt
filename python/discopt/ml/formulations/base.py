@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING, Protocol, Union
 from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml.formulations.relu_partition import (
+    AndersonCutSeparator,
+    PartitionFn,
+    ReluExtendedFormulation,
+    ReluPartitionFormulation,
+)
 from discopt.ml.network import NetworkDefinition
 from discopt.ml.scaling import OffsetScaling
 from discopt.ml.tree import TreeEnsembleDefinition
@@ -20,14 +26,24 @@ class _StrategyProtocol(Protocol):
 
 
 _StrategyCls = Union[
-    type[FullSpaceFormulation], type[ReluBigMFormulation], type[ReducedSpaceFormulation]
+    type[FullSpaceFormulation],
+    type[ReluBigMFormulation],
+    type[ReducedSpaceFormulation],
+    type[ReluPartitionFormulation],
+    type[ReluExtendedFormulation],
 ]
 
 _STRATEGIES: dict[str, _StrategyCls] = {
     "full_space": FullSpaceFormulation,
     "relu_bigm": ReluBigMFormulation,
     "reduced_space": ReducedSpaceFormulation,
+    "relu_partition": ReluPartitionFormulation,
+    "relu_extended": ReluExtendedFormulation,
 }
+
+#: Strategies that encode ReLU neurons with indicator binaries, and so can carry
+#: Anderson et al.'s ideal cuts.
+_RELU_MILP = ("relu_bigm", "relu_partition", "relu_extended")
 
 
 class NNFormulation:
@@ -45,12 +61,28 @@ class NNFormulation:
         The trained network to embed.
     strategy : str
         Formulation strategy. One of ``"full_space"`` (smooth activations),
-        ``"relu_bigm"`` (ReLU via big-M MILP), or ``"reduced_space"``
-        (nested expressions, no intermediate variables).
+        ``"relu_bigm"`` (ReLU via big-M MILP), ``"relu_partition"`` (the
+        partition-based MILP of Tsay et al. 2021, between big-M and the convex
+        hull), ``"relu_extended"`` (the per-neuron convex hull of Anderson et al.
+        2020), or ``"reduced_space"`` (nested expressions, no intermediate
+        variables). The three ``relu_*`` MILPs have the same integer-feasible
+        set; their LP relaxations are ordered big-M <= partition <= extended.
     prefix : str
         Name prefix for created variables and constraints.
     scaling : OffsetScaling or None
         Optional input/output scaling.
+    n_partitions : int, optional
+        ``relu_partition`` only: partitions per unstable neuron (default 2;
+        clipped to its number of nonzero weights). ``1`` is big-M.
+    partition_strategy : str or callable, optional
+        ``relu_partition`` only: ``"equal_size"`` (default, weight-sorted
+        blocks), ``"contiguous"``, or ``f(weights, P) -> index arrays``; see
+        :func:`~discopt.ml.formulations.relu_partition.partition_indices`.
+    ideal_cuts : bool
+        ``relu_*`` strategies only. Build an
+        :class:`~discopt.ml.formulations.relu_partition.AndersonCutSeparator`
+        for the embedded neurons, available after :meth:`formulate` as
+        :attr:`cut_callback`; pass it as ``model.solve(cut_callback=...)``.
 
     Example
     -------
@@ -66,9 +98,33 @@ class NNFormulation:
         strategy: str = "full_space",
         prefix: str = "nn",
         scaling: OffsetScaling | None = None,
+        *,
+        n_partitions: int | None = None,
+        partition_strategy: str | PartitionFn | None = None,
+        ideal_cuts: bool = False,
     ) -> None:
         if strategy not in _STRATEGIES:
             raise ValueError(f"Unknown strategy '{strategy}'. Choose from: {list(_STRATEGIES)}")
+        if strategy != "relu_partition" and (
+            n_partitions is not None or partition_strategy is not None
+        ):
+            raise ValueError(
+                "n_partitions / partition_strategy apply only to strategy='relu_partition'"
+            )
+        if ideal_cuts and strategy not in _RELU_MILP:
+            raise ValueError(f"ideal_cuts=True needs a ReLU MILP strategy, one of {_RELU_MILP}")
+        if n_partitions is not None and int(n_partitions) < 1:
+            raise ValueError(f"n_partitions must be >= 1, got {n_partitions}")
+        self._strategy_kwargs: dict = {}
+        if strategy == "relu_partition":
+            self._strategy_kwargs = {
+                "n_partitions": 2 if n_partitions is None else n_partitions,
+                "partition_strategy": (
+                    "equal_size" if partition_strategy is None else partition_strategy
+                ),
+            }
+        self._ideal_cuts = bool(ideal_cuts)
+        self._cut_callback: AndersonCutSeparator | None = None
         self._model = model
         self._network = network
         self._prefix = prefix
@@ -100,9 +156,22 @@ class NNFormulation:
         if self._formulated:
             raise RuntimeError("formulate() has already been called")
 
-        strategy = self._strategy_cls(self._model, self._network, self._prefix, self._scaling)
+        strategy = self._strategy_cls(
+            self._model, self._network, self._prefix, self._scaling, **self._strategy_kwargs
+        )
         self._inputs, self._outputs = strategy.build()
+        if self._ideal_cuts:
+            self._cut_callback = AndersonCutSeparator(getattr(strategy, "relu_layers", []))
         self._formulated = True
+
+    @property
+    def cut_callback(self) -> AndersonCutSeparator:
+        """The Anderson ideal-cut separator (``ideal_cuts=True`` only)."""
+        if not self._ideal_cuts:
+            raise RuntimeError("cut_callback needs NNFormulation(..., ideal_cuts=True)")
+        if self._cut_callback is None:
+            raise RuntimeError("Call formulate() before accessing cut_callback")
+        return self._cut_callback
 
 
 class TreeFormulation:
