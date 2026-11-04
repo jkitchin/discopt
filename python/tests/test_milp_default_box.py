@@ -103,17 +103,22 @@ def test_loa_proposes_a_configuration_when_its_master_is_unbounded(monkeypatch):
 
 
 @pytest.mark.parametrize("cmir", ["1", "0"])
-def test_driver_withdraws_a_misvalued_incumbent_certificate(monkeypatch, cmir):
-    """#2136: the Rust driver must not certify on its own when handed the
-    default box as finite bounds.
+def test_driver_values_integral_nodes_at_their_point_not_their_bound(monkeypatch, cmir):
+    """#2136: the Rust driver must reach the optimum, and certify honestly, even
+    when handed the default box as finite bounds.
 
     `_open_default_box` (above) removes the trigger at the marshaling layer.
-    This test keeps the trigger on purpose, so the driver's terminal guard is
-    tested on its own: with the box closed, the node LP reported about -752904
-    for a vertex whose cᵀx is 41907.46. Every gap test ran against the LP
-    value, so the driver returned OPTIMAL at 41907.46 with bound -752904. It
-    must now withdraw that certificate, since the returned point's objective
-    disagrees with the value the tree closed its gap against."""
+    This test keeps the trigger on purpose so the driver itself is tested. With
+    the box closed, the NS safe bound of an integral node came out near -752904
+    for a vertex whose cᵀx is 41907.46, and the tree recorded that BOUND as the
+    incumbent value. It then pruned against a value no point attains, lost the
+    optimum, and returned OPTIMAL 41907.46 with bound -752904 (c-MIR on), or
+    ITERATION_LIMIT at 55187.8 (c-MIR off).
+
+    The driver now promotes an integral node with its own point's value and keeps
+    the safe bound only as a floor on the dual bound (#2067's
+    `import_results_with_point_values`). Measured after the fix: 41420.27 under
+    both settings, uncertified, with the bound at or below the optimum."""
     monkeypatch.setattr(ms, "_open_default_box", lambda lb, ub: (lb, ub))
     monkeypatch.setenv("DISCOPT_MILP_CMIR", cmir)
     c, a_ub, b_ub, bounds, integ = _load()
@@ -121,10 +126,9 @@ def test_driver_withdraws_a_misvalued_incumbent_certificate(monkeypatch, cmir):
     tol = 1e-6 * abs(_TRUE_OPT)
     if r.bound is not None:
         assert r.bound <= _TRUE_OPT + tol, f"dual bound {r.bound} crosses {_TRUE_OPT}"
+    assert r.objective == pytest.approx(_TRUE_OPT, rel=1e-6), (
+        f"incumbent {r.objective} misses the optimum {_TRUE_OPT}: pruned against a bound"
+    )
     if r.status == SolveStatus.OPTIMAL:
-        assert r.objective == pytest.approx(_TRUE_OPT, rel=1e-6), (
-            f"false OPTIMAL {r.objective} (true optimum {_TRUE_OPT})"
-        )
         assert r.bound is not None and r.objective - r.bound <= 1e-4 * abs(r.objective)
-    if r.x is not None:
-        assert np.max(a_ub @ np.asarray(r.x) - b_ub) <= 1e-6
+    assert np.max(a_ub @ np.asarray(r.x) - b_ub) <= 1e-6

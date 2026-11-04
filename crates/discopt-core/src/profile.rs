@@ -216,9 +216,6 @@ counters!(
     // flag exists for; a zero here means the lever never engaged and any timing
     // read off that run is measuring nothing (CLAUDE.md §6).
     ObjLatticeSubst,
-    // Caller-supplied MILP seeds that passed / failed `validate_seed_incumbent`.
-    MilpSeedValidated,
-    MilpSeedRefused,
     // #1953 node NS bound (`DISCOPT_MILP_NS_NODE_BOUND`). `NodeNsBound` counts node
     // LPs whose bound came from the NS safe bound, `NodeNsFbbt` the subset that
     // needed the FBBT-implied box after abstaining on the node box, and

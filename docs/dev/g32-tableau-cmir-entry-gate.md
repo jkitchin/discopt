@@ -340,15 +340,13 @@ came from a capture made before `2df0b0a`, with 6 columns at the ±9.999e19 defa
 After `2df0b0a` reopened that box at the marshaling layer, a fresh capture solves to
 41420.27 in Rust and HiGHS alike. The driver defect was still there, though: with the box
 re-closed on today's capture, the strong profile still returned `optimal` 41907.46 /
-−752904. The node LP reported ≈ −752904 for a vertex whose `cᵀx` is 41907. Every gap
+−752904. The node's NS safe bound (not the LP value; corrected in "#2136 review" below) was ≈ −752904 for a vertex whose `cᵀx` is 41907. Every gap
 test ran against the LP value, and only the returned objective was recomputed (#1296).
 
-**Fix:** `milp_driver.rs` withdraws the certificate (Feasible, bound −inf) when the
-returned objective and the tree's incumbent value disagree beyond `1e-6·max(1,|obj|)`.
-Counter: `MilpIncumbentMisvaluedDecert`. Test:
-`test_milp_default_box.py::test_driver_withdraws_a_misvalued_incumbent_certificate`. It
-keeps the closed box on purpose; it fails on the baseline build (false OPTIMAL, c-MIR on)
-and passes after. Checks: `cargo test -p discopt-core` (980 lib tests + integration), all
+**Fix (first version, now the backstop):** `milp_driver.rs` withdraws the certificate
+(Feasible, bound −inf) when the returned objective and the tree's incumbent value disagree
+beyond `1e-6·max(1,|obj|)`. Counter: `MilpIncumbentMisvaluedDecert`. That treated the
+symptom; the root fix is in "#2136 review" below, with the test that now pins it. Checks: `cargo test -p discopt-core` (980 lib tests + integration), all
 pass; `pytest -m smoke`: 4482 passed, 27 skipped; adversarial suite: 19 passed.
 
 ### Oracle fixed
@@ -465,7 +463,7 @@ over the 24 `gdp_parity` instances under `loa`. LOA's masters reach the Rust dri
 - **What was removed:** both flags, `bnb/coef_tighten.rs`, `lp/tableau_cmir.rs`, the driver
   wiring, the `milp_coef_tighten_csc_py` binding, phase `SepTabCmir`, the
   `MilpCoefTighten*` and tableau `SepCmir*` counters, `test_1917_milp_coef_tighten.py`, and
-  the probes that only toggled these flags. All of it is recoverable from `3eba9bf`.
+  the probes that only toggled these flags. All of it is recoverable from branch `archive/g32-coef-tighten-cmir` (commit `3eba9bf`).
 - **What was kept:** the captures workflow, `oracle.py`, `replay.py` (now a generic
   `--env`/`--fire-ctr` A/B), `cutgrid.py` and the Python prototypes.
 
@@ -493,3 +491,45 @@ only on the coefficient-tightened MTP master. On the default path, a larger budg
 only rsyn0830m materially (+0.06 at 1000 cuts). The "next experiment" proposed above is
 withdrawn with it. MTP's root gap with coef OFF is not a cut-budget problem: no budget
 moves it off the bare LP bound.
+
+## #2136 review (2026-11-04): the root cause, fixed in the tree
+
+The owner's review of #2148 traced the misvalued incumbent to its source. An integral node
+was promoted with `NodeResult::lower_bound` as its incumbent value. With
+`DISCOPT_MILP_NS_NODE_BOUND` on (the default), that is `min(NS safe bound, vertex value)`:
+a bound on the box, not the value of the point. On the closed default box the safe bound
+was −752904 for a vertex whose `cᵀx` is 41907.46. This section's earlier text says "the
+node LP reported ≈ −752904"; that is wrong. It was the NS safe bound.
+
+The tree pruned against that value, so the old run also *lost the optimum*, not only its
+certificate. The end-of-solve check corrected only the label.
+
+**Fix.** Each node evaluation now records the integral vertex's own objective (`c_wᵀx +
+obj_const` over the full working vector) as `NodeOutput::point_value`. The batch is
+imported through `import_results_with_point_values` (#2067), so the incumbent records the
+point's value, and the safe bound stays only as the node's bound and as a floor on the dual
+bound (`safe_fathom_floor`). The end-of-solve check stays as a backstop.
+
+**Measured on the closed-box clay0203 master** (`solve_milp`, 60 s):
+
+| | c-MIR on | c-MIR off |
+|---|---|---|
+| before | OPTIMAL 41907.46, bound −752904 (false) | ITERATION_LIMIT 55187.82 |
+| backstop only | Feasible 41907.46, bound −inf | Feasible 55187.82 |
+| root fix | 41420.27 (the optimum), uncertified, bound ≤ optimum | 41420.27, uncertified |
+
+Test: `test_milp_default_box.py::test_driver_values_integral_nodes_at_their_point_not_their_bound`.
+It fails on the backstop-only build (incumbent 55187.82) and passes after.
+
+**Effect on the default path.** The 34 captures were solved under {captured options,
+strong profile @ 2000 nodes}, with no wall clock, on the build before and after the root
+fix:
+- 56 of 68 solves are identical.
+- **0 statuses changed, 0 objectives changed, 0 certificates lost or gained.**
+- Six solves take more nodes: strip_packing big-M 239 → 315 (both profiles), constrained
+  layout LOA 145 → 159 (both), jobshop strong 7 → 9, strip_packing LOA 155 → 159, and
+  i1183 5045 → 5057 (node-limited both arms).
+- The rest differ only in LP iterations or bound digits.
+
+More nodes is the expected direction: the tree no longer prunes against a value no point
+attains, so these are prunings that were never valid.

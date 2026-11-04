@@ -2047,22 +2047,15 @@ fn solve_milp_node_search(
     }
 
     // --- Caller-seeded incumbent: validate, then inject before the search ---
-    // Runs on the pre-cut matrix (the original rows) with the presolve-tightened
-    // bounds (FBBT
-    // never cuts a feasible point, so a genuinely feasible seed survives the
-    // tightening). A seed that cannot be proven feasible is dropped silently —
-    // seeding is an optimization and must never be able to produce a false
-    // certificate. The two counters let a probe tell a refused seed from an
-    // accepted one (CLAUDE.md §6).
+    // Runs on the pre-cut matrix (all rows are original rows here) with the
+    // presolve-tightened bounds (FBBT never cuts a feasible point, so a
+    // genuinely feasible seed survives the tightening). A seed that cannot be
+    // proven feasible is dropped silently — seeding is an optimization and
+    // must never be able to produce a false certificate.
     if let Some(seed) = opts.initial_incumbent.as_ref() {
-        let validated =
-            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w);
-        crate::profile::incr(if validated.is_some() {
-            crate::profile::Ctr::MilpSeedValidated
-        } else {
-            crate::profile::Ctr::MilpSeedRefused
-        });
-        if let Some((sx, sobj)) = validated {
+        if let Some((sx, sobj)) =
+            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
+        {
             // A seed is an integer-feasible point like any other, so it goes to
             // the separator first: seeding an incumbent the caller's lazy
             // constraints exclude would prune the tree against a point that is
@@ -2747,6 +2740,7 @@ fn solve_milp_node_search(
         let csc_rc: &SparseCols = problem.original_matrix();
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
+        let mut point_values: Vec<f64> = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
 
         // --- per-node evaluation (parallelizable) ---
@@ -3084,6 +3078,7 @@ fn solve_milp_node_search(
                             // report `Feasible`, never a false `Optimal`.
                             out.result.lower_bound = INFEAS_SENTINEL;
                             out.result.is_feasible = false;
+                            out.point_value = f64::NAN;
                             gap_certified = false;
                             search_incomplete = true;
                         }
@@ -3093,6 +3088,7 @@ fn solve_milp_node_search(
                     }
                 }
             }
+            point_values.push(out.point_value);
             results.push(out.result);
         }
         if lazy_failed || node_failed {
@@ -3101,7 +3097,8 @@ fn solve_milp_node_search(
             // ask for. Stop, uncertified (CLAUDE.md §7).
             gap_certified = false;
             search_incomplete = true;
-            tm.import_results(&results);
+            tm.import_results_with_point_values(&results, &point_values)
+                .expect("one point value per node result");
             tm.process_evaluated();
             break 'search;
         }
@@ -3109,7 +3106,8 @@ fn solve_milp_node_search(
             unbounded = true;
             break 'search;
         }
-        tm.import_results(&results);
+        tm.import_results_with_point_values(&results, &point_values)
+            .expect("one point value per node result");
         tm.process_evaluated();
 
         // --- A12 RINS: one improvement attempt at the batch boundary ---
@@ -3344,15 +3342,17 @@ fn solve_milp_node_search(
         crate::profile::incr(crate::profile::Ctr::MilpBoundContradictedDecert);
         withdraw_certificate(&mut res);
     }
-    // #2136: every gap test, cutoff and the incumbent cap on the bound used the
-    // tree's incumbent VALUE (the node LP objective), while `res.obj` is the
-    // recomputed `cᵀx` of the point returned. They agree up to LP noise on any
-    // healthy solve. When they do not, the gap the tree closed is not the gap
-    // between the returned point and the returned bound, so nothing derived
-    // from it is a certificate. Measured: a clay0203 GDP master with columns
-    // at the ±9.999e19 default box handed in as finite bounds returned
-    // `Optimal` with obj 41907.46 (true optimum 41420.27) and bound -752904:
-    // the node LP reported ≈ -752904 for a vertex whose `cᵀx` is 41907.
+    // #2136 backstop: every gap test, cutoff and the incumbent cap on the bound
+    // use the tree's incumbent VALUE, while `res.obj` is the recomputed `cᵀx` of
+    // the point returned. The root cause of a disagreement -- integral nodes
+    // promoted with their NS safe bound as the incumbent value -- is fixed in the
+    // node evaluation (`NodeOutput::point_value`); measured before that fix, a
+    // clay0203 GDP master with its default-box columns closed returned `Optimal`
+    // 41907.46 / bound -752904 (true optimum 41420.27). Any remaining disagreement
+    // beyond LP noise means the gap the tree closed is not the returned point's,
+    // so the certificate is withdrawn. The bound goes too: a point BETTER than
+    // its recorded value can sit below the tree's bound, and this guard is not
+    // meant to reason about which direction it caught.
     if has_inc && incumbent_misvalued(res.obj, stats.incumbent_value) {
         crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
         withdraw_certificate(&mut res);
@@ -3481,6 +3481,13 @@ struct NodeOutput {
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
+    /// #2136: the objective of `result.solution` when `result.is_feasible` (an
+    /// integral, verified vertex); `NaN` otherwise. Imported through
+    /// `TreeManager::import_results_with_point_values`, so the incumbent records
+    /// the point's own value while `result.lower_bound` (the NS safe bound, which
+    /// can sit far below it) stays the node's bound and floors the global dual
+    /// bound via `safe_fathom_floor` (#2067).
+    point_value: f64,
     /// The wall-clock deadline had already passed when this node was dequeued, so
     /// its (expensive) LP solve was skipped entirely. The reduce drops it without
     /// importing a result, leaving the node Evaluated with its parent-inherited
@@ -3535,6 +3542,7 @@ fn solve_node(
             tightened: None,
             iters: 0,
             unbounded: false,
+            point_value: f64::NAN,
             deferred: true,
         };
     }
@@ -3589,6 +3597,7 @@ fn solve_node(
                 tightened: None,
                 iters: 0,
                 unbounded: false,
+                point_value: f64::NAN,
                 deferred: false,
             };
         }
@@ -3705,6 +3714,7 @@ fn solve_node(
         tightened,
         iters: sol.iters,
         unbounded: false,
+        point_value: f64::NAN,
         deferred: false,
     };
 
@@ -3909,6 +3919,23 @@ fn solve_node(
                     out.branch_hint = best;
                     out.sb_observations = sb_obs;
                 }
+            }
+            // #2136: an integral vertex's incumbent value is its own objective,
+            // `cᵀx` over the full working vector (exact whatever the slack costs),
+            // not `node_lp_bound`. With the NS bound on, `node_lp_bound` is
+            // `min(safe bound, vertex value)` -- a bound on the box, which on a
+            // closed default box measured -752904 for a vertex whose `cᵀx` is
+            // 41907 (clay0203 master). Recording the bound as the incumbent value
+            // pruned against a value no point attains and certified a gap that
+            // was not closed for the returned point.
+            if feasible {
+                out.point_value = sol
+                    .x
+                    .iter()
+                    .zip(ctx.c_w.iter())
+                    .map(|(x, c)| x * c)
+                    .sum::<f64>()
+                    + ctx.obj_const;
             }
             out.result = NodeResult {
                 node_id: id,

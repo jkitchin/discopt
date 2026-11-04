@@ -41,7 +41,7 @@ Both flags these probes were built to decide, `DISCOPT_RUST_MILP_COEF_TIGHTEN` a
 `DISCOPT_RUST_MILP_TABLEAU_CMIR`, were **retired by #2136** (gate doc, section "#2136
 decisions"). The probes that only toggled them (`prof2.py`, `grid2x2.py`, `rustgrid.py`,
 `replay_step1.py`, `replay_step2.py`, `nsentry.py`, `ct_seed.py`, `mk_rustcoef.py`) were
-deleted with them; they are in git history at `3eba9bf`. What remains is reusable:
+deleted with them; they are on branch `archive/g32-coef-tighten-cmir` (commit `3eba9bf`). What remains is reusable:
 
 | script | measures | gate-doc section |
 |---|---|---|
@@ -68,12 +68,13 @@ Both halves of the diagnosis are now resolved:
    predates `2df0b0a`, so 6 of its 30 columns carried the default box (±9.999e19) as
    finite bounds. With the box re-closed on today's capture, the driver still returned
    `optimal` 41907.46 / bound −752904 on the strong profile (true optimum 41420.27). The
-   node LP reported ≈ −752904 for a vertex whose `cᵀx` is 41907; every gap test ran
-   against the LP value, and only the returned objective was recomputed (#1296). The
-   driver now withdraws the certificate whenever the returned objective and the tree's
-   incumbent value disagree beyond `1e-6·max(1,|obj|)` (counter
-   `MilpIncumbentMisvaluedDecert`; `test_milp_default_box.py::
-   test_driver_withdraws_a_misvalued_incumbent_certificate`, which fails before). On a
+   node's NS safe bound was ≈ −752904 for a vertex whose `cᵀx` is 41907, and the tree
+   recorded that bound as the incumbent value; every gap test and cutoff ran against it.
+   The root fix promotes an integral node with its own point's value
+   (`import_results_with_point_values`), and the end-of-solve check
+   (`MilpIncumbentMisvaluedDecert`) stays as a backstop. The run now reaches the optimum
+   (`test_milp_default_box.py::test_driver_values_integral_nodes_at_their_point_not_their_bound`,
+   which fails before). On a
    capture made after `2df0b0a` the trigger is gone: Rust and HiGHS both return 41420.27.
 2. **The oracle** is `oracle.py`: the primal reference is the best *independently verified*
    point across both arms and HiGHS; an arm's `optimal` must have its bound within gap of
