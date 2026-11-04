@@ -354,7 +354,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     status, every optimal row's node count equal to a baseline round** — the baseline
     describes HEAD on those panels (MIPLIB not re-checked). `cargo test` 980 + smoke 4482
     passed after the sync.
-- [ ] **P0.4 — Master baselines (R2a/R2b/R2c).** Scope: new
+- [x] **P0.4 — Master baselines (R2a/R2b/R2c).** Scope: new
   `discopt_benchmarks/scripts/master_parity_panel.py`. (i) R2a: replay the captured
   masters (`python/tests/data/oa_masters/*.npz`, `issue2069/clay0203_master.mps.gz`,
   `milp_default_box_clay0203_master.npz`) through `milp_highs.solve_milp` and
@@ -368,6 +368,55 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   comparison counter ≥ number of masters × 2 and 0 objective disagreements where both
   certify. Kill: a disagreement where both certify → correctness defect, P0-blocking as
   in P0.3. Regime: measurement.
+  **Result (2026-11-04): the kill fired once, was fixed, and the re-run is clean.**
+  Harness `discopt_benchmarks/scripts/master_parity_panel.py` (`fixtures`, `capture-decomp`,
+  `capture-gdp`, `replay`, `recheck`, `route`, `decomp-e2e`). `DISCOPT_DECOMP_MASTER` is
+  in `lp_backend.py:get_decomposition_master_solver` (test-only lever, default
+  unchanged, a typo raises). Data: `docs/dev/data/highs-parity/masters-67530f14/`
+  (pre-fix) and `masters-6351f589/` (post-fix).
+  - **Kill fired (pre-fix replay, 3050 masters, 6100 compared, 1 contradiction):**
+    `milp_highs.solve_milp` certified OPTIMAL with bound 41573.26 on
+    `milp_default_box_clay0203_master` against the 41420.272 the Rust engine verifies
+    to 1e-14. Cause: HiGHS was handed the default box `±9.999e19` as a finite bound;
+    both the primary solve and the #1634 cross-solve were wrong, so the cross-check
+    confirmed it. Filed as jkitchin/discopt#2146 and fixed (`6351f589`): every HiGHS
+    master opens the default box, as the Rust adapter already did. 999 of the 3042
+    captured decomposition masters carry that box, so this is a default-path class
+    (convex route + decomposition masters); the fix changed exactly 1 HiGHS answer
+    out of 3050.
+  - **Post-fix replay: 3103 masters (8 fixtures + 3042 decomposition + 53 GDP),
+    compared 6206 (≥ 2 × 3103), contradictions 0, raised 0.** Each engine's point is
+    verified by the script; every verified incumbent is held against every bound;
+    infeasible/unbounded splits are checked.
+
+    | set (n) | optimal H / S | total wall H / S | SGM wall S/H (both optimal) |
+    |---|---|---|---|
+    | R2a fixtures (8) | 8 / 8, identical objectives | 13.7 / 22.2 s | 0.84 |
+    | R2b decomposition (3042) | 3040 / 3040 (+2 infeasible each) | 55.7 / 4.5 s | **0.08** |
+    | R2c GDP, vendored Pyomo (53) | 51 / 51 (+2 infeasible each) | 3.5 / 1.0 s | 0.30 |
+
+    Per-fixture (status / objective / bound / nodes / wall, H vs S) is in the
+    commit `docs(highs-parity): P0.4` message and `replay.json`; HiGHS needs far
+    fewer nodes on the hard ones (m6 749 vs 24,254; rsyn0820m 148 vs 11,540).
+  - **R2a route panel, single arm (HiGHS master), 94 models:** post-fix 91/94
+    certified, 332.7 s; pre-fix 92/94, 325.9 s (§76.4: 92 optimal, 339.5 s). Route
+    fired 94/94, 169 bound checks, 0 violations in both. The one difference,
+    `portfol_roundlot@0`, is budget-edge noise: interleaved A/B, 3 reps at 30 s,
+    pre-fix 2/3 certified (one `feasible` at 30.5 s), post-fix 3/3 (20.8–21.2 s).
+  - **R2b end to end (132 decomposition tests × each forced engine):** simplex
+    132/132; HiGHS 131/131 with `test_benders::test_pounce_only_no_highspy`
+    deselected — that test simulates a missing `highspy`, so forcing `highs` makes it
+    raise by design. Recorded test-isolation hazard: when it fails, its
+    `sys.modules` surgery (it deletes every module named `*highs*`) leaves the session
+    such that `test_1611_lagrangian::test_requested_lagrangian_is_not_replaced_by_bnb_fallback`
+    (iteration-capped Kelley, HiGHS tie-breaking sensitive) returns 323.67 instead of
+    331.6; it passes alone and after any other decomposition file. The capture
+    plugin's run showed the same 323.67. **Retraction:** I first attributed that
+    failure to CPU contention; the loop is capped by iterations, not wall clock.
+  - **Not measured:** the 17 GDPlib PR58 instances (`gdplib` must be installed from
+    source; that install was not permitted in this session). R2b's G3.2 finding that
+    HiGHS wins *large* GDP masters is therefore untested here; the captured masters
+    are small, which is where Rust wins.
 - [ ] **P0.5 — Fixture capture for R3/R4/R6.** Scope: new `python/tests/data/highs_parity/`
   + a capture script. Instrument (temporary, not committed) `_root_cuts._solve_lp`,
   `convex_node_bound._lp_dual` and `solve_lp_std`'s MINLP-path callers to dump each LP
@@ -691,7 +740,7 @@ and is re-written by P4.1.**
 | P0.1 | [x] | L 25 / M 24 / INF 16 manifest at HiGHS v1.15.1; Done run executed 195/195, incorrect 0; route marker, per-panel counter, load gate, rotation added | `69ead3f` |
 | P0.2 | [x] | 38/38 recovered from the A14 artifact, validated against `.solu` (0 mismatches; obra needs > 60 s); Done run executed 9, incorrect 0 | see git log |
 | P0.3 | [x] | 927 executed, 0 incorrect; walls indicative (gate open on 41/103 rows); R/H geomean 1.41 (L) / 1.73 (M) / 1.78 (MIPLIB) but H/H0 = 110× on L | see git log |
-| P0.4 | [ ] | | |
+| P0.4 | [x] | kill fired: false HiGHS master optimum (#2146), fixed; post-fix 3103 masters, 6206 compared, 0 contradictions; Rust SGM 0.08× HiGHS on decomposition masters; route 91–92/94 | `6351f589` + see git log |
 | P0.5 | [ ] | | |
 | P0.6 | [ ] | | |
 | P0.7 / D0 | [ ] | | |
@@ -754,6 +803,17 @@ dev machine, earlier commits): H L 3.16 s, M 5.35 s, MIPLIB 38/38 72 s; Rust L 2
 *bars* are unchanged, but whether "wall ratio" means against H or H0 is put to the owner
 (they differ by ~100× on LP here). Retraction of: none — the earlier figures were
 measured on a different host and commit; they are superseded, not wrong.
+
+**2026-11-04 — P0.4: "the HiGHS master's #1634 cross-check keeps its bounds valid".**
+Commit `67530f14`, 3050 masters replayed, compared 6100. Measured: on
+`milp_default_box_clay0203_master` HiGHS's primary bound 41595.42 and presolve-free bound
+41573.26 both exceed the true optimum 41420.272 (Rust-verified point, feasible to 1e-14),
+and the cross-check published 41573.26 as OPTIMAL. Expected: bound ≤ 41420.272.
+Consequence: P0-blocking correctness defect jkitchin/discopt#2146, fixed in `6351f589`
+(every HiGHS master opens the default box; #1917's narrower fallback removed); P0.4 re-run
+on the fix: 6206 compared, 0 contradictions. Retraction of: none in this plan; it limits
+#1634's "min of the two bounds is valid whenever either one is" to inputs where at least
+one configuration is right.
 
 ---
 

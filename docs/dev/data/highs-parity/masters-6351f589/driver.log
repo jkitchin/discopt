@@ -1,0 +1,13 @@
+start fixtures 2026-11-04T14:04:46Z
+end fixtures rc=0 2026-11-04T14:04:47Z
+start capture-decomp 2026-11-04T14:04:47Z
+end capture-decomp rc=0 2026-11-04T14:06:09Z
+start capture-gdp 2026-11-04T14:06:09Z
+end capture-gdp rc=0 2026-11-04T14:06:37Z
+start replay 2026-11-04T14:06:37Z
+end replay rc=0 2026-11-04T14:12:58Z
+start route 2026-11-04T14:12:58Z
+end route rc=0 2026-11-04T14:18:48Z
+start decomp-e2e 2026-11-04T14:18:48Z
+end decomp-e2e rc=0 2026-11-04T14:20:38Z
+DRIVER_DONE 2026-11-04T14:20:38Z
