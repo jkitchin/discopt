@@ -1198,31 +1198,21 @@ def _parse_order(order: str) -> tuple[str, bool, bool, bool]:
 
     A permutation of ``"ICB"`` (phase order), optionally followed by ``"-"`` and
     flags: ``r`` visits elements in reverse, ``n`` skips the candidate stages, ``l``
-    runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering,
-    ``i`` relaxes integrality alone in the integrality phase instead of the whole
-    column (:func:`_relaxes_columns`). E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
+    runs the staged-oracle ladder (:func:`_milp_iis_arrays`) before filtering.
+    E.g. ``"CIB-r"``, ``"ICB-n"``, ``"CIB-l"``.
     """
     phases, _, flags = order.partition("-")
     if (
         sorted(phases) != ["B", "C", "I"]
-        or not set(flags) <= {"r", "n", "l", "i"}
+        or not set(flags) <= {"r", "n", "l"}
         or len(set(flags)) != len(flags)
         or ("-" in order and not flags)
     ):
         raise ValueError(
             "order must be a permutation of 'ICB' with optional '-' flags "
-            f"('r' reverse, 'n' no candidate stage, 'l' oracle ladder, 'i' integrality "
-            f"alone), got {order!r}"
+            f"('r' reverse, 'n' no candidate stage, 'l' oracle ladder), got {order!r}"
         )
     return phases, "r" in flags, "n" not in flags, "l" in flags
-
-
-def _relaxes_columns(order: str) -> bool:
-    """Whether ``order``'s integrality phase relaxes whole columns (integrality
-    and bounds together, :func:`_milp_iis_arrays`'s ``batch_filter_columns``)
-    -- the default -- or integrality alone (flag ``i``, the previous phase)."""
-    _parse_order(order)
-    return "i" not in order.partition("-")[2]
 
 
 def _milp_iis_arrays(
@@ -1243,7 +1233,6 @@ def _milp_iis_arrays(
         t_start = time.perf_counter()
     deadline = None if total_time_limit is None else t_start + float(total_time_limit)
     phase_order, reverse, order_sat, use_ladder = _parse_order(order)
-    relax_columns = _relaxes_columns(order)
     sat_candidate = sat_candidate and order_sat
     A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int = arrays
 
@@ -1472,7 +1461,7 @@ def _milp_iis_arrays(
         res, _ = eng.probe(cons, bounds, set())
         if res is True:
             ints_active.clear()
-        elif include_bounds and relax_columns:
+        elif include_bounds:
             batch_filter_columns(_ord(sorted(ints_active)))
         else:
             # Bounds are not elements: they always apply, only integrality goes.
@@ -1867,13 +1856,7 @@ def _milp_iis_arrays(
 #: complete; kedron 12 in 10 s vs 14.5 s. In the 60 s sweep it changed no
 #: completion (its exact confirmations need ~20 s each on otra), so it costs a
 #: core there and nothing else.
-#: ``ICB-i`` (integrality alone, the previous integrality phase) joins when the
-#: default phase began relaxing whole columns: that took dijle 3961 -> 2426 at
-#: 600 s (Gurobi 2402), neos-942886 47 -> 38, dell 158 -> 157, but misc05inf
-#: 126 -> 127 (deterministic over 3 runs, its ICB member's path). With both
-#: phases in the portfolio no instance of the 20-instance panel loses size; the
-#: sixth member costs a core, free under the competition's >= 8 threads.
-DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l", "ICB-i")
+DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
