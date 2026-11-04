@@ -3757,7 +3757,11 @@ mod tests {
             "#2142: this captured LP is now decided; check its objective against the \
              fixture's highs_obj and update this pin"
         );
-        assert_ne!(sol.status, LpStatus::Infeasible, "HiGHS solves it: never infeasible");
+        assert_ne!(
+            sol.status,
+            LpStatus::Infeasible,
+            "HiGHS solves it: never infeasible"
+        );
     }
 
     // #1013: the degeneracy-stall DETECTOR fires where `DualStallTrips` is blind.
