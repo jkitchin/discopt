@@ -1,0 +1,63 @@
+== DISCOPT_SPATIAL_BRANCH_CLAMP: /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/bp/panel/gdp_merged.jsonl
+fire: 0 lowerings checked; fired on 0; identical on 0; lowering error on 0
+
+instance                           method OFF solved ON solved  OFF wall   ON wall OFF nodes  ON nodes  verdicts
+batch_processing                   big-m       0/1       0/1       120.8     120.3       215       215  unsolved
+batch_processing                   hull        0/1       0/1       120.4     120.2         3         3  unsolved
+biofuel                            big-m       0/1       0/1       126.3     124.5         3         3  unsolved
+biofuel                            hull        0/1       0/1       129.5     124.1         0         0  unsolved
+cstr                               big-m       0/1       0/1        33.6      34.0      5000      5000  unsolved
+cstr                               hull        0/1       0/1       120.1     120.1       437       658  unsolved
+disease_model                      big-m       1/1       1/1        40.7      38.1      3970      3970  solved
+disease_model                      hull        1/1       1/1        62.5      52.3      3318      3318  solved
+ex1_linan_2023                     big-m       1/1       1/1         6.4       6.4         9         9  solved
+ex1_linan_2023                     hull        1/1       1/1        10.0      10.5         9         9  solved
+gdp_col                            big-m       0/1       0/1       120.1     120.1         0         0  unsolved
+gdp_col                            hull        0/1       0/1       120.1     120.4         7         7  unsolved
+hda                                big-m       0/1       0/1       120.4     120.2         3         3  unsolved
+hda                                hull        0/1       0/1       120.2     120.2         3         3  unsolved
+kaibel                             big-m       0/1       0/1           -         -         -         -  error
+kaibel                             hull        0/1       0/1           -         -         -         -  error
+med_term_purchasing                big-m       0/1       0/1         7.5       7.7        41        41  unsolved
+med_term_purchasing                hull        1/1       1/1         4.3       4.3         1         1  solved
+methanol                           big-m       0/1       0/1       120.9     120.4        15        15  unsolved
+methanol                           hull        0/1       0/1       120.1     122.3         3         3  unsolved
+mod_hens                           big-m       0/1       0/1           -         -         -         -  error
+mod_hens                           hull        0/1       0/1           -         -         -         -  error
+modprodnet                         big-m       1/1       1/1        38.5      39.5         5         5  solved
+modprodnet                         hull        1/1       1/1       120.9     120.6         5         5  solved
+positioning                        big-m       1/1       1/1        28.6      28.1       151       151  solved
+positioning                        hull        1/1       1/1        28.5      27.8       151       151  solved
+pyomo.constrained_layout_clay0203  big-m       0/1       1/1       120.8     119.1       133       133  solved,unsolved
+pyomo.constrained_layout_clay0203  hull        1/1       1/1        42.3      42.1       109       109  solved
+pyomo.eight_process                big-m       1/1       1/1        19.3      19.4        27        27  solved
+pyomo.eight_process                hull        1/1       1/1        20.2      20.4        59        59  solved
+pyomo.eight_process_logical        big-m       1/1       1/1        18.8      18.9        19        19  solved
+pyomo.eight_process_logical        hull        1/1       1/1        30.5      30.4        41        41  solved
+pyomo.ex_633_trespalacios          big-m       1/1       1/1         3.3       3.3        13        13  solved
+pyomo.ex_633_trespalacios          hull        1/1       1/1        25.7      25.3        75        75  solved
+pyomo.jobshop_small                big-m       1/1       1/1         0.4       0.3         1         1  solved
+pyomo.jobshop_small                hull        1/1       1/1         0.2       0.3         1         1  solved
+pyomo.nonconvex_hen                big-m       1/1       1/1        15.8      15.8         5         5  solved
+pyomo.nonconvex_hen                hull        1/1       1/1        40.2      40.2        13        13  solved
+pyomo.strip_packing_concrete       big-m       1/1       1/1         0.3       0.3         1         1  solved
+pyomo.strip_packing_concrete       hull        1/1       1/1         0.4       0.4         1         1  solved
+small_batch                        big-m       1/1       1/1        15.9      15.7         3         3  solved
+small_batch                        hull        1/1       1/1        16.0      16.0         3         3  solved
+spectralog                         big-m       0/1       0/1       120.1     120.1       415       417  unsolved
+spectralog                         hull        0/1       0/1       120.8     120.7       223       223  unsolved
+stranded_gas                       big-m       0/1       0/1       126.2     125.8         0         0  unsolved
+stranded_gas                       hull        0/1       0/1       125.7     125.2         0         0  unsolved
+syngas                             big-m       0/1       0/1       120.2     120.6         3         3  unsolved
+syngas                             hull        0/1       0/1       125.8     126.5         3         3  unsolved
+
+executed solves: 96
+cert-clean: incorrect=0 bound-crossings=0 solved-lost=0
+net: solved-gained=1 [('pyomo.constrained_layout_clay0203', 0, 1)]
+net: SGM(wall, shift 10 s, capped at 120 s) over 44 cells: OFF 42.13 s -> ON 41.90 s
+
+SpatialSplitMoved: fired on 2 pair(s)
+   cstr big-m {'SpatialSplits': 2736, 'SpatialSplitMoved': 2122}
+   cstr hull {'SpatialSplits': 343, 'SpatialSplitMoved': 260}
+unfired bit-identity: 24 pair(s) checked, 18 at the wall ['batch_processing big-m', 'batch_processing hull', 'biofuel big-m', 'biofuel hull', 'gdp_col big-m', 'gdp_col hull', 'hda big-m', 'hda hull', 'methanol big-m', 'methanol hull', 'modprodnet hull', 'pyomo.constrained_layout_clay0203 big-m', 'spectralog big-m', 'spectralog hull', 'stranded_gas big-m', 'stranded_gas hull', 'syngas big-m', 'syngas hull']
+errored in both arms (no solve to compare): ['kaibel big-m', 'kaibel hull', 'mod_hens big-m', 'mod_hens hull']
