@@ -42,35 +42,49 @@ OFF/OFF −8359.00.
 | `prof2.py <coef 0/1> <root_cuts> <rounds> <select 0/1> <cmir 0/1>` | Rust root bound on the MTP replay at `max_nodes=2`, with the cut counters | step 2 grid |
 | `grid2x2.py` | the coef × c-MIR 2×2 grid on MTP; asserts every c-MIR arm separated | step 2 grid |
 | `rustgrid.py` | the Rust cut-loop budget grid (GMI only) on MTP | "the loop is the lever" |
-| `replay_step1.py T out.jsonl pkl...` | step 1 differential: `COEF_TIGHTEN=0` vs `=1`, interleaved, against a HiGHS reference on the same standard form, with an independent feasibility check of the returned point | step 1 panel |
-| `replay_step2.py T out.jsonl pkl...` | the same with the strong root profile + `cmir_cuts=True` | step 2 differential (**see the defect below**) |
+| `replay.py --flag {coef,tabcmir} [--profile strong] [--base ENV=V] T out.jsonl pkl...` | flag OFF vs ON, interleaved, judged by `oracle.judge` against the best verified point (arms + HiGHS) | §5 differential |
+| `replay_step1.py T out.jsonl pkl...` | `replay.py --flag coef` (captured options) | step 1 panel |
+| `replay_step2.py T out.jsonl pkl...` | `replay.py --flag tabcmir --profile strong --base DISCOPT_RUST_MILP_COEF_TIGHTEN=1` | step 2 differential |
+| `cutgrid.py out.jsonl pkl...` | root gap closed per cut-loop budget (GMI + cover, coef ON) over every capture | step 5 cut-loop budget |
 | `nsentry.py out.jsonl pkl...` | NS default-box entry experiment (killed, 0/36 at default) | NS default-box |
 | `hugechk.py pkl...` | columns at the `±9.999e19` default box per input | NS default-box |
 | `ct_seed.py` | coef tightening with a seeded incumbent | step 1 |
 | `coef_entry.py`, `mk_rustcoef.py`, `rtight.py`, `feas_chk.py`, `mps2pkl.py` | step 1 entry experiment: FBBT + coef tightening on the MTP root LP, and HiGHS-side checks | step 1 entry |
 | `tab_cmir_entry2.py <pkl> <cmir|cmir_novub> <rounds>`, `proto_abl.py` | the Python tableau c-MIR prototype and ablations; every cut is checked to keep the HiGHS-optimal point; env `CAP` = cuts per round | step 2 entry |
 
-## Open defect: the step-2 replay oracle
+## The step-2 replay oracle defect (fixed 2026-11-04, #2136)
 
-The last step-2 replay, `replay_step2.py` at T=30 over 36 inputs, flagged one row as BAD:
+The last pre-fix step-2 replay (T=30, 36 inputs) flagged one row as BAD:
 
-| `inrepo__clay0203_master` | status | objective | bound |
+| `inrepo__clay0203_master` (captured before `2df0b0a`) | status | objective | bound |
 |---|---|---|---|
 | HiGHS reference | Optimal | 54489.415 | 54489.415 |
 | Rust, both flags OFF | **optimal** | **41907.460**, point verified (viol 1.4e-14) | −752903.98 |
 | Rust, coef ON | feasible | 55668.585 | −inf |
 
-- **The HiGHS reference is wrong here.** Rust's OFF arm returns an independently verified
-  point *below* HiGHS's "optimal" value. HiGHS's false optimum on the clay0203 master is
-  #2069.
-- **The flag is not implicated.** The row fails on the OFF arm.
-- **Before any §5 panel, the replay oracle needs to:**
-  1. stop trusting HiGHS's status as ground truth; use the best *verified* point across
-     arms and HiGHS as the primal reference;
-  2. flag a Rust `optimal` whose `bound` is not within gap of its `obj`. The OFF arm above
-     reports `optimal` with bound −752904 against obj 41907. That is either a status
-     mapping issue in the probe or a real certificate problem, and it needs a look on its
-     own.
+Both halves of the diagnosis are now resolved:
+
+1. **The Rust `optimal` was a real certificate defect, not a probe artefact.** The capture
+   predates `2df0b0a`, so 6 of its 30 columns carried the default box (±9.999e19) as
+   finite bounds. With the box re-closed on today's capture, the driver still returned
+   `optimal` 41907.46 / bound −752904 on the strong profile (true optimum 41420.27). The
+   node LP reported ≈ −752904 for a vertex whose `cᵀx` is 41907; every gap test ran
+   against the LP value, and only the returned objective was recomputed (#1296). The
+   driver now withdraws the certificate whenever the returned objective and the tree's
+   incumbent value disagree beyond `1e-6·max(1,|obj|)` (counter
+   `MilpIncumbentMisvaluedDecert`; `test_milp_default_box.py::
+   test_driver_withdraws_a_misvalued_incumbent_certificate`, which fails before). On a
+   capture made after `2df0b0a` the trigger is gone: Rust and HiGHS both return 41420.27.
+2. **The oracle** is `oracle.py`: the primal reference is the best *independently verified*
+   point across both arms and HiGHS; an arm's `optimal` must have its bound within gap of
+   its objective and must not be beaten by a verified point; HiGHS disagreements are
+   `notes`, not BAD rows. `python/tests/test_2136_g32_oracle.py` pins the rules, including
+   the row above.
+3. **`replay_step2.py` did not measure step 2.** It toggled `COEF_TIGHTEN`, and its
+   `cmir_cuts=True` is #2107's aggregated c-MIR, not the tableau separator. Both replays
+   are now wrappers over `replay.py --flag {coef,tabcmir}`, which asserts the flag's firing
+   counter on each arm; `replay_step2.py` toggles `DISCOPT_RUST_MILP_TABLEAU_CMIR` with
+   coefficient tightening held ON in both arms.
 
 ## Counter names
 

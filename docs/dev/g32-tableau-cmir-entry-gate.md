@@ -322,3 +322,105 @@ What the grid says:
 5. **The dominant lever is still the loop, not the separator.** The prototype's
    plain GMI, at 15 rounds × 200 cuts per round, reached -7198.9. Rust's best GMI
    is -7383.3, at 30 rounds with selection.
+
+## #2136 resumption (2026-11-04): certificate defect fixed, oracle fixed, both differentials, cut-loop grid
+
+Run on a Linux cloud container (4 cores) from `fix/1917-g32-decide` merged with `main`
+(`d032897`). Captures regenerated here: 27 GDPlib + 7 in-repo = 34 of the original 36.
+`loa__kaibel` and `loa__mod_hens` need a Pyomo `ipopt` executable to build and this
+container has none. **Absolute root bounds here differ from the figures above:** on this
+machine `prof2.py 1 200 10 1 0` gives −7952.99, not −8099.15, and the baseline build
+without this section's driver change gives the same −7952.99. So the difference is
+platform or capture, not code. Compare figures within one machine only.
+
+### The clay0203 "optimal with bound −752904" was a real driver defect
+
+The step-2 BAD row (Rust OFF `optimal` 41907.46, bound −752904, true optimum 41420.27)
+came from a capture made before `2df0b0a`, with 6 columns at the ±9.999e19 default box.
+After `2df0b0a` reopened that box at the marshaling layer, a fresh capture solves to
+41420.27 in Rust and HiGHS alike. The driver defect was still there, though: with the box
+re-closed on today's capture, the strong profile still returned `optimal` 41907.46 /
+−752904. The node LP reported ≈ −752904 for a vertex whose `cᵀx` is 41907. Every gap
+test ran against the LP value, and only the returned objective was recomputed (#1296).
+
+**Fix:** `milp_driver.rs` withdraws the certificate (Feasible, bound −inf) when the
+returned objective and the tree's incumbent value disagree beyond `1e-6·max(1,|obj|)`.
+Counter: `MilpIncumbentMisvaluedDecert`. Test:
+`test_milp_default_box.py::test_driver_withdraws_a_misvalued_incumbent_certificate`. It
+keeps the closed box on purpose; it fails on the baseline build (false OPTIMAL, c-MIR on)
+and passes after. Checks: `cargo test -p discopt-core` (980 lib tests + integration), all
+pass; `pytest -m smoke`: 4482 passed, 27 skipped; adversarial suite: 19 passed.
+
+### Oracle fixed
+
+`g32/oracle.py` now takes as the primal reference the best independently verified point
+across both arms and HiGHS. It flags any arm `optimal` whose bound is not within gap of
+its objective, and records HiGHS disagreements as notes. Its rules are pinned in
+`python/tests/test_2136_g32_oracle.py`, including the clay0203 row.
+
+The old `replay_step2.py` did not measure step 2. It toggled `COEF_TIGHTEN`, and its
+`cmir_cuts=True` is #2107's aggregated c-MIR. It now toggles
+`DISCOPT_RUST_MILP_TABLEAU_CMIR`, with coefficient tightening held ON in both arms.
+
+### Differentials on the 34 captures (T = 30 s, interleaved arms, fixed oracle)
+
+| replay | rows | checks | BAD | rows both arms `optimal` | nodes SGM OFF → ON | fewer / more nodes | wall sum OFF → ON | roots raised / lowered |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| step 1, `COEF_TIGHTEN`, captured options | 34 | 289 | **0** | 28 | 44.8 → 34.5 | 11 / 3 | 38.2 → 37.0 s | 11 / 1 |
+| step 2, `TABLEAU_CMIR` (coef ON both), strong profile | 34 (33 fired) | 291 | **0** | 29 | 38.6 → 36.3 | 3 / 5 | 52.7 → 58.5 s | 3 / 6 |
+
+There were no HiGHS notes: on post-`2df0b0a` captures HiGHS agrees with the verified
+reference everywhere. Step 2 did not fire on `loa__spectralog`, whose root LP is
+unbounded, so the cut loop stops before any separator runs.
+
+Unsolved rows (bound at 30 s, OFF → ON):
+- step 1: `loa__med_term_purchasing` −7771.0 → −7518.8, and OFF found no incumbent;
+  `rsyn0830m_master0` −967.5 → −1053.5; `highs_presolve_cycle_1671` 450494.8 → 450526.2.
+- step 2: `loa__med_term_purchasing` −7065.4 → −7138.2; `highs_presolve_cycle_1671`
+  450058.3 → 449962.4.
+
+Reading:
+- **Both flags are cert-clean on the captured inputs.** That is necessary, not
+  sufficient: these are replays of the first master, not the §5 whole-solve panel.
+- **Step 1 is net-positive here.** It gives fewer nodes on 11 of 28 rows, more on 3, at
+  equal wall.
+- **Step 2 is not.** It moves the root down on 6 rows and up on 3, adds wall, and
+  worsens the MTP bound. This repeats the unstable sign measured above.
+
+### Step 5: the cut-loop budget (GMI + cover only, coef ON), `g32/cutgrid.py`
+
+Root bound at `max_nodes=2` per budget (total cuts / rounds / select), as the fraction of
+the gap between the bare LP bound and the verified reference that the root closes. 33
+rows (spectralog skipped: no verified point), 231 checks, **0 bounds above the
+reference**. Rows where some budget moves the root:
+
+| instance | 16/1/no | 200/10/sel (escalation) | 1000/10/sel | 3000/15/sel | 3000/15/no | ∞/30/sel | ∞/30/no |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| loa__med_term_purchasing | 0.035 | 0.260 | 0.606 | 0.625 | 0.593 | 0.630 | 0.619 |
+| loa__batch_processing | 0.010 | 0.163 | 0.191 | 0.289 | 0.175 | 0.290 | 0.176 |
+| rsyn0830m_master0 | 0.070 | 0.785 | 0.819 | 0.831 | 0.852 | 0.842 | 0.872 |
+| big-m__positioning | 0.151 | 0.685 | 0.685 | 0.727 | 0.738 | 0.756 | 0.764 |
+| loa__positioning | 0.265 | 0.660 | 0.660 | 0.676 | 0.665 | 0.691 | 0.669 |
+| highs_presolve_cycle_1671 | 0.043 | 0.290 | 0.290 | 0.292 | 0.294 | 0.295 | 0.294 |
+| tls2_master0 | 0.391 | 1.000 | 1.000 | 1.000 | 0.696 | 1.000 | 0.739 |
+| loa__modprodnet | 0.141 | 0.636 | 0.636 | 0.636 | 0.636 | 0.636 | 0.636 |
+
+MTP root in absolute terms: −7953.0 → −7412.2 → −7382.9 → −7375.7, reading left to right
+over the `sel` columns. On the other 25 rows the root does not depend on the budget:
+it is either already closed by 200/10 or stuck at the LP bound under every budget.
+
+What the grid says:
+1. **The 200-cut total is the binding term, not the round count.** Raising it to 1000 at
+   the same 10 rounds takes MTP from 0.26 to 0.61 of the gap. That is most of what any
+   larger budget reaches (0.63). Batch_processing and rsyn0830m also gain, smaller.
+2. **Selection matters where cuts are plentiful.** At 3000/15 it is better on
+   batch_processing (0.289 vs 0.175), MTP and tls2, and slightly worse on positioning
+   and rsyn0830m.
+3. **Root wall is not the cost.** MTP's root goes from 0.4 s to 0.6 s. The open
+   question is what the extra cut rows cost in every node LP. That needs a whole-solve
+   measurement.
+
+**Next experiment (hypothesis, not a change):** raise the strong profile's total root
+budget from 200 to about 1000 at 10 rounds with selection, keeping GMI + cover, and run
+the §5 whole-solve panel. Kill it if, over the corpus, it is not net-positive on node
+count or bound, or if it regresses wall by more than the root-bound gain buys.
