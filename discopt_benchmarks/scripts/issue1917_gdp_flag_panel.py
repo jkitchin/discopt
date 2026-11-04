@@ -97,6 +97,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
     "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
     "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
+    # #2143 stage 3: the root presolve's marginal stop acts at solve time (the
+    # lowering is identical), so solve ``--all``.
+    "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

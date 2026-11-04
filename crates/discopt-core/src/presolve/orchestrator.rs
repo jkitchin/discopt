@@ -39,6 +39,54 @@ pub struct OrchestratorOptions {
     pub work_unit_budget: u64,
     /// The passes to run, in order. Each sweep walks the list once.
     pub pass_order: Vec<Box<dyn PresolvePass>>,
+    /// #2143 marginal stop. `0.0` (the default) keeps the legacy progress test:
+    /// any strict tightening, re-reported fixing or model change counts. When
+    /// positive, a sweep counts as progress only if the model was rewritten, or
+    /// some variable block's interval, compared at the start and end of the sweep,
+    /// became newly fixed, became finite on a side, or shrank by at least this
+    /// fraction of its finite width. Every tightening is still applied; only when
+    /// the loop stops changes. `f64::INFINITY` counts only rewrites and newly
+    /// fixed blocks: the setting for a caller that discards the box and keeps only
+    /// the rewritten model, where a fixing can still feed a rewrite next sweep.
+    pub significant_rel: f64,
+    /// #2143: run an exhaustive pass (`PresolvePass::exhaustive`, i.e. probing)
+    /// in the first sweep only. Later sweeps run the remaining passes.
+    pub exhaustive_once: bool,
+}
+
+/// Whether the box moved *significantly* between `before` and `after` (#2143).
+///
+/// A block that became fixed, or (for finite `rel`) a side that became finite or a
+/// finite width that shrank by at least `rel` of its former value. A change in the
+/// number of blocks (a model rewrite) is significant. With `rel` infinite only
+/// fixings count.
+pub fn significant_box_change(
+    before: &[super::fbbt::Interval],
+    after: &[super::fbbt::Interval],
+    rel: f64,
+) -> bool {
+    if before.len() != after.len() {
+        return true;
+    }
+    for (b, a) in before.iter().zip(after.iter()) {
+        if b.lo < b.hi && a.lo >= a.hi {
+            return true;
+        }
+        if !rel.is_finite() {
+            continue;
+        }
+        if (!b.lo.is_finite() && a.lo.is_finite()) || (!b.hi.is_finite() && a.hi.is_finite()) {
+            return true;
+        }
+        let w = b.hi - b.lo;
+        if w.is_finite() && w > 0.0 {
+            let shrink = (a.lo - b.lo).max(0.0) + (b.hi - a.hi).max(0.0);
+            if shrink >= rel * w {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl OrchestratorOptions {
@@ -52,6 +100,8 @@ impl OrchestratorOptions {
             time_limit_ms: 0,
             work_unit_budget: 0,
             pass_order: passes,
+            significant_rel: 0.0,
+            exhaustive_once: false,
         }
     }
 }
@@ -94,12 +144,22 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
     let mut last_iter: u32 = 0;
     let mut subtol_crossings_repaired: usize = 0;
 
+    let marginal = opts.significant_rel > 0.0;
     'outer: for sweep in 0..opts.max_iterations {
         ctx.iter = sweep;
         last_iter = sweep + 1;
         let mut sweep_progress = false;
+        let mut sweep_rewrote = false;
+        let sweep_start_bounds = if marginal {
+            Some(ctx.bounds.clone())
+        } else {
+            None
+        };
 
         for pass in opts.pass_order.iter_mut() {
+            if opts.exhaustive_once && sweep > 0 && pass.exhaustive() {
+                continue;
+            }
             // Snapshot category up front: invoking `run` may mutate the
             // pass's own state but the category is stable per impl.
             let category = pass.category();
@@ -172,6 +232,18 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
             if delta.made_progress() {
                 sweep_progress = true;
             }
+            if !delta.constraints_removed.is_empty()
+                || !delta.constraints_rewritten.is_empty()
+                || delta.aux_constraints_introduced > 0
+                || delta.aux_vars_introduced > 0
+                || !delta.vars_aggregated.is_empty()
+                || !delta
+                    .structure
+                    .reformulated_polynomial_constraints
+                    .is_empty()
+            {
+                sweep_rewrote = true;
+            }
             deltas.push(delta);
 
             if opts.time_limit_ms > 0
@@ -186,6 +258,13 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
             }
         }
 
+        if let Some(start) = sweep_start_bounds {
+            // #2143: a sweep whose only effect is sub-threshold tightening (a
+            // geometrically converging propagation cycle, or a fixing re-reported
+            // every sweep) is a fixed point for this purpose.
+            sweep_progress =
+                sweep_rewrote || significant_box_change(&start, &ctx.bounds, opts.significant_rel);
+        }
         if !sweep_progress {
             terminated_by = TerminationReason::NoProgress;
             break;
@@ -296,6 +375,155 @@ mod tests {
         assert!(!result.bounds[0].is_formally_inverted());
         assert!(result.bounds[0].contains(226.7));
         assert!(result.bounds[0].contains(226.699_999_999_999_9));
+    }
+
+    // ── #2143: the marginal stop ──────────────────────────────────────────
+
+    /// A pass that shrinks variable 0's interval by `frac` of its width every
+    /// call, forever: a geometrically converging propagation cycle.
+    struct GeometricPass {
+        frac: f64,
+        calls: u32,
+    }
+
+    impl PresolvePass for GeometricPass {
+        fn name(&self) -> &'static str {
+            "geometric"
+        }
+        fn category(&self) -> PassCategory {
+            PassCategory::BoundsOnly
+        }
+        fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+            self.calls += 1;
+            let b = ctx.bounds[0];
+            ctx.bounds[0] =
+                super::super::fbbt::Interval::new(b.lo, b.hi - self.frac * (b.hi - b.lo));
+            let mut d = PresolveDelta::empty(self.name(), ctx.iter);
+            d.bounds_tightened = 1;
+            d
+        }
+    }
+
+    /// Counts its calls; changes nothing; declares itself exhaustive.
+    struct ExhaustiveCounter {
+        calls: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl PresolvePass for ExhaustiveCounter {
+        fn name(&self) -> &'static str {
+            "exhaustive_counter"
+        }
+        fn category(&self) -> PassCategory {
+            PassCategory::BoundsOnly
+        }
+        fn exhaustive(&self) -> bool {
+            true
+        }
+        fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+            self.calls.set(self.calls.get() + 1);
+            PresolveDelta::empty(self.name(), ctx.iter)
+        }
+    }
+
+    #[test]
+    fn geometric_cycle_runs_to_the_cap_by_default() {
+        let mut opts = OrchestratorOptions::with_passes(vec![Box::new(GeometricPass {
+            frac: 0.034,
+            calls: 0,
+        })]);
+        opts.max_iterations = 16;
+        let result = run(trivial_model(), opts);
+        assert_eq!(result.terminated_by, TerminationReason::IterationCap);
+        assert_eq!(result.iterations, 16);
+    }
+
+    #[test]
+    fn marginal_stop_ends_a_geometric_cycle() {
+        let mut opts = OrchestratorOptions::with_passes(vec![Box::new(GeometricPass {
+            frac: 0.034,
+            calls: 0,
+        })]);
+        opts.max_iterations = 16;
+        opts.significant_rel = 0.05;
+        let result = run(trivial_model(), opts);
+        assert_eq!(result.terminated_by, TerminationReason::NoProgress);
+        assert_eq!(result.iterations, 1);
+        // The tightening the sweep made is still applied.
+        assert!(result.bounds[0].hi < 1.0);
+    }
+
+    #[test]
+    fn marginal_stop_keeps_sweeping_on_significant_change() {
+        let mut opts = OrchestratorOptions::with_passes(vec![Box::new(GeometricPass {
+            frac: 0.5,
+            calls: 0,
+        })]);
+        opts.max_iterations = 6;
+        opts.significant_rel = 0.05;
+        let result = run(trivial_model(), opts);
+        assert_eq!(result.terminated_by, TerminationReason::IterationCap);
+        assert_eq!(result.iterations, 6);
+    }
+
+    #[test]
+    fn exhaustive_once_runs_the_exhaustive_pass_in_sweep_zero_only() {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut opts = OrchestratorOptions::with_passes(vec![
+            Box::new(GeometricPass {
+                frac: 0.5,
+                calls: 0,
+            }),
+            Box::new(ExhaustiveCounter {
+                calls: calls.clone(),
+            }),
+        ]);
+        opts.max_iterations = 4;
+        opts.significant_rel = 0.05;
+        opts.exhaustive_once = true;
+        let result = run(trivial_model(), opts);
+        assert_eq!(result.iterations, 4);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn significant_box_change_cases() {
+        use super::super::fbbt::Interval;
+        let b = [Interval::new(0.0, 10.0)];
+        assert!(!significant_box_change(
+            &b,
+            &[Interval::new(0.0, 9.9)],
+            0.05
+        ));
+        assert!(significant_box_change(&b, &[Interval::new(0.0, 9.0)], 0.05));
+        assert!(significant_box_change(&b, &[Interval::new(0.3, 9.7)], 0.05));
+        assert!(significant_box_change(&b, &[Interval::new(4.0, 4.0)], 0.05));
+        let inf = [Interval::new(0.0, f64::INFINITY)];
+        assert!(significant_box_change(
+            &inf,
+            &[Interval::new(0.0, 1e6)],
+            0.05
+        ));
+        assert!(!significant_box_change(&inf, &inf, 0.05));
+        // An already fixed block re-fixed is not a change.
+        let fixed = [Interval::new(1.0, 1.0)];
+        assert!(!significant_box_change(&fixed, &fixed, 0.05));
+        assert!(significant_box_change(&b, &[], 0.05));
+        // Infinite threshold: only a new fixing (or a rewrite) counts.
+        assert!(!significant_box_change(
+            &b,
+            &[Interval::new(0.0, 1.0)],
+            f64::INFINITY
+        ));
+        assert!(!significant_box_change(
+            &inf,
+            &[Interval::new(0.0, 1e6)],
+            f64::INFINITY
+        ));
+        assert!(significant_box_change(
+            &b,
+            &[Interval::new(2.0, 2.0)],
+            f64::INFINITY
+        ));
     }
 
     /// ANTI-PERMISSIVENESS CONTROL: a crossing beyond FEAS_TOL must still abort.

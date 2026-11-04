@@ -3269,6 +3269,79 @@ def _node_probe_max_vars() -> int:
 _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
 
 
+#: Relative width shrink a presolve sweep must reach on some variable block to
+#: count as progress under ``DISCOPT_PRESOLVE_MARGINAL_STOP`` when the solve adopts
+#: the presolve box (``DISCOPT_PRESOLVE_BOUND_PROPAGATION=1``) (#2143).
+_PRESOLVE_SIGNIFICANT_REL = 0.05
+
+
+def _presolve_marginal_stop_enabled() -> bool:
+    """Whether root presolve stops at its marginal fixed point (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panels; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    Two changes to the Rust orchestrator (``OrchestratorOptions``):
+
+    * Probing runs in the first sweep only.
+    * A later sweep counts as progress only when it moves something this solve
+      keeps. By default (``DISCOPT_PRESOLVE_BOUND_PROPAGATION`` OFF) the solve keeps
+      only the returned model, not the presolve box (see that flag), so only a
+      rewrite or a newly fixed block counts. With the box adopted, a 5 % width
+      shrink or a newly finite side counts too.
+
+    Every tightening a sweep makes is still applied; only when the loop stops
+    changes.
+
+    Why. GDPlib ``syngas`` hull spent 30 s of a 120 s solve here, to ``TimeBudget``
+    after 4 sweeps:
+
+    * probing re-ran each sweep at about 7 s;
+    * a propagation cycle (``implied_bounds``) shrank 15-18 bounds by 3.4 % per
+      sweep forever: without probing, legacy runs all 16 sweeps (25.7 s,
+      ``IterationCap``);
+    * ``eliminate`` and ``factorable_elim`` cost 1.1-2.4 s per sweep and found
+      nothing on any sweep.
+
+    The root LP bound was 4347.80 under every variant.
+
+    Entry experiment (``run_root_presolve`` alone, solver.py's kwargs, 30 s budget):
+
+    * Legacy against this rule (infinite threshold, probing once) on 81 instances
+      (the 76 in-repo ``.nl`` and 5 GDP cells): the returned model was identical
+      on **all 81**, so on the default path the rule changes only time. Total
+      presolve wall was 54.2 -> 21.1 s; ``syngas`` hull 30.0 -> 11.3 s, ``hda``
+      8.6 -> 4.1 s, ``beuster`` 2.6 -> 0.26 s.
+    * With a 5 % threshold: identical model on 88 of 88; total 151.5 -> 81.7 s;
+      ``gdp_col`` hull 30.0 -> 15.1 s, ``syngas`` big-M 28.0 -> 2.1 s.
+    * The box was looser than legacy's on 13-18 instances. The default path
+      discards that box.
+
+    **Kill criterion**: a model the rule returns that differs from legacy's on the
+    default path, or a §5 panel that is not cert-clean or not net-positive in wall.
+    """
+    return os.environ.get("DISCOPT_PRESOLVE_MARGINAL_STOP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _presolve_marginal_stop_kwargs() -> dict:
+    """``run_root_presolve`` options for ``DISCOPT_PRESOLVE_MARGINAL_STOP`` (#2143).
+
+    Probing runs in the first sweep only. Later sweeps continue only on progress the
+    solve keeps. With the presolve box adopted, that is a 5 % width shrink, a newly
+    finite side or a new fixing. Without it (the default) the box is dropped and
+    only the rewritten model survives, so only a rewrite or a new fixing counts.
+    """
+    if not _presolve_marginal_stop_enabled():
+        return {}
+    rel = _PRESOLVE_SIGNIFICANT_REL if _presolve_bound_propagation_enabled() else float("inf")
+    return {"significant_rel": rel, "exhaustive_once": True}
+
+
 def _presolve_bound_propagation_enabled() -> bool:
     """Whether root presolve's own box is adopted as the model's declared bounds.
 
@@ -17578,6 +17651,7 @@ def solve_model(
             polynomial=presolve_polynomial,
             fbbt=True,
             time_limit_ms=int(_presolve_budget_s * 1000),
+            **_presolve_marginal_stop_kwargs(),
         )
         # #1061: hand the orchestrator's own box over as well. Without the
         # stats argument this call sees only the repr, which the Rust side

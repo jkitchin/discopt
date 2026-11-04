@@ -14555,3 +14555,57 @@ they spend most of `syngas` hull's root:
 Honouring either changes which incumbents are found where the deadline does not
 bind, so it is §5 bound-changing work. It is not part of a deadline fix, and is
 recorded as a lead.
+
+### 106.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, default OFF)
+
+**What the 30 s on `syngas` hull bought.** Per pass and per sweep
+(`probe_presolve_passes.py`, `probe_presolve_sweeps.py`), the run hit `TimeBudget`
+after 4 sweeps:
+
+- `probing` cost 6.9, 7.3, 7.6 and 0.5 s (cut off) per sweep and tightened 195, 355,
+  45 and 16 bounds.
+- `implied_bounds` tightened 436, 70, 118 and 21 at 2 ms per sweep.
+- `eliminate` + `factorable_elim` cost 1.3-2.4 s per sweep and found **nothing** on
+  any sweep.
+- Measured by magnitude, the later sweeps' changes are real: 375, 132, 29 and 45
+  blocks shrank, nearly all by more than 10 % of their width.
+- **Without probing**, one cycle never settles. 15-18 blocks shrink by 3.4 % per
+  sweep, sweep after sweep, so legacy runs all 16 sweeps to `IterationCap` (25.7 s).
+  The same shape shows on `bchoco06/07/08` and `beuster` (`IterationCap` in
+  0.4-3.0 s).
+
+The decisive fact is in `solver.py`, not in the orchestrator.
+`propagate_bounds_to_model` adopts the presolve box only under
+`DISCOPT_PRESOLVE_BOUND_PROPAGATION`, which is default OFF. By default the solve
+keeps only the returned repr, that is the rewrites. That explains why the root LP
+bound was 4347.80 under every presolve variant the diagnosis tried.
+
+**Rule.**
+
+- Probing (the one *exhaustive* pass) runs in sweep 0 only.
+- A later sweep counts as progress only if it moved something the solve keeps:
+  - by default, a rewrite or a newly fixed block, because a fixing can feed a
+    rewrite in the next sweep;
+  - with the box adopted, also a 5 % width shrink or a newly finite side.
+- Nothing in it is keyed to an instance. It is "do not pay for work whose product
+  is discarded", plus a cost rule for the one pass that redoes all its work every
+  sweep.
+
+**Entry experiment** (`probe_presolve_rules.py`: `run_root_presolve` alone,
+solver.py's kwargs, 30 s budget, one process; the returned repr fingerprinted by
+shape, declared bounds and per-row rhs/sense/expression id):
+
+| arm | instances | model identical to legacy | total wall | `syngas` hull | others moved |
+|---|---|---|---|---|---|
+| legacy | 81 | -- | 54.2 s | 30.0 s `TimeBudget` | |
+| `rel=inf` (no probing rule) | 81 | 81/81 | 32.4 s | 20.5 s | |
+| `rel=inf` + probing once (**the flag, default path**) | 81 | **81/81** | **21.1 s** | **11.3 s** | hda 8.6 -> 4.1, beuster 2.6 -> 0.26, 4stufen 1.2 -> 0.12 |
+| `rel=0.05` (box adopted) | 88 | 88/88 | 138.0 of 151.5 s | 30.0 s | |
+| `rel=0.05` + probing once (**the flag, box adopted**) | 88 | **88/88** | **81.7 of 151.5 s** | 22.0 s | gdp_col hull 30.0 -> 15.1, syngas big-M 28.0 -> 2.1, methanol hull 6.9 -> 3.1 |
+
+The box was looser than legacy's on 13 (default-path rule) and 18 (5 % rule)
+instances. The default path never adopts that box.
+
+On the default path, then, the flag changes no model the search sees. What it
+changes is time: the solve starts its root ~19 s earlier on `syngas` hull. Its
+§5 panels therefore measure what that time does downstream (results in 106.4).

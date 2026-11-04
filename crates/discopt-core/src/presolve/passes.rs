@@ -149,6 +149,9 @@ impl PresolvePass for ProbingPass {
     fn name(&self) -> &'static str {
         "probing"
     }
+    fn exhaustive(&self) -> bool {
+        true
+    }
     fn category(&self) -> PassCategory {
         PassCategory::BoundsOnly
     }
