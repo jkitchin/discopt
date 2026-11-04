@@ -47,7 +47,9 @@ this order inside `_Engine.confirm_infeasible`:
 | Exact reduction as a second-route pre-pass (`_iis_reduce`) | dijle path sets: presolve-free undecided at 300 s -> confirmed in 1-11 s; dingo / dives captured sets: 0.3 s / 0.0 s |
 | Confirmation budgets sized from confirmations (R2) | no effect alone (falsified); needed by the reduction route |
 | Integrality phase relaxes whole columns (integrality + bounds) | dijle 6282 -> 3961 (reduction) -> **2426** at 600 s (Gurobi 2402); neos-942886 47 -> 38; dell 158 -> 157; misc05inf 126 -> 127 |
-| Order flag `i` + `ICB-i` portfolio member | PANEL_RESULT |
+| Order flag `i` + `ICB-i` portfolio member (tried, reverted) | misc05inf back to 126, but bell3ainf 124 -> 126: `ICB-i` finishes it so early that the fast-wait window closes before `CIB-l` delivers 124 (126 twice with 6 workers, 124 twice with 5); net one element worse, one more core |
+
+Regression panel for the column-relaxing phase (20 completing smallset instances, 600 s, checker PASSED on all): sizes unchanged except neos-942886 47 -> 38, dell 158 -> 157, misc05inf 126 -> 127. On this 4-core machine the full portfolio gives dijle 4322 at 600 s (its CIB member alone: 2426) -- members share cores here; the competition gives >= 8 threads.
 
 dingo at 3600 s (2 workers): 4464 (Gurobi 1867). Its limit is the cost of each removal
 probe (12.6 s, the same 7838-node tree every time), not confirmation.
