@@ -279,3 +279,90 @@ def test_member_refuses_a_different_discopt(monkeypatch):
     monkeypatch.setattr(_iis_milp, "_DISCOPT_DIR", "/nonexistent/discopt")
     with pytest.raises(RuntimeError, match="imported discopt from"):
         compute_iis(_two_iis_model(), include_integrality=True, portfolio=("ICB",))
+
+
+def test_grace_extra_is_clamped_to_the_window():
+    """MIPcc27 sweep: every later member that beat the first finisher did so
+    within 31 s of it. A proportional wait (grace * t) cut improvements off on
+    fast instances and idled for minutes on slow ones."""
+    from discopt._iis_milp import _grace_extra
+
+    assert _grace_extra(4.0, 2.0) == 4.0  # proportional, unclamped
+    assert _grace_extra(4.0, 2.0, (10.0, 30.0)) == 10.0  # floor: bell3ainf's 124 at +13 s
+    assert _grace_extra(20.0, 2.0, (10.0, 30.0)) == 20.0
+    assert _grace_extra(285.0, 2.0, (10.0, 30.0)) == 30.0  # neos859080: was +285 s
+
+
+def test_grace_window_argument_validation():
+    import math
+
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._iis_milp import milp_iis_arrays
+
+    arrays = (
+        sp.csr_matrix(np.array([[1.0]])),
+        np.array([1.0]),
+        np.array([1e20]),
+        {0: np.array([0])},
+        np.array([0.0]),
+        np.array([0.5]),
+        np.array([False]),
+    )
+    with pytest.raises(ValueError, match="grace_window"):
+        milp_iis_arrays(arrays, portfolio=("ICB",), grace=math.inf, grace_window=(1.0, 2.0))
+    with pytest.raises(ValueError, match="grace_window"):
+        milp_iis_arrays(arrays, portfolio=("ICB",), grace=2.0, grace_window=(5.0, 2.0))
+    with pytest.raises(ValueError, match="need portfolio"):
+        milp_iis_arrays(arrays, grace_window=(1.0, 2.0))
+
+
+def test_the_entry_program_uses_the_fast_wait(tmp_path, monkeypatch):
+    from discopt import mipcc
+
+    seen = {}
+    import discopt._iis_milp as engine
+
+    def capture(*a, **k):
+        seen.update(k)
+        raise TimeoutError("stop here")
+
+    monkeypatch.setattr(engine, "milp_iis_arrays", capture)
+    m = _two_iis_model()
+    path = tmp_path / "m.mps"
+    m.to_mps(str(path))
+    monkeypatch.setenv("MIPCC_TIME_LIMIT", "60")
+    assert mipcc.main([str(path), str(tmp_path / "s.json")]) == 0
+    assert (seen["grace"], seen["grace_window"]) == (2.0, (10.0, 30.0))
+
+
+@pytest.mark.parametrize(
+    ("wait", "expected"), [("fast", (2.0, (10.0, 30.0))), ("all", (float("inf"), None))]
+)
+def test_compute_iis_portfolio_wait_reaches_the_portfolio(monkeypatch, wait, expected):
+    import discopt._iis_milp as engine
+
+    seen = {}
+    real = engine._portfolio_iis
+
+    def spy(*a, **k):
+        seen["grace"], seen["window"] = k["grace"], k["grace_window"]
+        return real(*a, **k)
+
+    monkeypatch.setattr(engine, "_portfolio_iis", spy)
+    res = compute_iis(
+        _two_iis_model(),
+        include_integrality=True,
+        include_bounds=False,
+        portfolio=("ICB", "ICB-r"),
+        portfolio_wait=wait,
+    )
+    assert (seen["grace"], seen["window"]) == expected
+    assert _names(res) == ["c0", "c1"]
+
+
+def test_portfolio_wait_is_validated():
+    with pytest.raises(ValueError, match="portfolio_wait"):
+        compute_iis(
+            _two_iis_model(), include_integrality=True, portfolio=("ICB",), portfolio_wait="slow"
+        )
