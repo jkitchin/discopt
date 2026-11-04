@@ -157,8 +157,9 @@ measured" — it may be scheduled only with an entry experiment. From the routin
   finish, then `maturin develop --release` / `pip install -e .` and the standing gates
   re-run before the next task. Baseline data is labelled by the commit it measured; after
   a rebase that commit survives only in the reflog, so a run JSON's
-  `header.commit` is the measurement's identity, not a branch commit. Last rebase:
-  *(none yet; `b0081ab` was a merge of `origin/main`, 2026-11-04)*.
+  `header.commit` is the measurement's identity, not a branch commit. Last sync:
+  2026-11-04 — a parallel session rebased the plan onto `main` and merged this branch back
+  (`ff3da5b`); this tree synced to it at `07f71bbd` after P0.3's run. Next due 2026-11-05.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
@@ -346,6 +347,13 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   - HiGHS on this host: H misses `enlight_hard`, `neos-2624317-amur`,
     `neos-3118745-obra` (`feasible`); H0 misses `amur`, `gsvm2rl3`, `obra` at 20 s —
     35/38 each, not the 38/38 of the 14-core dev machine.
+  - **Sync after the run** (`07f71bbd`: the branch as rebased onto `main` by a parallel
+    session, plus these commits) brought #1917 G3.2 into `milp_driver.rs` (coefficient
+    tightening, tableau c-MIR, both default OFF), `gomory.rs`, `fbbt.rs`, `lp_pounce.py`.
+    Drift check on the R arm at the synced HEAD, L + M, 1 round: **49/49 identical
+    status, every optimal row's node count equal to a baseline round** — the baseline
+    describes HEAD on those panels (MIPLIB not re-checked). `cargo test` 980 + smoke 4482
+    passed after the sync.
 - [ ] **P0.4 — Master baselines (R2a/R2b/R2c).** Scope: new
   `discopt_benchmarks/scripts/master_parity_panel.py`. (i) R2a: replay the captured
   masters (`python/tests/data/oa_masters/*.npz`, `issue2069/clay0203_master.mps.gz`,
