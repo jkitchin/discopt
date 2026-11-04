@@ -51,6 +51,20 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The in-house simplex certifies LPs with huge-but-finite bounds (#2125).** A bounded,
+  feasible multi-row LP with a finite variable bound in `[1e10, 1e20)` used to return
+  `SolveStatus.ERROR` from `lp_simplex.solve_lp`. Measured on the issue's GDPlib
+  `batch_processing` mbigm LPs at `u >= 3e16`: 7-8 of 40 agreed with HiGHS before, and
+  40 of 40 now. On a seeded multi-row sweep it was 72 of 192, and is now 192 of 192.
+  Three fixes, each held to the original LP's audit:
+  - the row audit lets a row's own slack absorb its rounding;
+  - a cold solve drops the huge sides and verifies the relaxation's answer;
+  - an active huge bound is fixed and certified from duals.
+
+  One case is still refused rather than certified: a vertex whose huge interior value
+  sits in a binding row. `DISCOPT_LP_HUGE_BOUND_RELAX=0` restores the previous engine
+  (bit-identical on 257 LPs measured); an unrecognized value is an error.
+
 - **The in-house MILP driver bounds nodes of translation-invariant masters
   (#2115).** Its node bound (Neumaier-Shcherbina from the node dual) was `-inf`
   whenever an open column -- a free variable arrives split `x+ - x-` -- had a
