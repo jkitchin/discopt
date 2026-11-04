@@ -68,10 +68,13 @@ _BASE_CONFIRM_CAP_S = 300.0
 #: shrunk by this factor since the last attempt ...
 _ROLL_SHRINK = 0.9
 #: ... while all attempts together have used at most this share of the elapsed
-#: time ...
-_ROLL_SHARE = 0.10
-#: ... each with 4x the last successful confirmation's time, at least this much
-#: (and never more than checkpoint 0's saturated budget). Measured on MIPcc27
+#: time (0.10 starved them: on MIPcc27's dijle one confirmation of a row-phase set
+#: costs 15-26 s while a probe costs 32 ms, so a 10% share early in the run never
+#: paid for one -- iis_generalint_strategy.md R2) ...
+_ROLL_SHARE = 0.25
+#: ... each with at least this much, 4x the slowest successful confirmation so
+#: far, and whatever the share leaves unspent (never more than checkpoint 0's
+#: saturated budget). Measured on MIPcc27
 #: (exp14, 300 s): intermediate sets confirm presolve-free in 0.1-2.5 s early in
 #: a phase (dijle's down to 1417 of 3136 held integralities, all <= 0.6 s) and not
 #: in 10 s late in it; the final sets of dijle / dingo / dives not in 90 s.
@@ -183,6 +186,11 @@ class _Engine:
         # (two solves), sized from recently observed solve times.
         self.reserve_confirm = reserve_confirm
         self._recent: deque[float] = deque(maxlen=20)  # wall seconds of recent solves
+        # Slowest successful two-route confirmation so far (seconds). Sizes the
+        # reserve for the final confirmation and the rolling budgets: on general-
+        # integer models confirmations cost 100-1000x a probe, so probe times
+        # alone under-reserved them (dijle: final confirmation left 1.7 s).
+        self.confirm_ref = 0.0
         # The last set a presolve-on solve proved infeasible (cons, bounds, ints).
         # The filter's current set is that set whenever the last batch it could
         # not drop was put back, so its final confirmation needs only the
@@ -306,7 +314,7 @@ class _Engine:
             # Two confirmation solves, each about as long as recent ones, with a
             # 25% margin. (Each may still overrun its own budget by up to
             # ``_GRACE_S`` before the guard stops it.)
-            hard -= 2.5 * max(self._recent, default=0.0)
+            hard -= max(2.5 * max(self._recent, default=0.0), 2.0 * self.confirm_ref)
         for lim in (hard, stop_at):
             if lim is not None:
                 stop = min(stop, lim)
@@ -1418,6 +1426,7 @@ def _milp_iis_arrays(
         # eat the filter's budget.
         base_stop = min(deadline, time.perf_counter() + base_budget)
         n_recent = len(eng._recent)
+        t_ck0 = time.perf_counter()
         try:
             verdict0 = eng.confirm_infeasible(
                 cons, bounds, ints_active, stop_at=base_stop, presolve=("off",)
@@ -1431,6 +1440,7 @@ def _milp_iis_arrays(
             eng._recent.pop()
         if verdict0 is True:
             checkpoint = (set(cons), set(bounds), set(ints_active))
+            eng.confirm_ref = max(eng.confirm_ref, time.perf_counter() - t_ck0)
         elif verdict0 is False:
             return redo_each()
 
@@ -1470,7 +1480,8 @@ def _milp_iis_arrays(
         if not eng.proven_on(cons, bounds, ints_active):
             return
         roll_ref = size
-        budget = min(base_budget, max(_ROLL_MIN_S, 4.0 * roll_last_ok))
+        unspent = _ROLL_SHARE * (now - t_start) - roll_spent
+        budget = min(base_budget, max(_ROLL_MIN_S, 4.0 * eng.confirm_ref, unspent))
         n_recent = len(eng._recent)
         try:
             verdict = eng.confirm_infeasible(
@@ -1489,6 +1500,7 @@ def _milp_iis_arrays(
         if verdict is True:
             checkpoint = (set(cons), set(bounds), set(ints_active))
             roll_last_ok = time.perf_counter() - now
+            eng.confirm_ref = max(eng.confirm_ref, roll_last_ok)
             n_rolling += 1
         elif verdict is False:
             raise _Refuted
@@ -1599,11 +1611,33 @@ def _milp_iis_arrays(
         for k, phase in enumerate(phases):
             phase()
             if confirm == "final" and k < len(phases) - 1:
-                verdict = eng.confirm_infeasible(cons, bounds, ints_active)
+                if checkpoint is not None and reported_size(
+                    cons, bounds, ints_active
+                ) >= reported_size(*checkpoint):
+                    # Not smaller than the anytime answer (after the integrality
+                    # phase it is usually larger): nothing to gain from it.
+                    continue
+                # Its own budget, like checkpoint 0's: cut to the 30 s probe
+                # limit it failed on dijle's 825-row set (needs 15-40 s), and
+                # only the presolve-free route when presolve-on is on record.
+                t_pe = time.perf_counter()
+                n_recent_pe = len(eng._recent)
+                verdict = eng.confirm_infeasible(
+                    cons,
+                    bounds,
+                    ints_active,
+                    stop_at=None if deadline is None else min(deadline, t_pe + base_budget),
+                    presolve=("off",)
+                    if eng.proven_on(cons, bounds, ints_active)
+                    else ("choose", "off"),
+                )
+                while len(eng._recent) > n_recent_pe:  # not a filtering probe
+                    eng._recent.pop()
                 if verdict is False:
                     return redo_each()
                 if verdict is True:
                     checkpoint = (set(cons), set(bounds), set(ints_active))
+                    eng.confirm_ref = max(eng.confirm_ref, time.perf_counter() - t_pe)
     except _OutOfTime:
         complete = False
         proven = False

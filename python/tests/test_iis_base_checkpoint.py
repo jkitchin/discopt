@@ -70,7 +70,10 @@ def test_base_confirmation_costs_one_solve_and_changes_nothing_else():
     m = _parity_model(12)
     free = milp_iis(m)
     timed = milp_iis(m, total_time_limit=600.0)
-    assert timed.n_solves == free.n_solves + 1
+    # One solve for checkpoint 0, and one fewer at the end of the integrality
+    # phase: every integrality is needed, so that set is no smaller than the
+    # base set checkpoint 0 already confirmed, and its confirmation is skipped.
+    assert timed.n_solves == free.n_solves
     assert (timed.constraints, timed.bounds, timed.integrality) == (
         free.constraints,
         free.bounds,
