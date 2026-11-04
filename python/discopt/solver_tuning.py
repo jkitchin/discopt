@@ -1316,8 +1316,22 @@ class SolverTuning:
     ``rate * Q^2 + k * F_A * F_B = 0``): OFF, the 1/yhat products make the
     probe-box and real-box relaxations differ in row count, so the native spatial
     kernel declines the model and the Python tree runs (bound 0.094 at 300 s, 1,317
-    nodes, 201 s of it in FBBT). ON, the kernel accepts it. Audit row in
-    ``docs/dev/flag-retirement-audit.md``."""
+    nodes, 201 s of it in FBBT). ON, the kernel accepts it (bound 1.841 at 300 s,
+    23,710 nodes; still uncertified, incumbent 3.0620 in both arms).
+
+    §5 panel 2026-11-03 (``issue1917_gdp_flag_panel.py``, the 11 GDPlib hull
+    instances where the flag fires, 3 reps x 120 s, interleaved): **cert-clean**
+    (0 incorrect, 0 bound crossings, 0 solved lost). Gains: modprodnet certified
+    3/3 vs 1/3, eight_process 59 -> 3 nodes, eight_process_logical 41 -> 3, gdp_col
+    finds an incumbent (OFF none), mod_hens and cstr bounds tighter. Costs:
+    methanol loses its incumbent 3/3 with a looser bound, hda bound looser, and
+    biofuel is OOM-killed 3/3 (peak RSS 15.3 GB vs 2.4 GB OFF). The blowup is in
+    convexity classification, not in the flag's row. ``affine_sign`` falls through
+    to ``affine_range``, which calls ``lp_pounce.solve_lp``, and
+    ``_stack_constraints`` densifies biofuel's ~15k-row sparse GDP system. **Not
+    net-positive: stays OFF.** What would change that: a sparse ``lp_pounce`` row
+    stack (or a size guard in ``affine_range``) plus a rerun that keeps methanol's
+    incumbent. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
