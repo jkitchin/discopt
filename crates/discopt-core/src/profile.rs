@@ -556,6 +556,10 @@ counters!(
     // contradicted an ancestor's bound.
     MilpTinyEntryDecert,
     MilpBoundContradictedDecert,
+    // #2136: MILP solves whose certificate was withdrawn because the returned
+    // point's recomputed objective disagreed with the tree's incumbent value
+    // (the value every gap test and cutoff used) beyond LP noise.
+    MilpIncumbentMisvaluedDecert,
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,

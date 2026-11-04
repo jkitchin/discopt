@@ -3434,7 +3434,37 @@ fn solve_milp_node_search(
         crate::profile::incr(crate::profile::Ctr::MilpBoundContradictedDecert);
         withdraw_certificate(&mut res);
     }
+    // #2136: every gap test, cutoff and the incumbent cap on the bound used the
+    // tree's incumbent VALUE (the node LP objective), while `res.obj` is the
+    // recomputed `cᵀx` of the point returned. They agree up to LP noise on any
+    // healthy solve. When they do not, the gap the tree closed is not the gap
+    // between the returned point and the returned bound, so nothing derived
+    // from it is a certificate. Measured: a clay0203 GDP master with columns
+    // at the ±9.999e19 default box handed in as finite bounds returned
+    // `Optimal` with obj 41907.46 (true optimum 41420.27) and bound -752904:
+    // the node LP reported ≈ -752904 for a vertex whose `cᵀx` is 41907.
+    if has_inc && incumbent_misvalued(res.obj, stats.incumbent_value) {
+        crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
+        withdraw_certificate(&mut res);
+    }
     res
+}
+
+/// Whether the returned point's recomputed objective `obj` disagrees with the
+/// tree's incumbent value `tree_inc` by more than LP noise (#2136).
+///
+/// The allowance is `1e-6 · max(1, |obj|)`, the solver's absolute/relative
+/// objective tolerance. A healthy node LP matches `cᵀx` to ~1e-9 relative, so
+/// this never fires on an honest solve; a disagreement past it means the
+/// tree's gap tests were run against a value the returned point does not
+/// have. Either direction is disqualifying: a point WORSE than recorded means
+/// `Optimal` was declared on a gap that is not closed for the returned point;
+/// a point BETTER than recorded can sit below the reported bound.
+fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
+    if !obj.is_finite() || !tree_inc.is_finite() {
+        return obj.is_finite() != tree_inc.is_finite();
+    }
+    (obj - tree_inc).abs() > 1e-6 * obj.abs().max(1.0)
 }
 
 /// Immutable per-batch context shared by every node evaluation. Holds the
@@ -9576,6 +9606,23 @@ mod tiny_entry_tests {
         assert!(!gate(&unit, 2, &l, &u, &[3.5, 1.0]));
         // ... and the row-scaled spelling does.
         assert!(gate(&dense, 2, &l, &u, &[3.5e5, 1e-6]));
+    }
+
+    #[test]
+    fn incumbent_misvalued_tolerates_lp_noise_only() {
+        // #2136: LP noise (~1e-9 relative) on a healthy solve never fires.
+        assert!(!incumbent_misvalued(41_420.271_951, 41_420.271_951 + 4e-8));
+        assert!(!incumbent_misvalued(0.0, 5e-7));
+        assert!(!incumbent_misvalued(-3.0, -3.0));
+        // The measured clay0203 case: cᵀx = 41907.46, node LP said -752904.
+        assert!(incumbent_misvalued(41_907.46, -752_903.98));
+        // Either direction disqualifies (a better point can sit below the bound).
+        assert!(incumbent_misvalued(10.0, 10.1));
+        assert!(incumbent_misvalued(10.1, 10.0));
+        assert!(incumbent_misvalued(0.0, 2e-6));
+        // A finite point against a non-finite tree value is a disagreement too.
+        assert!(incumbent_misvalued(1.0, f64::NEG_INFINITY));
+        assert!(!incumbent_misvalued(f64::INFINITY, f64::INFINITY));
     }
 
     #[test]
