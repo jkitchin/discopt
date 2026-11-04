@@ -5,12 +5,13 @@
 //! spatial B&B with no Python boundary crossing.
 //!
 //! Term encoding (parallel arrays, one entry per lifted term):
-//! * `term_kind`: 0=Bilinear, 1=Monomial, 2=AffineSquare, 3=Sqrt
+//! * `term_kind`: 0=Bilinear, 1=Monomial, 2=AffineSquare, 3=Sqrt, 4=AffinePow
 //! * `term_i`  : operand column (`i` / `x` / `j`)
 //! * `term_j`  : second operand for Bilinear, else ignored (pass -1)
 //! * `term_out`: auxiliary output column (`w` / `s`)
-//! * `term_p`  : integer power for Monomial, else ignored (pass 0)
-//! * `term_coeff`, `term_cst`: affine `coeff*x+cst` for AffineSquare/Sqrt, else 0
+//! * `term_p`  : integer power for Monomial / AffinePow, else ignored (pass 0)
+//! * `term_coeff`, `term_cst`: affine `coeff*x+cst` for AffineSquare/Sqrt/AffinePow,
+//!   else 0
 //!
 //! Fixed linear rows are passed CSR-style: `fixed_row_ptr` (len `n_fixed+1`) into
 //! `fixed_cols`/`fixed_coeffs`, plus `fixed_rhs` (each row is `<= rhs`).
@@ -212,6 +213,13 @@ pub fn solve_spatial_tree_py<'py>(
                 w: tout[k] as usize,
                 coeff: tcoeff[k],
                 cst: tcst[k],
+            },
+            4 => EnvTerm::AffinePow {
+                x: ti[k] as usize,
+                w: tout[k] as usize,
+                coeff: tcoeff[k],
+                cst: tcst[k],
+                p: tp[k] as i32,
             },
             other => {
                 return Err(PyValueError::new_err(format!(

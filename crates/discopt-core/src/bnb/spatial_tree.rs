@@ -731,6 +731,20 @@ fn term_true_value(t: &EnvTerm, x: &[f64]) -> Option<f64> {
             }
             arg.sqrt()
         }
+        EnvTerm::AffinePow {
+            x: xc,
+            coeff,
+            cst,
+            p,
+            ..
+        } => {
+            let t = coeff * x[xc] + cst;
+            let v = t.powf(p as f64);
+            if !v.is_finite() {
+                return None;
+            }
+            v
+        }
     })
 }
 
@@ -756,6 +770,7 @@ fn term_gap_and_branch_col(t: &EnvTerm, x: &[f64], width: &dyn Fn(usize) -> f64)
         EnvTerm::Monomial { i, .. } => i,
         EnvTerm::AffineSquare { j, .. } => j,
         EnvTerm::Sqrt { x: xc, .. } => xc,
+        EnvTerm::AffinePow { x: xc, .. } => xc,
     };
     (gap, col)
 }
@@ -1959,6 +1974,7 @@ fn term_operands(t: &EnvTerm) -> [Option<usize>; 2] {
         EnvTerm::Monomial { i, .. } => [Some(i), None],
         EnvTerm::AffineSquare { j, .. } => [Some(j), None],
         EnvTerm::Sqrt { x: xc, .. } => [Some(xc), None],
+        EnvTerm::AffinePow { x: xc, .. } => [Some(xc), None],
     }
 }
 

@@ -86,6 +86,22 @@ pub enum EnvTerm {
         /// Affine constant inside the sqrt.
         cst: f64,
     },
+    /// #2142: `w = (coeff*x + cst)^p`, integer `p` (the producer registers only
+    /// `p < 0`) — the `_emit_1d` envelope of a 1-D power atom over an affine
+    /// single-column base: 4 rows, some of them vacuous where the cold build drops
+    /// the row, or none (aux floor only) on a degenerate box.
+    AffinePow {
+        /// Operand column.
+        x: usize,
+        /// Output column `w`.
+        w: usize,
+        /// Affine coefficient.
+        coeff: f64,
+        /// Affine constant.
+        cst: f64,
+        /// Integer exponent.
+        p: i32,
+    },
 }
 
 impl EnvTerm {
@@ -96,6 +112,7 @@ impl EnvTerm {
             EnvTerm::Monomial { s, .. } => s,
             EnvTerm::AffineSquare { w, .. } => w,
             EnvTerm::Sqrt { w, .. } => w,
+            EnvTerm::AffinePow { w, .. } => w,
         }
     }
 
@@ -111,6 +128,9 @@ impl EnvTerm {
             EnvTerm::Sqrt { x, coeff, cst, .. } => {
                 return mc::sqrt_aux_bounds(coeff, cst, lo[x], hi[x])
             }
+            EnvTerm::AffinePow {
+                x, coeff, cst, p, ..
+            } => mc::affine_pow_aux_bounds(coeff, cst, lo[x], hi[x], p),
         })
     }
 
@@ -137,6 +157,19 @@ impl EnvTerm {
                     emit(&rows, out);
                 }
                 // else: degenerate/undefined base box -> aux-floor only, no rows.
+            }
+            EnvTerm::AffinePow {
+                x,
+                w,
+                coeff,
+                cst,
+                p,
+            } => {
+                if let Some(rows) =
+                    mc::univariate_rows(x, w, coeff, cst, lo[x], hi[x], mc::Univariate::Pow(p))
+                {
+                    emit(&rows, out);
+                }
             }
         }
     }
