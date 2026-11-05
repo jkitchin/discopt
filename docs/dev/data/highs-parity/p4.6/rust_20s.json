@@ -1,0 +1,65 @@
+{
+ "args": {
+  "instances": "enlight_hard,neos-2624317-amur",
+  "panel_json": "/home/user/discopt/discopt_benchmarks/data/miplib/panel.json",
+  "seeds": 2,
+  "max_moves": 1000000000,
+  "wall": 20.0,
+  "engine": "rust",
+  "out": "/tmp/claude-0/-home-user-discopt/38303ad9-c9f4-5a5b-9f75-f33b92707a61/scratchpad/fj_rust_20s.json"
+ },
+ "rows": [
+  {
+   "name": "enlight_hard",
+   "engine": "rust",
+   "seed": 0,
+   "found": false,
+   "verified": false,
+   "worst_violation": null,
+   "objective": null,
+   "opt": 37.0,
+   "moves": 3189415,
+   "weight_bumps": 498008,
+   "wall": 20.000613990999682
+  },
+  {
+   "name": "enlight_hard",
+   "engine": "rust",
+   "seed": 1,
+   "found": false,
+   "verified": false,
+   "worst_violation": null,
+   "objective": null,
+   "opt": 37.0,
+   "moves": 3247746,
+   "weight_bumps": 493181,
+   "wall": 20.00018759800014
+  },
+  {
+   "name": "neos-2624317-amur",
+   "engine": "rust",
+   "seed": 0,
+   "found": false,
+   "verified": false,
+   "worst_violation": null,
+   "objective": null,
+   "opt": 3.5223968,
+   "moves": 1834538,
+   "weight_bumps": 636629,
+   "wall": 20.002864556000077
+  },
+  {
+   "name": "neos-2624317-amur",
+   "engine": "rust",
+   "seed": 1,
+   "found": false,
+   "verified": false,
+   "worst_violation": null,
+   "objective": null,
+   "opt": 3.5223968,
+   "moves": 1641970,
+   "weight_bumps": 473357,
+   "wall": 20.001356873000077
+  }
+ ]
+}

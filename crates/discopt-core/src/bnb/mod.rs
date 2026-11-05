@@ -11,6 +11,7 @@ pub mod node;
 pub mod obbt_sweep;
 pub mod obj_integral;
 pub mod pool;
+pub mod primal_fj;
 pub mod relu_ideal;
 pub mod spatial_kernel;
 pub mod spatial_propagate;

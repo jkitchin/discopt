@@ -13,6 +13,7 @@ mod bnb_bindings;
 mod convex_bindings;
 mod decomp_bindings;
 mod expr_bindings;
+mod fj_bindings;
 mod lp_bindings;
 mod milp_handle;
 mod nl_bindings;
@@ -33,6 +34,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sat_bindings::PySatSolver>()?;
     m.add_class::<bnb_bindings::PyTreeManager>()?;
     m.add_class::<milp_handle::PyMilpHandle>()?;
+    m.add_function(wrap_pyfunction!(fj_bindings::fj_search_py, m)?)?;
     m.add_class::<expr_bindings::PyModelRepr>()?;
     m.add_class::<expr_bindings::PySubstitutionChain>()?;
     m.add_class::<expr_bindings::PyModelBuilder>()?;
