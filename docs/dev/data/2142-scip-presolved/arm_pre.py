@@ -42,6 +42,25 @@ def _w(**k):
             spec0 = {x: (int(k[x]) if x in ("n_cols", "n_orig") else np.asarray(k[x])) for x in CAP if not x.startswith("meta_")}
             spec, expand, compress, info, _ = T.build_spec(spec0)
             STATS.update({"rewritten": 1})
+            if os.environ.get("BOX_DISCOPT_FBBT") == "1":
+                kw0 = {x: (int(spec0[x]) if x in ("n_cols", "n_orig") else (np.asarray(spec0[x]).astype(np.int64) if np.asarray(spec0[x]).dtype.kind in "iub" else np.asarray(spec0[x], float))) for x in spec0}
+                live, flo, fhi = R.propagate_spec_py(**kw0, lo=kw0["global_lo"].copy(), hi=kw0["global_hi"].copy(), cutoff=None, rounds=15)
+                assert live
+                n0 = int(spec0["n_cols"]); act = [j for j in range(n0) if spec["global_hi"][j] > spec["global_lo"][j] or j in ()]
+                lo_, hi_ = spec["global_lo"].copy(), spec["global_hi"].copy()
+                for j in range(n0):
+                    if not (lo_[j] == 0.0 and hi_[j] == 0.0 and (spec0["global_lo"][j] != 0.0 or spec0["global_hi"][j] != 0.0)):
+                        lo_[j], hi_[j] = flo[j], fhi[j]
+                STATS["box_replaced"] = int(np.sum((lo_ != spec["global_lo"]) | (hi_ != spec["global_hi"])))
+                spec["global_lo"], spec["global_hi"] = lo_, hi_
+            if os.environ.get("ADD_MAPPED_ROWS") == "1":
+                E = np.load(os.path.join(HERE, "rows_mapped.npz"))
+                off = len(spec["fixed_cols"])
+                spec["fixed_row_ptr"] = np.concatenate([spec["fixed_row_ptr"], off + E["ptr"][1:]]).astype(spec["fixed_row_ptr"].dtype)
+                spec["fixed_cols"] = np.concatenate([spec["fixed_cols"], E["cols"]]).astype(spec["fixed_cols"].dtype)
+                spec["fixed_coeffs"] = np.concatenate([spec["fixed_coeffs"], E["coefs"]])
+                spec["fixed_rhs"] = np.concatenate([spec["fixed_rhs"], E["rhs"]])
+                STATS["mapped_rows_added"] = int(len(E["rhs"]))
             for x in spec:
                 k[x] = spec[x]
             for name in ("incumbent_value", "primal_hook"):
