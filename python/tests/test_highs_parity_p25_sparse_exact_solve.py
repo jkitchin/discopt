@@ -50,6 +50,10 @@ def test_sparse_solve_matches_dense_reference_including_singular():
     for _ in range(300):
         n = rnd.randint(1, 30)
         M = [[Fraction(rnd.choice(vals)) for _ in range(n)] for _ in range(n)]
+        if n >= 2 and rnd.random() < 0.5:
+            # Half the systems get a scaled duplicate row: singular by construction.
+            i, k = rnd.sample(range(n), 2)
+            M[k] = [Fraction(3, 2) * v for v in M[i]]
         rhs = [Fraction(rnd.randint(-9, 9), rnd.randint(1, 4)) for _ in range(n)]
         want = _dense_reference(M, rhs)
         got = H._exact_solve(M, rhs, None)
