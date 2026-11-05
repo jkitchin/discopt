@@ -15931,3 +15931,16 @@ established on this corpus, which rarely reaches the kernel with equality struct
 
 **Status: default OFF, panel owed.** The GDP parity panel (big-M + hull) and the full-solve
 cstr hull entry need gdplib from source; they decide graduation or retirement (audit row).
+
+**Verification run:**
+
+- `pytest -m smoke python/tests`: 4,523 passed, 25 skipped, 1 failed. The failure is
+  `test_gdp_bigm_argument_split.py::test_stranded_gas_lowers_by_big_m`: the PyPI `gdplib`
+  in this container ships without `stranded_gas/data.xlsx` (`FileNotFoundError`), unrelated.
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: 19 passed.
+- `python/tests/test_kernel_presolve.py`: 29 passed (the cstr entry test is env-gated,
+  `DISCOPT_RUN_2168_ENTRY=1`); `test_1345_flag_retirement_audit.py` and
+  `test_relax_module_status.py`: 31 passed.
+- `cargo test -p discopt-core --release`: ok (the only Rust change is a doc comment in
+  `discopt-python`).
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
