@@ -144,3 +144,31 @@ def test_panel_report_summarises_by_panel_and_arm():
     assert by[("INF", "R")]["solved"] == 1 and by[("INF", "H0")]["solved"] == 1
     with pytest.raises(SystemExit, match="incomplete"):
         rep.summarise([{**run, "complete": False}])
+
+
+def test_attribute_classify_is_sense_aware(mp):
+    """highs-parity P4.1: the attribution classes and shortfalls, both senses."""
+    gap = 1e-4
+    # minimize, opt 100: incumbent 110 (primal short 10/101), bound 50 (dual short 50/101)
+    c = mp.classify({"objective": 110.0, "bound": 50.0}, 100.0, False, gap)
+    assert c["class"] == "dual"
+    assert c["primal_short"] == pytest.approx(10 / 101) and c["dual_short"] == pytest.approx(
+        50 / 101
+    )
+    # the incumbent is the larger miss
+    c = mp.classify({"objective": 180.0, "bound": 99.0}, 100.0, False, gap)
+    assert c["class"] == "primal" and not c["primal_within_gap"]
+    # maximize, opt 100: incumbent 90 is short by 10, bound 101 by 1
+    c = mp.classify({"objective": 90.0, "bound": 101.0}, 100.0, True, gap)
+    assert c["class"] == "primal"
+    assert c["primal_short"] == pytest.approx(10 / 101) and c["dual_short"] == pytest.approx(
+        1 / 101
+    )
+    assert mp.classify({"objective": None, "bound": 50.0}, 100.0, False, gap)["class"] == (
+        "no-incumbent"
+    )
+    assert mp.classify({"objective": 100.0, "bound": 100.0, "gap_certified": True}, 100.0, False,
+                       gap)["class"] == "solved"  # fmt: skip
+    # optimum found, bound open: dual, with the incumbent within the gap
+    c = mp.classify({"objective": 100.0, "bound": float("-inf")}, 100.0, False, gap)
+    assert c["class"] == "dual" and c["primal_within_gap"] and c["dual_short"] is None

@@ -413,6 +413,9 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
         if stats.get("lp/std_engine_rust") == 1.0
         else "rust",
         "algorithm_route": r.algorithm_route,
+        # Why the solve stopped (highs-parity P4.1: P0.3's Rust MILP rows ended at
+        # 10-13 s of a 20 s budget without certifying).
+        "termination": None if r.termination is None else str(r.termination),
         "max_viol": viol,
         "env_backend": os.environ.get("DISCOPT_LP_MILP_BACKEND"),
         "env_std_engine": os.environ.get("DISCOPT_LP_STD_ENGINE"),

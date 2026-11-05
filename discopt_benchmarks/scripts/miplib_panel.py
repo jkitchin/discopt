@@ -19,6 +19,13 @@ Subcommands:
             round-trip loads with the right shape. A mismatch is excluded and listed,
             never dropped silently. Writes the members in ``lp_milp_panel``'s manifest
             format (panel ``MIPLIB``).
+``attribute`` (highs-parity P4.1) on the instances a baseline run left uncertified on
+            the Rust route, re-solve each on that route (``DISCOPT_LP_MILP_BACKEND=rust``,
+            fresh subprocess) at each ``--budgets`` and classify it against the
+            published optimum: ``solved`` (certified), ``no-incumbent``, or by the larger
+            of ``primal`` = how far the incumbent is from the optimum and ``dual`` = how
+            far the bound is, both as ``|opt - v| / (1 + |opt|)``, sense-aware. Records
+            the termination reason and wall too (P0.3's rows stopped early).
 ``run``     delegate to ``lp_milp_panel.py run`` on that manifest with every arm --
             H0 included -- in a fresh subprocess per solve: arms R
             (``DISCOPT_LP_MILP_BACKEND=rust``), H (default route) and H0 (raw highspy),
@@ -40,6 +47,8 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+
+import numpy as np
 
 HERE = Path(__file__).resolve()
 REPO = HERE.parents[2]
@@ -212,6 +221,66 @@ def cmd_screen(a) -> int:
     return 0 if compared > 0 else 1
 
 
+# ----------------------------------------------------------------------------- attribute
+def classify(res: dict, opt: float, maximize: bool, gap: float) -> dict:
+    """The P4.1 class of one Rust-route result against the published optimum ``opt``."""
+    scale = 1.0 + abs(opt)
+    inc, bnd = res.get("objective"), res.get("bound")
+    sgn = -1.0 if maximize else 1.0  # sgn * value is in the minimize sense
+    primal = None if inc is None else max(0.0, sgn * (inc - opt)) / scale
+    dual = None
+    if bnd is not None and np.isfinite(bnd):
+        dual = max(0.0, sgn * (opt - bnd)) / scale
+    if res.get("gap_certified"):
+        cls = "solved"
+    elif inc is None:
+        cls = "no-incumbent"
+    elif dual is None or (primal is not None and dual >= primal):
+        cls = "dual"
+    else:
+        cls = "primal"
+    return {"class": cls, "primal_short": primal, "dual_short": dual,
+            "primal_within_gap": primal is not None and primal <= gap}  # fmt: skip
+
+
+def cmd_attribute(a) -> int:
+    P._assert_discopt_under_test()
+    hdr = P._header()
+    base = json.loads(Path(a.baseline).read_text())
+    unsolved = [r["name"] for r in base["rows"] if not r["R"]["gap_certified"]]
+    man = {m["name"]: m for m in _load_panel(Path(a.panel_json))["members"]}
+    budgets = [float(b) for b in a.budgets.split(",")]
+    print("header", json.dumps(hdr), "unsolved", len(unsolved), "budgets", budgets, flush=True)
+    rows, executed = [], 0
+    for i, name in enumerate(unsolved, 1):
+        mem = man[name]
+        inst = L.read_instance(str(REPO / mem["path"]))
+        row: dict = {"name": name, "opt": mem["oracle_objective"], "maximize": inst.maximize,
+                     "n": inst.n, "m": inst.m, "n_int": int(inst.is_int.sum())}  # fmt: skip
+        for tl in budgets:
+            ns = argparse.Namespace(time_limit=tl, gap=a.gap, max_nodes=a.max_nodes)
+            load = os.getloadavg()[0]
+            res = P._run_sub(str(REPO / mem["path"]), "R", ns)
+            if "error" in res:
+                raise RuntimeError(f"{name} @ {tl}s: {res}")
+            P.check_route(name, "R", res)
+            executed += 1
+            c = classify(res, mem["oracle_objective"], inst.maximize, a.gap)
+            row[str(int(tl))] = {**c, "status": res["status"], "objective": res["objective"],
+                                 "bound": res["bound"], "nodes": res["nodes"],
+                                 "wall": res["wall"], "termination": res.get("termination"),
+                                 "load": load}  # fmt: skip
+            print(f"[{i}/{len(unsolved)}] {name:22s} {int(tl):>3d}s {c['class']:12s} "
+                  f"primal={c['primal_short']} dual={c['dual_short']} "
+                  f"status={res['status']} wall={res['wall']:.1f} "
+                  f"term={res.get('termination')}", flush=True)  # fmt: skip
+        rows.append(row)
+        Path(a.out).write_text(json.dumps({"header": hdr, "args": vars(a), "rows": rows},
+                                          indent=1) + "\n")  # fmt: skip
+    print(f"attribute: instances={len(rows)} executed={executed}", flush=True)
+    return 0 if executed else 1
+
+
 # ----------------------------------------------------------------------------- run
 def cmd_run(a, rest: list[str]) -> int:
     argv = [
@@ -240,6 +309,12 @@ def main(argv=None) -> int:
     s.add_argument("--time-limit", type=float, default=60.0)
     s.add_argument("--gap", type=float, default=P.GAP)
     s.add_argument("--instances", default="")
+    t = sub.add_parser("attribute")
+    t.add_argument("--baseline", default="docs/dev/data/highs-parity/baseline-dcdac02/miplib.json")
+    t.add_argument("--budgets", default="20,60")
+    t.add_argument("--gap", type=float, default=P.GAP)
+    t.add_argument("--max-nodes", type=int, default=100_000_000)
+    t.add_argument("--out", required=True)
     r = sub.add_parser("run")
     r.add_argument("--time-limit", type=float, default=20.0)
     r.add_argument("--gap", type=float, default=P.GAP)
@@ -254,7 +329,7 @@ def main(argv=None) -> int:
         return cmd_run(a, rest)
     if rest:
         p.error(f"unrecognized arguments: {rest}")
-    return {"fetch": cmd_fetch, "screen": cmd_screen}[a.cmd](a)
+    return {"fetch": cmd_fetch, "screen": cmd_screen, "attribute": cmd_attribute}[a.cmd](a)
 
 
 if __name__ == "__main__":
