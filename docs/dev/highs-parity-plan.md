@@ -966,6 +966,27 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (audit rows), keep `=highs` as the opt-out, and run the H4 MINLP guard (drift=0). Kill:
   bar missed → **D1**.
 
+  **Result (2026-11-05): measured; awaiting D1.** Harness arm **S** added (the verified LP
+  route with `DISCOPT_LP_STD_ENGINE=rust`, P1.1's seam; route marker `seam-rust`, pure LP
+  only -- `test_seam_arm_requires_the_rust_std_engine_on_the_verified_route`). Run
+  (`p2.6/gate_L_INF.json`): L (25) + INF (16), arms R/S/H/H0, **3 rounds, load gate 2.0
+  (0/41 rows gated), 480 executed, 0 incorrect.** P2.2–P2.5 contributed no flag (P2.2,
+  P2.3 killed; P2.4 not pursued; P2.5's fix is unflagged), so there is nothing to turn ON.
+
+  | | R (native Rust route) | S (Rust engine via seam) | H (HiGHS route) |
+  |---|---|---|---|
+  | L certified, every round | **25/25** | **25/25** | 25/25 |
+  | INF decided correctly | 16/16 (15 certified) | 12/12 LPs (11 certified) | 16/16 (15 certified) |
+  | geomean wall vs H, L / INF | **1.07 / 0.97** | **1.05 / 1.25** | 1 |
+  | geomean wall vs raw HiGHS (H0), L / INF | 84.9 / 55.1 | 83.4 / 85.6 | 79.5 / 56.7 |
+
+  The one uncertified INF row is `gas11` (`unbounded`), identical on all three arms. Bar
+  reading: against the HiGHS route the ≤ 3.0 bar holds with a wide margin on both Rust
+  arms; against raw HiGHS no route passes -- the HiGHS route itself is 80× (the
+  certificate ladder, verification and the modeling layer, P0.3/P2.0). Which one §1.3
+  means is the owner question still open, so the gate goes to **D1**. The bar's "24/24"
+  and "18/18" predate the P0.1 manifest (L has 25, INF 16).
+
 ### Phase 3 — persistent MILP handle and IIS (R5)
 
 - [ ] **P3.1 — Rust `MilpHandle`.** Scope: new `crates/discopt-python/src/milp_handle.rs`,
