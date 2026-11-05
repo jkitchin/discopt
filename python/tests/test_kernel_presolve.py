@@ -566,7 +566,10 @@ def test_e_kernel_optimum_is_preserved(seed):
     red, expand, _info = presolve_spec(
         spec,
     )
-    r0, r1 = _kernel(spec, max_nodes=50000), _kernel(red, max_nodes=50000)
+    # 2,000 nodes: every seed but 4 certifies in <= 237; seed 4 is uncertified in both
+    # arms even at 50,000 (31 s, over the fast-lane budget), and the cross-bound checks
+    # below need no certificate
+    r0, r1 = _kernel(spec, max_nodes=2000), _kernel(red, max_nodes=2000)
     assert r0["incumbent"] is not None and r1["incumbent"] is not None
     # each arm's incumbent respects the other arm's rigorous bound (gap tolerance
     # 1e-4 relative), whichever of them certified
