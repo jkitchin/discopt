@@ -1163,7 +1163,13 @@ def _gdp_loa_root_proposal(
 
     now = time.perf_counter()
     remaining = float(deadline) - now
-    budget = remaining - max(1.0, _GDP_LOA_PROPOSER_RESERVE * remaining)
+    # #1153: a carve of the role-1 remainder must saturate, so a larger time_limit
+    # buys search rather than a longer root heuristic (identity unless
+    # ``SolverTuning.budget_saturation`` is on).
+    budget = _role2_saturate(
+        remaining - max(1.0, _GDP_LOA_PROPOSER_RESERVE * remaining),
+        1.0 - _GDP_LOA_PROPOSER_RESERVE,
+    )
     if not np.isfinite(budget) or budget < _GDP_LOA_PROPOSER_MIN_S:
         logger.info("GDP LOA proposer (root): %.1f s budget, not started", budget)
         return None
