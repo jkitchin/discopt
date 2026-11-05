@@ -2696,9 +2696,6 @@ def _try_native_spatial_kernel(
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
     # #1970: the scored spatial branching rule (see the helper; default ON).
     solve_kwargs.update(_kernel_spatial_branching_kwargs())
-    # #2142: SCIP's spatial branching (point rule, violation measure and
-    # pseudocost normalisation together; default OFF).
-    solve_kwargs.update(_spatial_branch_scip_kwargs())
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -12198,40 +12195,6 @@ def _kernel_spatial_branching_kwargs() -> dict:
     if raw in ("0", "false", "no", "off", ""):
         return {}
     return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
-
-
-def _spatial_branch_scip_kwargs() -> dict:
-    """#2142: ``DISCOPT_SPATIAL_BRANCH_SCIP`` for the native spatial kernel.
-
-    **Default OFF** (branching only: every child pair still covers its parent box,
-    so no node bound moves). ON enables SCIP's spatial branching as one mode, the
-    three components that ``performance-plan.md`` sections 107-109 measured one at
-    a time:
-
-    - point rule (``SCIPbranchGetBranchingPoint``): ``branching/clamp = 0.2`` and
-      ``branching/midpullreldomtrig = 0.5`` on #1970's 0.75 midpull
-      (``SpatialTreeConfig::spatial_clamp`` / ``spatial_midpull_reldomtrig``);
-    - violation measure (``SCIPgetExprRelAuxViolationNonlinear``,
-      ``branching/violsplit = 'm'``): a term's gap divided by ``max(1, |f(x)|)``,
-      split over its operands by midness (``spatial_viol_scip``);
-    - pseudocost reliability / normalisation (``scoreBranchingCandidates``,
-      ``branching/pscostreliable = 2``): unreliable pseudocosts dropped and each
-      score divided by the weights it used (``spatial_pscost_reliable``).
-
-    Only acts when #1970's ``spatial_score`` is on (the default). Probe: profile
-    counters ``SpatialSplitMoved`` and ``SpatialViolScipPicks``. Read at call time.
-    """
-    raw = os.environ.get("DISCOPT_SPATIAL_BRANCH_SCIP", "0").strip().lower()
-    if raw in ("0", "false", "no", "off", ""):
-        return {}
-    if raw in ("1", "true", "on", "yes"):
-        return {
-            "spatial_clamp": 0.2,
-            "spatial_midpull_reldomtrig": 0.5,
-            "spatial_viol_scip": True,
-            "spatial_pscost_reliable": 2,
-        }
-    raise ValueError(f"DISCOPT_SPATIAL_BRANCH_SCIP={raw!r}: expected 0 or 1")
 
 
 def _py_tree_spatial_score_enabled() -> bool:
