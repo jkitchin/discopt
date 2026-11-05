@@ -34,6 +34,29 @@ pre-registration are in this directory (`README.md`). Performance-plan §114 is 
   fix in its own right (the panel measures ON against hull OFF), explicitly *not* as the
   close of #2142.
 
+## 0a. SCIP reference on the division-free hull (added 2026-11-05) — partial retraction of §5's diagnosis
+
+The kernel spec of cstr under the `homog` hull was captured exactly as §5's arm runs it
+(`scip/capture_homog.py`: 285 cols, 779 rows, 5 square terms, 29 BLF, max |bound| 1e3, so
+SCIP's `numerics/infinity` 1e20 never binds — unlike the eps-perspective spec of §114) and
+solved by SCIP 6.3.0 default with `2142-scip-expert/run.py`, 300 s limit; big-M spec as control:
+
+| spec | SCIP status | nodes | wall | primal = dual |
+|---|---|---|---|---|
+| homog hull | **optimal** | **7,470** | 12.2 s | 3.0620008 |
+| big-M | optimal | 38,157 | 50.5 s | 3.0619805 |
+
+Oracle 3.0620073 (rel. diff ≤ 1e-5, within SCIP's feasibility tolerance). Logs:
+`scip/scip_homog_300.log`, `scip/scip_bigm_300.log`.
+
+**Retraction.** §5 concluded "the remaining gap is the larger model per node … the hull's
+structural cost". That is falsified: on the *same* lowered model SCIP certifies the hull 5x
+faster in nodes than it certifies big-M. The homog hull is a better formulation, not a worse
+one; the gap between discopt (30,246 nodes, bound 1.58 at 300 s) and SCIP (7,470 nodes,
+certified) on it is in discopt's tree, not in the model. The verdict "killed as the lever for
+hull certifies cstr" is therefore withdrawn: the formulation is necessary (the shipped hull
+spec is unusable at any infinity setting, §114) and is not the binding limit.
+
 ## 1. What the shipped hull does, and why it is vacuous on cstr
 
 `_reformulate_disjunction_hull` (python/discopt/_relax/gdp_reformulate.py:2831) lowers a
