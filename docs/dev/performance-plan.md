@@ -14721,3 +14721,106 @@ item 3`). The measured state is the commit before it.
 - any further split-point tweak aimed at cstr.
 
 Data: `docs/dev/data/2142-branching/` (see its README).
+
+## 108. #2142: the branching variable — SCIP's violation measure reproduces its picks, wins on cstr, and is retired (2026-11-05)
+
+**Hypothesis.** §107's replay found that SCIP and the kernel choose the same branching
+variable on 27 of 195 identical boxes (13.8 %). The guess was that the difference is the
+violation measure in #1970's spatial score, not the pseudocost. SCIP's `cons_nonlinear.c`
+(v10.0.0 source, read for this entry) does three things differently:
+
+- it scores a term by its *relative* violation, `|gap| / max(1, |f(x)|)`
+  (`SCIPgetExprRelAuxViolationNonlinear`);
+- it splits that score over the term's variables by midness, `max(0.05, min(x - lo,
+  hi - x) / (hi - lo))` (`branching/violsplit = 'm'`), not evenly;
+- it picks uniformly at random among candidates scoring `>= 0.9 x` the best
+  (`branching/highscorefactor`). At a replay root there are no pseudocosts, so SCIP's
+  replayed pick is violation-only.
+
+**Kill criterion:** no offline rule reaches well above 13.8 % agreement (target >= 50 %)
+on the replayed boxes.
+
+**Entry experiment (offline, no tree runs).** `v1_rules.py` re-solves the kernel's node
+LP on each of the 192 boxes that re-solve `optimal` (190 reproduce the tree's bound) and
+scores candidate rules at that point. `v2_scip_lp.py` re-runs §107's replay (all 195
+decisions reproduced) and also records SCIP's own LP point, so the rule can be separated
+from LP-point differences. "In set" is SCIP's pick inside the rule's 0.9 set.
+
+| rule (192 boxes) | top-1, our LP | in set, our LP | top-1, SCIP's LP | in set, SCIP's LP |
+|---|---|---|---|---|
+| #1970: absolute gap, even split | 17.2 % | 23.4 % | 26.6 % | 41.1 % |
+| absolute gap, midness split | 19.8 % | 25.0 % | 31.8 % | 44.8 % |
+| relative gap, even split (convex-square side skipped) | 44.3 % | 57.8 % | 54.2 % | 79.2 % |
+| **relative gap, midness split (SCIP)** | **44.3 %** | **65.6 %** | **62.0 %** | **99.0 %** |
+| relative gap, width split | 25.5 % | 30.7 % | 31.8 % | 38.0 % |
+
+At SCIP's LP point the SCIP rule contains SCIP's pick on 99.0 % of boxes. The remaining
+top-1 misses come from SCIP's random tie-break (mean set size 1.53). At our LP point,
+LP-point degeneracy costs another 18 points. Leaving out convex squares whose aux lies
+below `x²` (SCIP separates those) changes nothing. The relative scaling is the lever.
+**Verdict on entry:** the rule is identified. The kill criterion is met on the in-set
+measure (65.6 %, and 99.0 % at SCIP's LP point). Top-1 is 44.3 %, short of 50 % only by
+SCIP's random pick and LP-point differences. Proceeded.
+
+**Kernel option (commit `feat(kernel): #2142 — SCIP's violation measure`).**
+`SpatialTreeConfig::spatial_viol_scip` changes only the violation component. The
+pseudocost and the split point are unchanged. The flag is `DISCOPT_SPATIAL_VIOL_SCIP`.
+The profile counters `SpatialViolScipPicks` / `SpatialViolScipChanged` record picks made
+under the rule and those whose column differs from #1970's at the same point.
+
+**cstr big-M arms** (`v3_arms.py`, deterministic, 3 concurrent processes):
+
+| arm | 10k nodes | 20k nodes |
+|---|---|---|
+| base (flag OFF; bit-identical to §107's baseline) | 0.5568486578 (49.5 s) | 1.3431805086 (80.7 s) |
+| **SCIP violation measure** | **1.3943 (81.8 s)**, 2,232 of 5,600 picks changed | **1.8051 (162.3 s)** |
+| SCIP violation measure, pseudocost weight 0 | 0.4676 (63.7 s) | 0.8292 (102.6 s) |
+| §107's SCIP point rule (retired) | 1.1636 | 1.6787 |
+| SCIP 10 on the same spec | 1.534 | 2.393 |
+
+The rule needs the pseudocost; without it the bound is below base. Per-node wall is
+about 1.65-2x base in both runs. The walls are not load-gated, but the two arms ran side
+by side. Nodes to certify: the ON tree stops at **117,675 nodes, bound 3.06171**
+(incumbent 3.06201, `gap_certified=False`, 1,061 s). Base has bound 2.8697 at 150k nodes.
+
+**§5 panel** (scripts as §107; deterministic, `max_nodes=2000`, 120 s backstop,
+`PYTHONHASHSEED=0`, `DISCOPT_PROFILE=1`, arms interleaved; `--jobs 3`, load 6-10):
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74 instances | 855 / 1 (see below); unfired bit-identical 57 checked, 16 at the wall | **tanksize only** | certified in both arms, **519 -> 771 nodes (+49 %)** |
+| the one violation, cvxnonsep_psig30 "certification lost", and heatexch_gen1 looser | | **unfired** (0 picks in both arms) | both at the wall backstop under load 8-10. Re-run at load 2-3: identical status/bound/nodes in both arms (89 / 413 nodes). Load, not the flag |
+| ON-only fire screen, §107's 60 extra instances | | 10 | |
+| those 10 (9 + nous1), same settings | 105 + 11 / 0 | 10 | certified 6 -> 6. Better: nvs20 181 -> 151, st_e03 263 -> 241, st_e05 131 -> 125. Neutral: fuel, st_e07, st_z, rbrock. Looser node-limited bounds: **ex1252a** (128893 -> 128861; undecided node LPs 11 -> 68) and **nous1 1.2849 -> 0.8074** |
+| nous1 to certification (`gap_tolerance=1e-4`) | certified in both arms | | **15,233 -> 34,581 nodes (+127 %)**, 39.8 -> 79.1 s |
+
+The GDP parity panel was not run. The net-positive bar already fails by large margins on two of #1970's own probes
+(nous1, its entry instance: +127 %; tanksize, its headline win: +49 %), and a GDP win cannot outweigh them under CLAUDE.md §2.
+
+**Verdict: cert-clean, not net-positive. Retired.** SCIP's violation measure reproduces
+SCIP's variable choice (99 % in-set at SCIP's LP point). It is worth more on cstr than
+§107's point rule: 1.81 vs 1.68 at 20k nodes, and the tree reaches 3.0617 at 118k nodes.
+Beyond cstr it is harmful on exactly the instances #1970 was tuned on.
+
+The likely reason, not tested: the measure is calibrated for SCIP's pseudocost
+normalisation. SCIP drops an unreliable pseudocost from a candidate's weighted score and
+divides by the weights actually used. The kernel adds a mean-imputed pseudocost to every
+candidate. Mixing the relative violation into the kernel's sum changes the balance of
+the two components on instances whose gaps are large in absolute terms (nous1).
+
+What a next attempt needs:
+
+- SCIP's per-candidate weight normalisation with a reliability threshold
+  (`branching/pscostreliable = 2`), measured as a pair with this measure, never alone;
+- a check of the in-tree pick agreement against a SCIP *in-tree* trace. The replay
+  roots have no pseudocosts, so they validate only the violation half.
+
+The flag, the kernel option, the counters, the binding kwarg and the Rust test are
+removed (commit `revert(kernel): #2142`). The measured state is the commit before it.
+
+**Do not build:**
+
+- the relative/midness violation measure alone on top of #1970's pseudocost sum;
+- a pseudocost-free violation rule (0.83 at 20k nodes, below base).
+
+Data: `docs/dev/data/2142-branching-var/` (see its README).
