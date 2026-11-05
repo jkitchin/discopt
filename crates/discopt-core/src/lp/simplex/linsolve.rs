@@ -14,7 +14,7 @@
 //!   it refactorizes on every solve, so it is for bring-up, tiny bases, and
 //!   cross-checking `FeralLU` in tests — not performance.
 
-use super::refine::residual_matvec_dd;
+use super::refine::residual_matvec_dd_sparse;
 use feral::{
     should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuPivoting, LuSingularAction,
     RefactorCause, SparseColMatrix, SparseLu, SparseLuSymbolic,
@@ -307,19 +307,88 @@ pub(crate) fn with_density_route_suppressed<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// The retained basis matrix, in dense-column form, kept **in sync** with every
+/// The retained basis matrix, kept **in sync** with every
 /// [`update`](LinearSolver::update) so a refined solve or condition estimate can
 /// form the residual `r = b − B·x` against the matrix the factor *currently*
 /// represents — not the one it was originally factorized from. Only populated in
 /// numeric-focus mode (`refine_steps > 0`); off by default it stays empty, so the
-/// hot path pays no retention cost. Dense columns are the canonical form because
-/// [`update`](LinearSolver::update) hands us a dense `entering_col`, so keeping it
-/// in sync is a trivial `cols[slot] = entering_col` — the sparse/dense feral
-/// matrix is rebuilt lazily, only when a refined solve is actually requested.
+/// hot path pays no retention cost. The feral matrix is rebuilt lazily, only when
+/// a refined solve is actually requested.
+///
+/// **Sparse columns, not dense ones (#2153).** `cols[slot]` lists the nonzeros of
+/// basis slot `slot` as `(row, value)`, sorted by row with exact zeros dropped —
+/// the canonical form [`canonical_sparse_columns`] produces, and exactly the
+/// pattern `SparseColMatrix::from_dense_columns` would read off the dense column,
+/// so every matrix rebuilt from it is the one the dense copy gave. The dense copy
+/// cost `O(m²)` memory and time per numeric-focus factorization (and again per
+/// refined solve, which rebuilt a sparse matrix by scanning it): measured on the
+/// GDPlib `stranded_gas` LOA master (m = 22 501), one in-engine refined recovery
+/// (`refined_basic_values` in the dual) took 13–21 s of a 2 s MILP budget, which
+/// is the long mode of the #2153 time-limit overrun. An update's dense
+/// `entering_col` is compressed in `O(m)`.
 #[derive(Debug, Clone, Default)]
 struct RetainedBasis {
     m: usize,
-    cols: Vec<Vec<f64>>,
+    cols: Vec<Vec<(usize, f64)>>,
+}
+
+impl RetainedBasis {
+    /// The dense columns, for feral's dense LU route only (small `m`: that route
+    /// is chosen by [`want_dense_route`] for bases where `O(m²)` is the factor's
+    /// own size anyway).
+    fn dense_columns(&self) -> Vec<Vec<f64>> {
+        let mut d = vec![vec![0.0; self.m]; self.m];
+        for (slot, col) in self.cols.iter().enumerate() {
+            for &(row, v) in col {
+                d[slot][row] = v;
+            }
+        }
+        d
+    }
+}
+
+/// The nonzeros of a dense column, in row order: the pattern
+/// `SparseColMatrix::from_dense_columns` reads off it.
+fn sparse_of_dense(col: &[f64]) -> Vec<(usize, f64)> {
+    col.iter()
+        .enumerate()
+        .filter(|&(_, &v)| v != 0.0)
+        .map(|(i, &v)| (i, v))
+        .collect()
+}
+
+/// Sparse columns in canonical form (#2153): each column's entries summed per row,
+/// sorted by row, exact zeros dropped — what `SparseColMatrix::from_sparse_columns`
+/// builds from the same input, so a matrix rebuilt from the result is the one the
+/// factor was built from. `O(nnz)` with one `m`-length scratch vector.
+pub(crate) fn canonical_sparse_columns(
+    m: usize,
+    cols: &[Vec<(usize, f64)>],
+) -> Vec<Vec<(usize, f64)>> {
+    let mut acc = vec![0.0_f64; m];
+    let mut touched: Vec<usize> = Vec::new();
+    cols.iter()
+        .map(|col| {
+            for &(r, v) in col {
+                if acc[r] == 0.0 {
+                    touched.push(r);
+                }
+                acc[r] += v;
+            }
+            touched.sort_unstable();
+            touched.dedup();
+            let out: Vec<(usize, f64)> = touched
+                .iter()
+                .filter(|&&r| acc[r] != 0.0)
+                .map(|&r| (r, acc[r]))
+                .collect();
+            for &r in &touched {
+                acc[r] = 0.0;
+            }
+            touched.clear();
+            out
+        })
+        .collect()
 }
 
 /// A feral basis matrix in whichever form the current factor consumes.
@@ -457,10 +526,10 @@ impl FeralLU {
     fn build_basis_matrix(&self) -> Option<Result<BasisMat, LinError>> {
         let rb = self.retained.as_ref()?;
         Some(match self.lu.as_ref()? {
-            Factored::Sparse(_) => SparseColMatrix::from_dense_columns(rb.m, &rb.cols)
+            Factored::Sparse(_) => SparseColMatrix::from_sparse_columns(rb.m, &rb.cols)
                 .map(BasisMat::Sparse)
                 .map_err(feral_err),
-            Factored::Dense(_) => GeneralMatrix::from_columns(rb.m, &rb.cols)
+            Factored::Dense(_) => GeneralMatrix::from_columns(rb.m, &rb.dense_columns())
                 .map(BasisMat::Dense)
                 .map_err(feral_err),
         })
@@ -631,7 +700,7 @@ impl FeralLU {
         let mut x = vec![0.0f64; cols.len()];
         for _ in 0..MAX_STEPS {
             // High-precision residual `target − (B or Bᵀ)·x`, sparse-aware O(nnz).
-            let mut r = residual_matvec_dd(&cols, &x, &target, transpose);
+            let mut r = residual_matvec_dd_sparse(&cols, &x, &target, transpose);
             let resnorm = r.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
             if resnorm <= TOL {
                 break;
@@ -711,7 +780,7 @@ impl LinearSolver for FeralLU {
         });
         self.retained = self.refine_enabled().then(|| RetainedBasis {
             m,
-            cols: cols.to_vec(),
+            cols: cols.iter().map(|c| sparse_of_dense(c)).collect(),
         });
         Ok(())
     }
@@ -721,10 +790,11 @@ impl LinearSolver for FeralLU {
         // nnz is the sum of column lengths — O(m), not the O(m²) dense scan the
         // `Vec<Vec<f64>>` path pays.
         let nnz: usize = cols.iter().map(|c| c.len()).sum();
-        // Densify once if either the dense LU branch needs it or numeric-focus
-        // retention does; reuse the single dense copy for both.
+        // Densify only for the dense LU branch. Numeric-focus retention keeps the
+        // sparse columns (#2153): densifying for it was `O(m²)` on every refined
+        // recovery, the long mode of the #2153 overrun.
         let want_dense = want_dense_route(m, nnz, &params);
-        let dense = (want_dense || self.refine_enabled()).then(|| {
+        let dense = want_dense.then(|| {
             let mut d = vec![vec![0.0; m]; m];
             for (slot, col) in cols.iter().enumerate() {
                 for &(row, v) in col {
@@ -754,9 +824,10 @@ impl LinearSolver for FeralLU {
             crate::profile::incr_by(crate::profile::Ctr::LuFactorNnz, lu.factor_nnz() as u64);
             Factored::Sparse(Box::new(lu))
         });
-        self.retained = dense
-            .filter(|_| self.refine_enabled())
-            .map(|cols| RetainedBasis { m, cols });
+        self.retained = self.refine_enabled().then(|| RetainedBasis {
+            m,
+            cols: canonical_sparse_columns(m, cols),
+        });
         Ok(())
     }
 
@@ -787,8 +858,7 @@ impl LinearSolver for FeralLU {
         // pre-update basis and silently corrupt the correction.
         if res.is_ok() {
             if let Some(rb) = self.retained.as_mut() {
-                rb.cols[leaving_slot].clear();
-                rb.cols[leaving_slot].extend_from_slice(entering_col);
+                rb.cols[leaving_slot] = sparse_of_dense(entering_col);
             }
         }
         res
@@ -1400,5 +1470,157 @@ mod tests {
         fl.ftran_refined(&mut a).unwrap();
         fl.ftran(&mut b).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// A deterministic sparse, diagonally dominant `m × m` basis: each column has
+    /// its diagonal plus up to three off-diagonal entries (LCG-placed), given both
+    /// densely and as sparse columns that are deliberately *non-canonical*
+    /// (reversed row order, one explicit zero) so the canonicalization is exercised.
+    fn sparse_basis_2153(m: usize) -> (Vec<Vec<f64>>, Vec<Vec<(usize, f64)>>) {
+        let mut seed: u64 = 0x2153;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        let mut dense = vec![vec![0.0; m]; m];
+        for (j, col) in dense.iter_mut().enumerate() {
+            col[j] = 4.0 + (j % 7) as f64;
+            for k in 0..3 {
+                let r = next() % m;
+                if r != j {
+                    col[r] = 0.25 * (k as f64 + 1.0) * if next() % 2 == 0 { 1.0 } else { -1.0 };
+                }
+            }
+        }
+        let sparse = dense
+            .iter()
+            .enumerate()
+            .map(|(j, col)| {
+                let mut c: Vec<(usize, f64)> = col
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &v)| v != 0.0)
+                    .map(|(i, &v)| (i, v))
+                    .collect();
+                c.reverse();
+                // An explicit zero on a row the column does not otherwise hold (a
+                // duplicate would be summed by feral but overwritten by a dense
+                // scatter -- a different matrix, not a different storage form).
+                if let Some(r) = (0..m).find(|&r| col[r] == 0.0) {
+                    c.push((r, 0.0));
+                }
+                c
+            })
+            .collect();
+        (dense, sparse)
+    }
+
+    fn rhs_2153(m: usize) -> Vec<f64> {
+        (0..m).map(|i| 1.0 + (i % 5) as f64 * 0.5).collect()
+    }
+
+    /// #2153: the sparse double-double residual is bit-identical to the dense one.
+    #[test]
+    fn residual_dd_sparse_matches_dense_bitwise_2153() {
+        use super::super::refine::residual_matvec_dd;
+        let m = 40;
+        let (dense, sparse) = sparse_basis_2153(m);
+        let canon = canonical_sparse_columns(m, &sparse);
+        let x: Vec<f64> = (0..m).map(|i| 0.1 * i as f64 - 1.3).collect();
+        let rhs = rhs_2153(m);
+        let mut n_cmp = 0;
+        for transpose in [false, true] {
+            let a = residual_matvec_dd(&dense, &x, &rhs, transpose);
+            let b = residual_matvec_dd_sparse(&canon, &x, &rhs, transpose);
+            for (u, v) in a.iter().zip(&b) {
+                assert_eq!(u.to_bits(), v.to_bits());
+                n_cmp += 1;
+            }
+        }
+        assert_eq!(n_cmp, 2 * m);
+    }
+
+    /// #2153: canonical columns are exactly the dense column's nonzero pattern.
+    #[test]
+    fn canonical_sparse_columns_match_dense_pattern_2153() {
+        let m = 30;
+        let (dense, sparse) = sparse_basis_2153(m);
+        let canon = canonical_sparse_columns(m, &sparse);
+        for (c, d) in canon.iter().zip(&dense) {
+            assert_eq!(c, &sparse_of_dense(d));
+        }
+        // A duplicate row entry is summed, as feral's `from_sparse_columns` does.
+        let dup = canonical_sparse_columns(3, &[vec![(2, 1.0), (0, 2.0), (2, 0.5)]]);
+        assert_eq!(dup, vec![vec![(0, 2.0), (2, 1.5)]]);
+        // Entries that cancel leave no entry.
+        let gone = canonical_sparse_columns(3, &[vec![(1, 1.0), (1, -1.0)]]);
+        assert_eq!(gone, vec![Vec::<(usize, f64)>::new()]);
+    }
+
+    /// #2153: in numeric-focus mode the retained basis is sparse (`O(nnz)`, not
+    /// `O(m²)`), and every refined solve -- after factorize, after an update, on the
+    /// sparse and the dense LU route, with and without singular-perturb hardening --
+    /// is bit-identical whether the factor came from dense or sparse columns.
+    #[test]
+    fn numeric_focus_sparse_retention_is_bit_identical_2153() {
+        let mut n_cmp = 0usize;
+        // m = 12 takes feral's dense LU route, m = 400 its sparse route.
+        for &m in &[12usize, 400] {
+            for perturb in [false, true] {
+                let (dense, sparse) = sparse_basis_2153(m);
+                let mk = || {
+                    let fl = FeralLU::new().with_numeric_focus();
+                    if perturb {
+                        fl.with_singular_perturb(HARDENING_ABS_FLOOR)
+                    } else {
+                        fl
+                    }
+                };
+                let mut a = mk();
+                let mut b = mk();
+                a.factorize(m, &dense).unwrap();
+                b.factorize_sparse(m, &sparse).unwrap();
+                let nnz: usize = dense
+                    .iter()
+                    .map(|c| c.iter().filter(|&&v| v != 0.0).count())
+                    .sum();
+                for fl in [&a, &b] {
+                    let rb = fl
+                        .retained
+                        .as_ref()
+                        .expect("numeric focus retains the basis");
+                    let kept: usize = rb.cols.iter().map(|c| c.len()).sum();
+                    assert_eq!(kept, nnz, "retention is the nonzeros, not m² entries");
+                }
+                let mut entering = vec![0.0; m];
+                entering[m / 2] = 3.0;
+                entering[(m / 2 + 3) % m] = -0.75;
+                for round in 0..2 {
+                    if round == 1 {
+                        let leaving = m / 2;
+                        a.update(leaving, &entering).unwrap();
+                        b.update(leaving, &entering).unwrap();
+                    }
+                    for transpose in [false, true] {
+                        let mut ra = rhs_2153(m);
+                        let mut rb = rhs_2153(m);
+                        if transpose {
+                            a.btran_refined(&mut ra).unwrap();
+                            b.btran_refined(&mut rb).unwrap();
+                        } else {
+                            a.ftran_refined(&mut ra).unwrap();
+                            b.ftran_refined(&mut rb).unwrap();
+                        }
+                        for (u, v) in ra.iter().zip(&rb) {
+                            assert_eq!(u.to_bits(), v.to_bits(), "m={m} perturb={perturb}");
+                            n_cmp += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(n_cmp, 2 * 2 * 2 * (12 + 400));
     }
 }

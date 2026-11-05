@@ -2740,6 +2740,7 @@ fn solve_milp_node_search(
         let csc_rc: &SparseCols = problem.original_matrix();
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
+        let mut point_values: Vec<f64> = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
 
         // --- per-node evaluation (parallelizable) ---
@@ -3077,6 +3078,7 @@ fn solve_milp_node_search(
                             // report `Feasible`, never a false `Optimal`.
                             out.result.lower_bound = INFEAS_SENTINEL;
                             out.result.is_feasible = false;
+                            out.point_value = f64::NAN;
                             gap_certified = false;
                             search_incomplete = true;
                         }
@@ -3086,6 +3088,7 @@ fn solve_milp_node_search(
                     }
                 }
             }
+            point_values.push(out.point_value);
             results.push(out.result);
         }
         if lazy_failed || node_failed {
@@ -3094,7 +3097,8 @@ fn solve_milp_node_search(
             // ask for. Stop, uncertified (CLAUDE.md §7).
             gap_certified = false;
             search_incomplete = true;
-            tm.import_results(&results);
+            tm.import_results_with_point_values(&results, &point_values)
+                .expect("one point value per node result");
             tm.process_evaluated();
             break 'search;
         }
@@ -3102,7 +3106,8 @@ fn solve_milp_node_search(
             unbounded = true;
             break 'search;
         }
-        tm.import_results(&results);
+        tm.import_results_with_point_values(&results, &point_values)
+            .expect("one point value per node result");
         tm.process_evaluated();
 
         // --- A12 RINS: one improvement attempt at the batch boundary ---
@@ -3337,7 +3342,39 @@ fn solve_milp_node_search(
         crate::profile::incr(crate::profile::Ctr::MilpBoundContradictedDecert);
         withdraw_certificate(&mut res);
     }
+    // #2136 backstop: every gap test, cutoff and the incumbent cap on the bound
+    // use the tree's incumbent VALUE, while `res.obj` is the recomputed `cᵀx` of
+    // the point returned. The root cause of a disagreement -- integral nodes
+    // promoted with their NS safe bound as the incumbent value -- is fixed in the
+    // node evaluation (`NodeOutput::point_value`); measured before that fix, a
+    // clay0203 GDP master with its default-box columns closed returned `Optimal`
+    // 41907.46 / bound -752904 (true optimum 41420.27). Any remaining disagreement
+    // beyond LP noise means the gap the tree closed is not the returned point's,
+    // so the certificate is withdrawn. The bound goes too: a point BETTER than
+    // its recorded value can sit below the tree's bound, and this guard is not
+    // meant to reason about which direction it caught.
+    if has_inc && incumbent_misvalued(res.obj, stats.incumbent_value) {
+        crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
+        withdraw_certificate(&mut res);
+    }
     res
+}
+
+/// Whether the returned point's recomputed objective `obj` disagrees with the
+/// tree's incumbent value `tree_inc` by more than LP noise (#2136).
+///
+/// The allowance is `1e-6 · max(1, |obj|)`, the solver's absolute/relative
+/// objective tolerance. A healthy node LP matches `cᵀx` to ~1e-9 relative, so
+/// this never fires on an honest solve; a disagreement past it means the
+/// tree's gap tests were run against a value the returned point does not
+/// have. Either direction is disqualifying: a point WORSE than recorded means
+/// `Optimal` was declared on a gap that is not closed for the returned point;
+/// a point BETTER than recorded can sit below the reported bound.
+fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
+    if !obj.is_finite() || !tree_inc.is_finite() {
+        return obj.is_finite() != tree_inc.is_finite();
+    }
+    (obj - tree_inc).abs() > 1e-6 * obj.abs().max(1.0)
 }
 
 /// Immutable per-batch context shared by every node evaluation. Holds the
@@ -3444,6 +3481,13 @@ struct NodeOutput {
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
+    /// #2136: the objective of `result.solution` when `result.is_feasible` (an
+    /// integral, verified vertex); `NaN` otherwise. Imported through
+    /// `TreeManager::import_results_with_point_values`, so the incumbent records
+    /// the point's own value while `result.lower_bound` (the NS safe bound, which
+    /// can sit far below it) stays the node's bound and floors the global dual
+    /// bound via `safe_fathom_floor` (#2067).
+    point_value: f64,
     /// The wall-clock deadline had already passed when this node was dequeued, so
     /// its (expensive) LP solve was skipped entirely. The reduce drops it without
     /// importing a result, leaving the node Evaluated with its parent-inherited
@@ -3498,6 +3542,7 @@ fn solve_node(
             tightened: None,
             iters: 0,
             unbounded: false,
+            point_value: f64::NAN,
             deferred: true,
         };
     }
@@ -3552,6 +3597,7 @@ fn solve_node(
                 tightened: None,
                 iters: 0,
                 unbounded: false,
+                point_value: f64::NAN,
                 deferred: false,
             };
         }
@@ -3668,6 +3714,7 @@ fn solve_node(
         tightened,
         iters: sol.iters,
         unbounded: false,
+        point_value: f64::NAN,
         deferred: false,
     };
 
@@ -3872,6 +3919,23 @@ fn solve_node(
                     out.branch_hint = best;
                     out.sb_observations = sb_obs;
                 }
+            }
+            // #2136: an integral vertex's incumbent value is its own objective,
+            // `cᵀx` over the full working vector (exact whatever the slack costs),
+            // not `node_lp_bound`. With the NS bound on, `node_lp_bound` is
+            // `min(safe bound, vertex value)` -- a bound on the box, which on a
+            // closed default box measured -752904 for a vertex whose `cᵀx` is
+            // 41907 (clay0203 master). Recording the bound as the incumbent value
+            // pruned against a value no point attains and certified a gap that
+            // was not closed for the returned point.
+            if feasible {
+                out.point_value = sol
+                    .x
+                    .iter()
+                    .zip(ctx.c_w.iter())
+                    .map(|(x, c)| x * c)
+                    .sum::<f64>()
+                    + ctx.obj_const;
             }
             out.result = NodeResult {
                 node_id: id,
@@ -9479,6 +9543,23 @@ mod tiny_entry_tests {
         assert!(!gate(&unit, 2, &l, &u, &[3.5, 1.0]));
         // ... and the row-scaled spelling does.
         assert!(gate(&dense, 2, &l, &u, &[3.5e5, 1e-6]));
+    }
+
+    #[test]
+    fn incumbent_misvalued_tolerates_lp_noise_only() {
+        // #2136: LP noise (~1e-9 relative) on a healthy solve never fires.
+        assert!(!incumbent_misvalued(41_420.271_951, 41_420.271_951 + 4e-8));
+        assert!(!incumbent_misvalued(0.0, 5e-7));
+        assert!(!incumbent_misvalued(-3.0, -3.0));
+        // The measured clay0203 case: cᵀx = 41907.46, node LP said -752904.
+        assert!(incumbent_misvalued(41_907.46, -752_903.98));
+        // Either direction disqualifies (a better point can sit below the bound).
+        assert!(incumbent_misvalued(10.0, 10.1));
+        assert!(incumbent_misvalued(10.1, 10.0));
+        assert!(incumbent_misvalued(0.0, 2e-6));
+        // A finite point against a non-finite tree value is a disagreement too.
+        assert!(incumbent_misvalued(1.0, f64::NEG_INFINITY));
+        assert!(!incumbent_misvalued(f64::INFINITY, f64::INFINITY));
     }
 
     #[test]

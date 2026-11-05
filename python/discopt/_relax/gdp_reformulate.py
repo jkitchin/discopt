@@ -1610,6 +1610,34 @@ def _extract_body_coeffs(
     Returns (c_vec, offset) where body(x) = c_vec @ x + offset,
     or None if the expression is nonlinear or is not a single scalar row
     (an array-valued variable, index or constant leaf; #1825).
+
+    :func:`_extract_body_terms` is the same extraction without the dense
+    ``n_vars``-long vector, for a caller that keeps the row sparse or only needs
+    the linearity verdict.
+    """
+    result = _extract_body_terms(expr, model, n_vars)
+    if result is None:
+        return None
+    coeffs_dict, offset = result
+    c_vec = np.zeros(n_vars)
+    for idx, val in coeffs_dict.items():
+        c_vec[idx] = val
+    return c_vec, offset
+
+
+def _extract_body_terms(
+    expr: Expression,
+    model: Model,
+    n_vars: int,
+) -> tuple[dict[int, float], float] | None:
+    """:func:`_extract_body_coeffs` as ``({column: coefficient}, offset)``.
+
+    The single linearity gate, without the dense vector (#2153): a caller that
+    walks every row of a wide model -- the GDP master builder, LOA's OA-cut mask
+    -- allocated one ``n_vars``-long array per row, 15,205 x 57,828 floats on
+    GDPlib ``stranded_gas``, and depending on the allocator's state that took
+    0.7 s or 24.5 s. Columns are the ones ``_extract_body_coeffs`` writes (those
+    below ``n_vars``); a coefficient may be zero.
     """
     from discopt._flat_index import resolve_scalar_slot
     from discopt._relax.scalarize import scalar_leaf_value
@@ -1725,11 +1753,7 @@ def _extract_body_coeffs(
         return None
 
     coeffs_dict, offset = result
-    c_vec = np.zeros(n_vars)
-    for idx, val in coeffs_dict.items():
-        if idx < n_vars:
-            c_vec[idx] = val
-    return c_vec, offset
+    return {idx: val for idx, val in coeffs_dict.items() if idx < n_vars}, offset
 
 
 class _LPData(tuple):
