@@ -142,12 +142,7 @@ _FLAGS = {
         "fired": lambda off, on: on["DualProofLearned"],
         "ran": lambda off, on: on["DualProofTightenings"] + on["DualProofFathoms"] > 0,
         "leak": lambda off: off["DualProofRays"],
-        "show": (
-            "DualProofRays",
-            "DualProofLearned",
-            "DualProofTightenings",
-            "DualProofFathoms",
-        ),
+        "show": ("DualProofLearned", "DualProofTightenings"),
     },
 }
 _CTRS = (

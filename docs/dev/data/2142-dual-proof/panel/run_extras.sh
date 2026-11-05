@@ -1,6 +1,6 @@
 #!/bin/bash
 # #2142: §107's 12 extra instances (11 from python/tests/data/minlplib + nous1), after the corpus panel.
 cd /home/user/discopt
-while kill -0 1767 2>/dev/null; do sleep 20; done
+sleep 5; while pgrep -f "corpus.json" >/dev/null; do sleep 20; done
 python -u discopt_benchmarks/scripts/issue2115_graduation_panel.py --flag DISCOPT_DUAL_PROOF_PROPAGATION --deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical --solu /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/panel/dl/minlplib.solu --jobs 2 --extra-dir python/tests/data/minlplib --instances ex1252a,fuel,mathopt5_8,nvs20,prob10,rbrock,st_e03,st_e05,st_e07,st_e31,st_z --out docs/dev/data/2142-dual-proof/panel/extra.json > docs/dev/data/2142-dual-proof/panel/extra.log 2>&1
 python -u discopt_benchmarks/scripts/issue2115_graduation_panel.py --flag DISCOPT_DUAL_PROOF_PROPAGATION --deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical --solu /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/panel/dl/minlplib.solu --jobs 1 --extra-dir python/tests/data/issue_1871 --instances nous1 --out docs/dev/data/2142-dual-proof/panel/extra_nous1.json > docs/dev/data/2142-dual-proof/panel/extra_nous1.log 2>&1
