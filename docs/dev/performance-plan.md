@@ -14556,7 +14556,9 @@ Honouring either changes which incumbents are found where the deadline does not
 bind, so it is §5 bound-changing work. It is not part of a deadline fix, and is
 recorded as a lead.
 
-### 106.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, default OFF)
+### 106.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, RETIRED)
+
+> **Retired 2026-11-04 in #2155, before merge.** Its §5 panels were cert-clean but met its pre-registered kill criterion (not net-positive in wall: gdp_parity SGM 35.33 -> 35.57 s, corpus certified 114 -> 113). The flag and its Rust implementation were deleted; the measurements below stand as the record. §106.3's all-flags-ON run included this flag and has not been repeated without it.
 
 **What the 30 s on `syngas` hull bought.** Per pass and per sweep
 (`probe_presolve_passes.py`, `probe_presolve_sweeps.py`), the run hit `TimeBudget`

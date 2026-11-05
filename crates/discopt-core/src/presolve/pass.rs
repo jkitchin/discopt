@@ -147,12 +147,4 @@ pub trait PresolvePass {
     /// Invoke the pass against `ctx`, mutating it in place. Returns a
     /// delta describing what changed.
     fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta;
-
-    /// Whether this pass is *exhaustive*: it re-derives its result from scratch
-    /// over every candidate on each call, at a cost far above the other passes
-    /// (probing: two FBBT runs on a cloned model per binary). Read only by
-    /// `OrchestratorOptions::exhaustive_once` (#2143).
-    fn exhaustive(&self) -> bool {
-        false
-    }
 }

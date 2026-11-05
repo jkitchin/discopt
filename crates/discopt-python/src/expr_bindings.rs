@@ -1173,10 +1173,7 @@ impl PyModelRepr {
         fbbt_max_iter=20,
         fbbt_tol=1e-8,
         reduced_cost_info=None,
-        significant_rel=0.0,
-        exhaustive_once=false,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn presolve(
         &self,
         py: Python<'_>,
@@ -1187,8 +1184,6 @@ impl PyModelRepr {
         fbbt_max_iter: usize,
         fbbt_tol: f64,
         reduced_cost_info: Option<Bound<'_, PyDict>>,
-        significant_rel: f64,
-        exhaustive_once: bool,
     ) -> PyResult<(PyModelRepr, PyObject)> {
         use discopt_core::presolve::{
             run_orchestrator, AggregatePass, CliquePass, CoefficientStrengtheningPass,
@@ -1316,8 +1311,6 @@ impl PyModelRepr {
             time_limit_ms,
             work_unit_budget,
             pass_order: pass_objs,
-            significant_rel,
-            exhaustive_once,
         };
         let result = run_orchestrator(self.inner.clone(), opts);
 

@@ -62,8 +62,6 @@ def run_root_presolve(
     max_iterations: int = 16,
     time_limit_ms: int = 0,
     python_passes=None,
-    significant_rel: float = 0.0,
-    exhaustive_once: bool = False,
 ) -> tuple[Any, dict]:
     """Run the root-stage presolve sequence on ``model_repr``.
 
@@ -81,13 +79,6 @@ def run_root_presolve(
         max_iterations: cap on full sweeps over the pass list. The
             orchestrator stops earlier if a sweep makes no progress.
         time_limit_ms: wall-clock cap (0 disables).
-        significant_rel: #2143 marginal stop (``DISCOPT_PRESOLVE_MARGINAL_STOP``).
-            ``0.0`` keeps the legacy progress test. When positive, a sweep counts as
-            progress only if it rewrote the model or moved some block's interval
-            significantly (newly fixed, newly finite, or a finite width shrunk by at
-            least this fraction). Passed to the Rust orchestrator only when set, so
-            the default call is the legacy call.
-        exhaustive_once: #2143: run probing in the first sweep only.
         reduced_cost: enable reduced-cost fixing (E2).
         reduced_cost_info: required by ``reduced_cost`` to do anything. A dict with
             ``lp_value``, ``cutoff``, ``reduced_costs`` (one per variable block) and
@@ -160,13 +151,6 @@ def run_root_presolve(
             },
         )
     else:
-        # Only a #2143 option that is set reaches the binding, so the default call is
-        # the legacy call (and an extension built before #2143 still accepts it).
-        marginal: dict = {}
-        if significant_rel > 0.0:
-            marginal["significant_rel"] = float(significant_rel)
-        if exhaustive_once:
-            marginal["exhaustive_once"] = True
         new_repr, raw = model_repr.presolve(
             passes=pass_names,
             max_iterations=max_iterations,
@@ -175,7 +159,6 @@ def run_root_presolve(
             fbbt_max_iter=fbbt_max_iter,
             fbbt_tol=fbbt_tol,
             reduced_cost_info=reduced_cost_info,
-            **marginal,
         )
 
     stats: dict = {

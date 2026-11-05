@@ -97,8 +97,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
     "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
     "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
-    # #2143 stage 3: the root presolve's marginal stop acts at solve time (the
-    # lowering is identical), so solve ``--all``.
+    # #2143 stage 3: the root presolve's marginal stop, RETIRED on this panel in the
+    # PR that introduced it (not net-positive in wall, its pre-registered kill).
+    # Kept, like the retired entries above, so ``--report`` can re-derive the
+    # recorded verdict from docs/dev/data/1917-flag-panel/.
     "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
     # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
     # configuration wave found nothing (lowering identical): solve ``--all``.
