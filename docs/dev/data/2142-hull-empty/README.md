@@ -23,3 +23,7 @@ nothing else is filtered.
 | `PREREG.md` | pre-registered E1/E2 for `DISCOPT_INT_ROUND_EXACT` |
 | `e1_instrument.log` | E1: flag OFF 0/94, ON 91/94 (no pre-rounding) |
 | `e_arm.py`, `e2_hull10k_f{0,1}.log` | E2: cstr hull, deterministic 10k nodes, OFF vs ON |
+| `d1_pin.py`, `d1_pin_f{0,1}.log` | after the kill: per-node status and bound at 1,000 nodes, plus counters. Every node LP is <= 0.0941 in both arms; ON makes 77 snaps |
+
+`DISCOPT_INT_ROUND_EXACT` was retired in `6733a279`. `e_arm.py`, `d1_pin.py` and `c11` with
+the flag set need the build at `515cee4a`.
