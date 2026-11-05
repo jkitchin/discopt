@@ -2966,8 +2966,6 @@ def _reformulate_disjunction_hull(
     child_cones: set[int] = set()
     child_ratio: set[str] = set()
     conic = _hull_conic_quadratic_enabled()
-    mixed = _hull_mixed_bigm_enabled()
-    mixed_stats = _HULL_MIXED_STATS if mixed else None
     for k, disjunct in enumerate(dc.disjuncts):
         rows_k: list[Constraint] = []
         local_k: dict[str, Variable] = {}
@@ -3181,18 +3179,6 @@ def _reformulate_disjunction_hull(
                     if cone_rows is not None:
                         cone_rows.add(id(row))
                     continue
-
-            if mixed and not _is_linear(con.body) and not _hull_row_proven_convex(con, model):
-                # #2142 (DISCOPT_HULL_MIXED_BIGM): a row the detector cannot prove
-                # convex is lowered by big-M on the variables it is written in.
-                new_cons.extend(
-                    _hull_mixed_big_m_rows(con, y_k, dc.disjuncts[k], arg_split, model, cname)
-                )
-                if mixed_stats is not None:
-                    mixed_stats["big_m"] += 1
-                continue
-            if mixed and mixed_stats is not None and not _is_linear(con.body):
-                mixed_stats["perspective"] += 1
 
             if _is_linear(con.body):
                 # Linear f(x) = a^T x + b: hull gives a^T v_k + b * y_k
@@ -3532,82 +3518,6 @@ def _origin_free_hull_row(
         )
         cache[vname] = t
     return g_t * y_k, _wrap(con.rhs) * y_k
-
-
-def _hull_mixed_bigm_enabled() -> bool:
-    """Is #2142's mixed hull on? (``DISCOPT_HULL_MIXED_BIGM``, default OFF)."""
-    from discopt.solver_tuning import current as _tuning
-
-    return bool(_tuning().hull_mixed_bigm)
-
-
-#: Rows the mixed hull lowered each way since the last reset, for instruments
-#: (CLAUDE.md §6: a probe must show the branch fired). Bound-neutral.
-_HULL_MIXED_STATS: dict[str, int] = {"big_m": 0, "perspective": 0}
-
-
-def _hull_row_proven_convex(con: Constraint, model: Model) -> bool:
-    """Does the convexity detector PROVE ``con`` defines a convex set?
-
-    :func:`discopt._relax.convexity.classify_constraint` (syntactic DCP rules plus
-    the fractional-epigraph pattern) on the model's declared box. ``UNKNOWN`` is
-    ``False``: only a proof keeps the perspective. An equality with a nonlinear
-    body is never convex. The verdict only chooses between two lowerings that are
-    both exact at every integer point (see :func:`_hull_mixed_big_m_rows`), so a
-    misclassification could cost tightness, never validity.
-    """
-    from discopt._relax.convexity import classify_constraint
-
-    return bool(classify_constraint(con, model))
-
-
-def _hull_mixed_big_m_rows(
-    con: Constraint,
-    y_k: Variable,
-    disjunct: list,
-    arg_split: Optional[_ArgumentDisaggregator],
-    model: Model,
-    name: str,
-) -> list[Constraint]:
-    """#2142: a nonconvex disjunct row of a hull lowered by big-M, ``g(x) <= M (1 - y_k)``.
-
-    **The big-M row is written on the row's own variables, not on disjunct k's
-    disaggregated copies.** For a variable shared by the disjunction that is the
-    original column ``x``; for a local of disjunct k (a nested child's selector or
-    copy) it is that local. ``M`` is :func:`_compute_big_m` over the declared boxes
-    of those columns, exactly the shipped big-M lowering's M (a domain gap is
-    split by the same :class:`_ArgumentDisaggregator`, and an unbounded side is
-    refused loudly by the same error).
-
-    Why this is exact at every integer point of the hull it sits in:
-
-    - ``y_k = 1``: every other disjunct's selector is 0, so its copies are pinned
-      to 0 by their bound links ``dlb y_j <= v_j <= dub y_j``, and the aggregation
-      row gives ``x = sum_j v_j = v_k``. The row reads ``g(x) <= 0``, i.e. disjunct
-      k's own row on its own copy: the same set the perspective enforces there.
-      (A local of disjunct k is the column the child hull already built, unscaled.)
-    - ``y_k = 0``: the row reads ``g(x) <= M``. ``x`` lies in its declared box (the
-      aggregation row and the copies' bound links never take it out), and ``M``
-      over-estimates ``g`` on that box, so the row removes no point. The locals of
-      disjunct k are 0 there (their select rows), still inside their boxes.
-
-    The disaggregated copies ``v_k`` keep their bound links and aggregation rows,
-    and the disjunct's linear rows still hull on them, so between integer points
-    the mixed form is the intersection of two relaxations of the same disjunction
-    (the linear rows' hull and the nonconvex rows' big-M), each exact at every
-    integer point. Writing the row on ``v_k`` instead (``g(v_k) <= M' (1 - y_k)``)
-    would also be exact, but needs ``g(0) <= M'`` and an ``M'`` over the copy's box
-    ``[min(dlb, 0), max(dub, 0)]``; the original-variable form is the shipped
-    big-M row verbatim, so its soundness argument (GDP-1, #413) carries over.
-    """
-    deactivation_y = _wrap(1.0) - y_k
-    out: list[Constraint] = []
-    pieces = _big_m_pieces(con, functools.partial(list, disjunct), arg_split, model)
-    for i, piece in enumerate(pieces):
-        M = _compute_big_m(piece, model)
-        piece_name = name if i == 0 else f"{name}_arg{i - 1}"
-        out.extend(_big_m_rows(piece, _wrap(M) * deactivation_y, piece_name))
-    return out
 
 
 def _hull_conic_quadratic_enabled() -> bool:
