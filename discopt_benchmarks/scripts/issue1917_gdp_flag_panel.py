@@ -89,10 +89,19 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2143: acts on the heuristics' sub-NLPs at solve time (lowering identical):
     # solve ``--all``. big-m is in the panel because FBBT pins columns there too.
     "DISCOPT_SUBNLP_REDUCED": ("hull", "big-m"),
+    # #2136 (G3.2): Rust MILP driver flag, RETIRED by #2136 on this panel
+    # (docs/dev/data/2136-g32-panel/; its sibling DISCOPT_RUST_MILP_TABLEAU_CMIR was
+    # retired on the g32 replay panel). Kept, like the retired entries above, so
+    # ``--report`` can re-derive the recorded verdict. LOA's masters reach the driver through
+    # ``get_milp_solver("auto")`` (``gdp/algorithms/master.py``); a linear big-M
+    # lowering is a pure MILP and goes to HiGHS by default, so ``loa`` is the
+    # default route these flags act on. Firing is shown per master by
+    # ``g32/replay.py``'s counters on the captured first masters.
+    "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
-_SOLVE_TIME_METHODS = frozenset({"enumerate"})
+_SOLVE_TIME_METHODS = frozenset({"enumerate", "loa"})
 _TRANSFORM = {"big-m": "gdp.bigm", "mbigm": "gdp.mbigm", "hull": "gdp.hull"}
 
 FIRE_CHILD = r"""

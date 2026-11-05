@@ -340,15 +340,13 @@ came from a capture made before `2df0b0a`, with 6 columns at the ±9.999e19 defa
 After `2df0b0a` reopened that box at the marshaling layer, a fresh capture solves to
 41420.27 in Rust and HiGHS alike. The driver defect was still there, though: with the box
 re-closed on today's capture, the strong profile still returned `optimal` 41907.46 /
-−752904. The node LP reported ≈ −752904 for a vertex whose `cᵀx` is 41907. Every gap
+−752904. The node's NS safe bound (not the LP value; corrected in "#2136 review" below) was ≈ −752904 for a vertex whose `cᵀx` is 41907. Every gap
 test ran against the LP value, and only the returned objective was recomputed (#1296).
 
-**Fix:** `milp_driver.rs` withdraws the certificate (Feasible, bound −inf) when the
-returned objective and the tree's incumbent value disagree beyond `1e-6·max(1,|obj|)`.
-Counter: `MilpIncumbentMisvaluedDecert`. Test:
-`test_milp_default_box.py::test_driver_withdraws_a_misvalued_incumbent_certificate`. It
-keeps the closed box on purpose; it fails on the baseline build (false OPTIMAL, c-MIR on)
-and passes after. Checks: `cargo test -p discopt-core` (980 lib tests + integration), all
+**Fix (first version, now the backstop):** `milp_driver.rs` withdraws the certificate
+(Feasible, bound −inf) when the returned objective and the tree's incumbent value disagree
+beyond `1e-6·max(1,|obj|)`. Counter: `MilpIncumbentMisvaluedDecert`. That treated the
+symptom; the root fix is in "#2136 review" below, with the test that now pins it. Checks: `cargo test -p discopt-core` (980 lib tests + integration), all
 pass; `pytest -m smoke`: 4482 passed, 27 skipped; adversarial suite: 19 passed.
 
 ### Oracle fixed
@@ -424,3 +422,114 @@ What the grid says:
 budget from 200 to about 1000 at 10 rounds with selection, keeping GMI + cover, and run
 the §5 whole-solve panel. Kill it if, over the corpus, it is not net-positive on node
 count or bound, or if it regresses wall by more than the root-bound gain buys.
+
+## #2136 decisions (2026-11-04): both flags RETIRED
+
+Each flag got the exit panel its audit row pre-registered, and a second panel at the budget
+step 5 had suggested raising. Same container, same 34 captures, 30 s per arm, interleaved,
+judged by the fixed oracle.
+
+| panel | checks | BAD | nodes SGM OFF → ON (fewer / more) | wall OFF → ON | bound movement |
+|---|---:|---:|---|---|---|
+| coef, captured options (above) | 289 | 0 | 44.8 → 34.5 (11 / 3) | 38.2 → 37.0 s | MTP |
+| coef, strong 200/10/select (**the row's exit condition**) | 291 | 0 | 35.1 → 38.6 (6 / 9) | 42.5 → 55.2 s | MTP only |
+| coef, 1000/10/select | 291 | 0 | 35.5 → 36.3 (7 / 8) | 39.4 → 52.0 s | MTP only |
+| tableau c-MIR (coef ON both), strong (above) | 291 | 0 | 38.6 → 36.3 (3 / 5) | 52.7 → 58.5 s | MTP worse |
+| tableau c-MIR (coef ON both), 1000/10/select | 291 | 0 | 36.3 → 34.2 (4 / 4) | 50.8 → 72.5 s | flat |
+
+**Coefficient tightening, §5 whole-solve panel.** `issue1917_gdp_flag_panel.py --flag
+DISCOPT_RUST_MILP_COEF_TIGHTEN --phase solve --all --reps 2 --time-limit 60 --max-load 3`,
+over the 24 `gdp_parity` instances under `loa`. LOA's masters reach the Rust driver through
+`get_milp_solver("auto")`, so this is the flag's default route. Rows are in
+`docs/dev/data/2136-g32-panel/coef_tighten_loa.jsonl`.
+
+- 96 solves. `kaibel` and `mod_hens` error in both arms because there is no `ipopt`
+  executable here.
+- **Cert-clean:** incorrect 0, bound crossings 0, solved lost 0.
+- **Not net-positive:** solved gained 0. SGM wall (shift 10 s, capped at 60) goes from
+  19.22 to 19.48 s.
+- Of the unsolved cells, only `med_term_purchasing` moves its bound (7701 → 6973; it is a
+  maximisation, optimum 6797.5). batch_processing, methanol and syngas are flat to noise.
+
+**Decisions.**
+
+- **`DISCOPT_RUST_MILP_TABLEAU_CMIR`: RETIRED.** It is cert-clean and not net-positive at
+  either budget, which is its pre-registered retirement condition.
+- **`DISCOPT_RUST_MILP_COEF_TIGHTEN`: RETIRED.** It is cert-clean. On the whole-solve panel
+  it solves nothing more, and its one measurable gain is on a single instance (MTP), which
+  CLAUDE.md §2 rejects. On the replays at both cut budgets it costs about 30 % wall and has
+  no node benefit. Its captured-options replay was positive on first-master node counts,
+  but that did not carry through to whole solves.
+- **What was removed:** both flags, `bnb/coef_tighten.rs`, `lp/tableau_cmir.rs`, the driver
+  wiring, the `milp_coef_tighten_csc_py` binding, phase `SepTabCmir`, the
+  `MilpCoefTighten*` and tableau `SepCmir*` counters, `test_1917_milp_coef_tighten.py`, and
+  the probes that only toggled these flags. All of it is recoverable from branch `archive/g32-coef-tighten-cmir` (commit `3eba9bf`).
+- **What was kept:** the captures workflow, `oracle.py`, `replay.py` (now a generic
+  `--env`/`--fire-ctr` A/B), `cutgrid.py` and the Python prototypes.
+
+**Bound-neutral check of the retirement.** Both flags defaulted OFF, so the default path
+must be unchanged. All 34 captures were solved with no wall-clock limit, in two runs:
+captured options, and the strong profile capped at 2000 nodes. Each run used the
+pre-retirement `.so` (marker present) and the post-retirement `.so` (marker absent).
+Result: **68 / 68 solves identical** in status, objective, bound, node count and LP iteration count.
+
+### Retraction (CLAUDE.md §11): the step-5 budget conclusion depended on coefficient tightening
+
+The step-5 grid above was taken with coef **ON**. Re-run with coef **OFF** (now the only
+path, `cutgrid.py`, 33 rows, 231 checks, 0 false bounds), the budget barely matters:
+
+| instance | 200/10/sel | 1000/10/sel | 3000/15/sel | ∞/30/sel | ∞/30/no |
+|---|---:|---:|---:|---:|---:|
+| loa__med_term_purchasing | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| loa__batch_processing | 0.208 | 0.208 | 0.208 | 0.208 | 0.289 |
+| rsyn0830m_master0 | 0.776 | 0.840 | 0.861 | 0.872 | 0.899 |
+| loa__positioning | 0.812 | 0.817 | 0.820 | 0.828 | 0.820 |
+| loa__modprodnet | 0.930 | 0.930 | 0.934 | 0.938 | 0.934 |
+
+So "the 200-cut total is the binding term" is **withdrawn** as a general statement. It held
+only on the coefficient-tightened MTP master. On the default path, a larger budget moves
+only rsyn0830m materially (+0.06 at 1000 cuts). The "next experiment" proposed above is
+withdrawn with it. MTP's root gap with coef OFF is not a cut-budget problem: no budget
+moves it off the bare LP bound.
+
+## #2136 review (2026-11-04): the root cause, fixed in the tree
+
+The owner's review of #2148 traced the misvalued incumbent to its source. An integral node
+was promoted with `NodeResult::lower_bound` as its incumbent value. With
+`DISCOPT_MILP_NS_NODE_BOUND` on (the default), that is `min(NS safe bound, vertex value)`:
+a bound on the box, not the value of the point. On the closed default box the safe bound
+was −752904 for a vertex whose `cᵀx` is 41907.46. This section's earlier text says "the
+node LP reported ≈ −752904"; that is wrong. It was the NS safe bound.
+
+The tree pruned against that value, so the old run also *lost the optimum*, not only its
+certificate. The end-of-solve check corrected only the label.
+
+**Fix.** Each node evaluation now records the integral vertex's own objective (`c_wᵀx +
+obj_const` over the full working vector) as `NodeOutput::point_value`. The batch is
+imported through `import_results_with_point_values` (#2067), so the incumbent records the
+point's value, and the safe bound stays only as the node's bound and as a floor on the dual
+bound (`safe_fathom_floor`). The end-of-solve check stays as a backstop.
+
+**Measured on the closed-box clay0203 master** (`solve_milp`, 60 s):
+
+| | c-MIR on | c-MIR off |
+|---|---|---|
+| before | OPTIMAL 41907.46, bound −752904 (false) | ITERATION_LIMIT 55187.82 |
+| backstop only | Feasible 41907.46, bound −inf | Feasible 55187.82 |
+| root fix | 41420.27 (the optimum), uncertified, bound ≤ optimum | 41420.27, uncertified |
+
+Test: `test_milp_default_box.py::test_driver_values_integral_nodes_at_their_point_not_their_bound`.
+It fails on the backstop-only build (incumbent 55187.82) and passes after.
+
+**Effect on the default path.** The 34 captures were solved under {captured options,
+strong profile @ 2000 nodes}, with no wall clock, on the build before and after the root
+fix:
+- 56 of 68 solves are identical.
+- **0 statuses changed, 0 objectives changed, 0 certificates lost or gained.**
+- Six solves take more nodes: strip_packing big-M 239 → 315 (both profiles), constrained
+  layout LOA 145 → 159 (both), jobshop strong 7 → 9, strip_packing LOA 155 → 159, and
+  i1183 5045 → 5057 (node-limited both arms).
+- The rest differ only in LP iterations or bound digits.
+
+More nodes is the expected direction: the tree no longer prunes against a value no point
+attains, so these are prunings that were never valid.

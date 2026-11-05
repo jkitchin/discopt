@@ -5,8 +5,8 @@ For each input: the bare LP bound (``root_cuts=0``), HiGHS's point verified on t
 original rows as the primal reference, and the root bound (``max_nodes=2``) for every
 budget in GRID. Reports root gap closed = (root - lp) / (ref - lp). Every root is
 checked against the verified reference (a root above it is a false bound and fails the
-run). Coefficient tightening is held at ``$DISCOPT_RUST_MILP_COEF_TIGHTEN`` (default 1:
-the gate doc measured it as the precondition); both c-MIR separators are OFF.
+run). #2107's c-MIR is OFF. (The #2136 figures with coefficient tightening ON were taken
+before DISCOPT_RUST_MILP_COEF_TIGHTEN was retired; see the gate doc.)
 
 usage: cutgrid.py out.jsonl pkl...      (prints PROBE_DONE rows=N checks=M)"""
 
@@ -19,8 +19,6 @@ import pickle
 import sys
 import time
 
-os.environ.setdefault("DISCOPT_RUST_MILP_COEF_TIGHTEN", "1")
-os.environ["DISCOPT_RUST_MILP_TABLEAU_CMIR"] = "0"
 W = os.environ.get("DISCOPT_ROOT") or str(pathlib.Path(__file__).resolve().parents[3])
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import discopt  # noqa: E402

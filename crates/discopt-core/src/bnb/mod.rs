@@ -1,7 +1,6 @@
 //! Branch-and-Bound engine — node pool, branching, pruning.
 
 pub mod branching;
-pub mod coef_tighten;
 pub mod convex_kernel;
 pub mod convex_quad_cuts;
 pub mod in_tree_presolve;

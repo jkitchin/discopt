@@ -17,7 +17,14 @@ This module replaces both rules:
    gap tolerance and (b) carry a bound within gap of its own objective.
 
 HiGHS disagreements are recorded as ``notes``, never as BAD rows against an arm.
-``judge`` is pure, so ``test_oracle.py`` exercises it on synthetic rows.
+``judge`` is pure, so ``python/tests/test_2136_g32_oracle.py`` exercises it on synthetic
+rows.
+
+**Limit.** Without a known optimum, the reference is the best point anyone *verified*,
+which is an upper bound on the optimum, not the optimum. The oracle therefore catches a
+bound that crosses a verified point, and an ``optimal`` beaten by one; a bound that sits
+between the true optimum and the best verified point passes unseen. Rows with a proven
+optimum (``minlplib.solu``, a GDPlib oracle) should be judged against it instead.
 """
 
 from __future__ import annotations
