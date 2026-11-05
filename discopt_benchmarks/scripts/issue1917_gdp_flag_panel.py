@@ -111,6 +111,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # ``--max-nodes N --deterministic``; ``DualProofLearned`` is 0 exactly where the
     # pool stayed empty (then the tree is OFF's, bit for bit).
     "DISCOPT_DUAL_PROOF_PROPAGATION": ("big-m", "hull"),
+    # #2142 §114: exact integer-bound rounding in the kernel's propagation. Solve time
+    # only; ``IntRoundExactSnaps`` is 0 exactly where the tree is OFF's.
+    "DISCOPT_INT_ROUND_EXACT": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -157,6 +160,7 @@ _COUNTER_FLAGS = {
     "DISCOPT_SPATIAL_BRANCH_CLAMP": "SpatialSplitMoved",
     "DISCOPT_SPATIAL_VIOL_SCIP": "SpatialViolScipChanged",
     "DISCOPT_DUAL_PROOF_PROPAGATION": "DualProofLearned",
+    "DISCOPT_INT_ROUND_EXACT": "IntRoundExactSnaps",
 }
 
 

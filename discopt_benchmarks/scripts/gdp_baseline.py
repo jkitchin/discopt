@@ -246,7 +246,9 @@ def _run_discopt(
         out["counters"] = {
             k: int(v)
             for k, v in ctrs.items()
-            if k.startswith(("DualRebuild", "SpatialSplit", "SpatialViolScip", "DualProof"))
+            if k.startswith(
+                ("DualRebuild", "SpatialSplit", "SpatialViolScip", "DualProof", "IntRoundExact")
+            )
         }
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)

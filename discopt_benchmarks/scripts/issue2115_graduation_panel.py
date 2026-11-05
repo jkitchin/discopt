@@ -144,6 +144,16 @@ _FLAGS = {
         "leak": lambda off: off["DualProofRays"],
         "show": ("DualProofLearned", "DualProofTightenings"),
     },
+    # #2142 §114: exact integer-bound rounding in the spatial kernel's propagation
+    # (``DISCOPT_INT_ROUND_EXACT``). It changes the search only where it snaps a
+    # bound the legacy rule kept, so ``IntRoundExactSnaps`` ON is where it ran;
+    # OFF it must be 0.
+    "DISCOPT_INT_ROUND_EXACT": {
+        "fired": lambda off, on: on["IntRoundExactSnaps"],
+        "ran": lambda off, on: on["IntRoundExactSnaps"] > 0,
+        "leak": lambda off: off["IntRoundExactSnaps"],
+        "show": ("IntRoundExactSnaps",),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -169,6 +179,7 @@ _CTRS = (
     "DualProofLearned",
     "DualProofTightenings",
     "DualProofFathoms",
+    "IntRoundExactSnaps",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 

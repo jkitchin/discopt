@@ -77,11 +77,19 @@ fn snap_integer_bounds(lo: &mut f64, hi: &mut f64, exact: bool) -> bool {
     let nl = (*lo - 1e-6).ceil();
     let nh = (*hi + 1e-6).floor();
     let mut changed = false;
-    if nl > *lo + EPS || (exact && nl > *lo) {
+    let legacy_lo = nl > *lo + EPS;
+    if legacy_lo || (exact && nl > *lo) {
+        if !legacy_lo {
+            crate::profile::incr(crate::profile::Ctr::IntRoundExactSnaps);
+        }
         *lo = nl;
         changed = true;
     }
-    if nh < *hi - EPS || (exact && nh < *hi) {
+    let legacy_hi = nh < *hi - EPS;
+    if legacy_hi || (exact && nh < *hi) {
+        if !legacy_hi {
+            crate::profile::incr(crate::profile::Ctr::IntRoundExactSnaps);
+        }
         *hi = nh;
         changed = true;
     }
