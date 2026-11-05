@@ -1,3 +1,0 @@
-{"instance": "cstr", "arm": "discopt-big-m", "status": "optimal", "objective": 3.062014576618532, "bound": 3.0617346252232247, "node_count": 29551, "wall": 89.56}
-load (2.9443359375, 2.37841796875, 2.35107421875)
-executed assertions: 2

@@ -160,3 +160,7 @@ seeds, flag ON vs OFF. Kill: ON mean bound < 2.0 or any seed ON <= OFF. Then nod
 the offline 40-proof arm certified at 53,051). Then §5 panel (in-repo corpus + GDP parity + tanksize/nous1 probes),
 which also tests generality: needs Farkas-infeasible node LPs whose proof uses only global rows; report
 the per-instance count of learned proofs so an unfired instance is visible.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-scip-expert/<name>.log.gz | gunzip` (or `.log`, no gunzip).

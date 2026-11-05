@@ -22,3 +22,7 @@ Build: branch `fix/2142-cstr-gdp-bound`; the flag `DISCOPT_DUAL_PROOF_PROPAGATIO
 | `panel/v5_one.py`, `panel/nous1_cert_{0,1}.log` | nous1 to certification, both arms (concurrent: node counts only) |
 | `panel/v7_timing.py`, `panel/timing.log` | section 9 timing: tanksize and nous1, interleaved, load-gated, 3 reps |
 | `panel/gdp_{bigm,hull}.*`, `panel/gdp_merged.jsonl`, `panel/gdp_report.txt` | `issue1917_gdp_flag_panel.py --phase solve --all --deterministic --max-nodes 5000 --time-limit 120 --reps 1`, one stream per method; `--report` over the merge |
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-dual-proof/<name>.log.gz | gunzip` (or `.log`, no gunzip).

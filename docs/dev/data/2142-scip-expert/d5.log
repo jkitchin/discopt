@@ -1,4 +1,0 @@
-boxes 553; proofs empty the converged box on 167; tighten it on 385; fix a binary on 0
-node LP bound: raised >1e-4 on 539 of 544 finite boxes; mean gain (capped at incumbent) 1.1577
-best example: node 152 bound without 0.09399999115727527 with inf nonempty False
-executed comparisons: 553
