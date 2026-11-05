@@ -14,6 +14,12 @@ comparison already exist as LP relaxations:
 * every Anderson inequality is valid for the per-neuron convex hull, so the most
   any set of them can reach is ``relu_extended``'s LP relaxation (the hull).
 
+The option was built and measured directly as well (bound after 100 nodes,
+cuts vs none, same tree), then RETIRED with its implementation: median 0.0%
+of the gap closed over 16 instances, +25% wall
+(docs/dev/issue-2167-relu-complementarity-results.md,
+docs/dev/data/2167/h3_direct.jsonl). This script keeps the LP proxy.
+
 So ``(LP_ext - LP_bigm) / (opt - LP_bigm)`` is an UPPER bound on the root gap
 the option could close. If it is below 10% on median, the option fails its kill
 criterion without being built.
@@ -73,44 +79,16 @@ def native_root(net) -> float:
     return float(r.root_bound) if r.root_bound is not None else float("nan")
 
 
-def bound_after_nodes(net, cuts: bool, nodes: int) -> tuple[float, int, float]:
-    """Global dual bound of the native model after ``nodes`` nodes (direct H3).
-
-    Not the root bound: callback cuts reach the relaxation only after the root
-    LP is solved, so ``root_bound`` is identical with and without them (measured:
-    4 instances, 4-19 cuts each, bounds equal to 4 digits). Both arms run on the
-    Python tree (``DISCOPT_COMPL_BRANCH=1``; any ``cut_callback`` already bypasses
-    the native kernel), so the only difference is the q columns and their cuts.
-    """
-    import os
-
-    from discopt.mpec import solve_mpec
-
-    assert os.environ.get("DISCOPT_COMPL_BRANCH") == "1", "run both arms on one tree"
-    m = Model("native_cuts")
-    nn = NNFormulation(m, net, strategy="relu_complementarity", ideal_cuts=cuts)
-    nn.formulate()
-    m.minimize(dm.sum(nn.outputs))
-    kw = {"cut_callback": nn.cut_callback} if cuts else {}
-    r = solve_mpec(m, nn.relations, method="native", max_nodes=nodes, deterministic=True, **kw)
-    n_cuts = nn.cut_callback.n_cuts if cuts else 0
-    return (float(r.bound) if r.bound is not None else float("nan")), n_cuts, r.wall_time
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=str, default="0,1,2")
     ap.add_argument("--time-limit", type=float, default=300.0)
     ap.add_argument("--native-root", action="store_true")
-    ap.add_argument(
-        "--direct", type=int, default=0, help="node budget for the direct cuts-vs-plain arm"
-    )
     args = ap.parse_args()
     warnings.filterwarnings("ignore")
     logging.disable(logging.WARNING)
     n_cmp = 0
     closed = []
-    direct: list[float] = []
     for n_in, width, depth in PANEL:
         for seed in [int(s) for s in args.seeds.split(",")]:
             net = make_net(seed, n_in, width, depth)
@@ -145,15 +123,6 @@ def main() -> int:
             rec["closed"] = None if gap <= 1e-9 else (lb_ext - lb_bigm) / gap
             if args.native_root:
                 rec["native_root"] = native_root(net)
-            if args.direct:
-                r0, _, w0 = bound_after_nodes(net, False, args.direct)
-                r1, nc, w1 = bound_after_nodes(net, True, args.direct)
-                rec.update(bound_plain=r0, bound_cuts=r1, n_cuts=nc, wall_plain=w0, wall_cuts=w1)
-                assert r1 <= opt + 1e-6 and r0 <= opt + 1e-6, rec  # no bound above opt
-                g = opt - r0
-                rec["closed_direct"] = None if g <= 1e-6 * max(1.0, abs(opt)) else (r1 - r0) / g
-                if rec["closed_direct"] is not None:
-                    direct.append(rec["closed_direct"])
             if rec["closed"] is not None:
                 closed.append(rec["closed"])
             n_cmp += 1
@@ -162,12 +131,6 @@ def main() -> int:
         print(
             f"# median gap closed by the hull (upper bound for H3): {np.median(closed):.4f} "
             f"over {len(closed)} instances; kill if < 0.10",
-            flush=True,
-        )
-    if direct:
-        print(
-            f"# DIRECT median root gap closed by the cuts: {np.median(direct):.4f} over "
-            f"{len(direct)} instances; kill if < 0.10",
             flush=True,
         )
     print(f"# comparisons made: {n_cmp}", flush=True)

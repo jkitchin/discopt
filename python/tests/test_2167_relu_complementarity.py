@@ -100,87 +100,11 @@ def test_relations_before_formulate_raises():
         nn.relations
 
 
-def test_ideal_cuts_adds_tied_continuous_q():
-    """#2167 slice 4: ``ideal_cuts=True`` gives each unstable neuron a continuous
-    ``q`` in [0, 1] with the tie rows ``q*s <= 0`` and ``(1-q)*y <= 0``; no binary."""
-    m = Model()
-    nn = NNFormulation(
-        m, _relu_net(hidden=(4, 3)), strategy="relu_complementarity", ideal_cuts=True
-    )
-    nn.formulate()
-    assert not any(v.var_type == VarType.BINARY for v in m._variables)
-    qs = [v for v in m._variables if v.name.startswith("nn_q_")]
-    assert len(qs) == len(nn.relations) > 0
-    assert all(float(v.lb) == 0.0 and float(v.ub) == 1.0 for v in qs)
-    names = [c.name or "" for c in m._constraints]
-    assert sum("_relu_qs_" in n for n in names) == len(qs)
-    assert sum("_relu_qy_" in n for n in names) == len(qs)
-    assert nn.cut_callback is not None
-
-
-def test_ideal_cuts_valid_on_lifted_feasible_points():
-    """Every Anderson cut the separator emits, at many random relaxed points,
-    holds at every sampled feasible LIFTED point (q included). A free q failed
-    exactly this in the solver's witness check (a cut excluded q=0.3 on an
-    active neuron); the tie rows are what make it hold."""
-    from discopt.warm_start import validate_initial_solution
-
-    net = _relu_net(seed=11, n_in=2, hidden=(5, 4))
-    m = Model()
-    nn = NNFormulation(m, net, strategy="relu_complementarity", ideal_cuts=True)
-    nn.formulate()
-    m.minimize(dm.sum(nn.outputs))
-    sep = nn.cut_callback
-    lb = np.concatenate([np.asarray(v.lb, dtype=float).ravel() for v in m._variables])
-    ub = np.concatenate([np.asarray(v.ub, dtype=float).ravel() for v in m._variables])
-    lb, ub = np.clip(lb, -50, 50), np.clip(ub, -50, 50)
-    rng = np.random.default_rng(0)
-    cuts = []
-    for _ in range(300):
-        cuts.extend(sep.separate(rng.uniform(lb, ub), m))
-    assert len(cuts) > 50, "the probe must actually produce cuts"
-    offsets, off = {}, 0
-    for v in m._variables:
-        offsets[id(v)] = off
-        off += v.size
-
-    def col(term_var):
-        from discopt.modeling.core import IndexExpression
-
-        if isinstance(term_var, IndexExpression):
-            k = int(
-                np.ravel_multi_index(
-                    term_var.index if isinstance(term_var.index, tuple) else (term_var.index,),
-                    term_var.base.shape,
-                )
-            )
-            return offsets[id(term_var.base)] + k
-        return offsets[id(term_var)]
-
-    points = [validate_initial_solution(m, st) for st in nn.local_starts(200, seed=5)]
-    n_checked = 0
-    for c in cuts:
-        assert c.sense == "<="
-        for x in points:
-            lhs = sum(coef * x[col(v)] for v, coef in c.terms)
-            assert lhs <= c.rhs + 1e-7 * max(1.0, abs(c.rhs)), (c, lhs)
-            n_checked += 1
-    assert n_checked == len(cuts) * 200
-
-
-def test_ideal_cuts_solve_certifies_same_objective(monkeypatch):
-    monkeypatch.setenv("DISCOPT_COMPL_BRANCH", "1")
-    net = _relu_net(seed=7, n_in=3, hidden=(4, 3))
-    mb, _ = _embed(net, "relu_bigm")
-    rb = mb.solve()
-    m = Model()
-    nn = NNFormulation(m, net, strategy="relu_complementarity", ideal_cuts=True)
-    nn.formulate()
-    m.minimize(dm.sum(nn.outputs))
-    r = solve_mpec(m, nn.relations, method="native", cut_callback=nn.cut_callback)
-    assert r.gap_certified and rb.gap_certified
-    assert r.objective == pytest.approx(rb.objective, abs=1e-6, rel=1e-6)
-    assert nn.cut_callback.n_calls > 0
+def test_ideal_cuts_refused():
+    """Continuous-q Anderson cuts for this strategy were retired by #2167's H3
+    panel (median 0.0% of the gap closed at equal nodes, +25% wall)."""
+    with pytest.raises(ValueError, match="ideal_cuts"):
+        NNFormulation(Model(), _relu_net(), strategy="relu_complementarity", ideal_cuts=True)
 
 
 def test_unbounded_inputs_accepted_all_neurons_unstable():

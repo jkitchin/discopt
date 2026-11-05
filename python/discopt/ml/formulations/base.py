@@ -97,10 +97,7 @@ class NNFormulation:
         :attr:`cut_callback`; pass it as ``model.solve(cut_callback=...)``.
         On a pure MILP the inequalities are then separated natively in Rust
         (#2157): over repeated root LP solves on the default HiGHS route, at
-        every fractional node on the Rust MILP engine. With
-        ``strategy="relu_complementarity"`` (#2167) each unstable neuron gets a
-        continuous ``q in [0, 1]`` instead of a binary; the cuts stay globally
-        valid and tighten the triangle relaxation toward the per-neuron hull.
+        every fractional node on the Rust MILP engine.
 
     Example
     -------
@@ -129,11 +126,13 @@ class NNFormulation:
             raise ValueError(
                 "n_partitions / partition_strategy apply only to strategy='relu_partition'"
             )
-        if ideal_cuts and strategy not in _RELU_MILP + ("relu_complementarity",):
-            raise ValueError(
-                "ideal_cuts=True needs a ReLU MILP strategy, one of "
-                f"{_RELU_MILP}, or 'relu_complementarity'"
-            )
+        if ideal_cuts and strategy not in _RELU_MILP:
+            # relu_complementarity is deliberately absent: its continuous-q
+            # Anderson cuts were RETIRED by #2167's H3 panel -- at equal node
+            # budgets they closed a median 0.0% of the remaining gap (16
+            # instances, 1 of 16 >= 10%) for +25% median wall
+            # (docs/dev/issue-2167-relu-complementarity-results.md).
+            raise ValueError(f"ideal_cuts=True needs a ReLU MILP strategy, one of {_RELU_MILP}")
         if n_partitions is not None and int(n_partitions) < 1:
             raise ValueError(f"n_partitions must be >= 1, got {n_partitions}")
         self._strategy_kwargs: dict = {}
@@ -144,9 +143,6 @@ class NNFormulation:
                     "equal_size" if partition_strategy is None else partition_strategy
                 ),
             }
-        if strategy == "relu_complementarity" and ideal_cuts:
-            # #2167 slice 4: continuous q columns for the Anderson separator.
-            self._strategy_kwargs = {"continuous_q": True}
         self._ideal_cuts = bool(ideal_cuts)
         self._cut_callback: AndersonCutSeparator | None = None
         self._model = model
