@@ -29,10 +29,10 @@ unscaled dense-retry — and still end `Optimal`/`Infeasible`. The dual-proof gl
 
 | arm (det, seed 0) | nodes | `LpVerdictNumerical` | kernel `n_undecided` | node-status `numerical` |
 |---|---|---|---|---|
-| bigm  (`2142-exact-hull/arm_bigm_10000.log`)  | 10k | 176   | **0** | absent |
-| homog (`2142-exact-hull/arm_homog_10000.log`) | 10k | 1,122 | **0** | absent |
-| homog (`2142-exact-hull/arm_homog_20000.log`) | 20k | 4,920 | **0** | absent |
-| aggr  (`2142-scip-hull-ablation/arm_aggr_10000.log`) | 10k | 2,430 | 105 | 105 |
+| bigm  (`2142-exact-hull/arm_bigm_10000.log.gz`)  | 10k | 176   | **0** | absent |
+| homog (`2142-exact-hull/arm_homog_10000.log.gz`) | 10k | 1,122 | **0** | absent |
+| homog (`2142-exact-hull/arm_homog_20000.log.gz`) | 20k | 4,920 | **0** | absent |
+| aggr  (`2142-scip-hull-ablation/arm_aggr_10000.log.gz`) | 10k | 2,430 | 105 | 105 |
 
 So on the homog arm the counter the hypothesis rests on counts *recovered attempts*: no node
 ended undecided. H predicts bound-holding nodes whose own LP decided nothing; the logs already
@@ -60,7 +60,7 @@ self-check). Every dumped LP is re-solved with HiGHS (and SoPlex via pyscipopt).
 - Otherwise (undecided/uncertified nodes hold the frontier AND a robust solver gives them a
   better bound): emulate the robust re-solve in a scratch Rust copy (retry chain extended),
   run homog 20k deterministic; **recommend implementing** iff the 20k bound exceeds
-  **2.7875** (big-M default @20k, `arm_bigm_20000.log`); otherwise kill.
+  **2.7875** (big-M default @20k, `arm_bigm_20000.log.gz`); otherwise kill.
 
 Secondary (reported, not a decision input): the walltime share of the recovered numerical
 attempts — not a bound question and the machine is loaded (4 cores, other panels), so it is

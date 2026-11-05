@@ -1344,7 +1344,7 @@ class SolverTuning:
     5, tanksize 461 -> 391 nodes. **Why it is still OFF:** the GDP parity panel and a
     full-solve cstr hull run were not possible where it was built (GDPlib ``cstr``
     needs gdplib from source); running them decides graduation or retirement.
-    performance-plan section 117, ``docs/dev/data/2168-kernel-presolve/``. Audit row
+    performance-plan section 119, ``docs/dev/data/2168-kernel-presolve/``. Audit row
     in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(

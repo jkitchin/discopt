@@ -2,7 +2,7 @@
 
 Code: `python/discopt/_relax/spatial_presolve.py` (`presolve_spec`), wired into
 `solver._try_native_spatial_kernel` on the MAIN kernel call behind
-`DISCOPT_KERNEL_PRESOLVE` (default OFF). Plan: `docs/dev/performance-plan.md` §117.
+`DISCOPT_KERNEL_PRESOLVE` (default OFF). Plan: `docs/dev/performance-plan.md` §119.
 
 ## Why the entry runs at the kernel level
 

@@ -50,7 +50,7 @@ bound, seeded kernel harness, stages 1-3 alone 2.28): eliminating a non-output
 column into rows AND BLF sides 0.17 (a side's interval becomes a sum of column
 intervals, loosening its envelopes); into rows only 1.74; restricted to implied-free
 columns, as SCIP does, nothing qualifies. Removed in the PR that built it;
-performance-plan section 117.
+performance-plan section 119.
 
 An eliminated column keeps its index (``n_cols`` is unchanged, so the kernel's and
 the verifier's index space is stable) with box ``[0, 0]``, integrality 0, objective

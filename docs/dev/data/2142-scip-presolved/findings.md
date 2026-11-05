@@ -48,7 +48,7 @@ What carries it (ablations on the translated model):
 - **Not SCIP's bound tightening.** discopt's own root-FBBT box (15 rounds) in place of SCIP's
   presolved bounds still certifies (12,087 nodes).
 - **So it is the structural reduction:** the column eliminations, of which the 106 doubleton
-  identities alone gave only 2.43 @20k (`../2142-scip-hull-ablation/arm_aggr_20000.log`).
+  identities alone gave only 2.43 @20k (`../2142-scip-hull-ablation/arm_aggr_20000.log.gz`).
   What SCIP does beyond them (from the cip, comparing the original 29 BLF / 5 terms with the
   presolved 33 nonlinear conss): (i) a product with a FIXED factor becomes linear
   (`w275 = x0 * x78` with `x0 = 1` -> `x78 = w275`, which then aggregates); (ii) aggregations

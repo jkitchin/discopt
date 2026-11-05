@@ -151,7 +151,13 @@ def test_probe_box_placeholder_declines(monkeypatch):
 def test_cstr_hull_spec_has_affine_pow_terms(monkeypatch):
     """GDPlib cstr under hull: 20 ``yc**-1`` atoms become kind-4 terms; the real-box
     build holds placeholders for the 44 McCormick rows of the ``yc**-3`` chains that
-    reach ``_BIG``, the probe build none."""
+    reach ``_BIG``, the probe build none.
+
+    Pinned to the eps-perspective lowering (``DISCOPT_HULL_EXACT_PERSPECTIVE=0``): the
+    ``yc**-1`` atoms exist only there. The default homogenized hull is division-free and
+    is pinned by ``test_1917_hull_plain_equality.test_cstr_hull_reaches_the_native_kernel``.
+    """
+    monkeypatch.setenv("DISCOPT_HULL_EXACT_PERSPECTIVE", "0")
     pytest.importorskip("pyomo")
     cstr = pytest.importorskip("gdplib.cstr")
     from discopt._relax.gdp_reformulate import reformulate_gdp

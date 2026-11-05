@@ -40,5 +40,5 @@ GDP: `issue1917_gdp_flag_panel.py --phase solve --all --reps 2 --time-limit 120`
 | `screen_gdp.*`, `screen_corpus.*` | `DISCOPT_HEUR_FIXING_SCREEN` | cert-clean |
 | `warmstart_corpus.*` | `DISCOPT_ROOT_WARMSTART_FIRST`, `--from-start` | cert-clean, neutral |
 
-Summary and verdicts: `docs/dev/performance-plan.md` §106.4 and
+Summary and verdicts: `docs/dev/performance-plan.md` §118.4 and
 `docs/dev/flag-retirement-audit.md`.

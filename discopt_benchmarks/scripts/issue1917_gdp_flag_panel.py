@@ -86,42 +86,6 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
     # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
     "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
-    # #2143: acts on the heuristics' sub-NLPs at solve time (lowering identical):
-    # solve ``--all``. big-m is in the panel because FBBT pins columns there too.
-    "DISCOPT_SUBNLP_REDUCED": ("hull", "big-m"),
-    # #2143 stage 2: both act on root primal heuristics at solve time (lowering
-    # identical), so solve ``--all``. The memo/pump screen fires under either
-    # lowering; the warm-start reorder fires only on a model with a start (GDPlib
-    # instances carry none), so its GDP panel is a no-channel control; its real
-    # panel needs instances solved from a start (MINLPLib ``.gms`` with ``x.l``
-    # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
-    "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
-    "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
-    # #2143 stage 3: the root presolve's marginal stop, RETIRED on this panel in the
-    # PR that introduced it (not net-positive in wall, its pre-registered kill).
-    # Kept, like the retired entries above, so ``--report`` can re-derive the
-    # recorded verdict from docs/dev/data/1917-flag-panel/.
-    "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
-    # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
-    # configuration wave found nothing (lowering identical): solve ``--all``.
-    "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
-    # #2143 stage 4: the root pumps skipped once an incumbent exists (primal only,
-    # lowering identical): solve ``--all``. Its panel runs with the other four
-    # #2143 flags ON in both arms, the regime where an incumbent precedes the pumps.
-    "DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT": ("hull", "big-m"),
-    # #2143 stage 4: the root LOA proposer's proved bound installed as the search's
-    # root dual bound (bound-changing): solve ``--all``, with the five other #2143
-    # flags ON in both arms (it acts only when the proposer fires).
-    "DISCOPT_GDP_LOA_PROPOSER_BOUND": ("hull", "big-m"),
-    # #2136 (G3.2): Rust MILP driver flag, RETIRED by #2136 on this panel
-    # (docs/dev/data/2136-g32-panel/; its sibling DISCOPT_RUST_MILP_TABLEAU_CMIR was
-    # retired on the g32 replay panel). Kept, like the retired entries above, so
-    # ``--report`` can re-derive the recorded verdict. LOA's masters reach the driver through
-    # ``get_milp_solver("auto")`` (``gdp/algorithms/master.py``); a linear big-M
-    # lowering is a pure MILP and goes to HiGHS by default, so ``loa`` is the
-    # default route these flags act on. Firing is shown per master by
-    # ``g32/replay.py``'s counters on the captured first masters.
-    "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
     # #2142 A: the absorbed exact perspective for nonlinear hull rows. RETIRED by
     # its panel (docs/dev/data/2142-flag-panel/); kept so --report re-derives it.
     "DISCOPT_HULL_LIFTED_PERSPECTIVE": ("hull",),
@@ -154,6 +118,47 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2142 §115: the homogenized (division-free) hull of nonconvex polynomial disjunct
     # rows. A lowering flag: the fire phase fingerprints the hull lowering OFF vs ON.
     "DISCOPT_HULL_EXACT_PERSPECTIVE": ("hull",),
+    # #2143: acts on the heuristics' sub-NLPs at solve time (lowering identical):
+    # solve ``--all``. big-m is in the panel because FBBT pins columns there too.
+    "DISCOPT_SUBNLP_REDUCED": ("hull", "big-m"),
+    # #2143 stage 2: both act on root primal heuristics at solve time (lowering
+    # identical), so solve ``--all``. The memo/pump screen fires under either
+    # lowering; the warm-start reorder fires only on a model with a start (GDPlib
+    # instances carry none), so its GDP panel is a no-channel control; its real
+    # panel needs instances solved from a start (MINLPLib ``.gms`` with ``x.l``
+    # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
+    "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
+    "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
+    # #2143 stage 3: the root presolve's marginal stop, RETIRED on this panel in the
+    # PR that introduced it (not net-positive in wall, its pre-registered kill).
+    # Kept, like the retired entries above, so ``--report`` can re-derive the
+    # recorded verdict from docs/dev/data/1917-flag-panel/.
+    "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
+    # #1917 (PR #2162): split the root fixpoint's OBBT budget evenly across its
+    # rounds. RETIRED in the PR that introduced it (a deterministically looser bound
+    # on 4stufen at 120 s). Kept, like the retired entries above, so ``--report`` can
+    # re-derive the recorded verdict.
+    "DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT": ("hull", "big-m"),
+    # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
+    # configuration wave found nothing (lowering identical): solve ``--all``.
+    "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
+    # #2143 stage 4: the root pumps skipped once an incumbent exists (primal only,
+    # lowering identical): solve ``--all``. Its panel runs with the other four
+    # #2143 flags ON in both arms, the regime where an incumbent precedes the pumps.
+    "DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT": ("hull", "big-m"),
+    # #2143 stage 4: the root LOA proposer's proved bound installed as the search's
+    # root dual bound (bound-changing): solve ``--all``, with the five other #2143
+    # flags ON in both arms (it acts only when the proposer fires).
+    "DISCOPT_GDP_LOA_PROPOSER_BOUND": ("hull", "big-m"),
+    # #2136 (G3.2): Rust MILP driver flag, RETIRED by #2136 on this panel
+    # (docs/dev/data/2136-g32-panel/; its sibling DISCOPT_RUST_MILP_TABLEAU_CMIR was
+    # retired on the g32 replay panel). Kept, like the retired entries above, so
+    # ``--report`` can re-derive the recorded verdict. LOA's masters reach the driver through
+    # ``get_milp_solver("auto")`` (``gdp/algorithms/master.py``); a linear big-M
+    # lowering is a pure MILP and goes to HiGHS by default, so ``loa`` is the
+    # default route these flags act on. Firing is shown per master by
+    # ``g32/replay.py``'s counters on the captured first masters.
+    "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
