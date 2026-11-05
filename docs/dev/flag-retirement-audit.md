@@ -176,7 +176,9 @@ forty-five. "Panel owed, never run" is therefore the honest state for most rows 
 this document has said since its first pass that **that is itself the finding**, not a gap
 in the audit.
 
-<!-- live-solver-math-gates: 48 -->
+<!-- live-solver-math-gates: 49 -->
+
+_48 -> 49 (2026-11-05, merge of `main` 8ebd87bf into `claude/happy-hamilton-0vvo3b`): the merge took `main`'s marker (48), which does not count `DISCOPT_SUBNLP_REDUCED` (#2143, default-OFF, row below) -- that flag is on this branch only. On `main` the count stays 48 until #2143 lands._
 
 _48 -> 49 -> 48 (2026-11-04, #2151): `DISCOPT_MILP_REFUTED_TIGHT_RESOLVE` added default-OFF, then graduated on introduction in the same PR (row below)._
 

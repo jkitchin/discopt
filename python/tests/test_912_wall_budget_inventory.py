@@ -486,6 +486,16 @@ _SLICE_CATEGORY = {(p, s): c for p, s, c in KNOWN_SLICES}
 
 # (module-relative path, source line, category). See the module docstring.
 KNOWN: tuple[tuple[str, str, str], ...] = (
+    # highs-parity P0.7: ``_solve_milp_bb`` checks the caller's own ``time_limit``
+    # before each node of a batch (not once per batch), and requeues the nodes it did
+    # not evaluate with their pop-time bound -- 120 s ran 141-147 s before, 120-121 s
+    # after. The clock decides only WHEN to stop; which nodes a run that finishes
+    # evaluates, and in what order, does not depend on it. ``contract``, like #1624.
+    (
+        "solver.py",
+        "if i > 0 and time.perf_counter() - t_start >= time_limit:",
+        "contract",
+    ),
     # #1624: the convex-route probe classifies under the caller's own deadline,
     # so classification stops when the caller's time_limit is spent -- the
     # ``contract`` role. The probe's work is bounded by its own budget, not this.

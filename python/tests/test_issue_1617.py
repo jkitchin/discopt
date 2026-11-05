@@ -130,9 +130,12 @@ def test_absorb_tiny_entries_is_a_sound_relaxation():
     assert checks > 1000
 
 
-def test_highs_route_error_records_its_cause():
+def test_highs_route_error_records_its_cause(monkeypatch):
     """An ``error`` from the HiGHS LP route carries HiGHS's reason, not the generic
     backfill."""
+    # highs-parity D1: an LP defaults to the Rust route (which solves this model:
+    # the 1.9e20 right-hand side is no constraint); this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     m = dm.Model("lp_rhs_sentinel")
     x = m.continuous("x", lb=0.0, ub=10.0)
     m.subject_to(2 * x <= 1.94849311702961e20)
