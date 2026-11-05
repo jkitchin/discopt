@@ -957,7 +957,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   `_exact_solve`: identical, and `exact_ns_bound` is never called on either. Rust
   certifies L 25/25, M 18/24, INF 15/16 (H: 25, 24, 15). Test
   `test_highs_parity_p25_sparse_exact_solve.py` (the `perold` case fails before).
-- [ ] **P2.6 — R1-LP graduation gate → D1.** Scope: `solver.py:37494` (`_lp_milp_backend`
+- [x] **P2.6 — R1-LP graduation gate → D1.** *(D1 decided 2026-11-05: flip)* Scope: `solver.py:37494` (`_lp_milp_backend`
   split: new `DISCOPT_LP_BACKEND`, default `highs`, for the pure-LP class only;
   `DISCOPT_LP_MILP_BACKEND` keeps governing MILP), docs. Done: L panel, Rust engine via
   P1.1's seam, flags of P2.2–P2.5 ON: **24/24 certified, 0 incorrect, geomean wall ratio
@@ -986,6 +986,34 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   certificate ladder, verification and the modeling layer, P0.3/P2.0). Which one §1.3
   means is the owner question still open, so the gate goes to **D1**. The bar's "24/24"
   and "18/18" predate the P0.1 manifest (L has 25, INF 16).
+
+  **D1 (owner, 2026-11-05): the §1.3 wall bar is measured against the HiGHS route →
+  parity met → flip the pure-LP class to Rust.** Done in `7a851adc`, `bb29aee3`,
+  `c1d9a0a3`:
+  - `solver._lp_backend()`: `DISCOPT_LP_BACKEND` (`rust` default, `highs` opt-out); if
+    unset, an explicitly set `DISCOPT_LP_MILP_BACKEND` still decides an LP (so every A/B
+    run and opt-out keeps its meaning); MILP reads only `DISCOPT_LP_MILP_BACKEND`
+    (default `highs`, unchanged). Used at the LP dispatch in `_solve_impl` (only when no
+    `milp_backend` keyword is given -- an explicit keyword still decides), in AMP's and
+    MIP-NLP's pure-LP paths. Arm R (native Rust route) is the default: it is what the
+    gate measured and it needs no `highspy` (P6).
+  - The default Rust LP route names itself (`rust-lp: discopt LP solve, Rust simplex`),
+    as the HiGHS route and `native` always did.
+  - AMP's pure-LP shortcut existed only for the HiGHS route; with the Rust default it
+    fell to the NLP path (`iteration_limit` on `nlp_cvx_002_010`). It now hands the LP
+    to whichever engine `_lp_backend()` names.
+  - **H4 MINLP guard** (`lp_milp_minlp_guard.py`, now taking the env var to vary;
+    `d1/minlp_guard_lp_backend.json`): `DISCOPT_LP_BACKEND` rust vs highs vs rust, 74
+    `.nl` instances, **drift 0**, 7 timing-noisy (R ≠ R2) listed.
+  - Gates: `-m "not slow"` full lane (20,142 passed; the 12 failures triaged: 3 were D1
+    -- two HiGHS-route tests now pin the route, the AMP gap fixed; 5 are the container
+    lacking `sympy`/`cyipopt`; 2 bookkeeping -- the #912 inventory entry for P0.7's
+    per-node deadline (`contract`) and the audit's live-gate count, 49 on this branch
+    with #2143's `DISCOPT_SUBNLP_REDUCED`; 1 the AMP test's misplaced reference check),
+    smoke 4485 passed, adversarial 19 passed. Test `test_highs_parity_p26_lp_backend.py`.
+  - No P2 flag contributed (P2.2/P2.3 killed, P2.4 not pursued, P2.5 unflagged), so no
+    flag graduates. `DISCOPT_LP_BACKEND=highs` is an opt-out for a shipped default (out
+    of scope of the flag audit).
 
 ### Phase 3 — persistent MILP handle and IIS (R5)
 
@@ -1168,7 +1196,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry, P2.4 not pursued (owner) | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
+| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry, P2.4 not pursued (owner), P2.6 [x] → **D1: flipped** | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
