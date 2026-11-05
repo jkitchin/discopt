@@ -843,7 +843,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     on, or keep cutting that tail first?
   - **Closed 2026-11-05 by owner decision:** accepted at R −68 % / H −44 % (the H bar is
     the HiGHS route's own overhead, not Rust parity); the remaining tail is not pursued.
-- [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
+- [x] **P2.2 — Cold-start basis and dual-slack warm start for the LP route. KILLED 2026-11-05 (see result).** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
   structural crash, CPLEX/HiGHS style) cuts cold iterations ≥ 30 % vs the all-slack
@@ -854,6 +854,25 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   retire flag + implementation. Regime: bound-neutral in objective (vertex may differ —
   it is an LP optimum either way; node-count golden must hold with the flag OFF; MILP
   node drift with it ON makes it bound-changing and it then needs the P4-style panel).
+  **Result (2026-11-05): killed at its kill bar; flag and implementation retired
+  (never merged).** Entry (`p22_entry_phase_split.py`, `p2.2/entry_phase_split.json`, L
+  panel, Rust route, every LP of each solve): phase 1 is **49.6 %** of the 15,549 cold
+  pivots (median 41 %, up to 65 % on `perold`/`shell`), and Rust pivots 2.6× HiGHS's
+  iterations, so a crash could in principle reach −30 %. The cold primal already crashes
+  structural **singletons** into the start basis (`primal.rs` `run`): 70–80 % of rows
+  start structural (`perold` 425/625, `25fv47` 628/820). Built: a triangular crash on top,
+  kept primal feasible because phase 1 here minimizes the sum of artificials and needs
+  in-box basics -- a multi-nonzero column crashed into an untouched artificial row only
+  when its value and every singleton it shifts stay in their boxes, never touching
+  another crashed column's row (block-triangular, so nonsingular). Measured, flag ON vs
+  OFF, same panel: v1 (column must touch only artificial rows) total pivots **−0.06 %**;
+  v2 (singleton rows allowed) **−3.4 %** (15,549 → 15,025; phase 1 −5.7 %), placing 1–50
+  columns into 127–257 open rows (`p2.2/crash_v{1,2}_*.json`). The remaining rows have no
+  column whose value lands in its box: that is the ceiling of a feasibility-preserving
+  crash. Below the 10 % kill bar → retired, no code kept but the entry instrument. A
+  Bixby/CPLEX crash that ignores feasibility needs a composite phase 1 that tolerates
+  bound-infeasible basics -- a different task, not this hypothesis; and the wall term was
+  never reachable (the whole simplex is ~35 ms of `scrs8`'s 1.2 s route wall).
 - [ ] **P2.3 — Hypersparse FTRAN/BTRAN and row-wise pricing.** Scope: `linsolve.rs`,
   `dual.rs` (Devex pricing loop), `feral` interface. Entry: on the P2.1 instances, measure
   the density of `B⁻¹a_q` and `eᵀB⁻¹` results; hypothesis: ≥ 50 % of solves have < 10 %
@@ -1068,7 +1087,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x] | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s | see git log |
+| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %) | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
@@ -1153,6 +1172,15 @@ Commit `d9a6009a`, P0.5's 60 R4 fixtures, compared 60. Measured: 0 lost, 55 with
 CERT_ABS + CERT_REL·|v|, 3 looser by 1.0–1.25e-6 (translated `clay0303hfsg`), 2 strictly
 tighter. Expected: none looser. Consequence: P1.3 killed, R4 stays HiGHS-first, the 3 LPs
 go to P2.1.
+
+**2026-11-05 — P2.2: "a crash basis cuts the Rust LP route's cold iterations ≥ 30 %".**
+Commit `cada2c4e` + an uncommitted crash, L panel, Rust route, pivots summed over every LP
+of each solve. Measured: phase 1 is 49.6 % of 15,549 pivots, but a crash that keeps phase
+1's start feasible (the only kind this sum-of-artificials phase 1 accepts) cut total
+pivots by 0.06 % (strict) and 3.4 % (singleton rows allowed); it placed 1–50 columns into
+127–257 open rows, the rest having no in-box column. Expected: ≥ 30 % (kill < 10 %).
+Consequence: P2.2 killed, flag and implementation retired unmerged; a feasibility-ignoring
+crash would need a composite phase 1 (not scheduled).
 
 ---
 
