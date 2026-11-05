@@ -3676,6 +3676,11 @@ def _root_pump_skip_decision(
     The tree's lower bound is the right reference: it includes a bound installed by
     :meth:`PyTreeManager.seed_root_bound` (the LOA proposer's), which the batch
     minimum of the root relaxations does not.
+    Panel (CLAUDE.md §5, old rule vs this one, ``gdp_parity`` x {big-M, hull} at 120 s,
+    ``docs/dev/data/2170-pump-skip-gap-gate/``): cert-clean, 24 -> 24 solved, and
+    methanol hull the only objective that moved. On the certified cells where the pumps
+    now run, nodes and objective are unchanged and the wall cost is at most a few
+    seconds.
     """
     inc = tree.incumbent()
     if inc is None or not np.isfinite(float(inc[1])):
