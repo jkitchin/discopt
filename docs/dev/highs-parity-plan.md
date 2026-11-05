@@ -1316,6 +1316,15 @@ and is re-written by P4.1.**
     all 144 MIPLIB rows of v1+v2 (no bound past the optimum, no incumbent below it).
   - Entry bar met (4 rows strictly better primal, reproducibly). Next: the §5 corpus panel
     (`flag_onoff_corpus_panel.py --time-limit 20 --reps 2`; the flag is inert above ~21 s).
+  **§5 corpus panel (2026-11-05, `corpus_panel.{jsonl,log}`):** in-repo MINLP corpus,
+  `flag_onoff_corpus_panel.py --time-limit 20 --jobs 2 --reps 2`, load 1.5-4.9. **Cert-clean:**
+  148 rows, 0 with a problem, certified 112 → 112 (none gained, none lost), 260
+  incumbent feasibility checks, 0 errors. **Neutral on the corpus:** 13 rows differ, all
+  on time-limited spatial-B&B / OA routes the flag does not reach, in both directions and
+  swapping between reps (`beuster` 6352 ↔ 6372): timing noise. The three corpus instances
+  on the native MILP route (`nvs02`, `nvs07`, `nvs14`) certify early and are identical.
+  Net-positive evidence is the MIPLIB entry (4/24 rows reproducibly 25-89 % → <= 0.3 %
+  primal gap, cert-clean on 144 rows). **Graduation is the owner's call (decision point).**
 - [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a
