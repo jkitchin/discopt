@@ -326,6 +326,14 @@ counters!(
     // healthy majority — so the guard's action is auditable and its
     // bound-neutrality (same optimum, cold path) is measurable.
     DualStallTrips,
+    // #2142 learned dual-proof rows (`SpatialTreeConfig::dual_proof_propagation`):
+    // certified-empty node LPs examined, global-rows fallback LPs solved, rows
+    // stored, and proof-row bound changes / fathoms during node propagation.
+    DualProofRays,
+    DualProofGlobalLps,
+    DualProofLearned,
+    DualProofTightenings,
+    DualProofFathoms,
     // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
     // above fires only when the F2 *cap* is reached, so an LP that grinds below
     // the cap reads 0 there while 43% of its pivots take a zero-length step —

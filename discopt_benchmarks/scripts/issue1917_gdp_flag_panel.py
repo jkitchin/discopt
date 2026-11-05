@@ -106,6 +106,11 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # --report re-derives it. Solve time only, like the entry above;
     # ``SpatialViolScipChanged`` says where a branching column changed.
     "DISCOPT_SPATIAL_VIOL_SCIP": ("big-m", "hull"),
+    # #2142: learned dual-proof rows in the native spatial kernel (performance-plan
+    # §112). Solve time only (lowering identical): solve ``--all`` with
+    # ``--max-nodes N --deterministic``; ``DualProofLearned`` is 0 exactly where the
+    # pool stayed empty (then the tree is OFF's, bit for bit).
+    "DISCOPT_DUAL_PROOF_PROPAGATION": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -151,6 +156,7 @@ _COUNTER_FLAGS = {
     "DISCOPT_LP_DUAL_REBUILD": "DualRebuilds",
     "DISCOPT_SPATIAL_BRANCH_CLAMP": "SpatialSplitMoved",
     "DISCOPT_SPATIAL_VIOL_SCIP": "SpatialViolScipChanged",
+    "DISCOPT_DUAL_PROOF_PROPAGATION": "DualProofLearned",
 }
 
 

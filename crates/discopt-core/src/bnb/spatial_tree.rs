@@ -1211,6 +1211,13 @@ pub fn solve_spatial_tree_observed(
             dp_counts.s.n_propagations += 1;
             dp_counts.s.n_tightenings += pr.n_tightenings;
             dp_counts.s.n_fathoms += usize::from(pr.fathomed);
+            crate::profile::incr_by(
+                crate::profile::Ctr::DualProofTightenings,
+                pr.n_tightenings as u64,
+            );
+            if pr.fathomed {
+                crate::profile::incr(crate::profile::Ctr::DualProofFathoms);
+            }
             let hits = std::mem::take(&mut pr.hits);
             dp_pool.touch(&hits, node_count);
             live
@@ -1331,6 +1338,7 @@ pub fn solve_spatial_tree_observed(
                 // #2142: learn a dual-proof row from the verified Farkas ray.
                 if config.dual_proof_propagation {
                     dp_counts.s.n_rays += 1;
+                    crate::profile::incr(crate::profile::Ctr::DualProofRays);
                     // The node LP's own ray first; when the envelope rows carried
                     // the infeasibility, the global-rows feasibility LP on the same
                     // box (pilot, seed 0 at 20k nodes: 1.889 ray-only vs 2.788 with
@@ -1339,9 +1347,15 @@ pub fn solve_spatial_tree_observed(
                         proof_with_global_lp(spec, &node_cuts, &node.dual, &lo, &hi, &node_opts);
                     n_lp_solves += usize::from(solved);
                     dp_counts.s.n_global_lps += usize::from(solved);
+                    if solved {
+                        crate::profile::incr(crate::profile::Ctr::DualProofGlobalLps);
+                    }
                     match got {
                         Ok(row) => match dp_pool.insert(row, node_count) {
-                            PoolInsert::Added => dp_counts.s.n_learned += 1,
+                            PoolInsert::Added => {
+                                dp_counts.s.n_learned += 1;
+                                crate::profile::incr(crate::profile::Ctr::DualProofLearned);
+                            }
                             PoolInsert::Tightened => dp_counts.s.n_tightened_rhs += 1,
                             PoolInsert::Duplicate => dp_counts.s.n_duplicates += 1,
                         },

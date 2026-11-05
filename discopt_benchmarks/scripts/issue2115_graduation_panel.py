@@ -132,6 +132,23 @@ _FLAGS = {
         "leak": lambda off: off["SpatialViolScipPicks"],
         "show": ("SpatialViolScipPicks", "SpatialViolScipChanged"),
     },
+    # #2142: learned dual-proof (Farkas) rows in the native spatial kernel
+    # (``dual_proof_propagation``, performance-plan §112). A learned row changes the
+    # search only through propagation, so ``DualProofTightenings`` /
+    # ``DualProofFathoms`` ON is where it ran (a fallback LP or a stored row that
+    # never tightens leaves the tree bit-identical); ``DualProofLearned`` is the
+    # per-instance count of rows learned. OFF every counter must be 0.
+    "DISCOPT_DUAL_PROOF_PROPAGATION": {
+        "fired": lambda off, on: on["DualProofLearned"],
+        "ran": lambda off, on: on["DualProofTightenings"] + on["DualProofFathoms"] > 0,
+        "leak": lambda off: off["DualProofRays"],
+        "show": (
+            "DualProofRays",
+            "DualProofLearned",
+            "DualProofTightenings",
+            "DualProofFathoms",
+        ),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -152,6 +169,11 @@ _CTRS = (
     "SpatialSplitMoved",
     "SpatialViolScipPicks",
     "SpatialViolScipChanged",
+    "DualProofRays",
+    "DualProofGlobalLps",
+    "DualProofLearned",
+    "DualProofTightenings",
+    "DualProofFathoms",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
