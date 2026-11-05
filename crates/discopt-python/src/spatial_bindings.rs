@@ -509,6 +509,7 @@ pub fn solve_spatial_tree_py<'py>(
     let dpd = PyDict::new(py);
     for (k, v) in [
         ("rays", dp.n_rays),
+        ("global_lps", dp.n_global_lps),
         ("learned", dp.n_learned),
         ("tightened_rhs", dp.n_tightened_rhs),
         ("duplicates", dp.n_duplicates),

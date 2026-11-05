@@ -19,7 +19,7 @@
 //!   feasible point is ever lost.
 
 use crate::bnb::convex_quad_cuts::{detect_convex_quad_forms, separate_round, ConvexQuadForm};
-use crate::bnb::dual_proof::{proof_from_farkas, DualProofPool, PoolInsert, ProofReject};
+use crate::bnb::dual_proof::{proof_with_global_lp, DualProofPool, PoolInsert, ProofReject};
 use crate::bnb::spatial_kernel::{
     solve_spatial_node_with_cuts, EnvTerm, FixedRow, SpatialKernelSpec, SpatialNodeResult,
 };
@@ -494,6 +494,9 @@ impl Default for SpatialTreeConfig {
 pub struct DualProofStats {
     /// Certified-empty node LPs whose Farkas ray was examined.
     pub n_rays: usize,
+    /// Global-rows feasibility LPs solved (the fallback when the node ray,
+    /// restricted to the global rows, does not cut the node).
+    pub n_global_lps: usize,
     /// Proof rows stored (new rows; duplicates excluded).
     pub n_learned: usize,
     /// Offered rows that tightened an existing row's rhs.
@@ -1328,17 +1331,14 @@ pub fn solve_spatial_tree_observed(
                 // #2142: learn a dual-proof row from the verified Farkas ray.
                 if config.dual_proof_propagation {
                     dp_counts.s.n_rays += 1;
-                    let pilot_phase1 = std::env::var("DISCOPT_DUAL_PROOF_PHASE1_PILOT")
-                        .is_ok_and(|v| v.trim() == "1");
-                    let got = if pilot_phase1 {
-                        let (r, solved) = crate::bnb::dual_proof::proof_with_global_lp(
-                            spec, &node_cuts, &node.dual, &lo, &hi, &node_opts,
-                        );
-                        n_lp_solves += usize::from(solved);
-                        r
-                    } else {
-                        proof_from_farkas(spec, &node_cuts, &node.dual, &lo, &hi)
-                    };
+                    // The node LP's own ray first; when the envelope rows carried
+                    // the infeasibility, the global-rows feasibility LP on the same
+                    // box (pilot, seed 0 at 20k nodes: 1.889 ray-only vs 2.788 with
+                    // this fallback; performance-plan §112).
+                    let (got, solved) =
+                        proof_with_global_lp(spec, &node_cuts, &node.dual, &lo, &hi, &node_opts);
+                    n_lp_solves += usize::from(solved);
+                    dp_counts.s.n_global_lps += usize::from(solved);
                     match got {
                         Ok(row) => match dp_pool.insert(row, node_count) {
                             PoolInsert::Added => dp_counts.s.n_learned += 1,

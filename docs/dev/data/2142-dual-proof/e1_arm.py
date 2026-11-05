@@ -56,6 +56,7 @@ def _w(*a, **k):
         k["fixed_rhs"] = rhs[perm].copy()
     t = time.perf_counter()
     r = _orig(*a, **k)
+    assert "global_lps" in r["dual_proof"], "stale _rust (no #2142 global-LP counter)"
     calls.append(
         dict(
             max_nodes=k.get("max_nodes"),
