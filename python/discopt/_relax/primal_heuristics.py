@@ -947,10 +947,23 @@ def _reduce_subnlp(
             return _REDUCED_REFUTED
         vals = np.asarray(evaluator.evaluate_jacobian_values(x0), dtype=np.float64)
         scale = np.zeros(m, dtype=np.float64)
-        np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        with np.errstate(invalid="ignore"):
+            np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
         viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
         threshold = 10.0 * np.maximum(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale)
-        if np.any(constant & ~(viol <= threshold)):
+        # #2144: refuse only on a row this test can judge. A row's derivative can
+        # be non-finite at a point where the row itself holds exactly -- under hull,
+        # an off disjunct's eps-perspective row at ``v = 0, y = 0`` has a 0/0
+        # partial -- and then ``scale`` and ``threshold`` are NaN and
+        # ``~(viol <= NaN)`` refused the fixing. The final check accepts such a row
+        # (a violation within ``SMALL_ROW_ABS_FLOOR`` needs no Jacobian there), so
+        # the refusal broke this function's own contract. Measured on GDPlib
+        # mod_hens (hull): a configuration feasible to 1.5e-12 (objective
+        # 360045.09, the lifted big-M point) was refused on 14 such rows, and so
+        # was every sampled configuration. A row left unjudged is still dropped
+        # from the reduced NLP and checked by the full-evaluator verification.
+        judged = np.isfinite(threshold)
+        if np.any(constant & judged & ~(viol <= threshold)):
             return _REDUCED_REFUTED
     keep = np.flatnonzero(touches_free)
     ev_solve = _RowSubsetEvaluator(evaluator, keep, lb_red, ub_red)
@@ -2969,6 +2982,10 @@ _WAVE_SOLVE_CAP = 48
 #: -- at a few seconds, paid once per solve.
 _FEAS_SAMPLE_ATTEMPTS = 16
 
+#: Draws the fallback may make per attempt before giving up. A draw that is refuted
+#: by the integer-only rows, or repeats an earlier one, costs no NLP.
+_FEAS_SAMPLE_DRAWS_PER_ATTEMPT = 64
+
 #: Process-wide firing record of the #2144 fallback (CLAUDE.md §6: a panel must be
 #: able to show where the flag fired). Read by ``gdp_baseline``'s worker.
 FEAS_FALLBACK_COUNTS = {"calls": 0, "attempted": 0, "feasible": 0}
@@ -3036,32 +3053,44 @@ def _one_hot_feasibility_samples(
     from discopt.solver import _role1_deadline
 
     rng = np.random.default_rng(seed)
+    int_mask = _get_integer_mask(model)
+    lb, ub = _get_variable_bounds(model)
     results: list[tuple[np.ndarray, float]] = []
     seen: set[tuple[int, ...]] = set()
     attempted = 0
     draws = 0
-    stop = "attempt cap"
-    # Bounded draws so a model with few distinct configurations cannot spin here.
-    while attempted < max_attempts and draws < 8 * max_attempts:
+    refuted = 0
+    stop = "draw cap"
+    # Draws are cheap (no NLP) and only sub-NLP solves count as attempts, so the
+    # draw cap is generous; it only stops a model whose integer rows admit too few
+    # configurations for uniform draws to keep finding new ones.
+    while attempted < max_attempts and draws < _FEAS_SAMPLE_DRAWS_PER_ATTEMPT * max_attempts:
         draws += 1
-        picks = tuple(int(rng.integers(len(g))) for g in groups)
+        picks = [int(rng.integers(len(g))) for g in groups]
         ri = 0 if attempted % 2 == 0 else int(rng.integers(len(residual_assigns)))
-        key = picks + (ri,)
+        key = tuple(picks) + (ri,)
         if key in seen:
             continue
         seen.add(key)
-        stop_at = _role1_deadline()
-        if stop_at is not None and _now() >= stop_at:
-            stop = "deadline"
-            break
         x0 = zero_start.copy()
         for g, k in zip(groups, picks):
             for j in g:
                 x0[j] = 0.0
             x0[g[k]] = 1.0
-        if residual:
-            for j, v in zip(residual, residual_assigns[ri]):
-                x0[j] = v
+        for j, v in zip(residual, residual_assigns[ri]):
+            x0[j] = v
+        # The integer-only rows (logic between disjunctions, say) are checked here,
+        # with no NLP -- the same check ``subnlp`` applies first -- so a draw they
+        # refute is redrawn and not counted as an attempt.
+        x_int = x0.copy()
+        x_int[int_mask] = np.clip(np.round(x_int[int_mask]), lb[int_mask], ub[int_mask])
+        if _refuted_by_integer_rows(model, int_mask, x_int, 1e-6):
+            refuted += 1
+            continue
+        stop_at = _role1_deadline()
+        if stop_at is not None and _now() >= stop_at:
+            stop = "deadline"
+            break
         attempted += 1
         found = subnlp(
             model,
@@ -3079,12 +3108,13 @@ def _one_hot_feasibility_samples(
     else:
         if attempted >= max_attempts:
             stop = "attempt cap"
-        else:
-            stop = "draw cap"
     logger.debug(
-        "one_hot_config feasibility fallback: %d sample(s) attempted (%s), %d feasible",
+        "one_hot_config feasibility fallback: %d sample(s) attempted (%s), %d draw(s), "
+        "%d refuted by integer rows, %d feasible",
         attempted,
         stop,
+        draws,
+        refuted,
         len(results),
     )
     FEAS_FALLBACK_COUNTS["calls"] += 1
@@ -3092,6 +3122,8 @@ def _one_hot_feasibility_samples(
     FEAS_FALLBACK_COUNTS["feasible"] += len(results)
     if stats is not None:
         stats["attempted"] = attempted
+        stats["draws"] = draws
+        stats["refuted"] = refuted
         stats["first_feasible_at"] = attempted if results else None
     return results
 
@@ -3127,9 +3159,9 @@ def one_hot_config_feasibility_fallback(
     lb, ub = _get_variable_bounds(model)
     n_vars = int(int_mask.size)
     x_relax = np.asarray(x_relax, dtype=np.float64)
-    groups, decided = _prune_decided_groups(
-        _scan_one_hot_rows(model, int_mask, n_vars), *_pinned_bounds(model, lb, ub)
-    )
+    plb, pub = _pinned_bounds(model, lb, ub)
+    all_groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    groups, decided = _prune_decided_groups(all_groups, plb, pub)
     if not groups:
         return []
     covered = {j for g in groups for j in g} | decided
@@ -3142,6 +3174,19 @@ def one_hot_config_feasibility_fallback(
     zero_start = x_relax.copy()
     cont = ~int_mask
     zero_start[cont] = np.clip(0.0, lb, ub)[cont]
+    # A column pinned by a ROW (``_pinned_bounds``), not by its own box, starts at
+    # its pinned value. Left at the relaxation point's rounding, it is refused by
+    # the very integer row that pins it. Measured on GDPlib mod_hens (hull and
+    # big-M, bound-midpoint start): 0 of 1024 draws survived the integer-row check
+    # before this, because 40 such columns rounded to the wrong value.
+    pinned = int_mask & (plb == pub)
+    zero_start[pinned] = plb[pinned]
+    # ... and a decided group's other members are 0, as its one-hot row says.
+    for g in all_groups:
+        ones = [j for j in g if plb[j] > 0.5]
+        if ones:
+            zero_start[g] = 0.0
+            zero_start[ones[0]] = 1.0
     return _one_hot_feasibility_samples(
         model,
         groups,

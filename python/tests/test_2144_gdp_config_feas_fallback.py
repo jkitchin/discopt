@@ -34,14 +34,18 @@ from discopt.validation.feasibility import max_constraint_violation
 N_GROUPS = 12
 
 
-def _argmax_infeasible_gdp():
+def _argmax_infeasible_gdp(capacity=30.0, forced_cheap=0):
     m = dm.Model("argmax_infeasible_gdp")
     y = m.binary("y", 2 * N_GROUPS)  # y[2i] cheap disjunct, y[2i+1] expensive
     x = m.continuous("x", shape=(N_GROUPS,), lb=0.0, ub=10.0)
     for i in range(N_GROUPS):
         m.subject_to(y[2 * i] + y[2 * i + 1] == 1, name=f"disj{i}")
         m.subject_to(x[i] >= 5.0 * y[2 * i], name=f"claim{i}")
-    m.subject_to(sum(x[i] for i in range(N_GROUPS)) <= 30.0, name="resource")
+    m.subject_to(sum(x[i] for i in range(N_GROUPS)) <= capacity, name="resource")
+    if forced_cheap:
+        # A binary-only logic row: the first ``forced_cheap`` groups take the cheap
+        # disjunct. Uniform sampling violates it with probability 1 - 2**-k.
+        m.subject_to(sum(y[2 * i + 1] for i in range(forced_cheap)) <= 0, name="logic")
     m.minimize(
         sum(1.0 * y[2 * i] + 3.0 * y[2 * i + 1] for i in range(N_GROUPS))
         + 0.01 * sum(x[i] * x[i] for i in range(N_GROUPS))
@@ -135,3 +139,41 @@ def test_the_solver_runs_it_last_and_only_when_switched_on(monkeypatch):
     assert not _gdp_feas_fallback_due(None, None, 5, _Tree(None))  # ran / never armed
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0")
     assert not _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
+
+
+@pytest.mark.smoke
+def test_draws_refuted_by_integer_only_rows_are_not_attempts():
+    """A binary-only logic row forces the first 6 groups cheap; a uniform draw
+    satisfies it with probability 1/64. Such draws are rejected by the integer-row
+    check, which costs no NLP, so they do not use up the attempt budget (before,
+    each was an attempt, and 16 attempts found nothing here)."""
+    m = _argmax_infeasible_gdp(capacity=40.0, forced_cheap=6)
+    stats: dict = {}
+    found = one_hot_config_feasibility_fallback(m, _relaxation_point(), stats=stats)
+    assert len(found) == 1, stats
+    assert stats["attempted"] <= ph._FEAS_SAMPLE_ATTEMPTS < stats["draws"]
+    assert stats["refuted"] > 0
+    x, _ = found[0]
+    assert max_constraint_violation(m, x) <= 1e-6
+    y = np.round(x[: 2 * N_GROUPS])
+    assert np.all(y[0:12:2] == 1.0)  # the logic row held
+    assert y[0::2].sum() <= 8.0
+
+
+@pytest.mark.smoke
+def test_reduced_pose_does_not_refuse_a_row_with_a_nonfinite_derivative():
+    """#2144: ``_reduce_subnlp`` refused a fixing when a constant row held exactly
+    but had a non-finite partial at the point (NaN scale, NaN threshold). Under hull
+    that is every off disjunct's eps-perspective row at ``v = 0, y = 0``; on GDPlib
+    mod_hens it refused a configuration feasible to 1.5e-12. Here ``sqrt(v)`` at the
+    FBBT-pinned ``v = 0`` has derivative inf, and ``(y, v) = (0, 0)`` is feasible."""
+    m = dm.Model("nan_jacobian_row")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0.0, ub=10.0)
+    m.subject_to(v <= 10.0 * y, name="link")
+    m.subject_to(dm.sqrt(v) <= 2.0, name="perspective_like")
+    m.minimize(v - y)
+    out: dict = {}
+    found = subnlp(m, np.array([0.0, 0.0]), outcome=out)
+    assert out.get("refuted") is None, out
+    assert found is not None and found[1] == pytest.approx(0.0, abs=1e-9)
