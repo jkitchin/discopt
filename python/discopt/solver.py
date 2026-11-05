@@ -1619,6 +1619,29 @@ def _native_spatial_kernel_enabled() -> bool:
     )
 
 
+def _compl_branch_enabled() -> bool:
+    """``DISCOPT_COMPL_BRANCH``: the native complementarity branch (#2167). Default OFF.
+
+    ON, every pair a model lowered with :func:`discopt.mpec.reformulate_native`
+    (``solve_mpec(method="native")``) is registered with the spatial tree, which
+    splits a pair violated at the node's relaxation point into ``ub(f)=0`` /
+    ``ub(g)=0`` before its ordinary branching rules, and the native spatial kernel
+    is bypassed (it has no such branch). Both children cover the pair's feasible
+    set ``{f=0} ∪ {g=0}`` exactly, and each pair splits at most once per path.
+
+    Bound-changing per CLAUDE.md §5 (it changes which boxes are relaxed), so it is
+    default-off until a corpus panel passes; tracked in
+    ``docs/dev/flag-retirement-audit.md``. OFF, a natively lowered model is still
+    solved exactly by ordinary spatial branching on its ``f·g <= 0`` rows.
+    """
+    return os.environ.get("DISCOPT_COMPL_BRANCH", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _native_kernel_bypass_reasons(
     *,
     mccormick_bounds,
@@ -19346,6 +19369,13 @@ def solve_model(
         debug_attached=_debug_instruments_this_solve(),
     )
 
+    # #2167: the native kernel has no complementarity branch; a model whose pairs
+    # the caller asked to branch on natively goes to the Python-orchestrated tree.
+    if _compl_branch_enabled() and any(
+        p.lowering_in(model) == "native" for p in getattr(model, "_complementarities", ())
+    ):
+        _native_bypass.append("complementarity_branch")
+
     def _bypass_coverage() -> Optional[bool]:
         return _native_kernel_covers(model, lb, ub, n_vars)
 
@@ -19818,6 +19848,7 @@ def solve_model(
     _lp_downgraded = False
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
     _spatial_score_registered = False  # #1978: score terms handed to the tree
+    _compl_pairs_registered = False  # #2167: complementarity pairs handed to the tree
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
@@ -20134,6 +20165,29 @@ def solve_model(
                     # multi-line box's bound off 0. Order-only metadata (soundness
                     # unaffected); empty list when the flag is off or the structure
                     # is absent, leaving the branch path byte-identical.
+                    # Native complementarity branch (#2167, ``DISCOPT_COMPL_BRANCH``,
+                    # default off). Register every pair the model lowered with
+                    # ``mpec.reformulate_native`` so the tree splits a violated
+                    # pair into ``ub(f)=0`` / ``ub(g)=0``. The split covers the
+                    # pair's feasible set exactly; no pairs (flag off, or none
+                    # lowered natively) leaves the branch path byte-identical.
+                    if _compl_branch_enabled():
+                        from discopt.mpec import native_pair_columns
+
+                        _cpairs = native_pair_columns(model)
+                        if _cpairs:
+                            _ca = np.asarray(_cpairs, dtype=np.int64)
+                            if int(_ca.max()) >= n_vars:
+                                raise RuntimeError(
+                                    "complementarity branch: a pair column is outside the "
+                                    f"tree's {n_vars} columns; refusing to register pairs "
+                                    "against a different layout (#2167)"
+                                )
+                            tree.set_complementarity_pairs(
+                                np.ascontiguousarray(_ca[:, 0]), np.ascontiguousarray(_ca[:, 1])
+                            )
+                            _compl_pairs_registered = True
+                            logger.info("complementarity branch: %d pair(s)", len(_cpairs))
                     if _tuning().sos1_selector_branch:
                         # #1514: no ``except``. Structural detection with no external call.
                         _sos1_cols = sorted(_sos1_selector_vars(model))
@@ -21733,7 +21787,7 @@ def solve_model(
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
         # #1978: each node's relaxation LP point, for the tree's spatial score.
         _score_pts: dict[int, np.ndarray] = {}
-        _score_on = _py_tree_spatial_score_enabled()
+        _score_on = _py_tree_spatial_score_enabled() or _compl_pairs_registered
         if _use_pounce_batch and n_batch > 1:
             with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
                 result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
@@ -24180,7 +24234,7 @@ def solve_model(
             _spatial_score_registered = _register_spatial_score_terms(
                 tree, _mc_lp_relaxer if _mc_mode == "lp" else None
             )
-        if _spatial_score_registered and _score_pts:
+        if (_spatial_score_registered or _compl_pairs_registered) and _score_pts:
             _sp_idx = sorted(_score_pts)
             tree.set_spatial_score_points(
                 np.asarray([int(batch_ids[k]) for k in _sp_idx], dtype=np.int64),
@@ -25478,6 +25532,10 @@ def solve_model(
         )
     if _spatial_score_registered:
         _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
+    if _compl_pairs_registered:
+        # #2167 probe: dichotomies taken. Present only when pairs were registered,
+        # so a missing key means "the branch was never armed", not "it fired 0x".
+        _solver_stats["tree/compl_branches"] = float(tree.compl_branches())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:

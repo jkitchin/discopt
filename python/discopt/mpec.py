@@ -80,6 +80,8 @@ __all__ = [
     "unlowered_relations",
     "solve_mpec",
     "solve_mpec_multistart",
+    "reformulate_native",
+    "native_pair_columns",
     "MultistartRecord",
 ]
 
@@ -1713,6 +1715,93 @@ def reformulate_sos1(
     _lower_each(model, todo, "sos1", emit, _operand_lifts)
 
 
+def reformulate_native(model: Model, pairs: list[Complementarity]) -> None:
+    """Encode each complementarity exactly as ``f·g <= 0`` over ``f, g >= 0`` (#2167).
+
+    With both operands nonnegative, ``f·g <= 0`` holds exactly when ``f·g = 0``,
+    so the rows are an **encoding**, not a relaxation (unlike Scholtes's
+    ``f·g <= t``), and no binary or big-M constant is introduced -- the
+    encoding is exact on an unbounded box. The global solver relaxes the
+    product row with McCormick envelopes over the *node* box; for ``f`` in
+    ``[0, u_f]`` and ``g`` in ``[0, u_g]`` the envelope is exactly the triangle
+    ``f/u_f + g/u_g <= 1`` (the #245 pair cut, the convex hull of the pair),
+    regenerated per node from the node's own bounds, so it is never applied
+    outside the subtree whose box produced it.
+
+    With ``DISCOPT_COMPL_BRANCH=1`` the spatial tree also registers each pair and
+    splits a violated pair into ``ub(f)=0`` / ``ub(g)=0`` (the native
+    complementarity branch) before its ordinary rules. Flag off, the same model
+    is solved by ordinary spatial branching on the product row: still exact,
+    only the branching order differs.
+
+    Requires every scalar pair to be the symmetric ``(0, inf)`` form with both
+    operands **single variable elements whose declared lower bound is >= 0**:
+    the dichotomy fixes an operand by its bound, which states ``f = 0`` only for
+    such a column. Anything else is refused before any row is emitted; lower it
+    with :func:`reformulate_gdp` or :func:`reformulate_sos1` instead.
+    """
+    todo = _pending(model, pairs)
+    offsets = _target_flat_offsets(model)
+    bad: list[str] = []
+    for p in _scalarize_pairs(model, todo):
+        if not p.is_symmetric_nonnegative:
+            bad.append(f"{p.describe()}: not the symmetric (0, inf) pair")
+            continue
+        for side, expr in (("f", p.f), ("g", p.g)):
+            if _variable_slot(model, expr, offsets) is None:
+                bad.append(f"{p.describe()}: operand {side} is not a single variable element")
+                continue
+            lo = float(np.min(np.asarray(_operand_leaves_lb(expr))))
+            if lo < 0.0:
+                bad.append(f"{p.describe()}: operand {side} has declared lb {lo:g} < 0")
+    if bad:
+        raise ValueError(
+            "native complementarity lowering needs each pair to be two single variable "
+            "elements declared >= 0 (the branch fixes a side by its bound): "
+            + "; ".join(bad)
+            + ". Use method='gdp' or 'sos1' for these relations."
+        )
+
+    def emit(p: Complementarity, derived: list) -> None:
+        tag = p.name
+        model.subject_to(p.f >= 0, name=f"{tag}_f_nonneg")
+        model.subject_to(p.g >= 0, name=f"{tag}_g_nonneg")
+        model.subject_to(p.f * p.g <= 0, name=f"{tag}_native")
+
+    _lower_each(model, todo, "native", emit)
+
+
+def _operand_leaves_lb(expr: Expression):
+    """Declared lower bound of a variable element operand (``Variable`` or ``x[k]``)."""
+    from discopt.modeling.core import IndexExpression
+
+    if isinstance(expr, Variable):
+        return np.asarray(expr.lb, dtype=np.float64)
+    assert isinstance(expr, IndexExpression) and isinstance(expr.base, Variable)
+    return np.asarray(expr.base.lb, dtype=np.float64).reshape(expr.base.shape or ())[expr.index]
+
+
+def native_pair_columns(model: Model) -> list[tuple[int, int]]:
+    """``(f_col, g_col)`` for every scalar pair ``model`` lowered with ``"native"``.
+
+    The columns are flat indices in ``model._variables`` order, which is the
+    layout the solver's tree uses. Empty when no relation was lowered natively.
+    """
+    offsets = _target_flat_offsets(model)
+    out: list[tuple[int, int]] = []
+    native = [p for p in model._complementarities if p.lowering_in(model) == "native"]
+    for p in _scalarize_pairs(model, native):
+        fc = _variable_slot(model, p.f, offsets)
+        gc = _variable_slot(model, p.g, offsets)
+        if fc is None or gc is None:
+            raise ComplementarityProvenanceError(
+                f"{p.describe()} is marked lowered 'native' in this model but its "
+                "operands no longer resolve to variable columns"
+            )
+        out.append((fc, gc))
+    return out
+
+
 def reformulate_gdp(
     model: Model,
     pairs: list[Complementarity],
@@ -2056,14 +2145,17 @@ def solve_mpec(
         augmented in place with the reformulation constraints.
     pairs : list[Complementarity]
         The complementarity conditions ``0 <= f ⊥ g >= 0``.
-    method : {"scholtes", "sos1", "gdp"}
+    method : {"scholtes", "sos1", "gdp", "native"}
         ``"scholtes"`` runs a homotopy of *local* NLP solves with the
         regularization ``t`` shrinking ``t0 -> t0·sigma -> ...`` until ``t_min``.
         ``"sos1"`` encodes each pair as a Special Ordered Set of type 1 and
         ``"gdp"`` as the exact disjunction ``(f==0) ∨ (g==0)``; both build a
         standard model and call the global MINLP solver (``solve_kwargs``
         forwarded to :meth:`Model.solve`). ``"gdp"`` typically explores far
-        fewer nodes than the smooth bilinear encoding.
+        fewer nodes than the smooth bilinear encoding. ``"native"`` (#2167) is
+        that bilinear encoding, ``f·g <= 0`` over ``f, g >= 0`` (see
+        :func:`reformulate_native`): exact, no binaries, and with
+        ``DISCOPT_COMPL_BRANCH=1`` the tree branches on the pairs directly.
     residual_kind : str
         Which complementarity residual definition to report; see
         :class:`discopt.mpec_report.ComplementarityKind`. Reporting only — it
@@ -2110,7 +2202,7 @@ def solve_mpec(
     report_pairs = list(pairs) if pairs else list(model._complementarities)
     snapshot = _source_snapshot(model)
 
-    if method in ("sos1", "gdp"):
+    if method in ("sos1", "gdp", "native"):
         if solve_kwargs.get("stream"):
             # The unified return type is a SolveResult (#1148 §D). ``stream=True``
             # makes ``Model.solve`` return an iterator of updates instead, which
@@ -2146,9 +2238,12 @@ def solve_mpec(
 
         operand_lifts: list[tuple[Variable, Expression]] = []
 
-        _get_transformation("mpec.sos1" if method == "sos1" else "mpec.gdp").apply(
-            model, pairs=pairs, _operand_lifts=operand_lifts
-        )
+        if method == "native":
+            _get_transformation("mpec.native").apply(model, pairs=pairs)
+        else:
+            _get_transformation("mpec.sos1" if method == "sos1" else "mpec.gdp").apply(
+                model, pairs=pairs, _operand_lifts=operand_lifts
+            )
         if source_point is not None and operand_lifts:
             import warnings
 
@@ -2199,7 +2294,9 @@ def solve_mpec(
         return result
 
     if method != "scholtes":
-        raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', or 'gdp'")
+        raise ValueError(
+            f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', 'gdp' or 'native'"
+        )
 
     return _solve_scholtes(
         model,
@@ -2297,8 +2394,14 @@ def _scholtes_homotopy(
     x0,
     nlp_options,
     residual_kind: str,
+    deadline: Optional[float] = None,
 ) -> "tuple[SolveResult, Optional[np.ndarray]]":
     """One Scholtes continuation from ``x0`` on an already-lowered model.
+
+    ``deadline`` (a ``time.perf_counter()`` value, default ``None`` = none) caps
+    the continuation: no stage starts past it, and each stage's NLP gets the
+    remaining time as its ``max_wall_time``. ``solve_mpec`` passes none, so its
+    behaviour is unchanged; the multistart driver passes its budget (#2167).
 
     Returns the local :class:`SolveResult` (see :func:`_solve_scholtes`) and the
     reported flat point (``None`` when no stage produced a usable one). Split out
@@ -2345,6 +2448,12 @@ def _scholtes_homotopy(
     wall0 = time.perf_counter()
     tv = t0
     for it in range(max_iter):
+        if deadline is not None:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0.0:
+                termination = "time_limit"
+                break
+            opts["max_wall_time"] = max(1e-3, remaining)
         t.value = np.asarray(tv, dtype=np.float64)
         # Re-request the evaluator so the updated parameter value is compiled in.
         # #1063: the canonical funnel, not the JAX ctor. The cache fingerprint
@@ -2694,8 +2803,11 @@ def solve_mpec_multistart(
         and reached -0.3620 (= ``relu_bigm``'s 120 s incumbent; best of 20 000
         sampled inputs -0.2912), ``1e-4`` in the least wall time (20.8 s vs 26.8 s).
     time_limit : float, optional
-        Wall-clock budget; starts not begun when it runs out are not run (the
-        start in flight finishes).
+        Wall-clock budget for the whole run: no start or homotopy stage begins
+        past it, and every NLP solve (stage or polish) is capped by the time that
+        remains (POUNCE ``max_wall_time``), so one slow start cannot overrun it by
+        a whole continuation. Measured before this cap (#2167 H1): one start on a
+        4-256-256-1 net took 367 s against a 120 s budget.
 
     Returns
     -------
@@ -2755,8 +2867,9 @@ def solve_mpec_multistart(
     if model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         sense = -1.0
     wall0 = time.perf_counter()
+    deadline = None if time_limit is None else wall0 + float(time_limit)
     for i, x0 in enumerate(flat_starts):
-        if time_limit is not None and time.perf_counter() - wall0 >= time_limit:
+        if deadline is not None and time.perf_counter() >= deadline:
             break
         ts = time.perf_counter()
         try:
@@ -2772,6 +2885,7 @@ def solve_mpec_multistart(
                 x0=x0,
                 nlp_options=nlp_options,
                 residual_kind=residual_kind,
+                deadline=deadline,
             )
         except RuntimeError as exc:
             # A first-stage subsolver failure for THIS start (see the homotopy):
@@ -2786,8 +2900,14 @@ def solve_mpec_multistart(
         candidates: list[np.ndarray] = []
         note = skip_note
         if x_sch is not None:
-            if slots is not None:
-                pr = _polish_active_set(model, x_sch, slots, nlp_options)
+            left = None if deadline is None else deadline - time.perf_counter()
+            if slots is not None and left is not None and left <= 0.0:
+                note = (note + "; " if note else "") + "polish skipped: time limit reached"
+            elif slots is not None:
+                popts = dict(nlp_options) if nlp_options else {}
+                if left is not None:
+                    popts["max_wall_time"] = max(1e-3, left)
+                pr = _polish_active_set(model, x_sch, slots, popts)
                 polish_status = str(getattr(pr.status, "value", pr.status))
                 if pr.x is not None:
                     candidates.append(np.asarray(pr.x, dtype=np.float64))

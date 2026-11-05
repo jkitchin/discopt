@@ -777,6 +777,12 @@ register(
     summary="Complementarity pairs= as SOS1 sets",
 )
 register(
+    "mpec.native",
+    "discopt.mpec:reformulate_native",
+    style="in_place",
+    summary="Complementarity pairs= as f*g <= 0 over f, g >= 0 (exact, no binaries; #2167)",
+)
+register(
     "mpec.scholtes",
     "discopt.mpec:reformulate_scholtes",
     style="in_place",

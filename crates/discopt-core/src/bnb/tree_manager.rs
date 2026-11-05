@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use crate::bnb::branching::{
-    create_children, create_children_spatial, create_children_spatial_int, is_integer_feasible,
-    select_branch_variable, select_branch_variable_pseudocost, select_spatial_branch_variable,
+    create_children, create_children_complementarity, create_children_spatial,
+    create_children_spatial_int, is_integer_feasible, select_branch_variable,
+    select_branch_variable_pseudocost, select_spatial_branch_variable,
     select_spatial_integer_branch_variable, select_spatial_score_variable, select_unbounded_branch,
     spatial_box_is_tight, BranchDecision, Pseudocosts, ScoreTerm, VarBranchInfo,
 };
@@ -245,6 +246,13 @@ struct BranchRecord {
 /// the gap that makes a single constant workable for both directions.
 const LATTICE_EPS: f64 = 1e-9;
 
+/// A complementarity pair is split only when `min(y, s)` at the node's
+/// relaxation point exceeds this (#2167). Below it the pair is treated as
+/// satisfied at that point and the standard branching rules decide; that is a
+/// choice of *order* only, never of validity, since the standard rules are
+/// complete on their own.
+const COMPL_BRANCH_TOL: f64 = 1e-6;
+
 /// A proven objective lattice: every attainable objective value lies within
 /// `drift` of `k * spacing + offset` for some integer `k` (#1953: zero only when
 /// the stored coefficients are exactly the rationals the lattice was built from).
@@ -377,6 +385,15 @@ pub struct TreeManager {
     /// [`Self::set_sos1_selector_cols`] (gated by `DISCOPT_SOS1_SELECTOR_BRANCH`),
     /// so this is inert by default and the legacy branch path is byte-identical.
     sos1_selector_cols: Vec<usize>,
+    /// Complementarity pairs `(y_col, s_col)` meaning `0 <= y ⊥ s >= 0`
+    /// (#2167). When non-empty, a node whose relaxation point has a pair with
+    /// `min(y, s)` above [`COMPL_BRANCH_TOL`] is split into `ub(y)=0` /
+    /// `ub(s)=0` before any other branching rule. Empty unless registered via
+    /// [`Self::set_complementarity_pairs`] (gated by `DISCOPT_COMPL_BRANCH`), so
+    /// this is inert by default and the legacy branch path is byte-identical.
+    compl_pairs: Vec<(usize, usize)>,
+    /// Number of complementarity dichotomies taken (#2167 probe).
+    compl_branches: u64,
     /// #1869: split an unbounded dimension at a finite point instead of fathoming
     /// the node unresolved (see `select_unbounded_branch`). Off by default.
     unbounded_branching: bool,
@@ -444,6 +461,8 @@ impl TreeManager {
             bound_contradicted: false,
             branch_var_counts: vec![0; n_vars],
             sos1_selector_cols: Vec::new(),
+            compl_pairs: Vec::new(),
+            compl_branches: 0,
             unbounded_branching: false,
             root_seed: f64::NEG_INFINITY,
             created_from: 0,
@@ -552,6 +571,58 @@ impl TreeManager {
             .copied()
             .filter(|&c| c < self.global_lb.len())
             .collect();
+    }
+
+    /// Register complementarity pairs `(y_col, s_col)`, each meaning
+    /// `0 <= y ⊥ s >= 0` (#2167). A pair with an out-of-range column, or with
+    /// `y_col == s_col`, is ignored. Empty (the default) disables the
+    /// complementarity branch, keeping the legacy branch path byte-identical.
+    pub fn set_complementarity_pairs(&mut self, pairs: &[(usize, usize)]) {
+        let n = self.global_lb.len();
+        self.compl_pairs = pairs
+            .iter()
+            .copied()
+            .filter(|&(y, s)| y < n && s < n && y != s)
+            .collect();
+    }
+
+    /// Complementarity dichotomies taken so far (#2167 probe).
+    pub fn compl_branches(&self) -> u64 {
+        self.compl_branches
+    }
+
+    /// The registered pair to split at `node_id`, scored at `point`, or `None`.
+    ///
+    /// A pair is *open* at a node when both sides may still be positive and may
+    /// still be zero: `lb <= 0 < ub` on each. (A side with `lb > 0` forces its
+    /// partner to 0 -- FBBT on the pair's `y·s <= 0` row does that -- and a side
+    /// with `ub <= 0` is already fixed; neither needs a branch.) Among open pairs
+    /// the one with the largest `min(y, s)` at the node's relaxation point is
+    /// chosen, provided it exceeds [`COMPL_BRANCH_TOL`]; when every open pair is
+    /// complementary at the point, `None` lets the standard rules run.
+    fn select_complementarity(&self, node_id: NodeId, point: &[f64]) -> Option<(usize, usize)> {
+        if self.compl_pairs.is_empty() {
+            return None;
+        }
+        let node = self.pool.get(node_id);
+        let (lb, ub) = (&node.lb, &node.ub);
+        let mut best: Option<(usize, usize)> = None;
+        let mut best_score = COMPL_BRANCH_TOL;
+        for &(y, s) in &self.compl_pairs {
+            if y >= lb.len() || s >= lb.len() || y >= point.len() || s >= point.len() {
+                continue;
+            }
+            let open = |c: usize| lb[c] <= 0.0 && ub[c] > 0.0;
+            if !(open(y) && open(s)) {
+                continue;
+            }
+            let score = point[y].min(point[s]);
+            if score.is_finite() && score > best_score {
+                best_score = score;
+                best = Some((y, s));
+            }
+        }
+        best
     }
 
     /// Pick a continuous SOS1 selector to branch spatially at this node, or
@@ -945,6 +1016,31 @@ impl TreeManager {
                 stats.branched += 1;
                 self.record_branch_var(sos1_decision.var_index);
                 continue;
+            }
+
+            // 2c. Complementarity dichotomy (#2167, `DISCOPT_COMPL_BRANCH`). The
+            // children `ub(y)=0` / `ub(s)=0` cover the pair's feasible set
+            // `{y=0} ∪ {s=0}` exactly, so the split is sound whatever the point;
+            // each pair splits at most once per path (a child fixes one side and
+            // is no longer open), so it adds finitely many levels and the
+            // standard rules below take over when no open pair is violated at
+            // the relaxation point. Scored on the node's relaxation point when
+            // the orchestrator registered one, else on the result's solution.
+            // No pairs registered (the default) makes this a no-op.
+            if !self.compl_pairs.is_empty() {
+                let point: &[f64] = score_point.as_deref().unwrap_or(&result.solution);
+                if let Some((y, s)) = self.select_complementarity(result.node_id, point) {
+                    let parent = self.pool.get(result.node_id).clone();
+                    self.retire(result.node_id, NodeStatus::Branched);
+                    let (off, on) =
+                        create_children_complementarity(&parent, y, s, || self.next_id());
+                    self.pool.add(off);
+                    self.pool.add(on);
+                    stats.branched += 1;
+                    self.compl_branches += 1;
+                    self.record_branch_var(y);
+                    continue;
+                }
             }
 
             // 3. Branch: use hint if available, else pseudocost/most-fractional.
@@ -3601,6 +3697,145 @@ mod tests {
             off, 5.0,
             "an excluded region leaves the incumbent certified"
         );
+    }
+
+    /// #2167: a nonconvex 4-column tree over `[0, 2]^4` with pairs `(0, 1)` and
+    /// `(2, 3)` registered; the root is evaluated at `point` and processed.
+    fn compl_tree(point: Vec<f64>, pairs: &[(usize, usize)]) -> (TreeManager, ProcessingStats) {
+        let mut tm = TreeManager::new(
+            4,
+            vec![0.0; 4],
+            vec![2.0; 4],
+            vec![],
+            SelectionStrategy::BestFirst,
+        );
+        tm.set_nonconvex(true);
+        tm.set_complementarity_pairs(pairs);
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: -1.0,
+            solution: point,
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
+        let stats = tm.process_evaluated();
+        (tm, stats)
+    }
+
+    #[test]
+    fn compl_branch_splits_most_violated_pair_exactly_2167() {
+        // min(y, s): pair (0,1) -> 0.3, pair (2,3) -> 0.9. The second is split.
+        let (mut tm, stats) = compl_tree(vec![0.3, 1.0, 0.9, 1.5], &[(0, 1), (2, 3)]);
+        assert_eq!(stats.branched, 1);
+        assert_eq!(tm.compl_branches(), 1);
+        let batch = tm.export_batch(2);
+        assert_eq!(batch.node_ids.len(), 2);
+        let mut fixed: Vec<usize> = Vec::new();
+        for (lb, ub) in batch.lb.iter().zip(batch.ub.iter()) {
+            // exactly one column changed from the parent box, and to ub = 0
+            let changed: Vec<usize> = (0..4).filter(|&c| ub[c] != 2.0 || lb[c] != 0.0).collect();
+            assert_eq!(changed.len(), 1, "lb={lb:?} ub={ub:?}");
+            assert_eq!(ub[changed[0]], 0.0);
+            assert_eq!(lb[changed[0]], 0.0);
+            fixed.push(changed[0]);
+        }
+        fixed.sort();
+        assert_eq!(fixed, vec![2, 3], "children must be ub(y)=0 and ub(s)=0");
+    }
+
+    #[test]
+    fn compl_branch_falls_through_when_complementary_2167() {
+        // Every pair has min(y, s) <= tol: no dichotomy, the standard rule branches.
+        let (tm, stats) = compl_tree(vec![0.0, 1.0, 1.2, 1e-9], &[(0, 1), (2, 3)]);
+        assert_eq!(tm.compl_branches(), 0);
+        assert_eq!(
+            stats.branched, 1,
+            "the ordinary spatial rule still branches"
+        );
+    }
+
+    #[test]
+    fn compl_branch_inert_without_pairs_2167() {
+        let (tm, _) = compl_tree(vec![1.0, 1.0, 1.0, 1.0], &[]);
+        assert_eq!(tm.compl_branches(), 0);
+    }
+
+    #[test]
+    fn compl_pairs_filter_bad_columns_2167() {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0; 2],
+            vec![1.0; 2],
+            vec![],
+            SelectionStrategy::BestFirst,
+        );
+        tm.set_complementarity_pairs(&[(0, 1), (0, 0), (1, 7)]);
+        assert_eq!(tm.compl_pairs, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn compl_branch_skips_closed_pairs_and_is_finite_2167() {
+        // Drive the whole tree with a point that violates every open pair: the
+        // dichotomy must stop after each pair is split once per path (2 pairs ->
+        // at most 4 leaves of dichotomy), with every leaf fixing one side of each
+        // pair, and every child box must keep every feasible point of its parent
+        // in one of the two children (checked on the leaf cover below).
+        let mut tm = TreeManager::new(
+            4,
+            vec![0.0; 4],
+            vec![2.0; 4],
+            vec![],
+            SelectionStrategy::BestFirst,
+        );
+        tm.set_nonconvex(true);
+        tm.set_complementarity_pairs(&[(0, 1), (2, 3)]);
+        tm.initialize();
+        let mut leaves: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
+        for _ in 0..16 {
+            let batch = tm.export_batch(8);
+            if batch.node_ids.is_empty() {
+                break;
+            }
+            let results: Vec<NodeResult> = batch
+                .node_ids
+                .iter()
+                .map(|&id| NodeResult {
+                    node_id: id,
+                    lower_bound: -1.0,
+                    solution: vec![1.0; 4],
+                    is_feasible: false,
+                    certified_infeasible: false,
+                    sentinel_is_exclusion: false,
+                })
+                .collect();
+            let before = tm.compl_branches();
+            tm.import_results(&results);
+            tm.process_evaluated();
+            if tm.compl_branches() == before {
+                // no dichotomy left: these nodes were the leaves of the dichotomy
+                for (lb, ub) in batch.lb.iter().zip(batch.ub.iter()) {
+                    leaves.push((lb.clone(), ub.clone()));
+                }
+                break;
+            }
+        }
+        assert_eq!(
+            tm.compl_branches(),
+            3,
+            "root + one split per child: 2 pairs"
+        );
+        assert_eq!(leaves.len(), 4);
+        // every feasible pattern (one side of each pair zero) lies in some leaf
+        let mut covered = 0;
+        for &(a, b) in &[(0usize, 2usize), (0, 3), (1, 2), (1, 3)] {
+            let ok = leaves.iter().any(|(_, ub)| ub[a] == 0.0 && ub[b] == 0.0);
+            assert!(ok, "pattern zero({a}),zero({b}) not covered");
+            covered += 1;
+        }
+        assert_eq!(covered, 4);
     }
 
     /// A nonconvex root narrowed to a TIGHT box `[0, 1e-7]` of `[0, 1]`, with

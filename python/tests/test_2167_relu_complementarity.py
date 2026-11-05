@@ -100,9 +100,87 @@ def test_relations_before_formulate_raises():
         nn.relations
 
 
-def test_ideal_cuts_refused():
-    with pytest.raises(ValueError, match="ideal_cuts"):
-        NNFormulation(Model(), _relu_net(), strategy="relu_complementarity", ideal_cuts=True)
+def test_ideal_cuts_adds_tied_continuous_q():
+    """#2167 slice 4: ``ideal_cuts=True`` gives each unstable neuron a continuous
+    ``q`` in [0, 1] with the tie rows ``q*s <= 0`` and ``(1-q)*y <= 0``; no binary."""
+    m = Model()
+    nn = NNFormulation(
+        m, _relu_net(hidden=(4, 3)), strategy="relu_complementarity", ideal_cuts=True
+    )
+    nn.formulate()
+    assert not any(v.var_type == VarType.BINARY for v in m._variables)
+    qs = [v for v in m._variables if v.name.startswith("nn_q_")]
+    assert len(qs) == len(nn.relations) > 0
+    assert all(float(v.lb) == 0.0 and float(v.ub) == 1.0 for v in qs)
+    names = [c.name or "" for c in m._constraints]
+    assert sum("_relu_qs_" in n for n in names) == len(qs)
+    assert sum("_relu_qy_" in n for n in names) == len(qs)
+    assert nn.cut_callback is not None
+
+
+def test_ideal_cuts_valid_on_lifted_feasible_points():
+    """Every Anderson cut the separator emits, at many random relaxed points,
+    holds at every sampled feasible LIFTED point (q included). A free q failed
+    exactly this in the solver's witness check (a cut excluded q=0.3 on an
+    active neuron); the tie rows are what make it hold."""
+    from discopt.warm_start import validate_initial_solution
+
+    net = _relu_net(seed=11, n_in=2, hidden=(5, 4))
+    m = Model()
+    nn = NNFormulation(m, net, strategy="relu_complementarity", ideal_cuts=True)
+    nn.formulate()
+    m.minimize(dm.sum(nn.outputs))
+    sep = nn.cut_callback
+    lb = np.concatenate([np.asarray(v.lb, dtype=float).ravel() for v in m._variables])
+    ub = np.concatenate([np.asarray(v.ub, dtype=float).ravel() for v in m._variables])
+    lb, ub = np.clip(lb, -50, 50), np.clip(ub, -50, 50)
+    rng = np.random.default_rng(0)
+    cuts = []
+    for _ in range(300):
+        cuts.extend(sep.separate(rng.uniform(lb, ub), m))
+    assert len(cuts) > 50, "the probe must actually produce cuts"
+    offsets, off = {}, 0
+    for v in m._variables:
+        offsets[id(v)] = off
+        off += v.size
+
+    def col(term_var):
+        from discopt.modeling.core import IndexExpression
+
+        if isinstance(term_var, IndexExpression):
+            k = int(
+                np.ravel_multi_index(
+                    term_var.index if isinstance(term_var.index, tuple) else (term_var.index,),
+                    term_var.base.shape,
+                )
+            )
+            return offsets[id(term_var.base)] + k
+        return offsets[id(term_var)]
+
+    points = [validate_initial_solution(m, st) for st in nn.local_starts(200, seed=5)]
+    n_checked = 0
+    for c in cuts:
+        assert c.sense == "<="
+        for x in points:
+            lhs = sum(coef * x[col(v)] for v, coef in c.terms)
+            assert lhs <= c.rhs + 1e-7 * max(1.0, abs(c.rhs)), (c, lhs)
+            n_checked += 1
+    assert n_checked == len(cuts) * 200
+
+
+def test_ideal_cuts_solve_certifies_same_objective(monkeypatch):
+    monkeypatch.setenv("DISCOPT_COMPL_BRANCH", "1")
+    net = _relu_net(seed=7, n_in=3, hidden=(4, 3))
+    mb, _ = _embed(net, "relu_bigm")
+    rb = mb.solve()
+    m = Model()
+    nn = NNFormulation(m, net, strategy="relu_complementarity", ideal_cuts=True)
+    nn.formulate()
+    m.minimize(dm.sum(nn.outputs))
+    r = solve_mpec(m, nn.relations, method="native", cut_callback=nn.cut_callback)
+    assert r.gap_certified and rb.gap_certified
+    assert r.objective == pytest.approx(rb.objective, abs=1e-6, rel=1e-6)
+    assert nn.cut_callback.n_calls > 0
 
 
 def test_unbounded_inputs_accepted_all_neurons_unstable():
@@ -397,4 +475,233 @@ def test_multistart_skips_polish_for_expression_operands():
     res = solve_mpec_multistart(m, [complementarity(x + 0.0 * y, y)], [None])
     assert res.multistart[0].polish_status is None
     assert "polish skipped" in res.multistart[0].note
+    assert not res.gap_certified
+
+
+# ── slice 3: native lowering + complementarity branch ──
+
+
+def _solve_native(net, sense="min", flag="0", monkeypatch=None, box=None, extra=None):
+    """Embed with relu_complementarity, lower natively, solve globally."""
+    if monkeypatch is not None:
+        monkeypatch.setenv("DISCOPT_COMPL_BRANCH", flag)
+    m, nn = _embed(net, "relu_complementarity", sense)
+    if box is not None:
+        lo, hi = box
+        m.subject_to(nn.inputs >= lo, name="box_lo")
+        m.subject_to(nn.inputs <= hi, name="box_hi")
+    if extra is not None:
+        extra(m, nn)
+    res = solve_mpec(m, nn.relations, method="native")
+    return m, nn, res
+
+
+def test_native_lowering_is_exact_bilinear_rows():
+    m, nn = _embed(_relu_net(hidden=(3,)), "relu_complementarity")
+    from discopt.mpec import RELAXING_METHODS, native_pair_columns, reformulate_native
+
+    reformulate_native(m, nn.relations)
+    assert "native" not in RELAXING_METHODS
+    assert all(r.lowering_in(m) == "native" for r in nn.relations)
+    assert sum((c.name or "").endswith("_native") for c in m._constraints) == len(nn.relations)
+    cols = native_pair_columns(m)
+    assert len(cols) == len(nn.relations)
+    # the columns are the y / s elements, in the model's flat layout
+    off, names = 0, {}
+    for v in m._variables:
+        for k in range(v.size):
+            names[off + k] = (v.name, k)
+        off += v.size
+    for (fc, gc), rel in zip(cols, nn.relations):
+        assert names[fc] == ("nn_z_0", rel.index[0])
+        assert names[gc][0] == rel.g.name
+
+
+def test_native_lowering_refuses_non_variable_or_negative_operands():
+    from discopt.mpec import complementarity, reformulate_native
+
+    m = Model("bad_native")
+    x = m.continuous("x", lb=0, ub=1)
+    y = m.continuous("y", lb=-1, ub=1)
+    with pytest.raises(ValueError, match="single variable element"):
+        reformulate_native(m, [complementarity(x + 0.0, x)])
+    with pytest.raises(ValueError, match="lb -1"):
+        reformulate_native(m, [complementarity(x, y)])
+    assert not m._constraints, "a refused lowering must emit no row"
+
+
+@pytest.mark.parametrize("flag", ["0", "1"])
+@pytest.mark.parametrize("kw,sense", _NETS)
+def test_native_matches_relu_bigm(kw, sense, flag, monkeypatch):
+    net = _relu_net(**kw)
+    mb, _ = _embed(net, "relu_bigm", sense)
+    rb = mb.solve()
+    assert rb.gap_certified
+    _, nn, rc = _solve_native(net, sense, flag, monkeypatch)
+    assert rc.status == "optimal" and rc.gap_certified
+    assert rc.objective == pytest.approx(rb.objective, abs=1e-6, rel=1e-6)
+    # certificate invariant against the oracle
+    if sense == "min":
+        assert rc.bound <= rb.objective + 1e-6
+    else:
+        assert rc.bound >= rb.objective - 1e-6
+    x_in = np.asarray(rc.x["nn_input"], dtype=np.float64)
+    assert float(net.forward(x_in)[0]) == pytest.approx(rc.objective, abs=1e-5)
+    stats = rc.solver_stats or {}
+    if flag == "1":
+        assert "tree/compl_branches" in stats, "the branch was never armed"
+    else:
+        assert "tree/compl_branches" not in stats
+
+
+def test_compl_branch_fires_on_a_net_that_needs_branching(monkeypatch):
+    """Probe that the dichotomy actually ran somewhere (CLAUDE.md §6)."""
+    fired = 0
+    for kw, sense in [
+        (dict(seed=7, n_in=3, hidden=(4, 3)), "min"),
+        (dict(seed=11, n_in=2, hidden=(5, 4)), "max"),
+    ]:
+        _, _, rc = _solve_native(_relu_net(**kw), sense, "1", monkeypatch)
+        fired += int((rc.solver_stats or {}).get("tree/compl_branches", 0))
+    assert fired > 0
+
+
+def test_native_lowering_cuts_no_feasible_point():
+    """Feasible-point sampling: every forward-pass point satisfies every row and
+    bound of the natively lowered model."""
+    from discopt.mpec import reformulate_native
+    from discopt.validation.feasibility import verify_point
+    from discopt.warm_start import validate_initial_solution
+
+    net = _relu_net(seed=11, n_in=2, hidden=(5, 4))
+    m, nn = _embed(net, "relu_complementarity")
+    starts = nn.local_starts(200, seed=3)
+    reformulate_native(m, nn.relations)
+    n_ok = 0
+    for st in starts:
+        x = validate_initial_solution(m, st)
+        assert verify_point(m, x).ok
+        n_ok += 1
+    assert n_ok == 200
+
+
+_BOXES = [
+    (np.array([-1.0, -1.0]), np.array([0.0, 0.0])),
+    (np.array([0.0, -1.0]), np.array([1.0, 0.0])),
+    (np.array([-0.5, 0.2]), np.array([0.5, 1.0])),
+]
+
+
+@pytest.mark.parametrize("box", _BOXES, ids=["q3", "q4", "strip"])
+def test_compl_branch_bound_on_fixed_boxes(box, monkeypatch):
+    """Differential bound test: on a fixed input sub-box the flag-ON certified
+    bound never exceeds the box's true optimum (relu_bigm on the same box), and
+    the flag-ON and flag-OFF objectives agree."""
+    net = _relu_net(seed=11, n_in=2, hidden=(5, 4))
+
+    def oracle():
+        mb, nnb = _embed(net, "relu_bigm", "min")
+        mb.subject_to(nnb.inputs >= box[0], name="box_lo")
+        mb.subject_to(nnb.inputs <= box[1], name="box_hi")
+        r = mb.solve()
+        assert r.gap_certified
+        return r.objective
+
+    opt = oracle()
+    _, _, on = _solve_native(net, "min", "1", monkeypatch, box=box)
+    _, _, off = _solve_native(net, "min", "0", monkeypatch, box=box)
+    assert on.gap_certified and off.gap_certified
+    assert on.bound <= opt + 1e-6
+    assert on.objective == pytest.approx(opt, abs=1e-6, rel=1e-6)
+    assert off.objective == pytest.approx(opt, abs=1e-6, rel=1e-6)
+
+
+def _input_rows(m, x):
+    """Bound the inputs by model ROWS, not by the network's input box."""
+    m.subject_to(x >= -1, name="in_lo")
+    m.subject_to(x <= 1, name="in_hi")
+    m.subject_to(x[0] + x[1] + x[2] <= 1, name="budget")
+
+
+def test_compl_branch_certifies_without_input_bounds(monkeypatch):
+    """The network declares no input box (relu_bigm refuses it); the inputs are
+    bounded only by the surrounding model's rows. The native lowering with the
+    branch certifies, and matches relu_bigm given the box explicitly."""
+    net_free = _relu_net(seed=7, n_in=3, hidden=(4, 3), with_bounds=False)
+    with pytest.raises(ValueError, match="input_bounds"):
+        _embed(net_free, "relu_bigm")
+    _, _, rc = _solve_native(
+        net_free, "min", "1", monkeypatch, extra=lambda m, nn: _input_rows(m, nn.inputs)
+    )
+    assert rc.status == "optimal" and rc.gap_certified
+    assert (rc.solver_stats or {}).get("tree/compl_branches", 0) > 0
+
+    boxed = NetworkDefinition(net_free.layers, input_bounds=(-np.ones(3), np.ones(3)))
+    mb, nnb = _embed(boxed, "relu_bigm", "min")
+    _input_rows(mb, nnb.inputs)
+    rb = mb.solve()
+    assert rb.gap_certified
+    assert rc.objective == pytest.approx(rb.objective, abs=1e-6, rel=1e-6)
+    assert rc.bound <= rb.objective + 1e-6
+
+
+def test_compl_branch_sound_on_an_unbounded_relaxation(monkeypatch):
+    """Free inputs with a quadratic penalty: the LP relaxation cannot bound
+    ``0.1*||x||^2`` over a free ``x``, so this does not certify within a node
+    budget (measured: 163 nodes / 60 s, incumbent -11.5585, no dual bound).
+    Whatever it returns must stay sound: no certificate on a wrong value, no
+    bound above the true optimum (relu_bigm on a box wide enough to hold it)."""
+    net_free = _relu_net(seed=7, n_in=3, hidden=(4, 3), with_bounds=False)
+
+    def penalty(m, nn):
+        m.minimize(dm.sum(nn.outputs) + 0.1 * dm.sum(nn.inputs * nn.inputs))
+
+    monkeypatch.setenv("DISCOPT_COMPL_BRANCH", "1")
+    m, nn = _embed(net_free, "relu_complementarity")
+    penalty(m, nn)
+    rc = solve_mpec(m, nn.relations, method="native", max_nodes=40, deterministic=True)
+
+    B = 30.0
+    wide = NetworkDefinition(net_free.layers, input_bounds=(-B * np.ones(3), B * np.ones(3)))
+    mb, nnb = _embed(wide, "relu_bigm", "min")
+    mb.minimize(dm.sum(nnb.outputs) + 0.1 * dm.sum(nnb.inputs * nnb.inputs))
+    rb = mb.solve()
+    assert rb.gap_certified
+    assert np.max(np.abs(np.asarray(rb.x["nn_input"]))) < 0.9 * B, "wide box must be inactive"
+    # The oracle is certified to an interval [rb.bound, rb.objective]: a primal
+    # point may not lie below its bound, a dual bound may not lie above its
+    # incumbent. (Measured: the native incumbent -11.5585181 sits below the
+    # oracle's -11.5585034, inside the oracle's own certified gap 1.3e-6.)
+    tol = 1e-7 * max(1.0, abs(rb.objective))
+    checks = 0
+    if rc.objective is not None:
+        assert rc.objective >= rb.bound - tol
+        x_in = np.asarray(rc.x["nn_input"], dtype=np.float64)
+        true_obj = float(net_free.forward(x_in)[0]) + 0.1 * float(x_in @ x_in)
+        assert true_obj == pytest.approx(rc.objective, abs=1e-6)
+        checks += 1
+    if rc.bound is not None:
+        assert rc.bound <= rb.objective + tol
+        checks += 1
+    if rc.gap_certified:
+        assert rc.bound <= rb.objective + tol and rc.objective >= rb.bound - tol
+        checks += 1
+    assert checks > 0, "the solve returned nothing to check"
+
+
+def test_multistart_time_limit_caps_inflight_start():
+    """The budget bounds the run, not only the start of each start: every
+    stage and polish NLP is capped by the remaining time (#2167 H1 measured a
+    367 s start against a 120 s budget before the cap)."""
+    import time
+
+    from discopt_benchmarks.scripts.relu_local_h1 import make_net
+
+    net = make_net(0, 4, 32, 2)  # ~2.5 s per start; 20 starts ~ 50 s uncapped
+    m, nn = _embed(net, "relu_complementarity")
+    t0 = time.perf_counter()
+    res = nn.solve_local(n_starts=20, seed=0, time_limit=3.0)
+    wall = time.perf_counter() - t0
+    assert wall < 3.0 + 8.0, f"budget 3 s, ran {wall:.1f} s"
+    assert 1 <= len(res.multistart) < 20
     assert not res.gap_certified

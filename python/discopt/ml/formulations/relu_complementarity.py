@@ -161,10 +161,25 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
         network: NetworkDefinition,
         prefix: str,
         scaling,
+        *,
+        continuous_q: bool = False,
     ) -> None:
         super().__init__(model, network, prefix, scaling)
         self.relations: list[mpec.Complementarity] = []
         self.neurons: list[ReluComplementarityRecord] = []
+        #: #2167 slice 4: add a continuous ``q_j in [0, 1]`` per unstable neuron,
+        #: tied to the pair by the exact rows ``q·s <= 0`` and ``(1-q)·y <= 0``,
+        #: so the Anderson ideal-cut separator has the column its inequalities are
+        #: written in. The rows are what make the cuts valid in the LIFTED space:
+        #: ``s > 0`` forces ``q = 0``, ``y > 0`` forces ``q = 1``, and at
+        #: ``y = s = 0`` (so ``z = 0``) both ``(x, 0, 0)`` and ``(x, 0, 1)`` lie in
+        #: the neuron's hull, hence so does every ``(x, 0, q)``. A FREE ``q`` was
+        #: tried first and is unsound in the lifted space: a cut valid only in
+        #: projection excluded a verified feasible point (``q = 0.3`` on an active
+        #: neuron), which ``callbacks.validate_cut_against_witnesses`` refused.
+        #: The McCormick envelopes of the two rows are the big-M rows
+        #: ``s <= -l (1-q)`` and ``y <= u q``.
+        self._continuous_q = bool(continuous_q)
 
     # ── bound hooks: no finite box is required ──
 
@@ -235,6 +250,12 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
             h = (x - sc.x_offset) / sc.x_factor
             out[by_name[f"{pfx}_scaled_input"]] = h
         s_by_key = {(r.layer_index, r.neuron): r.s for r in self.neurons}
+        q_by_key = {
+            (rec.layer_index, j): q
+            for rec in getattr(self, "relu_layers", [])
+            for j, q in enumerate(rec.binaries)
+            if q is not None
+        }
         for k, layer in enumerate(net.layers):
             zhat = h @ np.asarray(layer.weights, dtype=np.float64) + layer.biases
             out[by_name[f"{pfx}_zhat_{k}"]] = zhat
@@ -246,6 +267,9 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
                     s_var = s_by_key.get((k, j))
                     if s_var is not None:
                         out[s_var] = np.asarray(max(0.0, -float(zhat[j])))
+                    q_var = q_by_key.get((k, j))
+                    if q_var is not None:
+                        out[q_var] = np.asarray(1.0 if float(zhat[j]) > 0.0 else 0.0)
         if self._scaling is not None:
             sc = self._scaling
             out[self._outputs_var] = h * sc.y_factor + sc.y_offset
@@ -276,6 +300,7 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
             ub=np.maximum(pre_ub, 0.0),
         )
         parent = f"{pfx}.layer[{k}]"
+        qs: list = [None] * n_out
         for j in range(n_out):
             lb_j = float(pre_lb[j])
             ub_j = float(pre_ub[j])
@@ -296,6 +321,11 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
                     index=(j,),
                 )
                 self.relations.append(rel)
+                if self._continuous_q:
+                    q = m.continuous(f"{pfx}_q_{k}_{j}", lb=0.0, ub=1.0)
+                    m.subject_to(q * s <= 0, name=f"{pfx}_relu_qs_{k}_{j}")
+                    m.subject_to((1 - q) * y[j] <= 0, name=f"{pfx}_relu_qy_{k}_{j}")
+                    qs[j] = q
                 self.neurons.append(
                     ReluComplementarityRecord(
                         layer_index=k,
@@ -308,4 +338,38 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
                         pre_ub=ub_j,
                     )
                 )
+        if self._continuous_q:
+            self._record_q_layer(k, y, prev_z, W, b, in_lb, in_ub, bounds, qs)
         return y
+
+    def _record_q_layer(self, k, y, prev_z, W, b, in_lb, in_ub, bounds, qs) -> None:
+        """Record the layer for the Anderson separator, with the continuous ``q``s.
+
+        The separator derives every inequality from ``in_lb``/``in_ub``, the box
+        the layer's input variable carries, so the cuts are valid wherever those
+        bounds are; an unbounded input side makes the coefficients infinite, so a
+        layer whose input box is not finite is not recorded (no cut is better
+        than a non-finite one).
+        """
+        from discopt.ml.formulations.relu_bigm import ReluLayerRecord
+
+        lo = np.asarray(in_lb, dtype=np.float64)
+        hi = np.asarray(in_ub, dtype=np.float64)
+        if not (np.all(np.abs(lo) < _UNBOUNDED) and np.all(np.abs(hi) < _UNBOUNDED)):
+            return
+        if not hasattr(self, "relu_layers"):
+            self.relu_layers: list[ReluLayerRecord] = []
+        self.relu_layers.append(
+            ReluLayerRecord(
+                layer_index=k,
+                z=y,
+                x=prev_z,
+                weights=W,
+                biases=b,
+                in_lb=lo,
+                in_ub=hi,
+                pre_lb=np.asarray(bounds.pre_lb, dtype=np.float64),
+                pre_ub=np.asarray(bounds.pre_ub, dtype=np.float64),
+                binaries=qs,
+            )
+        )
