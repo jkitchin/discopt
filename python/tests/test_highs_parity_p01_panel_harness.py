@@ -192,3 +192,18 @@ def test_resumed_run_keeps_every_earlier_header(panel, tmp_path):
     d = json.loads(out.read_text())
     assert d["complete"] is True and d["executed"] == 1
     assert d["header"]["resumed_from"] == [first]
+
+
+def test_seam_arm_requires_the_rust_std_engine_on_the_verified_route(panel):
+    """highs-parity P2.6: arm S is the verified LP route with the Rust engine behind the
+    seam. A row the HiGHS engine answered, or one run without the engine env, is refused."""
+    row = {"route": "seam-rust", "env_backend": "highs", "env_std_engine": "rust",
+           "algorithm_route": "x", "status": "optimal"}  # fmt: skip
+    panel.check_route("inst", "S", row)
+    panel.check_route("inst", "S", {**row, "route": "presolve"})
+    for bad in ({"route": "highs"}, {"route": "rust"}, {"env_std_engine": None},
+                {"env_backend": "rust"}):  # fmt: skip
+        with pytest.raises(RuntimeError):
+            panel.check_route("inst", "S", {**row, **bad})
+    with pytest.raises(RuntimeError):  # H must not carry the Rust engine env
+        panel.check_route("inst", "H", {**row, "route": "highs"})

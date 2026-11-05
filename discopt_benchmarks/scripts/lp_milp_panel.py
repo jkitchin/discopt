@@ -53,7 +53,14 @@ GAP = 1e-4
 HIGHS_REPO = "https://github.com/ERGO-Code/HiGHS"
 REF_DIR = REPO / "ref" / "HiGHS"
 #: The ``DISCOPT_LP_MILP_BACKEND`` value and route marker each subprocess arm must show.
-ARM_BACKEND = {"R": "rust", "H": "highs"}
+ARM_BACKEND = {"R": "rust", "H": "highs", "S": "highs"}
+#: The route marker each subprocess arm must show. ``S`` (highs-parity P2.6) is the verified
+#: LP route with the Rust engine behind P1.1's seam (``DISCOPT_LP_STD_ENGINE=rust``): the
+#: same dispatch and certificate ladder as ``H``, the raw LP solved by the Rust simplex.
+#: Pure LP only -- a MILP still goes to HiGHS on that route, and ``check_route`` refuses it.
+ARM_ROUTE = {"R": "rust", "H": "highs", "S": "seam-rust"}
+#: ``DISCOPT_LP_STD_ENGINE`` per arm (``None``: unset, the HiGHS default).
+ARM_STD_ENGINE = {"R": None, "H": None, "S": "rust"}
 #: HiGHS oracle statuses that put an instance on the INF panel.
 INF_STATUSES = ("Infeasible", "Unbounded", "Primal infeasible or unbounded")
 
@@ -402,10 +409,13 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
         if r.termination == TERMINATION_PRESOLVE
         else "highs"
         if stats.get("route/lp_milp_backend") == 1.0
+        else "seam-rust"
+        if stats.get("lp/std_engine_rust") == 1.0
         else "rust",
         "algorithm_route": r.algorithm_route,
         "max_viol": viol,
         "env_backend": os.environ.get("DISCOPT_LP_MILP_BACKEND"),
+        "env_std_engine": os.environ.get("DISCOPT_LP_STD_ENGINE"),
     }
 
 
@@ -418,11 +428,16 @@ def check_route(name: str, arm: str, res: dict) -> None:
     engine; it is kept -- its verdict is still checked against the oracle -- and
     reported as such, never as a measurement of the arm's engine.
     """
-    want = ARM_BACKEND[arm]
-    if res.get("env_backend") != want or res.get("route") not in (want, "presolve"):
+    want, env = ARM_ROUTE[arm], ARM_BACKEND[arm]
+    if (
+        res.get("env_backend") != env
+        or res.get("env_std_engine") != ARM_STD_ENGINE[arm]
+        or res.get("route") not in (want, "presolve")
+    ):
         raise RuntimeError(
-            f"{name}: arm {arm} expects route {want!r} (env {want!r}), got route "
-            f"{res.get('route')!r} with env {res.get('env_backend')!r} "
+            f"{name}: arm {arm} expects route {want!r} (env {env!r}, std engine "
+            f"{ARM_STD_ENGINE[arm]!r}), got route {res.get('route')!r} with env "
+            f"{res.get('env_backend')!r} / {res.get('env_std_engine')!r} "
             f"(algorithm_route {res.get('algorithm_route')!r})"
         )
 
@@ -442,6 +457,9 @@ def _run_sub(path: str, arm: str, a) -> dict:
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     if arm in ARM_BACKEND:
         env["DISCOPT_LP_MILP_BACKEND"] = ARM_BACKEND[arm]
+        env.pop("DISCOPT_LP_STD_ENGINE", None)
+        if ARM_STD_ENGINE[arm] is not None:
+            env["DISCOPT_LP_STD_ENGINE"] = ARM_STD_ENGINE[arm]
     cmd = [sys.executable, str(HERE), "worker", path, arm, str(a.time_limit), str(a.gap),
            str(a.max_nodes)]  # fmt: skip
     p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3 * a.time_limit + 120)
