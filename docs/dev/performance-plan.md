@@ -15334,3 +15334,168 @@ remaining gap is in discopt's tree on this model, not in the formulation.
   not touch.
 - With the flag forced ON, the hull and nesting suites pass, except for 3 tests that assert the
   eps-perspective shape (`/` in the row). The soundness batteries on those same shapes pass.
+
+## 116. #2142: discopt certifies cstr on SCIP's presolved hull model; the homogenized hull graduates; hda's "loss" was a tighter bound (2026-11-05)
+
+### 116.1 Entry: discopt's tree on SCIP's presolved model — passes
+
+Data: `docs/dev/data/2142-scip-presolved/` (`PREREG.md`, `findings.md`).
+
+SCIP's transformed problem of the homog-hull kernel spec has 110 vars and 174 conss
+(`presolved_homog.cip`). `translate.py` translates it back into a kernel spec over the same
+column indices. Eliminated columns are recovered by SCIP's affine maps. The translation is
+checked against two fidelity gates:
+
+- SCIP solves the translation to the oracle (9,367 nodes);
+- both directions of the point maps verify to within SCIP's feastol. The PREREG gate was
+  1e-6 and is amended to 1e-5, because SCIP's own optimum of the original has residual
+  9.7e-7.
+
+`arm_pre.py` swaps the translation into a real cstr hull solve through a spy. It expands
+every point back and verifies the incumbent on the original spec. Deterministic results:
+
+| arm | 10k nodes | 20k node cap |
+|---|---|---|
+| base (control) | 1.6107840610272945 (bit-identical to §115) | 2.1886 (§115) |
+| **SCIP-presolved model** | **2.8834** | **certified, 12,931 nodes, 43 s kernel** |
+| + all original rows mapped back | | certified, 18,943 |
+| + discopt's own root-FBBT box | | certified, 12,087 |
+
+The pre-registered kill was a 20k bound <= 2.7875 with no certificate in 300 s. It **does not
+fire**. The gap to SCIP is in the model handed to the kernel, not in discopt's tree.
+
+**Retraction (§11).** This partly retracts §0a of `2142-exact-hull/proposal.md` and the
+§115 status line, both of which said "the gap is in discopt's tree".
+
+What carries the effect:
+
+- **Not** the deleted rows, and **not** SCIP's bound tightening; the two ablations above
+  show it.
+- It **is** the column eliminations beyond the 106 doubleton identities that `arm_aggr`
+  emulated (2.43 @20k):
+  - products with a fixed factor are linearised;
+  - non-identity aggregations into term and BLF outputs;
+  - 8 multi-aggregations;
+  - negated binaries;
+  - a product with two definitions is merged.
+
+SCIP ablations on the original spec: `cons_linear` presolve off takes 60,371 nodes (against
+7,470); varbound presolve off 12,617; probing presolve off 11,274.
+
+Scope decision (owner, via coordinator): the presolve is **not** built on #2142. The design
+for it is `2142-scip-presolved/followup_issue.md` (drafted, not filed).
+
+### 116.2 hda MAXIMIZES: §115's net-positive verdict is retracted
+
+§115 kept `DISCOPT_HULL_EXACT_PERSPECTIVE` OFF for one reason: hda's root bound went from
+121140.98 to 118678.93 and was recorded as "looser". hda's objective sense is `maximize`. Its
+dual bound is an upper bound, so **118678.93 is 2.0 % tighter**.
+
+The pure McCormick LP of each lowering at the declared box, with no tree, reproduces the
+pair exactly (`docs/dev/data/2142-hda-root/lp.py`). The 37 degree-2 rows carry the change.
+
+**Retracted (§11):**
+
+- §115's "not net-positive" and its "what would graduate it" (a perspective-aware envelope
+  to remove the hda loss): there was no loss.
+- The same misreading is in the retirement record of `DISCOPT_HULL_LIFTED_PERSPECTIVE`
+  (audit), whose "hda loss" is the identical pair. That flag stays retired (its code is
+  gone), but its record is corrected here: on hda it tightened the bound. Re-opening it
+  would need its own entry experiment.
+
+Tried and not shipped (`2142-hda-root/README.md`):
+
+- **Keep the eps row alongside the homogenized row.** On cstr this brings the 1e27
+  magnitudes back: 7 nodes in 120 s, bound 0.
+- **Linear perspective-McCormick rows.**
+  - hda: tighter again, 117453.
+  - gdp_col: neutral.
+  - cstr: worse at 5,000 deterministic nodes, 0.455 against 0.728.
+
+**Defect fixed on the way.** `_relax/convexity/patterns.py`'s declared-box memo kept the
+model size from before the hull lowering appended variables, because the homogenized row
+calls `classify_constraint` mid-lowering. hda's whole-model classification then raised
+`IndexError` and the solver marked the model convexity-unknown. The memo is now invalidated
+when the variable count changes. Regression test:
+`test_patterns_declared_box_cache.py::test_cache_invalidated_when_the_model_grows`.
+hda's bound is unchanged by the fix.
+
+### 116.3 §5 panel re-run and graduation
+
+Data: `docs/dev/data/2142-exact-hull/panel2/`; arm OFF is `=0`, arm ON is `=1`; load 2-3 on
+4 cores.
+
+**GDP parity, hull** (`issue1917_gdp_flag_panel.py`, deterministic, 5,000 nodes / 120 s,
+1 rep):
+
+- Fire phase: fires on 6 of 22 lowerable instances. kaibel and mod_hens fail to lower in both
+  arms (no ipopt).
+- **Cert-clean:**
+  - 0 incorrect, 0 bound crossings, 0 solved lost;
+  - every incumbent verified in Pyomo (max relative violation 2.8e-14).
+
+| instance | sense | OFF | ON |
+|---|---|---|---|
+| cstr | min | 0.0940, 591 nodes | **0.7226**, 4,568 nodes |
+| gdp_col | min | no incumbent, bound 1000.0 | **incumbent 22959.8**, bound **8736.8** |
+| hda | **max** | UB 121140.98 | **UB 118678.93** |
+| pyomo.ex_633_trespalacios | min | optimal, 75 nodes, 21.9 s | optimal, **47 nodes, 10.8 s** |
+| methanol | min | -4699.665321805 | -4699.665321838 (neutral) |
+| syngas | min | 4347.8025834920 | 4347.8025834920 (neutral) |
+
+**Net-positive:** 4 gains, 0 losses. SGM wall goes from 92.88 to 85.81 s.
+
+Big-M is unaffected by construction: the flag acts only inside the hull lowering. cstr big-M
+is re-checked below.
+
+**Corpus** (`issue2115_graduation_panel.py --deterministic --max-nodes 2000 --time-limit 120
+--assert-unfired-identical`, 74 instances): no `.nl` instance reaches a hull lowering. 813 checks, **0 violations**; 60 bit-identical OFF vs ON, 14 at the wall backstop; certified 59 -> 59; no bound tighter or looser. Verdict INCONCLUSIVE (never fired), by construction, as in §115. The same run checks the convexity-memo fix: this run's OFF arm against §115's OFF arm (before the fix) is bit-identical (status, objective, bound, nodes, `gap_certified`) on all 59 instances where neither hit the backstop (`panel2/off_vs_section115.py`).
+
+**Decision: graduated, default ON.** `=0` restores the eps-perspective lowering byte for byte;
+`test_2142_exact_hull.py::test_flag_off_is_byte_identical_to_before` checks this against the
+pre-flag fingerprints.
+
+Tests that assert the eps-perspective shape are pinned to `=0`:
+
+- `test_1917_hull_plain_equality.py::test_nonlinear_equalities_keep_the_perspective`
+- `test_1917_hull_plain_equality.py::test_retired_flag_is_inert`
+- `test_2142_hull_lifted_perspective_retired.py::test_rows_keep_the_eps_perspective`
+
+`test_cstr_hull_reaches_the_native_kernel` (slow) now pins the default route:
+
+- the spec is accepted;
+- it has no `AffinePow` terms;
+- every finite global bound is <= 1e4.
+
+`test_cstr_eps_hull_reaches_the_native_kernel` keeps the `=0` route (20 `AffinePow` terms).
+The audit row is updated, and the live-gate count goes from 49 to 48.
+
+### 116.4 cstr at the gdp_parity budget, default path (no `DISCOPT_*` env), 300 s
+
+Data: `docs/dev/data/2142-exact-hull/final/`.
+
+| method | status | incumbent | bound | nodes | wall |
+|---|---|---|---|---|---|
+| big-m | **optimal** | 3.0620146 | 3.0617346 | 29,551 | 89.6 s |
+| hull | time_limit | 3.1301981 | 1.6671 | 33,735 | 300 s |
+
+Hull reaches the native kernel with bounded magnitudes: the spec max is 1e3, against 1e27
+for the eps-perspective. It does not certify. Full hull certification moves to the follow-up
+(`2142-scip-presolved/followup_issue.md`).
+
+**#2142 status against the owner's revised target:**
+
+- big-M certifies cstr on default: done.
+- hull reaches the native kernel with bounded magnitudes on the default path: done.
+
+**Verification run:**
+
+- `pytest -m smoke python/tests`: 4,578 passed, 17 skipped.
+- `pytest -m slow` on `test_adversarial_recent_fixes.py`, `test_2142_exact_hull.py` and
+  `test_1917_hull_plain_equality.py`: 23 passed.
+- The non-slow hull / GDP / nesting / convexity / patterns suites: 2,229 passed and 1 failed.
+  The failure is `test_ipopt_backend_active_constraint_gradient`, a `ModuleNotFoundError:
+  cyipopt` in this environment, unrelated.
+- `test_1345_flag_retirement_audit.py`: 11 passed.
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
+- No Rust was touched.
