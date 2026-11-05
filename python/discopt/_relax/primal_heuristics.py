@@ -763,7 +763,9 @@ def _implied_box(evaluator) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndar
 def _subnlp_reduced_enabled() -> bool:
     """Whether :func:`subnlp` poses its NLP on the FBBT-reduced problem (#2143).
 
-    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panel and the owner's #2143
+    rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the legacy
+    path. Row in
     ``docs/dev/flag-retirement-audit.md``.
 
     With the integers fixed, node FBBT (the ``_implied_box`` pass ``subnlp`` already
@@ -798,11 +800,11 @@ def _subnlp_reduced_enabled() -> bool:
     point and the reduced pose does not, a reduced point that fails verification on
     the full rows, or a panel that is not cert-clean.
     """
-    return os.environ.get("DISCOPT_SUBNLP_REDUCED", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_SUBNLP_REDUCED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -1587,7 +1589,9 @@ def passes_false_primal_screen(evaluator: NLPEvaluator, x: np.ndarray) -> bool:
 def _heur_fixing_screen_enabled() -> bool:
     """Whether root heuristics skip integer fixings already known to fail (#2143).
 
-    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panel and the owner's #2143
+    rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the legacy
+    path. Row in
     ``docs/dev/flag-retirement-audit.md``. Two pieces, one question each -- "has
     this fixing already been shown to give nothing?":
 
@@ -1615,11 +1619,11 @@ def _heur_fixing_screen_enabled() -> bool:
     memoized fixing that a later identical pose would have solved, or a pump point
     the screen loses, on the panel.
     """
-    return os.environ.get("DISCOPT_HEUR_FIXING_SCREEN", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_HEUR_FIXING_SCREEN", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

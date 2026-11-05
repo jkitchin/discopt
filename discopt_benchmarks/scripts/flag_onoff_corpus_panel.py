@@ -45,6 +45,7 @@ import discopt.modeling as dm
 from discopt.modeling.core import objective_sense_sign
 from discopt.warm_start import check_feasibility
 path, tl = sys.argv[1], float(sys.argv[2])
+from_start = len(sys.argv) > 3 and sys.argv[3] == "start"
 t = time.time()
 out = {}
 import discopt
@@ -52,7 +53,22 @@ out["discopt_file"] = discopt.__file__
 try:
     m = dm.from_nl(path)
     out["sense"] = int(objective_sense_sign(m))
-    r = m.solve(time_limit=tl)
+    start = None
+    if from_start:
+        # The file's own ``x`` segment as the modeler's start (``--from-start``);
+        # an element it does not name starts at 0, AMPL's default, clipped to bounds.
+        ip = m.initial_point
+        out["start_entries"] = sum(len(e) for e in ip.values())
+        if ip:
+            start = {}
+            for v in m._variables:
+                lo = np.broadcast_to(np.asarray(v.lb, float), v.shape).ravel()
+                hi = np.broadcast_to(np.asarray(v.ub, float), v.shape).ravel()
+                arr = np.clip(np.zeros(v.size), lo, hi)
+                for k, val in ip.get(v, {}).items():
+                    arr[int(k)] = val
+                start[v] = arr.reshape(v.shape) if v.shape else float(arr[0])
+    r = m.solve(time_limit=tl, initial_solution=start) if start else m.solve(time_limit=tl)
     out.update(status=r.status, obj=r.objective, bound=r.bound,
                cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count,
                route=str(r.algorithm_route)[:60], stats={k: v for k, v in
@@ -81,19 +97,26 @@ def _wait_for_load(max_load: float | None) -> float:
     return load
 
 
-def solve(path: str, arm: str, tl: float, flag: str = FLAG, max_load: float | None = None) -> dict:
+def solve(
+    path: str,
+    arm: str,
+    tl: float,
+    flag: str = FLAG,
+    max_load: float | None = None,
+    from_start: bool = False,
+) -> dict:
     # ``flag`` may name several flags (comma-separated): a bundle switched together.
     env = dict(os.environ, **{f.strip(): arm for f in flag.split(",") if f.strip()})
     load1 = _wait_for_load(max_load)
-    res = _solve(path, tl, env)
+    res = _solve(path, tl, env, from_start)
     res["load1"] = round(load1, 2)
     return res
 
 
-def _solve(path: str, tl: float, env: dict) -> dict:
+def _solve(path: str, tl: float, env: dict, from_start: bool = False) -> dict:
     try:
         p = subprocess.run(
-            [sys.executable, "-c", CHILD, path, str(tl)],
+            [sys.executable, "-c", CHILD, path, str(tl)] + (["start"] if from_start else []),
             env=env,
             capture_output=True,
             text=True,
@@ -115,9 +138,10 @@ def run_instance(
     flag: str = FLAG,
     max_load: float | None = None,
     rep: int = 0,
+    from_start: bool = False,
 ) -> dict:
     arms = ["1", "0"] if first_on else ["0", "1"]
-    res = {arm: solve(path, arm, tl, flag, max_load) for arm in arms}
+    res = {arm: solve(path, arm, tl, flag, max_load, from_start) for arm in arms}
     return {"name": name, "rep": rep, "off": res["0"], "on": res["1"]}
 
 
@@ -177,6 +201,12 @@ def main() -> None:
     ap.add_argument(
         "--max-load", type=float, default=None, help="start a solve only below this load1"
     )
+    ap.add_argument(
+        "--from-start",
+        action="store_true",
+        help="solve from each file's own .nl x-segment start (initial_solution); rows "
+        "record start_entries, 0 when the file carries none",
+    )
     args = ap.parse_args()
 
     insts = {p.stem: str(p) for p in sorted(CORPUS.glob("*.nl"))}
@@ -207,6 +237,7 @@ def main() -> None:
                 args.flag,
                 args.max_load,
                 rep,
+                args.from_start,
             ): n
             for rep in range(args.reps)
             for i, (n, p) in enumerate(sorted(insts.items()))

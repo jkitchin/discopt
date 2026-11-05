@@ -9,7 +9,11 @@ and both at least as tight in their LP relaxation:
   pre-activation sum ``w.x`` is split into ``P`` partial sums
   ``s_p = sum_{i in S_p} w_i x_i``, each disaggregated over the two ReLU branches.
   ``P = 1`` is exactly big-M (and is emitted as big-M); ``P = n_in`` is the
-  convex hull of the neuron over its input box.
+  convex hull of the neuron over its input box. A partition of negligible range
+  is folded into the neuron's widest one before the rows are written
+  (:func:`merge_negligible_partitions`, #2156), so ``P`` can come out smaller
+  and the hull is matched to within ``NEGLIGIBLE_PARTITION_RTOL`` of each
+  neuron's range.
 * :class:`ReluExtendedFormulation` -- the extended (ideal) formulation of a
   single neuron from Anderson, Huchette, Ma, Tjandraatmadja and Vielma (Math.
   Prog. 2020, arXiv:1811.08359): the disjunctive hull with one copy of every
@@ -128,6 +132,89 @@ def partition_indices(
     return [p for p in np.array_split(order, P) if p.size]
 
 
+#: A partition whose partial-sum range ``UB_p - LB_p`` is at most this fraction of
+#: the neuron's total range ``U - L`` (bias excluded) is merged into the neuron's
+#: widest partition (#2156). See :func:`merge_negligible_partitions`.
+NEGLIGIBLE_PARTITION_RTOL = 1e-4
+#: A partition whose range is below this absolute floor is merged too, whatever its
+#: neuron's range: HiGHS's default ``mip_feasibility_tolerance`` (1e-6), below which
+#: an auxiliary's whole range is inside the solver's tolerance (#2156 review).
+NEGLIGIBLE_PARTITION_ATOL = 1e-6
+
+
+def merge_negligible_partitions(
+    parts: Sequence[np.ndarray],
+    term_range: np.ndarray,
+    rtol: float | None = None,
+    atol: float | None = None,
+) -> list[np.ndarray]:
+    """Fold every partition of negligible range into the neuron's widest one (#2156).
+
+    A partition ``S_p`` gets an auxiliary ``zb_p`` with bounds ``[LB_p, UB_p]`` and
+    four rows whose coefficients are ``LB_p`` and ``UB_p``. When
+    ``UB_p - LB_p = sum_{i in S_p} |w_i| (u_i - l_i)`` is tiny (trained networks
+    carry many weights near 1e-6 to 1e-8), the column's whole range falls below a
+    MILP solver's feasibility tolerance. A tolerance-sized slack on ``zb_p`` then
+    stands for a large move of ``x_i``, because ``x_i`` enters the same row with
+    coefficient ``w_i``. Measured on the #2156 network: HiGHS declares the
+    ``relu_extended`` model infeasible, and with presolve rules off it certifies
+    0.0092 against a true optimum of -6.3749.
+
+    Merging is exact. Every partition of the inputs gives the same integer-feasible
+    set (module docstring), so only the LP relaxation changes. Folding ``S_a`` into
+    ``S_b`` moves the LP upper envelope of ``y`` at any ``(x, q)`` by at most
+    ``UB_a - LB_a``, because ``min(A_b, B_b) + min(A_a, B_a) <= min(A_b + A_a, B_b +
+    B_a) <= min(A_b, B_b) + max(A_a, B_a)`` with ``A_a = UB_a q`` and ``B_a = s_a -
+    LB_a (1 - q)``, and ``|A_a - B_a| <= UB_a - LB_a`` on the box. The loosening of
+    one neuron is therefore at most ``max(rtol (U - L), atol)`` per merged partition.
+
+    The relative test alone leaves a neuron of small total range with partitions
+    narrower than the solver tolerance (``U - L = 2.5e-6`` split into pieces of
+    9e-7, 9e-7 and 7e-7), so a partition below ``atol`` is merged as well.
+
+    Parameters
+    ----------
+    parts : sequence of np.ndarray
+        The partition, as returned by :func:`partition_indices`.
+    term_range : np.ndarray
+        ``|w_i| (u_i - l_i)`` per input, shape ``(n_in,)``.
+    rtol : float, optional
+        Relative threshold; defaults to :data:`NEGLIGIBLE_PARTITION_RTOL`.
+    atol : float, optional
+        Absolute floor; defaults to :data:`NEGLIGIBLE_PARTITION_ATOL`. ``rtol = atol
+        = 0`` disables merging.
+
+    Returns
+    -------
+    list of np.ndarray
+        The merged partition. It still covers every input of ``parts`` exactly once.
+    """
+    rtol = NEGLIGIBLE_PARTITION_RTOL if rtol is None else float(rtol)
+    atol = NEGLIGIBLE_PARTITION_ATOL if atol is None else float(atol)
+    if rtol < 0 or atol < 0:
+        raise ValueError(f"rtol and atol must be >= 0, got rtol={rtol}, atol={atol}")
+    parts = [np.asarray(p) for p in parts]
+    if len(parts) <= 1 or (rtol == 0.0 and atol == 0.0):
+        return parts
+    tr = np.asarray(term_range, dtype=np.float64)
+    ranges = np.array([float(tr[p].sum()) for p in parts])
+    total = float(ranges.sum())
+    small = (ranges <= rtol * total) | (ranges < atol)
+    if not small.any():
+        return parts
+    keep = [p for p, s in zip(parts, small) if not s]
+    if not keep:
+        # Every partition is negligible: there is no wide one to absorb them, so
+        # the whole neuron is one partition (big-M).
+        return [np.concatenate(parts)]
+    widest = int(np.argmax(np.where(small, -np.inf, ranges)))
+    kept_idx = [i for i, s in enumerate(small) if not s]
+    target = kept_idx.index(widest)
+    folded = np.concatenate([parts[widest]] + [p for p, s in zip(parts, small) if s])
+    keep[target] = folded
+    return keep
+
+
 class ReluPartitionFormulation(ReluBigMFormulation):
     """Partition-based ReLU formulation (Tsay et al., NeurIPS 2021).
 
@@ -221,6 +308,14 @@ class ReluPartitionFormulation(ReluBigMFormulation):
             wu = w * in_ub
             term_lo = np.minimum(wl, wu)
             term_hi = np.maximum(wl, wu)
+            parts = merge_negligible_partitions(parts, term_hi - term_lo)
+            if len(parts) <= 1:
+                m.subject_to(z[j] <= ub_j * q, name=f"{pfx}_relu_ub_{k}_{j}")
+                m.subject_to(
+                    z[j] <= zhat[j] - lb_j * (1 - q),
+                    name=f"{pfx}_relu_bigm_{k}_{j}",
+                )
+                continue
             LB = np.array([float(term_lo[p].sum()) for p in parts])
             UB = np.array([float(term_hi[p].sum()) for p in parts])
             zb = m.continuous(
@@ -251,7 +346,11 @@ class ReluExtendedFormulation(ReluPartitionFormulation):
     The ``P = n_in`` partition: one disaggregated term per nonzero weight. Its
     LP relaxation of each unstable neuron is the convex hull of
     ``{(x, y): y = relu(w.x + b), x in box}``, the tightest any single-neuron
-    formulation can be; the price is ``n_in`` auxiliaries and ``4 n_in`` rows per
+    formulation can be. Inputs of negligible range are folded into the widest term
+    (:func:`merge_negligible_partitions`, #2156); that keeps the hull to within
+    ``NEGLIGIBLE_PARTITION_RTOL`` of the neuron's range and avoids auxiliaries
+    whose range is below a MILP solver's feasibility tolerance. The price is
+    ``n_in`` auxiliaries and ``4 n_in`` rows per
     unstable neuron. Big-M plus :class:`AndersonCutSeparator` reaches the same
     hull in the original space, adding only the inequalities a node violates.
     """
@@ -283,8 +382,14 @@ class AndersonCutSeparator:
     ``O(n_in)`` per neuron. The box is the one the input variable carries, so
     every cut is globally valid -- which is what a ``CutResult`` must be.
 
-    Use as ``model.solve(cut_callback=nn.cut_callback)``. A cut callback moves a
-    MILP onto discopt's spatial branch and bound (HiGHS has no cut hook).
+    Use as ``model.solve(cut_callback=nn.cut_callback)``. On a pure MILP the
+    solver recognises this separator (:meth:`native_milp_spec`) and separates the
+    same inequalities natively in Rust (#2157): on the default HiGHS route over
+    repeated root LP solves, the violated rows then handed to HiGHS with the
+    MILP; on the monolithic Rust MILP engine at every fractional node. Any other
+    ``cut_callback`` -- including this object wrapped in a function -- still
+    moves the MILP onto discopt's spatial branch and bound, which calls it from
+    Python at every node.
 
     Parameters
     ----------
@@ -353,10 +458,72 @@ class AndersonCutSeparator:
         self.n_calls += 1
         return self.separate(ctx.x_relaxation, model)
 
+    def native_milp_spec(self, model: Model) -> dict[str, np.ndarray] | None:
+        """The neurons as flat column-index arrays for the Rust separator (#2157).
+
+        A pure MILP whose ``cut_callback`` is this separator has the inequalities
+        separated by the native ``discopt._rust.ReluIdealSeparator`` -- at the
+        root on the HiGHS route, at every fractional node on the Rust MILP
+        engine -- instead of moving to the Python spatial tree. Columns are
+        offsets into the model's flattened variables, which are the engines'
+        structural columns. The input box is
+        deliberately *not* included: the solver takes it from the columns' own
+        bounds at solve time, so a cut can never rest on a box the model does not
+        enforce.
+
+        Returns ``None`` when a recorded variable is not in ``model`` (a
+        separator built for a different model must not address this one's
+        columns); a network with no unstable neuron gives empty arrays.
+        """
+        offsets = self._offsets(model)
+        y_cols: list[int] = []
+        q_cols: list[int] = []
+        bias: list[float] = []
+        ptr = [0]
+        x_cols: list[int] = []
+        w_all: list[float] = []
+        for rec in self._layers:
+            if id(rec.z) not in offsets or id(rec.x) not in offsets:
+                return None
+            zo = offsets[id(rec.z)]
+            xo = offsets[id(rec.x)]
+            n_in = rec.weights.shape[0]
+            for j, q in enumerate(rec.binaries):
+                if q is None:
+                    continue
+                if id(q) not in offsets:
+                    return None
+                w = np.asarray(rec.weights[:, j], dtype=np.float64)
+                if w.shape[0] != n_in:
+                    return None  # columns and weights must pair one to one
+                nz = np.flatnonzero(w != 0.0)
+                y_cols.append(zo + j)
+                q_cols.append(offsets[id(q)])
+                bias.append(float(rec.biases[j]))
+                x_cols.extend(int(xo + i) for i in nz)
+                w_all.extend(float(w[i]) for i in nz)
+                ptr.append(len(x_cols))
+        return {
+            "y": np.asarray(y_cols, dtype=np.int64),
+            "q": np.asarray(q_cols, dtype=np.int64),
+            "bias": np.asarray(bias, dtype=np.float64),
+            "ptr": np.asarray(ptr, dtype=np.int64),
+            "x": np.asarray(x_cols, dtype=np.int64),
+            "w": np.asarray(w_all, dtype=np.float64),
+        }
+
+    def record_native_counts(self, calls: int, cuts: int) -> None:
+        """Fold the Rust separator's executed-call / added-cut counts in (#2157)."""
+        self.n_calls += int(calls)
+        self.n_cuts += int(cuts)
+
 
 __all__ = [
     "AndersonCutSeparator",
     "ReluExtendedFormulation",
+    "NEGLIGIBLE_PARTITION_ATOL",
+    "NEGLIGIBLE_PARTITION_RTOL",
     "ReluPartitionFormulation",
+    "merge_negligible_partitions",
     "partition_indices",
 ]

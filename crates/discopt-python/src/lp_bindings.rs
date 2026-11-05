@@ -16,6 +16,7 @@ use discopt_core::bnb::milp_driver::{
     MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpNodeHook, MilpNodeVerdict,
     MilpOptions, MilpStatus,
 };
+use discopt_core::bnb::relu_ideal::ReluIdealSeparator;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
@@ -1186,6 +1187,7 @@ pub fn solve_milp_py<'py>(
         0,
         abs_gap_tol,
         None,
+        None,
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1376,8 +1378,318 @@ pub fn solve_milp_csc_py<'py>(
         0,
         abs_gap_tol,
         max_open_nodes,
+        None,
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
+}
+
+/// The native Anderson ideal-ReLU separator as a Python object (#2157).
+///
+/// Same CSR neuron layout as [`solve_milp_relu_csc_py`]. `separate(x)` returns the
+/// most violated ideal inequality of every neuron that has one at `x` (length
+/// `n_struct`), each as `(cols, vals, rhs)` meaning `vals @ x[cols] <= rhs`. Used by
+/// the HiGHS route's root cut loop, which adds the rows to the MILP it hands
+/// HiGHS; the cuts are global (the box is each input column's own bounds).
+#[pyclass(name = "ReluIdealSeparator", module = "discopt._rust")]
+pub struct PyReluIdealSeparator {
+    inner: ReluIdealSeparator,
+}
+
+#[pymethods]
+impl PyReluIdealSeparator {
+    #[new]
+    #[pyo3(signature = (n_struct, relu_y, relu_q, relu_bias, relu_ptr, relu_x, relu_w,
+                        relu_x_lb, relu_x_ub, tol=1e-6))]
+    fn new<'py>(
+        n_struct: usize,
+        relu_y: PyReadonlyArray1<'py, i64>,
+        relu_q: PyReadonlyArray1<'py, i64>,
+        relu_bias: PyReadonlyArray1<'py, f64>,
+        relu_ptr: PyReadonlyArray1<'py, i64>,
+        relu_x: PyReadonlyArray1<'py, i64>,
+        relu_w: PyReadonlyArray1<'py, f64>,
+        relu_x_lb: PyReadonlyArray1<'py, f64>,
+        relu_x_ub: PyReadonlyArray1<'py, f64>,
+        tol: f64,
+    ) -> PyResult<Self> {
+        let to_usize = |a: &PyReadonlyArray1<'py, i64>, what: &str| -> PyResult<Vec<usize>> {
+            a.as_slice()?
+                .iter()
+                .map(|&v| {
+                    usize::try_from(v).map_err(|_| {
+                        PyValueError::new_err(format!("ReluIdealSeparator: negative {what}"))
+                    })
+                })
+                .collect()
+        };
+        let inner = ReluIdealSeparator::new(
+            n_struct,
+            &to_usize(&relu_y, "relu_y")?,
+            &to_usize(&relu_q, "relu_q")?,
+            relu_bias.as_slice()?,
+            &to_usize(&relu_ptr, "relu_ptr")?,
+            &to_usize(&relu_x, "relu_x")?,
+            relu_w.as_slice()?,
+            relu_x_lb.as_slice()?,
+            relu_x_ub.as_slice()?,
+            tol,
+        )
+        .map_err(PyValueError::new_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Number of neurons held.
+    #[getter]
+    fn n_neurons(&self) -> usize {
+        self.inner.n_neurons()
+    }
+
+    /// Executed separation calls (0 means "never ran", CLAUDE.md §6).
+    #[getter]
+    fn calls(&self) -> usize {
+        self.inner.calls()
+    }
+
+    /// Cuts returned over all calls.
+    #[getter]
+    fn cuts_returned(&self) -> usize {
+        self.inner.cuts_returned()
+    }
+
+    /// Separate `x`; returns a list of `(cols, vals, rhs)` with `vals @ x[cols] <= rhs`.
+    fn separate<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<Vec<(Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>, f64)>> {
+        let xs = x.as_slice()?;
+        if xs.len() < self.inner.n_struct() {
+            return Err(PyValueError::new_err(format!(
+                "ReluIdealSeparator.separate: x has {} entries for {} structural columns",
+                xs.len(),
+                self.inner.n_struct()
+            )));
+        }
+        let verdict = self.inner.separate_node(xs);
+        let cuts = match verdict {
+            MilpNodeVerdict::Cuts(c) => c,
+            _ => Vec::new(),
+        };
+        Ok(cuts
+            .into_iter()
+            .map(|cut| {
+                // Driver form `coeffs @ x >= rhs`  ==>  `(-coeffs) @ x <= -rhs`.
+                let (cols, vals): (Vec<i64>, Vec<f64>) = cut
+                    .coeffs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0.0)
+                    .map(|(j, v)| (j as i64, -v))
+                    .unzip();
+                (
+                    PyArray1::from_vec(py, cols),
+                    PyArray1::from_vec(py, vals),
+                    -cut.rhs,
+                )
+            })
+            .collect())
+    }
+}
+
+/// [`solve_milp_csc_py`] with the native Anderson ideal-ReLU separator attached
+/// as the driver's fractional-node hook (#2157).
+///
+/// The neuron list is CSR-shaped: neuron `k` has output column `relu_y[k]`,
+/// indicator column `relu_q[k]`, bias `relu_bias[k]` and inputs
+/// `relu_ptr[k]..relu_ptr[k+1]` of `relu_x` / `relu_w` / `relu_x_lb` /
+/// `relu_x_ub` (each input column's own box -- the cuts are global, so this must
+/// be the column bounds, never a node's). `relu_rounds` caps the separation
+/// rounds one node may run and `relu_cut_cap` the rows added over the whole
+/// solve; both must be positive (a zero budget would silently disable the
+/// separator).
+///
+/// Returns [`solve_milp_csc_py`]'s 6-tuple plus `(node_calls, node_cuts_added)`
+/// -- the anti-vacuity counters (CLAUDE.md §6): `node_calls == 0` means the
+/// separator never saw a fractional point, not that it found nothing to cut.
+#[pyfunction]
+#[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub, integer_cols, n_struct,
+                    relu_y, relu_q, relu_bias, relu_ptr, relu_x, relu_w, relu_x_lb, relu_x_ub,
+                    relu_rounds, relu_cut_cap, relu_tol=1e-6,
+                    obj_const=0.0, max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
+                    cut_rounds=1, gmi_cuts=true, cmir_cuts=false, cut_select=false, node_cuts=false,
+                    max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
+                    node_propagation=true, reduced_cost_fixing=true,
+                    sb_max_cands=6, sb_node_budget=48,
+                    initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
+                    root_cut_prune=true,
+                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_milp_relu_csc_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'py, i64>,
+    row_idx: PyReadonlyArray1<'py, i64>,
+    vals: PyReadonlyArray1<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integer_cols: PyReadonlyArray1<'py, i64>,
+    n_struct: usize,
+    relu_y: PyReadonlyArray1<'py, i64>,
+    relu_q: PyReadonlyArray1<'py, i64>,
+    relu_bias: PyReadonlyArray1<'py, f64>,
+    relu_ptr: PyReadonlyArray1<'py, i64>,
+    relu_x: PyReadonlyArray1<'py, i64>,
+    relu_w: PyReadonlyArray1<'py, f64>,
+    relu_x_lb: PyReadonlyArray1<'py, f64>,
+    relu_x_ub: PyReadonlyArray1<'py, f64>,
+    relu_rounds: usize,
+    relu_cut_cap: usize,
+    relu_tol: f64,
+    obj_const: f64,
+    max_nodes: usize,
+    gap_tol: f64,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cmir_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
+    time_limit_s: Option<f64>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
+    debug_hook: Option<Py<PyAny>>,
+    abs_gap_tol: Option<f64>,
+    max_open_nodes: Option<usize>,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    f64,
+    usize,
+    usize,
+    usize,
+    usize,
+)> {
+    if relu_rounds == 0 || relu_cut_cap == 0 {
+        return Err(PyValueError::new_err(format!(
+            "solve_milp_relu_csc_py: relu_rounds={relu_rounds}/relu_cut_cap={relu_cut_cap}; a \
+             zero budget means the separator can never fire, which would be \
+             indistinguishable from one that found nothing"
+        )));
+    }
+    let to_usize = |a: &PyReadonlyArray1<'py, i64>, what: &str| -> PyResult<Vec<usize>> {
+        a.as_slice()?
+            .iter()
+            .map(|&v| {
+                usize::try_from(v).map_err(|_| {
+                    PyValueError::new_err(format!("solve_milp_relu_csc_py: negative {what}"))
+                })
+            })
+            .collect()
+    };
+    let sep = ReluIdealSeparator::new(
+        n_struct,
+        &to_usize(&relu_y, "relu_y")?,
+        &to_usize(&relu_q, "relu_q")?,
+        relu_bias.as_slice()?,
+        &to_usize(&relu_ptr, "relu_ptr")?,
+        &to_usize(&relu_x, "relu_x")?,
+        relu_w.as_slice()?,
+        relu_x_lb.as_slice()?,
+        relu_x_ub.as_slice()?,
+        relu_tol,
+    )
+    .map_err(PyValueError::new_err)?;
+    let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
+    let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
+    let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
+    let c_owned: Vec<f64> = c.as_slice()?.to_vec();
+    let b_owned: Vec<f64> = b.as_slice()?.to_vec();
+    let l_owned: Vec<f64> = lb.as_slice()?.to_vec();
+    let u_owned: Vec<f64> = ub.as_slice()?.to_vec();
+    let int_cols: Vec<usize> = integer_cols
+        .as_slice()?
+        .iter()
+        .map(|&v| v as usize)
+        .collect();
+    let csc = SparseCols::from_csc(col_ptr_v, row_idx_v, vals_v);
+    let (
+        status,
+        x,
+        obj,
+        bound,
+        nodes,
+        lp_iters,
+        _lazy_calls,
+        _lazy_requeues,
+        node_calls,
+        node_cuts_added,
+    ) = run_milp_hooked(
+        py,
+        csc,
+        m,
+        n,
+        c_owned,
+        l_owned,
+        u_owned,
+        b_owned,
+        int_cols,
+        n_struct,
+        obj_const,
+        max_nodes,
+        gap_tol,
+        tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cmir_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        initial_incumbent,
+        time_limit_s,
+        root_cut_time_s,
+        root_cut_prune,
+        debug_hook,
+        None,
+        None,
+        relu_rounds,
+        relu_cut_cap,
+        abs_gap_tol,
+        max_open_nodes,
+        Some(&sep),
+    )?;
+    Ok((
+        status,
+        x,
+        obj,
+        bound,
+        nodes,
+        lp_iters,
+        node_calls,
+        node_cuts_added,
+    ))
 }
 
 /// CSC-input MILP entry **with a lazy-constraint separator** (#1060).
@@ -1564,6 +1876,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
         node_hook_cut_cap,
         abs_gap_tol,
         None,
+        None,
     )
 }
 
@@ -1612,6 +1925,7 @@ fn run_milp_hooked<'py>(
     node_hook_cut_cap: usize,
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
+    relu_separator: Option<&ReluIdealSeparator>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1624,6 +1938,12 @@ fn run_milp_hooked<'py>(
     usize,
     usize,
 )> {
+    if relu_separator.is_some() && node_callback.is_some() {
+        return Err(PyValueError::new_err(
+            "a native ReLU separator and a Python node_callback cannot share the one \
+             fractional-node hook; pass one of them",
+        ));
+    }
     let opts = MilpOptions {
         n_struct,
         integer_cols: int_cols,
@@ -1707,7 +2027,11 @@ fn run_milp_hooked<'py>(
         n_struct,
         pending: std::sync::Mutex::new(None),
     });
-    let node_ref: Option<&dyn MilpNodeHook> = node.as_ref().map(|h| h as &dyn MilpNodeHook);
+    let node_ref: Option<&dyn MilpNodeHook> = match relu_separator {
+        // #2157: the native Anderson separator is pure Rust -- no GIL round trip.
+        Some(r) => Some(r as &dyn MilpNodeHook),
+        None => node.as_ref().map(|h| h as &dyn MilpNodeHook),
+    };
     let res = py.allow_threads(|| {
         let r = core_solve_milp_node_hooked(
             csc, m, n, &c_owned, &l_owned, &u_owned, &b_owned, obj_const, &opts, hook_ref,

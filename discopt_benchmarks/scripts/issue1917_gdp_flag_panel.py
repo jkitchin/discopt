@@ -108,6 +108,14 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
     # configuration wave found nothing (lowering identical): solve ``--all``.
     "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
+    # #2143 stage 4: the root pumps skipped once an incumbent exists (primal only,
+    # lowering identical): solve ``--all``. Its panel runs with the other four
+    # #2143 flags ON in both arms, the regime where an incumbent precedes the pumps.
+    "DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT": ("hull", "big-m"),
+    # #2143 stage 4: the root LOA proposer's proved bound installed as the search's
+    # root dual bound (bound-changing): solve ``--all``, with the five other #2143
+    # flags ON in both arms (it acts only when the proposer fires).
+    "DISCOPT_GDP_LOA_PROPOSER_BOUND": ("hull", "big-m"),
     # #2136 (G3.2): Rust MILP driver flag, RETIRED by #2136 on this panel
     # (docs/dev/data/2136-g32-panel/; its sibling DISCOPT_RUST_MILP_TABLEAU_CMIR was
     # retired on the g32 replay panel). Kept, like the retired entries above, so

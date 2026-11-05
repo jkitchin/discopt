@@ -1,0 +1,4 @@
+rep=0 skip=0 load=2.53 skipped_logs=0  105.18s DONE status=optimal obj=12.089262200968323 bound=12.089059684234234 nodes=793
+rep=0 skip=1 load=3.60 skipped_logs=1  104.18s DONE status=optimal obj=12.089262200968323 bound=12.089059684234234 nodes=793
+rep=1 skip=0 load=2.28 skipped_logs=0  104.51s DONE status=optimal obj=12.089262200968323 bound=12.089059684234234 nodes=793
+rep=1 skip=1 load=4.45 skipped_logs=1  104.09s DONE status=optimal obj=12.089262200968323 bound=12.089059684234234 nodes=793

@@ -984,7 +984,9 @@ def _root_warm_start_first_enabled() -> bool:
 
     ``DISCOPT_ROOT_WARMSTART_FIRST``.
 
-    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panel and the owner's #2143
+    rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the legacy
+    path. Row in
     ``docs/dev/flag-retirement-audit.md``.
 
     The root already poses ONE ``subnlp`` from the modeler's start (GAMS ``x.l``
@@ -1002,18 +1004,20 @@ def _root_warm_start_first_enabled() -> bool:
     certificate is lost (the earlier incumbent changes what the stages after it
     prune or improve).
     """
-    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
 def _gdp_loa_proposer_enabled() -> bool:
     """Whether the root runs LOA as a configuration proposer when the wave fails (#2143).
 
-    **Default OFF** pending its CLAUDE.md §5 panels; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Row in
     ``docs/dev/flag-retirement-audit.md``.
 
     It fires at the root of a solve whose model came out of a GDP lowering, when
@@ -1054,11 +1058,11 @@ def _gdp_loa_proposer_enabled() -> bool:
     modprodnet hull, eight_process, ex_633, nonconvex_hen, clay0203), or an instance
     where the proposer spends its budget without an incumbent and OFF had one.
     """
-    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -1120,6 +1124,110 @@ def _place_loa_configuration(
     return placed
 
 
+def _gdp_loa_proposer_bound_enabled() -> bool:
+    """Whether the root LOA proposer's proved bound floors the search (#2143).
+
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Acts only
+    when :func:`_gdp_loa_proposer_enabled` also fires. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    The proposer runs :class:`~discopt.gdp.algorithms.loa.LOA` on the source GDP.
+    LOA puts OA cuts only on rows certified convex and solves each configuration's
+    subproblem globally, so its ``bound`` (published only when ``bound_valid``) is a
+    valid bound on the source GDP's optimum: the same certificate
+    ``gdp_method="loa"`` returns. The lowered model this search runs on is a
+    reformulation of that GDP that is exact at integer selectors (big-M takes M
+    from finite variable bounds and refuses an infinite one; the hull's
+    Furman-Sawaya-Grossmann rows ``yhat g(v/yhat) - eps g(0)(1 - y) <= 0`` are the row
+    itself at ``y = 1`` and identically 0 at ``y = 0``, and a row with no finite
+    ``g(0)`` gets the exact eps-free lifted form or is refused), so its optimum is no
+    better than the GDP's and LOA's bound floors it. ON installs it with
+    :meth:`PyTreeManager.seed_root_bound`, the hook for externally proved root
+    bounds.
+
+    Two guards, both refusals:
+
+    * sign and offset: the bound is used only when LOA's incumbent objective and
+      the verified incumbent the proposer posed from it agree to
+      :data:`_GDP_LOA_BOUND_OBJ_RTOL` in this search's internal minimization sense,
+      so a lowering that negated, shifted or scaled the objective is caught;
+    * invariant: a bound above the tree's incumbent is refused with a warning
+      (it would be a false certificate), never installed.
+
+    Measured on GDPlib ``syngas`` hull, the four other #2143 flags ON, 120 s: LOA
+    proves 4669.0235 optimal at ~67 s with master bound 4668.809 (gap 4.6e-5), the
+    bound the hull tree itself only reaches after 27 nodes at about 180-224 s.
+    """
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER_BOUND", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+#: Relative agreement (internal sense) required between LOA's incumbent objective
+#: and the verified point the proposer posed from it before LOA's bound is used.
+_GDP_LOA_BOUND_OBJ_RTOL = 1e-6
+
+
+def _seed_loa_proposer_bound(tree: Any, work: Model, loa: Any, found_obj: float) -> bool:
+    """Floor ``tree``'s dual bound with the root LOA proposer's proved bound (#2143).
+
+    ``loa`` is LOA's ``SolveResult`` on the source GDP (user sense); ``found_obj`` is
+    the objective, in this search's internal minimization sense, of the verified
+    point the proposer posed from LOA's incumbent. See
+    :func:`_gdp_loa_proposer_bound_enabled` for why the bound is valid here and for
+    the two guards. Returns whether the bound was installed; every outcome is logged.
+    """
+    if loa is None or not getattr(loa, "bound_valid", False):
+        logger.info("GDP LOA proposer bound: LOA kept no valid bound; not used")
+        return False
+    bound, loa_obj = loa.bound, loa.objective
+    if bound is None or loa_obj is None or not (np.isfinite(bound) and np.isfinite(loa_obj)):
+        logger.info("GDP LOA proposer bound: LOA bound/objective not finite; not used")
+        return False
+    from discopt.modeling.core import ObjectiveSense as _Sense
+
+    if work._objective is None:
+        logger.info("GDP LOA proposer bound: the model has no objective; not used")
+        return False
+    sign = -1.0 if work._objective.sense == _Sense.MAXIMIZE else 1.0
+    seed, loa_int = sign * float(bound), sign * float(loa_obj)
+    if abs(loa_int - float(found_obj)) > _GDP_LOA_BOUND_OBJ_RTOL * max(1.0, abs(loa_int)):
+        logger.info(
+            "GDP LOA proposer bound: LOA objective %.12g (internal) and the posed point's "
+            "%.12g disagree beyond %g; the objective did not map, bound not used",
+            loa_int,
+            float(found_obj),
+            _GDP_LOA_BOUND_OBJ_RTOL,
+        )
+        return False
+    inc = tree.incumbent()
+    if inc is not None and np.isfinite(inc[1]):
+        tol = _DEFAULT_ABS_GAP_TOL + 1e-9 * max(1.0, abs(float(inc[1])))
+        if seed > float(inc[1]) + tol:
+            logger.warning(
+                "GDP LOA proposer bound %.12g lies above the incumbent %.12g (internal "
+                "sense); refused, it would be a false certificate",
+                seed,
+                float(inc[1]),
+            )
+            return False
+        seed = min(seed, float(inc[1]))
+    tree.seed_root_bound(float(seed))
+    logger.info(
+        "GDP LOA proposer bound: LOA %s, bound %.12g installed as the root dual bound "
+        "(internal %.12g)",
+        loa.status,
+        float(bound),
+        seed,
+    )
+    return True
+
+
 def _gdp_loa_root_proposal(
     src: Model,
     work: Model,
@@ -1130,8 +1238,12 @@ def _gdp_loa_root_proposal(
     backend: Any,
     nlp_options: Optional[dict],
     deadline: float,
+    out: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """A point for ``work`` from LOA run on its source GDP ``src`` (#2143).
+
+    ``out``, when given, receives ``out["loa"]``: LOA's ``SolveResult`` (its status,
+    ``bound`` and ``bound_valid``), for :func:`_gdp_loa_proposer_bound_enabled`.
 
     Runs :class:`discopt.gdp.algorithms.loa.LOA` on ``src`` until its first
     verified incumbent, under the time left before ``deadline`` minus a
@@ -1152,8 +1264,9 @@ def _gdp_loa_root_proposal(
 
     It is then posed through :func:`~discopt._relax.primal_heuristics.subnlp` on ``work``. That
     returns only a point verified on ``work``'s own evaluator, and the caller's
-    ``_inject_incumbent`` verifies it again. Primal only: nothing LOA proves reaches
-    the search's bound.
+    ``_inject_incumbent`` verifies it again. LOA's proved bound reaches the search
+    only through :func:`_seed_loa_proposer_bound` (``out["loa"]``), under
+    ``DISCOPT_GDP_LOA_PROPOSER_BOUND``.
 
     Returns ``None``, with the reason logged at INFO, when the budget is too small,
     the variables do not line up, LOA finds no point, or the sub-NLP fails.
@@ -1188,6 +1301,8 @@ def _gdp_loa_root_proposal(
         r = alg.run()
     finally:
         _IN_GDP_LOA_PROPOSER.reset(token)
+    if out is not None:
+        out["loa"] = r
     logger.info(
         "GDP LOA proposer (root): LOA %s after %d iteration(s), %.1f s, objective %s",
         r.status,
@@ -3478,6 +3593,37 @@ def _node_probe_max_vars() -> int:
 # wiring so it cannot silently disconnect again. Process-global, reset at the
 # top of ``solve_model``; read via ``_in_tree_presolve_global_calls()``.
 _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
+
+
+def _root_pump_skip_enabled() -> bool:
+    """Whether the root feasibility pumps are skipped once an incumbent exists (#2143).
+
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    At the end of the root batch two pumps run back to back: the LP-vertex pump
+    (``feasibility_pump`` from the root relaxation point) and the NLP-relaxation
+    pump (one root NLP multistart to seed a second pump). Both are primal only:
+    they inject a point only when it strictly improves the incumbent. When an
+    incumbent already exists, ON skips both, so the time goes to the root
+    reduce fixpoint and the tree instead. The integer local search after them
+    still runs. Nothing about the bound changes; only which primal heuristics run.
+
+    Measured on GDPlib syngas hull, the four other #2143 flags ON, wall clock at
+    120 s (``time_probe``, 1 rep each arm, run side by side): OFF the pumps took
+    15.0 s plus a 23.9 s root multistart, after LOA had already found the optimum
+    4669.0235 at about 59 s; the tree reached 7 nodes and bound 4347.80. ON: 29
+    nodes, bound 4666.75. At 600 s, both arms certify with the same 27 nodes and
+    bound; ON in 178 s, OFF in 224 s.
+    """
+    return os.environ.get("DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def _presolve_bound_propagation_enabled() -> bool:
@@ -18480,6 +18626,95 @@ def solve_model(
                     _merge_engine_bound(_bb_res, _engine_bound, model),
                     _deferred.get("stats"),
                 )
+            # #2157: a ``cut_callback`` that is the Anderson ideal-ReLU separator
+            # (``NNFormulation(..., ideal_cuts=True).cut_callback``) is separated
+            # natively in Rust instead of moving the MILP to the Python spatial
+            # tree, which measured ~200x slower than plain big-M on HiGHS with an
+            # unchanged root gap. Only when it is the sole callback: lazy
+            # constraints / incumbent screens keep the #748 spatial route, which
+            # honours them, and any other cut callback still runs there.
+            _relu_spec = None
+            if (
+                cut_callback is not None
+                and lazy_constraints is None
+                and incumbent_callback is None
+                and not _observe_tree
+                and not lagrangian_bound
+                and not (abs_gap_tolerance is not None and abs_gap_tol < gap_tolerance)
+            ):
+                _spec_fn = getattr(cut_callback, "native_milp_spec", None)
+                _relu_spec = _spec_fn(model) if callable(_spec_fn) else None
+            if _relu_spec is not None:
+                # Two engines, the same Rust separator. HiGHS (the default MILP
+                # route) has no cut hook, so there the cuts are separated over
+                # repeated root LP solves and handed to HiGHS as rows. Where the
+                # caller selects the monolithic Rust engine instead (HiGHS opt-out,
+                # ``nlp_solver="simplex"``, an attached debugger), the separator runs
+                # at every fractional node through the engine's own node hook.
+                _relu_counts: dict = {}
+                _relu_res = None
+                _relu_engine = ""
+                if (
+                    _lpm_backend == "highs"
+                    and nlp_solver != "simplex"
+                    and not _debug_instruments_this_solve()
+                ):
+                    with _highs_route_options(presolve=_caller_presolve):
+                        _relu_res = _solve_milp_highs(
+                            model,
+                            time_limit,
+                            gap_tolerance,
+                            max_nodes,
+                            t_start,
+                            initial_point=initial_point,
+                            abs_gap_tolerance=abs_gap_tolerance,
+                            relu_cuts=_relu_spec,
+                            relu_counts=_relu_counts,
+                        )
+                    _relu_engine = (
+                        f"verified HiGHS MILP route after {_relu_counts.get('rounds', 0)} "
+                        "root separation rounds"
+                    )
+                if _relu_res is None and _lpm_backend != "native":
+                    _relu_counts = {}
+                    _relu_res = _solve_milp_simplex(
+                        model,
+                        time_limit,
+                        gap_tolerance,
+                        max_nodes,
+                        t_start,
+                        initial_point=initial_point,
+                        prefer_pounce=nlp_solver == "pounce",
+                        abs_gap_tolerance=abs_gap_tolerance,
+                        incumbent_time_extension=incumbent_time_extension,
+                        relu_cuts=_relu_spec,
+                        relu_counts=_relu_counts,
+                    )
+                    _relu_engine = (
+                        "discopt monolithic Rust MILP engine, separated at every fractional node"
+                    )
+                _n_calls = int(_relu_counts.get("calls", 0))
+                _n_cuts = int(_relu_counts.get("cuts", 0))
+                _record = getattr(cut_callback, "record_native_counts", None)
+                if callable(_record):
+                    _record(_n_calls, _n_cuts)
+                if _relu_res is not None:
+                    _relu_res.solver_stats = {
+                        **(_relu_res.solver_stats or {}),
+                        "ml/relu_ideal_native_calls": float(_n_calls),
+                        "ml/relu_ideal_native_cuts": float(_n_cuts),
+                    }
+                    _relu_res.algorithm_route = (
+                        "native-relu-cuts: Anderson ideal-ReLU inequalities separated in "
+                        f"Rust ({_n_cuts} cuts, {_n_calls} separator calls) on the "
+                        f"{_relu_engine} (#2157); underlying route: "
+                        f"{_relu_res.algorithm_route or 'unlabelled'}"
+                    )
+                    return _relu_res
+                logger.info(
+                    "native ReLU-cut MILP engine deferred; routing the cut_callback to "
+                    "spatial Branch-and-Bound (#2157)"
+                )
             if _lpm_backend == "native":
                 # #1535: the caller asked for discopt's own search and gets it -- the
                 # spatial tree, the one engine that screens these callbacks (#748).
@@ -22652,6 +22887,7 @@ def solve_model(
         def _root_gdp_config_primal() -> None:
             nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
             nonlocal _gdp_cfg_deferred
+            _loa_bound_pending = None
             if not (
                 iteration == 0
                 and not _gdp_cfg_ran
@@ -22733,6 +22969,7 @@ def solve_model(
                 and not _IN_GDP_LOA_PROPOSER.get()
             ):
                 _subnlp_calls += 1
+                _loa_out: dict = {}
                 try:
                     _loa_pt = _gdp_loa_root_proposal(
                         _gdp_src,
@@ -22743,6 +22980,7 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         deadline=_deadline,
+                        out=_loa_out,
                     )
                 except Exception as _e:
                     # A proposer failure costs only its point; logged, not hidden.
@@ -22750,12 +22988,17 @@ def solve_model(
                     _loa_pt = None
                 if _loa_pt is not None:
                     _cfg_results = [_loa_pt]
+                    if _gdp_loa_proposer_bound_enabled():
+                        _loa_bound_pending = (_loa_out.get("loa"), float(_loa_pt[1]))
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
                     if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
                         _subnlp_incumbent_updates += 1
                         logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+            if _loa_bound_pending is not None:
+                _seed_loa_proposer_bound(tree, model, *_loa_bound_pending)
+                _loa_bound_pending = None
 
         def _root_warm_start_subnlp() -> None:
             """ONE root ``subnlp`` from the modeler's start, if there is one.
@@ -22843,7 +23086,10 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
+            _fp_skip = _root_pump_skip_enabled() and tree.incumbent() is not None
+            if _fp_skip:
+                logger.info("Feasibility pump (root): skipped, an incumbent exists")
+            if best_root_idx is not None and not _fp_skip and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
 
@@ -22889,6 +23135,7 @@ def solve_model(
                 if (
                     _mc_lp_relaxer is not None
                     and not _model_is_convex
+                    and not _fp_skip
                     and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
                     # Taken BEFORE the try: ``_observe_heur_nlp`` in the
@@ -38308,6 +38555,165 @@ def _highs_termination(out) -> Optional[str]:
     return None
 
 
+#: Root-loop limits for the ideal ReLU cuts on the HiGHS route (#2157).
+_RELU_ROOT_MAX_ROUNDS = 50
+#: A round whose LP bound moves less than this (relative) ends the root loop.
+_RELU_ROOT_TAIL_REL = 1e-5
+
+
+def _relu_inputs_boxed(x_l: np.ndarray, x_u: np.ndarray) -> bool:
+    """True when every ReLU input column has a genuine finite box (#2157).
+
+    The ideal inequalities put each input's bounds into the cut, so an input without
+    a real box must decline them. "Without a real box" includes the default box
+    ``DEFAULT_VARIABLE_BOUND = 9.999e19`` -- the stand-in for "no bound" -- which is
+    finite and below the LP layer's ``1e20`` sentinel, so neither ``np.isfinite`` nor
+    ``|x| < 1e20`` excludes it. HiGHS computing at that scale certified a false
+    optimum (#2146); a cut carrying it would bring the same magnitude into the LP.
+    """
+    side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    return bool(
+        np.all(np.isfinite(x_l))
+        and np.all(np.isfinite(x_u))
+        and np.all(np.abs(x_l) < side)
+        and np.all(np.abs(x_u) < side)
+    )
+
+
+def _relu_root_cut_loop(sf, n_orig: int, spec: dict, *, budget: float):
+    """Separate Anderson's ideal ReLU inequalities at the root LP (#2157).
+
+    Returns ``(sf_aug, stats)`` -- ``sf`` with one ``<=`` row (plus its logical
+    column ``s >= 0``) per cut -- or ``None`` when the cuts cannot be formed
+    soundly: an indicator that is not an integer column, a column outside the
+    structural block, or an input column without a finite box (the hull rows do
+    not exist over an unbounded input). The box is ``sf``'s own column bounds, so
+    every row is valid for every integer-feasible point of ``sf``: the cuts are
+    global, and the augmented problem has exactly ``sf``'s integer-feasible set
+    projected onto the structural columns.
+
+    Each round solves the continuous relaxation with ``solve_lp_std`` and hands
+    its point to the native ``discopt._rust.ReluIdealSeparator``. The loop ends
+    when no inequality is violated, when a round moves the LP bound by less than
+    ``_RELU_ROOT_TAIL_REL`` (relative), after ``_RELU_ROOT_MAX_ROUNDS`` rounds,
+    on an LP that does not come back optimal (the rows found so far are kept --
+    each is valid on its own), or when ``budget`` seconds are spent.
+    """
+    import dataclasses as _dc
+
+    import scipy.sparse as _sp
+
+    from discopt._rust import ReluIdealSeparator
+    from discopt.solvers.lp_milp_highs import INF as _HIGHS_INF
+    from discopt.solvers.lp_milp_highs import solve_lp_std
+
+    t0 = time.perf_counter()
+    x_cols = np.asarray(spec["x"], dtype=np.int64)
+    y_cols = np.asarray(spec["y"], dtype=np.int64)
+    q_cols = np.asarray(spec["q"], dtype=np.int64)
+    for arr in (x_cols, y_cols, q_cols):
+        if arr.size and (arr.min() < 0 or arr.max() >= n_orig):
+            logger.info("ideal ReLU cuts declined: a column is outside the model (#2157)")
+            return None
+    if not set(q_cols.tolist()) <= set(np.asarray(sf.int_idx).tolist()):
+        logger.info("ideal ReLU cuts declined: an indicator is not an integer column (#2157)")
+        return None
+    x_l = np.asarray(sf.xl, dtype=np.float64)[x_cols]
+    x_u = np.asarray(sf.xu, dtype=np.float64)[x_cols]
+    if not _relu_inputs_boxed(x_l, x_u):
+        logger.info("ideal ReLU cuts declined: an input column is unbounded (#2157)")
+        return None
+    sep = ReluIdealSeparator(
+        int(n_orig),
+        y_cols,
+        q_cols,
+        np.ascontiguousarray(spec["bias"], dtype=np.float64),
+        np.ascontiguousarray(spec["ptr"], dtype=np.int64),
+        x_cols,
+        np.ascontiguousarray(spec["w"], dtype=np.float64),
+        np.ascontiguousarray(x_l),
+        np.ascontiguousarray(x_u),
+    )
+    rows_i: list = []
+    rows_j: list = []
+    rows_v: list = []
+    rhs: list = []
+    seen: set = set()
+
+    def _augmented():
+        k = len(rhs)
+        if k == 0:
+            return sf
+        C = _sp.csr_matrix(
+            (np.asarray(rows_v), (np.asarray(rows_i), np.asarray(rows_j))), shape=(k, sf.n)
+        )
+        A = _sp.bmat([[sf.A, None], [C, _sp.identity(k, format="csc")]], format="csc")
+        return _dc.replace(
+            sf,
+            c=np.concatenate([sf.c, np.zeros(k)]),
+            A=A,
+            b=np.concatenate([sf.b, np.asarray(rhs, dtype=np.float64)]),
+            xl=np.concatenate([sf.xl, np.zeros(k)]),
+            xu=np.concatenate([sf.xu, np.full(k, _HIGHS_INF)]),
+        )
+
+    rounds = 0
+    last_bound = None
+    stop = "no_violation"
+    while True:
+        remaining = budget - (time.perf_counter() - t0)
+        if remaining <= 0.0:
+            stop = "budget"
+            break
+        lp = solve_lp_std(_augmented().relaxed(), time_limit=remaining)
+        if lp.status != "optimal" or lp.x is None or lp.objective is None:
+            stop = f"lp_{lp.status}"
+            break
+        if last_bound is not None and (
+            lp.objective - last_bound <= _RELU_ROOT_TAIL_REL * max(1.0, abs(lp.objective))
+        ):
+            stop = "tailing_off"
+            break
+        last_bound = lp.objective
+        if rounds >= _RELU_ROOT_MAX_ROUNDS:
+            stop = "max_rounds"
+            break
+        fresh = 0
+        for cols, vals, r in sep.separate(np.ascontiguousarray(lp.x[:n_orig], dtype=np.float64)):
+            key = (tuple(cols.tolist()), tuple(np.round(vals, 12).tolist()), round(r, 12))
+            if key in seen:
+                continue
+            seen.add(key)
+            i = len(rhs)
+            rows_i.extend([i] * len(cols))
+            rows_j.extend(cols.tolist())
+            rows_v.extend(vals.tolist())
+            rhs.append(float(r))
+            fresh += 1
+        rounds += 1
+        if fresh == 0:
+            break
+    stats = {
+        "calls": int(sep.calls),
+        "cuts": len(rhs),
+        "rounds": rounds,
+        "root_lp_bound": last_bound,
+        "stop": stop,
+        "time": time.perf_counter() - t0,
+    }
+    logger.info(
+        "ideal ReLU root cuts (#2157): %d cuts over %d rounds (%d separator calls), "
+        "root LP bound %s, stop=%s, %.2fs",
+        stats["cuts"],
+        rounds,
+        stats["calls"],
+        last_bound,
+        stop,
+        stats["time"],
+    )
+    return _augmented(), stats
+
+
 def _solve_milp_highs(
     model: Model,
     time_limit: float,
@@ -38318,12 +38724,25 @@ def _solve_milp_highs(
     # #1243: the caller's absolute gap tolerance, or None for this route's
     # established 1e-6. Passed straight through to HiGHS's ``mip_abs_gap``.
     abs_gap_tolerance: Optional[float] = None,
+    relu_cuts: Optional[dict] = None,
+    relu_counts: Optional[dict] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with HiGHS under the verified contract of plan §3.2.
 
     Returns ``None`` only when the model is not exactly linear (the same gate as
-    ``_solve_milp_simplex``: the MILP projection would drop terms). Every other
-    outcome is returned, ``error`` included -- no fallback engine (plan §4).
+    ``_solve_milp_simplex``: the MILP projection would drop terms), or -- with
+    ``relu_cuts`` -- when the ideal ReLU cuts cannot be formed soundly (see
+    ``_relu_root_cut_loop``). Every other outcome is returned, ``error`` included
+    -- no fallback engine (plan §4).
+
+    ``relu_cuts`` (#2157) is an ``AndersonCutSeparator.native_milp_spec`` dict.
+    HiGHS has no cut callback, so the inequalities are separated at the ROOT:
+    repeated LP solves of the relaxation, each point separated by the native Rust
+    separator, the violated rows appended, until no row is violated or the bound
+    stops moving. The cuts are global (built over the columns' own bounds), so
+    the MILP handed to HiGHS has the same integer-feasible set, and every
+    certificate -- point verification, bound, refutation guards -- is about that
+    cut-augmented problem. ``relu_counts`` accumulates ``calls``/``cuts``/``rounds``.
     """
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers.lp_milp_highs import solve_milp_std
@@ -38331,11 +38750,34 @@ def _solve_milp_highs(
     if not _milp_is_exactly_linear(model):
         return None
     lp_data, n_orig, sf = _highs_std_form(model)
+    sf_milp = sf
+    relu_stats: dict = {}
+    if relu_cuts is not None:
+        _aug = _relu_root_cut_loop(
+            sf,
+            n_orig,
+            relu_cuts,
+            # Role-2 work budget (#912/#1153/#1187): a quarter of the time left,
+            # saturated, and the role-1 remainder under ``deterministic`` -- the
+            # loop's own caps (rounds, tail-off) then decide how much it does.
+            budget=_role2_horizon(
+                _role2_saturate(
+                    max(0.0, 0.25 * (float(time_limit) - (time.perf_counter() - t_start))),
+                    0.25,
+                )
+            ),
+        )
+        if _aug is None:
+            return None
+        sf_milp, relu_stats = _aug
+        if relu_counts is not None:
+            for _k in ("calls", "cuts", "rounds"):
+                relu_counts[_k] = relu_counts.get(_k, 0) + int(relu_stats.get(_k, 0))
     seed = None
     if initial_point is not None and np.asarray(initial_point).size == n_orig:
         seed = np.asarray(initial_point, dtype=np.float64).ravel()
     out = solve_milp_std(
-        sf,
+        sf_milp,
         time_limit=float(time_limit) - (time.perf_counter() - t_start),
         gap_tolerance=float(gap_tolerance),
         # #1243 x #1258: this route is the DEFAULT for pure MILP, so the
@@ -38677,6 +39119,76 @@ def _milp_engine_max_open_nodes(n_cols: int, n_rows: int) -> int:
     return max(1000, _MILP_ENGINE_FRONTIER_BYTES // per_node)
 
 
+#: Per-node separation rounds for the native Anderson ReLU separator (#2157).
+_RELU_NATIVE_ROUNDS = 8
+#: Total rows the native Anderson separator may add, per unstable neuron.
+_RELU_NATIVE_CUTS_PER_NEURON = 64
+
+
+def _relu_native_engine(
+    spec: dict, lp_data, n_orig: int, int_idx: list, counts: Optional[dict]
+) -> Optional[Callable]:
+    """``solve_milp_csc_py`` with the native Anderson ReLU separator attached (#2157).
+
+    Returns a drop-in for ``solve_milp_csc_py`` (same positional arguments, same
+    6-tuple) that runs the same Rust MILP driver with
+    ``ReluIdealSeparator`` as its fractional-node hook, or ``None`` when the cuts
+    cannot be formed soundly here -- a column index outside the structural
+    columns, an indicator that is not an integer column, or an unbounded input --
+    in which case the caller defers. The input box is the columns' own bounds
+    from ``lp_data``: the cuts are folded into the shared matrix, so they must
+    hold over the whole problem, never a narrower box.
+    """
+    try:
+        from discopt._rust import solve_milp_relu_csc_py
+    except ImportError:
+        return None
+
+    x_cols = np.asarray(spec["x"], dtype=np.int64)
+    y_cols = np.asarray(spec["y"], dtype=np.int64)
+    q_cols = np.asarray(spec["q"], dtype=np.int64)
+    for arr in (x_cols, y_cols, q_cols):
+        if arr.size and (arr.min() < 0 or arr.max() >= n_orig):
+            logger.info("native ReLU cuts declined: a column is outside the model (#2157)")
+            return None
+    if not set(int(v) for v in q_cols) <= set(int(v) for v in int_idx):
+        logger.info("native ReLU cuts declined: an indicator is not an integer column (#2157)")
+        return None
+    x_l = np.asarray(lp_data.x_l, dtype=np.float64)[x_cols]
+    x_u = np.asarray(lp_data.x_u, dtype=np.float64)[x_cols]
+    if not _relu_inputs_boxed(x_l, x_u):
+        logger.info("native ReLU cuts declined: an input column is unbounded (#2157)")
+        return None
+    rounds = _RELU_NATIVE_ROUNDS
+    cap = max(1, _RELU_NATIVE_CUTS_PER_NEURON * int(y_cols.size))
+    named = ("obj_const", "max_nodes", "gap_tol")
+
+    def _engine(*args, **kwargs):
+        head, tail = args[:11], args[11:]
+        for name, val in zip(named, tail):
+            kwargs[name] = val
+        out = solve_milp_relu_csc_py(
+            *head,
+            y_cols,
+            q_cols,
+            np.ascontiguousarray(spec["bias"], dtype=np.float64),
+            np.ascontiguousarray(spec["ptr"], dtype=np.int64),
+            x_cols,
+            np.ascontiguousarray(spec["w"], dtype=np.float64),
+            np.ascontiguousarray(x_l),
+            np.ascontiguousarray(x_u),
+            rounds,
+            cap,
+            **kwargs,
+        )
+        if counts is not None:
+            counts["calls"] = counts.get("calls", 0) + int(out[6])
+            counts["cuts"] = counts.get("cuts", 0) + int(out[7])
+        return tuple(out[:6])
+
+    return _engine
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -38688,6 +39200,8 @@ def _solve_milp_simplex(
     prefer_pounce: bool = False,
     abs_gap_tolerance: Optional[float] = None,
     incumbent_time_extension: float = 0.0,
+    relu_cuts: Optional[dict] = None,
+    relu_counts: Optional[dict] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -38710,6 +39224,14 @@ def _solve_milp_simplex(
     default route does, and the public ``nlp_solver="simplex"`` option always does.
     ``None`` is passed through as ``None`` (no absolute criterion), which is this
     engine's established default and keeps an omitted argument bound-neutral.
+
+    ``relu_cuts`` (#2157) is an ``AndersonCutSeparator.native_milp_spec`` dict:
+    the engine then separates Anderson et al.'s ideal ReLU inequalities natively
+    at fractional nodes (root included) through its fractional-node hook. The
+    input box of every cut is read here from the columns' own bounds, so the cuts
+    are global. Returns ``None`` (defer) if any weighted input column is
+    unbounded. ``relu_counts``, when a dict, accumulates the executed separator
+    calls and added cuts under ``"calls"`` / ``"cuts"`` (CLAUDE.md §6).
     """
     from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
@@ -38744,6 +39266,12 @@ def _solve_milp_simplex(
     n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+
+    if relu_cuts is not None:
+        _relu_engine = _relu_native_engine(relu_cuts, lp_data, n_orig, int_idx, relu_counts)
+        if _relu_engine is None:
+            return None
+        solve_milp_csc_py = _relu_engine  # noqa: F811 -- same driver, hook attached
 
     # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
     # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to None -> no
@@ -39104,25 +39632,60 @@ def _solve_milp_simplex(
         # input check (a NaN box) already ran on this exact data in the solve
         # above. A raise here is a defect, not "no root bound".
         _t_root = time.perf_counter()
-        _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-            np.ascontiguousarray(lp_data.c, dtype=np.float64),
-            _A_m,
-            _A_n,
-            _A_ptr,
-            _A_idx,
-            _A_val,
-            np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-            np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-            np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
-            np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
-            n_orig,
-            float(lp_data.obj_const),
-            1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
-            float(gap_tolerance),
-            time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
-        )
+        if relu_cuts is None:
+            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                _A_m,
+                _A_n,
+                _A_ptr,
+                _A_idx,
+                _A_val,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
+                n_orig,
+                float(lp_data.obj_const),
+                1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
+                float(gap_tolerance),
+                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+            )
+        else:
+            # #2157: the integer-free LP above never reaches the fractional-node
+            # hook (every point of an integer-free LP is "integral"), so it would
+            # report the bare big-M root and hide the ideal cuts entirely -- the
+            # unchanged root gap the issue measured. Probe the ROOT NODE instead:
+            # integers kept, the separator attached, one node. Its returned bound
+            # is the frontier minimum after the root's separation rounds, a valid
+            # bound over the root box.
+            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                _A_m,
+                _A_n,
+                _A_ptr,
+                _A_idx,
+                _A_val,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                n_orig,
+                float(lp_data.obj_const),
+                # The loop stops once the tree holds this many nodes, so 1 would
+                # stop before the root is ever solved; 2 lets the root run all of
+                # its separation rounds and stops as soon as it branches.
+                2,
+                float(gap_tolerance),
+                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+                heuristics=False,
+                **_cut_opts,
+            )
+            _lp_obj = _lp_bound if np.isfinite(_lp_bound) else None
         root_time_val = time.perf_counter() - _t_root
-        if _lp_status in ("optimal", "feasible") and _lp_obj is not None and np.isfinite(_lp_obj):
+        _root_probe_ok = _lp_status in ("optimal", "feasible") or (
+            relu_cuts is not None and _lp_status == "node_limit"
+        )
+        if _root_probe_ok and _lp_obj is not None and np.isfinite(_lp_obj):
             root_bound_val = -_lp_obj if maximize else _lp_obj
             if obj_val is not None and np.isfinite(obj_val):
                 root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
