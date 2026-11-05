@@ -1174,6 +1174,23 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   undecided where HiGHS proves it; and pigeonhole PHP(10,9) (1 test, plus 1 variant) --
   the driver cannot prove it infeasible within a 6 s budget where HiGHS does (Phase 4
   MILP strength).
+  **RETRACTION + soundness fix (2026-11-05, later): the graduated exact check issued a
+  false `Infeasible`.** `main`'s #2142 fixture `captured_cstr_bigm_node_lp_stays_undecided_2142`
+  (a GDPlib cstr big-M node LP that HiGHS solves; merged here at `13880cbc`) failed on
+  this branch: with the flag ON the warm dual returned `Infeasible`, with `=0` it stayed
+  undecided. Cause: `certify_one` certified on a bare exact `g > 0`, which proves only the
+  *exact* system empty; this LP is infeasible by ~1e-8 but feasible within the solver's
+  tolerance. The corpus panel above did not contain such an LP, so "cert-clean" was true
+  of the panel and false of the mechanism. **Fix:** certify only when
+  `g > Σ_i |y_i| tol_i + Σ_j |rc_j| tol_j` with `tol = AUDIT_FEAS (1 + |side|)` -- the row
+  and bound tests of `primal::audit_feasibility` -- which proves that no point the
+  solver itself would accept as feasible exists (derivation in the code). Tests: the
+  #2142 fixture and a new `tolerance_feasible_system_is_not_certified_2142` both fail
+  with the bare `g > 0` and pass with the margin; `cargo test` 1004/0. Re-measured: Rust
+  IIS still returns P0.6's set on **53/53** (`p3.2/iis_engine_panel_exact_v3_margin.json`,
+  median wall ratio 0.87), P3.2 tests 7/7. The flag stays default ON *with the margin*;
+  the claim "cert-clean" is restated as "cert-clean on the panel; the mechanism was not
+  sound until the margin".
   **Closed (owner, 2026-11-05): graduate `DISCOPT_FARKAS_EXACT_OPEN`; `iis_engine` stays
   `"highs"`.** The flag is default ON (`=0` opt-out; audit row *Graduated*).
   `iis_engine="rust"` is a supported opt-in that matches HiGHS on P0.6's 53 fixtures;

@@ -29,7 +29,7 @@
 //! `false`, which is the pre-flag behaviour.
 
 use num_rational::BigRational;
-use num_traits::{Signed, Zero};
+use num_traits::{One, Signed, Zero};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::sparse::SparseCols;
@@ -221,31 +221,51 @@ fn certify_one(y: &[f64], cols: &SparseCols, n: usize, b: &[f64], l: &[f64], u: 
             yq[i] += v;
         }
     }
-    // Exact Farkas inequality: bᵀy − Σ_j sup_{x_j ∈ box} rc_j x_j > 0.
+    // Exact Farkas inequality, with the solver's own feasibility tolerance as the
+    // margin: certify only if NO point the solver would accept as feasible exists.
+    //
+    // For `x` with `A x = b + r`, `|r_i| <= tol_i = AUDIT_FEAS (1 + |b_i|)` and
+    // `l_j - tol_j <= x_j <= u_j + tol_j`, `tol_j = AUDIT_FEAS (1 + |bound_j|)` (the
+    // row and bound tests of `primal::audit_feasibility`):
+    //   bᵀy = rcᵀx − rᵀy <= Σ_j sup_box rc_j x_j + Σ_j |rc_j| tol_j + Σ_i |y_i| tol_i.
+    // So `g = bᵀy − Σ_j sup_box rc_j x_j > Σ_i |y_i| tol_i + Σ_j |rc_j| tol_j` proves
+    // the tolerance-widened system empty. A bare `g > 0` (P3.2 as first graduated)
+    // proves only the EXACT system empty, and certified a #2142 cstr node LP that is
+    // infeasible by ~1e-8 but feasible within tolerance (HiGHS solves it): a false
+    // `Infeasible` that would fathom a node holding accepted points.
+    let feas = q(super::primal::AUDIT_FEAS);
+    let one = BigRational::one();
     let mut g = BigRational::zero();
+    let mut margin = BigRational::zero();
     for (bi, yi) in b.iter().zip(&yq) {
-        if *bi != 0.0 && !yi.is_zero() {
+        if yi.is_zero() {
+            continue;
+        }
+        if *bi != 0.0 {
             g += q(*bi) * yi;
         }
+        margin += yi.abs() * &feas * (&one + q(bi.abs()));
     }
     for j in 0..n {
         let rc = reduced(cols, j, &yq);
         if rc.is_zero() {
             continue;
         }
-        if rc.is_positive() {
+        let side = if rc.is_positive() {
             if u[j] >= INF {
                 return false;
             }
-            g -= &rc * q(u[j]);
+            u[j]
         } else {
             if l[j] <= -INF {
                 return false;
             }
-            g -= &rc * q(l[j]);
-        }
+            l[j]
+        };
+        g -= &rc * q(side);
+        margin += rc.abs() * &feas * (&one + q(side.abs()));
     }
-    g.is_positive()
+    g > margin
 }
 
 /// Is `y` (in either orientation), corrected exactly on its open columns, a Farkas
@@ -366,5 +386,21 @@ mod tests {
             &l2,
             &u2
         ));
+    }
+
+    #[test]
+    fn tolerance_feasible_system_is_not_certified_2142() {
+        // x0 in [0, 1] and x0 - x1 = 1 + 1e-8 with x1 free in the row but fixed in
+        // [0, 0]: exactly infeasible by 1e-8, yet x0 = 1 satisfies the row within the
+        // solver's feasibility tolerance (1e-6 relative), so no certificate may be
+        // issued. A bare exact `g > 0` (P3.2 as first graduated) certified it: the
+        // #2142 cstr node LP failure, which HiGHS solves.
+        let a = vec![1.0, -1.0];
+        let c = csc(&a, 1, 2);
+        let (b, l, u) = (vec![1.0 + 1e-8], vec![0.0, 0.0], vec![1.0, 0.0]);
+        assert!(!farkas_exact_open(&[1.0], &c, 2, 1, &b, &l, &u));
+        // Infeasible by a clear margin (0.5): certified.
+        let b2 = vec![1.5];
+        assert!(farkas_exact_open(&[1.0], &c, 2, 1, &b2, &l, &u));
     }
 }
