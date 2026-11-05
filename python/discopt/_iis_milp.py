@@ -102,7 +102,10 @@ PORTFOLIO_WAITS: dict[str, tuple[float, Optional[tuple[float, float]]]] = {
 #: Wall-clock grace past a run's own budget before the interrupt callback stops
 #: it. HiGHS normally honours ``time_limit`` itself; this catches the overruns
 #: measured on presolve-free re-solves (7-10x a 30 s limit on ``enlight4``).
-_GRACE_S = 0.5
+#: Route-specific since P3.3: only the HiGHS backend (and ``_iis_reduce``'s HiGHS
+#: solve) installs the guard; the Rust driver polls its own deadline (measured: a
+#: 0.5 s budget returns in <= 0.58 s on enlight 8x8..14x14, presolve on and off).
+_GRACE_S = _bk.GRACE_S  # the HiGHS route's overrun grace (single source: _iis_backend)
 
 
 class _Refuted(Exception):

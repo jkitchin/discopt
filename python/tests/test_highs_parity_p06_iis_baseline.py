@@ -58,4 +58,5 @@ def test_iis_matches_the_baseline(panel, sha):
     assert got["bounds"] == want["bounds"]
     assert got["integrality"] == want["integrality"]
     assert got["proven_irreducible"] == want["proven_irreducible"]
+    assert got["n_solves"] == want["n_solves"]  # the worker runs the HiGHS engine
     assert got["complete"] == want["complete"]

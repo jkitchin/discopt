@@ -24,7 +24,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 27,
+   "n_solves": 22,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -32,6 +32,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 27,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "078109be21de54d6": {
@@ -46,7 +52,7 @@
      []
     ]
    ],
-   "n_solves": 11,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 1,
@@ -54,6 +60,12 @@
    "n_int": 1,
    "tests": [
     "python/tests/test_iis.py::test_integer_domain_conflict (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 11,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "0ee55d743a7f1d4f": {
@@ -75,7 +87,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 24,
+   "n_solves": 19,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -83,6 +95,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 24,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "1d578861f93b5b71": {
@@ -107,7 +125,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 17,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -115,6 +133,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "1ec8e0a9f8f1c72c": {
@@ -146,7 +170,7 @@
      []
     ]
    ],
-   "n_solves": 26,
+   "n_solves": 25,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -154,6 +178,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 26,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "220b33f80c96d93b": {
@@ -163,7 +193,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 11,
+   "n_solves": 5,
    "proven_irreducible": true,
    "complete": true,
    "n": 1,
@@ -171,6 +201,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis.py::test_result_len_and_bool_and_summary (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 11,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "31829ea29cfbd56b": {
@@ -191,7 +227,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 20,
+   "n_solves": 15,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -199,6 +235,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 20,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "34db13325e1b7e9b": {
@@ -214,7 +256,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 20,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -222,6 +264,12 @@
    "n_int": 1,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 20,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "35c8baf4d55c124b": {
@@ -231,7 +279,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 12,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 1,
@@ -242,6 +290,12 @@
     "python/tests/test_iis_probe_errors.py::test_probe_exception_propagates_and_model_is_restored[1] (call)",
     "python/tests/test_iis_probe_errors.py::test_probe_exception_propagates_and_model_is_restored[2] (call)",
     "python/tests/test_iis_probe_errors.py::test_returned_non_proof_status_is_still_inconclusive (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 12,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "3797e88c3c90df5d": {
@@ -266,7 +320,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 24,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -274,6 +328,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 24,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "3e102933220b85bf": {
@@ -299,7 +359,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 25,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -307,6 +367,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 25,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "3e38f4b1b3752c67": {
@@ -328,7 +394,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -336,6 +402,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "3e427344ac4791fe": {
@@ -355,7 +427,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 21,
+   "n_solves": 15,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -363,6 +435,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 21,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "41296b0c340cf210": {
@@ -376,7 +454,7 @@
      []
     ]
    ],
-   "n_solves": 7,
+   "n_solves": 5,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -384,6 +462,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_lp_feasible_mip_infeasible_keeps_only_needed_integrality (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 7,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "41cbd21c9741c633": {
@@ -398,7 +482,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 10,
+   "n_solves": 4,
    "proven_irreducible": true,
    "complete": true,
    "n": 1,
@@ -406,6 +490,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis.py::test_include_bounds_false_skips_bound_members (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 10,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "462ed5f6fbe75fe6": {
@@ -415,7 +505,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 16,
+   "n_solves": 10,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -423,6 +513,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis_deadline.py::test_default_path_honours_the_budget (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 16,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "48e0e041c2552b34": {
@@ -447,7 +543,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 22,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -455,6 +551,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 22,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "51b999a5213eafad": {
@@ -480,7 +582,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 25,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -488,6 +590,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 25,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "615233bf341b8552": {
@@ -513,7 +621,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 21,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -521,6 +629,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 21,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "645858197f60fc12": {
@@ -530,7 +644,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 12,
+   "n_solves": 7,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -538,6 +652,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_issue_1723_iis_probe_warnings.py::test_issue_repro_vector_variable_no_warning (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 12,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "6a0d46c6d5944d92": {
@@ -552,7 +672,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 17,
+   "n_solves": 11,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -560,6 +680,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 17,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "6dc1c72a601335ff": {
@@ -585,7 +711,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 21,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -593,6 +719,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 21,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "6e890b49289ca18d": {
@@ -680,7 +812,7 @@
      []
     ]
    ],
-   "n_solves": 21,
+   "n_solves": 17,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -688,6 +820,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 21,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "70d0d874e1d1c3b9": {
@@ -697,7 +835,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 14,
+   "n_solves": 9,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -706,6 +844,12 @@
    "tests": [
     "python/tests/test_iis_integrality.py::test_default_confirmation_is_final_and_the_output_is_two_config_infeasible (call)",
     "python/tests/test_iis_integrality.py::test_solution_format_example (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 14,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "70d3b384092a1047": {
@@ -726,7 +870,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 20,
+   "n_solves": 15,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -734,6 +878,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 20,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "782f38f89aa5dfe1": {
@@ -743,7 +893,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 12,
+   "n_solves": 7,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -751,6 +901,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_issue_1723_iis_probe_warnings.py::test_plain_solve_still_warns_after_compute_iis (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 12,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "81902b995a8c324d": {
@@ -770,7 +926,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 16,
+   "n_solves": 10,
    "proven_irreducible": true,
    "complete": true,
    "n": 3,
@@ -778,6 +934,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_issue_1618_remainder.py::test_c17_iis_names_bound_elements (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 16,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "82884eb8832ff97a": {
@@ -787,7 +949,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 29,
+   "n_solves": 23,
    "proven_irreducible": true,
    "complete": true,
    "n": 42,
@@ -795,6 +957,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis_deadline.py::test_default_path_honours_the_budget (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 29,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "867f6ad726860468": {
@@ -809,7 +977,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 13,
+   "n_solves": 7,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -817,6 +985,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis_probe_errors.py::test_vector_bound_with_some_infinite_elements_is_a_candidate (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 13,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "8ae113541fbf1583": {
@@ -831,7 +1005,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 11,
+   "n_solves": 5,
    "proven_irreducible": true,
    "complete": true,
    "n": 1,
@@ -839,6 +1013,12 @@
    "n_int": 1,
    "tests": [
     "python/tests/test_iis_integrality.py::test_relaxed_binary_bounds_become_members (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 11,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "97083706a8966d15": {
@@ -861,7 +1041,7 @@
      []
     ]
    ],
-   "n_solves": 23,
+   "n_solves": 22,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -869,6 +1049,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "98fca78d1c93a377": {
@@ -894,7 +1080,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 25,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -902,6 +1088,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 25,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "9c781214bca95cc5": {
@@ -918,7 +1110,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -926,6 +1118,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "9f677a19a4ef56db": {
@@ -950,7 +1148,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 24,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -958,6 +1156,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 24,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "9fb29f954e045f93": {
@@ -977,7 +1181,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 26,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -985,6 +1189,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 26,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "a099b98cf4796db1": {
@@ -1010,7 +1220,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 24,
+   "n_solves": 19,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1018,6 +1228,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 24,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "a42bb9ea75053e4c": {
@@ -1028,7 +1244,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 17,
+   "n_solves": 11,
    "proven_irreducible": true,
    "complete": true,
    "n": 3,
@@ -1043,6 +1259,12 @@
     "python/tests/test_iis_portfolio.py::test_portfolio_returns_smallest_complete_member (call)",
     "python/tests/test_iis_portfolio.py::test_portfolio_tie_goes_to_earlier_order (call)",
     "python/tests/test_iis_portfolio.py::test_portfolio_with_fewer_workers_than_orders_runs_all (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 17,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "ae2d29e43e77a80c": {
@@ -1052,7 +1274,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 31,
+   "n_solves": 25,
    "proven_irreducible": true,
    "complete": true,
    "n": 62,
@@ -1062,6 +1284,12 @@
     "python/tests/test_iis_deadline.py::test_budget_returns_a_confirmed_anytime_subsystem[each] (call)",
     "python/tests/test_iis_deadline.py::test_budget_returns_a_confirmed_anytime_subsystem[final] (call)",
     "python/tests/test_iis_deadline.py::test_no_time_to_prove_infeasibility_raises (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 31,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "b26b1eb7717aaf11": {
@@ -1091,7 +1319,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 26,
+   "n_solves": 20,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1099,6 +1327,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 26,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "b42ca31ab8f97d54": {
@@ -1123,7 +1357,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 22,
+   "n_solves": 16,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1131,6 +1365,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 22,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "b5d4acf5ee10069d": {
@@ -1160,7 +1400,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 24,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1168,6 +1408,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 24,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "c2361b4f1dee29af": {
@@ -1177,7 +1423,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 13,
+   "n_solves": 8,
    "proven_irreducible": true,
    "complete": true,
    "n": 3,
@@ -1185,6 +1431,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_issue_1723_iis_probe_warnings.py::test_user_declared_free_variable_is_still_reported (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 13,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "c2568609ac8d8da2": {
@@ -1209,7 +1461,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 21,
+   "n_solves": 15,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1217,6 +1469,12 @@
    "n_int": 2,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 21,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "c6f797d7d6aed7a5": {
@@ -1242,7 +1500,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 26,
+   "n_solves": 22,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1250,6 +1508,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 26,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "d5bac80dadfd081c": {
@@ -1269,7 +1533,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 17,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1277,6 +1541,12 @@
    "n_int": 1,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "d7446f8a07b0ea37": {
@@ -1305,7 +1575,7 @@
      []
     ]
    ],
-   "n_solves": 22,
+   "n_solves": 21,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1313,6 +1583,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 22,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "e5474cec3b8fe883": {
@@ -1332,7 +1608,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 16,
+   "n_solves": 10,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1340,6 +1616,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_issue_1723_iis_probe_warnings.py::test_bound_driven_iis_no_warning_and_bounds_restored (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 16,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "e5580a1c8b69a9ae": {
@@ -1365,7 +1647,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1373,6 +1655,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "e71ca9d8c5e23b5d": {
@@ -1382,7 +1670,7 @@
    ],
    "bounds": [],
    "integrality": [],
-   "n_solves": 14,
+   "n_solves": 8,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -1390,6 +1678,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis.py::test_isolates_two_constraint_conflict_from_red_herrings (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 14,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "f55c50e7d60f1f69": {
@@ -1404,7 +1698,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 12,
+   "n_solves": 6,
    "proven_irreducible": true,
    "complete": true,
    "n": 2,
@@ -1412,6 +1706,12 @@
    "n_int": 0,
    "tests": [
     "python/tests/test_iis.py::test_finds_bound_vs_constraint_conflict (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 12,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "f7de0d662dc894de": {
@@ -1432,7 +1732,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 22,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1440,6 +1740,12 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 22,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   },
   "f819cc464ba6f802": {
@@ -1461,7 +1767,7 @@
     ]
    ],
    "integrality": [],
-   "n_solves": 23,
+   "n_solves": 19,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -1469,6 +1775,12 @@
    "n_int": 4,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
+   ],
+   "n_solves_history": [
+    {
+     "n_solves": 23,
+     "until": "main 8ebd87bf..db232311 merge (#2145/#2159 IIS changes), re-recorded 2026-11-05 (P3.3)"
+    }
    ]
   }
  },

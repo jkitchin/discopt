@@ -1176,11 +1176,29 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (identical sets and `proven_irreducible` on every fixture with the flag ON, wall ≤ 2x:
   median 0.91x). Gates with the flag ON: `cargo test` 993/0, clippy `-D warnings`
   clean (both feature sets), smoke 4506, adversarial 19, IIS + parity + audit 650.
-- [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
+- [x] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with
   `time_limit=0.5` on `enlight`-class data returns within 1.0 s; `n_solves` and sets
   unchanged on P0.6. Kill: none. Regime: bound-neutral.
+
+  **Result (2026-11-05): done.** The HiGHS overrun guard already became route-specific in
+  P3.2 (it lives in `HighsBackend`; `_iis_reduce`'s HiGHS solve installs it too); the
+  Rust backend relies on the driver polling its own deadline. `_iis_milp._GRACE_S` is now
+  single-sourced from `_iis_backend.GRACE_S`. **Entry measurement:** a Rust probe with a
+  0.5 s budget on enlight-class lights-out models (8x8 .. 14x14, presolve on and off)
+  returned in **<= 0.58 s** (bar: 1.0 s), reported `INTERRUPTED`; a whole Rust-engine IIS
+  of pigeonhole PHP(10,9) under `total_time_limit` 2 s / 6 s raised `TimeoutError` at
+  2.01 s / 6.01 s (nothing confirmable in time -- on time). **`n_solves` on P0.6:** the
+  HiGHS engine's counts are 53/53 identical to the tree before P3.1 (a worktree at
+  `d553b789`, its `discopt` path and the absence of `_iis_backend` asserted); they
+  differed from P0.6's recorded counts on 52/53 because the 2026-11-05 `main` merge
+  (#2145/#2159) changed the IIS engine, not the backend refactor -- re-recorded with
+  history, and now **pinned** for the HiGHS engine in
+  `test_highs_parity_p06_iis_baseline.py`. Tests
+  `test_highs_parity_p33_iis_time_bound.py` (the bar, presolve on/off; the total
+  budget; the single-sourced grace). Gates: smoke 4505 (+1 timing-conditional skip,
+  `test_1386`, at a loaded 513 s run), IIS + parity 643, ruff/mypy clean.
 
 ### Phase 4 — MILP search (R1-MILP), ordered by measured expected gain
 
@@ -1334,7 +1352,7 @@ and is re-written by P4.1.**
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
 | P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry, P2.4 not pursued (owner), P2.6 [x] → **D1: flipped** | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
-| P3.1–P3.3 | P3.1 [x], P3.2 [x] (gaps), P3.3 [ ] | P3.1: Rust `MilpHandle`, 276 fresh-solve comparisons bit-identical, 120/120 vs HiGHS. P3.2: IIS engine behind a backend; `DISCOPT_FARKAS_EXACT_OPEN` graduated (corpus cert-clean, Rust IIS 53/53 vs P0.6, median wall 0.91x); IIS default stays HiGHS (big-M slack, pigeonhole → Phase 4) | see git log |
+| P3.1–P3.3 | P3.1 [x], P3.2 [x] (gaps), P3.3 [x] | P3.1: Rust `MilpHandle`, 276 fresh-solve comparisons bit-identical, 120/120 vs HiGHS. P3.2: IIS engine behind a backend; `DISCOPT_FARKAS_EXACT_OPEN` graduated (corpus cert-clean, Rust IIS 53/53 vs P0.6, median wall 0.91x); IIS default stays HiGHS (big-M slack, pigeonhole → Phase 4). P3.3: Rust probe 0.5 s budget returns ≤ 0.58 s; HiGHS `n_solves` pinned, refactor-neutral 53/53 | see git log |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
 | P6.1–P6.6 / D4 | [ ] | | |
