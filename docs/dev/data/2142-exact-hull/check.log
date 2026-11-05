@@ -1,0 +1,3 @@
+big-M default: status=optimal obj=3.062014576618532 bound=3.0617346252232247 nodes=29551 wall=100s
+x*: 5 active reactors, recycle at [5]
+x* max violation on the original plain rows: 1.11e-16

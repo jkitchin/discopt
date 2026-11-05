@@ -11,20 +11,28 @@ pre-registration are in this directory (`README.md`). Performance-plan §114 is 
   `(v_r/yhat)(v_Q/yhat)(v_Q/yhat) + 2 (v_FA/yhat)(v_FB/yhat)` times `yhat`. The lifted
   spatial spec the kernel is handed carries |global bound| up to **1e27** (`arm_hull_1.log`),
   above the LP's 1e20 sentinel. The model's own variables are all within [-10, 10].
-- **Design chosen: the lifted hull (LH).** Factor every nonconvex nonlinear disjunct row into
-  atoms (products, squares, univariates) *before* hulling; hull the now-linear row exactly
-  (Balas); define each atom's disaggregated copy by a *homogenized* equality
-  `w*y = p*q` (no division anywhere); add the perspective of each atom's envelope on the
-  disjunct's box as static linear rows (the exact hull of the per-disjunct McCormick
-  relaxation, Lee & Grossmann 2001 / Ruiz & Grossmann 2010). Exact at `y in {0,1}`; a
-  relaxation of the disjunction at fractional `y`; every column bounded by its atom's range
-  on the disjunct's box. Proof sketch in §3.
-- **Entry experiment (cstr, deterministic, `PYTHONHASHSEED=0`; §5 below).** The spec's
-  largest bound drops from 1e27 to 1e3 for every candidate; all three candidates move the
-  10k-node bound off 0.094. Numbers and the kill-criterion verdict are in §5.
+- **Design chosen: the homogenized perspective.** For a polynomial disjunct row of degree
+  `d`, replace `yhat g(v/yhat)` by `sum_m c_m prod_{i in m} v_i * y^(d-|m|) <sense> rhs y^d`:
+  the perspective multiplied through by `y^(d-1)`, so no division anywhere and every product
+  is between disaggregated copies (box <= the disjunct's) and `y in [0,1]`. Exact at
+  `y in {0,1}`; a relaxation of the disjunction at fractional `y`; a special case of the
+  lift-then-hull construction whose proof is in §3. A row the detector proves convex keeps
+  the eps-perspective (its exact convex hull); only nonconvex rows change.
+- **Entry experiment (cstr, deterministic, `PYTHONHASHSEED=0`; §5).** Every candidate
+  drops the spec's largest bound from 1e27 to 1e3. The homogenized perspective (`homog`,
+  candidate (a)) is the best: 10k-node bound 0.094 -> **1.611**, 20k-node bound **2.189**,
+  numerical LP verdicts ~6,000 per 1k nodes -> ~110 per 1k. The lift-then-hull design
+  (`lifted`, (b)) is tighter at the LP and *worse* in the tree (0.47 at 10k; 0.11 with both
+  row sets), so the chosen design is `homog`, with (b)'s construction retired by measurement.
+- **Kill criterion (pre-registered): not met.** `homog` at 20k (2.189) is below big-M's
+  2.788, and it does not certify on the default path in 300 s (30k nodes, bound 1.58). The
+  lowering fixes the hull's magnitude pathology; it does not make the hull route certify
+  cstr. The remaining gap is the hull's larger model per node, not its relaxation.
 - **Implementation plan** (§6): `DISCOPT_HULL_EXACT_PERSPECTIVE`, default OFF, in
   `gdp_reformulate.py` next to the #1917 origin-free hook, polynomial rows first, convex
-  rows keep the eps-perspective; tests and the §5 panel plan.
+  rows keep the eps-perspective; tests and the §5 panel plan. Recommended as a hull-route
+  fix in its own right (the panel measures ON against hull OFF), explicitly *not* as the
+  close of #2142.
 
 ## 1. What the shipped hull does, and why it is vacuous on cstr
 
@@ -124,7 +132,7 @@ None gives a nonconvex-row hull beyond "relax, then hull". (b) is that construct
 exact by the homogenized atom definitions, which is the part the literature leaves to the
 global solver's spatial branching.
 
-## 3. Soundness of (b)
+## 3. Soundness of (b), and of (a) as its special case
 
 Let `S_k = {x in B_k : rows_k(x)}` be disjunct `k`'s set, `Z_k = {(x, z): x in S_k, z =
 atoms(x)}` its lift, `P_k = {(x, z): x in B_k, linear rows, envelope rows}` its McCormick
@@ -158,6 +166,11 @@ columns. On cstr the lifted spec's largest bound is 1e3 (the range of `rate*Q*Q`
 it implies is `pi' <= 10 v_FA + 100 (1 - y)` and `pi' >= 10 v_FA + 10 v_FB - 100`, both
 weaker by `100 (1-y)`. Every (a) row is implied by (b)'s, so (b) dominates (a) at the LP.
 
+**3.4a (a) is (b) without the auxes.** Substituting `w_z y = w_p w_q` recursively into (b)'s
+linear row and multiplying through by `y^(d-1)` gives exactly (a)'s row, so (a)'s lowered set
+is the projection of (b)'s minus the envelope rows (iv): 3.1 and 3.2 hold for (a) verbatim.
+At the LP, (a) is weaker (3.4); in the tree, (a) is better (§5).
+
 **3.5 What is not claimed.** (iv) is built on `B_k` at lowering time; the kernel's per-node
 envelopes of (iii) use the copies' node boxes (which contain 0), so after branching on a
 copy, (iii)'s McCormick tightens while (iv) does not. A perspective-aware kernel term
@@ -179,80 +192,131 @@ Pre-registered in `PREREG.md` before any run past 1 node. cstr, deterministic,
 compared). Driver `arm.py`; prototype `exact_hull_proto.py` (monkeypatch of the hull's
 origin-free hook; the rest of the hull is the shipped code).
 
-RESULTS_TABLE
+| arm (cstr, deterministic, `PYTHONHASHSEED=0`, dual proofs ON unless noted) | 1 node | 10k nodes | 20k nodes | spec max \|bound\| | `LpVerdictNumerical` | node statuses (optimal / infeasible / numerical) |
+|---|---|---|---|---|---|---|
+| `hull` (shipped eps-perspective) | 0.0 | 0.0940 (§111/§114, 855-1022 s) | not run | **1e27** | 6,089 per 1k nodes (§114 d1) | 753 / 20 / 167 per 1k (§114) |
+| `bigm` (shipped default) | -1e-12 | **2.2486** (51.5 s) | **2.7875** (84.3 s; = §112 seed 0) | 1e3 | 176 @10k, 216 @20k | 5,570 / 3,362 / 0 @10k |
+| `homog` (candidate (a)) | -1e-12 | **1.6108** (183 s) | **2.1886** (405 s) | 1e3 | 1,122 @10k, 4,920 @20k | 5,640 / 3,395 / 0 @10k |
+| `homog`, dual proofs OFF | | | 0.7481 (231 s) | 1e3 | 1,441 | 10,542 / 7,741 / 17 @20k |
+| `lifted` (candidate (b)) | -1e-12 | 0.4705 (305 s) | not run (below `homog`) | 1e3 | 2,772 | 5,550 / 1,107 / 37 |
+| `both` (`lifted` rows + `homog` row) | -1e-12 | 0.1056 (303 s) | not run | 1e3 | 1,558 | 6,544 / 1,945 / 4 |
+| `ratio` (shipped #1917 hook on every row) | -1e-12 | 0.2574 (550 s) | not run | 1.2e3 | 12,064 | 6,090 / 1,046 / 11 |
+| `homog`, default path, `time_limit=300` (criterion 2; load 3) | | 30,246 nodes: bound 1.5799, incumbent 3.1302, **not certified** | | 1e3 | 838 | 18,631 / 9,431 / 0 |
+
+Reference for the dual-proof-OFF row: big-M OFF at 20k is 1.3432 (§108, §111). Walls: up to 4
+arms concurrent on 4 cores (§9: node counts are the comparison, not walls); `bigm` and `homog`
+10k ran side by side, so their walls are comparable to each other only roughly (`homog` is
+~3.5x slower per node on a model of 285 columns against 105).
+
+**Falsified expectation, recorded (§4 house style).** `lifted` dominates `homog` at the LP
+(§3.4, by construction) and reaches a *lower* tree bound at 10k nodes (0.47 against 1.61);
+adding the lifted rows to `homog` (`both`) drops it to 0.11. The static hull-envelope rows and
+the atom auxes do not pay in the tree: both arms fathom far fewer nodes as infeasible
+(1,107 and 1,945 against 3,395) and their bound stays low. The per-node McCormick of the
+homogenized row on the branched copies is what moves the bound, and the extra product terms
+`w*y = p*q` dilute it (the kernel's envelope of a product with `y in [0,1]` is loose until `y`
+is fixed). The chosen design is therefore the simplest one, `homog`; the lifted construction
+is retired by this measurement (its exactness proof in §3 stands and is reused for `homog`,
+which is its special case without auxes).
 
 Exactness checks (`check.py`, `check.log`): CHECK_SUMMARY
 
-VERDICT
+**Verdict against the pre-registered kill criterion: killed as the lever for #2142's
+"hull certifies cstr".** Criterion 1 fails: `homog` at 20k nodes is 2.1886 against big-M's
+2.7875 (and 0.7481 against 1.3432 with dual proofs off in both). Criterion 2 fails: on the
+default path at 300 s `homog` reaches 30k nodes and bound 1.58, uncertified. The secondary
+bar passes by a wide margin: 0.094 -> 1.61 at 10k and 0.094 -> 2.19 at 20k, the spec's
+largest bound 1e27 -> 1e3, numerical LP verdicts from ~6,000 per 1k nodes to ~110 per 1k.
+
+What the data says about the issue: with the magnitude pathology removed, the hull route on
+cstr behaves like big-M's tree (the same node-status mix, dual proofs firing at the same
+rate) on a model 2.7x larger, and reaches ~78 % of big-M's bound at equal nodes. The hull
+lowering is no longer the reason the route does not certify; the remaining gap is the
+larger model per node (the copies and their links are branched and propagated instead of
+`x`), which is the hull's structural cost on a model whose nonlinear rows are all nonconvex
+equalities. Pyomo's `gdp.hull` + SCIP does not certify cstr either (the issue's premise).
 
 ## 6. Implementation plan
 
 Flag `DISCOPT_HULL_EXACT_PERSPECTIVE` (default OFF; `solver_tuning.py` field
-`hull_exact_perspective`, `_env_flag(..., default=False)`, read through
-`_tuning()` like `hull_conic_quadratic`). Row added to `docs/dev/flag-retirement-audit.md`
-in the same PR.
+`hull_exact_perspective`, `_env_flag(..., default=False)`, read through `_tuning()` like
+`hull_conic_quadratic`). A row is added to `docs/dev/flag-retirement-audit.md` in the same
+PR, naming the panel below as its exit.
 
 Files and functions (`python/discopt/_relax/gdp_reformulate.py`):
 
 1. `_polynomial_monomials(body) -> dict[tuple[str, ...], float] | None` — the prototype's
-   `monomials()`: scalar variables, constants, `+ - *`, `neg`, `SumOver`; `None` on anything
-   else (division, `**`, function calls, array variables, a `Parameter` — its coefficients
-   must stay live, #1862). Pure function, unit-tested.
-2. `_lifted_hull_row(con, y_k, owned, bounds_k, cache, model, stem, new_vars, new_cons)
-   -> tuple[Expression, Expression]` — the prototype's `lifted` arm: per monomial of degree
-   >= 2 a left-to-right chain of atom copies (cached per disjunct and monomial prefix so
-   `Q*Q` is shared by every row of the disjunct), each with its homogenized equality, its
-   links and its hulled envelope rows (`_hull_envelope_rows`: McCormick for two distinct
-   columns; secant plus three tangents for a square). Returns the linear body and
-   `rhs * y_k`, in the row's own sense (an equality becomes `_le`/`_ge` as today).
-3. In `_reformulate_disjunction_hull`, nonlinear branch (line ~3190): when the flag is on,
-   the row is not proven convex (`classify_constraint`, as §111's probe used; a convex row
-   keeps the eps-perspective / cone, which is its exact hull) and `_polynomial_monomials`
-   succeeds, call `_lifted_hull_row`; else fall through to today's code unchanged. The
-   origin-free (#1917) path is untouched. With the flag off the lowering is byte-identical.
-4. Nesting: the new rows are homogeneous of degree 1 in the disjunct's locals for fixed
-   `y` only through `w`; a parent hulling this disjunction as a child re-hulls them like any
-   other local rows (the atom copies are locals, zero when `y_k` is, which is what the nested
-   hull needs). Covered by the existing nesting tests under the flag.
-5. Counters: `_HULL_EXACT_STATS` (rows lifted, atoms, envelope rows), printed by the solve
-   inventory, so a run can prove the branch fired (CLAUDE.md §6).
+   `monomials()` (`exact_hull_proto.py`): scalar variables, constants, `+ - *`, `neg`,
+   `SumOver`; `None` on anything else (division, `**`, function calls, array variables,
+   `IndexExpression`, a `Parameter` — its coefficients must stay live, #1862). A pure
+   function with its own unit test (distributivity, cancellation to an empty dict, the
+   `None` cases).
+2. `_homogenized_hull_row(con, y_k, copies, mono) -> tuple[Expression, Expression]` — the
+   prototype's `homog` arm: `d = max |m|`, body `sum_m c_m prod_{i in m} v_i * y^(d-|m|)`,
+   rhs `rhs * y^d`, in the row's own sense (an equality becomes `_le`/`_ge` as today). No
+   new column, no new row beyond today's; the lowered model keeps today's 236 columns and
+   597 rows on cstr (`check.log`).
+3. In `_reformulate_disjunction_hull`, nonlinear branch (line ~3190, `if not origin_free`):
+   when the flag is on, `_polynomial_monomials` succeeds, and the row is not proven convex
+   (`classify_constraint`, as §111's `e0_classify.py` used — a convex row keeps the
+   eps-perspective / cone, which is its exact convex hull), emit the homogenized row
+   instead of `subst_body * y_clamp - eps g0 (1-y)`; otherwise fall through unchanged. The
+   origin-free (#1917) path and the cone path are untouched. With the flag off the
+   lowering is byte-identical.
+4. Nesting (#1775 G2.1): the homogenized row is a polynomial in disjunct `k`'s locals and
+   `y_k`; a parent re-hulls it like any other nonlinear local row (its `g(0)` is 0, so the
+   eps-perspective applies, and under the flag the parent homogenizes it again, which is
+   exact by the same argument with `y_k` as one more local). Covered by the nesting tests
+   run under the flag.
+5. Counter `_HULL_EXACT_STATS` (rows homogenized, rows declined and why), surfaced by the
+   solve inventory so a run can prove the branch fired (CLAUDE.md §6).
+
+Not built, recorded: the lifted construction (b) (`exact_hull_proto.py`, `lifted`/`both`),
+retired by §5's measurement; the univariate extension (`exp`, `log`, fractional powers in a
+disjunct row keep the eps-perspective and its magnitudes — the same homogenization is not
+available, the ratio form (b') measured worst of all).
 
 Tests (`python/tests/test_2142_hull_exact_perspective.py`):
 
-- flag OFF: `reformulate_gdp(cstr, "hull")` row/variable counts and a 200-node
-  deterministic `node_count`/bound bit-identical to no flag;
+- flag OFF: `reformulate_gdp(cstr, "hull")` byte-identical rows (compare `str(body)` of
+  every row) and a 200-node deterministic `node_count`/bound identical to no flag;
+- `_polynomial_monomials` unit test;
 - `gdp_differential.run_shape` battery (`python/tests/gdp_differential.py`) on three new
-  shapes with bilinear and cubic disjunct rows (an equality, an inequality, a shared
-  product across rows): no feasible point cut, no infeasible point admitted — the §5
-  feasible-point sampling;
-- fixed-selector exactness: each configuration of the shapes solved under the flag, big-M
-  and the shipped hull gives the same optimum; the cstr optimum 3.0620073 is reproduced;
-- fixed-box differential: on 200 random sub-boxes of the shapes, the flag-ON LP bound is
-  <= the enumerated true box optimum (soundness) and the comparison with the flag-OFF bound
-  is recorded — ON >= OFF is *not* asserted, because the two are different formulations,
-  not a strengthening; on cstr-like boxes ON is expected far above OFF;
-- convex-combination containment: convex combinations of lowered feasible points of
-  different configurations satisfy every linear lowered row;
-- magnitude: the lifted spec's largest |global bound| on cstr under the flag is <= 1e4;
-- cstr regression: deterministic 2,000 nodes, flag ON bound > flag OFF bound, <= oracle.
+  shapes with bilinear and cubic disjunct rows (an equality, an inequality, a product shared
+  by two rows): no feasible point cut, no infeasible point admitted — the §5 feasible-point
+  sampling (the battery enumerates the integer auxiliaries and decides the continuous ones
+  by LP; the hull's copies are pinned, so the nonlinear verdict path applies);
+- fixed-selector exactness: every configuration of the shapes solved under the flag, big-M
+  and the shipped hull gives the same certified optimum; cstr's 3.0620073 reproduced under
+  the flag (deterministic, `max_nodes` cap, backstop time limit);
+- fixed-box differential: on 200 random sub-boxes of the shapes, the flag-ON LP bound is <=
+  the enumerated true box optimum (soundness). The comparison with the flag-OFF bound is
+  recorded, not asserted as `>=`: the two are different formulations, not a strengthening;
+- the off-disjunct rows are exactly 0 in floating point at `v = 0, y = 0` (the #1043 class);
+- magnitude: the lifted spec's largest finite |global bound| on cstr under the flag <= 1e4
+  (through `solve_spatial_tree_py`'s `global_lo`/`global_hi`, as `arm.py` reads them);
+- cstr regression: deterministic 2,000 nodes, flag ON bound > flag OFF bound and <= oracle.
 
-Panel (§5, both bars): flag ON vs OFF, `--assert-unfired-identical`, over the in-repo
-corpus (74, `max_nodes=2000`) and the GDP parity set (24 x hull, `max_nodes=5000`), plus
-the `requires-hull` GDPlib instances whose disjuncts carry polynomial nonconvex rows (the
-fire screen lists them). Cert-clean: `incorrect_count = 0`, no bound above its reference,
-no certification lost, incumbents feasibility-verified. Net-positive: a certification gained
-or a tighter node-limited bound where it fires, and bit-identical trees where it does not.
-Graduation flips the default; failure retires the flag and the implementation in one PR.
+Panel (§5, both bars, ON vs hull OFF): `--assert-unfired-identical`, over the in-repo corpus
+(74, `max_nodes=2000`) and the GDP parity set (24 x hull, `max_nodes=5000`), plus the GDPlib
+instances whose disjuncts carry polynomial nonconvex rows (a fire screen over
+`python/tests/data` GDP cases lists them). Cert-clean: `incorrect_count = 0`, no bound above
+its reference, no certification lost, incumbents feasibility-verified. Net-positive: a
+certification gained or a tighter node-limited bound where it fires, bit-identical trees
+where it does not. A pass flips the default (keep `=0` and today's path); a fail retires the
+flag and the implementation in one PR.
 
 ## 7. Risks
 
-- **Model growth.** On cstr the lowered model goes from 236 to 251 columns and 597 to ~690
-  rows; the mixed hull of §111 showed that a larger model can cost more nodes than the
-  tighter rows gain. The entry numbers in §5 measure this directly.
-- **Static envelopes (3.5).** The hulled envelope rows do not tighten with the node box;
-  on instances whose gap closes only by spatial branching on the copies, the kernel's own
-  McCormick of the homogenized rows carries the tightening, and it is weaker than a
-  perspective-aware term would be.
+- **It does not close #2142.** Both pre-registered criteria failed (§5). Building it is
+  justified only as a fix of the hull route's magnitude pathology, measured ON against hull
+  OFF by the panel; whoever builds it must not present it as the cstr certification.
+- **Per-node tightness.** The homogenized row's McCormick is on the copies' node boxes, which
+  contain 0 while `y` is fractional; a perspective-aware kernel term (the envelope on the box
+  of `t = v/y`) would be tighter per node and is the one lever left on the relaxation side.
+  The static version of it (`lifted`) made the tree worse, so this is not a safe bet either.
+- **Model size per node** is the hull's structural cost (285 vs 105 kernel columns on
+  cstr; ~3.5x the wall per node). Nothing in this design reduces it.
 - **Scope.** Polynomial rows only in the first increment; a disjunct row with `exp`, `log`,
   a division or a fractional power keeps the eps-perspective and its magnitudes. The
   univariate extension (atom copy `w = y f(t)` with the envelope rows of `f` on `B_k`

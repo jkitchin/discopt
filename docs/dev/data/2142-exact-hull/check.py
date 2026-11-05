@@ -114,12 +114,19 @@ def solve(model, max_nodes=2000, time_limit=120, **kw):
 
 
 # ---- 1. x* under big-M ----------------------------------------------------------------
+import json
 m = convert_pyomo_gdp(cstr.build_model()).model
-res_star, w = solve(m, gdp_method="big-m", max_nodes=150000, time_limit=600)
-print(f"big-M default: status={res_star.status} obj={res_star.objective} bound={res_star.bound} "
-      f"nodes={res_star.node_count} wall={w:.0f}s", flush=True)
-assert abs(res_star.objective - ORACLE) <= 1e-4, res_star.objective; n_assert += 1
-x_star = values(m, res_star)
+REF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_ref.json")
+cached = json.load(open(REF)) if os.path.exists(REF) else None
+if cached is None:
+    res_star, w = solve(m, gdp_method="big-m", max_nodes=150000, time_limit=600)
+    print(f"big-M default: status={res_star.status} obj={res_star.objective} bound={res_star.bound} "
+          f"nodes={res_star.node_count} wall={w:.0f}s", flush=True)
+    assert abs(res_star.objective - ORACLE) <= 1e-4, res_star.objective; n_assert += 1
+    x_star = values(m, res_star)
+else:
+    print("big-M references read from check_ref.json (written by an earlier run of this script)")
+    x_star = cached["x_star"]
 j_star = sum(int(round(x_star[f"YP_is_cstr[{n}]_active"])) for n in range(1, 6))
 r_star = [n for n in range(1, 6) if round(x_star[f"YR_is_recycle[{n}]_active"]) == 1]
 print(f"x*: {j_star} active reactors, recycle at {r_star}")
@@ -132,12 +139,20 @@ print(f"x* max violation on the original plain rows: {viol_star:.2e}")
 # ---- 2. the configurations under big-M -----------------------------------------------
 ref = {}
 for j, r in CONFIGS:
+    if cached is not None:
+        ref[(j, r)] = tuple(cached["ref"][f"{j},{r}"])
+        print(f"big-M config j={j} r={r} (cached): status={ref[(j, r)][0]} obj={ref[(j, r)][1]} "
+              f"bound={ref[(j, r)][2]}")
+        continue
     mc = m.clone()
     fix_config(mc, j, r)
     res, w = solve(mc, gdp_method="big-m")
     ref[(j, r)] = (res.status, res.objective, res.bound)
     print(f"big-M config j={j} r={r}: status={res.status} obj={res.objective} bound={res.bound} "
           f"nodes={res.node_count} wall={w:.0f}s", flush=True)
+if cached is None:
+    json.dump({"x_star": x_star, "ref": {f"{j},{r}": list(v) for (j, r), v in ref.items()}},
+              open(REF, "w"))
 assert ref[(j_star, r_star[0])][1] is not None; n_assert += 1
 assert abs(ref[(j_star, r_star[0])][1] - ORACLE) <= 1e-4; n_assert += 1
 
@@ -148,7 +163,8 @@ copy_re = re.compile(r"^_hull_(?P<prefix>.+)_v_(?P<vname>.+)_(?P<k>\d+)$")
 
 def lowered_point(low, x, arm):
     """Map an original point (dict) to the lowered columns: copies, auxes, ratio columns."""
-    sels = {key: [s.name for s in sels] for key, (dc, sels) in plan.groups.items()}
+    # the hull sanitizes the group key into the variable names (':' -> '_')
+    sels = {key.replace(":", "_"): [s.name for s in sels] for key, (dc, sels) in plan.groups.items()}
     vals = dict(x)
     for v in low._variables:
         if v.name in vals:

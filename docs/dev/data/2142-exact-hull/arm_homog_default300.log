@@ -234998,3 +234998,11 @@
   SepGomoryBtranFail          0
   SepGomoryCutsEmitted          0
   SepGomoryCutNnz             0
+ARM=homog METHOD=hull DET=False MAX_NODES=0 TL=300.0 status=time_limit obj=3.1301981335523896 bound=1.5798741317628495 nodes=30246 gap_certified=False wall=300.1s
+proto stats: {'rows': 5, 'auxes': 0, 'hull_mc_rows': 0, 'arm': 'homog'}
+spec max |global bound|: 1.000e+03
+  kernel: {'max_nodes': 100000, 'status': 'time_limit', 'bound': 1.5798741317628495, 'nodes': 30246, 'undecided': 1, 'n_cols': 285, 'wall': 285.1}
+node status histogram: {'optimal': 18631, 'infeasible': 9431, 'iter_limit': 1}
+counters: {'DualProofLearned': 76, 'DualProofTightenings': 705824, 'DualProofFathoms': 122, 'LpVerdictOptimal': 10503, 'LpVerdictInfeasible': 264, 'LpVerdictNumerical': 838, 'LpInfeasUncertified': 208, 'FarkasRejectMargin': 10670}
+RESULT arm=homog nodes=0 bound=1.5798741317628495 status=time_limit wall=300.1 spec_mag=1.000e+03 numerical=838
+executed assertions: 6
