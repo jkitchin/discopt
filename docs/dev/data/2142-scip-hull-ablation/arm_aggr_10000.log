@@ -234998,3 +234998,10 @@
   SepGomoryBtranFail          0
   SepGomoryCutsEmitted          0
   SepGomoryCutNnz             0
+ARM=aggr MAX_NODES=10000 status=node_limit obj=3.0620145766187727 bound=1.6998176455766523 nodes=10000 gap_certified=False wall=450.3s
+rewrite stats: {'skip_term': 5, 'aggregated': 106, 'rows_dropped': 118}
+  kernel: {'max_nodes': 10000, 'status': 'node_limit', 'bound': 1.6998176455766523, 'nodes': 10000, 'undecided': 105, 'n_cols': 285, 'n_rows': 661, 'wall': 403.4}
+node status histogram: {'optimal': 5447, 'infeasible': 2973, 'numerical': 105}
+counters: {'DualProofLearned': 50, 'DualProofTightenings': 96638, 'DualProofFathoms': 189, 'LpVerdictOptimal': 4339, 'LpVerdictInfeasible': 121, 'LpVerdictNumerical': 2430, 'LpInfeasUncertified': 662, 'FarkasRejectMargin': 12271}
+RESULT arm=aggr nodes=10000 bound=1.6998176455766523 status=node_limit wall=450.3 numerical=2430
+executed assertions: 5

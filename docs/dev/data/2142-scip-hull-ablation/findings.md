@@ -95,9 +95,11 @@ from `obbt_candidates`; `incumbent_x` and the `incumbent_value` / `primal_hook` 
 expanded back; every expanded incumbent asserted feasible on the ORIGINAL spec to 1e-6).
 Arms: `aggr` 10k, `aggr` 20k, `base` 10k (bit-identity control against 1.6107840610272945).
 Kill: 20k bound <= 2.7875. Logs: `arm_aggr_10000.log`, `arm_aggr_20000.log`,
-`arm_base_10000.log` (lines `RESULT ...`, `rewrite stats`, `counters`). **Results pending at
-the time of writing** (launched 14:09, ~4 processes on 4 cores; the base 10k alone takes
-~3 min unloaded, 20k ~7 min).
+`arm_base_10000.log` (lines `RESULT ...`, `rewrite stats`, `counters`). First result (`arm_aggr_10000.log`): **aggr @10k bound 1.6998** vs homog base 1.6108
+(+0.089; big-M 2.2486); 106 of the 111 aggregations expressible (5 skipped: non-identity
+kind-1 term inputs), 118 rows dropped, incumbent 3.0620146 feasible on the original spec
+(5 executed assertions), `LpVerdictNumerical` 2,430 (base 1,122). A small gain, far from the
+big-M line; the 20k arm (kill at <= 2.7875) and the base 10k control are still running.
 
 ## 5. Implementation proposal (for the agent that builds it)
 
