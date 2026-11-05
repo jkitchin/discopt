@@ -21,3 +21,75 @@ lowered: vars 236 rows 597 stats {'rows': 5, 'auxes': 0, 'hull_mc_rows': 0, 'arm
  INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=4.0587626770616225e-7 obj=9.894549424662353 acceptable_tol=1e-6 window=15 kappa=0.1
 [3b] j=1 r=1: arm status=feasible obj=9.894736842105258 bound=3.3081474927589176 nodes=247 wall=120s | big-M status=feasible obj=9.894736842105234 bound=2.6533450330586756
       projection on the original + selected-disjunct rows: 2.22e-16 (None)
+[3b] j=2 r=1: arm status=feasible obj=4.061881684530911 bound=1.2436607389211407 nodes=583 wall=120s | big-M status=feasible obj=4.061881684530911 bound=2.6636755711242985
+      projection on the original + selected-disjunct rows: 8.88e-16 (YP_is_cstr[1]_then_0)
+[3b] j=3 r=3: arm status=feasible obj=3.3148454030723995 bound=0.42386184013402484 nodes=445 wall=120s | big-M status=feasible obj=3.3148454030723977 bound=0.26253682305348647
+      projection on the original + selected-disjunct rows: 1.11e-16 (None)
+[3c] 18 convex combinations of 4 lowered points satisfy all 575 linear lowered rows
+
+===== arm lifted =====
+lowered: vars 251 rows 702 stats {'rows': 5, 'auxes': 15, 'hull_mc_rows': 60, 'arm': 'lifted'}
+[3a] x* on every lowered row: max violation 2.22e-16 (_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_d0_c0_ge)
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[1]_0_0_wmc_Q[1]_Q[1]_sqtan'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[1]_0_0_wub'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[1]_0_0_wlb'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[1]_0_0_wmc_Q[1]_Q[1]_rate[A,1]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[1]_0_0_wmc_F[A,1]_F[B,1]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[2]_1_0_wmc_Q[2]_Q[2]_sqtan'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[2]_1_0_wub'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[2]_1_0_wlb'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[2]_1_0_wmc_Q[2]_Q[2]_rate[A,2]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[2]_1_0_wmc_F[A,2]_F[B,2]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[3]_2_0_wmc_Q[3]_Q[3]_sqtan'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[3]_2_0_wub'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[3]_2_0_wlb'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[3]_2_0_wmc_Q[3]_Q[3]_rate[A,3]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[3]_2_0_wmc_F[A,3]_F[B,3]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[4]_3_0_wmc_Q[4]_Q[4]_sqtan'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[4]_3_0_wub'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[4]_3_0_wlb'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[4]_3_0_wmc_Q[4]_Q[4]_rate[A,4]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[4]_3_0_wmc_F[A,4]_F[B,4]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_0_wmc_Q[5]_Q[5]_sqtan'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_0_wub'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_0_wlb'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_0_wmc_Q[5]_Q[5]_rate[A,5]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+/home/user/discopt/python/discopt/modeling/core.py:10171: UserWarning: Duplicate constraint name: '_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_0_wmc_F[A,5]_F[B,5]_mc'. result.constraint_duals is keyed by name, so rows sharing a name collide there (expected for indexed/array constraint families). Give distinct names if you need per-row duals. (M5, #413)
+  self.validate()
+[3b] j=5 r=5: arm status=node_limit obj=3.062014576618524 bound=1.0765902674750838 nodes=2000 wall=31s | big-M status=node_limit obj=3.062014576618535 bound=1.2021923155508145
+      projection on the original + selected-disjunct rows: 2.22e-16 (None)
+[3b] j=1 r=1: arm status=feasible obj=9.894736842105253 bound=0.23212760573880037 nodes=59 wall=124s | big-M status=feasible obj=9.894736842105234 bound=2.6533450330586756
+      projection on the original + selected-disjunct rows: 3.33e-16 (None)
+spatial B&B (#1659): the incumbent fails the exit gate (constraint row 280 violated by 1.109e-06 beyond the term-scaled tolerance, declared abs tol 1e-06, 1404 comparisons); reporting it UNCERTIFIED.
+[3b] j=2 r=1: arm status=feasible obj=4.061881684530911 bound=0.9574751196893301 nodes=415 wall=120s | big-M status=feasible obj=4.061881684530911 bound=2.6636755711242985
+      projection on the original + selected-disjunct rows: 8.88e-16 (None)
+[3b] j=3 r=3: arm status=feasible obj=3.3148454030723986 bound=0.21807665330893042 nodes=277 wall=120s | big-M status=feasible obj=3.3148454030723977 bound=0.26253682305348647
+      projection on the original + selected-disjunct rows: 1.11e-16 (None)
+[3c] 18 convex combinations of 4 lowered points satisfy all 675 linear lowered rows
+
+executed assertions: 63
+exit 0

@@ -219,7 +219,22 @@ is fixed). The chosen design is therefore the simplest one, `homog`; the lifted 
 is retired by this measurement (its exactness proof in §3 stands and is reused for `homog`,
 which is its special case without auxes).
 
-Exactness checks (`check.py`, `check.log`): CHECK_SUMMARY
+Exactness checks (`check.py`, `check.log`; 63 executed assertions, both `homog` and
+`lifted`):
+
+- the big-M certified optimum x* (29,551 nodes, obj 3.0620146), mapped to the lowered
+  columns, violates no lowered row by more than **2.2e-16**;
+- four fixed selector configurations ((5,5) = x*'s, (1,1), (2,1), (3,3)): the candidate's
+  incumbent equals big-M's to 1e-14 in every case (3.0620146, 9.8947368, 4.0618817,
+  3.3148454), and each candidate solution projects onto the original rows plus the selected
+  disjuncts' rows with violation <= **8.9e-16**. (The fixed configurations are nonconvex
+  NLPs that no arm certifies in the 120 s / 2,000-node budget, so this compares incumbents,
+  not certified optima; the (5,5) incumbent is the oracle.)
+- 18 convex combinations of the four lowered points satisfy every linear lowered row (575
+  rows under `homog`, which adds none to today's 597; 675 under `lifted`).
+
+`homog` leaves the lowered model at today's 236 columns and 597 rows; only the five
+nonlinear rows' expressions change.
 
 **Verdict against the pre-registered kill criterion: killed as the lever for #2142's
 "hull certifies cstr".** Criterion 1 fails: `homog` at 20k nodes is 2.1886 against big-M's
