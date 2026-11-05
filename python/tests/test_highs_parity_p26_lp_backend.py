@@ -46,6 +46,7 @@ def test_lp_defaults_to_the_rust_route():
     r = _lp().solve(time_limit=30)
     assert r.status == "optimal" and r.gap_certified
     assert not _on_highs(r)
+    assert r.algorithm_route.startswith("rust-lp: discopt LP solve, Rust simplex")
     assert r.objective == pytest.approx(2.0)
 
 

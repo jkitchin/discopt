@@ -18001,7 +18001,7 @@ def solve_model(
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
-            if _lpm_backend == "native" and _lp_res.algorithm_route is None:
+            if _lp_res.algorithm_route is None:
                 _lp_stats = _lp_res.solver_stats or {}
                 _lp_engine = (
                     "Rust simplex"
@@ -18010,8 +18010,12 @@ def solve_model(
                     if "lp/engine_pounce" in _lp_stats
                     else "no engine certified"
                 )
+                # highs-parity D1: the default LP route names itself, as the HiGHS
+                # route (``highs-lp: ...``) and ``native`` always did.
                 _lp_res.algorithm_route = (
                     f"native-lp: discopt LP solve, {_lp_engine} (milp_backend='native')"
+                    if _lpm_backend == "native"
+                    else f"rust-lp: discopt LP solve, {_lp_engine}"
                 )
             return _lp_res
         elif problem_class == ProblemClass.QP and not _callbacks_force_bb:

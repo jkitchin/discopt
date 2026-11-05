@@ -230,7 +230,8 @@ def test_a21_zero_quadratic_coefficient_is_linear(form, where, integer):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(12.0, abs=1e-6)  # x=4, y=0
-    assert _route(r).startswith("highs-milp" if integer else "highs-lp"), r.algorithm_route
+    # A MILP goes to HiGHS; an LP to the default LP route (Rust since highs-parity D1).
+    assert _route(r).startswith("highs-milp" if integer else "rust-lp"), r.algorithm_route
 
 
 @pytest.mark.parametrize("where", ["objective", "constraint"])
