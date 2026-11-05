@@ -890,8 +890,8 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   held; Rust unit tests cover each reduction's postsolve on crafted LPs. Kill: entry fails
   or any certificate lost → retire. Regime: bound-neutral (postsolve must be exact; a
   dual that fails the ladder is a bug, not a tolerance to widen).
-- [ ] **P2.5 — Degeneracy: bound-flipping ratio test + cost perturbation on the LP
-  route** *(≤ 2 iterations)*. Scope: `dual.rs` (`cost_perturbation_*` tests exist), the
+- [x] **P2.5 — Degeneracy: bound-flipping ratio test + cost perturbation on the LP
+  route** *(re-scoped by the owner 2026-11-05 to the exact dual correction; done)* *(≤ 2 iterations)*. Scope: `dual.rs` (`cost_perturbation_*` tests exist), the
   stall guard. Entry: per P2.1, the share of iterations spent in degenerate pivots on the
   three failures. Flag `DISCOPT_LP_DEGEN_PERTURB` default OFF. Done: the three failures
   certify in < 20 s with the ladder closing; iterations −30 % on degenerate instances;
@@ -914,6 +914,31 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   such: 35 % of the L panel's Rust pivots are degenerate (`p2.2/entry_phase_split.json`;
   46–49 % on `etamacro`, `stair`) -- an iteration-only target, since the simplex is ≤ 7 %
   of the route's wall (P2.1).
+  **Re-scope (owner, 2026-11-05):** fix the exact dual correction rather than degeneracy;
+  the degeneracy work (bound-flipping ratio test, cost perturbation,
+  `DISCOPT_LP_DEGEN_PERTURB`) is not pursued -- it could only cut iterations, and the
+  simplex is ≤ 7 % of the route's wall.
+  **Result (2026-11-05): `perold` certifies on the Rust route; L is 25/25 on both.** The
+  cost was `_exact_solve`'s **dense** rational Gaussian elimination: every row update
+  swept every column of a block made of LP columns with a few nonzeros each. Now sparse
+  (row maps, the pivot in each column the remaining row with the fewest nonzeros).
+  `perold`'s Rust-dual correction: dense ran out of `EXACT_MAX_TOTAL_WORK` (4e8) in round
+  6, sparse needs **1.9e7** and certifies −9380.755278236511 (oracle −9380.755278235187);
+  on HiGHS's dual the bound is bit-identical and the correction ~2× faster in wall. No
+  flag and no cap changed: a nonsingular system has exactly one rational solution, and
+  elimination finds no pivot exactly when the system is singular, so the change can only
+  turn a work-cap refusal into the answer the dense form would have reached. Evidence:
+  300 random rational systems (half singular by construction) identical to a dense
+  reference; `solve_lp_std` on every P0.5 fixture with equality rows + L + INF, both
+  engines, old vs new code: **379/380 bit-identical** (status, certificate, bound,
+  objective, provenance), the one change `perold|rust` → certified. Panel L/M/INF R+H,
+  1 round (`p2.5/sparse_exact_lmi.json`): 130 executed, 0 incorrect; vs the P2.0 (ii)
+  panel the only verdict change from this commit is `perold` R; `bell5` H (objective
+  8966635.6 → 8966413.7, both certified) and `rgn` R (2461 → 2565 nodes) moved with the
+  2026-11-05 `main` merge (#2136/#2151) -- re-run 3× each with the old and the new
+  `_exact_solve`: identical, and `exact_ns_bound` is never called on either. Rust
+  certifies L 25/25, M 18/24, INF 15/16 (H: 25, 24, 15). Test
+  `test_highs_parity_p25_sparse_exact_solve.py` (the `perold` case fails before).
 - [ ] **P2.6 — R1-LP graduation gate → D1.** Scope: `solver.py:37494` (`_lp_milp_backend`
   split: new `DISCOPT_LP_BACKEND`, default `highs`, for the pure-LP class only;
   `DISCOPT_LP_MILP_BACKEND` keeps governing MILP), docs. Done: L panel, Rust engine via
@@ -1104,7 +1129,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %) | see git log |
+| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped) | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25 | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |

@@ -21,7 +21,7 @@ import scipy.sparse as sp
 
 H = pytest.importorskip("discopt.solvers.lp_milp_highs")
 
-_FIX = Path(__file__).parent / "data" / "highs_parity" / "p25_perold_rust_dual.npz"
+_FIX = Path(__file__).parent / "data" / "highs_parity" / "p25" / "perold_rust_dual.npz"
 
 
 def _dense_reference(M, rhs):
