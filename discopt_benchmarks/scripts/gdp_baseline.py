@@ -240,6 +240,10 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
             if k.startswith("vub_cmir/")
         },
     }
+    # #2144: where the configuration search's feasibility fallback fired.
+    from discopt._relax.primal_heuristics import FEAS_FALLBACK_COUNTS
+
+    out["feas_fallback"] = dict(FEAS_FALLBACK_COUNTS)
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
     return out

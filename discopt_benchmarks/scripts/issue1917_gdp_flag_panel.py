@@ -122,6 +122,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # default route these flags act on. Firing is shown per master by
     # ``g32/replay.py``'s counters on the captured first masters.
     "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
+    # #2144: the configuration search's feasibility-first fallback acts at solve
+    # time (lowering identical): solve ``--all``. Rows carry ``feas_fallback``, the
+    # worker's firing counter.
+    "DISCOPT_GDP_CONFIG_FEAS_FALLBACK": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

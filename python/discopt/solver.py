@@ -21398,6 +21398,8 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
+                        # #2144: the sampling fallback is a constructor only.
+                        feasibility_fallback=tree.incumbent() is None,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
@@ -28930,6 +28932,8 @@ def _solve_nlp_bb(
                         model,
                         _gdd_nb["seed"],
                         evaluator=evaluator,
+                        # #2144: the sampling fallback is a constructor only.
+                        feasibility_fallback=tree.incumbent() is None,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )

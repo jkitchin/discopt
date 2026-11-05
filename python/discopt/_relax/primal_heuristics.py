@@ -2956,6 +2956,144 @@ def _residual_assignments(
 #: is what leaves the dive a share to work in.
 _WAVE_SOLVE_CAP = 48
 
+#: Sub-NLP solves the #2144 feasibility-first fallback may spend. A **count**, for
+#: the same #912 reason as ``_WAVE_SOLVE_CAP``: how many samples run is a function
+#: of the model, never of machine speed. The clock only stops it at the solve's own
+#: deadline (role 1), which is the stopping contract, not a work budget.
+#:
+#: Sized from #2144's measurement on batch_processing (big-M, the 29-group GDP whose
+#: relaxation argmax is infeasible): 54 of 60 uniformly sampled valid configurations
+#: gave a feasible sub-NLP, so the chance that 16 samples all fail at that rate is
+#: about 1e-16; and from the per-solve cost there (0.14-0.53 s), which puts the
+#: worst case -- every sample infeasible, on a model where the fallback cannot help
+#: -- at a few seconds, paid once per solve.
+_FEAS_SAMPLE_ATTEMPTS = 16
+
+#: Process-wide firing record of the #2144 fallback (CLAUDE.md §6: a panel must be
+#: able to show where the flag fired). Read by ``gdp_baseline``'s worker.
+FEAS_FALLBACK_COUNTS = {"calls": 0, "attempted": 0, "feasible": 0}
+
+
+def _gdp_config_feas_fallback_enabled() -> bool:
+    """Whether the #2144 feasibility-first fallback runs (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``).
+
+    **Default OFF** until its CLAUDE.md §5 panel passes (row in
+    ``docs/dev/flag-retirement-audit.md``). See :func:`_one_hot_feasibility_samples`.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _one_hot_feasibility_samples(
+    model: Model,
+    groups: list[list[int]],
+    residual: list[int],
+    residual_assigns: list[tuple[float, ...]],
+    zero_start: np.ndarray,
+    *,
+    backend: Optional[Callable],
+    nlp_options: Optional[dict],
+    evaluator: Optional[NLPEvaluator],
+    integer_tol: float,
+    max_attempts: int = _FEAS_SAMPLE_ATTEMPTS,
+    seed: int = 0,
+    stats: Optional[dict] = None,
+) -> list[tuple[np.ndarray, float]]:
+    """#2144: sample valid disjunct configurations until one is feasible.
+
+    The fallback for the case the wave and the dive both miss: the relaxation's
+    preference is *anti-correlated* with feasibility, so a search that ranks by it
+    stays in an infeasible neighbourhood. Measured on GDPlib batch_processing
+    (big-M): the root relaxation puts its weight on the first disjunct of every
+    group, that argmax configuration is infeasible, LOA's feasible configuration
+    differs from it in 17 of 29 groups -- and 54 of 60 *uniformly* sampled valid
+    configurations are feasible. Ranking by the relaxation is worse there than not
+    ranking at all, so this stops ranking.
+
+    Each sample picks one disjunct per group uniformly (a valid configuration by
+    construction, as in the wave), fixes the residual binaries to the relaxation's
+    own rounding on even samples and to a uniformly drawn residual assignment on odd
+    ones, and solves the fixed sub-NLP from the wave's zero start. It stops at the
+    **first** feasible point: the goal is an incumbent, and improving it is the
+    tree's job (and the deferred constructor call's).
+
+    Its budget is its own, ``max_attempts`` sub-NLP solves, *not* a share of the
+    wave's deadline. That is the lesson of #2150, which interleaved samples into
+    the wave and lost either way: samples placed early took the time ``mod_hens``
+    (big-M) needs to reach its ranked plan, and samples placed late got no time at
+    all. Here the samples run only after both ranked searches have found nothing,
+    so they cannot displace a ranked plan, and they are bounded by a count, so they
+    cannot be starved by a clock either. The solve's own deadline still stops them.
+
+    Soundness: every point comes from :func:`subnlp`, which re-verifies integer-
+    and constraint-feasibility. Primal only; the dual bound is never touched.
+    """
+    from discopt.solver import _role1_deadline
+
+    rng = np.random.default_rng(seed)
+    results: list[tuple[np.ndarray, float]] = []
+    seen: set[tuple[int, ...]] = set()
+    attempted = 0
+    draws = 0
+    stop = "attempt cap"
+    # Bounded draws so a model with few distinct configurations cannot spin here.
+    while attempted < max_attempts and draws < 8 * max_attempts:
+        draws += 1
+        picks = tuple(int(rng.integers(len(g))) for g in groups)
+        ri = 0 if attempted % 2 == 0 else int(rng.integers(len(residual_assigns)))
+        key = picks + (ri,)
+        if key in seen:
+            continue
+        seen.add(key)
+        stop_at = _role1_deadline()
+        if stop_at is not None and _now() >= stop_at:
+            stop = "deadline"
+            break
+        x0 = zero_start.copy()
+        for g, k in zip(groups, picks):
+            for j in g:
+                x0[j] = 0.0
+            x0[g[k]] = 1.0
+        if residual:
+            for j, v in zip(residual, residual_assigns[ri]):
+                x0[j] = v
+        attempted += 1
+        found = subnlp(
+            model,
+            x0,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            integer_tol=integer_tol,
+            time_budget=None if stop_at is None else max(0.0, stop_at - _now()),
+        )
+        if found is not None:
+            results.append(found)
+            stop = "feasible"
+            break
+    else:
+        if attempted >= max_attempts:
+            stop = "attempt cap"
+        else:
+            stop = "draw cap"
+    logger.debug(
+        "one_hot_config feasibility fallback: %d sample(s) attempted (%s), %d feasible",
+        attempted,
+        stop,
+        len(results),
+    )
+    FEAS_FALLBACK_COUNTS["calls"] += 1
+    FEAS_FALLBACK_COUNTS["attempted"] += attempted
+    FEAS_FALLBACK_COUNTS["feasible"] += len(results)
+    if stats is not None:
+        stats["attempted"] = attempted
+        stats["first_feasible_at"] = attempted if results else None
+    return results
+
 
 @_stops_at_solve_deadline
 def one_hot_config_subnlp(
@@ -2968,6 +3106,7 @@ def one_hot_config_subnlp(
     integer_tol: float = 1e-5,
     deadline: Optional[float] = None,
     stats: Optional[dict] = None,
+    feasibility_fallback: bool = True,
 ) -> list[tuple[np.ndarray, float]]:
     """Root primal *constructor* for disjunctive (GDP) models: pick one disjunct
     per disjunction, then solve the fixed-integer sub-NLP.
@@ -3049,11 +3188,18 @@ def one_hot_config_subnlp(
         deadline: Absolute ``perf_counter`` deadline; the loop stops before
             starting a configuration that cannot finish inside it.
         stats: Optional dict, filled with ``{"attempted": n}`` -- the number of
-            sub-NLP solves this call and its dive actually issued. The caller
+            sub-NLP solves this call, its dive and its fallback actually issued
+            (the fallback's own count is also under ``"fallback_attempted"``). The caller
             needs this because the return value carries only the *feasible*
             points: counting those as sub-NLP calls reports 0 on exactly the
             models where the heuristic worked hardest and found nothing, which
             is the vacuous instrument #1062 is named after (CLAUDE.md 6).
+        feasibility_fallback: Allow the #2144 fallback
+            (:func:`_one_hot_feasibility_samples`, behind
+            ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``) when the wave and the dive both
+            return nothing. A caller that already holds an incumbent passes
+            ``False``: the fallback is a constructor, and its first feasible
+            sample is rarely an improvement.
 
     Returns:
         Every feasible ``(x, obj)`` found (possibly empty). The caller injects
@@ -3291,6 +3437,28 @@ def one_hot_config_subnlp(
     )
     if stats is not None:
         stats["attempted"] = attempted + int(_dive_stats.get("attempted", 0))
+    # #2144: both ranked searches found nothing. Stop ranking and sample, on a
+    # budget of its own (see ``_one_hot_feasibility_samples`` for why it cannot
+    # share the wave's deadline).
+    if not results and feasibility_fallback and _gdp_config_feas_fallback_enabled():
+        _fb_stats: dict = {}
+        results.extend(
+            _one_hot_feasibility_samples(
+                model,
+                groups,
+                residual,
+                residual_assigns,
+                zero_start,
+                backend=backend,
+                nlp_options=nlp_options,
+                evaluator=evaluator,
+                integer_tol=integer_tol,
+                stats=_fb_stats,
+            )
+        )
+        if stats is not None:
+            stats["fallback_attempted"] = int(_fb_stats.get("attempted", 0))
+            stats["attempted"] += stats["fallback_attempted"]
     return results
 
 
