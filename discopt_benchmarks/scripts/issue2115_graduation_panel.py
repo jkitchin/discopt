@@ -120,7 +120,10 @@ _FLAGS = {
         "show": ("SpatialSplits", "SpatialSplitMoved"),
     },
     # #2142: SCIP's violation measure for the kernel's spatial score
-    # (``spatial_viol_scip``, performance-plan §108). Only a pick whose column
+    # (``spatial_viol_scip``, performance-plan §108). RETIRED by its panel
+    # (docs/dev/data/2142-branching-var/); the build no longer has the
+    # SpatialViolScip* counters. Kept so ``--rows`` re-derives the verdict.
+    # Only a pick whose column
     # differs from the #1970 rule's can change the search, so
     # ``SpatialViolScipChanged`` ON is where it ran; OFF both counters must be 0.
     "DISCOPT_SPATIAL_VIOL_SCIP": {

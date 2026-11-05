@@ -102,8 +102,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # split point moved, and ``--report`` asserts bit-identity everywhere else.
     "DISCOPT_SPATIAL_BRANCH_CLAMP": ("big-m", "hull"),
     # #2142: SCIP's violation measure for the kernel's spatial score (performance-plan
-    # §108). Solve time only, like the entry above; ``SpatialViolScipChanged`` says
-    # where a branching column changed.
+    # §108). RETIRED by its panel (docs/dev/data/2142-branching-var/); kept so
+    # --report re-derives it. Solve time only, like the entry above;
+    # ``SpatialViolScipChanged`` says where a branching column changed.
     "DISCOPT_SPATIAL_VIOL_SCIP": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
