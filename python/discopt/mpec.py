@@ -79,6 +79,8 @@ __all__ = [
     "tighten_complementarity_bounds",
     "unlowered_relations",
     "solve_mpec",
+    "solve_mpec_multistart",
+    "MultistartRecord",
 ]
 
 _INF = float("inf")
@@ -2243,6 +2245,66 @@ def _solve_scholtes(
     * the achieved **source** complementarity residual, independent of that final
       ``t``, beside the ``sqrt(t)`` accuracy floor the regularization imposes.
     """
+    _refuse_scholtes_solve_kwargs(solve_kwargs, "solve_mpec(method='scholtes')")
+    t = _lower_scholtes(model, pairs, t0)
+    result, _best_x = _scholtes_homotopy(
+        model,
+        t,
+        report_pairs=report_pairs,
+        snapshot=snapshot,
+        t0=t0,
+        sigma=sigma,
+        t_min=t_min,
+        max_iter=max_iter,
+        x0=x0,
+        nlp_options=nlp_options,
+        residual_kind=residual_kind,
+    )
+    return result
+
+
+def _refuse_scholtes_solve_kwargs(solve_kwargs: dict, who: str) -> None:
+    """A Scholtes run is local NLP solves; a ``Model.solve`` kwarg would be ignored."""
+    if solve_kwargs:
+        raise TypeError(
+            f"{who} takes no Model.solve keyword arguments "
+            f"(got {sorted(solve_kwargs)}). The homotopy is a sequence of local NLP "
+            "solves, not a call to the global solver, so a forwarded 'time_limit' or "
+            "'validate' would have been accepted and silently ignored."
+        )
+
+
+def _lower_scholtes(model: Model, pairs: list[Complementarity], t0: float):
+    """Emit the Scholtes rows for ``pairs`` once; return the ``t`` parameter."""
+    _require_not_already_lowered(model, pairs)
+    t = model.parameter("_mpec_t", value=t0)
+    from discopt.transformations import get as _get_transformation
+
+    _get_transformation("mpec.scholtes").apply(model, pairs=pairs, t=t)
+    return t
+
+
+def _scholtes_homotopy(
+    model: Model,
+    t,
+    *,
+    report_pairs: list[Complementarity],
+    snapshot,
+    t0: float,
+    sigma: float,
+    t_min: float,
+    max_iter: int,
+    x0,
+    nlp_options,
+    residual_kind: str,
+) -> "tuple[SolveResult, Optional[np.ndarray]]":
+    """One Scholtes continuation from ``x0`` on an already-lowered model.
+
+    Returns the local :class:`SolveResult` (see :func:`_solve_scholtes`) and the
+    reported flat point (``None`` when no stage produced a usable one). Split out
+    of :func:`_solve_scholtes` so a multistart driver lowers the relations once
+    and runs one continuation per start (#2167); the body is unchanged.
+    """
     from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.modeling.core import SolveResult
     from discopt.mpec_report import (
@@ -2261,20 +2323,6 @@ def _solve_scholtes(
     # ERROR are NOT here: their "point" is wherever restoration stopped and stands
     # for nothing. See the comment at the acceptance test below.
     _USABLE_STAGE_STATUSES = (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
-
-    if solve_kwargs:
-        raise TypeError(
-            "solve_mpec(method='scholtes') takes no Model.solve keyword arguments "
-            f"(got {sorted(solve_kwargs)}). The homotopy is a sequence of local NLP "
-            "solves, not a call to the global solver, so a forwarded 'time_limit' or "
-            "'validate' would have been accepted and silently ignored."
-        )
-
-    _require_not_already_lowered(model, pairs)
-    t = model.parameter("_mpec_t", value=t0)
-    from discopt.transformations import get as _get_transformation
-
-    _get_transformation("mpec.scholtes").apply(model, pairs=pairs, t=t)
 
     backend = get_nlp_solver("auto")
     opts = dict(nlp_options) if nlp_options else {}
@@ -2447,23 +2495,26 @@ def _solve_scholtes(
         # No stage converged. This is "the local solver failed to find a point",
         # NOT an infeasibility proof — publishing it as ``infeasible`` would be a
         # false certificate in the direction nothing downstream checks (#1148 §B).
-        return SolveResult(
-            status=_status.LOCAL_INFEASIBLE,
-            objective=None,
-            wall_time=wall,
-            gap_certified=False,
-            mpec_report=_report_for(
-                model,
-                report_pairs,
-                snapshot,
-                _last_iterate,
-                kind=residual_kind,
-                continuation=trace,
-                notes=(
-                    "no homotopy stage converged: the residuals below are measured at "
-                    "the last iterate, which is NOT a solution and carries no claim",
+        return (
+            SolveResult(
+                status=_status.LOCAL_INFEASIBLE,
+                objective=None,
+                wall_time=wall,
+                gap_certified=False,
+                mpec_report=_report_for(
+                    model,
+                    report_pairs,
+                    snapshot,
+                    _last_iterate,
+                    kind=residual_kind,
+                    continuation=trace,
+                    notes=(
+                        "no homotopy stage converged: the residuals below are measured at "
+                        "the last iterate, which is NOT a solution and carries no claim",
+                    ),
                 ),
             ),
+            None,
         )
 
     from discopt.solver import _unpack_solution
@@ -2481,23 +2532,319 @@ def _solve_scholtes(
     # generated product row violated by 24 (#1158 review 3, blocking 3). Neither
     # branch carries a bound or certification: a local solve proves nothing about
     # the global problem either way (#1148 §C).
-    return SolveResult(
-        status=_status.LOCAL_OPTIMAL if best_certified else _status.LOCAL_LIMIT,
-        objective=objective,
-        # bound stays None: a local solve may contribute an incumbent (after
-        # independent feasibility verification) and never a dual bound (#1148 §C).
-        x=_unpack_solution(model, best_x),
-        wall_time=wall,
-        gap_certified=False,
-        mpec_report=_report_for(
+    return (
+        SolveResult(
+            status=_status.LOCAL_OPTIMAL if best_certified else _status.LOCAL_LIMIT,
+            objective=objective,
+            # bound stays None: a local solve may contribute an incumbent (after
+            # independent feasibility verification) and never a dual bound (#1148 §C).
+            x=_unpack_solution(model, best_x),
+            wall_time=wall,
+            gap_certified=False,
+            mpec_report=_report_for(
+                model,
+                report_pairs,
+                snapshot,
+                lambda: point_from_flat(model, best_x),
+                kind=residual_kind,
+                continuation=trace,
+            ),
+        ),
+        best_x,
+    )
+
+
+@dataclass
+class MultistartRecord:
+    """What one start of :func:`solve_mpec_multistart` produced.
+
+    ``scholtes_status``/``scholtes_objective`` are the continuation's own local
+    result. ``polish_status`` is the active-set polish NLP's status (``None`` when
+    no polish ran) and ``verified_objective`` the objective
+    :func:`~discopt.mpec_report.accept_local_incumbent` vouched for, in model units,
+    or ``None`` when the point was refused -- the only number here that may be
+    used as an incumbent.
+    """
+
+    start: int
+    scholtes_status: str
+    scholtes_objective: Optional[float]
+    polish_status: Optional[str]
+    verified_objective: Optional[float]
+    wall_time: float
+    note: str = ""
+
+
+def _variable_slot(model: Model, expr: Expression, offsets: dict[int, int]) -> Optional[int]:
+    """Flat column of ``expr`` when it is one scalar variable element, else ``None``."""
+    from discopt.modeling.core import IndexExpression
+
+    if isinstance(expr, Variable) and expr.size == 1:
+        return offsets.get(id(expr))
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        k = _static_flat_element(expr.base, expr.index)
+        base = offsets.get(id(expr.base))
+        if k is not None and base is not None:
+            return base + k
+    return None
+
+
+def _active_set_slots(
+    model: Model, pairs: list[Complementarity]
+) -> Optional[list[tuple[int, int]]]:
+    """``(f_col, g_col)`` per scalar pair, or ``None`` if any operand is not a variable.
+
+    The polish fixes one side of every pair to zero by a **bound**, which is only
+    an exact statement of ``f = 0`` when ``f`` is a variable element whose declared
+    lower bound is 0. A pair over a general expression would need a generated row,
+    which this driver does not add; it then skips the polish and says so.
+    """
+    offsets = _target_flat_offsets(model)
+    out = []
+    for p in _scalarize_pairs(model, pairs):
+        if not p.is_symmetric_nonnegative:
+            return None
+        fc = _variable_slot(model, p.f, offsets)
+        gc = _variable_slot(model, p.g, offsets)
+        if fc is None or gc is None:
+            return None
+        out.append((fc, gc))
+    return out
+
+
+def _polish_active_set(
+    model: Model,
+    x: np.ndarray,
+    slots: list[tuple[int, int]],
+    nlp_options: Optional[dict],
+):
+    """Fix the smaller side of each pair to 0 and re-solve the NLP from ``x``.
+
+    The fixed-side NLP is an ordinary smooth NLP over one piece of the MPEC's
+    feasible set, so a point it converges to satisfies every complementarity
+    **exactly** (``f = 0`` or ``g = 0`` by bound), not to the ``sqrt(t)`` the
+    Scholtes relaxation admits. That is what lets the point pass the source-side
+    check of :func:`~discopt.mpec_report.accept_local_incumbent` at its 1e-6
+    tolerance. Bounds are overridden on an evaluator proxy; the model's variables
+    are never touched. Returns the backend's result (``x`` may be ``None``).
+    """
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.solver import _BoundOverrideEvaluator
+    from discopt.solvers.nlp_backend import get_nlp_solver
+
+    evaluator = make_evaluator(model)
+    lb, ub = (np.array(a, dtype=np.float64) for a in evaluator.variable_bounds)
+    for fc, gc in slots:
+        side = fc if x[fc] <= x[gc] else gc
+        if lb[side] > 0.0:
+            # The declared box already forbids this side being zero; the other
+            # side must be the zero one.
+            side = gc if side == fc else fc
+        lb[side] = 0.0
+        ub[side] = 0.0
+    x_start = np.clip(x, lb, ub)
+    opts = dict(nlp_options) if nlp_options else {}
+    opts.setdefault("print_level", 0)
+    backend = get_nlp_solver("auto")
+    return backend(_BoundOverrideEvaluator(evaluator, lb, ub), x_start, options=opts)
+
+
+def solve_mpec_multistart(
+    model: Model,
+    pairs: list[Complementarity],
+    starts,
+    *,
+    polish: bool = True,
+    t0: float = 1e-4,
+    sigma: float = 0.1,
+    t_min: float = 1e-8,
+    max_iter: int = 16,
+    nlp_options: Optional[dict] = None,
+    residual_kind: str = "auto",
+    time_limit: Optional[float] = None,
+) -> "SolveResult":
+    """Multistart Scholtes: one continuation per start, verified incumbents only (#2167).
+
+    The relations are lowered **once** (Scholtes rows ``f, g >= 0``,
+    ``f·g <= t``); each start then runs one continuation
+    (:func:`solve_mpec`'s ``method="scholtes"`` homotopy) and, with ``polish``,
+    an active-set NLP that fixes the smaller side of every pair to zero. A point
+    becomes a candidate incumbent **only** after
+    :func:`~discopt.mpec_report.accept_local_incumbent` verifies it -- the source
+    relations first, then every row and bound of the model -- so a point that
+    sits on the relaxation's ``sqrt(t)`` edge is never reported as a solution.
+
+    Parameters
+    ----------
+    starts : iterable
+        Each entry is an initial point: a ``{Variable: value}`` dict (validated by
+        :func:`discopt.warm_start.validate_initial_solution`; omitted variables
+        get their midpoint), a flat vector in ``model._variables`` order, or
+        ``None`` for the midpoint.
+    polish : bool
+        Run the active-set polish (default). It applies when every scalar pair
+        is a pair of variable elements -- true for ``relu_complementarity`` --
+        and is otherwise skipped with a note on each record.
+    t0 : float
+        First homotopy parameter. Default ``1e-4``, **not** :func:`solve_mpec`'s
+        ``1.0``: a start that already satisfies the relations (a forward pass of a
+        network) is erased by a loose first stage. Measured on a 4-32-32-1 random
+        ReLU net, 10 forward-pass starts (#2167): ``t0=1`` sent all 10 to one
+        local point (objective -0.1746); ``t0=1e-2`` and ``1e-4`` kept them apart
+        and reached -0.3620 (= ``relu_bigm``'s 120 s incumbent; best of 20 000
+        sampled inputs -0.2912), ``1e-4`` in the least wall time (20.8 s vs 26.8 s).
+    time_limit : float, optional
+        Wall-clock budget; starts not begun when it runs out are not run (the
+        start in flight finishes).
+
+    Returns
+    -------
+    SolveResult
+        **Local, never certified** (``gap_certified=False``, no ``bound``).
+        ``status="local_optimal"`` with ``x``/``objective`` the best *verified*
+        point; ``"local_infeasible"`` with ``x=None`` when no start produced a
+        verified point (not an infeasibility proof). ``result.multistart`` holds
+        one :class:`MultistartRecord` per start that ran, and
+        ``result.mpec_report`` the source-residual report at the returned point.
+    """
+    from discopt.modeling.core import SolveResult
+    from discopt.mpec_report import accept_local_incumbent, point_from_flat
+    from discopt.solver import _unpack_solution
+
+    starts = list(starts)
+    if not starts:
+        raise ValueError("solve_mpec_multistart needs at least one start")
+    pairs = list(pairs)
+    _validate_all(model, _pending(model, pairs or list(model._complementarities)))
+    register_relations(model, pairs)
+    report_pairs = pairs if pairs else list(model._complementarities)
+    snapshot = _source_snapshot(model)
+
+    # Validate dict starts while the model still has exactly its source columns.
+    from discopt.warm_start import validate_initial_solution
+
+    lb, ub = _flat_bounds(model)
+    flat_starts: list[np.ndarray] = []
+    for st in starts:
+        if st is None:
+            flat_starts.append(_midpoint(lb, ub))
+        elif isinstance(st, dict):
+            flat_starts.append(np.asarray(validate_initial_solution(model, st), dtype=np.float64))
+        else:
+            arr = np.asarray(st, dtype=np.float64).ravel()
+            if arr.shape != lb.shape:
+                raise ValueError(
+                    f"start has {arr.size} entries; model has {lb.size} variable elements"
+                )
+            flat_starts.append(arr)
+
+    t = _lower_scholtes(model, pairs, t0)
+    slots = _active_set_slots(model, report_pairs) if polish else None
+    skip_note = (
+        ""
+        if not polish or slots is not None
+        else "polish skipped: a pair operand is not a single [0, inf) variable element"
+    )
+
+    records: list[MultistartRecord] = []
+    best_x: Optional[np.ndarray] = None
+    best_obj: Optional[float] = None
+    sense = 1.0
+    from discopt.modeling.core import ObjectiveSense
+
+    if model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        sense = -1.0
+    wall0 = time.perf_counter()
+    for i, x0 in enumerate(flat_starts):
+        if time_limit is not None and time.perf_counter() - wall0 >= time_limit:
+            break
+        ts = time.perf_counter()
+        try:
+            res, x_sch = _scholtes_homotopy(
+                model,
+                t,
+                report_pairs=report_pairs,
+                snapshot=snapshot,
+                t0=t0,
+                sigma=sigma,
+                t_min=t_min,
+                max_iter=max_iter,
+                x0=x0,
+                nlp_options=nlp_options,
+                residual_kind=residual_kind,
+            )
+        except RuntimeError as exc:
+            # A first-stage subsolver failure for THIS start (see the homotopy):
+            # recorded, never swallowed, and the next start still runs.
+            records.append(
+                MultistartRecord(
+                    i, "error", None, None, None, time.perf_counter() - ts, note=str(exc)
+                )
+            )
+            continue
+        polish_status: Optional[str] = None
+        candidates: list[np.ndarray] = []
+        note = skip_note
+        if x_sch is not None:
+            if slots is not None:
+                pr = _polish_active_set(model, x_sch, slots, nlp_options)
+                polish_status = str(getattr(pr.status, "value", pr.status))
+                if pr.x is not None:
+                    candidates.append(np.asarray(pr.x, dtype=np.float64))
+            candidates.append(x_sch)
+        verified: Optional[float] = None
+        for cand in candidates:
+            v = accept_local_incumbent(model, None, x_flat=cand)
+            if v is not None:
+                verified = float(v)
+                if best_obj is None or sense * verified < sense * best_obj:
+                    best_obj, best_x = verified, cand.copy()
+                break
+        records.append(
+            MultistartRecord(
+                start=i,
+                scholtes_status=str(res.status),
+                scholtes_objective=res.objective,
+                polish_status=polish_status,
+                verified_objective=verified,
+                wall_time=time.perf_counter() - ts,
+                note=note,
+            )
+        )
+    t.value = np.asarray(t_min, dtype=np.float64)
+    wall = time.perf_counter() - wall0
+
+    if best_x is None:
+        result = SolveResult(
+            status=_status.LOCAL_INFEASIBLE,
+            objective=None,
+            wall_time=wall,
+            gap_certified=False,
+        )
+        result.mpec_report = None
+    else:
+        point = best_x
+        result = SolveResult(
+            status=_status.LOCAL_OPTIMAL,
+            objective=best_obj,
+            x=_unpack_solution(model, point),
+            wall_time=wall,
+            gap_certified=False,
+        )
+        result.mpec_report = _report_for(
             model,
             report_pairs,
             snapshot,
-            lambda: point_from_flat(model, best_x),
+            lambda: point_from_flat(model, point),
             kind=residual_kind,
-            continuation=trace,
-        ),
-    )
+            notes=(
+                f"multistart Scholtes: best of {len(records)} start(s); the point was "
+                "verified against the source relations and every model row by "
+                "accept_local_incumbent. A LOCAL result: no bound, no certificate.",
+            ),
+        )
+    result.multistart = records
+    return result
 
 
 def _stage_reason(certified: bool, has_point: bool, status) -> str:

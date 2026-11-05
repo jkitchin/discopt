@@ -262,3 +262,139 @@ def test_scholtes_is_local_and_near_certified_optimum(kw, sense):
         rr = relation_residuals(mc, nn.relations, _point(mc, rc))
         assert len(rr) == len(nn.relations)
         assert max(r.complementarity.value for r in rr) <= 1e-3
+
+
+# ── slice 2: multistart local mode ──
+
+
+def test_start_point_is_exact_forward_pass():
+    sc = OffsetScaling(
+        x_offset=np.array([0.5, -0.2]),
+        x_factor=np.array([2.0, 0.5]),
+        y_offset=np.array([1.0]),
+        y_factor=np.array([3.0]),
+    )
+    net = _relu_net(seed=3, hidden=(4, 3))
+    m, nn = _embed(net, "relu_complementarity", scaling=sc)
+    starts = nn.local_starts(5, seed=1)
+    assert len(starts) == 5
+    from discopt.mpec_report import source_residual_report
+    from discopt.validation.feasibility import verify_point
+    from discopt.warm_start import validate_initial_solution
+
+    checked = 0
+    for st in starts:
+        x = validate_initial_solution(m, st)
+        # every NN variable is set, so the start is exactly on the network graph
+        assert verify_point(m, x).ok
+        assert source_residual_report(m, x_flat=x).source_satisfied
+        x_in = np.asarray(st[nn.inputs])
+        assert np.all(np.abs(x_in) <= 1.0)
+        x_scaled = (x_in - sc.x_offset) / sc.x_factor
+        assert float(st[nn.outputs][0]) == pytest.approx(
+            float(net.forward(x_scaled)[0]) * 3.0 + 1.0, abs=1e-12
+        )
+        checked += 1
+    assert checked == 5
+
+
+def test_local_starts_needs_complementarity_strategy():
+    _, nn = _embed(_relu_net(), "relu_bigm")
+    with pytest.raises(RuntimeError, match="relu_complementarity"):
+        nn.local_starts(2)
+
+
+@pytest.mark.parametrize("kw,sense", _NETS)
+def test_multistart_is_local_and_verified(kw, sense):
+    from discopt.mpec_report import accept_local_incumbent, source_residual_report
+
+    net = _relu_net(**kw)
+    mb, _ = _embed(net, "relu_bigm", sense)
+    rb = mb.solve()
+    m, nn = _embed(net, "relu_complementarity", sense)
+    res = nn.solve_local(n_starts=4, seed=0)
+    assert res.status in ("local_optimal", "local_infeasible")
+    assert not res.gap_certified and res.bound is None
+    assert len(res.multistart) == 4
+    assert all(
+        r.scholtes_status.startswith("local_") or r.scholtes_status == "error"
+        for r in res.multistart
+    )
+    assert res.status == "local_optimal"
+    from discopt.mpec_report import _flat_from_result
+
+    x = _flat_from_result(m, res)
+    assert accept_local_incumbent(m, None, x_flat=x) == pytest.approx(res.objective)
+    rep = source_residual_report(m, x_flat=x)
+    assert rep.source_satisfied
+    assert rep.complementarity.value <= 1e-9  # polish makes it exact, not sqrt(t)
+    # never better than the certified optimum (a local point is a primal point)
+    if sense == "min":
+        assert res.objective >= rb.objective - 1e-6
+    else:
+        assert res.objective <= rb.objective + 1e-6
+    # the reported objective is the network's true output at the reported input
+    x_in = np.asarray(res.x["nn_input"], dtype=np.float64)
+    assert float(net.forward(x_in)[0]) == pytest.approx(res.objective, abs=1e-6)
+    best = [r.verified_objective for r in res.multistart if r.verified_objective is not None]
+    assert res.objective == pytest.approx(min(best) if sense == "min" else max(best))
+
+
+def test_multistart_refuses_unverifiable_point(monkeypatch):
+    """With the verifier refusing every point, nothing becomes ``x``."""
+    import discopt.mpec_report as rep
+
+    m, nn = _embed(_relu_net(), "relu_complementarity")
+    calls = []
+
+    def refuse(model, result, *, x_flat=None):
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(rep, "accept_local_incumbent", refuse)
+    res = nn.solve_local(n_starts=2, seed=0)
+    assert calls, "the verifier was never consulted"
+    assert res.status == "local_infeasible"
+    assert res.x is None and res.objective is None and not res.gap_certified
+    assert all(r.verified_objective is None for r in res.multistart)
+
+
+def test_multistart_without_polish_stays_local():
+    """``polish=False`` runs no polish NLP; whatever is reported is still a point
+    ``accept_local_incumbent`` vouched for (an unpolished Scholtes point passes the
+    1e-6 source check only when it happens to be that close to complementary --
+    the H1 entry rows measured 1e-7 to 3e-6, so neither outcome is pinned here)."""
+    m, nn = _embed(_relu_net(seed=7, n_in=3, hidden=(4, 3)), "relu_complementarity")
+    res = nn.solve_local(n_starts=3, seed=0, polish=False)
+    assert len(res.multistart) == 3
+    assert all(r.polish_status is None for r in res.multistart)
+    assert not res.gap_certified and res.bound is None
+    verified = [r.verified_objective for r in res.multistart if r.verified_objective is not None]
+    assert (res.status == "local_optimal") == bool(verified)
+    if verified:
+        assert res.objective == pytest.approx(min(verified))
+
+
+def test_multistart_rejects_solve_kwargs_and_empty_starts():
+    from discopt.mpec import solve_mpec_multistart
+
+    m, nn = _embed(_relu_net(), "relu_complementarity")
+    with pytest.raises(ValueError, match="at least one start"):
+        solve_mpec_multistart(m, nn.relations, [])
+    with pytest.raises(ValueError, match="entries"):
+        solve_mpec_multistart(m, nn.relations, [np.zeros(1)])
+
+
+def test_multistart_skips_polish_for_expression_operands():
+    """A pair over a general expression cannot be fixed by a bound; the driver
+    records the skip rather than pretending to polish."""
+    from discopt.mpec import complementarity, solve_mpec_multistart
+
+    m = Model("expr_pair")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+    res = solve_mpec_multistart(m, [complementarity(x + 0.0 * y, y)], [None])
+    assert res.multistart[0].polish_status is None
+    assert "polish skipped" in res.multistart[0].note
+    assert not res.gap_certified

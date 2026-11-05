@@ -206,8 +206,50 @@ class ReluComplementarityFormulation(ReluBigMFormulation):
 
     def build(self) -> tuple[Variable, Variable]:
         inputs, outputs = super().build()
+        self._inputs_var = inputs
+        self._outputs_var = outputs
         mpec.register_relations(self._model, self.relations)
         return inputs, outputs
+
+    def start_point(self, x_in) -> dict:
+        """The network's exact point at input ``x_in``, as ``{Variable: value}``.
+
+        A forward pass fills every variable this strategy declared -- the input,
+        the scaled input, each layer's pre-activation ``zhat`` and post-activation,
+        every negative part ``s = max(0, -zhat)`` and the scaled output -- so the
+        point satisfies the network's rows and every complementarity exactly. It
+        is the warm start of the local mode (#2167 slice 2). Variables outside the
+        network are not set.
+        """
+        from discopt.ml.activations import evaluate
+        from discopt.ml.network import Activation
+
+        net = self._network
+        x = np.asarray(x_in, dtype=np.float64).reshape(net.input_size)
+        by_name = {v.name: v for v in self._model._variables}
+        pfx = self._prefix
+        out: dict = {self._inputs_var: x}
+        h = x
+        if self._scaling is not None:
+            sc = self._scaling
+            h = (x - sc.x_offset) / sc.x_factor
+            out[by_name[f"{pfx}_scaled_input"]] = h
+        s_by_key = {(r.layer_index, r.neuron): r.s for r in self.neurons}
+        for k, layer in enumerate(net.layers):
+            zhat = h @ np.asarray(layer.weights, dtype=np.float64) + layer.biases
+            out[by_name[f"{pfx}_zhat_{k}"]] = zhat
+            h = evaluate(layer.activation, zhat, layer.beta)
+            if layer.activation != Activation.LINEAR:
+                out[by_name[f"{pfx}_z_{k}"]] = h
+            if layer.activation == Activation.RELU:
+                for j in range(zhat.shape[0]):
+                    s_var = s_by_key.get((k, j))
+                    if s_var is not None:
+                        out[s_var] = np.asarray(max(0.0, -float(zhat[j])))
+        if self._scaling is not None:
+            sc = self._scaling
+            out[self._outputs_var] = h * sc.y_factor + sc.y_offset
+        return out
 
     # ── the per-layer encoding ──
 

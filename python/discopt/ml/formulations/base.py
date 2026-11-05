@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Union
 
+import numpy as np
+
 from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
@@ -146,6 +148,7 @@ class NNFormulation:
         self._inputs: Variable | None = None
         self._outputs: Variable | None = None
         self._relations: list = []
+        self._strategy: object = None
         self._formulated = False
 
     @property
@@ -159,6 +162,57 @@ class NNFormulation:
         if not self._formulated:
             raise RuntimeError("Call formulate() before accessing relations")
         return list(self._relations)
+
+    def local_starts(self, n_starts: int, *, seed: int | None = 0) -> list[dict]:
+        """``n_starts`` forward-pass warm starts from sampled inputs (#2167).
+
+        ``relu_complementarity`` only. Inputs are drawn uniformly from the input
+        box, or from a standard normal per coordinate where a side is unbounded;
+        each start is the network's exact point at that input (see
+        :meth:`ReluComplementarityFormulation.start_point`), so every relation
+        holds with zero residual at the start. Variables outside the network are
+        left to the solver's default.
+        """
+        strategy = self._require_complementarity("local_starts")
+        net = self._network
+        rng = np.random.default_rng(seed)
+        n = net.input_size
+        if net.input_bounds is None:
+            lo, hi = np.full(n, -np.inf), np.full(n, np.inf)
+        else:
+            lo = np.asarray(net.input_bounds[0], dtype=np.float64)
+            hi = np.asarray(net.input_bounds[1], dtype=np.float64)
+        finite = np.isfinite(lo) & np.isfinite(hi)
+        starts = []
+        for _ in range(int(n_starts)):
+            x = rng.standard_normal(n)
+            u = rng.uniform(size=n)
+            x = np.where(finite, lo + u * (hi - lo), x)
+            x = np.where(~finite & np.isfinite(lo), np.maximum(x, lo), x)
+            x = np.where(~finite & np.isfinite(hi), np.minimum(x, hi), x)
+            starts.append(strategy.start_point(x))
+        return starts
+
+    def solve_local(self, n_starts: int = 20, *, seed: int | None = 0, **kwargs):
+        """Multistart local solve of the embedded network's model (#2167).
+
+        Runs :func:`discopt.mpec.solve_mpec_multistart` over :attr:`relations`
+        from :meth:`local_starts`. A **local** result: ``local_optimal`` /
+        ``local_infeasible``, never a bound or certificate; ``x`` is only ever a
+        point verified against the source relations and every model row.
+        ``kwargs`` are forwarded (``polish``, ``t_min``, ``time_limit``, ...).
+        """
+        from discopt.mpec import solve_mpec_multistart
+
+        starts = self.local_starts(n_starts, seed=seed)
+        return solve_mpec_multistart(self._model, self.relations, starts, **kwargs)
+
+    def _require_complementarity(self, what: str) -> ReluComplementarityFormulation:
+        if not self._formulated:
+            raise RuntimeError(f"Call formulate() before {what}()")
+        if not isinstance(self._strategy, ReluComplementarityFormulation):
+            raise RuntimeError(f"{what}() needs strategy='relu_complementarity'")
+        return self._strategy
 
     @property
     def inputs(self) -> Variable:
@@ -186,6 +240,7 @@ class NNFormulation:
             self._model, self._network, self._prefix, self._scaling, **self._strategy_kwargs
         )
         self._inputs, self._outputs = strategy.build()
+        self._strategy = strategy
         self._relations = list(getattr(strategy, "relations", []))
         if self._ideal_cuts:
             self._cut_callback = AndersonCutSeparator(getattr(strategy, "relu_layers", []))
