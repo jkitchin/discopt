@@ -2444,6 +2444,120 @@ def _multivar_box_curvature(
             box[v] = saved[v]
 
 
+def _certified_indefinite_at(
+    expr: Expression,
+    model: Model,
+    idxs: list[int],
+    point: np.ndarray,
+    box: dict,
+) -> bool:
+    """True only if ``∇²expr`` at ``point`` is *provably* indefinite: one direction
+    of curvature below ``-2·tol`` and one above ``+2·tol``
+    (``tol = _COMPOSITE_CURV_TOL``).
+
+    ``point`` gives the coordinates for ``idxs``. The other variables keep their
+    ``box`` intervals, and ``expr`` does not depend on them.
+
+    Such a point is a witness that :func:`_multivar_box_curvature` abstains on every
+    box containing it. Every refinement of that function's partition has a sub-box
+    ``S`` holding ``point``. ``S``'s interval Hessian encloses ``∇²expr(point)``.
+    The Gershgorin bounds on ``S`` therefore bracket that matrix's spectrum:
+    ``gersh_lo ≤ λ_min < -tol`` and ``gersh_hi ≥ λ_max > tol``. So ``S`` refutes
+    both verdicts, and the proof returns ``None``.
+
+    The ``2·tol`` margin keeps that implication robust to the proof's own
+    floating-point rounding. It could flip only if a sub-box's entries were large
+    enough (about ``1e7``) for rounding to exceed ``tol``. In that case the fresh
+    verdict would itself contradict a certified indefinite point, i.e. be unsound.
+    (#1917 follow-up, curvature-certificate cost.)
+
+    The test is a rigorous Rayleigh quotient. For unit ``v``,
+    ``λ_min ≤ vᵀHv ≤ Σ P_ij·(hi_ij if P_ij > 0 else lo_ij)`` with ``P = vvᵀ``,
+    using the interval enclosure ``[lo, hi]`` of the point Hessian. A forward
+    error bound on that float sum is added before comparing. ``v`` is the
+    numerically extreme eigenvector of the midpoint matrix. Any ``v`` gives a
+    valid bound, so a poor ``v`` only makes the test answer ``False``.
+    Any decline (an AD failure, a non-finite entry, an out-of-range index)
+    returns ``False``, which means "no witness".
+    """
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_ad import interval_hessian
+
+    dep = [int(j) for j in idxs]
+    d = len(dep)
+    if d == 0 or point.shape != (d,) or not np.all(np.isfinite(point)):
+        return False
+    starts = []
+    offset = 0
+    for v in model._variables:
+        starts.append(offset)
+        offset += v.size
+    saved: dict = {}
+    lo_arr: dict = {}
+    hi_arr: dict = {}
+    for i, j in enumerate(dep):
+        if not 0 <= j < offset:
+            return False
+        k = bisect.bisect_right(starts, j) - 1
+        var = model._variables[k]
+        if var not in saved:
+            saved[var] = box[var]
+            lo_arr[var] = np.array(box[var].lo, dtype=np.float64).reshape(-1)
+            hi_arr[var] = np.array(box[var].hi, dtype=np.float64).reshape(-1)
+        lo_arr[var][j - starts[k]] = float(point[i])
+        hi_arr[var][j - starts[k]] = float(point[i])
+    try:
+        for var in saved:
+            box[var] = Interval(
+                lo_arr[var].reshape(saved[var].lo.shape), hi_arr[var].reshape(saved[var].hi.shape)
+            )
+        try:
+            ad = interval_hessian(expr, model, box=box, compact=True)
+        except ValueError:
+            return False
+    finally:
+        for var in saved:
+            box[var] = saved[var]
+    full_lo = np.asarray(ad.hess.lo, dtype=np.float64)
+    full_hi = np.asarray(ad.hess.hi, dtype=np.float64)
+    if not (np.all(np.isfinite(full_lo)) and np.all(np.isfinite(full_hi))):
+        return False
+    if ad.support is None:
+        h_lo = full_lo[np.ix_(dep, dep)]
+        h_hi = full_hi[np.ix_(dep, dep)]
+    else:
+        # The compact Hessian over the expression's support. A Rayleigh vector on
+        # it, padded with zeros, is one on the dependent block, so the bounds hold
+        # for the matrix the proof tests.
+        h_lo, h_hi = full_lo, full_hi
+    if h_lo.ndim != 2 or h_lo.shape[0] == 0 or h_lo.shape[0] != h_lo.shape[1]:
+        return False
+    mid = 0.5 * (h_lo + h_hi)
+    mid = 0.5 * (mid + mid.T)
+    try:
+        _, vecs = np.linalg.eigh(mid)
+    except np.linalg.LinAlgError:
+        return False
+    n = h_lo.shape[0]
+    tol = _COMPOSITE_CURV_TOL
+    mag = np.maximum(np.abs(h_lo), np.abs(h_hi))
+    eps = np.finfo(np.float64).eps
+
+    def _rayleigh(vec: np.ndarray) -> tuple[float, float, float]:
+        # Rigorous [lower, upper] of vᵀHv over the enclosure, and vᵀv.
+        P = np.outer(vec, vec)
+        upper = float(np.sum(np.where(P > 0, P * h_hi, P * h_lo)))
+        lower = float(np.sum(np.where(P > 0, P * h_lo, P * h_hi)))
+        err = (n * n + 2) * eps * float(np.sum(np.abs(P) * mag))
+        return lower - err, upper + err, float(vec @ vec) * (1.0 + 4 * eps)
+
+    # λ_min ≤ vᵀHv / vᵀv < -2·tol needs vᵀHv < -2·tol·vᵀv, implied by the upper
+    # bound below -2·tol times an upper bound on vᵀv (and symmetrically for λ_max).
+    _, neg_hi, vv_neg = _rayleigh(vecs[:, 0])
+    pos_lo, _, vv_pos = _rayleigh(vecs[:, -1])
+    return bool(neg_hi < -2.0 * tol * vv_neg and pos_lo > 2.0 * tol * vv_pos)
+
+
 _EMPTY_VARMAP_KEYS: tuple[str, ...] = (
     "bilinear",
     "trilinear",
