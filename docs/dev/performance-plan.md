@@ -14930,3 +14930,55 @@ keeping the rest of the hull. A cstr-hull fix has to change how the *nonconvex* 
 relaxed at fractional selectors. Changing which lowering they get does not help: the
 big-M one is already measured above. Data: `docs/dev/data/2142-hull-mixed/` (see its
 README).
+
+## 113. #2142 Part B: the AffinePow reverse step — killed at the entry check (2026-11-05)
+
+**Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`, "Hull"). SCIP certifies
+discopt's captured cstr-hull spec in 1,772 nodes. With SCIP's nonlinear propagation off,
+its emulation reproduces discopt's 0.0940 at 10k nodes exactly. The kernel propagates the
+20 eps-perspective terms `w = ((1-1e-8) y + 1e-8)^-1` (`EnvTerm::AffinePow`, `p = -1`)
+**forward only**. The guess was that the missing reverse step (w-bounds -> `y`) is the gap.
+
+**Kill criterion (pre-registered in `PREREG.md` before any run).** On captured hull node
+boxes, the reverse step must close at least 50 % of the kernel-vs-SCIP box gap. The
+primary measure is at converged rounds:
+
+- per box and arm, the excess is the summed root-normalised width over SCIP's box;
+- a box SCIP proves empty counts every column, unless the arm also empties it.
+
+**Implementation measured.** Flag `DISCOPT_AFFINE_POW_REVERSE` (Rust, read once, default
+OFF), committed at `2d7d9c54`:
+
+- on a sign-definite base interval, `t ∈ [w_hi^(-1/q), w_lo^(-1/q)]` (and the `t < 0`
+  odd/even cases), with directed roots;
+- it declines at the pole;
+- a Rust test checks 20,000 sampled feasible points.
+
+| cstr hull, 94 boxes (every 10th of the first 1,000 deterministic nodes) | 15 rounds | 100,000 rounds |
+|---|---|---|
+| boxes / columns the reverse step tightens (KR vs K) | 0 / 0 | 0 / 0 |
+| closure of the gap to SCIP | **0.000** | **0.000** |
+| boxes proven empty: kernel / kernel + reverse / SCIP | 0 / 0 / 94 | 0 / 0 / 94 |
+
+**Verdict: killed.** The step has nothing to act on. On all 1,880 (term, box) pairs, any
+nontrivial upper bound on a perspective `w` came from the forward step on the same `y`,
+and `1/w_hi` never exceeds the base's lower bound (`b5_probe.log`). Nothing else in the
+spec bounds `w` from above. The flag, the implementation and the Rust test were removed
+in the commit after `8b552939` (§5, *Retired*); they never reached `main`.
+
+**Recorded, unexplained.**
+
+- SCIP 6.3 root propagation (`2142-propagation/scip_prop.py`) calls all 94 captured
+  boxes empty. It does so with its nonlinear (93/94), linear or pseudo-objective
+  propagator switched off.
+- It also calls the first 10 boxes empty with **no cutoff at all**, while the global box
+  stays open (`b6_scip_sanity.log`).
+- So either the hull tree spends its first 1,000 nodes on regions with no point
+  feasible for the exact lifted system, which the kernel cannot prove empty, or the
+  instrument has an artifact on this spec. Settle that before any further hull-propagation
+  work.
+- Dual-proof learning (§112) does not reach hull: 20 certified-empty node LPs in 1,000
+  nodes, 1 row learned, 0 tightenings, bound unchanged at 0.094 (`2142-dual-proof/hull_on_1k.log`).
+
+**Do not build:** a reverse step for the AffinePow perspective terms as a cstr-hull fix.
+Data: `docs/dev/data/2142-affinepow-reverse/`.
