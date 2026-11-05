@@ -14675,3 +14675,83 @@ done here.
 Under hull the proposer's sub-NLP needs `DISCOPT_SUBNLP_REDUCED`. On the toy, the
 legacy pose fails on the right configuration (status ERROR) and the reduced pose
 returns 2.0.
+
+### 106.4 `syngas` hull certifies: the LOA proposer's bound reaches the search (`DISCOPT_GDP_LOA_PROPOSER_BOUND`, `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`)
+
+**Where the 120 s went after 106.3.** The panels of 106.3 (all #2143 flags ON, 120 s)
+left `syngas` hull `feasible`: the incumbent 4669.0235 at about 67 s, bound 4347.80,
+3-7 nodes. Wall attribution without cProfile (`time_probe`, outermost inclusive calls):
+
+| stage | OFF pump skip | ON |
+|---|---|---|
+| root presolve (3 calls; the first hits its 30 s cap, 24.7 s of it probing) | 34.0 s | 34.0 s |
+| config wave (`one_hot_config_subnlp`, 48 sub-NLPs, 0 feasible) | 12.6 s | 12.6 s |
+| root pumps + the NLP multistart seeding the second | 15.0 + 23.9 s | skipped |
+| root fixpoint (OBBT with the cutoff) | 12.8 s | 12.8 s |
+| node relaxations (`solve_at_node`) | 3.9 s, 5 nodes | 23.8 s, 25 nodes |
+| result | bound 4347.80, 7 nodes | bound 4666.75, 29 nodes |
+
+Two levers were measured and dropped:
+
+- **Curvature-certificate cache: nothing to gain.** A direct count over a full certifying
+  600 s run gives 9,396 `_curvature_cert` calls in 8.4 s, of which 489 fresh proofs take
+  1.8 s; the rest are already answered by the existing inheritance/abstain/witness caches.
+  The "22 s of 32 s rebuilds" quoted on #2143 came from cProfile's overhead on the
+  recursive interval walk, and is retracted.
+- **Root presolve: not reopened.** Its 30 s yields no reduction the solve keeps (the box
+  is dropped by default, `DISCOPT_PRESOLVE_BOUND_PROPAGATION` OFF), but the stop rule
+  that would end it, `DISCOPT_PRESOLVE_MARGINAL_STOP`, was retired on its panel (106.2).
+
+**The missing piece was a bound already proved.** The proposer's LOA on the source GDP
+reports `optimal after 2 iteration(s)` at about 66 s: master bound 4668.809 against
+4669.0235, relative gap 4.6e-5. That is discopt's own certificate (`gdp/algorithms/base.py`:
+`optimal` only with a valid LB, nothing unresolved, gap within tolerance; LOA cuts only
+certified-convex rows and solves subproblems globally). The hull tree, at 600 s, ends at
+bound 4668.80896982951 after 27 nodes -- the same number, re-derived for 2-3 minutes after
+the proposer had it. 106.3 left it out ("needs its own soundness argument"); the argument:
+the lowering is exact at integer selectors, so the lowered model's optimum is no better
+than the GDP's, and LOA's GDP bound floors it. Checked against `_relax/gdp_reformulate.py`:
+big-M takes M from finite variable bounds and refuses an infinite one rather than clamp it;
+the hull's nonlinear rows use the Furman-Sawaya-Grossmann form
+`yhat g(v/yhat) - eps g(0) (1 - y) <= 0`, `yhat = (1 - eps) y + eps`, which is the row
+itself at `y = 1` and `eps g(0) - eps g(0) = 0` at `y = 0` (copies pinned to 0), and a row
+whose `g(0)` is not finite gets the eps-free lifted perspective, exact by construction, or is
+refused.
+
+`DISCOPT_GDP_LOA_PROPOSER_BOUND` installs it through `PyTreeManager.seed_root_bound` (the
+hook for externally proved root bounds), after two guards: LOA's objective and the
+verified point posed from it must agree to 1e-6 relative in internal sense (catches a
+sign, offset or scale between the source and lowered objectives), and a bound above the
+incumbent is refused with a WARNING. Entry (syngas hull, 120 s): bound 4668.80896819
+installed at 66.2 s, `optimal` at 71.5 s, 3 nodes.
+
+**Panels** (GDPlib parity set, 24 instances x {hull, big-m} x 2 reps x 120 s; in each the
+flag under test toggles and the other #2143 flags are ON in both arms; data
+`docs/dev/data/2143-four-flag-panel/`):
+
+| flag | incorrect | bound crossings | solved lost | solved gained | SGM wall |
+|---|---|---|---|---|---|
+| `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT` | 0 | 0 | 0 (spectralog hull 1 reported; re-run at low load 4/4 both arms, 793 nodes) | 0 | 31.14 -> 30.94 s |
+| `DISCOPT_GDP_LOA_PROPOSER_BOUND` | 0 | 0 | 0 | 1 (syngas hull 0/2 -> 2/2) | 30.76 -> 30.05 s |
+
+Pump skip, in-repo corpus (default config, 60 s, 2 reps): certified 118 -> 118, 272
+incumbent checks, 0 errors, total wall 2102 -> 2092 s; it rarely fires there, since the
+pumps usually run before any incumbent exists.
+
+Own panels for the two stage-2 flags that had none, the five other #2143 flags ON in
+both arms (`screen_*`, `warmstart_corpus.*`):
+
+- `DISCOPT_HEUR_FIXING_SCREEN`: GDP 192 solves, incorrect 0, bound crossings 0, solved
+  lost 0; syngas hull 91.8 -> 71.5 s, big-M 76.2 -> 59.7 s; SGM 30.87 -> 30.52 s. Corpus:
+  certified 118 -> 118, 268 incumbent checks, 0 errors.
+- `DISCOPT_ROOT_WARMSTART_FIRST`: the in-repo corpus solved from each file's own `.nl`
+  `x`-segment start (`flag_onoff_corpus_panel.py --from-start`, new; 114 of 148 rows carry
+  a start): certified 116 -> 116, 268 incumbent checks, 0 errors, wall 2253 -> 2249 s.
+  Cert-clean and neutral.
+
+**Graduated** (owner's #2143 rule: syngas hull certifies within 120 s and nothing is lost,
+modprodnet hull 2/2 in every arm): `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXING_SCREEN`,
+`DISCOPT_ROOT_WARMSTART_FIRST`, `DISCOPT_GDP_LOA_PROPOSER`,
+`DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`, `DISCOPT_GDP_LOA_PROPOSER_BOUND`, each with
+`=0` kept. Default build, no flags set, 120 s, load 3.4-3.8: syngas hull `optimal` at
+73.3 s, big-M `optimal` at 52.7 s (was ~99 s), bound 4668.808968 in both.

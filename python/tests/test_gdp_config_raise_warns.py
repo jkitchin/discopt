@@ -102,6 +102,10 @@ def test_root_call_raise_is_a_warning(build, site, monkeypatch, caplog):
 )
 def test_deferred_call_raise_is_a_warning(build, site, monkeypatch, caplog):
     monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
+    # #2143: with the root wave forced empty, the (default-ON) LOA proposer fires and
+    # LOA's own subproblem solves run the wave too, adding calls this spy would count.
+    # This test is about the deferral, so the proposer is pinned off.
+    monkeypatch.setenv("DISCOPT_GDP_LOA_PROPOSER", "0")
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
     # A zero root share holds the whole grant back, and making it due at iteration
     # 1 reaches the deferred call without depending on wall-clock timing.

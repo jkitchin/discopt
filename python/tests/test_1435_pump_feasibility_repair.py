@@ -148,6 +148,10 @@ def test_repair_is_attempted_at_most_once_per_pump(monkeypatch):
     m.subject_to(x * x + k * k <= -1.0)
     m.minimize(x + k)
 
+    # #2143: DISCOPT_HEUR_FIXING_SCREEN (default ON) refutes every round of this model
+    # by FBBT before its repair, so no repair runs at all. This test is about the
+    # repair cap, so the screen is pinned off.
+    monkeypatch.setenv("DISCOPT_HEUR_FIXING_SCREEN", "0")
     calls = {"n": 0}
     real = PH._repair_to_feasible
 

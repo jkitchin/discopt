@@ -174,8 +174,10 @@ def _hull_toy():
     return low, make_evaluator(low), next(iter(_configurations(low, 3)))
 
 
-def test_the_flag_is_default_off(monkeypatch):
+def test_the_flag_is_default_on(monkeypatch):
     monkeypatch.delenv("DISCOPT_SUBNLP_REDUCED", raising=False)
+    assert PH._subnlp_reduced_enabled() is True  # graduated 2026-11-05 (#2143)
+    monkeypatch.setenv("DISCOPT_SUBNLP_REDUCED", "0")
     assert PH._subnlp_reduced_enabled() is False
     monkeypatch.setenv("DISCOPT_SUBNLP_REDUCED", "1")
     assert PH._subnlp_reduced_enabled() is True
