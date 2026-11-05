@@ -36,18 +36,30 @@ if arm in ("ratio", "homog", "lifted", "both"):
 os.environ.pop("DISCOPT_HULL_EXACT_PERSPECTIVE", None)
 
 UNDECIDED = ("numerical", "iter_limit", "unbounded")
-calls, recs, dumps = [], {}, {}
+calls, recs, dumps, fidelity = [], {}, {}, set()
 _o = R.solve_spatial_tree_py
+
+
+CK = ("LpVerdictNumerical", "LpVerdictOptimal", "LpVerdictInfeasible", "LpDenseRetries",
+      "LpInfeasUncertified", "DualProofGlobalLps")
+last_ctr = {}
 
 
 def obs(rec):
     nid = int(rec["id"])
     own = float(rec["bound"])
     st = str(rec["status"])
+    # Profile-counter deltas since the previous observed node: this node's LP attempts plus
+    # the previous infeasible node's dual-proof global LP (which runs after its observation).
+    now = dict(R.profile_counters_py())
+    d = {k: int(now.get(k, 0)) - int(last_ctr.get(k, 0)) for k in CK}
+    last_ctr.update(now)
     recs[nid] = dict(parent=rec["parent"], status=st, own=own, obj=rec["obj"],
-                     n_pivots=int(rec["n_pivots"]), lp_s=float(rec["lp_s"]))
+                     n_pivots=int(rec["n_pivots"]), lp_s=float(rec["lp_s"]), d=d)
     uncert = st == "optimal" and not np.isfinite(own)
-    if st in UNDECIDED or uncert:
+    # The first few decided nodes are dumped too: HiGHS must reproduce their objective, which
+    # proves the LP export is faithful before any failed LP is judged by it (§6).
+    if st in UNDECIDED or uncert or (st == "optimal" and len(fidelity) < 8 and fidelity.add(nid) is None):
         dumps[nid] = {k: np.array(rec[k]) for k in
                       ("col_ptr", "row_idx", "vals", "b", "l", "u", "c", "lo", "hi")}
         dumps[nid]["m"], dumps[nid]["n"] = int(rec["m"]), int(rec["n"])
@@ -96,7 +108,8 @@ print(f"undecided nodes: {n_und} (kernel n_undecided={main['undecided']}); "
       f"uncertified optimal nodes: {n_unc} (kernel n_uncertified={main['uncertified']})")
 assert n_und == main["undecided"], (n_und, main["undecided"]); n_assert += 1
 assert n_unc == main["uncertified"], (n_unc, main["uncertified"]); n_assert += 1
-assert len(dumps) == n_und + n_unc, (len(dumps), n_und, n_unc); n_assert += 1
+assert len(dumps) == n_und + n_unc + len(fidelity), (len(dumps), n_und, n_unc, len(fidelity))
+n_assert += 1
 
 # Effective bound = max(own finite bound, parent's effective bound), as the kernel does.
 # Nodes popped and fathomed by propagation never reach the observer; their children do not
@@ -111,16 +124,25 @@ for nid in sorted(recs):
     depth[nid] = depth[p] + 1 if p is not None else 0
     if p is not None:
         kids[p] += 1
-# Open frontier: every branched node pushed two children; a node with < 2 processed children
-# that was not fathomed has an open child carrying eff[node]. The kernel pops best-bound
-# first, so the reported bound is min over the open frontier and the closed regions.
+# Open frontier: every branched node pushed two children; a node with < 2 OBSERVED children
+# either has an open child carrying eff[node] or had a child popped and fathomed by
+# propagation / dual proofs before any LP (those never reach the observer). The kernel pops
+# best-bound first, so every open node has pb >= the reported bound; a candidate with
+# eff < bound therefore accounts for (2 - kids) propagation-fathomed children -- the §6
+# self-check is that this deficit fits the kernel's count, and that no candidate sits below
+# the bound without that explanation.
+gb, tol = main["bound"], 1e-9 * max(1.0, abs(main["bound"]))
 cands = [nid for nid, r in recs.items() if r["status"] != "infeasible" and kids[nid] < 2]
 assert cands, "no frontier candidates"; n_assert += 1
-fb = min(eff[n] for n in cands)
-print(f"reconstructed frontier bound {fb!r} vs kernel bound {main['bound']!r}")
-assert abs(fb - main["bound"]) <= 1e-9 * max(1.0, abs(main["bound"])), (fb, main["bound"])
+n_pf = main["nodes"] - len(recs)
+deficit = sum(2 - kids[n] for n in cands if eff[n] < gb - tol)
+print(f"candidates {len(cands)}, min eff {min(eff[n] for n in cands)!r}, kernel bound {gb!r}; "
+      f"unseen children below the bound {deficit} <= propagation-fathomed {n_pf}")
+assert deficit <= n_pf, (deficit, n_pf); n_assert += 1
+assert min(eff[n] for n in cands) <= gb + tol, "no candidate at or below the kernel bound"
 n_assert += 1
-holders = [n for n in cands if eff[n] <= main["bound"] + 1e-9]
+holders = [n for n in cands if abs(eff[n] - gb) <= tol]
+assert holders, "no node reproduces the kernel bound"; n_assert += 1
 print(f"bound-holding nodes (eff == global bound, open children): {len(holders)}")
 h_st = collections.Counter(recs[n]["status"] for n in holders)
 h_inh = sum(1 for n in holders if recs[n]["own"] < eff[n] - 1e-12)
@@ -145,7 +167,25 @@ if dumps:
     ds = [depth[n] for n in dumps]
     print(f"dumped nodes depth: min {min(ds)} median {int(np.median(ds))} max {max(ds)} "
           f"(all nodes: max depth {max(depth.values())})")
+# Where the LpVerdictNumerical attempts went (per-node counter deltas, see obs()).
+ids = sorted(recs)
+prev_inf = {ids[i]: (i > 0 and recs[ids[i - 1]]["status"] == "infeasible") for i in range(len(ids))}
+num_nodes = [n for n in ids if recs[n]["d"]["LpVerdictNumerical"] > 0]
+by_st = collections.Counter(recs[n]["status"] for n in num_nodes)
+after_inf = sum(1 for n in num_nodes if prev_inf[n])
+tot_num = sum(recs[n]["d"]["LpVerdictNumerical"] for n in ids)
+print(f"nodes whose counter window holds a Numerical attempt: {len(num_nodes)} / {len(ids)} "
+      f"(attempts in windows: {tot_num}); by final node status {dict(by_st)}; "
+      f"windows that also hold the previous infeasible node's dual-proof LP: {after_inf}")
+dist = collections.Counter(recs[n]["d"]["LpVerdictNumerical"] for n in num_nodes)
+print(f"  Numerical attempts per such window: {dict(sorted(dist.items()))}")
+dense = sum(recs[n]["d"]["LpDenseRetries"] for n in ids)
+print(f"  dense retries in windows: {dense}; nodes with a Numerical window that still ended "
+      f"optimal with a FINITE safe bound: "
+      f"{sum(1 for n in num_nodes if recs[n]['status'] == 'optimal' and np.isfinite(recs[n]['own']))}")
+piv_num = sum(recs[n]["n_pivots"] for n in num_nodes)
 piv_all = sum(r["n_pivots"] for r in recs.values())
+print(f"pivots in Numerical-window nodes: {piv_num} of {piv_all} ({100 * piv_num / max(1, piv_all):.1f}%)")
 piv_dump = sum(recs[n]["n_pivots"] for n in dumps)
 print(f"pivots: all nodes {piv_all}, dumped nodes {piv_dump}")
 
@@ -196,6 +236,11 @@ if dumps:
         hs, ho = highs_solve(d)
         ss, so = soplex_solve(d)
         n_cmp += 1
+        if nid in fidelity:
+            assert hs == "Optimal" and abs(ho - r["obj"]) <= 1e-6 * (1 + abs(ho)), (nid, hs, ho, r["obj"])
+            assert ss == "Optimal" and abs(so - r["obj"]) <= 1e-6 * (1 + abs(so)), (nid, ss, so, r["obj"])
+            n_assert += 2
+            continue
         out[(r["status"], hs, ss)] += 1
         if ho is not None:
             gains.append(ho - inherited)
@@ -209,6 +254,7 @@ if dumps:
         print(f"HiGHS obj - inherited bound over decided LPs: n={len(g)} min {g.min():.4g} "
               f"median {np.median(g):.4g} max {g.max():.4g}; >1e-6: {(g > 1e-6).sum()}")
     assert n_cmp == len(dumps); n_assert += 1
+    print(f"export fidelity: {len(fidelity)} decided nodes reproduced by HiGHS and SoPlex")
     np.savez_compressed(os.path.join(HERE, f"dumps_{arm}_{max_nodes}.npz"),
                         ids=np.array(sorted(dumps)), **{f"{k}_{n}": v for n, d in dumps.items()
                                                         for k, v in d.items()})
