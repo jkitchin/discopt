@@ -1,3 +1,0 @@
-METHOD=hull FLAG=1 DET=True MAX_NODES=10000 TL=7200.0 status=node_limit obj=3.0620145766186386 bound=0.09399999749882468 nodes=10000 gap_certified=False wall=839.0s
-  kernel: {'max_nodes': 10000, 'status': 'node_limit', 'bound': 0.09399999749882468, 'nodes': 10000, 'undecided': 3539, 'wall': 811.1}
-executed assertions: 4

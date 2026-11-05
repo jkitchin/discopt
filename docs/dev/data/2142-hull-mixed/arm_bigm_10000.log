@@ -1,2 +1,0 @@
-ARM=bigm MAX_NODES=10000 status=node_limit obj=3.062014576618532 bound=0.5568486578344218 gap_certified=False nodes=10000 wall=46.8s mixed_stats={'big_m': 0, 'perspective': 0} kernel_calls=[1, 10000]
-executed assertions: 4

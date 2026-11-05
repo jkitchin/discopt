@@ -1,2 +1,0 @@
-ARM=hull MAX_NODES=1 status=node_limit obj=3.0620145766186386 bound=0.0 gap_certified=False nodes=1 wall=32.9s mixed_stats={'big_m': 0, 'perspective': 0} kernel_calls=[1]
-executed assertions: 4

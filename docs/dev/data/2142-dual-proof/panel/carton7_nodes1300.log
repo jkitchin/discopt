@@ -1,5 +1,0 @@
-carton7.nl FLAG=0 status=node_limit obj=None bound=25.999999999993044 nodes=1300 wall=584.5s {'DualProofRays': 0, 'DualProofGlobalLps': 0, 'DualProofLearned': 0, 'DualProofTightenings': 0, 'DualProofFathoms': 0, 'LpVerdictNumerical': 5570}
-executed assertions: 1
-carton7.nl FLAG=1 status=node_limit obj=326.3141906577274 bound=25.999999999993044 nodes=1300 wall=656.8s {'DualProofRays': 11, 'DualProofGlobalLps': 1, 'DualProofLearned': 10, 'DualProofTightenings': 144, 'DualProofFathoms': 23, 'LpVerdictNumerical': 6047}
-executed assertions: 1
-# DISCOPT_PROFILE=1 dump lines removed; v6_nodes.py, sequential, load ~1

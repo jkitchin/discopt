@@ -1,0 +1,211 @@
+"""#2144: the GDP configuration search's feasibility-first fallback.
+
+On GDPlib batch_processing the relaxation's per-group argmax is infeasible and the
+feasible configurations sit 15+ demotions away from it, so the ranked wave and the
+dive (both steered by the relaxation) return nothing, while ~90 % of *uniformly*
+sampled valid configurations are feasible. ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``
+samples, once every other root constructor has missed, on a budget of its own: a
+fixed number of sub-NLP **attempts**, not a share of the wave's deadline (the #2150 lesson -- a
+shared deadline either starved the samples or let them displace a ranked plan).
+
+The model here has the same property in miniature: 12 two-way disjunctions whose
+cheap disjunct each claims 5 units of a 30-unit resource, so at most 6 cheap picks
+fit, while the relaxation point (and the objective) favour the cheap disjunct in
+every group. The argmax configuration is infeasible, and about 61 % of uniform
+samples are feasible.
+"""
+
+from __future__ import annotations
+
+import time
+
+import discopt.modeling as dm
+import numpy as np
+import pytest
+from discopt._relax import primal_heuristics as ph
+from discopt._relax.primal_heuristics import (
+    one_hot_config_feasibility_fallback,
+    one_hot_config_subnlp,
+    subnlp,
+)
+from discopt.solver import _gdp_feas_fallback_due
+from discopt.validation.feasibility import max_constraint_violation
+
+N_GROUPS = 12
+
+
+def _argmax_infeasible_gdp(capacity=30.0, forced_cheap=0):
+    m = dm.Model("argmax_infeasible_gdp")
+    y = m.binary("y", 2 * N_GROUPS)  # y[2i] cheap disjunct, y[2i+1] expensive
+    x = m.continuous("x", shape=(N_GROUPS,), lb=0.0, ub=10.0)
+    for i in range(N_GROUPS):
+        m.subject_to(y[2 * i] + y[2 * i + 1] == 1, name=f"disj{i}")
+        m.subject_to(x[i] >= 5.0 * y[2 * i], name=f"claim{i}")
+    m.subject_to(sum(x[i] for i in range(N_GROUPS)) <= capacity, name="resource")
+    if forced_cheap:
+        # A binary-only logic row: the first ``forced_cheap`` groups take the cheap
+        # disjunct. Uniform sampling violates it with probability 1 - 2**-k.
+        m.subject_to(sum(y[2 * i + 1] for i in range(forced_cheap)) <= 0, name="logic")
+    m.minimize(
+        sum(1.0 * y[2 * i] + 3.0 * y[2 * i + 1] for i in range(N_GROUPS))
+        + 0.01 * sum(x[i] * x[i] for i in range(N_GROUPS))
+    )
+    return m
+
+
+def _relaxation_point():
+    """What the relaxation says: the cheap disjunct, confidently, in every group."""
+    x = np.zeros(3 * N_GROUPS)
+    x[0 : 2 * N_GROUPS : 2] = 0.9
+    x[1 : 2 * N_GROUPS : 2] = 0.1
+    x[2 * N_GROUPS :] = 2.5
+    return x
+
+
+def _argmax_config_point():
+    x = np.zeros(3 * N_GROUPS)
+    x[0 : 2 * N_GROUPS : 2] = 1.0
+    return x
+
+
+@pytest.mark.smoke
+def test_the_argmax_configuration_is_infeasible():
+    """The property the fallback exists for (else the test below proves nothing)."""
+    assert subnlp(_argmax_infeasible_gdp(), _argmax_config_point()) is None
+
+
+@pytest.mark.smoke
+def test_ranked_searches_miss_and_the_fallback_finds_a_point_within_its_attempt_budget():
+    """The regression the issue asks for: a fixed ATTEMPT budget, not a clock.
+
+    The ranked constructor, out of time, finds nothing (the fallback no longer
+    lives inside it, so it cannot fire there); the fallback, given no deadline at
+    all, returns a verified point within ``_FEAS_SAMPLE_ATTEMPTS`` sub-NLP solves.
+    """
+    m = _argmax_infeasible_gdp()
+    expired = time.perf_counter() - 1.0
+    assert one_hot_config_subnlp(m, _relaxation_point(), deadline=expired) == []
+
+    stats: dict = {}
+    found = one_hot_config_feasibility_fallback(m, _relaxation_point(), stats=stats)
+    assert len(found) == 1
+    assert 1 <= stats["attempted"] <= ph._FEAS_SAMPLE_ATTEMPTS
+    assert stats["first_feasible_at"] == stats["attempted"]
+    x, obj = found[0]
+    assert max_constraint_violation(m, x) <= 1e-6
+    y = np.round(x[: 2 * N_GROUPS])
+    assert np.all(y[0::2] + y[1::2] == 1.0)
+    assert y[0::2].sum() <= 6.0  # the resource row: at most 6 cheap picks
+    assert np.isfinite(obj)
+
+
+@pytest.mark.smoke
+def test_the_fallback_is_reproducible():
+    a = one_hot_config_feasibility_fallback(_argmax_infeasible_gdp(), _relaxation_point())
+    b = one_hot_config_feasibility_fallback(_argmax_infeasible_gdp(), _relaxation_point())
+    assert len(a) == len(b) == 1 and np.array_equal(a[0][0], b[0][0])
+
+
+@pytest.mark.smoke
+def test_fallback_stops_at_its_attempt_cap_when_nothing_is_feasible():
+    """Every configuration infeasible: the fallback spends exactly its count."""
+    m = _argmax_infeasible_gdp()
+    m.subject_to(m._variables[1][0] >= 1.0, name="contradiction")  # x[0] >= 1 ...
+    m.subject_to(m._variables[1][0] <= 0.5, name="contradiction2")  # ... and <= 0.5
+    stats: dict = {}
+    assert one_hot_config_feasibility_fallback(m, _relaxation_point(), stats=stats) == []
+    assert stats["attempted"] == ph._FEAS_SAMPLE_ATTEMPTS
+
+
+class _Tree:
+    def __init__(self, inc):
+        self._inc = inc
+
+    def incumbent(self):
+        return self._inc
+
+
+@pytest.mark.smoke
+def test_the_solver_runs_it_last_and_only_when_switched_on(monkeypatch):
+    """It must not displace the constructors gated on "no incumbent yet": measured
+    on mod_hens big-M, firing at the root gave 110441.39 where the pump finds
+    106766.53. So: past the root, after the deferred call, with no incumbent."""
+    seed = np.zeros(3)
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "1")
+    assert _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
+    assert not _gdp_feas_fallback_due(seed, None, 0, _Tree(None))  # root batch
+    assert not _gdp_feas_fallback_due(seed, {"ready_at": 0.0}, 5, _Tree(None))  # deferred
+    assert not _gdp_feas_fallback_due(seed, None, 5, _Tree((seed, 1.0)))  # incumbent
+    assert not _gdp_feas_fallback_due(None, None, 5, _Tree(None))  # ran / never armed
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0")  # the opt-out
+    assert not _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
+    monkeypatch.delenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK")  # graduated: default ON
+    assert _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
+
+
+@pytest.mark.smoke
+def test_draws_refuted_by_integer_only_rows_are_not_attempts():
+    """A binary-only logic row forces the first 6 groups cheap; a uniform draw
+    satisfies it with probability 1/64. Such draws are rejected by the integer-row
+    check, which costs no NLP, so they do not use up the attempt budget (before,
+    each was an attempt, and 16 attempts found nothing here)."""
+    m = _argmax_infeasible_gdp(capacity=40.0, forced_cheap=6)
+    stats: dict = {}
+    found = one_hot_config_feasibility_fallback(m, _relaxation_point(), stats=stats)
+    assert len(found) == 1, stats
+    assert stats["attempted"] <= ph._FEAS_SAMPLE_ATTEMPTS < stats["draws"]
+    assert stats["refuted"] > 0
+    x, _ = found[0]
+    assert max_constraint_violation(m, x) <= 1e-6
+    y = np.round(x[: 2 * N_GROUPS])
+    assert np.all(y[0:12:2] == 1.0)  # the logic row held
+    assert y[0::2].sum() <= 8.0
+
+
+@pytest.mark.smoke
+def test_reduced_pose_does_not_refuse_a_row_with_a_nonfinite_derivative():
+    """#2144: ``_reduce_subnlp`` refused a fixing when a constant row held exactly
+    but had a non-finite partial at the point (NaN scale, NaN threshold). Under hull
+    that is every off disjunct's eps-perspective row at ``v = 0, y = 0``; on GDPlib
+    mod_hens it refused a configuration feasible to 1.5e-12. Here ``sqrt(v)`` at the
+    FBBT-pinned ``v = 0`` has derivative inf, and ``(y, v) = (0, 0)`` is feasible."""
+    m = dm.Model("nan_jacobian_row")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0.0, ub=10.0)
+    m.subject_to(v <= 10.0 * y, name="link")
+    m.subject_to(dm.sqrt(v) <= 2.0, name="perspective_like")
+    m.minimize(v - y)
+    out: dict = {}
+    found = subnlp(m, np.array([0.0, 0.0]), outcome=out)
+    assert out.get("refuted") is None, out
+    assert found is not None and found[1] == pytest.approx(0.0, abs=1e-9)
+
+
+def _nan_jacobian_rows(rhs):
+    """``sqrt(v) >= rhs`` (and ``<= 2``) with ``y`` fixed at 0 and ``v`` pinned at 0:
+    both rows constant, both with a non-finite partial at ``v = 0``."""
+    m = dm.Model("nan_jacobian_constant_rows")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0.0, ub=10.0)
+    m.subject_to(v <= 10.0 * y, name="link")
+    m.subject_to(dm.sqrt(v) <= 2.0, name="holds")
+    m.subject_to(dm.sqrt(v) >= rhs, name="maybe_violated")
+    m.minimize(v - y)
+    y.lb = np.zeros_like(y.lb)
+    y.ub = np.zeros_like(y.ub)
+    ev = ph.cached_evaluator(m)
+    lb, ub = (np.asarray(b, dtype=np.float64) for b in ev.variable_bounds)
+    t_lb, t_ub = lb.copy(), ub.copy()
+    t_ub[1] = 0.0  # what FBBT pins through ``link`` (supplied by hand, so FBBT
+    # cannot refute the violated row first and the reduced check is what decides)
+    return ev, (lb, ub, t_lb, t_ub, False)
+
+
+@pytest.mark.smoke
+def test_reduced_check_judges_nonfinite_scale_rows_without_their_scale():
+    """Review of #2173: a non-finite-scale row is judged against the scale-free
+    threshold -- accepted when it holds, still refused when clearly violated."""
+    ev, implied = _nan_jacobian_rows(rhs=0.0)  # sqrt(0) >= 0 holds exactly
+    assert not isinstance(ph._reduce_subnlp(ev, implied, np.zeros(2), 1e-6), str)
+    ev, implied = _nan_jacobian_rows(rhs=1.0)  # sqrt(0) >= 1 violated by 1
+    assert ph._reduce_subnlp(ev, implied, np.zeros(2), 1e-6) == ph._REDUCED_REFUTED
