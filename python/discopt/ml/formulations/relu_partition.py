@@ -136,12 +136,17 @@ def partition_indices(
 #: the neuron's total range ``U - L`` (bias excluded) is merged into the neuron's
 #: widest partition (#2156). See :func:`merge_negligible_partitions`.
 NEGLIGIBLE_PARTITION_RTOL = 1e-4
+#: A partition whose range is below this absolute floor is merged too, whatever its
+#: neuron's range: HiGHS's default ``mip_feasibility_tolerance`` (1e-6), below which
+#: an auxiliary's whole range is inside the solver's tolerance (#2156 review).
+NEGLIGIBLE_PARTITION_ATOL = 1e-6
 
 
 def merge_negligible_partitions(
     parts: Sequence[np.ndarray],
     term_range: np.ndarray,
     rtol: float | None = None,
+    atol: float | None = None,
 ) -> list[np.ndarray]:
     """Fold every partition of negligible range into the neuron's widest one (#2156).
 
@@ -161,7 +166,11 @@ def merge_negligible_partitions(
     ``UB_a - LB_a``, because ``min(A_b, B_b) + min(A_a, B_a) <= min(A_b + A_a, B_b +
     B_a) <= min(A_b, B_b) + max(A_a, B_a)`` with ``A_a = UB_a q`` and ``B_a = s_a -
     LB_a (1 - q)``, and ``|A_a - B_a| <= UB_a - LB_a`` on the box. The loosening of
-    one neuron is therefore at most ``rtol (U - L)`` per merged partition.
+    one neuron is therefore at most ``max(rtol (U - L), atol)`` per merged partition.
+
+    The relative test alone leaves a neuron of small total range with partitions
+    narrower than the solver tolerance (``U - L = 2.5e-6`` split into pieces of
+    9e-7, 9e-7 and 7e-7), so a partition below ``atol`` is merged as well.
 
     Parameters
     ----------
@@ -170,8 +179,10 @@ def merge_negligible_partitions(
     term_range : np.ndarray
         ``|w_i| (u_i - l_i)`` per input, shape ``(n_in,)``.
     rtol : float, optional
-        Relative threshold; defaults to :data:`NEGLIGIBLE_PARTITION_RTOL`. ``0``
-        disables merging.
+        Relative threshold; defaults to :data:`NEGLIGIBLE_PARTITION_RTOL`.
+    atol : float, optional
+        Absolute floor; defaults to :data:`NEGLIGIBLE_PARTITION_ATOL`. ``rtol = atol
+        = 0`` disables merging.
 
     Returns
     -------
@@ -179,21 +190,22 @@ def merge_negligible_partitions(
         The merged partition. It still covers every input of ``parts`` exactly once.
     """
     rtol = NEGLIGIBLE_PARTITION_RTOL if rtol is None else float(rtol)
-    if rtol < 0:
-        raise ValueError(f"rtol must be >= 0, got {rtol}")
+    atol = NEGLIGIBLE_PARTITION_ATOL if atol is None else float(atol)
+    if rtol < 0 or atol < 0:
+        raise ValueError(f"rtol and atol must be >= 0, got rtol={rtol}, atol={atol}")
     parts = [np.asarray(p) for p in parts]
-    if len(parts) <= 1 or rtol == 0.0:
+    if len(parts) <= 1 or (rtol == 0.0 and atol == 0.0):
         return parts
     tr = np.asarray(term_range, dtype=np.float64)
     ranges = np.array([float(tr[p].sum()) for p in parts])
     total = float(ranges.sum())
-    small = ranges <= rtol * total
+    small = (ranges <= rtol * total) | (ranges < atol)
     if not small.any():
         return parts
     keep = [p for p, s in zip(parts, small) if not s]
     if not keep:
-        # Every partition is negligible next to the total: there is no wide one to
-        # absorb them, so the whole neuron is one partition (big-M).
+        # Every partition is negligible: there is no wide one to absorb them, so
+        # the whole neuron is one partition (big-M).
         return [np.concatenate(parts)]
     widest = int(np.argmax(np.where(small, -np.inf, ranges)))
     kept_idx = [i for i, s in enumerate(small) if not s]
@@ -444,6 +456,7 @@ class AndersonCutSeparator:
 __all__ = [
     "AndersonCutSeparator",
     "ReluExtendedFormulation",
+    "NEGLIGIBLE_PARTITION_ATOL",
     "NEGLIGIBLE_PARTITION_RTOL",
     "ReluPartitionFormulation",
     "merge_negligible_partitions",

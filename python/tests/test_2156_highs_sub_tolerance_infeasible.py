@@ -78,6 +78,7 @@ def _exact_point(m: Model, net: NetworkDefinition, x_in: np.ndarray) -> np.ndarr
 def test_unmerged_extended_model_is_not_certified_infeasible(monkeypatch):
     """Before #2156 this returned ``infeasible`` with ``gap_certified=True``."""
     monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_RTOL", 0.0)
+    monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_ATOL", 0.0)
     net = _tiny_weight_net(0, 32)
     n = 0
     mb = Model("bigm")
