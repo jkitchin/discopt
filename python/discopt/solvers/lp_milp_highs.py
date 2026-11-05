@@ -2776,8 +2776,9 @@ def _sub_tolerance_infeasible_guard(sf: StdForm, out: HighsOutcome) -> HighsOutc
     Only the infeasible label is withdrawn. On the same panel every false HiGHS
     ``optimal`` was already refuted by the #1509/#1634 checks. 72 of the 89
     correct certificates (big-M, merged extended, merged P = 4) sit on models with
-    such columns, and with this guard all 89 are still certified. A Farkas proof of the root relaxation is the route's own
-    certificate and stands. The withdrawn label becomes ``error``, the #1295
+    such columns, and with this guard all 89 are still certified. A Farkas proof
+    of the root relaxation is the route's own certificate and stands. The
+    withdrawn label becomes ``error``, the #1295
     treatment of an unverified ``kInfeasible``.
     """
     if not (out.status == "infeasible" and out.gap_certified):
