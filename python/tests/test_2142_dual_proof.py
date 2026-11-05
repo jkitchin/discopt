@@ -81,12 +81,12 @@ def test_cstr_bigm_learns_proofs_that_lift_a_sound_bound(runs):
     assert executed == 7
 
 
-def test_python_flag_default_off(monkeypatch):
+def test_python_flag_graduated_default_on_with_opt_out(monkeypatch):
     from discopt.solver import _kernel_dual_proof_enabled
 
     monkeypatch.delenv("DISCOPT_DUAL_PROOF_PROPAGATION", raising=False)
-    assert _kernel_dual_proof_enabled() is False
-    monkeypatch.setenv("DISCOPT_DUAL_PROOF_PROPAGATION", "1")
     assert _kernel_dual_proof_enabled() is True
     monkeypatch.setenv("DISCOPT_DUAL_PROOF_PROPAGATION", "0")
     assert _kernel_dual_proof_enabled() is False
+    monkeypatch.setenv("DISCOPT_DUAL_PROOF_PROPAGATION", "1")
+    assert _kernel_dual_proof_enabled() is True
