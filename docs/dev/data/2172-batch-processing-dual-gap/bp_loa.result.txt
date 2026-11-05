@@ -1,0 +1,2 @@
+RESULT {"method": "loa", "status": "feasible", "obj": 681615.1362575785, "bound": 598109.8482557461, "nodes": 0, "wall": 122.33120971999983, "env": {}}
+STATS {"route": "gdpopt-loa: logic-based outer approximation (MILP master + NLP)", "stop_reason": "exhausted", "iterations": 3, "n_master": 3, "n_subproblems": 2, "n_solved": 2, "n_unresolved": 0}
