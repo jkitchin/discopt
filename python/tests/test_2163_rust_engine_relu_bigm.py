@@ -21,8 +21,8 @@ HiGHS certifies the optimum in a second. Two defects, one fixture each:
   them with the dual simplex from an all-logical basis, as HiGHS starts. Before:
   ``feasible``, gap 0.39 and 0.087.
 
-Both are 2-12-12-1 sub-networks of network A / B of the issue (the
-``net.json`` attachments to #2156 / #2151), stored in
+All four are sub-networks (2-12-12-1, 2-12-12-1, 2-8-8-1, 2-16-16-1) of
+network A / B of the issue (the ``net.json`` attachments to #2156 / #2151), stored in
 ``data/relu_bigm_2163_nets.json``. The oracle is the default HiGHS route on the
 same model, whose certificate discopt verifies independently (#1229).
 """
