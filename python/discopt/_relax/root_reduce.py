@@ -87,30 +87,6 @@ class RootReduceResult:
 DEFAULT_STAGES = ("fbbt", "obbt")
 
 
-def _even_split_enabled() -> bool:
-    """``DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT`` (default OFF, CLAUDE.md §5), read per call.
-
-    Legacy: each round's S3 OBBT gets ``obbt_stage_frac`` of the loop's *remaining*
-    budget, so round 1 takes 85% of the whole loop and round 2 runs on what is left
-    (measured on GDPlib ``modprodnet`` hull, default mode, time_limit 120: round 1
-    10.2 s / 370 tightenings, round 2 **1.4 s** / 81; the solve then took 249 nodes,
-    113-115 s). ON divides round ``r``'s share by the rounds still to run (``max_rounds
-    - r``), so the rounds split the same total: 5.1 s / 363 then 4.9 s / 688, and the
-    solve certifies at 5 nodes in 33.6 s (2 reps each, identical certified optimum).
-    The total time is unchanged; only its division between rounds moves. Each
-    tightening is still the NS-safe OBBT clamp, and the loop is still tighten-only,
-    so soundness does not depend on the split. It changes the box the tree starts
-    from, so it is bound-changing and graduates only on a §5 panel; the row is in
-    ``docs/dev/flag-retirement-audit.md``.
-    """
-    return os.environ.get("DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 def _is_int_mask(model: Model, n: int) -> np.ndarray:
     from discopt.modeling.core import VarType
 
@@ -352,10 +328,6 @@ def run_root_fixpoint(
                 obbt_budget = None
                 if remaining is not None:
                     obbt_budget = remaining * float(obbt_stage_frac)
-                    if _even_split_enabled():
-                        # Share the loop's budget across the rounds still to run,
-                        # instead of handing round 1 85% of all of it.
-                        obbt_budget /= max(1, max_rounds) - _round
                 obbt_deadline = None if obbt_budget is None else time.perf_counter() + obbt_budget
                 t0 = time.perf_counter()
                 lb, ub, obbt_infeas, nt = _stage_obbt(
