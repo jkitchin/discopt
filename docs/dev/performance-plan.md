@@ -14386,3 +14386,292 @@ mechanism.
 net-positive bar, recorded in the flag audit. The rationale: OFF discards a correct
 `Optimal` for a `Numerical` built on a pivot whose reduced cost is rounding residue.
 ON settles that column through the existing verification instead.
+
+## 105. #2143 stage 2: root heuristic budget hygiene; the in-root LOA proposer is falsified at 120 s (2026-11-04)
+
+**Context.** GDPlib `syngas` under `gdp_method="hull"` ends its 120 s with no incumbent.
+The #2143 diagnosis showed the `DISCOPT_SUBNLP_REDUCED` sub-NLP is not the gap: no root
+heuristic proposes a feasible disjunct configuration, and much of the budget goes to
+heuristics re-solving fixings already shown to fail. Probes and data for this section:
+`scratchpad/stage2/` of the session (`probe_memo_kill.py`, `probe_pump_kill.py`,
+`probe_tierb_entry.py`, `probe_loa_entry.py`, `e2e.py`). All runs: one probe at a time,
+`OMP_NUM_THREADS=1`, on a 4-core box shared with another session's panel (load1 1.5-2.9
+for the probes, 3.6-8.7 for the end-to-end pairs).
+
+**What shipped, default OFF** (rows in `flag-retirement-audit.md`):
+
+- `DISCOPT_HEUR_FIXING_SCREEN`. ILS keeps a per-call memo of failed fixings. A fixing
+  refuted by a box proof is skipped from any start. A bit-identical start that failed
+  on any status except `TIME_LIMIT` is skipped too. The budget is charged as if the
+  solve ran. The pump also screens each round with `subnlp`'s two refutations before
+  its NLP and repair.
+  - Kill experiments, legacy arm: 976 ILS sub-NLPs, of which 357 are refuted repeats
+    and 43 identical-start repeats. **None** of them later succeeded. Pump: 46
+    candidates, 9 screened, **0** of the screened verified.
+  - Converged failures are memoized by the whole start, not by the integers alone. A
+    local NLP's failure depends on its start, so an integer-keyed memo would skip
+    starts it has no evidence about. The sweep saw only 2 repeats of that kind
+    (`ex1225`, same integers after a converged failure, different start), and neither
+    succeeded. That is too few to justify the wider key.
+  - Effect on `syngas` LOA: ILS 5.3 s -> 0.56 s, with 23 of 24 poses skipped. LOA
+    certifies 4669.0235 in 46.6 s ON vs 83.1 s OFF. The LOA trajectory changed, 2
+    vs 3 iterations.
+  - Effect on `syngas` hull: the root pump took 0.25 s instead of 29.1 s.
+- `DISCOPT_ROOT_WARMSTART_FIRST`. The root warm-start `subnlp` is posed before the
+  other root heuristics. On `syngas` hull warm-started from the big-M optimum, the
+  incumbent 4669.0235 appeared at 50.1 s. The diagnosis had no incumbent at 120 s.
+  The run ends `feasible`: bound 4347.80 after 3 nodes.
+
+**End-to-end** (`gdp_baseline.py --worker` scored by `gdp_baseline.score`, all three
+#2143 flags ON vs all OFF, interleaved, 2 reps, 120 s):
+
+| instance | arm | rep 0 | rep 1 |
+|---|---|---|---|
+| `syngas` hull | OFF | no incumbent, bound 4347.80, 3 nodes, 120.1 s | same, 120.2 s |
+| `syngas` hull | ON | no incumbent, bound 4347.80, 3 nodes, 121.7 s | same, **144.8 s** |
+| `ex_633_trespalacios` hull | OFF | optimal 4.4603676, 75 nodes, 33.3 s | 75 nodes, 33.1 s |
+| `ex_633_trespalacios` hull | ON | optimal 4.4603676, 75 nodes, 29.6 s | 75 nodes, 28.3 s |
+| `modprodnet` hull | OFF | feasible 3592.924, bound 3594.53858, 57 nodes | 77 nodes |
+| `modprodnet` hull | ON | feasible 3592.924, bound 3594.53858, 57 nodes | 69 nodes |
+
+- Every incumbent passed the worker's Pyomo re-check: max relative violation 0.0 /
+  2.1e-25.
+- **No cell gained or lost an incumbent or a certificate.**
+- The 144.8 s is the overrun below, not solver math.
+
+**Falsified: Tier B, an LOA configuration proposer as a root heuristic.** Entry
+experiment (probe-level prototype, no product code): when the root configuration wave
+returns nothing, run `gdp.algorithms.loa.LOA` on the source GDP for the rest of the
+budget. Its first verified point would be mapped to the lowered model
+(`complete_initial_point`) and posed through `subnlp`.
+
+- Standalone LOA, with the memo, needs ~44 s to its first feasible subproblem:
+  - convexity pass 9.5 s;
+  - seed cuts 4.3 s;
+  - iterations 16.7 s and 13.2 s.
+- Inside the hull solve the wave ends at 61.7 / 62.5 s (2 reps). LOA then gets 55.3 /
+  54.5 s. Both reps reached iteration 3, the optimal configuration (master bound
+  4668.809), at 117.0 s, but its subproblem did not finish.
+- **No incumbent in either rep.**
+- The in-root LOA runs a smaller default subproblem cap (0.1 x 55 s against 12 s
+  standalone) and takes 3 iterations, against 2 standalone.
+
+Per the entry discipline Tier B was not built. What stands in its way is the time the
+hull root spends before any heuristic runs. That makes A3 below the prerequisite, not
+an alternative.
+
+**Leads, not results:**
+
+- **A3**: the root presolve cap. 30 s of `syngas` hull's 120 s goes to
+  `run_root_presolve` before the root LP, which bounds 4347.80 in every presolve
+  variant. This is bound-changing, so it needs its own §5 panel. It is also what would
+  give an in-root LOA proposer room (~83 s instead of ~55 s).
+- **Pump repair overrun.** `_repair_to_feasible`'s pounce QP is checked against the
+  deadline only between QPs. On `syngas` hull with the flags ON, the
+  NLP-relaxation-seeded second pump gets the time the first pump no longer wastes.
+  Its single repair then ran 19-21 s from ~5 s before the deadline: the solve ended
+  at 128-145 s of 120. This is pre-existing (the stage was simply not reached before)
+  and wants a cost-aware entry gate for the repair.
+
+## 106. #2143 stage 3: deadline adherence, the root presolve stop, the in-root LOA proposer (2026-11-04)
+
+Probes and data: `scratchpad/stage3/` of the session. Box: 4 cores, nothing else of
+ours running unless stated; load is recorded beside every timing.
+
+### 106.1 A root heuristic's sub-solve stops at the solve's deadline (default ON)
+
+**Reproduced first.** GDPlib `syngas`, `gdp_method="hull"`, 120 s, the three stage-2
+flags ON, every heuristic, NLP and QP entry point wrapped and timed
+(`probe_overrun.py`, load 0.2-0.8). Four runs ended at **127.0, 124.1, 160.1 and
+123.6 s**. Two different sub-solves outlived the deadline:
+
+- **A POUNCE NLP that ignores its own `max_wall_time`.** The pump's seed multistart
+  ran one start from 86.0 s with `max_wall_time=30` that returned `OPTIMAL` at 159.8 s:
+  1,984 iterations, 21,587 of its callbacks after its cap. A pump fix-and-solve capped
+  at 3.0 s ran 7.95 s (116.0 -> 123.9 s, status 2) and 9.6 s in another run. Callback
+  gaps were at most 0.14 s, so this is not one expensive iteration. POUNCE keeps
+  iterating past the cap.
+- **One QP of the pump's repair.** It ran from 105.95 s to 123.48 s. pounce 0.15.0's
+  `project_to_feasible` takes no time limit and calls back into Python only between
+  QPs, so `_DeadlineCallbacks` could not stop it. The stage-2 write-up (§105) had
+  attributed the overrun to this QP. That is confirmed for that run shape. Offline,
+  an earlier pump's repair on the same model took 10 QPs of 1.1-1.9 s each
+  (`probe_repair_qp.py`, 12.4 s in all), so the cost of one QP varies by an order of
+  magnitude with the rounding.
+
+**Fix.**
+
+- `solvers/_nlp_hard_stop.py`: every public primal heuristic in `primal_heuristics.py`
+  (and the pump's seed multistart in `solver.py`) arms a hard stop at the live
+  solve's ROLE-1 deadline (`solver_tuning.ROLE1_DEADLINE`).
+  - `nlp_pounce.solve_nlp` and `nlp_ipopt.solve_nlp` then hand the solver an
+    `intermediate` hook. It returns `False` once that deadline passes, which ends the
+    solve with `User_Requested_Stop`, reported as `TIME_LIMIT`.
+  - A solve due after the deadline is not started.
+  - Only the user's `time_limit` is used, never a stage's or a heuristic's own earlier
+    deadline. So the stop truncates only work past the solve's deadline.
+  - Node NLPs are never armed.
+- `_project_to_feasible_until`: pounce's projection loop, step for step, with
+  `time_limit = deadline - now` on each QP. While the deadline does not bind its point
+  is bit-identical to pounce's (`test_2143_deadline_adherence`, 4 starts). Without a
+  deadline the repair still calls pounce.
+
+**After** (same probe and flags, load 0.06-0.72): **120.16 s**. The repair QP
+started at 118.73 s and stopped at 120.13 s, and the post-deadline ILS solve was not
+started.
+
+**Bound-neutral regime.** Code-version A/B (`ab_code_panel.py`): HEAD exported
+(no `_nlp_hard_stop`, asserted absent) against the worktree (asserted present). It
+covers the 76 in-repo `.nl` plus `ex_633`, `eight_process`, `nonconvex_hen`,
+`clay0203`, `small_batch` hull and `eight_process` big-M, at 60 s with jobs=2, load
+2.0-3.6.
+
+- 80 pairs, 62 where neither arm's deadline bound (optimal/infeasible in under 45 s):
+  **60 exactly equal** in node count and objective. Every GDP cell is identical
+  (ex_633 75 nodes, eight_process 59 / 27, nonconvex_hen 13, clay0203 111,
+  small_batch 3).
+- The two others are `cvxnonsep_nsig30` / `psig30`, with identical objectives and
+  node counts 4368 / 4157 and 3640 / 3894. A rerun of both arms twice each, at jobs=1
+  and load about 2.1, gave:
+  - base `nsig30` 4198 and 4401, new 4386 and 4190;
+  - base `psig30` 4102 and 4102, new 4288 and 4330.
+
+  Base against itself already spans 3640-4102 and 4198-4401. The spread is run-to-run
+  noise, not the change.
+- The one status change is `ex8_5_3`: optimal at 57.6 s (base) against feasible at
+  60.1 s (new), a cell where the deadline binds.
+
+Kept residuals: an in-flight factorization or IPM iteration is not interrupted
+(pounce: "expiry can overshoot by one such operation").
+
+**Not changed here, and why.** Two budget defects do not outlive the deadline, but
+they spend most of `syngas` hull's root:
+
+- `_solve_root_node_multistart` replaces the caller's per-start cap with the whole
+  time left for every start after the first. Its comment says "shrink". The pump
+  seed's `min(3.0, ...)` thus became 30 s, and two starts took 24 + 22 s.
+- POUNCE overruns `max_wall_time` well before the deadline.
+
+Honouring either changes which incumbents are found where the deadline does not
+bind, so it is §5 bound-changing work. It is not part of a deadline fix, and is
+recorded as a lead.
+
+### 106.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, RETIRED)
+
+> **Retired 2026-11-04 in #2155, before merge.** Its §5 panels were cert-clean but met its pre-registered kill criterion (not net-positive in wall: gdp_parity SGM 35.33 -> 35.57 s, corpus certified 114 -> 113). The flag and its Rust implementation were deleted; the measurements below stand as the record. §106.3's all-flags-ON run included this flag and has not been repeated without it.
+
+**What the 30 s on `syngas` hull bought.** Per pass and per sweep
+(`probe_presolve_passes.py`, `probe_presolve_sweeps.py`), the run hit `TimeBudget`
+after 4 sweeps:
+
+- `probing` cost 6.9, 7.3, 7.6 and 0.5 s (cut off) per sweep and tightened 195, 355,
+  45 and 16 bounds.
+- `implied_bounds` tightened 436, 70, 118 and 21 at 2 ms per sweep.
+- `eliminate` + `factorable_elim` cost 1.3-2.4 s per sweep and found **nothing** on
+  any sweep.
+- Measured by magnitude, the later sweeps' changes are real: 375, 132, 29 and 45
+  blocks shrank, nearly all by more than 10 % of their width.
+- **Without probing**, one cycle never settles. 15-18 blocks shrink by 3.4 % per
+  sweep, sweep after sweep, so legacy runs all 16 sweeps to `IterationCap` (25.7 s).
+  The same shape shows on `bchoco06/07/08` and `beuster` (`IterationCap` in
+  0.4-3.0 s).
+
+The decisive fact is in `solver.py`, not in the orchestrator.
+`propagate_bounds_to_model` adopts the presolve box only under
+`DISCOPT_PRESOLVE_BOUND_PROPAGATION`, which is default OFF. By default the solve
+keeps only the returned repr, that is the rewrites. That explains why the root LP
+bound was 4347.80 under every presolve variant the diagnosis tried.
+
+**Rule.**
+
+- Probing (the one *exhaustive* pass) runs in sweep 0 only.
+- A later sweep counts as progress only if it moved something the solve keeps:
+  - by default, a rewrite or a newly fixed block, because a fixing can feed a
+    rewrite in the next sweep;
+  - with the box adopted, also a 5 % width shrink or a newly finite side.
+- Nothing in it is keyed to an instance. It is "do not pay for work whose product
+  is discarded", plus a cost rule for the one pass that redoes all its work every
+  sweep.
+
+**Entry experiment** (`probe_presolve_rules.py`: `run_root_presolve` alone,
+solver.py's kwargs, 30 s budget, one process; the returned repr fingerprinted by
+shape, declared bounds and per-row rhs/sense/expression id):
+
+| arm | instances | model identical to legacy | total wall | `syngas` hull | others moved |
+|---|---|---|---|---|---|
+| legacy | 81 | -- | 54.2 s | 30.0 s `TimeBudget` | |
+| `rel=inf` (no probing rule) | 81 | 81/81 | 32.4 s | 20.5 s | |
+| `rel=inf` + probing once (**the flag, default path**) | 81 | **81/81** | **21.1 s** | **11.3 s** | hda 8.6 -> 4.1, beuster 2.6 -> 0.26, 4stufen 1.2 -> 0.12 |
+| `rel=0.05` (box adopted) | 88 | 88/88 | 138.0 of 151.5 s | 30.0 s | |
+| `rel=0.05` + probing once (**the flag, box adopted**) | 88 | **88/88** | **81.7 of 151.5 s** | 22.0 s | gdp_col hull 30.0 -> 15.1, syngas big-M 28.0 -> 2.1, methanol hull 6.9 -> 3.1 |
+
+The box was looser than legacy's on 13 (default-path rule) and 18 (5 % rule)
+instances. The default path never adopts that box.
+
+On the default path, then, the flag changes no model the search sees. What it
+changes is time: the solve starts its root ~19 s earlier on `syngas` hull. Its
+§5 panels therefore measure what that time does downstream (results in 106.4).
+
+### 106.3 Tier B rerun: the root LOA proposer reaches an incumbent on `syngas` hull (`DISCOPT_GDP_LOA_PROPOSER`, default OFF)
+
+**Entry experiment redone.** This is stage 2's prototype (`probe_tierb_entry.py`,
+probe-level), now on top of 106.1 and 106.2. All flags were ON:
+
+- `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXING_SCREEN`,
+  `DISCOPT_ROOT_WARMSTART_FIRST`;
+- `DISCOPT_PRESOLVE_MARGINAL_STOP`.
+
+Two reps, load 1.1-1.7:
+
+| rep | wave ends | LOA budget | LOA | incumbent in the hull solve | end |
+|---|---|---|---|---|---|
+| 0 | 44.2 s | 72.8 s | optimal 4669.0235, 2 iterations, 83.5 s | **4669.0235 at 84.7 s** | feasible, bound 4347.80, 3 nodes, 120.5 s |
+| 1 | 44.2 s | 72.8 s | optimal 4669.0235, 2 iterations, 81.5 s | **4669.0235 at 82.6 s** | same, 120.5 s |
+
+In stage 2 the wave ended at 61.7 / 62.5 s and LOA's third iteration never
+finished, so there was no incumbent. The 17-18 s the presolve stop frees is what
+lets LOA finish here. The entry bar was an incumbent within 120 s. It **passed**,
+so the proposer was built.
+
+**Built behind the flag.**
+
+- `_gdp_loa_root_proposal` runs LOA on the source GDP:
+  - with 90 % of the time left;
+  - until its first verified incumbent (`GDPAlgorithm(stop_at_first_incumbent=True)`).
+- The point goes onto the lowered model:
+  - the source columns are its prefix;
+  - LOA's disjunct choice is written onto the lowering's selectors, through a new
+    record of them, `_gdp_disjunct_selectors`;
+  - the other appended columns come from the root relaxation point.
+- It is posed through `subnlp`.
+
+Two defects found while building it, both fixed before measuring:
+
+1. **Recursion.** LOA solves each configuration's subproblem with a nested
+   `Model.solve`, and the proposer fired again inside it. A second LOA on a
+   subproblem took 8.8 s of the outer one's budget, and that run ended with no
+   incumbent. A context variable now keeps the proposer out of its own LOA.
+2. **Placement.** `complete_initial_point`'s generic completion cannot place hull
+   selectors. It left both selectors of the toy's disjunction at 1, because the
+   disaggregated copies sat at their defaults. Its default for a factorable
+   auxiliary was 5e7, and the sub-NLP failed from it. Hence the selector record
+   and the relaxation-point start. On `syngas` the indicators are user variables,
+   so they are part of the source prefix ("0 selectors placed"). On the toy's
+   `either_or` the record places them.
+
+**Product code, all flags ON** (`probe_proposer_e2e.py`, load 1.6): the proposer
+started at 47 s with 65.8 s of budget. LOA took 3 iterations this time, not 2,
+and proved 4669.0235 optimal. The hull solve had the incumbent **4669.0235 at
+100.0 s** and ended `feasible`: bound 4347.80, 3 nodes, 120.5 s.
+
+**What stays open.** The proposer gives `syngas` hull its incumbent. It does not
+certify. The hull B&B explores 3 nodes in what is left, and its root bound 4347.80
+is 7 % below the optimum. LOA itself proves 4669.0235 optimal (master bound
+4668.809 against 4669.0235), but that bound is LOA's. Using it as the hull solve's
+dual bound would be a bound-changing step that needs its own soundness argument,
+since LOA's bound rests on OA cuts certified convex on the source model. It is not
+done here.
+
+Under hull the proposer's sub-NLP needs `DISCOPT_SUBNLP_REDUCED`. On the toy, the
+legacy pose fails on the right configuration (status ERROR) and the reduced pose
+returns 2.0.

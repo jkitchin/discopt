@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import logging
 import math
+import operator
 import os
 import time
 from dataclasses import dataclass
@@ -303,6 +304,77 @@ def _cached_row_structure(model: Model, rule_name: str, constraint, metadata, bu
     value = build()
     rowstruct[key] = (body, value)
     return value
+
+
+def _rule_rows(model: Model, rule_name: str, metadata, deadline: Optional[float]):
+    """The rows a rule's scan must visit: every row minus its *structural* misses.
+
+    Most rows of a large model match none of a rule's patterns, and that verdict
+    depends only on the row's expression and the flat metadata, never on the box.
+    Measured on GDPlib ``modprodnet`` under hull (11.5k rows, 318 rule scans in one
+    solve), the scans spent ~17 s of a 26 s nonlinear pass just re-deciding those
+    misses: 7.2M ``_get_struct_cache`` and 3.7M ``_cached_row_structure`` calls.
+
+    A rule reports a structural miss with :func:`_reject_row`; later scans skip
+    the row. A rejected row is one the rule's loop would ``continue`` past without
+    touching the box or proving anything, so dropping it leaves every remaining
+    row in its original order and each bound bit-identical (CLAUDE.md 5,
+    bound-neutral). The skip set is keyed to the row list *and* each row's body
+    identity, checked on every call: a list mutated in place, or a body replaced in
+    place (the #2090 exact pass does that), drops every skip set. A caller passing
+    its own ``metadata`` gets the full row list, as in ``_cached_row_structure``.
+
+    With a ``deadline`` the poll counts visited rows, so a scan that skips more
+    rows reaches further before it stops -- still a valid prefix bail (#875).
+    """
+    cache = _get_struct_cache(model)
+    if metadata is not cache["metadata"]:
+        return _rows_until(model, deadline)
+    constraints = model._constraints
+    snap = cache.get("rowskip_snapshot")
+    valid = (
+        snap is not None
+        and len(snap[0]) == len(constraints)
+        and all(map(operator.is_, snap[0], constraints))
+        and all(map(operator.is_, snap[1], map(_row_body, constraints)))
+    )
+    if not valid:
+        cache["rowskip_snapshot"] = (list(constraints), list(map(_row_body, constraints)))
+        cache["rowskip"] = {}
+    skip = cache["rowskip"]
+    entry = skip.get(rule_name)
+    if entry is None:
+        rows = constraints
+    else:
+        rejected, rows = entry
+        if rows is None:
+            rows = [c for c in constraints if id(c) not in rejected]
+            skip[rule_name] = (rejected, rows)
+    if deadline is None:
+        return rows
+    return _iter_rows_until(rows, deadline)
+
+
+def _row_body(constraint):
+    return getattr(constraint, "body", None)
+
+
+def _reject_row(model: Model, rule_name: str, constraint, metadata) -> None:
+    """Record that ``constraint`` structurally fails ``rule_name``'s pattern.
+
+    Call it only at a ``continue`` reached before the row has read the box, written
+    a bound, or proved anything, on a test that depends solely on the row's
+    expression, its sense and ``metadata`` -- see :func:`_rule_rows`.
+    """
+    cache = _get_struct_cache(model)
+    if metadata is not cache["metadata"] or "rowskip" not in cache:
+        return
+    skip = cache["rowskip"]
+    entry = skip.get(rule_name)
+    rejected = set() if entry is None else entry[0]
+    if id(constraint) not in rejected:
+        rejected.add(id(constraint))
+        skip[rule_name] = (rejected, None)
 
 
 @dataclass(frozen=True)
@@ -1219,8 +1291,9 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -1253,6 +1326,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 square_coeffs[flat_idx] = square_coeffs.get(flat_idx, 0.0) + coeff
 
             if not matches_pattern or not square_coeffs:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             rhs = -constant_term
@@ -1388,8 +1462,9 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -1414,6 +1489,7 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 sqrt_match = match
 
             if not matches_pattern or sqrt_match is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             sqrt_coeff, square_coeffs = sqrt_match
@@ -1589,8 +1665,9 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             structure = _cached_row_structure(
@@ -1601,6 +1678,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._decompose_row(model, c, metadata),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             constant_term, coeffs, constant_absum = structure
 
@@ -1891,8 +1969,9 @@ class MonotoneFunctionEqualityRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) != "==":
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -1931,6 +2010,7 @@ class MonotoneFunctionEqualityRule(NonlinearBoundTighteningRule):
                 or function_match is None
                 or affine_match[0] is None
             ):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             linear_idx, linear_coeff, linear_offset = affine_match
@@ -2160,8 +2240,9 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -2183,6 +2264,7 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
                 function_match = match
 
             if not matches_pattern or function_match is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             func_name, func_coeff, flat_idx, arg_coeff, arg_offset = function_match
@@ -2328,8 +2410,9 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) != "==":
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -2371,6 +2454,7 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 or square_match is None
                 or affine_match[0] is None
             ):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             linear_idx, linear_coeff, linear_offset = affine_match
@@ -2635,7 +2719,7 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             structure = _cached_row_structure(
                 model,
                 self.name,
@@ -2644,6 +2728,7 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._decompose_row(c, metadata),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             constant_term, target_idx, target_scale, positive, const_absum = structure
 
@@ -2799,8 +2884,9 @@ class PositiveAffineReciprocalBoundsRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
         n_vars = len(flat_lb)
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -2822,6 +2908,7 @@ class PositiveAffineReciprocalBoundsRule(NonlinearBoundTighteningRule):
                 reciprocal_match = match
 
             if not matches_pattern or reciprocal_match is None or constant_term <= 0.0:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             scaled_numerator, denominator = reciprocal_match
@@ -2929,7 +3016,7 @@ class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
         n_vars = len(flat_lb)
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             structure = _cached_row_structure(
                 model,
                 self.name,
@@ -2938,6 +3025,7 @@ class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._decompose_row(model, c, metadata, n_vars),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             affine_coeff, affine_const, base_idx, exponent, power_scale = structure
 
@@ -3058,8 +3146,9 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             terms = _cached_flat_terms(model, constraint.body)
@@ -3081,6 +3170,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
                 reciprocal_match = match
 
             if not matches_pattern or reciprocal_match is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             numerator, flat_idx, denom_coeff, denom_offset = reciprocal_match
@@ -3382,7 +3472,7 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
         eps = 1e-9
         lp_rows = None  # #1981: built on first need
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             structure = _cached_row_structure(
                 model,
                 self.name,
@@ -3391,6 +3481,7 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._decompose_row(model, c, metadata),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             scale_p, v_idx, f_coeffs, f_const, rest_coeffs, rest_const_val = structure
 
@@ -4088,9 +4179,10 @@ class ConvexQuadraticEllipsoidRule(NonlinearBoundTighteningRule):
         if not _ellipsoid_bounds_enabled():
             return tightened_lb, tightened_ub
 
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             sense = getattr(constraint, "sense", None)
             if sense not in ("<=", ">=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
 
             structure = _cached_row_structure(
@@ -4101,6 +4193,7 @@ class ConvexQuadraticEllipsoidRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._row_ellipsoids(model, c, metadata),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             support, le_box, ge_box = structure
 
@@ -4390,10 +4483,11 @@ class IntegerBlockQuadraticRule(NonlinearBoundTighteningRule):
     ) -> tuple[np.ndarray, np.ndarray]:
         if not integer_block_quadratic_enabled():
             return flat_lb.copy(), flat_ub.copy()
-        for constraint in _rows_until(model, deadline):
+        for constraint in _rule_rows(model, self.name, metadata, deadline):
             # ``>=`` rows are ``-body <= 0`` with a negated Q, which is never PD when
             # Q is, so only ``<=`` and ``==`` (its ``<=`` half) can be decided here.
             if getattr(constraint, "sense", None) not in ("<=", "=="):
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             structure = _cached_row_structure(
                 model,
@@ -4403,6 +4497,7 @@ class IntegerBlockQuadraticRule(NonlinearBoundTighteningRule):
                 lambda c=constraint: self._row_blocks(model, c, metadata),
             )
             if structure is None:
+                _reject_row(model, self.name, constraint, metadata)
                 continue
             support, d, blocks = structure
             sup = np.asarray(support, dtype=np.int64)

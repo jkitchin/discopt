@@ -92,6 +92,7 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
+from discopt.solvers._nlp_ladder_scope import apply_ladder_scope, ladder_off
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
@@ -976,6 +977,247 @@ def _gdp_config_first_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _root_warm_start_first_enabled() -> bool:
+    """Whether the root poses its warm-start sub-NLP first (#2143).
+
+    ``DISCOPT_ROOT_WARMSTART_FIRST``.
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    The root already poses ONE ``subnlp`` from the modeler's start (GAMS ``x.l``
+    values, else the caller's ``initial_solution`` completed across the lowering),
+    but only after the disjunct-configuration constructor, both feasibility pumps,
+    integer local search and diving -- whatever those leave of the budget. ON poses
+    the same sub-NLP, with the same budget, before all of them, and the late site
+    then does not pose it again. Nothing else changes, and a model without a start
+    is untouched.
+
+    Measured on GDPlib ``syngas`` under hull (#2143 diagnosis), warm-started from the
+    big-M optimum: no incumbent at 120 s, although ``subnlp`` from that completed
+    start returns 4669.0235 in 1.5 s; the root heuristics ahead of it spent the
+    budget. **Kill criterion**: a panel instance with a start whose incumbent or
+    certificate is lost (the earlier incumbent changes what the stages after it
+    prune or improve).
+    """
+    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _gdp_loa_proposer_enabled() -> bool:
+    """Whether the root runs LOA as a configuration proposer when the wave fails (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panels; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    It fires at the root of a solve whose model came out of a GDP lowering, when
+    three things hold:
+
+    * the configuration wave (and its dive) returned no feasible point;
+    * no incumbent exists;
+    * the solve is not one of the proposer's own LOA subproblems.
+
+    It then runs :class:`discopt.gdp.algorithms.loa.LOA` on the source GDP until
+    LOA's first verified incumbent, for the time left minus a 10 % reserve. The point
+    is placed on the lowered model:
+
+    * the source columns are its prefix;
+    * the lowering's ``_gdp_disjunct_selectors`` record places LOA's disjunct choice;
+    * the other appended columns start at the root relaxation point.
+
+    It is then posed through ``subnlp`` (verified on the lowered evaluator) and
+    injected like a wave point. Primal only: LOA's bound never reaches the search.
+
+    Why: GDPlib ``syngas`` under hull has no incumbent at 120 s. No root heuristic
+    proposes a feasible disjunct configuration, and LOA reaches the optimal one in
+    2-3 iterations.
+
+    * Entry experiment, all #2143 flags ON (probe-level prototype, 2 reps, load
+      1.1-1.7): the wave ended at 44.2 s, LOA certified 4669.0235 and the
+      incumbent 4669.0235 reached the hull solve at 84.7 s and 82.6 s. Stage 2,
+      without the item-1/item-2 time, had none.
+    * This code, all flags ON: incumbent at 100.0 s. LOA took 3 iterations here,
+      not 2.
+    * The status stays ``feasible``: the hull B&B bound (4347.80 after 3 nodes)
+      does not close in 120 s.
+
+    Under hull the proposer's sub-NLP needs ``DISCOPT_SUBNLP_REDUCED``. On the
+    legacy pose the toy's right configuration fails as #2143 describes.
+
+    **Kill criterion**: any certificate lost on the GDP panel (``gdp_parity`` cells:
+    modprodnet hull, eight_process, ex_633, nonconvex_hen, clay0203), or an instance
+    where the proposer spends its budget without an incumbent and OFF had one.
+    """
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: Set while the root LOA proposer's LOA runs (#2143). LOA solves each
+#: configuration's subproblem with a nested ``Model.solve``; without this the
+#: proposer fired again inside it (measured on syngas hull: a second LOA on a
+#: subproblem took 8.8 s of the outer LOA's budget).
+_IN_GDP_LOA_PROPOSER: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IN_GDP_LOA_PROPOSER", default=False
+)
+
+#: Share of the time left that the root LOA proposer leaves to the search (#2143).
+_GDP_LOA_PROPOSER_RESERVE = 0.1
+#: Below this many seconds of LOA budget the proposer does not start (#2143).
+_GDP_LOA_PROPOSER_MIN_S = 5.0
+
+
+def _place_loa_configuration(
+    x: np.ndarray,
+    work: Model,
+    loa_work: Model,
+    loa_x: dict,
+    selector_names: Optional[dict],
+) -> int:
+    """Write LOA's disjunct choice onto ``work``'s selectors in ``x``, in place (#2143).
+
+    ``selector_names`` maps a top-level disjunction's index in the source model's
+    ``_constraints`` to its selector names in ``work``. ``loa_work`` (LOA's clone of
+    the source) holds the same disjunction at the same index with its indicators
+    materialized, and ``loa_x`` their values. The disjunct with the largest
+    indicator value is set to 1 and the others to 0. A disjunction whose record is
+    missing or does not line up is left to the completion. Returns how many were
+    placed.
+    """
+    from discopt.modeling.core import _DisjunctiveConstraint
+
+    if not selector_names:
+        return 0
+    offsets: dict[str, int] = {}
+    off = 0
+    for v in work._variables:
+        offsets[v.name] = off
+        off += int(v.size)
+    placed = 0
+    for ci, names in selector_names.items():
+        if names is None or ci >= len(loa_work._constraints):
+            continue
+        c = loa_work._constraints[ci]
+        inds = c._indicator_vars if isinstance(c, _DisjunctiveConstraint) else None
+        if inds is None or len(inds) != len(names) or not all(nm in offsets for nm in names):
+            continue
+        if not all(iv.name in loa_x for iv in inds):
+            continue
+        vals = [float(np.asarray(loa_x[iv.name], dtype=np.float64).ravel()[0]) for iv in inds]
+        pick = int(np.argmax(vals))
+        for k, nm in enumerate(names):
+            x[offsets[nm]] = 1.0 if k == pick else 0.0
+        placed += 1
+    return placed
+
+
+def _gdp_loa_root_proposal(
+    src: Model,
+    work: Model,
+    *,
+    selector_names: Optional[dict] = None,
+    seed: Optional[np.ndarray] = None,
+    evaluator: Any,
+    backend: Any,
+    nlp_options: Optional[dict],
+    deadline: float,
+) -> Optional[tuple[np.ndarray, float]]:
+    """A point for ``work`` from LOA run on its source GDP ``src`` (#2143).
+
+    Runs :class:`discopt.gdp.algorithms.loa.LOA` on ``src`` until its first
+    verified incumbent, under the time left before ``deadline`` minus a
+    :data:`_GDP_LOA_PROPOSER_RESERVE` share kept for the search. The point is
+    mapped onto ``work``:
+
+    * ``src``'s columns are a prefix of ``work``'s, as the lowering appends;
+    * the configuration LOA chose is written onto ``work``'s selector binaries
+      through ``selector_names`` (the lowering's record, ``_gdp_disjunct_selectors``:
+      top-level disjunction index in ``src._constraints`` -> selector names in
+      disjunct order), matched to LOA's materialized indicators at the same index;
+    * every other appended column starts at ``seed`` (the root relaxation point the
+      wave was seeded with), whose auxiliary columns are consistent with the
+      lowering's own rows; without a usable seed, at
+      :func:`discopt.warm_start.complete_initial_point`'s defaults. On the test
+      toy, those defaults put a factorable auxiliary at 5e7 and the sub-NLP failed
+      from them.
+
+    It is then posed through :func:`~discopt._relax.primal_heuristics.subnlp` on ``work``. That
+    returns only a point verified on ``work``'s own evaluator, and the caller's
+    ``_inject_incumbent`` verifies it again. Primal only: nothing LOA proves reaches
+    the search's bound.
+
+    Returns ``None``, with the reason logged at INFO, when the budget is too small,
+    the variables do not line up, LOA finds no point, or the sub-NLP fails.
+    """
+    from discopt._relax.primal_heuristics import subnlp
+    from discopt.gdp.algorithms.loa import LOA
+    from discopt.warm_start import complete_initial_point
+
+    now = time.perf_counter()
+    remaining = float(deadline) - now
+    # #1153: a carve of the role-1 remainder must saturate, so a larger time_limit
+    # buys search rather than a longer root heuristic (identity unless
+    # ``SolverTuning.budget_saturation`` is on).
+    budget = _role2_saturate(
+        remaining - max(1.0, _GDP_LOA_PROPOSER_RESERVE * remaining),
+        1.0 - _GDP_LOA_PROPOSER_RESERVE,
+    )
+    if not np.isfinite(budget) or budget < _GDP_LOA_PROPOSER_MIN_S:
+        logger.info("GDP LOA proposer (root): %.1f s budget, not started", budget)
+        return None
+    src_vars = list(src._variables)
+    work_vars = list(work._variables)
+    if len(work_vars) < len(src_vars) or any(
+        a.name != b.name or int(a.size) != int(b.size) for a, b in zip(src_vars, work_vars)
+    ):
+        logger.info("GDP LOA proposer (root): source variables are not a prefix of the model's")
+        return None
+    logger.info("GDP LOA proposer (root): LOA on the source GDP, %.1f s", budget)
+    token = _IN_GDP_LOA_PROPOSER.set(True)
+    try:
+        alg = LOA(src, time_limit=budget, stop_at_first_incumbent=True)
+        r = alg.run()
+    finally:
+        _IN_GDP_LOA_PROPOSER.reset(token)
+    logger.info(
+        "GDP LOA proposer (root): LOA %s after %d iteration(s), %.1f s, objective %s",
+        r.status,
+        alg.iterations,
+        time.perf_counter() - now,
+        r.objective,
+    )
+    if r.x is None:
+        return None
+    head = np.concatenate([np.asarray(r.x[v.name], dtype=np.float64).ravel() for v in src_vars])
+    n_work = sum(int(v.size) for v in work_vars)
+    if seed is not None and np.size(seed) == n_work and np.all(np.isfinite(seed)):
+        x_full = np.asarray(seed, dtype=np.float64).ravel().copy()
+        x_full[: head.size] = head
+    else:
+        x_full = complete_initial_point(work, head, evaluator=evaluator)
+    if x_full is None:
+        logger.info("GDP LOA proposer (root): the LOA point does not complete on the model")
+        return None
+    placed = _place_loa_configuration(x_full, work, alg.space.work, r.x, selector_names)
+    logger.info("GDP LOA proposer (root): %d disjunction selector(s) placed", placed)
+    outcome: dict = {}
+    found = subnlp(
+        work, x_full, backend=backend, nlp_options=nlp_options, evaluator=evaluator, outcome=outcome
+    )
+    logger.info(
+        "GDP LOA proposer (root): sub-NLP %s",
+        f"found nothing ({outcome})" if found is None else f"objective {found[1]:.10g}",
+    )
+    return found
 
 
 def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
@@ -16548,6 +16790,11 @@ def solve_model(
         model, method=gdp_method, fbbt_deadline=_solve_t0 + float(time_limit)
     )
     _carry_solve_clocks(_gdp_src, model)
+    # #2143: the lowering returns ``model`` itself when there is nothing to lower.
+    # Its selector names per top-level disjunction are read here, before later
+    # passes rebuild ``model`` into fresh objects.
+    _gdp_lowered = model is not _gdp_src
+    _gdp_selector_names = getattr(model, "_gdp_disjunct_selectors", None) if _gdp_lowered else None
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
     # flattened against the variables the USER declared no longer describes this
@@ -20183,6 +20430,8 @@ def solve_model(
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
     _gdp_cfg_ran = False  # #1760: the root disjunct-configuration constructor runs once
+    # #2143: the root warm-start sub-NLP has been posed (it runs at most once).
+    _ws_subnlp_done = False
     # #1775 G6.2: the held-back rest of that constructor's grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` -- {"seed", "remaining", "ready_at"} -- else None.
     _gdp_cfg_deferred: Optional[dict] = None
@@ -21260,19 +21509,22 @@ def solve_model(
         _score_pts: dict[int, np.ndarray] = {}
         _score_on = _py_tree_spatial_score_enabled()
         if _use_pounce_batch and n_batch > 1:
-            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
-                _active_evaluator,
-                batch_lb,
-                batch_ub,
-                batch_ids,
-                n_vars,
-                _active_cb,
-                opts,
-                batch_psols=batch_psols,
-                multistart=_POUNCE_BATCH_MULTISTART,
-                convex=_model_is_convex,
-                excl_out=_exclusion_mask,
-            )
+            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_pounce(
+                        _active_evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        _active_cb,
+                        opts,
+                        batch_psols=batch_psols,
+                        multistart=_POUNCE_BATCH_MULTISTART,
+                        convex=_model_is_convex,
+                        excl_out=_exclusion_mask,
+                    )
+                )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
@@ -21692,16 +21944,17 @@ def solve_model(
                     else:
                         lb_clipped, ub_clipped = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    nlp_result = _solve_node_nlp(
-                        _active_evaluator,
-                        x0,
-                        node_lb,
-                        node_ub,
-                        _active_cb,
-                        opts,
-                        nlp_solver=nlp_solver,
-                        convex=_model_is_convex,
-                    )
+                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
+                        nlp_result = _solve_node_nlp(
+                            _active_evaluator,
+                            x0,
+                            node_lb,
+                            node_ub,
+                            _active_cb,
+                            opts,
+                            nlp_solver=nlp_solver,
+                            convex=_model_is_convex,
+                        )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -22477,12 +22730,106 @@ def solve_model(
             # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
             # running, which is the exact reading that named this issue.
             _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+            # #2143 (``DISCOPT_GDP_LOA_PROPOSER``, default OFF): the wave and its dive
+            # found no configuration on a lowered GDP. Run LOA on the source GDP as a
+            # proposer; its point is posed and verified on this model, like a wave
+            # point, and injected below.
+            if (
+                not _cfg_results
+                and _gdp_lowered
+                and tree.incumbent() is None
+                and _gdp_loa_proposer_enabled()
+                and not _IN_GDP_LOA_PROPOSER.get()
+            ):
+                _subnlp_calls += 1
+                try:
+                    _loa_pt = _gdp_loa_root_proposal(
+                        _gdp_src,
+                        model,
+                        selector_names=_gdp_selector_names,
+                        seed=np.asarray(_cfg_seed, dtype=np.float64),
+                        evaluator=evaluator,
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        deadline=_deadline,
+                    )
+                except Exception as _e:
+                    # A proposer failure costs only its point; logged, not hidden.
+                    logger.warning("GDP LOA proposer (root) raised: %s: %s", type(_e).__name__, _e)
+                    _loa_pt = None
+                if _loa_pt is not None:
+                    _cfg_results = [_loa_pt]
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
                     if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
                         _subnlp_incumbent_updates += 1
                         logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+
+        def _root_warm_start_subnlp() -> None:
+            """ONE root ``subnlp`` from the modeler's start, if there is one.
+
+            The start is the GAMS ``x.l`` point (``_gams_initial_seed``), else the
+            caller's ``initial_solution`` when the root multistart did not already
+            start from it. Posed at most once per solve (``_ws_subnlp_done``): at the
+            SubNLP site below, or first of all the root heuristics under
+            ``DISCOPT_ROOT_WARMSTART_FIRST`` (#2143).
+            """
+            nonlocal _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
+            nonlocal _ws_subnlp_done
+            from discopt._relax.primal_heuristics import subnlp as _ws_subnlp
+
+            _ws_subnlp_done = True
+            _gseed = _gams_initial_seed(model, lb, ub)
+            if (
+                _gseed is None
+                and initial_point is not None
+                and not _ws_root_nlp_started
+                and np.size(initial_point) == np.size(lb)
+            ):
+                _gseed = np.clip(np.asarray(initial_point, dtype=np.float64), lb, ub)
+            if _gseed is None:
+                return
+            _subnlp_calls += 1
+            _t_sn_g = time.perf_counter()
+            try:
+                _sn = _ws_subnlp(
+                    model,
+                    _gseed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    # Single root attempt (no loop): give it a fair budget
+                    # so it can converge to a feasible incumbent even if
+                    # preprocessing already consumed the deadline.
+                    time_budget=_role2_budget(min(3.0, float(time_limit))),
+                )
+            except Exception as _e:
+                logger.debug("subnlp (gams seed) raised: %s", _e)
+                _sn = None
+            _observe_heur_nlp(time.perf_counter() - _t_sn_g)
+            if _sn is not None:
+                _x_sn, _obj_sn = _sn
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
+
+        # #2143 (``DISCOPT_ROOT_WARMSTART_FIRST``, default OFF): the warm-start
+        # sub-NLP the SubNLP site below poses late, posed before every other root
+        # heuristic. The gates are that site's own.
+        if (
+            iteration == 0
+            and not _ws_subnlp_done
+            and _root_warm_start_first_enabled()
+            and _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _subnlp_calls < subnlp_max_calls
+            and not _root_optimum_proven()
+            and _root_heur_nlp_entry_ok(evaluator)
+        ):
+            _root_warm_start_subnlp()
 
         if _gdp_config_first_enabled():
             _root_gdp_config_primal()
@@ -22567,20 +22914,28 @@ def solve_model(
                             _DEADLINE_NODE_FLOOR_S,
                             min(3.0, _fp_stage_deadline - time.perf_counter()),
                         )
-                        _root_relax = _solve_root_node_multistart(
-                            _active_evaluator,
-                            np.array(batch_lb[best_root_idx]),
-                            np.array(batch_ub[best_root_idx]),
-                            _active_cb,
-                            _relax_opts,
-                            nlp_solver,
-                            n_random=0,
-                            # #1153: the SEED is the expensive half of this stage
-                            # (3.27 s of the measured 6.4 s). Leaving it on the
-                            # global deadline is what made the first attempt inert.
-                            deadline=_fp_stage_deadline,
-                            observe_cost=_observe_heur_nlp,
-                        )
+                        # #2143: this NLP only seeds the pump below (a primal
+                        # heuristic), so it is hard-stopped at the solve's deadline
+                        # like the pump's own NLPs. Measured on syngas hull: one of
+                        # its starts ran from 86 s to 160 s of a 120 s solve.
+                        from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
+
+                        with stop_at_solve_deadline(), ladder_off():
+                            _root_relax = _solve_root_node_multistart(
+                                _active_evaluator,
+                                np.array(batch_lb[best_root_idx]),
+                                np.array(batch_ub[best_root_idx]),
+                                _active_cb,
+                                _relax_opts,
+                                nlp_solver,
+                                n_random=0,
+                                # #1153: the SEED is the expensive half of this stage
+                                # (3.27 s of the measured 6.4 s). Leaving it on the
+                                # global deadline is what made the first attempt
+                                # inert.
+                                deadline=_fp_stage_deadline,
+                                observe_cost=_observe_heur_nlp,
+                            )
                         if (
                             _root_relax is not None
                             and _root_relax.x is not None
@@ -22802,43 +23157,11 @@ def solve_model(
             # (it does not run when the LP relaxer supplies the root bound).
             if (
                 iteration == 0
+                and not _ws_subnlp_done
                 and _subnlp_calls < subnlp_max_calls
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
-                _gseed = _gams_initial_seed(model, lb, ub)
-                if (
-                    _gseed is None
-                    and initial_point is not None
-                    and not _ws_root_nlp_started
-                    and np.size(initial_point) == np.size(lb)
-                ):
-                    _gseed = np.clip(np.asarray(initial_point, dtype=np.float64), lb, ub)
-                if _gseed is not None:
-                    _subnlp_calls += 1
-                    _t_sn_g = time.perf_counter()
-                    try:
-                        _sn = _subnlp(
-                            model,
-                            _gseed,
-                            backend=_subnlp_backend_fn,
-                            nlp_options=subnlp_options,
-                            evaluator=evaluator,
-                            # Single root attempt (no loop): give it a fair budget
-                            # so it can converge to a feasible incumbent even if
-                            # preprocessing already consumed the deadline.
-                            time_budget=_role2_budget(min(3.0, float(time_limit))),
-                        )
-                    except Exception as _e:
-                        logger.debug("subnlp (gams seed) raised: %s", _e)
-                        _sn = None
-                    _observe_heur_nlp(time.perf_counter() - _t_sn_g)
-                    if _sn is not None:
-                        _x_sn, _obj_sn = _sn
-                        _subnlp_feasible += 1
-                        if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                            if _inject_incumbent(_x_sn.copy(), float(_obj_sn)):
-                                _subnlp_incumbent_updates += 1
-                                logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
+                _root_warm_start_subnlp()
 
             _cands_sn = [
                 (i, float(result_lbs[i]))
@@ -28511,19 +28834,22 @@ def _solve_nlp_bb(
         t_jax_start = time.perf_counter()
 
         if _use_pounce_batch and n_batch > 1:
-            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
-                evaluator,
-                batch_lb,
-                batch_ub,
-                batch_ids,
-                n_vars,
-                constraint_bounds,
-                opts,
-                batch_psols=batch_psols,
-                multistart=_POUNCE_BATCH_MULTISTART,
-                convex=_model_is_convex,
-                excl_out=result_excl,
-            )
+            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_pounce(
+                        evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        constraint_bounds,
+                        opts,
+                        batch_psols=batch_psols,
+                        multistart=_POUNCE_BATCH_MULTISTART,
+                        convex=_model_is_convex,
+                        excl_out=result_excl,
+                    )
+                )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
             # not a valid lower bound, so decertify the gap rather than trust
@@ -28616,16 +28942,17 @@ def _solve_nlp_bb(
                     else:
                         lb_c, ub_c = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_c + ub_c)
-                    nlp_result = _solve_node_nlp(
-                        evaluator,
-                        x0,
-                        node_lb,
-                        node_ub,
-                        constraint_bounds,
-                        opts,
-                        nlp_solver=nlp_solver,
-                        convex=_model_is_convex,
-                    )
+                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
+                        nlp_result = _solve_node_nlp(
+                            evaluator,
+                            x0,
+                            node_lb,
+                            node_ub,
+                            constraint_bounds,
+                            opts,
+                            nlp_solver=nlp_solver,
+                            convex=_model_is_convex,
+                        )
 
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -30487,6 +30814,9 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
+    # The wave runs in POUNCE's Rust pool, outside any Python contextvar read, so
+    # a caller's ladder scope (``solvers._nlp_ladder_scope``) is applied here.
+    apply_ladder_scope(batch_opts)
     # The caller's ``max_wall_time`` is what is left of its budget; the whole
     # wave, not each instance, must end by then.
     _batch_deadline = time.perf_counter() + caller_limit

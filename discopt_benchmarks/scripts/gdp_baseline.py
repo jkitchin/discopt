@@ -114,6 +114,16 @@ FAMILIES = {
 #: *executable* (Pyomo ``scip``, built by install_open_gdp_solvers.sh), not
 #: ``scip_direct``.
 _MIP, _NLP, _GLOBAL, _GLOBAL_EXE = "cbc", "ipopt", "scip_direct", "scip"
+#: ``GDP_BASELINE_GLOBAL=scip`` runs the gdp.bigm / gdp.hull arms on the SCIP
+#: *executable* instead of ``scip_direct``, for a host whose Pyomo has no
+#: ``scip_direct`` (Pyomo 6.10 on macOS; the #1917 G6.1 gate run). Same SCIP, but the
+#: arm then pays Pyomo's ``.nl`` write and ``.sol`` read inside its wall time, which
+#: makes the Pyomo side slower than profile O specifies -- a deviation in discopt's
+#: favour, so every row records the choice as ``global_solver`` and a report built on
+#: it must say so.
+_GLOBAL = os.environ.get("GDP_BASELINE_GLOBAL", _GLOBAL)
+if _GLOBAL not in ("scip_direct", "scip"):
+    raise ValueError(f"GDP_BASELINE_GLOBAL must be scip_direct or scip, not {_GLOBAL!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +152,12 @@ def _run_pyomo(model, arm: str, time_limit: float) -> dict:
             # hull search for a well-defined point with a nonlinear solver whose
             # default is gurobi_direct_minlp (GDPlib gdp_col); keep it open.
             opts["well_defined_points_heuristic_solver"] = _GLOBAL
-        pyo.TransformationFactory("gdp." + transform).apply_to(model, **opts)
+        xf = pyo.TransformationFactory("gdp." + transform)
+        # Pyomo releases before the well-defined-points search (6.10, the macOS host of
+        # the #1917 G6.1 run) reject the key; they also never call a default solver
+        # for it, so dropping it keeps the arm open. Recorded per row.
+        opts = {k: v for k, v in opts.items() if k in xf.CONFIG}
+        xf.apply_to(model, **opts)
         res = pyo.SolverFactory(_GLOBAL).solve(model, timelimit=time_limit, load_solutions=False)
         tc = str(res.solver.termination_condition)
         if len(res.solution) > 0:  # an incumbent exists (none at a bare time limit)
@@ -422,6 +437,15 @@ def preflight(arms: list[str]) -> None:
         raise RuntimeError("solver preflight failed: " + "; ".join(missing))
 
 
+def _pyomo_version() -> str | None:
+    try:
+        import pyomo
+
+        return str(pyomo.__version__)
+    except ImportError:
+        return None
+
+
 def _run_one(name: str, arm: str, args) -> dict:
     """One run in its own subprocess, hard-killed at ``time_limit + grace``."""
     load = os.getloadavg()[0]
@@ -465,6 +489,8 @@ def _run_one(name: str, arm: str, args) -> dict:
     rec["load_gated"] = load > args.max_load
     rec["time_limit"] = args.time_limit
     rec["jobs"] = args.jobs
+    rec["global_solver"] = _GLOBAL
+    rec["pyomo_version"] = _pyomo_version()
     return rec
 
 

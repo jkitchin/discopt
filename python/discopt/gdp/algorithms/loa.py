@@ -92,7 +92,7 @@ def _oa_cut_rows(evaluator: Any, low: Model, oa_rows: Any) -> Any:
     by construction (a false infeasibility certificate on ``bchoco07``). Skipping
     the cut is bound-neutral in exact arithmetic: the cut *is* the master row.
     """
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt._relax.gdp_reformulate import _extract_body_terms
     from discopt.modeling.core import Constraint
     from discopt.solvers.oa import _OARows
 
@@ -105,7 +105,7 @@ def _oa_cut_rows(evaluator: Any, low: Model, oa_rows: Any) -> Any:
         if (
             stop - start == 1
             and id(c) in in_master
-            and _extract_body_coeffs(c.body, low, n) is not None
+            and _extract_body_terms(c.body, low, n) is not None
         ):
             mask[start] = False
     return _OARows(
