@@ -1334,9 +1334,18 @@ class SolverTuning:
     outputs -- choosing the representative so that outputs, integers and objective
     columns survive. Iterated to closure. The reduced spec goes to the MAIN kernel
     call only; every point it hands back is expanded and verified on the model as
-    before. Entry (GDPlib cstr hull, deterministic, ``PYTHONHASHSEED=0``):
-    performance-plan section 117 and ``docs/dev/data/2168-kernel-presolve/``.
-    Audit row in ``docs/dev/flag-retirement-audit.md``."""
+    before.
+
+    Entry (pre-registered; kernel level, the captured cstr homog-hull spec with the
+    solver's main-call options, seeded, deterministic): 20k-node bound 1.9044 ->
+    2.7936 against the kill line 2.7875 -- passes, not certified (SCIP's presolved
+    model certifies at 12,049 nodes in the same harness). Corpus panel (74
+    instances, 2,000 nodes): cert-clean, 800 checks, certified 57 -> 57, applied on
+    5, tanksize 461 -> 391 nodes. **Why it is still OFF:** the GDP parity panel and a
+    full-solve cstr hull run were not possible where it was built (GDPlib ``cstr``
+    needs gdplib from source); running them decides graduation or retirement.
+    performance-plan section 117, ``docs/dev/data/2168-kernel-presolve/``. Audit row
+    in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)

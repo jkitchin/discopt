@@ -15917,3 +15917,17 @@ kernel support for a BLF whose output is an affine form.
 aggregations (`x107 = 1 - x2` class, implied by branching on the binary, not by any row) and
 its row reductions (§116's `prerows` arm: certified at 18,943 nodes with the original rows
 mapped back, vs 12,931). Neither is in this presolve's scope.
+
+**§5 corpus panel** (`issue2115_graduation_panel.py --flag DISCOPT_KERNEL_PRESOLVE
+--deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical --jobs 2`, 74
+in-repo `.nl` instances, run in two parts after a background time limit stopped the first;
+`docs/dev/data/2168-kernel-presolve/panel/corpus_all_summary.txt`): 800 checks, 0
+violations; certified 57 -> 57; the presolve applied on 5 instances (nvs06 7 columns
+eliminated, nvs21 5, st_e38 5, tanksize 3, st_e13 fixings only), each certifying the same
+optimum; tanksize 461 -> 391 nodes, the others node-identical; 53 unfired instances
+bit-identical; 16 at the 120 s wall backstop, among them tspn08 / tspn12, the two "looser"
+rows (presolve not applied there: a timing artifact). Cert-clean; net-positive not
+established on this corpus, which rarely reaches the kernel with equality structure.
+
+**Status: default OFF, panel owed.** The GDP parity panel (big-M + hull) and the full-solve
+cstr hull entry need gdplib from source; they decide graduation or retirement (audit row).
