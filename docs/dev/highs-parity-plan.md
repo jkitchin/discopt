@@ -1188,7 +1188,9 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   #2142 fixture and a new `tolerance_feasible_system_is_not_certified_2142` both fail
   with the bare `g > 0` and pass with the margin; `cargo test` 1004/0. Re-measured: Rust
   IIS still returns P0.6's set on **53/53** (`p3.2/iis_engine_panel_exact_v3_margin.json`,
-  median wall ratio 0.87), P3.2 tests 7/7. The flag stays default ON *with the margin*;
+  median wall ratio 0.87), P3.2 tests 7/7. Corpus ON vs OFF with the margin
+  (`p3.2/farkas_margin_corpus.*`, 20 s, 1 rep): 74 rows, 0 problems, certified 56 = 56,
+  130 incumbent checks. The flag stays default ON *with the margin*;
   the claim "cert-clean" is restated as "cert-clean on the panel; the mechanism was not
   sound until the margin".
   **Closed (owner, 2026-11-05): graduate `DISCOPT_FARKAS_EXACT_OPEN`; `iis_engine` stays
