@@ -630,10 +630,28 @@ counters!(
     // #2125: `Rows` audit residuals forgiven because a singleton column (a row
     // slack) absorbs them within its own representability (`singleton_absorbs`).
     AuditRowsSingletonAbsorbed,
+    // #2163: `ScaledProblem` solves that ended `Numerical` on the equilibrated
+    // matrix and were re-solved on the original one (the #649 recovery), and how
+    // many of those retries decided the LP. Zero retries on a run means the path
+    // never fired (CLAUDE.md §6).
+    ScaledNumericalUnscaledRetry,
+    ScaledNumericalUnscaledRetryDecided,
+    // #2163: `ScaledProblem` solves still `Numerical` after the unscaled retry that
+    // were re-solved by the dual simplex from an all-logical basis, and how many of
+    // those it decided with a certificate checked on the original LP (CLAUDE.md §6).
+    LogicalBasisDualAttempts,
+    LogicalBasisDualDecided,
     // #1945: integral MILP-driver vertices (node LP or dive) whose original rows
     // verify but whose original columns miss their bounds, refused as incumbents
     // by `incumbent_verified` (defense in depth behind `ScaledProblem::verify`).
     DriverIncumbentBoundsRefused,
+    // #2163: integral vertices whose rows/bounds hold as computed but not at their
+    // integral realisation (integers rounded), refused by `incumbent_verified`;
+    // the fixed-integer polish re-solves those, and how many it turned into a
+    // verified incumbent (CLAUDE.md §6: Attempts > 0 shows the path fired).
+    DriverIncumbentSnapRefused,
+    DriverPolishAttempts,
+    DriverPolishVerified,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,
