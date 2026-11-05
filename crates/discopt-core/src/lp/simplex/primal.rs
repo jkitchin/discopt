@@ -1206,7 +1206,7 @@ pub(super) fn farkas_ray_certifies_cols(
     {
         return true;
     }
-    // highs-parity P3.2 (`DISCOPT_FARKAS_EXACT_OPEN`, default OFF): a ray that must
+    // highs-parity P3.2 (`DISCOPT_FARKAS_EXACT_OPEN`, default ON): a ray that must
     // have an exactly-zero reduced cost on an open column cannot certify in floating
     // point at all; decide it over the rationals (`farkas_exact`). Sound either way:
     // the exact check is a proof or a refusal.

@@ -1061,7 +1061,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     HiGHS** (the ranged-row layout is the intended problem). Gates: `cargo test` 988/0,
     clippy `-D warnings` on `discopt-core` (both feature sets), smoke 4506, adversarial
     19, the 71 Rust-MILP-route test files 1101 passed.
-- [ ] **P3.2 — `_iis_milp._Engine` on the handle, HiGHS as the opt-in.** Scope:
+- [x] **P3.2 — `_iis_milp._Engine` on the handle, HiGHS as the opt-in.** *(done with gaps, owner 2026-11-05: flag graduated, IIS default stays HiGHS)* Scope:
   `_iis_milp.py:111-470`; new `iis_engine="rust"|"highs"` kwarg on `milp_iis`/`compute_iis`
   (default `rust`), `_solve`'s presolve ladder mapped to `presolve_only()` →
   `solve(presolve=True)` → `solve(presolve=False)`. Done: P0.6 fixtures: identical element
@@ -1165,6 +1165,17 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   undecided where HiGHS proves it; and pigeonhole PHP(10,9) (1 test, plus 1 variant) --
   the driver cannot prove it infeasible within a 6 s budget where HiGHS does (Phase 4
   MILP strength).
+  **Closed (owner, 2026-11-05): graduate `DISCOPT_FARKAS_EXACT_OPEN`; `iis_engine` stays
+  `"highs"`.** The flag is default ON (`=0` opt-out; audit row *Graduated*).
+  `iis_engine="rust"` is a supported opt-in that matches HiGHS on P0.6's 53 fixtures;
+  it is not the default because of two measured Rust-MILP gaps, both handed to Phase 4:
+  big-M integrality slack (`INT_TOL` 1e-5 lets a 6e-11-off integer through an 8e6
+  coefficient look feasible; the engine correctly refuses the artifact and leaves the
+  element undecided) and pigeonhole-class infeasibility proofs within a short budget.
+  The bar's "default `rust`" is therefore not met; the plan's other P3.2 bars are
+  (identical sets and `proven_irreducible` on every fixture with the flag ON, wall ≤ 2x:
+  median 0.91x). Gates with the flag ON: `cargo test` 993/0, clippy `-D warnings`
+  clean (both feature sets), smoke 4506, adversarial 19, IIS + parity + audit 650.
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with
@@ -1323,7 +1334,7 @@ and is re-written by P4.1.**
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
 | P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry, P2.4 not pursued (owner), P2.6 [x] → **D1: flipped** | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
-| P3.1–P3.3 | [ ] | | |
+| P3.1–P3.3 | P3.1 [x], P3.2 [x] (gaps), P3.3 [ ] | P3.1: Rust `MilpHandle`, 276 fresh-solve comparisons bit-identical, 120/120 vs HiGHS. P3.2: IIS engine behind a backend; `DISCOPT_FARKAS_EXACT_OPEN` graduated (corpus cert-clean, Rust IIS 53/53 vs P0.6, median wall 0.91x); IIS default stays HiGHS (big-M slack, pigeonhole → Phase 4) | see git log |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
 | P6.1–P6.6 / D4 | [ ] | | |

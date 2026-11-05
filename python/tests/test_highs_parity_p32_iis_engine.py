@@ -5,8 +5,9 @@ pre-P3.2 code, unchanged -- P0.6's 53-fixture baseline still passes element for 
 with ``iis_engine="highs"``) and the in-house MILP driver through a ``MilpHandle``. On two
 fixtures the driver could not certify an infeasibility over free columns
 (``FarkasRejectOpen``): the probe stayed undecided and the set, still proven infeasible,
-was not irreducible. ``DISCOPT_FARKAS_EXACT_OPEN=1`` certifies those exactly; it is
-default OFF pending its §5 panel, and ``"highs"`` stays the IIS default.
+was not irreducible. ``DISCOPT_FARKAS_EXACT_OPEN`` (default ON since its §5 panel)
+certifies those exactly. ``"highs"`` stays the IIS default: on the broader IIS suite the
+Rust driver is still worse on big-M integrality slack and pigeonhole (plan P3.2).
 """
 
 from __future__ import annotations
@@ -84,9 +85,9 @@ def _worker_subprocess(sha: str, flag: str):
 
 @pytest.mark.parametrize("sha", sorted(EXACT_FARKAS_FIXTURES))
 def test_exact_farkas_returns_the_baseline_iis(sha):
-    """``DISCOPT_FARKAS_EXACT_OPEN=1``: the Rust engine returns P0.6's baseline IIS,
-    proven irreducible (a strict superset without it)."""
-    got = _worker_subprocess(sha, "1")
+    """Default environment (``DISCOPT_FARKAS_EXACT_OPEN`` ON since P3.2): the Rust engine
+    returns P0.6's baseline IIS, proven irreducible (a strict superset with ``=0``)."""
+    got = _worker_subprocess(sha, "")
     assert _sig(got) == _sig(_EXPECTED[sha])
     assert got["proven_irreducible"] and got["complete"]
 

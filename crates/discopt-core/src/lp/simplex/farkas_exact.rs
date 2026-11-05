@@ -1,5 +1,5 @@
 //! Exact Farkas certificate over open columns (highs-parity P3.2,
-//! `DISCOPT_FARKAS_EXACT_OPEN`, default OFF pending its §5 panel).
+//! `DISCOPT_FARKAS_EXACT_OPEN`, default ON; `=0` opts out).
 //!
 //! **The gap it closes.** [`super::primal::farkas_ray_certifies_cols`] verifies a
 //! ray `y` for `{A x = b, l ≤ x ≤ u}` in floating point: each reduced cost
@@ -47,18 +47,23 @@ const MAX_WORK: u64 = 200_000_000;
 const MAX_TOTAL_WORK: u64 = 400_000_000;
 
 /// Whether the exact open-column Farkas check runs (`DISCOPT_FARKAS_EXACT_OPEN`,
-/// read once). **Default OFF** pending its §5 panel: it changes which node LPs are
-/// proven infeasible, so what the MILP / spatial trees fathom (bound-changing). The
-/// first panel (2026-11-05) was retracted -- it ran while a length check made this a
-/// no-op on the primal simplex's call site -- and is being re-run.
+/// read once). **Default ON** since its §5 panel (highs-parity P3.2, owner decision
+/// 2026-11-05); `=0` opts out to the float-only verifier. Bound-changing (it decides
+/// which node LPs are proven infeasible), so it was gated: 132-instance MINLP corpus ON
+/// vs OFF cert-clean (0 problems, 244 incumbent checks, certified 107 = 107), L/M/INF on
+/// the Rust route identical certification (130 runs, 0 incorrect), and decisive on its
+/// class -- the Rust IIS engine returns P0.6's baseline IIS on 53/53 fixtures (51/53
+/// without it) and the random-MILP IIS test's 131 uncertifiable node LPs certify. (A
+/// first panel was retracted: it ran while a length check made this a no-op on the
+/// primal simplex's call site.)
 pub(crate) fn farkas_exact_open_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         let raw = std::env::var("DISCOPT_FARKAS_EXACT_OPEN").unwrap_or_default();
         match raw.trim() {
-            "" | "0" | "false" | "False" | "off" | "OFF" => false,
-            "1" | "true" | "True" | "on" | "ON" => true,
+            "0" | "false" | "False" | "off" | "OFF" => false,
+            "" | "1" | "true" | "True" | "on" | "ON" => true,
             other => panic!(
                 "DISCOPT_FARKAS_EXACT_OPEN={other:?} is not a recognized value; use 1/on or 0/off"
             ),

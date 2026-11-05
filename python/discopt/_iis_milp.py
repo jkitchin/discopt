@@ -957,7 +957,7 @@ def milp_iis(
     ``iis_engine`` (highs-parity P3.2) names the MILP solver behind every probe:
     ``"highs"`` (the default) or ``"rust"``, discopt's own MILP driver through a
     persistent :class:`~discopt.solvers.milp_handle.MilpHandle` (an opt-in). On
-    P0.6's fixtures the two agree with ``DISCOPT_FARKAS_EXACT_OPEN=1``; the Rust
+    P0.6's fixtures the two agree (``DISCOPT_FARKAS_EXACT_OPEN``, default ON); the Rust
     driver still leaves some probes undecided where HiGHS decides them -- integrality
     slack on big-M rows (``INT_TOL`` 1e-5) and hard combinatorial MILPs (pigeonhole)
     -- so it is not the default (``docs/dev/highs-parity-plan.md`` P3.2). The deletion
