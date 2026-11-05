@@ -75,41 +75,41 @@ def _exact_point(m: Model, net: NetworkDefinition, x_in: np.ndarray) -> np.ndarr
     return np.concatenate([np.atleast_1d(vals[v.name]).ravel() for v in m._variables])
 
 
+#: Big-M's certified optimum on ``_tiny_weight_net(0, 32)`` (measured, highspy 1.15.1).
+SEED0_OPTIMUM = 0.04328811180858727
+
+
 def test_unmerged_extended_model_is_not_certified_infeasible(monkeypatch):
-    """Before #2156 this returned ``infeasible`` with ``gap_certified=True``."""
+    """Before #2156 this returned ``infeasible`` with ``gap_certified=True``.
+
+    Feasibility is shown without a second solve: the forward pass at any input is an
+    exact point of the model (two inputs are checked). The big-M reference solve was
+    dropped to fit the fast-lane time budget; its optimum is :data:`SEED0_OPTIMUM`.
+    """
     monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_RTOL", 0.0)
     monkeypatch.setattr(rp, "NEGLIGIBLE_PARTITION_ATOL", 0.0)
     net = _tiny_weight_net(0, 32)
     n = 0
-    mb = Model("bigm")
-    nb = NNFormulation(mb, net, strategy="relu_bigm")
-    nb.formulate()
-    mb.minimize(nb.outputs[0])
-    rb = mb.solve(time_limit=120, threads=1, deterministic=True)
-    assert rb.status == "optimal"
-    n += 1
-
     m = Model("ext")
     nn = NNFormulation(m, net, strategy="relu_extended")
     nn.formulate()
     m.minimize(nn.outputs[0])
-    # The model is feasible: an exact point at big-M's optimal input verifies.
-    x_in = np.asarray(rb.x["nn_input"], dtype=float)
-    vr = verify_point(m, _exact_point(m, net, x_in), with_objective=True)
-    assert vr.ok, vr.reason
-    n += 1
-    assert vr.objective == pytest.approx(rb.objective, rel=1e-6, abs=1e-9)
-    n += 1
+    for x_in in (np.zeros(2), np.array([1.0, -2.0])):
+        vr = verify_point(m, _exact_point(m, net, x_in), with_objective=True)
+        assert vr.ok, vr.reason
+        n += 1
+        assert vr.objective == pytest.approx(float(net.forward(x_in[None, :]).ravel()[0]))
+        n += 1
 
     r = m.solve(time_limit=120, threads=1, deterministic=True)
-    assert not (r.status == "infeasible"), (r.status, r.gap_certified)
+    assert r.status != "infeasible", (r.status, r.gap_certified)
     n += 1
     assert not (r.gap_certified and r.status != "optimal")
     n += 1
     if r.status == "optimal":
-        assert r.objective == pytest.approx(rb.objective, rel=1e-4, abs=1e-6)
+        assert r.objective == pytest.approx(SEED0_OPTIMUM, rel=1e-4, abs=1e-6)
         n += 1
-    assert n >= 5
+    assert n >= 6
 
 
 def _sf_with_width(width: float, integer_col: bool = False) -> R.StdForm:
