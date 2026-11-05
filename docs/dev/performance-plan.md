@@ -15225,3 +15225,101 @@ panel was run; none is owed after a pre-registered entry kill.
 **#2142 status.** Big-M certifies (§112). Hull does not, and nothing in §113 or §114 changes that.
 The issue's "done means" (both formulations certify) is unmet, so the issue stays open on hull's
 Problem A.
+
+## 115. #2142: the division-free hull (`DISCOPT_HULL_EXACT_PERSPECTIVE`) — built, bound-neutral to its prototype, cert-clean, not net-positive, kept OFF (2026-11-05)
+
+**What was built.** `_relax/gdp_reformulate.py` `_homogenized_hull_row` (with
+`_polynomial_monomials`), gated by `SolverTuning.hull_exact_perspective`
+(`DISCOPT_HULL_EXACT_PERSPECTIVE`, default OFF). Under `gdp_method="hull"`, a disjunct row
+that is a polynomial and that `classify_constraint` does not prove convex is emitted as
+
+    sum_m c_m prod_{i in m} v_i * y^(d-|m|)  <sense>  rhs * y^d     (d >= 1)
+
+instead of the eps-perspective. A polynomial here means `+ - *`, `neg`, `Σ`, or an integer
+`**` <= 8, with no Parameter. The emitted row has no division, no eps and no aux column. It is
+exact at `y ∈ {0,1}` (proof: `2142-exact-hull/proposal.md` §3), and an off disjunct's rows are
+exactly `0.0`. Convex rows keep the eps-perspective or cone, and so do non-polynomial rows.
+`_HULL_EXACT_STATS` counts rows homogenized, left convex, and declined. Tests:
+`python/tests/test_2142_exact_hull.py`:
+
+- flag OFF: sha256 fingerprints taken on the parent commit, byte-identical;
+- monomial unit test;
+- routing of each row class;
+- fixed-selector exactness, including off-disjunct rows exactly 0;
+- the differential battery on three new bilinear/cubic shapes;
+- certified optima equal to big-M under 4 objectives;
+- cstr (slow): spec max |bound| <= 1e4, and the 2,000-node bound equal to the prototype's.
+
+**Bound-neutral against the prototype** (`arm.py flag` against `arm.py homog`, cstr,
+deterministic, `PYTHONHASHSEED=0`):
+
+| run | prototype `homog` | shipped flag |
+|---|---|---|
+| 2,000 nodes | 0.38595045554133645 | **0.38595045554133645** (also under `PYTHONHASHSEED=1`) |
+| 10,000 nodes | 1.6107840610272945 | **1.6107840610272945** |
+| `LpVerdictNumerical` @10k | 1,122 | 1,122 |
+| spec max \|bound\| | 1e3 | 1e3 |
+
+The kernel records, node-status histograms and counters are identical line for line. The
+convexity gate changes nothing on cstr, because none of its 5 rows is proven convex.
+
+**§5 panel** (data `docs/dev/data/2142-exact-hull/panel/`). Load was 5-10 on 4 cores: a
+concurrent agent's SCIP and arm runs were on the machine. The deterministic node-limited cells
+do not depend on that load; the wall-limited ones are compared only as reported.
+
+- **Corpus** (`issue2115_graduation_panel.py --deterministic --max-nodes 2000 --time-limit 120
+  --assert-unfired-identical`, 74 instances). A `.nl` instance carries no disjunction, so the
+  flag cannot run there:
+  - 861 checks, **0 violations**;
+  - 60 instances bit-identical; 14 at the wall backstop;
+  - certified 59 -> 59;
+  - the one bound difference (4stufen, tighter) is at the backstop.
+
+  Verdict: INCONCLUSIVE (never fired), by construction.
+- **GDP parity** (`issue1917_gdp_flag_panel.py`, hull). Fire phase:
+  - fires on 6 of 22 lowerable instances. Homogenized rows per instance: cstr 5, gdp_col 126,
+    hda 49 (1 convex kept), methanol 18, syngas 21, ex_633 4;
+  - identical on 16;
+  - 2 lowering errors, in both arms (kaibel, mod_hens: no ipopt).
+
+  The fired 6 were solved deterministic, 5,000 nodes / 120 s, 1 rep:
+
+| instance | OFF | ON |
+|---|---|---|
+| cstr | bound 0.0940, 496 nodes | **0.6641**, 4,130 nodes |
+| gdp_col | no incumbent, bound 1000.0 | **incumbent 22959.8**, bound **8736.8** (3 nodes) |
+| pyomo.ex_633_trespalacios | optimal, 75 nodes, 22.6 s | optimal, **47 nodes, 11.4 s** |
+| hda | root bound **121140.98** | 118678.93 (looser, 3 nodes each) |
+| methanol | -4699.665 | -4699.665 |
+| syngas | 4347.803 | 4347.803 |
+
+**Cert-clean: passes.** The ON arm has 0 incorrect, 0 bound crossings and 0 solved lost.
+Every incumbent is verified in the Pyomo model (max relative violation <= 2.8e-14).
+
+**Net-positive: fails.**
+
+- 3 instances gain, 1 loses and 2 are neutral. No certification is gained. SGM wall goes
+  93.2 -> 86.2 s.
+- The loss is hda's root bound. It is deterministic, and it is exactly the pair (118678.9 vs
+  121141.0) that killed the retired `DISCOPT_HULL_LIFTED_PERSPECTIVE` (audit). Both
+  division-free forms lose the same amount there.
+- The cause is the one the proposal predicted in §3.4. The homogenized row is relaxed by
+  McCormick on the copies' *global* boxes. On hda's rows that is weaker than the
+  eps-perspective, which these rows tolerate.
+
+**cstr at the parity budget** (default path, `time_limit=300`, flag ON, load 5-9): 11,854
+nodes, bound **0.939**, incumbent 3.0620146, **not certified**. Hull OFF reaches 0.094 at
+120 s. The prototype at load 3 reached 30,246 nodes and 1.58 (`proposal.md` §5). The
+difference in node count is the machine load, not the code: the two are bit-identical at
+equal nodes. SCIP certifies the same lowered model in 7,470 nodes (`proposal.md` §0a).
+
+**Decision.** Not graduated, because §5 requires both bars. The flag is **kept as a documented
+opt-out**, default OFF, not retired. It is the only hull lowering of cstr with bounded
+magnitudes (1e3 against 1e27), and the formulation that SCIP certifies. That makes it the base
+the next hull lever builds on. What would graduate it: a perspective-aware kernel envelope of
+the homogenized products (on the box of `t = v/y`, `proposal.md` §3.5) that removes the hda
+loss, followed by a re-run of this panel. Audit row: `docs/dev/flag-retirement-audit.md`.
+
+**#2142 status.** Unchanged in kind. Big-M certifies (§112). Hull ON is far better than hull
+OFF on cstr (bound 0.094 -> 0.94 at 300 s under load), but it does not certify. Per §0a, the
+remaining gap is in discopt's tree on this model, not in the formulation.

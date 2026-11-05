@@ -1295,7 +1295,7 @@ class SolverTuning:
         default_factory=lambda: _env_flag("DISCOPT_HULL_EXACT_PERSPECTIVE", default=False)
     )
     """Hull a nonconvex polynomial disjunct row by the homogenized perspective
-    (``DISCOPT_HULL_EXACT_PERSPECTIVE``, default OFF while its §5 panel decides;
+    (``DISCOPT_HULL_EXACT_PERSPECTIVE``, default OFF -- documented opt-out, see below;
     bound-changing on the ``"hull"`` route; #2142).
 
     For ``g(x) = sum_m c_m prod x_i <sense> rhs`` of degree ``d`` the hull emits
@@ -1308,8 +1308,20 @@ class SolverTuning:
     unchanged. Entry (GDPlib cstr, deterministic, ``PYTHONHASHSEED=0``): the lifted
     spec's largest bound 1e27 -> 1e3, 10k-node bound 0.094 -> 1.611
     (``docs/dev/data/2142-exact-hull/proposal.md`` §5; SCIP certifies the lowered
-    model in 7,470 nodes, §0a). Audit row in ``docs/dev/flag-retirement-audit.md``;
-    the panel result is recorded in performance-plan §115."""
+    model in 7,470 nodes, §0a). Audit row in ``docs/dev/flag-retirement-audit.md``.
+
+    §5 panel (performance-plan §115, 2026-11-05): in-repo corpus 74 instances never
+    reach a hull lowering (60 bit-identical, 14 at the wall backstop, 0 violations);
+    GDP parity under hull fires on 6 of 22 lowerable instances, cert-clean (0
+    incorrect, 0 crossings, 0 lost). **Not net-positive**: cstr 0.094 -> 0.664 at
+    120 s, gdp_col finds an incumbent (bound 1000 -> 8737), ex_633 75 -> 47 nodes,
+    but hda's root bound is deterministically looser (121140.98 -> 118678.93) and no
+    certification is gained, so it stays OFF. Why it is not the default, and what
+    would change that: the homogenized row is relaxed by McCormick on the copies'
+    *global* boxes (proposal §3.4), weaker than the eps-perspective on rows like
+    hda's; a perspective-aware kernel envelope (on the box of ``t = v / y``) that
+    removes the hda loss would re-open graduation. It is kept because it is the only
+    hull lowering of cstr that has bounded magnitudes (SCIP certifies it)."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)

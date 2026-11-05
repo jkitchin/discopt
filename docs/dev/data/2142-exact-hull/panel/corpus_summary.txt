@@ -1,0 +1,14 @@
+
+instances           : 74
+executed checks     : 861
+violations          : 0
+mechanism fired     : 0 on 0 instance(s) []
+unfired identical   : 60 checked, 14 skipped (wall backstop) ['4stufen', 'bchoco06', 'bchoco07', 'bchoco08', 'beuster', 'casctanks', 'contvar', 'hda', 'heatexch_gen1', 'heatexch_gen2', 'heatexch_gen3', 'prolog', 'tspn10', 'tspn12']
+certified           : OFF 59 -> ON 59  gained []
+bounds tighter      : 1 ['4stufen']  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 6729 -> ON 6709
+wall  (all)         : OFF 2434.9s -> ON 2438.9s
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/corpus_rederived.json
+
+VERDICT: INCONCLUSIVE - the mechanism never fired.
