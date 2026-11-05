@@ -14824,3 +14824,31 @@ removed (commit `revert(kernel): #2142`). The measured state is the commit befor
 - a pseudocost-free violation rule (0.83 at 20k nodes, below base).
 
 Data: `docs/dev/data/2142-branching-var/` (see its README).
+
+## 109. #2142: SCIP pseudocost normalisation — killed at the entry test
+
+**Hypothesis (from §108):** the SCIP violation measure hurt nous1/tanksize because our
+kernel adds a mean-imputed pseudocost to every candidate, whereas SCIP drops
+unreliable pseudocosts and normalises each score by the weights it actually uses.
+Pairing the measure with that normalisation should remove the harm.
+
+**Kill criterion (stated before running):** stop if either arm is worse than base by
+more than ~10% on nous1 nodes-to-certify (15,233) or tanksize nodes (519).
+
+| arm (deterministic, to certification) | nous1 nodes | tanksize nodes |
+|---|---|---|
+| base | 15,233 (30.9 s) | 519 |
+| measure + normalisation | 14,763 (32.5 s, −3%) | 589 (**+13.5%**) |
+| normalisation alone | 13,609 (100.0 s, −11%) | 743 (**+43%**) |
+
+All six runs certified with `executed assertions: 2`. Both arms fail the tanksize
+criterion, so neither was taken to cstr or a panel, and no flag was committed. The
+combination does remove most of §108's nous1 harm (34,581 → 14,763), which supports
+the hypothesis's mechanism, but not enough of tanksize's. The criterion is not
+relaxed after the fact (§4).
+
+**Status of item 3 (branching):** three SCIP components have now been measured one at
+a time — the point rule (§107), the violation measure (§108), the pseudocost
+normalisation (this section). Each moves cstr toward certification and each costs a
+reference instance of #1970. Data: `docs/dev/data/2142-pscost-norm/`.
+
