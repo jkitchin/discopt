@@ -35,7 +35,15 @@ model. With presolve (aggregation), conflict and the extra propagators off, SCIP
 discopt's tree with its dual proofs; the whole SCIP advantage is in the switched-off
 components, of which aggregation (6.5x) and conflict (4x, which discopt already has) dominate.
 
-Pending at the time of writing (queued, logs land in this directory):
+**20k-node bounds of the big arms** (`*_20k.log`; run after the `batch3` waiter was found
+stuck on its own pgrep pattern): presolve off **2.2516**, aggregation off (presolve on)
+**2.2205**, conflict off 2.8772, presolve+conflict off 1.5736, emu 1.6757 — against
+discopt's 2.1886 on the same model. **SCIP without aggregation sits exactly where discopt
+sits at 20k nodes** (2.22-2.25 vs 2.19); SCIP without conflict but with aggregation is at
+2.88. In bound units the discopt-to-SCIP gap at equal nodes is the aggregation, and the
+spec-level emulation (§4, 2.4254) recovers ~40 % of it.
+
+Formerly pending (now all in this directory):
 `emu_nonlinprop_off_20k`, `nopre_noconf_20k`, `nopresolve_20k`, `noconflict_20k`,
 `donotaggr_20k` (the 20k-node bounds of the big arms, for comparison with discopt's 2.1886),
 and the conflict sub-arms `conf_graphonly` (`useinflp=c`), `conf_dualonly` (`useinflp=d`),
