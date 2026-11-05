@@ -19,6 +19,7 @@ The budget is stated in sub-NLP **attempts**, not wall-clock, as the issue asks.
 
 from __future__ import annotations
 
+import time
 from math import comb
 
 import discopt._relax.primal_heuristics as ph
@@ -100,24 +101,6 @@ def _run(
     return outcomes, found, stats
 
 
-def _sample_slots(n_attempts: int) -> list[int]:
-    """0-based attempt indices at which the doubling schedule draws a sample, for a
-    run with nothing found: after ranked plans 1, 2, 4, 8, ... (then one per step
-    once the wave is exhausted)."""
-    slots, k, i = [], 0, 0
-    while i < n_attempts:
-        if k < _WAVE_SOLVE_CAP:
-            k += 1
-            i += 1
-            if k & (k - 1) == 0:
-                slots.append(i)
-                i += 1
-        else:
-            slots.append(i)
-            i += 1
-    return [s for s in slots if s < n_attempts]
-
-
 def test_premise_the_ranked_wave_cannot_reach_a_feasible_configuration(monkeypatch):
     """Sampling OFF reproduces #2144: a full wave, nothing feasible."""
     distance_below_need = sum(comb(N_GROUPS, k) for k in range(NEED))
@@ -129,15 +112,15 @@ def test_premise_the_ranked_wave_cannot_reach_a_feasible_configuration(monkeypat
 
 @pytest.mark.smoke
 def test_feasibility_first_sampling_finds_a_point_within_an_attempt_budget(monkeypatch):
-    outcomes, found, _ = _run(monkeypatch, "1")
+    outcomes, found, stats = _run(monkeypatch, "1")
     assert outcomes, "probe vacuous: no sub-NLP ran"
     assert found, "no feasible configuration found"
     first = outcomes.index(True) + 1
-    # Samples come after ranked plans 1, 2 and 4, i.e. at attempts 2, 4 and 7. A
-    # uniform sample is feasible with probability 0.945, so any stream hits within
-    # those three except with probability ~1.7e-4; the stream is fixed, so this run
-    # is deterministic.
-    assert first <= 7, f"first feasible point at attempt {first}"
+    # Samples start only after the whole ranked wave. A uniform sample is feasible
+    # with probability 0.945, so any stream hits within three samples except with
+    # probability ~1.7e-4; the stream is fixed, so this run is deterministic.
+    assert _WAVE_SOLVE_CAP < first <= _WAVE_SOLVE_CAP + 3, f"first hit at attempt {first}"
+    assert stats["sample_wall"] > 0.0
     for x, obj in found:
         ones = int(round(sum(x[2 * i + 1] for i in range(N_GROUPS))))
         assert ones + x[-1] >= NEED - 1e-6
@@ -147,24 +130,50 @@ def test_feasibility_first_sampling_finds_a_point_within_an_attempt_budget(monke
 @pytest.mark.smoke
 def test_sampling_stops_at_the_first_feasible_point_and_is_capped(monkeypatch):
     outcomes, _, stats = _run(monkeypatch, "1")
-    first = outcomes.index(True)
-    # After the first hit the wave alone continues, so the total is the wave cap
-    # plus the samples spent up to the hit -- never more than _FEAS_SAMPLE_CAP.
     samples = len(outcomes) - _WAVE_SOLVE_CAP
     assert 1 <= samples <= _FEAS_SAMPLE_CAP
     assert samples == stats["sampled"]
-    assert samples == len(_sample_slots(first + 1)), (outcomes[: first + 1], samples)
+    assert outcomes[-1] and not any(outcomes[:-1]), "sampling went on past its first hit"
 
 
-def test_schedule_costs_the_ranked_wave_at_most_a_log(monkeypatch):
-    """Samples share the wave's deadline, so a 1:1 interleave would halve how deep
-    the ranked wave gets in a binding slice. With the doubling schedule, ranked plan
-    k is reached after at most k + floor(log2 k) + 1 solves."""
-    for k in (1, 2, 3, 8, 17, _WAVE_SOLVE_CAP):
-        n = k
-        while n - len(_sample_slots(n)) < k:
-            n += 1
-        assert n <= k + k.bit_length(), (k, n)
+@pytest.mark.smoke
+def test_the_ranked_search_is_exactly_the_flag_off_search(monkeypatch):
+    """#2150 panel: interleaved samples took wall time from ranked plans
+    (mod_hens big-M lost its OFF incumbent). The ranked wave must now issue the
+    same sub-NLPs in the same order as OFF, with samples only after it."""
+    on: list = []
+    off: list = []
+    _run(monkeypatch, "1", seeds=on)
+    _run(monkeypatch, "0", seeds=off)
+    assert len(off) == _WAVE_SOLVE_CAP
+    assert on[: len(off)] == off
+    assert len(on) > len(off), "vacuous: no sample ran"
+
+
+@pytest.mark.smoke
+def test_samples_have_their_own_budget(monkeypatch):
+    """The ranked wave stops on the caller's deadline, which on batch_processing
+    expires after 1 root / 5-8 deferred attempts. Samples that waited for that
+    deadline would never run, so they get a budget of their own."""
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "1")
+    monkeypatch.setattr(ph, "one_hot_config_dive", lambda *a, **kw: [])
+    stats: dict = {}
+    expired = time.perf_counter() - 1.0
+    found = ph.one_hot_config_subnlp(
+        _argmax_infeasible_gdp(), _relaxation_point(), deadline=expired, stats=stats
+    )
+    assert stats["attempted"] == stats["sampled"] >= 1, stats
+    assert found
+
+
+@pytest.mark.smoke
+def test_no_sampling_when_the_dive_finds_a_point(monkeypatch):
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "1")
+    point = (np.zeros(2 * N_GROUPS + 1), 1.0)
+    monkeypatch.setattr(ph, "one_hot_config_dive", lambda *a, **kw: [point])
+    stats: dict = {}
+    ph.one_hot_config_subnlp(_argmax_infeasible_gdp(), _relaxation_point(), stats=stats)
+    assert stats["sampled"] == 0
 
 
 @pytest.mark.smoke

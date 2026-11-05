@@ -22450,8 +22450,13 @@ def solve_model(
             except Exception:
                 _warn_gdp_config_raised("spatial root")
                 _cfg_results = []
+            # #2144: samples run on a budget of their own after the ranked search,
+            # so the hold-back is computed as if they had not run (the OFF schedule).
             _gdp_cfg_deferred = _gdp_config_hold_back(
-                _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
+                _cfg_seed,
+                _cfg_full,
+                _cfg_until,
+                time.perf_counter() - float(_cfg_stats.get("sample_wall", 0.0)),
             )
             if _gdp_cfg_deferred is not None:
                 logger.info(
@@ -28790,8 +28795,12 @@ def _solve_nlp_bb(
                         )
                     except Exception:
                         _warn_gdp_config_raised("nlp-bb root")
+                    # #2144: hold back as if the post-search samples had not run.
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
-                        result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
+                        result_sols[best_root_idx],
+                        _cfg_full,
+                        _cfg_until,
+                        time.perf_counter() - float(_cfg_stats.get("sample_wall", 0.0)),
                     )
                     logger.info(
                         "GDP config subNLP: %d sub-NLP solve(s) (%d feasibility-first "

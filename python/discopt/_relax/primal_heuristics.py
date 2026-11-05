@@ -2343,9 +2343,9 @@ def _residual_assignments(
 _WAVE_SOLVE_CAP = 48
 
 #: Cap on the #2144 feasibility-first samples one :func:`one_hot_config_subnlp`
-#: call may solve. Counted separately from :data:`_WAVE_SOLVE_CAP`, so the COUNT of
-#: ranked plans is unchanged; their wall time is not -- samples share the wave's
-#: deadline, which is why they are interleaved on a doubling schedule (see the loop).
+#: call may solve. They run only after the ranked wave and the dive found nothing,
+#: on their own budget (:data:`_FEAS_SAMPLE_WALL_S`), so neither the count nor the
+#: wall time of the ranked search changes (see :func:`_feas_first_samples`).
 #: Sampling stops at the first feasible point, so the cap binds only on models where
 #: uniformly random configurations are themselves rarely feasible, and it bounds the
 #: waste there. On batch_processing 54 of 60 uniform samples were feasible (#2144),
@@ -2356,6 +2356,13 @@ _FEAS_SAMPLE_CAP = 16
 #: linear row refutes. Refuted draws cost a row scan, not a sub-NLP, and are not
 #: counted against :data:`_FEAS_SAMPLE_CAP`; when the budget runs out sampling stops.
 _FEAS_SAMPLE_DRAWS = 64
+
+#: Wall budget of the #2144 samples, spent only after the ranked wave and the dive
+#: both found nothing, and on top of the constructor's own grant (see
+#: :func:`_feas_first_samples`). At the ~1.7-2.7 s per sub-NLP measured on
+#: ``batch_processing`` it fits 3-4 samples; at that instance's 0.9 per-sample
+#: feasibility, all of them miss with probability ~1e-3 to 1e-4.
+_FEAS_SAMPLE_WALL_S = 8.0
 
 #: Process-wide count of #2144 samples solved, over every caller of
 #: :func:`one_hot_config_subnlp`. The per-call ``stats`` only reach
@@ -2372,23 +2379,23 @@ def feas_samples_solved_total() -> int:
 
 
 def _gdp_config_feas_sample_enabled() -> bool:
-    """Whether :func:`one_hot_config_subnlp` interleaves uniformly sampled
-    configurations into its wave while nothing feasible has been found (#2144).
+    """Whether :func:`one_hot_config_subnlp` falls back to uniformly sampled
+    configurations when its ranked wave and dive found nothing (#2144).
     **Default OFF** pending the CLAUDE.md §5 panel; ``=1`` turns it on.
 
     Primal only: samples go through :func:`subnlp`'s verification, so the flag can
     change which incumbent is found and when, never the soundness of the bound.
 
-    Measured on the first version (1:1 interleave, one shared seed; #2144, 120 s,
-    ``gdp_parity`` worker path). GDPlib
-    ``batch_processing`` has no incumbent OFF under big-M or hull and 1623421.03
-    ON under both (two runs each, sequential). Over the 7 in-repo ``pyomo.*``
-    instances of ``gdp_parity`` x {big-m, hull}, all 14 cells certified the same
-    objective in the same node count in both arms (SGM wall 11.09 -> 10.97 s).
-    **What would graduate it:** the same panel over the 17 GDPlib instances
-    (``issue1917_gdp_flag_panel.py --flag DISCOPT_GDP_CONFIG_FEAS_SAMPLE --phase
-    solve --all``), which needs gdplib from source and could not run where this
-    was written. Row in ``docs/dev/flag-retirement-audit.md``.
+    The §5 panel on the previous version (samples interleaved into the wave on its
+    deadline; ``9cb2823``, PR #2150) was cert-clean but not net-positive:
+    ``batch_processing`` (big-M and hull) and ``mod_hens`` hull gained an incumbent,
+    ``mod_hens`` big-M lost or worsened one in 2 of 2 reps. This version runs the
+    ranked search exactly as OFF and samples only after it, on a budget of its own
+    (:func:`_feas_first_samples`). **What would graduate it** (kill criterion, stated
+    in PR #2150 before this version was built): on the 15 cells where the flag acted,
+    2 reps, OFF/ON alternating, at low load, ``batch_processing`` and ``mod_hens``
+    hull keep their incumbents AND ``mod_hens`` big-M matches OFF (106766.53);
+    otherwise it is retired. Row in ``docs/dev/flag-retirement-audit.md``.
     """
     return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_SAMPLE", "0").strip().lower() in (
         "1",
@@ -2510,6 +2517,7 @@ def one_hot_config_subnlp(
         stats["attempted"] = 0
         stats["sampled"] = 0
         stats["sample_rejected"] = 0
+        stats["sample_wall"] = 0.0
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask):
         return []
@@ -2655,16 +2663,17 @@ def one_hot_config_subnlp(
             seed[j] = v
         return seed
 
-    def _attempt(seed: np.ndarray) -> Optional[bool]:
+    def _attempt(seed: np.ndarray, until: Optional[float]) -> Optional[bool]:
         """One fixed-configuration sub-NLP. ``None`` means the deadline stopped it."""
         nonlocal attempted
-        if wave_deadline is not None and _now() >= wave_deadline:
+        if until is not None and _now() >= until:
             return None
         # The caller's deadline is a stopping contract, so the per-solve budget is
-        # what remains of it — not a slice of it. ``wave_deadline`` is ``deadline``
-        # except under ``deterministic``, where it is the solve's own role-1
-        # deadline and the wave's extent is its solve cap (see above).
-        budget = None if wave_deadline is None else max(0.0, wave_deadline - _now())
+        # what remains of it — not a slice of it. For the wave, ``until`` is
+        # ``wave_deadline``: ``deadline`` except under ``deterministic``, where it is
+        # the solve's own role-1 deadline and the wave's extent is its solve cap (see
+        # above). The #2144 samples pass their own budget (see below).
+        budget = None if until is None else max(0.0, until - _now())
         if budget is not None and budget <= 0.0:
             return None
         attempted += 1
@@ -2682,103 +2691,13 @@ def one_hot_config_subnlp(
             return True
         return False
 
-    # #2144 feasibility-first fallback. Every ranked plan sits near the
-    # relaxation's argmax, and on batch_processing that whole neighbourhood is
-    # infeasible: the root relaxation is confident in the *wrong* disjunct of every
-    # group (17 of 29 groups differ from LOA's feasible configuration), so the
-    # least-confident flips never leave it. Measured there, a uniformly random valid
-    # configuration solves feasibly 54 times in 60, while 4 root + 27 deferred
-    # ranked attempts found 0 -- the solve ended with no incumbent under both big-M
-    # and hull. So, for as long as nothing feasible has been found, samples are
-    # interleaved into the wave: one uniformly drawn configuration (one disjunct per
-    # group, residual binaries 0/1) after ranked plans 1, 2, 4, 8, 16 and 32 -- never
-    # before the anchor -- and, once the ranked wave is exhausted, one per step up to
-    # ``_FEAS_SAMPLE_CAP``. The doubling schedule is what bounds the cost to the
-    # ranked search: samples and ranked plans share one deadline, so a 1:1 interleave
-    # would halve how deep the ranked wave gets inside a binding slice (the
-    # deferred-schedule root slice is 1.5 s) and could lose a feasible ranked plan at
-    # depth k; with doubling, plan k is reached after at most k + log2(k) + 1 solves.
-    # Where uniform samples are as feasible as on batch_processing (0.9 each), the
-    # first one, right after the anchor, already succeeds.
-    #
-    # A draw that breaks an integer-only linear row (a nested-indicator or logic row
-    # outside the one-hot groups) is rejected before it is counted: ``subnlp`` would
-    # refuse it without solving (the same :func:`_refuted_by_integer_rows` test), so
-    # counting it would only spend the cap. The first feasible point ends sampling;
-    # the ranked wave then continues undisturbed. Draws come from a fixed-seed stream
-    # chosen by ``sample_stream``, so the heuristic is reproducible, and a deferred
-    # call from the same relaxation point draws different configurations from the
-    # root call's. Primal only: each point still comes from ``subnlp``'s
-    # verification, so a sample can cost time but cannot yield an infeasible
-    # incumbent or touch the bound.
-    feas_sample = _gdp_config_feas_sample_enabled()
-    sample_rng = np.random.default_rng([2144, int(sample_stream)])
-    sampled = 0
-    sample_rejected = 0
-    sample_dry = False
     tried: set[tuple] = set()
-    sample_space = 1
-    for g in groups:
-        sample_space *= len(g)
-    sample_space *= 2 ** len(residual)
-
-    def _draw_sample() -> Optional[tuple[list[int], tuple[float, ...]]]:
-        nonlocal sample_rejected
-        for _ in range(_FEAS_SAMPLE_DRAWS):
-            picks = [int(sample_rng.integers(len(g))) for g in groups]
-            resid = tuple(float(v) for v in sample_rng.integers(0, 2, size=len(residual)))
-            key = (tuple(picks), resid)
-            if key in tried:
-                continue
-            if _refuted_by_integer_rows(model, int_mask, _seed_for(picks, resid), 1e-6):
-                tried.add(key)
-                sample_rejected += 1
-                continue
-            return picks, resid
-        return None
-
-    def _sampling() -> bool:
-        return (
-            feas_sample
-            and not sample_dry
-            and not results
-            and sampled < _FEAS_SAMPLE_CAP
-            and len(tried) < sample_space
-        )
-
-    pi = 0
-    while True:
-        if pi < len(wave_plans):
-            ci, ri = wave_plans[pi]
-            pi += 1
-            choice = configs[ci]
-            picks = [choice.get(gi, 0) for gi in range(len(groups))]
-            resid = tuple(float(v) for v in residual_assigns[ri])
-            key = (tuple(picks), resid)
-            # A sample may already have tested this fixing; one start per
-            # candidate (#1004), so do not solve it twice.
-            if key not in tried:
-                tried.add(key)
-                if _attempt(_seed_for(picks, resid)) is None:
-                    stop = "deadline"
-                    break
-            # Doubling schedule: a sample only after ranked plans 1, 2, 4, 8, ...
-            if pi & (pi - 1):
-                continue
-        elif not _sampling():
-            break
-        if not _sampling():
-            continue
-        draw = _draw_sample()
-        if draw is None:
-            # No untried, unrefuted configuration in the draw budget: stop sampling
-            # for good rather than re-paying the draws after every ranked plan.
-            sample_dry = True
-            continue
-        tried.add((tuple(draw[0]), draw[1]))
-        sampled += 1
-        _FEAS_SAMPLES_SOLVED[0] += 1
-        if _attempt(_seed_for(*draw)) is None:
+    for ci, ri in wave_plans:
+        choice = configs[ci]
+        picks = [choice.get(gi, 0) for gi in range(len(groups))]
+        resid = tuple(float(v) for v in residual_assigns[ri])
+        tried.add((tuple(picks), resid))
+        if _attempt(_seed_for(picks, resid), wave_deadline) is None:
             stop = "deadline"
             break
     # An empty return has several distinct causes — no sub-NLP was even started,
@@ -2787,21 +2706,16 @@ def one_hot_config_subnlp(
     # after the fact; without it "found nothing" is unfalsifiable (CLAUDE.md §6).
     logger.debug(
         "one_hot_config_subnlp: %d group(s), %d residual binaries, %d/%d sub-NLP(s) "
-        "attempted (%s; %d of them feasibility-first samples, %d draws refuted unsolved), "
-        "%d feasible",
+        "attempted (%s), %d feasible",
         len(groups),
         len(residual),
         attempted,
         len(plans[:max_configs]),
         stop,
-        sampled,
-        sample_rejected,
         len(results),
     )
     if stats is not None:
         stats["attempted"] = attempted
-        stats["sampled"] = sampled
-        stats["sample_rejected"] = sample_rejected
     if not groups:
         return results
     # Spend what is left of the budget on the dive, which re-solves between choices
@@ -2847,9 +2761,125 @@ def one_hot_config_subnlp(
             stats=_dive_stats,
         )
     )
+    attempted += int(_dive_stats.get("attempted", 0))
     if stats is not None:
-        stats["attempted"] = attempted + int(_dive_stats.get("attempted", 0))
+        stats["attempted"] = attempted
+    # Not gated on "the caller has no incumbent yet": measured on batch_processing
+    # (120 s, nlp-bb), the root's one sample finds 2451022.92 and the DEFERRED call's
+    # samples improve it to 1317428.80 (big-M and hull alike); gating the deferred
+    # call on "no incumbent" kept 2451022.92. The cost of not gating, measured on the
+    # in-repo ``nonconvex_hen`` hull where no sample is ever feasible: 32 samples and
+    # +6 s on a ~35 s certified solve, against 16 and +3.4 s gated.
+    if results or not _gdp_config_feas_sample_enabled():
+        return results
+    # ``_attempt`` appends every feasible sample to ``results`` itself.
+    _feas_first_samples(
+        model, groups, residual, _seed_for, _attempt, int_mask, sample_stream, tried, stats
+    )
+    if stats is not None:
+        stats["attempted"] = attempted
     return results
+
+
+def _feas_first_samples(
+    model: Model,
+    groups: list[list[int]],
+    residual: list[int],
+    seed_for: Callable[[list[int], tuple[float, ...]], np.ndarray],
+    attempt: Callable[[np.ndarray, Optional[float]], Optional[bool]],
+    int_mask: np.ndarray,
+    sample_stream: int,
+    tried: set[tuple],
+    stats: Optional[dict],
+) -> None:
+    """#2144 feasibility-first fallback: uniform valid configurations, tried only
+    after the ranked wave AND the dive have both returned nothing.
+
+    Why after, and why on its own budget. On GDPlib ``batch_processing`` every
+    ranked plan sits near the relaxation's argmax, which is confident in the wrong
+    disjunct of every group (17 of 29 groups differ from LOA's feasible
+    configuration); 4 root + 27 deferred ranked attempts found 0 feasible, while 54
+    of 60 uniform valid configurations were feasible. The first version interleaved
+    samples into the wave on the wave's own deadline. The §5 panel on ``9cb2823``
+    (PR #2150) showed the cost of that: ``batch_processing`` and ``mod_hens`` hull
+    gained an incumbent, but ``mod_hens`` big-M lost (no incumbent) or worsened
+    (108441.39 vs 106766.53) the one it found without the flag, in 2 of 2 reps.
+    Sharing the deadline means a sample can take the time a ranked plan needed. Here
+    the wave and the dive run exactly as with the flag OFF, and samples run only
+    where both found nothing, on a budget of their own (``_FEAS_SAMPLE_CAP``
+    sub-NLPs and ``_FEAS_SAMPLE_WALL_S`` seconds, never past the solve's role-1
+    deadline). The ranked wave cannot finish inside its grant on
+    ``batch_processing`` (1 root and 5-8 deferred attempts against a 48-plan cap),
+    so a fallback that waited for the shared deadline would never run there.
+
+    The wall this spends is reported as ``stats["sample_wall"]`` so that the
+    deferred schedule (:func:`discopt.solver._gdp_config_hold_back`) holds back the
+    same rest as with the flag OFF.
+
+    Draws come from a fixed-seed stream chosen by ``sample_stream`` (a deferred
+    call from the same relaxation point draws different configurations from the
+    root call's). A draw that repeats a ranked plan, or breaks an integer-only
+    linear row (``subnlp`` would refuse it unsolved), is not counted. The first
+    feasible point ends sampling. Primal only: each point comes from ``subnlp``'s
+    verification, so a sample costs time and cannot yield an infeasible incumbent
+    or touch the bound.
+    """
+    from discopt import solver_tuning as _st
+    from discopt.solver import _role1_deadline
+
+    t0 = _now()
+    role1 = _role1_deadline()
+    # Under ``deterministic`` the extent is the sub-NLP cap alone (bounded by the
+    # solve's role-1 deadline), so it does not depend on machine speed (#1187).
+    until = role1 if _st.current().deterministic else t0 + _FEAS_SAMPLE_WALL_S
+    if role1 is not None and until is not None:
+        until = min(until, role1)
+    rng = np.random.default_rng([2144, int(sample_stream)])
+    space = 2 ** len(residual)
+    for g in groups:
+        space *= len(g)
+    sampled = rejected = 0
+    stop = "cap"
+    while sampled < _FEAS_SAMPLE_CAP and len(tried) < space:
+        draw = None
+        for _ in range(_FEAS_SAMPLE_DRAWS):
+            picks = [int(rng.integers(len(g))) for g in groups]
+            resid = tuple(float(v) for v in rng.integers(0, 2, size=len(residual)))
+            key = (tuple(picks), resid)
+            if key in tried:
+                continue
+            tried.add(key)
+            if _refuted_by_integer_rows(model, int_mask, seed_for(picks, resid), 1e-6):
+                rejected += 1
+                continue
+            draw = (picks, resid)
+            break
+        if draw is None:
+            stop = "dry"
+            break
+        sampled += 1
+        _FEAS_SAMPLES_SOLVED[0] += 1
+        outcome = attempt(seed_for(*draw), until)
+        if outcome is None:
+            sampled -= 1
+            _FEAS_SAMPLES_SOLVED[0] -= 1
+            stop = "deadline"
+            break
+        if outcome:
+            stop = "feasible"
+            break
+    wall = _now() - t0
+    logger.debug(
+        "one_hot_config_subnlp #2144 samples: %d solved, %d draws refuted unsolved, %.2f s (%s)",
+        sampled,
+        rejected,
+        wall,
+        stop,
+    )
+    if stats is not None:
+        stats["sampled"] = sampled
+        stats["sample_rejected"] = rejected
+        stats["sample_wall"] = wall
 
 
 def one_hot_config_dive(
