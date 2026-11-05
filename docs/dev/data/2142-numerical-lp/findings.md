@@ -4,9 +4,9 @@
 no node LP ends with a numerical verdict, so a robust re-solve of such nodes is the identity on
 the tree's bound. Nothing to implement.
 
-Runs: `probe.py homog 10000` (`probe_homog_10000.log`, deterministic, `PYTHONHASHSEED=0`,
-`DISCOPT_PROFILE=1`, 29 executed assertions) and the 300-node smoke (`smoke_homog_300.log`).
-The 10k bound reproduces `../2142-exact-hull/arm_homog_10000.log` bit for bit:
+Runs: `probe.py homog 10000` (`probe_homog_10000.log.gz`, deterministic, `PYTHONHASHSEED=0`,
+`DISCOPT_PROFILE=1`, 29 executed assertions) and the 300-node smoke (`smoke_homog_300.log.gz`).
+The 10k bound reproduces `../2142-exact-hull/arm_homog_10000.log.gz` bit for bit:
 **1.6107840610272945**.
 
 ## 1. What a numerical verdict does (code path)
@@ -76,8 +76,8 @@ Neumaier-Shcherbina bound or certified `Infeasible`. The 20k emulation was not r
 pre-registration says not to), and no `DISCOPT_*` flag, kernel change or test is proposed.
 
 The same holds for the big-M default and homog 20k from the existing logs (`n_undecided = 0`
-in `arm_bigm_10000.log`, `arm_homog_20000.log`). Only the (already killed) aggregation arm
-had undecided nodes (105 / 10k, `arm_aggr_10000.log`), 1 % of its nodes, and that arm is dead
+in `arm_bigm_10000.log.gz`, `arm_homog_20000.log.gz`). Only the (already killed) aggregation arm
+had undecided nodes (105 / 10k, `arm_aggr_10000.log.gz`), 1 % of its nodes, and that arm is dead
 on its own pre-registration.
 
 Consequence for #2142: the remaining gap to SCIP on this spec is not in LP robustness. The

@@ -102,13 +102,13 @@ term/BLF forms, bounds mapped to the representative, aggregated column fixed at 
 from `obbt_candidates`; `incumbent_x` and the `incumbent_value` / `primal_hook` arguments
 expanded back; every expanded incumbent asserted feasible on the ORIGINAL spec to 1e-6).
 Arms: `aggr` 10k, `aggr` 20k, `base` 10k (bit-identity control against 1.6107840610272945).
-Kill: 20k bound <= 2.7875. Logs: `arm_aggr_10000.log`, `arm_aggr_20000.log`,
-`arm_base_10000.log` (lines `RESULT ...`, `rewrite stats`, `counters`). First result (`arm_aggr_10000.log`): **aggr @10k bound 1.6998** vs homog base 1.6108
+Kill: 20k bound <= 2.7875. Logs: `arm_aggr_10000.log.gz`, `arm_aggr_20000.log.gz`,
+`arm_base_10000.log.gz` (lines `RESULT ...`, `rewrite stats`, `counters`). First result (`arm_aggr_10000.log.gz`): **aggr @10k bound 1.6998** vs homog base 1.6108
 (+0.089; big-M 2.2486); 106 of the 111 aggregations expressible (5 skipped: non-identity
 kind-1 term inputs), 118 rows dropped, incumbent 3.0620146 feasible on the original spec
 (5 executed assertions), `LpVerdictNumerical` 2,430 (base 1,122). A small gain, far from the
-big-M line; The base 10k control reproduces **1.6107840610272945 bit for bit** (`arm_base_10000.log`,
-§8 satisfied). **20k arm (`arm_aggr_20000.log`): bound 2.4254** vs homog base 2.1886 (+0.237) and big-M
+big-M line; The base 10k control reproduces **1.6107840610272945 bit for bit** (`arm_base_10000.log.gz`,
+§8 satisfied). **20k arm (`arm_aggr_20000.log.gz`): bound 2.4254** vs homog base 2.1886 (+0.237) and big-M
 2.7875; incumbent feasible on the original spec, `LpVerdictNumerical` 5,292 (base 4,920).
 **Verdict against the pre-registered kill (20k bound <= 2.7875): KILLED.** The aggregation
 helps (+0.09 @10k, +0.24 @20k, 40 % of the homog-to-big-M gap at 20k) but a spec-level
@@ -157,6 +157,6 @@ kernel pseudocost rules do not share (branching was already killed as a directio
   form; (c) a term-output / kind-1 input non-identity pair is *not* aggregated;
   (d) regression on cstr homog (`DISCOPT_HULL_EXACT_PERSPECTIVE=1`): 111 aggregations, the
   expanded incumbent feasible on the unaggregated spec, 10k-node deterministic bound equal
-  to the recorded `arm_aggr_10000.log` value; (e) every point handed to `incumbent_value` /
+  to the recorded `arm_aggr_10000.log.gz` value; (e) every point handed to `incumbent_value` /
   `primal_hook` has `len == n_cols` and satisfies the aggregation equalities.
 - **Counters:** `KernelAggregated` (columns), `KernelAggrRowsDropped`.

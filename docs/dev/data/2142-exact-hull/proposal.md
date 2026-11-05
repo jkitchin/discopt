@@ -9,7 +9,7 @@ pre-registration are in this directory (`README.md`). Performance-plan §114 is 
 - **Root cause (confirmed on the lowered model, `p0_structure.log`).** The shipped hull
   lowers cstr's five rate-law rows `rate*Q*Q + 2*FA*FB == 0` as
   `(v_r/yhat)(v_Q/yhat)(v_Q/yhat) + 2 (v_FA/yhat)(v_FB/yhat)` times `yhat`. The lifted
-  spatial spec the kernel is handed carries |global bound| up to **1e27** (`arm_hull_1.log`),
+  spatial spec the kernel is handed carries |global bound| up to **1e27** (`arm_hull_1.log.gz`),
   above the LP's 1e20 sentinel. The model's own variables are all within [-10, 10].
 - **Design chosen: the homogenized perspective.** For a polynomial disjunct row of degree
   `d`, replace `yhat g(v/yhat)` by `sum_m c_m prod_{i in m} v_i * y^(d-|m|) <sense> rhs y^d`:
@@ -113,7 +113,7 @@ per-disjunct polyhedra `P_k = {x in B_k, linear rows, envelope rows}`: the conve
 Lee–Grossmann / Ruiz–Grossmann "relax each disjunct, then hull" relaxation
 (`Lee2001`, `Ruiz2010`), which is the tightest polyhedral relaxation obtainable from
 per-disjunct McCormick. Steps 2–3 make the lowering exact at integer points, which that
-relaxation alone is not. On cstr: 15 auxes and 60 hull-envelope rows (`arm_lifted_1.log`).
+relaxation alone is not. On cstr: 15 auxes and 60 hull-envelope rows (`arm_lifted_1.log.gz`).
 
 ### (b') The shipped eps-free lifted perspective applied to every nonlinear row (`ratio`)
 
