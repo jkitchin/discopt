@@ -86,6 +86,25 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Acts on the heuristics' sub-NLPs at solve time (lowering identical): solve
     # ``--all``. Pre-registered rule: DISCOPT_SUBNLP_IMPLIED_BOX.prereg.md.
     "DISCOPT_SUBNLP_IMPLIED_BOX": ("hull", "big-m"),
+    # #2143: acts on the heuristics' sub-NLPs at solve time (lowering identical):
+    # solve ``--all``. big-m is in the panel because FBBT pins columns there too.
+    "DISCOPT_SUBNLP_REDUCED": ("hull", "big-m"),
+    # #2143 stage 2: both act on root primal heuristics at solve time (lowering
+    # identical), so solve ``--all``. The memo/pump screen fires under either
+    # lowering; the warm-start reorder fires only on a model with a start (GDPlib
+    # instances carry none), so its GDP panel is a no-channel control; its real
+    # panel needs instances solved from a start (MINLPLib ``.gms`` with ``x.l``
+    # values, or an ``initial_solution``), which the ``.nl`` corpus does not carry.
+    "DISCOPT_HEUR_FIXING_SCREEN": ("hull", "big-m"),
+    "DISCOPT_ROOT_WARMSTART_FIRST": ("hull", "big-m"),
+    # #2143 stage 3: the root presolve's marginal stop, RETIRED on this panel in the
+    # PR that introduced it (not net-positive in wall, its pre-registered kill).
+    # Kept, like the retired entries above, so ``--report`` can re-derive the
+    # recorded verdict from docs/dev/data/1917-flag-panel/.
+    "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
+    # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
+    # configuration wave found nothing (lowering identical): solve ``--all``.
+    "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
     # #2136 (G3.2): Rust MILP driver flag, RETIRED by #2136 on this panel
     # (docs/dev/data/2136-g32-panel/; its sibling DISCOPT_RUST_MILP_TABLEAU_CMIR was
     # retired on the g32 replay panel). Kept, like the retired entries above, so

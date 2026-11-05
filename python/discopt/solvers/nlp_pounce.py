@@ -20,6 +20,12 @@ from discopt import _timing
 from discopt.modeling.core import Model
 from discopt.solver_tuning import subsolve_wall_options
 from discopt.solvers import NLPResult, PounceOptionError, SolveStatus
+from discopt.solvers._nlp_hard_stop import (
+    USER_REQUESTED_STOP,
+    HardStopCallbacks,
+    armed_deadline,
+    expired_result,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #75: importing this at module scope pulls jax on every solve, because
@@ -488,7 +494,15 @@ def solve_nlp(
         cl = np.empty(0, dtype=np.float64)
         cu = np.empty(0, dtype=np.float64)
 
-    callbacks = _IpoptCallbacks(evaluator)
+    callbacks: Any = _IpoptCallbacks(evaluator)
+    # #2143: a primal heuristic armed the solve's deadline as a hard stop
+    # (``_nlp_hard_stop``). Past it, start nothing; before it, end the solve from
+    # the per-iteration hook once it passes. Unarmed: unchanged.
+    hard_stop = armed_deadline()
+    if hard_stop is not None:
+        if time.perf_counter() >= hard_stop:
+            return expired_result(x0)
+        callbacks = HardStopCallbacks(callbacks, hard_stop)
 
     def _solve_with(obj_, m_, cl_, cu_, schur_, ordering_, blocks_, ws_):
         # One POUNCE solve of ``obj_`` (``m_`` rows). Factored out so the
@@ -642,6 +656,10 @@ def solve_nlp(
         dof_retry = _constant_row_retry(callbacks, lb, ub, cl, cu, x0)
         if dof_retry is not None:
             keep, sub = dof_retry
+            if hard_stop is not None:
+                if time.perf_counter() >= hard_stop:
+                    return expired_result(x0)
+                sub = callbacks = HardStopCallbacks(sub, hard_stop)
             blocks_kept = None
             if block_structure is not None:
                 blocks_kept = (block_structure[0], [block_structure[1][i] for i in keep])
@@ -664,6 +682,8 @@ def solve_nlp(
         # the caller's error, not a solver outcome -- raise with the reason.
         raise _invalid_option_error(opts)
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
+    if status_code == USER_REQUESTED_STOP and getattr(callbacks, "fired", False):
+        status = SolveStatus.TIME_LIMIT
 
     # (The interim cyipopt-retry-on-UNBOUNDED guard was removed once pounce#258 fixed
     # the actual root cause. jit1's B&B nodes converged to the node optimum and then

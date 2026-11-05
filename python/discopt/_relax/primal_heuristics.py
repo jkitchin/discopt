@@ -8,6 +8,7 @@ and re-solves the resulting NLP.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import logging
 import math
@@ -15,7 +16,7 @@ import os
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, cast
 
 import numpy as np
 
@@ -36,6 +37,7 @@ from discopt.modeling.core import Model, VarType
 # ``qubo_local_search``; ``solve_model`` imports the JAX-free module directly.
 from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
 from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
+from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR,
     evaluator_box,
@@ -46,6 +48,27 @@ from discopt.validation.feasibility import (
 )
 
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _stops_at_solve_deadline(fn: _F) -> _F:
+    """Arm the NLP hard stop at the live solve's deadline for one heuristic call (#2143).
+
+    Every NLP the heuristic poses (through its ``backend`` or its own) then ends at
+    ``solve_model``'s deadline instead of running past it on a ``max_wall_time``
+    POUNCE overran (:mod:`discopt.solvers._nlp_hard_stop` has the measurements, and
+    says when that deadline is earlier than the user's ``time_limit``).
+    Only work past the solve's deadline is truncated, so a solve whose deadline
+    never binds is unchanged. Outside ``solve_model`` it is a no-op.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with stop_at_solve_deadline():
+            return fn(*args, **kwargs)
+
+    return cast(_F, wrapper)
 
 
 def _now() -> float:
@@ -444,6 +467,7 @@ class MultiStartNLP:
         return result
 
 
+@_stops_at_solve_deadline
 def feasibility_pump(
     model: Model,
     x_nlp: np.ndarray,
@@ -452,6 +476,7 @@ def feasibility_pump(
     backend: Optional[Callable] = None,
     evaluator: Optional[NLPEvaluator] = None,
     deadline: Optional[float] = None,
+    stats: Optional[dict] = None,
 ) -> Optional[np.ndarray]:
     """Try to find an integer-feasible solution via rounding + re-solve.
 
@@ -481,6 +506,9 @@ def feasibility_pump(
             The evaluator reads variable bounds from the model on each solve, so
             the integer-pinning below is honoured regardless of which evaluator
             is used. If None, a fresh one is constructed.
+        stats: Optional dict counting rounds ``posed`` (an NLP ran) and
+            ``screened`` (refuted before any solve under
+            ``DISCOPT_HEUR_FIXING_SCREEN``, #2143).
 
     Returns:
         An integer-feasible solution vector, or None if not found.
@@ -502,6 +530,7 @@ def feasibility_pump(
 
     rng = np.random.default_rng(42)
     repairs_left = _PUMP_REPAIR_ATTEMPTS
+    screen = _heur_fixing_screen_enabled()
 
     for round_idx in range(max_rounds):
         # Always run the first round (a feasible incumbent is the primary goal,
@@ -541,6 +570,22 @@ def feasibility_pump(
                     v.lb = fixed.copy()
                     v.ub = fixed.copy()
                 offset += sz
+
+            # #2143 (``DISCOPT_HEUR_FIXING_SCREEN``, default OFF): the two
+            # refutations ``subnlp`` runs before its NLP. A refuted fixing has no
+            # continuous completion, so neither the projection nor the repair
+            # below can return a point: solve nothing, keep the repair for a
+            # round that can use it, and perturb. Measured on GDPlib syngas under
+            # hull: all 5 rounds refuted, 28.7 s of NLP and repair for nothing.
+            if screen and (
+                _refuted_by_integer_rows(model, int_mask, x0, _PUMP_SCREEN_TOL)
+                or (evaluator.n_constraints > 0 and _implied_box(evaluator)[4])
+            ):
+                if stats is not None:
+                    stats["screened"] = stats.get("screened", 0) + 1
+                continue
+            if stats is not None:
+                stats["posed"] = stats.get("posed", 0) + 1
             solve_opts = dict(opts)
             _wall_cap = _deadline_wall_cap(deadline)
             if _wall_cap is not None:
@@ -642,6 +687,13 @@ _PUMP_REPAIR_OUTER_ITERS = 10
 #: or tighter criterion of its own.
 _PUMP_REPAIR_TOL = 1e-6
 
+#: Tolerance the pump's #2143 integer-row screen refuses beyond (ten times what
+#: :func:`_refuted_by_integer_rows` derives from it). The ``tol`` that
+#: :func:`_verified_pump_point`'s :func:`_check_constraint_feasibility` call
+#: verifies a candidate with, so a screened round is one whose every candidate
+#: that check would reject anyway.
+_PUMP_SCREEN_TOL = 1e-6
+
 
 def _subnlp_verify_any_status() -> bool:
     """Whether :func:`subnlp` accepts a verified point whatever the NLP status (#1760).
@@ -707,6 +759,202 @@ def _implied_box(evaluator) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndar
     return lb, ub, t_lb, t_ub, bool(infeasible)
 
 
+def _subnlp_reduced_enabled() -> bool:
+    """Whether :func:`subnlp` poses its NLP on the FBBT-reduced problem (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    With the integers fixed, node FBBT (the ``_implied_box`` pass ``subnlp`` already
+    runs to refute a fixing) pins some continuous columns to a single value: under
+    the hull reformulation every disaggregated copy of a disjunct whose indicator is
+    0 is pinned to exactly 0 by its linking rows. ON fixes those columns, drops the
+    rows that are then structurally over fixed columns only (each is checked at the
+    fixed point first, and a violation beyond ten times the final accept tolerance
+    refuses the fixing without a solve), and solves ONCE on the remaining rows. A
+    fixing with nothing pinned is posed exactly as before. The returned point is
+    still verified against EVERY row of the full evaluator, so a dropped row cannot
+    admit a point the legacy path would reject.
+
+    Why: on the legacy pose the interior-point solve has to approach ``v = 0``
+    through the eps-perspective rows ``yhat * g(v / yhat)`` at ``yhat ~ eps``, and
+    POUNCE stops at ``Invalid_Number_Detected``. Measured (the #2143 entry
+    experiment, sub-NLP by sub-NLP inside real hull solves, legacy result kept):
+    ``ex_633_trespalacios`` 0 -> 20 points found, ``nonconvex_hen`` 1 -> 29
+    (12.3 s -> 2.4 s of NLP), ``eight_process`` 0 -> 42, ``clay0203`` both
+    infeasible; 349 comparisons in all, 0 lost, 0 refusals, 0 verification
+    failures. Big-M controls: 0 pins on ``ex_633`` / ``nonconvex_hen`` (identical
+    pose); ``eight_process`` big-M pins on 22 calls, 22/22 found in both arms,
+    objective difference <= 7.9e-7. Toy (``test_1917_hull_subnlp_regression``'s
+    ``_chain(3)``): 1/8 configurations legacy, 8/8 reduced.
+
+    It differs from the retired ``DISCOPT_SUBNLP_FBBT_BOX`` / ``DISCOPT_SUBNLP_IMPLIED_BOX``
+    in that it never narrows a column FBBT does not pin and never adds a second
+    solve. Still bound-changing in §5's sense (incumbents move pruning), so it is
+    default-OFF until ``issue1917_gdp_flag_panel.py --flag DISCOPT_SUBNLP_REDUCED
+    --phase solve --all`` (hull and big-M) and the corpus ON/OFF panel pass both
+    bars. **Kill criterion**: any sub-NLP where the legacy pose finds a verified
+    point and the reduced pose does not, a reduced point that fails verification on
+    the full rows, or a panel that is not cert-clean.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_REDUCED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+class _RowSubsetEvaluator:
+    """``base`` restricted to the rows ``keep``, on the column box ``lb``/``ub`` (#2143).
+
+    Everything else is forwarded. The rows left out are the ones over fixed columns
+    only: constants, with no gradient in any free column, so the Lagrangian Hessian
+    gives each of them a zero multiplier, which is what removing a constant row
+    means. The box is carried explicitly (not read from the model), so the pins
+    reach the solve whatever ``base.variable_bounds`` is built from.
+
+    Hand it to an NLP backend only together with explicit ``constraint_bounds``:
+    the source constraint list belongs to ``base`` and would describe the full row
+    set, so the two attributes that expose it refuse instead of forwarding. Never
+    verify a point with it; feasibility is judged on ``base``.
+    """
+
+    def __init__(self, base, keep: np.ndarray, lb: np.ndarray, ub: np.ndarray) -> None:
+        self._base = base
+        self._keep = np.asarray(keep, dtype=np.int64)
+        self._m_full = int(base.n_constraints)
+        self._lb = np.asarray(lb, dtype=np.float64)
+        self._ub = np.asarray(ub, dtype=np.float64)
+        rows, cols = base.jacobian_structure()
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        new_index = np.full(self._m_full, -1, dtype=np.int64)
+        new_index[self._keep] = np.arange(self._keep.size, dtype=np.int64)
+        self._jac_mask = new_index[rows] >= 0
+        self._jac_struct = (new_index[rows[self._jac_mask]], cols[self._jac_mask])
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    @property
+    def _source_constraints(self):
+        raise TypeError("_RowSubsetEvaluator has no source constraint list; pass constraint_bounds")
+
+    @property
+    def _constraint_flat_sizes(self):
+        raise TypeError("_RowSubsetEvaluator has no source constraint list; pass constraint_bounds")
+
+    @property
+    def n_constraints(self) -> int:
+        return int(self._keep.size)
+
+    @property
+    def variable_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._lb, self._ub
+
+    def has_sparse_structure(self) -> bool:
+        return True
+
+    def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._jac_struct
+
+    def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self._base.evaluate_constraints(x), dtype=np.float64)[self._keep]
+
+    def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        vals = np.asarray(self._base.evaluate_jacobian_values(x), dtype=np.float64)
+        return vals[self._jac_mask]
+
+    def evaluate_jacobian(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(self._base.evaluate_jacobian(x), dtype=np.float64)[self._keep]
+
+    def _full_lambda(self, lambda_: np.ndarray) -> np.ndarray:
+        full = np.zeros(self._m_full, dtype=np.float64)
+        full[self._keep] = np.asarray(lambda_, dtype=np.float64).ravel()
+        return full
+
+    def evaluate_hessian_values(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        return self._base.evaluate_hessian_values(x, obj_factor, self._full_lambda(lambda_))
+
+    def evaluate_lagrangian_hessian(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        return self._base.evaluate_lagrangian_hessian(x, obj_factor, self._full_lambda(lambda_))
+
+
+#: :func:`_reduce_subnlp`'s verdict that the fixing breaks a row over fixed columns.
+_REDUCED_REFUTED = "refuted"
+
+
+def _reduce_subnlp(
+    evaluator, implied, x0: np.ndarray, feas_tol: float
+) -> Optional[tuple[Any, np.ndarray, list[tuple[float, float]]] | str]:
+    """The reduced pose of a fixed-integer sub-NLP (#2143), or why there is none.
+
+    Returns ``None`` when FBBT pins no column, the evaluator has no sparse
+    structure or no rows (the caller poses the legacy NLP, unchanged);
+    :data:`_REDUCED_REFUTED` when a row over fixed columns only is non-finite or
+    violated beyond ten times what :func:`subnlp`'s final
+    :func:`_check_constraint_feasibility` accepts on it -- the same 10x rule as
+    :func:`_refuted_by_integer_rows`, so no point the legacy pose could return is
+    lost; else ``(ev_solve, x0, constraint_bounds)``.
+
+    Only EXACT pins (``t_lb == t_ub``) are fixed; a column FBBT narrows to a
+    sliver of width ~1e-14 stays free, and no column FBBT merely narrows is
+    touched (narrowing every column is what lost ``heatexch_gen3`` incumbents under
+    the retired ``DISCOPT_SUBNLP_IMPLIED_BOX``).
+    """
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    m = int(evaluator.n_constraints)
+    if m == 0 or not (
+        hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
+    ):
+        return None
+    lb, ub, t_lb, t_ub, _ = implied
+    t_lb = np.asarray(t_lb, dtype=np.float64)
+    t_ub = np.asarray(t_ub, dtype=np.float64)
+    already = lb == ub
+    pinned = (t_lb == t_ub) & ~already & np.isfinite(t_lb)
+    if not pinned.any():
+        return None
+    x0 = x0.copy()
+    x0[pinned] = t_lb[pinned]
+    lb_red = lb.copy()
+    ub_red = ub.copy()
+    lb_red[pinned] = t_lb[pinned]
+    ub_red[pinned] = t_lb[pinned]
+
+    fixed = already | pinned
+    rows, cols = evaluator.jacobian_structure()
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    touches_free = np.zeros(m, dtype=bool)
+    touches_free[rows[~fixed[cols]]] = True
+    constant = ~touches_free
+    cl, cu = _infer_constraint_bounds(evaluator)
+    cl = np.asarray(cl, dtype=np.float64)
+    cu = np.asarray(cu, dtype=np.float64)
+    if constant.any():
+        g = np.asarray(evaluator.evaluate_constraints(x0), dtype=np.float64)
+        if not np.all(np.isfinite(g[constant])):
+            return _REDUCED_REFUTED
+        vals = np.asarray(evaluator.evaluate_jacobian_values(x0), dtype=np.float64)
+        scale = np.zeros(m, dtype=np.float64)
+        np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
+        threshold = 10.0 * np.maximum(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale)
+        if np.any(constant & ~(viol <= threshold)):
+            return _REDUCED_REFUTED
+    keep = np.flatnonzero(touches_free)
+    ev_solve = _RowSubsetEvaluator(evaluator, keep, lb_red, ub_red)
+    bounds = list(zip(cl[keep].tolist(), cu[keep].tolist()))
+    return ev_solve, x0, bounds
+
+
 class _RepairDeadline(Exception):
     """Raised by :class:`_DeadlineCallbacks` once the caller's deadline has passed."""
 
@@ -742,6 +990,176 @@ class _DeadlineCallbacks:
         return getattr(self._inner, name)
 
 
+#: Bound magnitude treated as infinite by the projection, as in ``pounce._starts``.
+_PROJECTION_BOUND_INF = 1e19
+
+
+def _projection_violation(g: np.ndarray, g_l: np.ndarray, g_u: np.ndarray) -> float:
+    """``‖max(cl − g, g − cu, 0)‖₂``, the merit ``pounce.project_to_feasible`` uses."""
+    if g.size == 0:
+        return 0.0
+    return float(np.linalg.norm(np.maximum(np.maximum(g_l - g, g - g_u), 0.0)))
+
+
+def _project_to_feasible_until(
+    problem_obj: Any,
+    x0: np.ndarray,
+    *,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    tol: float,
+    max_iter: int,
+    deadline: float,
+    rho: float = 1e3,
+    sigma: float = 1.0,
+    accept_ratio: float = 1e-2,
+    max_trials: int = 5,
+) -> np.ndarray:
+    """``pounce.project_to_feasible`` (pounce-solver 0.15.0) with every QP time-limited.
+
+    Each QP gets ``time_limit = deadline - now`` (#2143). pounce's own function
+    takes no time limit and calls back into Python only between QPs, so one QP
+    could not be stopped. Measured on GDPlib ``syngas`` under hull: one repair QP
+    started at 105.95 s of a 120 s solve and returned at 123.48 s, so the solve
+    ended 3.6 s late. The repair QPs of an earlier pump on the same model took
+    1.1-1.9 s each, ten per repair.
+
+    The algorithm is pounce's, step for step, with the defaults
+    :func:`_repair_to_feasible` relies on (``radius=None``, ``margin=0``). A QP that
+    stops on its time limit raises :class:`_RepairDeadline`, and so does a deadline
+    that has already passed when a QP is due. While the deadline does not bind, the
+    point returned is the one pounce's function returns.
+    ``test_2143_deadline_adherence`` holds the two to bit-identical output.
+    """
+    import scipy.sparse as sp
+    from pounce.qp import solve_qp
+
+    x0 = np.asarray(x0, dtype=float).ravel()
+    n = x0.size
+    x_l = np.asarray(lb, dtype=float).ravel()
+    x_u = np.asarray(ub, dtype=float).ravel()
+    x_l = np.where(x_l <= -_PROJECTION_BOUND_INF, -np.inf, x_l)
+    x_u = np.where(x_u >= _PROJECTION_BOUND_INF, np.inf, x_u)
+    g_l = np.asarray(cl, dtype=float).ravel()
+    g_u = np.asarray(cu, dtype=float).ravel()
+    m = g_l.size
+    if m == 0:
+        return np.clip(x0, x_l, x_u)
+    g_l = np.where(g_l <= -_PROJECTION_BOUND_INF, -np.inf, g_l)
+    g_u = np.where(g_u >= _PROJECTION_BOUND_INF, np.inf, g_u)
+    eq_mask = np.isfinite(g_l) & np.isfinite(g_u) & (np.abs(g_u - g_l) <= 1e-12)
+    lo_mask = np.isfinite(g_l) & ~eq_mask
+    hi_mask = np.isfinite(g_u) & ~eq_mask
+
+    x = np.clip(x0.copy(), x_l, x_u)
+    g = np.asarray(problem_obj.constraints(x), dtype=float).ravel()
+    theta = _projection_violation(g, g_l, g_u)
+    best_x = x.copy()
+    if theta == 0.0:
+        return best_x
+
+    d_scale = np.ones(n)
+    for _outer in range(max(1, int(max_iter))):
+        jv = np.asarray(problem_obj.jacobian(x), dtype=float).ravel()
+        if hasattr(problem_obj, "jacobianstructure"):
+            jr, jc = problem_obj.jacobianstructure()
+            J = sp.coo_matrix(
+                (jv, (np.asarray(jr, dtype=int).ravel(), np.asarray(jc, dtype=int).ravel())),
+                shape=(m, n),
+            ).tocsc()
+        else:
+            J = sp.csc_matrix(jv.reshape(m, n))
+        row_norm = np.sqrt(np.asarray(abs(J).power(2).sum(axis=1)).ravel())
+        w = 1.0 / np.maximum(row_norm, 1.0)
+        delta = max(1.0, float(np.linalg.norm(x, ord=np.inf)))
+
+        n_p = int(np.count_nonzero(eq_mask | lo_mask))
+        n_q = int(np.count_nonzero(eq_mask | hi_mask))
+        w_p = w[eq_mask | lo_mask]
+        w_q = w[eq_mask | hi_mask]
+        P = sp.diags(np.concatenate([sigma * d_scale**2, w_p**2, w_q**2]), format="csc")
+        c_lin = np.concatenate([np.zeros(n), rho * np.ones(n_p + n_q)])
+        Ep = sp.coo_matrix(
+            (np.ones(n_p), (np.flatnonzero(eq_mask | lo_mask), np.arange(n_p))), shape=(m, n_p)
+        ).tocsc()
+        Eq = sp.coo_matrix(
+            (np.ones(n_q), (np.flatnonzero(eq_mask | hi_mask), np.arange(n_q))), shape=(m, n_q)
+        ).tocsc()
+        row_block = sp.hstack([J, Ep, -Eq], format="csc")
+        A = b = G = h = None
+        if eq_mask.any():
+            A = row_block.tocsr()[np.flatnonzero(eq_mask)].tocsc()
+            b = (g_l - g)[eq_mask]
+        g_blocks, h_blocks = [], []
+        if hi_mask.any():
+            g_blocks.append(row_block.tocsr()[np.flatnonzero(hi_mask)].tocsc())
+            h_blocks.append((g_u - g)[hi_mask])
+        if lo_mask.any():
+            g_blocks.append(-row_block.tocsr()[np.flatnonzero(lo_mask)].tocsc())
+            h_blocks.append(-(g_l - g)[lo_mask])
+        if g_blocks:
+            G = sp.vstack(g_blocks, format="csc")
+            h = np.concatenate(h_blocks)
+
+        accepted_this_outer = False
+        trial_delta = delta
+        for _trial in range(max(1, int(max_trials))):
+            tr = trial_delta / d_scale
+            # ``+ 0.0`` / ``- 0.0`` are pounce's ``margin=0`` terms, kept so the
+            # bounds match bit for bit (they turn a ``-0.0`` into ``0.0``).
+            d_lo = np.maximum(x_l - x + 0.0, -tr)
+            d_hi = np.minimum(x_u - x - 0.0, tr)
+            d_hi = np.maximum(d_hi, d_lo)
+            z_lo = np.concatenate([d_lo, np.zeros(n_p + n_q)])
+            z_hi = np.concatenate([d_hi, np.full(n_p + n_q, np.inf)])
+            remaining = float(deadline) - _now()
+            if remaining <= 0.0:
+                raise _RepairDeadline()
+            res = solve_qp(
+                P=P,
+                c=c_lin,
+                A=A,
+                b=b,
+                G=G,
+                h=h,
+                lb=z_lo,
+                ub=z_hi,
+                tol=tol,
+                check_psd=False,
+                time_limit=remaining,
+            )
+            if getattr(res, "status", None) == "time_limit":
+                raise _RepairDeadline()
+            if not res.success:
+                trial_delta *= 0.5
+                continue
+            z = np.asarray(res.x, dtype=float).ravel()
+            d = z[:n]
+            theta_pred = _projection_violation(g + J @ d, g_l, g_u)
+            predicted = theta - theta_pred
+            x_try = np.clip(x + d, x_l, x_u)
+            g_try = np.asarray(problem_obj.constraints(x_try), dtype=float).ravel()
+            theta_try = _projection_violation(g_try, g_l, g_u)
+            actual = theta - theta_try
+            if (
+                np.isfinite(theta_try)
+                and theta_try < theta
+                and actual >= accept_ratio * max(predicted, 0.0)
+            ):
+                x, g, theta = x_try, g_try, theta_try
+                best_x = x_try
+                accepted_this_outer = True
+                break
+            trial_delta *= 0.5
+        if not accepted_this_outer:
+            break
+        if theta <= tol:
+            break
+    return best_x
+
+
 def _repair_to_feasible(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -773,8 +1191,8 @@ def _repair_to_feasible(
     Returns ``None`` — leaving the round to fail exactly as it does today —
     when ``DISCOPT_PUMP_REPAIR=0``, when pounce is not installed, when the
     repair raises, or when the caller's deadline has passed, before the repair or
-    during it (:class:`_DeadlineCallbacks`, checked between its QPs). Soundness
-    is unaffected either way:
+    during it: between its QPs (:class:`_DeadlineCallbacks`) and inside each QP
+    (:func:`_project_to_feasible_until`, #2143). Soundness is unaffected either way:
     the returned point is verified by :func:`_verified_pump_point` like any
     other candidate, and ``inject_incumbent`` enforces strict improvement on top.
     """
@@ -798,7 +1216,27 @@ def _repair_to_feasible(
         cu = np.empty(0, dtype=float)
     callbacks: Any = _IpoptCallbacks(evaluator)
     if deadline is not None:
-        callbacks = _DeadlineCallbacks(callbacks, deadline)
+        # #2143: the deadline reaches inside each QP (``time_limit``), not only
+        # between them (``_DeadlineCallbacks``).
+        try:
+            x_rep = _project_to_feasible_until(
+                _DeadlineCallbacks(callbacks, deadline),
+                np.asarray(x0, dtype=float),
+                lb=np.asarray(lb, dtype=float),
+                ub=np.asarray(ub, dtype=float),
+                cl=np.asarray(cl, dtype=float),
+                cu=np.asarray(cu, dtype=float),
+                tol=_PUMP_REPAIR_TOL,
+                max_iter=_PUMP_REPAIR_OUTER_ITERS,
+                deadline=float(deadline),
+            )
+        except _RepairDeadline:
+            logger.debug("feasibility repair stopped at the caller's deadline")
+            return None
+        except BaseException as exc:
+            logger.debug("feasibility repair failed: %s: %s", type(exc).__name__, exc)
+            return None
+        return np.asarray(x_rep, dtype=float)
     try:
         x_rep, report = pounce.project_to_feasible(
             callbacks,
@@ -1145,6 +1583,117 @@ def passes_false_primal_screen(evaluator: NLPEvaluator, x: np.ndarray) -> bool:
     )
 
 
+def _heur_fixing_screen_enabled() -> bool:
+    """Whether root heuristics skip integer fixings already known to fail (#2143).
+
+    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    ``docs/dev/flag-retirement-audit.md``. Two pieces, one question each -- "has
+    this fixing already been shown to give nothing?":
+
+    * :func:`integer_local_search` keeps a :class:`_FixingMemo` for the call and
+      does not re-pose a fixing ``subnlp`` already refused by a proof over the
+      fixed box (integer rows, node FBBT, the reduced pose's fixed rows), nor the
+      SAME start (integers and continuous values bit-identical) whose NLP ended
+      without a point on any status but ``TIME_LIMIT``. The work budget is charged
+      exactly as if the sub-NLP had run, so the search visits the same fixings in
+      the same order: only the repeated solve is skipped.
+    * :func:`feasibility_pump` screens each round's fixing with the same two
+      refutations ``subnlp`` runs (:func:`_refuted_by_integer_rows`,
+      :func:`_implied_box`) before its NLP and before :func:`_repair_to_feasible`;
+      a refuted round solves nothing and does not spend the repair.
+
+    Measured on GDPlib ``syngas`` under hull (#2143 diagnosis): the root ILS posed
+    7 sub-NLPs on ONE fixing at 3.5-4.2 s each (30.2 s); every one of the pump's
+    5 rounds was FBBT-refuted (all but the first also integer-row refuted), and the
+    pump spent 29.1 s on 5 capped NLPs and a 12.7 s repair. Inside the LOA route's
+    native-kernel seed, 25 of 25 ILS sub-NLPs posed the same start.
+
+    Why it is not simply ON: the pump half changes which round the repair runs on,
+    so the pump's trajectory is not the legacy one, and the memo assumes the NLP
+    backend is deterministic for an identical start. **Kill criterion**: a
+    memoized fixing that a later identical pose would have solved, or a pump point
+    the screen loses, on the panel.
+    """
+    return os.environ.get("DISCOPT_HEUR_FIXING_SCREEN", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+class _FixingMemo:
+    """Integer fixings one heuristic call has already seen fail in :func:`subnlp` (#2143).
+
+    Two kinds of failure, kept apart because they generalize differently:
+
+    * ``refuted`` -- keyed by the integer values alone. ``subnlp`` refused the
+      fixing on a proof over the fixed box (``outcome["refuted"]``): an integer
+      row broken, node FBBT proving the box empty, or a fixed row of the reduced
+      pose violated. None of these reads the continuous start, so ANY start with
+      these integers is refused the same way.
+    * ``failed`` -- keyed by the whole start, bit for bit. The NLP ran and gave
+      no verified point. An NLP's outcome depends on its start (a local solver can
+      fail from one start and succeed from another), so only the identical pose is
+      skipped, and only when the solve did not stop on its wall clock
+      (``TIME_LIMIT`` depends on machine speed, so a repeat might get further).
+
+    Integer values come from :func:`_subnlp_start`, the same normalization
+    ``subnlp`` applies, so a key names exactly the problem ``subnlp`` would pose.
+    """
+
+    def __init__(self, int_mask: np.ndarray, lb: np.ndarray, ub: np.ndarray) -> None:
+        self._int_mask = int_mask
+        self._lb = lb
+        self._ub = ub
+        self._refuted: set[bytes] = set()
+        self._failed: set[bytes] = set()
+        #: Poses skipped because the integers were already refuted / the start already failed.
+        self.skipped_refuted = 0
+        self.skipped_failed = 0
+
+    def _keys(self, x: np.ndarray) -> tuple[bytes, bytes]:
+        x0 = _subnlp_start(x, self._int_mask, self._lb, self._ub)
+        return x0[self._int_mask].tobytes(), x0.tobytes()
+
+    def known_to_fail(self, x: np.ndarray) -> bool:
+        """Whether ``subnlp`` from ``x`` is already known to return ``None``; counts the skip."""
+        int_key, start_key = self._keys(x)
+        if int_key in self._refuted:
+            self.skipped_refuted += 1
+            return True
+        if start_key in self._failed:
+            self.skipped_failed += 1
+            return True
+        return False
+
+    def record(self, x: np.ndarray, outcome: dict) -> None:
+        """Remember a ``subnlp`` call from ``x`` that returned ``None`` with ``outcome``."""
+        int_key, start_key = self._keys(x)
+        if outcome.get("refuted"):
+            self._refuted.add(int_key)
+            return
+        status = outcome.get("nlp_status")
+        if status is not None and status != SolveStatus.TIME_LIMIT:
+            self._failed.add(start_key)
+
+
+def _subnlp_start(
+    x_relax: np.ndarray, int_mask: np.ndarray, lb: np.ndarray, ub: np.ndarray
+) -> np.ndarray:
+    """The start :func:`subnlp` poses from ``x_relax``: integers rounded, then clipped.
+
+    One helper so :class:`_FixingMemo` keys a fixing exactly as ``subnlp`` poses it.
+    ``+ 0.0`` maps ``-0.0`` to ``0.0`` so equal starts have equal bytes.
+    """
+    x0 = np.asarray(x_relax, dtype=np.float64).copy()
+    if np.any(int_mask):
+        x0[int_mask] = np.round(x0[int_mask])
+        x0 = np.clip(x0, lb, ub)
+    return x0 + 0.0
+
+
+@_stops_at_solve_deadline
 def subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -1154,6 +1703,7 @@ def subnlp(
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
     time_budget: Optional[float] = None,
+    outcome: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """SubNLP-style primal heuristic: fix integers, re-solve continuous NLP.
 
@@ -1180,6 +1730,13 @@ def subnlp(
             caller's deadline. Unaccepted by backends that ignore the key (it is
             silently skipped there). An explicit ``max_wall_time`` already in
             ``nlp_options`` takes precedence.
+        outcome: Optional dict this call fills with why it returned what it did
+            (#2143), for a caller that memoizes failed fixings
+            (:class:`_FixingMemo`): ``"refuted"`` is set to ``"integer_rows"``,
+            ``"fbbt"`` or ``"reduced"`` when the integer fixing itself was proved
+            to admit no point (a proof over the fixed box, independent of the
+            start), and ``"nlp_status"`` to the backend's :class:`SolveStatus`
+            when an NLP was solved (``"nlp_raised"`` when it raised).
 
     Returns:
         ``(x, obj)`` if the heuristic produced a usable integer- and
@@ -1196,22 +1753,22 @@ def subnlp(
     int_mask = _get_integer_mask(model)
     lb_orig, ub_orig = _get_variable_bounds(model)
 
-    x0 = np.asarray(x_relax, dtype=np.float64).copy()
+    x0 = _subnlp_start(x_relax, int_mask, lb_orig, ub_orig)
+    if outcome is None:
+        outcome = {}
 
     # Fix integer variables by rounding and clamping bounds to that value.
     # We mutate the model variables' bounds in-place and restore afterwards
     # since NLPEvaluator.variable_bounds reads from the model on each call.
     with model.saved_bounds():
         if np.any(int_mask):
-            x0[int_mask] = np.round(x0[int_mask])
-            x0 = np.clip(x0, lb_orig, ub_orig)
-
             # #1775 G6.2: with the integers fixed, a linear row over integers only
             # is a constant. If the assignment breaks one, no continuous
             # completion exists, so do not solve for one. Measured on the GDP
             # panel's big-M eight_process: integer_local_search spent 4.9 s on 24
             # sub-NLPs, every one breaking a ``sum_k y_k == 1`` row.
             if _refuted_by_integer_rows(model, int_mask, x0, feas_tol):
+                outcome["refuted"] = "integer_rows"
                 return None
 
             # Tighten bounds on integer variables; ``saved_bounds`` restores them.
@@ -1237,6 +1794,19 @@ def subnlp(
         if np.any(int_mask) and evaluator.n_constraints > 0:
             implied = _implied_box(evaluator)
             if implied[4]:
+                outcome["refuted"] = "fbbt"
+                return None
+
+        # #2143 (``DISCOPT_SUBNLP_REDUCED``, default OFF): pose the NLP with the
+        # columns that FBBT pins fixed and the rows over fixed columns only checked
+        # here and dropped. Under hull those are an off disjunct's copies and its
+        # eps-perspective rows at ``yhat ~ eps``. Verification below stays on the
+        # full ``evaluator``.
+        reduced = None
+        if implied is not None and _subnlp_reduced_enabled():
+            reduced = _reduce_subnlp(evaluator, implied, x0, feas_tol)
+            if isinstance(reduced, str):  # _REDUCED_REFUTED
+                outcome["refuted"] = "reduced"
                 return None
 
         opts = _heuristic_nlp_options(nlp_options)
@@ -1244,11 +1814,17 @@ def subnlp(
             opts.setdefault("max_wall_time", float(time_budget))
 
         try:
-            nlp_result = backend(evaluator, x0, options=opts)
+            if reduced is None or isinstance(reduced, str):
+                nlp_result = backend(evaluator, x0, options=opts)
+            else:
+                ev_solve, x0, bounds = reduced
+                nlp_result = backend(ev_solve, x0, constraint_bounds=bounds, options=opts)
         except BaseException:
             # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
             # raise PanicException, which is not a subclass of Exception.
+            outcome["nlp_raised"] = True
             return None
+        outcome["nlp_status"] = nlp_result.status
 
     # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
     # interior-point solver routinely caps out one step short of its convergence
@@ -1296,6 +1872,7 @@ def subnlp(
     return x_out, obj
 
 
+@_stops_at_solve_deadline
 def continuous_multistart(
     model: Model,
     n_starts: int = 32,
@@ -1413,6 +1990,7 @@ def continuous_multistart(
     return best_x, best_obj
 
 
+@_stops_at_solve_deadline
 def integer_local_search(
     model: Model,
     x_relax: np.ndarray,
@@ -1429,6 +2007,7 @@ def integer_local_search(
     feas_tol: float = 1e-6,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
     seed: int = 0,
+    stats: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Constraint-violation-guided integer local search (1-opt + 2-opt).
 
@@ -1490,6 +2069,9 @@ def integer_local_search(
             within-limit search does.
         feas_tol: Constraint feasibility tolerance.
         seed: RNG seed for reproducible perturbations.
+        stats: Optional dict filled with ``subnlp_calls`` (sub-NLPs actually
+            posed) and ``memo_skipped_refuted`` / ``memo_skipped_failed`` (poses
+            the ``DISCOPT_HEUR_FIXING_SCREEN`` memo skipped, #2143).
 
     Returns:
         ``(x, obj)`` for the best feasible point found, else ``None``.
@@ -1577,6 +2159,41 @@ def integer_local_search(
 
     has_continuous = bool(np.any(~int_mask))
 
+    # #2143 (``DISCOPT_HEUR_FIXING_SCREEN``, default OFF): skip a repair whose
+    # fixing this call already saw refuted, or whose identical start already
+    # failed. The caller charges the budget before calling, skip or not, so the
+    # search's path is the legacy one; only the repeated solve is saved.
+    memo = (
+        _FixingMemo(int_mask, *_get_variable_bounds(model))
+        if _heur_fixing_screen_enabled()
+        else None
+    )
+    n_posed = 0
+
+    def _repair(x: np.ndarray) -> Optional[tuple[np.ndarray, float]]:
+        nonlocal n_posed
+        if memo is not None and memo.known_to_fail(x):
+            return None
+        n_posed += 1
+        outcome: dict = {}
+        cand = subnlp(
+            model,
+            x,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            feas_tol=feas_tol,
+            # #966: cap the repair from whichever deadline the budget is
+            # actually enforcing. ``budget.exhausted()`` is polled BETWEEN
+            # solves, so without this a step launched just under the wall runs
+            # past it.
+            time_budget=_deadline_wall_cap(budget.deadline),
+            outcome=outcome,
+        )
+        if cand is None and memo is not None:
+            memo.record(x, outcome)
+        return cand
+
     def _objective_improve(x_feas: np.ndarray, obj_feas: float) -> tuple[np.ndarray, float]:
         """Descend the OBJECTIVE over feasible integer neighbours from a feasible
         point. The violation descent above only reaches *a* feasible integer
@@ -1619,19 +2236,7 @@ def integer_local_search(
                     if has_continuous:
                         _solves_used += 1
                         budget.charge(NLP_SOLVE)
-                        cand = subnlp(
-                            model,
-                            xt,
-                            backend=backend,
-                            nlp_options=nlp_options,
-                            evaluator=evaluator,
-                            feas_tol=feas_tol,
-                            # #966: cap the repair from whichever deadline the
-                            # budget is actually enforcing. ``budget.exhausted()``
-                            # is polled BETWEEN solves, so without this a descent
-                            # step launched just under the wall runs past it.
-                            time_budget=_deadline_wall_cap(budget.deadline),
-                        )
+                        cand = _repair(xt)
                         if cand is None:
                             continue
                         cx, cobj = np.asarray(cand[0], dtype=np.float64), float(cand[1])
@@ -1761,15 +2366,7 @@ def integer_local_search(
         # integer-consistent points, so anything it gives back is a valid
         # incumbent candidate.
         budget.charge(NLP_SOLVE)
-        repaired = subnlp(
-            model,
-            xc,
-            backend=backend,
-            nlp_options=nlp_options,
-            evaluator=evaluator,
-            feas_tol=feas_tol,
-            time_budget=_deadline_wall_cap(budget.deadline),  # #966
-        )
+        repaired = _repair(xc)
         if repaired is not None:
             x_ok, obj_ok = repaired
             # Turn "a feasible point" into "the locally objective-best feasible
@@ -1786,14 +2383,24 @@ def integer_local_search(
     # ``stopped_on="deadline"`` means the machine's speed cut it short, so the
     # incumbent it returns (and the tree below it) is NOT reproducible; the
     # determinism panel reads this line.
+    skipped_refuted = memo.skipped_refuted if memo is not None else 0
+    skipped_failed = memo.skipped_failed if memo is not None else 0
     logger.debug(
-        "integer_local_search: evals=%d solves=%d limits=%s stopped_on=%s seeds=%d",
+        "integer_local_search: evals=%d solves=%d limits=%s stopped_on=%s seeds=%d "
+        "subnlp_posed=%d memo_skipped=%d+%d",
         budget.spent(EVAL),
         budget.spent(NLP_SOLVE),
         budget.limits,
         budget.stopped_on,
         n_seeds,
+        n_posed,
+        skipped_refuted,
+        skipped_failed,
     )
+    if stats is not None:
+        stats["subnlp_calls"] = n_posed
+        stats["memo_skipped_refuted"] = skipped_refuted
+        stats["memo_skipped_failed"] = skipped_failed
     return best
 
 
@@ -1894,6 +2501,7 @@ def _box_cells_by_distance(
     return [tuple(row) for row in grid[order].tolist()]
 
 
+@_stops_at_solve_deadline
 def integer_box_search(
     model: Model,
     x_incumbent: np.ndarray,
@@ -2140,6 +2748,7 @@ def integer_box_search(
     return best
 
 
+@_stops_at_solve_deadline
 def enumerate_binary_seeds_subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -2343,6 +2952,7 @@ def _residual_assignments(
 _WAVE_SOLVE_CAP = 48
 
 
+@_stops_at_solve_deadline
 def one_hot_config_subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -2679,6 +3289,7 @@ def one_hot_config_subnlp(
     return results
 
 
+@_stops_at_solve_deadline
 def one_hot_config_dive(
     model: Model,
     x_relax: np.ndarray,
@@ -3060,6 +3671,7 @@ def _finalize_candidate(
     return x_out, obj
 
 
+@_stops_at_solve_deadline
 def diving(
     model: Model,
     x_relax: np.ndarray,
@@ -3172,6 +3784,7 @@ def diving(
             v.ub = ub_v
 
 
+@_stops_at_solve_deadline
 def fractional_diving(
     model: Model, x_relax: np.ndarray, **kwargs
 ) -> Optional[tuple[np.ndarray, float]]:
@@ -3179,6 +3792,7 @@ def fractional_diving(
     return diving(model, x_relax, mode="fractional", **kwargs)
 
 
+@_stops_at_solve_deadline
 def objective_diving(
     model: Model, x_relax: np.ndarray, **kwargs
 ) -> Optional[tuple[np.ndarray, float]]:
@@ -3186,6 +3800,7 @@ def objective_diving(
     return diving(model, x_relax, mode="objective", **kwargs)
 
 
+@_stops_at_solve_deadline
 def rins(
     model: Model,
     x_incumbent: np.ndarray,
@@ -3267,6 +3882,7 @@ def _restrict_slot(v: object, local: int, lo: float, hi: float) -> None:
     v.ub = new_ub  # type: ignore[attr-defined]
 
 
+@_stops_at_solve_deadline
 def rens(
     model: Model,
     x_relax: np.ndarray,
@@ -3471,6 +4087,7 @@ _SWAP_BUDGET_RATIO = 0.2  # 1 s / 5 s
 _LB_SUBMIP_MIN_BUDGET_S = 2.5
 
 
+@_stops_at_solve_deadline
 def local_branching(
     model: Model,
     x_incumbent: np.ndarray,
@@ -3899,6 +4516,7 @@ def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -
     return groups
 
 
+@_stops_at_solve_deadline
 def one_hot_swap_search(
     model: Model,
     x_incumbent: np.ndarray,
