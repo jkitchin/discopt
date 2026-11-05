@@ -38587,7 +38587,15 @@ def _solve_milp_highs(
             sf,
             n_orig,
             relu_cuts,
-            budget=max(0.0, 0.25 * (float(time_limit) - (time.perf_counter() - t_start))),
+            # Role-2 work budget (#912/#1153/#1187): a quarter of the time left,
+            # saturated, and the role-1 remainder under ``deterministic`` -- the
+            # loop's own caps (rounds, tail-off) then decide how much it does.
+            budget=_role2_horizon(
+                _role2_saturate(
+                    max(0.0, 0.25 * (float(time_limit) - (time.perf_counter() - t_start))),
+                    0.25,
+                )
+            ),
         )
         if _aug is None:
             return None
