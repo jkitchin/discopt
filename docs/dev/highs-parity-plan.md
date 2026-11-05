@@ -1328,6 +1328,11 @@ and is re-written by P4.1.**
   P4.6")**: default ON, `DISCOPT_MILP_REENTRY_SPEND=0` restores the legacy gate; audit
   row Graduated, live-gate marker 50 → 49. After the flip: smoke 4518 passed (444 s vs
   474 s before), adversarial 19, re-entry/audit/MILP tests 62 passed.
+  Full fast lane (`-m "not slow" --time-budget 15`, 4 workers): 20252 passed, 29 failed --
+  none from the flip: 6 need `sympy`/`cyipopt`, absent in this container (fail with `=0`
+  too); `test_issue1729…[shape1]` takes 14.2 s with the flag ON *and* OFF, so it crosses the
+  15 s budget only under load; the other 22 pass on a quiet re-run (the full run shared
+  the machine with a runaway unit test of P4.6's prototype).
 - [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a
@@ -1355,11 +1360,29 @@ and is re-written by P4.1.**
   roots on MIPLIB-38; hypothesis ≥ 8 instances qualify and the restarted root bound
   improves ≥ 1 pp on ≥ 4. Flag `DISCOPT_MILP_ROOT_RESTART`. Done: panel bars. Kill: entry
   fails → retire. Regime: bound-changing.
-- [ ] **P4.6 — Feasibility jump + shifting primal heuristics.** Scope: new
+- [x] **P4.6 — Feasibility jump + shifting primal heuristics. KILLED AT ENTRY 2026-11-05.** Scope: new
   `bnb/primal_fj.rs`. Entry: on P4.1's no-incumbent instances, a standalone FJ run (10 %
   of TL) finds a feasible point on ≥ half of them. Flag `DISCOPT_MILP_FJ`. Done: panel bars
   with the incumbent-verified screen; FJ points are verified before adoption. Kill: entry
   < half → retire. Regime: bound-changing (primal only; bounds untouched — still panelled).
+  **Result (2026-11-05): killed at its entry bar; implementation retired.** Instrument:
+  `p46_fj_entry.py` (data `docs/dev/data/highs-parity/p4.6/`). A Rust Feasibility Jump
+  (Luteberget & Sartor 2023: weighted `<=` rows, jump values by a slope walk over each
+  column's breakpoints, candidates from up to 25 sampled violated rows plus 5 random
+  columns, +1 weight on every violated row at a local minimum; commit `4aef7331`), run
+  standalone at 10 % of the 20 s limit (2 s), 5 seeds, every point re-verified on the
+  original rows / box / integrality:
+  - `neos-1425699`: found 5/5 in 0.03-0.17 s; objective 6.97e9-8.19e9 against the
+    optimum 3.18e9 (2.2-2.6x).
+  - `enlight_hard`: 0/5 (~300k moves, ~55k weight steps each).
+  - `neos-2624317-amur`: 0/5 (~150k moves, ~47k weight steps each).
+  1/3 < the pre-registered half. A full 20 s run (1.6-3.2M moves, 2 seeds) finds
+  nothing on either miss, so the failure is not budget. A Python prototype of the same
+  search (60 s, ~2.5-6k moves) found nothing on any of the three; it is too slow to judge
+  and is kept in the script only as a reference implementation. Retired: `bnb/primal_fj.rs`
+  and `fj_search_py` deleted (recoverable from `4aef7331`); no flag was ever added.
+  Not tested by this entry: FJ on the 12 *primal-class* rows (incumbent frozen 20 → 60 s),
+  which P4.2 (RENS) targets next.
 - [ ] **P4.7 — Conflict analysis.** Scope: `milp_driver.rs` infeasible-node handling
   (Farkas ray → conflict constraint over the branching bounds), `pool.rs`. Entry: on
   `gsvm2rl3`/`neos-2624317-amur`-class instances (§2.6: branching-and-conflicts), count

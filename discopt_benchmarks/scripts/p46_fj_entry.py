@@ -11,8 +11,10 @@ up to 25 violated rows at random and move the best-scoring variable in them (plu
 random columns); when no candidate improves, increase the weights of every violated row by 1.
 
 It is a Python prototype, so it is budgeted in *moves* as well as wall time, and both are
-recorded: the Rust implementation P4.6 would build runs the same moves orders of
-magnitude faster, so "found within N moves" is the transferable quantity.
+recorded. P4.6's entry verdict came from a Rust implementation (``bnb/primal_fj.rs`` and
+``fj_search_py``, commit ``4aef7331``; ~150-330k moves in 2 s), which was retired with
+the task when the entry missed its bar (``docs/dev/data/highs-parity/p4.6/``). Restore it
+from that commit to re-run the Rust arm.
 
 Every returned point is re-checked against the instance's original rows, column
 bounds and integrality (``verify``) before it counts. Prints executed / verified counts
@@ -157,23 +159,6 @@ class FJ:
         return None, moves, bumps, time.perf_counter() - t0
 
 
-def rust_run(inst, seed: int, max_moves: int, wall: float):
-    """The Rust implementation (``bnb/primal_fj.rs``) on the same instance."""
-    from discopt._rust import fj_search_py
-
-    a = sp.csr_matrix(inst.A, dtype=np.float64)
-    a.sort_indices()
-    t0 = time.perf_counter()
-    x, moves, bumps = fj_search_py(
-        a.shape[0], a.shape[1], a.indptr.astype(np.int64), a.indices.astype(np.int64),
-        a.data.astype(np.float64), np.asarray(inst.row_lo, dtype=np.float64),
-        np.asarray(inst.row_hi, dtype=np.float64), np.asarray(inst.col_lo, dtype=np.float64),
-        np.asarray(inst.col_hi, dtype=np.float64), np.asarray(inst.is_int, dtype=bool),
-        seed=seed, max_moves=max_moves, time_limit_s=wall,
-    )  # fmt: skip
-    return (None if x is None else np.asarray(x)), moves, bumps, time.perf_counter() - t0
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", default="neos-1425699,enlight_hard,neos-2624317-amur")
@@ -181,7 +166,6 @@ def main(argv=None) -> int:
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--max-moves", type=int, default=200_000)
     ap.add_argument("--wall", type=float, default=60.0)
-    ap.add_argument("--engine", choices=("python", "rust"), default="rust")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     man = {m["name"]: m for m in M._load_panel(Path(a.panel_json))["members"]}
@@ -189,15 +173,12 @@ def main(argv=None) -> int:
     for name in a.instances.split(","):
         inst = L.read_instance(str(REPO / man[name]["path"]))
         for seed in range(a.seeds):
-            if a.engine == "rust":
-                x, moves, bumps, wall = rust_run(inst, seed, a.max_moves, a.wall)
-            else:
-                x, moves, bumps, wall = FJ(inst, seed).run(a.max_moves, a.wall)
+            x, moves, bumps, wall = FJ(inst, seed).run(a.max_moves, a.wall)
             executed += 1
             ok, worst = (False, None) if x is None else verify(inst, x)
             verified += ok
             obj = None if x is None else float(inst.c @ x + inst.offset)
-            row = {"name": name, "engine": a.engine, "seed": seed, "found": x is not None,
+            row = {"name": name, "engine": "python", "seed": seed, "found": x is not None,
                    "verified": ok,
                    "worst_violation": worst, "objective": obj, "opt": man[name]["oracle_objective"],
                    "moves": moves, "weight_bumps": bumps, "wall": wall}  # fmt: skip
