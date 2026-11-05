@@ -7,7 +7,9 @@ gdplib's cstr is not installable in this container), the same in both arms.
 
   DISCOPT_PROFILE=1 PYTHONHASHSEED=0 python -u kernel_arm.py {orig|pre|multi|scip} MAX_NODES [seeded]
 
-``pre`` is stages 1-3 (``presolve_spec``), ``multi`` adds stage 4 (``multi_aggregate=True``).
+``pre`` is stages 1-3 (``presolve_spec``). ``multi`` (stage 4, multi-aggregation) ran at
+commit 921b450 with ``presolve_spec(spec, multi_aggregate=True)``; stage 4 was removed after
+those arms (see ``README.md``), so the arm now refuses to run.
 
 ``scip`` is the positive control: SCIP's presolved model translated back to a kernel spec
 (``../2142-scip-presolved/cstr_homog_scippre_spec.npz``); its incumbent is not expanded
@@ -66,9 +68,10 @@ if seeded:
 print("options:", {k: v for k, v in kw.items()}, flush=True)
 expand = None
 run_spec = spec
-if arm in ("pre", "multi"):
+assert arm != "multi", "stage 4 was removed; check out 921b450 to re-run it"
+if arm == "pre":
     t = time.perf_counter()
-    out = presolve_spec(spec, multi_aggregate=arm == "multi")
+    out = presolve_spec(spec)
     assert out is not None, "presolve declined"; n_assert += 1
     run_spec, expand, info = out
     print(f"presolve: {time.perf_counter() - t:.2f}s", {k: v for k, v in info.items() if k not in ("compress", "eliminated")}, flush=True)

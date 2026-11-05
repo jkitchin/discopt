@@ -42,6 +42,16 @@ Reductions, iterated to closure:
 4. **Row cleanup.** Empty rows are checked and dropped, parallel duplicates keep the
    minimum right-hand side.
 
+**Not done: multi-aggregation** (the issue's optional stage 4). SCIP's eight
+multi-aggregations on cstr eliminate a BLF *output* into its linear context
+(``w := x62 - x67 - 0.99``), which the kernel cannot express: a BLF needs one output
+column. The two expressible variants were built and measured on cstr (10k-node
+bound, seeded kernel harness, stages 1-3 alone 2.28): eliminating a non-output
+column into rows AND BLF sides 0.17 (a side's interval becomes a sum of column
+intervals, loosening its envelopes); into rows only 1.74; restricted to implied-free
+columns, as SCIP does, nothing qualifies. Removed in the PR that built it;
+performance-plan section 117.
+
 An eliminated column keeps its index (``n_cols`` is unchanged, so the kernel's and
 the verifier's index space is stable) with box ``[0, 0]``, integrality 0, objective
 0, no occurrence anywhere, and no OBBT candidacy. ``expand`` maps a reduced point
@@ -187,8 +197,6 @@ class _Problem:
             self._add_blf(sides[0], sides[1], int(spec["blf_w"][t]))
         self.obbt = [int(j) for j in np.asarray(spec["obbt_candidates"]).tolist()]
         self._obbt_set = set(self.obbt)
-        self.prop_lo = self.lo.copy()  # the last root propagation's box
-        self.prop_hi = self.hi.copy()
         self.fixed: set[int] = set()  # columns with lo == hi, substituted out
         self.dead: set[int] = set()  # eliminated columns
         self.elim: list[tuple[int, dict[int, float], float]] = []
@@ -220,7 +228,7 @@ class _Problem:
 
     def _uses(self, j: int) -> dict:
         """Where column ``j`` occurs: term/BLF inputs and outputs."""
-        out = dict(t_in=[], t_out=[], b_in=[], b_out=[])
+        out: dict[str, list[int]] = dict(t_in=[], t_out=[], b_in=[], b_out=[])
         for t, d in self.terms.items():
             if d["i"] == j or (d["kind"] == 0 and d["j"] == j):
                 out["t_in"].append(t)
@@ -304,8 +312,7 @@ class _Problem:
         for t in uses["t_in"]:
             self._subst_term_input(t, j, form, b)
         if eliminate:
-            # outputs are eliminated only into a single representative (``_elim_cost``)
-            k, a = next(iter(form.items())) if len(form) == 1 else (-1, 0.0)
+            ((k, a),) = form.items()  # aggregation is into one representative
             for t in self._uses(j)["t_out"]:
                 d = self.terms[t]
                 if d["kind"] == 0:
@@ -448,7 +455,8 @@ class _Problem:
         for r, (row, _) in self.rows.items():
             if 0 < len(row) <= max_support:
                 index.setdefault(self._key(row, 1.0), r)
-        out, seen = [], set()
+        out: list[tuple] = []
+        seen: set[int] = set()
         for key, r in index.items():
             if r in seen:
                 continue
@@ -558,85 +566,6 @@ class _Problem:
             n_new += 1
         return n_new
 
-    def multi_aggregate(self, max_support: int = 8, max_fill: int = 20) -> int:
-        """Stage 4: an equality of support 3..``max_support`` eliminates one column
-        ``x_p := (b - sum_{k != p} a_k x_k) / a_p``.
-
-        Only a continuous column that occurs in linear rows alone (no term input or
-        output, no BLF side or output) and carries no objective coefficient
-        qualifies, and only when it is *implied free*: the equality and the other
-        columns' boxes already imply its box, so no bound becomes a row. This is the
-        kernel form of SCIP's multi-aggregation of a product output
-        into its linear context (#2168 item 6):
-        the output column survives and absorbs the context instead. A BLF side is
-        deliberately excluded although it could take the form: the side's interval
-        would become the sum of several column intervals, loosening every envelope
-        built on it (measured: cstr 10k-node bound 2.28 -> 0.17 with BLF sides
-        allowed, ``docs/dev/data/2168-kernel-presolve/``).
-        Among the qualifying columns, the one with the fewest occurrences goes
-        (fewest added nonzeros), an unbounded one first (no box rows), ties to the
-        larger index.
-        """
-        n_new = 0
-        for r1, r2, row, row2, rhs in self.equalities(max_support):
-            if len(row) < 3:
-                continue
-            if r1 not in self.rows or r2 not in self.rows:
-                continue
-            if self.rows[r1][0] != row or self.rows[r2][0] != row2:
-                continue
-            best = None
-            for p, ap in row.items():
-                if p in self.fixed or p in self.dead or self.integ[p] or self.c[p] != 0.0:
-                    continue
-                form = {k: -a / ap for k, a in row.items() if k != p}
-                if any(not (1.0 / _MAX_SCALE <= abs(v) <= _MAX_SCALE) for v in form.values()):
-                    continue
-                if any(self._uses(p).values()):
-                    continue
-                if not self._implied_free(p, form, rhs / ap):
-                    continue
-                occ = len(self.col_rows.get(p, ())) - 2
-                if occ > max_fill:
-                    continue
-                n_box = int(self.lo[p] > -_INF) + int(self.hi[p] < _INF)
-                key = (occ, n_box, -p)
-                if best is None or key < best[0]:
-                    best = (key, p, form, rhs / ap)
-            if best is None:
-                continue
-            _, p, form, b = best
-            self._drop_row(r1)
-            self._drop_row(r2)
-            self.substitute(p, form, b, eliminate=True)
-            self.stats["multi_aggregated"] += 1
-            n_new += 1
-        return n_new
-
-    def _implied_free(self, p: int, form: dict, b: float) -> bool:
-        """Whether ``sum(form) + b`` over the propagated box lies inside ``p``'s box.
-
-        The other columns' bounds are the root propagation's (globally valid, so the
-        implication holds at every feasible point); ``p``'s own is its declared box,
-        the one the elimination would otherwise have to keep as rows.
-        """
-        plo, phi = self.prop_lo, self.prop_hi
-        lo_f = hi_f = b
-        for k, a in form.items():
-            lk, hk = max(self.lo[k], plo[k]), min(self.hi[k], phi[k])
-            if a > 0:
-                lo_f = -_INF if lk <= -_INF or lo_f <= -_INF else lo_f + a * lk
-                hi_f = _INF if hk >= _INF or hi_f >= _INF else hi_f + a * hk
-            else:
-                lo_f = -_INF if hk >= _INF or lo_f <= -_INF else lo_f + a * hk
-                hi_f = _INF if lk <= -_INF or hi_f >= _INF else hi_f + a * lk
-        # outward by the rounding of the sum, so "implied" is never claimed falsely
-        mag = [abs(a) * max(abs(plo[k]), abs(phi[k])) for k, a in form.items()]
-        slack = 1e-12 * (1.0 + abs(b) + sum(m for m in mag if m < _INF))
-        ok_lo = self.lo[p] <= -_INF or (lo_f > -_INF and lo_f - slack >= self.lo[p])
-        ok_hi = self.hi[p] >= _INF or (hi_f < _INF and hi_f + slack <= self.hi[p])
-        return ok_lo and ok_hi
-
     # -- spec I/O ----------------------------------------------------------------
 
     def to_spec(self) -> dict:
@@ -714,7 +643,7 @@ def _propagate(spec: dict) -> Optional[tuple[np.ndarray, np.ndarray]]:
 
 
 def presolve_spec(
-    spec: dict, *, multi_aggregate: bool = False
+    spec: dict,
 ) -> Optional[tuple[dict, Callable[[np.ndarray], np.ndarray], dict]]:
     """Reduce a kernel spec; ``(reduced_spec, expand, info)`` or ``None``.
 
@@ -724,7 +653,6 @@ def presolve_spec(
     ``>= n_cols``; columns past ``n_cols`` are the LP's envelope columns and are
     returned untouched) to the original space. ``info`` holds the counters, the
     eliminated columns and ``compress`` (original point -> reduced point).
-    ``multi_aggregate`` adds stage 4 (:meth:`_Problem.multi_aggregate`).
     """
     prob = _Problem(spec)
     try:
@@ -736,7 +664,6 @@ def presolve_spec(
                 PRESOLVE_STATS.update(prob.stats)
                 return None
             plo, phi = box
-            prob.prop_lo, prob.prop_hi = plo, phi
             for j in range(prob.n):
                 if j in prob.fixed or j in prob.dead:
                     continue
@@ -745,10 +672,6 @@ def presolve_spec(
                     prob.fix(j, float(plo[j]))
             while prob.aggregate():
                 pass
-            if multi_aggregate:
-                while prob.multi_aggregate():
-                    while prob.aggregate():
-                        pass
             prob.cleanup_rows()
             if (len(prob.fixed), len(prob.dead), len(prob.rows)) == before:
                 break

@@ -15868,3 +15868,52 @@ for the eps-perspective. It does not certify. Full hull certification moves to t
 - `test_1345_flag_retirement_audit.py`: 11 passed.
 - `mypy python/discopt/`: clean. `ruff check python/`: clean.
 - No Rust was touched.
+
+## 117. #2168: a column-eliminating presolve of the kernel spec — entry passes at the kernel level, stage 4 removed (2026-11-05)
+
+Data: `docs/dev/data/2168-kernel-presolve/` (`PREREG.md`, `README.md`). Code:
+`python/discopt/_relax/spatial_presolve.py`, behind `DISCOPT_KERNEL_PRESOLVE` (default OFF)
+on the MAIN kernel call of `_try_native_spatial_kernel` only.
+
+**Hypothesis (§116 follow-up).** §116 showed discopt's tree certifies cstr hull on SCIP's
+presolved model (12,931 nodes) and that the lever is SCIP's column eliminations, not its
+deleted rows or its box. The issue's stages 1-3 (root-propagation fixings, fixed-factor
+linearisation, doubleton aggregation choosing the representative so that outputs, integers
+and objective columns survive, through term inputs, BLF sides and product outputs) should
+transfer most of it.
+
+**Harness (a deviation from the issue's entry, recorded).** GDPlib's `cstr` is not in the
+PyPI `gdplib` and the from-source install was refused in this container, so the entry runs
+on the captured homog kernel spec (`2142-exact-hull/scip/cstr_homog_spec.npz`) with the
+solver's own main-call options (`kernel_arm.py`), and `initial_incumbent` set to the value
+of the verified incumbent the full solve's NLP seed finds (no hook, no pricer). The harness
+tracks the full solve: SCIP's presolved model reaches 2.9144 @10k here (2.8834 in the full
+solve) and certifies at 12,049 nodes (12,931).
+
+**Result (deterministic):**
+
+| arm | 2k | 10k | 20k |
+|---|---|---|---|
+| original spec | 0.3421 | 1.4385 | 1.9044 |
+| **presolved (stages 1-3)** | 0.3412 | **2.2822** | **2.7936** |
+| SCIP's presolved model (control) | | 2.9144 | certified, 12,049 |
+
+The presolve fixes 51 columns (SCIP: 51), aggregates 112 (SCIP: 115 + 9 negated), rows
+779 -> 292, free columns 234 -> 122 (SCIP: 110), in 0.03 s. **Passes the pre-registered kill
+line** (20k > 2.7875), by 0.006, and does not certify at 20k. At 10k it closes 57 % of the
+gap to SCIP's model. Flipping the representative tie-break to SCIP's (keep the higher index)
+is neutral (2.2766).
+
+**Stage 4 (multi-aggregation) — built, falsified, removed.** SCIP's eight
+multi-aggregations on cstr eliminate an implied-free BLF *output* into its linear context
+(`w := x62 - x67 - 0.99`). The kernel cannot express that (a BLF has one output column). Its
+expressible variants, 10k seeded: a non-output column into rows and BLF sides 0.1719 (the
+side's interval becomes a sum of column intervals, loosening every envelope on it); into
+rows only 1.7415; implied-free columns only, SCIP's rule: none qualifies. All below stages
+1-3 alone (2.2822). Removed in the same PR (the arms ran at 921b450). What would reopen it:
+kernel support for a BLF whose output is an affine form.
+
+**What the gap still is.** Beyond the multi-aggregations, SCIP's model has 4 probing-derived
+aggregations (`x107 = 1 - x2` class, implied by branching on the binary, not by any row) and
+its row reductions (§116's `prerows` arm: certified at 18,943 nodes with the original rows
+mapped back, vs 12,931). Neither is in this presolve's scope.

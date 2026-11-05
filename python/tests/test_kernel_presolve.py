@@ -329,48 +329,6 @@ def test_eliminated_columns_have_no_occurrence():
     _same_optimum(spec, red, expand)
 
 
-# --- stage 4: multi-aggregation ----------------------------------------------------------
-
-
-def test_multi_aggregation_keeps_the_product_output():
-    # w = x0 * x1 (BLF output) and w - x2 + x3 = -0.99 (SCIP: w := -0.99 + x2 - x3).
-    # The kernel needs w as a column, so x3 goes instead: x3 = w - x2 + 0.99 ... with
-    # x3's box [0, 5] becoming two rows over (w, x2).
-    lo, hi = [0, 0, 0, 0, -INF], [2, 2, 5, 5, INF]
-    spec = make_spec(
-        lo,
-        hi,
-        [("eq", {4: 1.0, 2: -1.0, 3: 1.0}, -0.99), ({3: 1.0, 0: 1.0}, 4.0)],
-        c=[0.0, 0.0, -1.0, 0.0, 1.0],
-        blfs=[(({0: 1.0}, 0.0), ({1: 1.0}, 0.0), 4)],
-        n_orig=4,
-    )
-    x0, x1, x2 = 1.0, 1.5, 3.0
-    w = x0 * x1
-    x_star = np.array([x0, x1, x2, x2 - w - 0.99, w])
-    assert presolve_spec(spec) is None  # stages 1-3 find nothing
-    red, expand, info = _check_maps(spec, x_star, multi_aggregate=True)
-    assert info["eliminated"] == [3]
-    assert int(red["blf_w"][0]) == 4
-    assert info["n_rows_after"] == 3  # x3's box rows; x3 + x0 <= 4 rewritten over w, x2
-    _same_optimum(spec, red, expand)
-
-
-def test_multi_aggregation_refuses_term_inputs_and_integers():
-    # x0 + x1 + x2 = 1 with x0 integer, x1 the input of a square, x2 in the objective:
-    # no column qualifies
-    spec = make_spec(
-        [0, 0, 0, 0],
-        [1, 1, 1, 1],
-        [("eq", {0: 1.0, 1: 1.0, 2: 1.0}, 1.0)],
-        c=[0.0, 0.0, 1.0, 1.0],
-        integ=[1, 0, 0, 0],
-        terms=[dict(kind=1, i=1, out=3, p=2)],
-        n_orig=3,
-    )
-    assert presolve_spec(spec, multi_aggregate=True) is None
-
-
 # --- (e) differential: planted points and kernel optima -----------------------------------
 
 
@@ -441,14 +399,15 @@ def _planted(rng):
     return spec, xs
 
 
-@pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("seed", range(12))
-def test_e_planted_point_round_trips(seed, multi):
+def test_e_planted_point_round_trips(seed):
     spec, x_star = _planted(np.random.default_rng(seed))
-    red, expand, info = _check_maps(spec, x_star, tol=1e-7, multi_aggregate=multi)
+    red, expand, info = _check_maps(
+        spec,
+        x_star,
+        tol=1e-7,
+    )
     assert info["n_eliminated"] >= 4
-    if multi:
-        assert info["stats"].get("multi_aggregated", 0) >= 1
     # random points of the reduced box: expand maps reduced row values onto original ones
     rng = np.random.default_rng(1000 + seed)
     lo = np.maximum(red["global_lo"], -50.0)
@@ -464,14 +423,15 @@ def test_e_planted_point_round_trips(seed, multi):
         assert float(spec["c"] @ x) == pytest.approx(float(red["c"] @ y), abs=1e-9)
 
 
-@pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("seed", range(6))
-def test_e_kernel_optimum_is_preserved(seed, multi):
+def test_e_kernel_optimum_is_preserved(seed):
     spec, _ = _planted(np.random.default_rng(seed))
     # bound every column so the kernel can certify
     spec["global_lo"] = np.maximum(spec["global_lo"], -200.0)
     spec["global_hi"] = np.minimum(spec["global_hi"], 200.0)
-    red, expand, _info = presolve_spec(spec, multi_aggregate=multi)
+    red, expand, _info = presolve_spec(
+        spec,
+    )
     r0, r1 = _kernel(spec, max_nodes=50000), _kernel(red, max_nodes=50000)
     assert r0["incumbent"] is not None and r1["incumbent"] is not None
     # each arm's incumbent respects the other arm's rigorous bound (gap tolerance
@@ -536,16 +496,27 @@ def test_solver_flag_routes_main_call_through_presolve(monkeypatch):
     assert on.objective == pytest.approx(off.objective, abs=1e-5)
 
 
-# --- (f) slow: cstr hull with the flag ON ----------------------------------------------------
+# --- (f) slow: the cstr entry --------------------------------------------------------------
+
+#: The entry run takes ~300 s (20,000 kernel nodes), five times the slow lane's 60 s
+#: budget, and no smaller budget separates the arms: at 2,000 nodes the original and
+#: presolved specs reach 0.3421 and 0.3412 (``docs/dev/data/2168-kernel-presolve/``).
+#: So it is skipped at collection; ``DISCOPT_RUN_2168_ENTRY=1`` re-runs it.
+_ENTRY = os.environ.get("DISCOPT_RUN_2168_ENTRY") == "1"
 
 
 @pytest.mark.slow
-def test_f_cstr_hull_flag_on_beats_bigm_at_20k():
-    pytest.importorskip("gdplib")
-    script = Path(__file__).resolve().parents[2] / "docs/dev/data/2168-kernel-presolve/arm.py"
+@pytest.mark.skipif(not _ENTRY, reason="~300 s; set DISCOPT_RUN_2168_ENTRY=1 (measured 2.7936)")
+def test_f_cstr_homog_presolved_beats_bigm_line_at_20k():
+    """The captured cstr homog-hull spec, presolved, seeded with the verified incumbent
+    value, 20,000 deterministic kernel nodes: the bound passes the big-M default's 20k
+    line 2.7875 (the pre-registered kill line; measured 2.7936, original spec 1.9044)."""
+    script = (
+        Path(__file__).resolve().parents[2] / "docs/dev/data/2168-kernel-presolve/kernel_arm.py"
+    )
     env = dict(os.environ, PYTHONHASHSEED="0")
     out = subprocess.run(
-        [sys.executable, str(script), "on", "20000"],
+        [sys.executable, str(script), "pre", "20000", "seeded"],
         capture_output=True,
         text=True,
         env=env,
@@ -555,5 +526,4 @@ def test_f_cstr_hull_flag_on_beats_bigm_at_20k():
     line = next(ln for ln in out.stdout.splitlines() if ln.startswith("RESULT"))
     bound = float(line.split("bound=")[1].split()[0])
     status = line.split("status=")[1].split()[0]
-    # the big-M default's deterministic 20k bound is 2.7875 (performance-plan 116)
     assert status == "optimal" or bound > 2.7875, line

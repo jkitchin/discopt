@@ -535,7 +535,9 @@ pub fn solve_spatial_tree_py<'py>(
 /// `n_cols`, the `1e20` sentinel for an infinite bound), an optional objective
 /// cutoff and the round cap. Returns `(live, lo, hi)`: `live = False` means the box
 /// was proven empty under the cutoff (the returned box is then whatever the
-/// propagator left). Observes only -- no solve path calls it.
+/// propagator left). Reads the spec and box only. Solve-path caller: the kernel
+/// presolve (`discopt._relax.spatial_presolve`, #2168, `DISCOPT_KERNEL_PRESOLVE`),
+/// which reads its fixings off the root box.
 #[pyfunction]
 #[pyo3(signature = (
     n_cols, n_orig, c, integrality, global_lo, global_hi,
