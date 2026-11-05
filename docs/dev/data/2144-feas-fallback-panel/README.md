@@ -56,3 +56,5 @@ runs and finds -1793.43 at ~90 s; on the branch the proposer's point (645.51,
 genuinely feasible) is accepted, and `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT` then
 skips the pump. The fix is correct; the loss comes from the pump-skip rule
 acting on a poor first incumbent.
+Tracked in #2170. batch_processing's remaining dual gap (no certificate at 120 s)
+is #2172.
