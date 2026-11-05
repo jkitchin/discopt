@@ -370,6 +370,16 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "min(tl, deadline - time.perf_counter())",
         "contract",
     ),
+    # The MIPcc27 entry's checker-settings re-solve (``mipcc.checker_rejects``)
+    # verifies an answer that is ALREADY written; its cap only bounds how long
+    # that verification may run before the process must exit. Undecided keeps
+    # the answer, so the clock never changes which elements are reported -- it
+    # can only fail to catch a borderline set (the competition's own limit).
+    (
+        "mipcc.py",
+        "min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)",
+        "contract",
+    ),
     # Caps one piece LP of the integer-ratio dive by what is left of the dive's
     # own deadline. That deadline is already ``_role2``-suppressed at its origin
     # (``mccormick_lp``, recorded in KNOWN), so under the flag it is ``None`` and
@@ -516,6 +526,24 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     (
         "_iis_milp.py",
         "stop_l = min(deadline, time.perf_counter() + base_budget)",
+        "contract",
+    ),
+    # The exact-reduction second route (``_Engine._reduced``) runs inside a
+    # confirmation and takes the confirmation's own ``stop_at``; without one it
+    # gets one probe's limit, exactly as a presolve-free solve would. The clock
+    # decides only whether this route concludes; an inconclusive result falls
+    # through to the other routes, so which elements are kept never depends on it.
+    (
+        "_iis_milp.py",
+        "stop = time.perf_counter() + float(self.probe_tl) if stop_at is None else stop_at",
+        "contract",
+    ),
+    # The wall-clock interrupt guard on that checker-settings re-solve: it
+    # enforces the solve's own time_limit (HiGHS overruns it 7-10x on some
+    # solves) and decides nothing else.
+    (
+        "mipcc.py",
+        "stop = time.perf_counter() + float(time_limit) + 1.0",
         "contract",
     ),
     (

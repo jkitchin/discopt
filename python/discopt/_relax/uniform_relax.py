@@ -806,6 +806,10 @@ _EMPTY_BOX = np.empty(0, dtype=np.float64)
 _BOUNDS_CACHE_CAP = 500_000
 # Cap on the per-node proven/abstained curvature-box lists (drop-oldest).
 _CERT_LIST_CAP = 8
+# Indefinite-point witnesses short-circuit curvature proofs that must abstain
+# (bound-neutral; ``_curvature_cert``). ``DISCOPT_CURV_WITNESS=0`` restores the
+# always-prove path for A/B.
+_DISCOPT_CURV_WITNESS = os.environ.get("DISCOPT_CURV_WITNESS", "1") != "0"
 # #248: magnitude past which the objective's box-interval floor is treated as
 # garbage — the factorable-reform signature where a wide-boxed monomial-lift
 # auxiliary (e.g. nvs16's ``_fr_aux == x1**6`` over [0, 6.4e13]) with a negative
@@ -892,6 +896,7 @@ class _ModelAnalysisCache:
         "bounds_by_box",
         "hessian_certs",
         "hessian_abstain",
+        "hessian_witness",
         "linear_rows",
         "implied_by_box",
     )
@@ -918,6 +923,9 @@ class _ModelAnalysisCache:
         self.hessian_certs: dict[int, list[tuple[np.ndarray, np.ndarray, str]]] = {}
         # id(cnode) -> [(lo_support, hi_support)] abstained boxes (capped).
         self.hessian_abstain: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+        # id(cnode) -> [point] where the Hessian is provably indefinite (capped). The
+        # certificate abstains on every box containing one (see ``_curvature_cert``).
+        self.hessian_witness: dict[int, list[np.ndarray]] = {}
         # #2012: the model's linear rows (``poles._LinearRows``, built on first need)
         # and (id(cnode), lb.tobytes(), ub.tobytes()) -> proved implied range.
         self.linear_rows: Any = None
@@ -1637,21 +1645,56 @@ class _Builder:
         for alo, ahi in self._analysis.hessian_abstain.get(nid, ()):
             if _box_subset(lo, hi, alo, ahi) and bool(np.all((hi - lo) >= 0.5 * (ahi - alo))):
                 return None
-        # 3) Prove afresh and record the outcome (support-restricted, capped).
-        from discopt._relax.milp_relaxation import _multivar_box_curvature
-
-        verdict = cast(
-            Optional[str],
-            _multivar_box_curvature(
-                self._expr(node),
-                self.model,
-                idxs,
-                flat_lb,
-                flat_ub,
-                cbox,
-                abort_deadline=self._abort_deadline,
-            ),
+        # 3) Prove afresh and record the outcome (support-restricted, capped) --
+        #    unless the box holds a point where the Hessian is provably indefinite.
+        #    Then the proof must abstain (``_certified_indefinite_at``), so ``None`` is
+        #    its verdict without running it, and the abstained box is recorded as
+        #    if it had run. A node that has abstained before gets its query-box
+        #    midpoint tested (one point Hessian) when no stored witness covers the box;
+        #    a node that never abstained is proven directly, so a convex node pays
+        #    nothing. Measured on GDPlib ex_633 (hull): 321 of 375 abstaining proofs
+        #    had an indefinite midpoint.
+        from discopt._relax.milp_relaxation import (
+            _certified_indefinite_at,
+            _multivar_box_curvature,
         )
+
+        sel = np.asarray(idxs, dtype=np.intp)
+        q_lo = np.asarray(flat_lb, dtype=np.float64)[sel]
+        q_hi = np.asarray(flat_ub, dtype=np.float64)[sel]
+        witnessed = _DISCOPT_CURV_WITNESS and any(
+            bool(np.all(q_lo <= w) and np.all(w <= q_hi))
+            for w in self._analysis.hessian_witness.get(nid, ())
+        )
+        if (
+            _DISCOPT_CURV_WITNESS
+            and not witnessed
+            and nid in self._analysis.hessian_abstain
+            and np.all(np.isfinite(q_lo))
+            and np.all(np.isfinite(q_hi))
+        ):
+            mid = 0.5 * q_lo + 0.5 * q_hi
+            if _certified_indefinite_at(self._expr(node), self.model, idxs, mid, cbox):
+                witnessed = True
+                found = self._analysis.hessian_witness.setdefault(nid, [])
+                found.append(mid)
+                if len(found) > _CERT_LIST_CAP:
+                    del found[0]
+        if witnessed:
+            verdict = None
+        else:
+            verdict = cast(
+                Optional[str],
+                _multivar_box_curvature(
+                    self._expr(node),
+                    self.model,
+                    idxs,
+                    flat_lb,
+                    flat_ub,
+                    cbox,
+                    abort_deadline=self._abort_deadline,
+                ),
+            )
         if verdict == "convex" or verdict == "concave":
             certs = self._analysis.hessian_certs.setdefault(nid, [])
             certs.append((lo, hi, verdict))

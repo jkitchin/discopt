@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
@@ -468,7 +468,20 @@ def solve_nlp(
         cl = np.empty(0, dtype=np.float64)
         cu = np.empty(0, dtype=np.float64)
 
-    callbacks = _IpoptCallbacks(evaluator)
+    callbacks: Any = _IpoptCallbacks(evaluator)
+    # #2143: the hard stop a primal heuristic armed (see ``nlp_pounce.solve_nlp``).
+    from discopt.solvers._nlp_hard_stop import (
+        USER_REQUESTED_STOP,
+        HardStopCallbacks,
+        armed_deadline,
+        expired_result,
+    )
+
+    hard_stop = armed_deadline()
+    if hard_stop is not None:
+        if time.perf_counter() >= hard_stop:
+            return expired_result(x0)
+        callbacks = HardStopCallbacks(callbacks, hard_stop)
 
     problem = cyipopt.Problem(
         n=n,
@@ -505,6 +518,8 @@ def solve_nlp(
 
     status_code = info["status"]
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
+    if status_code == USER_REQUESTED_STOP and getattr(callbacks, "fired", False):
+        status = SolveStatus.TIME_LIMIT
 
     multipliers = info.get("mult_g", None)
     if multipliers is not None and len(multipliers) == 0:

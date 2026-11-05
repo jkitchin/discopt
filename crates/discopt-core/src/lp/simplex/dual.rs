@@ -2446,16 +2446,22 @@ fn refined_basic_values(
     basis: &[usize],
     stat: &[i8],
 ) -> Option<Vec<f64>> {
-    let cols: Vec<Vec<f64>> = basis
+    // Sparse basis columns straight from the CSC view, in the canonical form
+    // (sorted rows, exact zeros dropped) that `factorize` read off the dense
+    // scatter this used to build -- so the route decision, the factor and the
+    // refined solve are those of the dense build, at O(nnz) instead of O(m²)
+    // (#2153: m = 22 501 on the GDPlib stranded_gas LOA master, where the dense
+    // build made one recovery take 13-21 s of a 2 s MILP budget).
+    let raw: Vec<Vec<(usize, f64)>> = basis
         .iter()
         .map(|&j| {
-            let mut col = vec![0.0; m];
-            sp.scatter(j, &mut col);
-            col
+            let (rows, vals) = sp.col(j);
+            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
         })
         .collect();
+    let cols = super::linsolve::canonical_sparse_columns(m, &raw);
     let mut lu = node_feral_lu().with_numeric_focus();
-    lu.factorize(m, &cols).ok()?;
+    lu.factorize_sparse(m, &cols).ok()?;
     let mut xb = reduced_rhs(sp, b, n, l, u, stat);
     lu.ftran_refined(&mut xb).ok()?;
     Some(xb)

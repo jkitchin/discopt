@@ -1760,13 +1760,25 @@ impl<'a> Simplex<'a> {
     }
 
     fn refined_basic_values(&self, art_sign: &[f64]) -> Option<Vec<f64>> {
-        let cols: Vec<Vec<f64>> = self
+        // Sparse columns as `refactorize` builds them, canonicalized (sorted rows,
+        // exact zeros dropped) so they are the pattern `factorize` read off the
+        // dense `column()` build this used to make: same route, same factor, at
+        // O(nnz) instead of O(m²) (#2153).
+        let raw: Vec<Vec<(usize, f64)>> = self
             .basis
             .iter()
-            .map(|&j| self.column(j, art_sign))
+            .map(|&j| {
+                if j < self.n {
+                    let (rows, vals) = self.cols.col(j);
+                    rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                } else {
+                    vec![(j - self.n, art_sign[j - self.n])]
+                }
+            })
             .collect();
+        let cols = super::linsolve::canonical_sparse_columns(self.m, &raw);
         let mut lu = node_feral_lu().with_numeric_focus();
-        lu.factorize(self.m, &cols).ok()?;
+        lu.factorize_sparse(self.m, &cols).ok()?;
         let mut rhs = self.reduced_rhs(art_sign);
         lu.ftran_refined(&mut rhs).ok()?;
         Some(rhs)

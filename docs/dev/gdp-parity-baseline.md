@@ -455,3 +455,54 @@ it is the next target (branching variable and point, compared against SCIP on th
 same box sequence). The default's 1152–1175 undecided node LPs per 120 s are also
 worth a look. How an undecided node contributes to the global bound has not been
 measured here.
+
+## G6.1 gate run (2026-11-04)
+
+Data: `docs/dev/data/gdp_g61/`. Score: `python discopt_benchmarks/scripts/gdp_g61_score.py`.
+Build: `d032897d` (main) plus this branch's harness changes; Pyomo 6.10.0; SCIP 10.0.2;
+24 instances × 14 arms; 300 s limit, 120 s grace; `--jobs 4` on a 14-core Mac mini.
+
+### Result: no family passes all three bars
+
+| family | solved d / p | incorrect d / p | SGM d (s) | SGM p (s) | ratio | 95% CI | per-repeat ratios |
+|---|---|---|---|---|---|---|---|
+| big-m | 15 / 15 | 0 / 2 | 26.6 | 13.0 | 1.97 | [1.06, 3.53] | 1.98 1.97 1.97 |
+| hull | **14 / 16** | 0 / 0 | 35.6 | 10.5 | 3.19 | [1.59, 6.18] | 3.23 3.16 3.18 |
+| loa | 13 / 12 | 0 / 2 | 22.6 | 32.3 | **0.71** | [0.38, 1.15] | 0.70 0.71 0.72 |
+| gloa | 13 / 11 | 0 / 3 | 23.2 | 30.7 | **0.76** | [0.41, 1.22] | 0.75 0.78 0.77 |
+| ric | 12 / 12 | 0 / 2 | 38.6 | 30.9 | 1.24 | [1.02, 1.57] | 1.23 1.24 1.25 |
+| enumerate | 10 / 10 | 0 / 1 | 47.8 | 39.0 | 1.22 | [0.97, 1.61] | 1.21 1.22 1.22 |
+| lbb | 15 / 15 | 0 / 0 | 45.7 | 31.7 | 1.43 | [0.82, 2.39] | 1.42 1.43 1.43 |
+
+* **Correctness: passes everywhere.** discopt has 0 incorrect and 0 unverified claims in
+  every family and every repeat. Pyomo has 10 incorrect answers across five families.
+* **Solved count: passes in six families.** hull is short by 2: cstr, batch_processing and
+  syngas solve under Pyomo hull and not under discopt (tracked in #2142, #2144, #2143);
+  discopt hull solves positioning, which Pyomo does not.
+* **SGM ratio.** If the bar is the point estimate ≤ 1.0, **loa and gloa pass the whole gate**.
+  If the bar is the bootstrap CI's upper end ≤ 1.0, no family passes: loa's and gloa's CIs
+  straddle 1. The spec does not say which; the CI is wide because it resamples 24
+  instances, not because the repeats disagree (per-repeat ratios differ by ≤ 0.07).
+* **big-m and hull lose on small instances.** Pyomo + SCIP solves most of the pyomo.*
+  examples in 0.1–0.2 s; discopt takes 2–11 s (eight_process hull 7.6 s vs 0.18 s).
+  That points at per-solve fixed cost, not search, and is the next thing to profile.
+
+### How it was run, and deviations from the spec
+
+* **Repeats.** Repeat 1 ran all 336 (instance, arm) pairs. Repeats 2 and 3 re-ran only the
+  174 pairs that both sides solved in repeat 1; a run that is not solved counts at 300 s
+  in the SGM whatever its wall, so repeating it measures nothing. No verdict changed in the
+  re-runs. 93% of a full repeat's time was time-outs (an estimated 11–13 h for three full
+  repeats against about 4.5 h for this design).
+* **Concurrency.** `--jobs 4`. A serial control (two pairs per family, 28 rows, jobs=1)
+  measured jobs=4 walls at 1.11× serial (sd of log 0.08, n 60): discopt 1.09×, Pyomo 1.13×.
+  The inflation is symmetric, so it does not move the ratios.
+* **Global solver.** Pyomo's `scip_direct` is absent in Pyomo 6.10.0 here, so the bigm/hull
+  arms use the SCIP executable (`GDP_BASELINE_GLOBAL=scip`, recorded per row). That adds
+  `.nl` write and process start to Pyomo's walls, which if anything favours discopt.
+* **Pyomo 6.10 hull** rejects `well_defined_points_heuristic_solver`;
+  `gdp_baseline.py` now passes only the options the transformation's CONFIG declares.
+* **Pyomo hull errors** on gdp_col (math domain error), hda, kaibel and stranded_gas;
+  they count as not solved for Pyomo.
+* The driver scripts in the data directory hard-code the session's scratch paths; they
+  are kept as the record of what ran.

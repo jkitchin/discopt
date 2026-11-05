@@ -32,6 +32,14 @@ def _parity_model(n=30):
     return m
 
 
+@pytest.fixture(autouse=True)
+def _raw_presolve_free_route(monkeypatch):
+    """These tests pin checkpoint 0 against the raw presolve-free solve, faked
+    through ``_Engine._solve``. The exact-reduction route (tried first, see
+    test_iis_reduce.py) would decide these sets before the faked solve runs."""
+    monkeypatch.setattr(_iis_milp._Engine, "_reduced", lambda self, stop_at: None)
+
+
 def _choose_budget(monkeypatch, n_real):
     """Presolve-on solves after the first ``n_real`` raise out-of-time; record calls."""
     real = _iis_milp._Engine._solve
@@ -70,7 +78,10 @@ def test_base_confirmation_costs_one_solve_and_changes_nothing_else():
     m = _parity_model(12)
     free = milp_iis(m)
     timed = milp_iis(m, total_time_limit=600.0)
-    assert timed.n_solves == free.n_solves + 1
+    # One solve for checkpoint 0, and one fewer at the end of the integrality
+    # phase: every integrality is needed, so that set is no smaller than the
+    # base set checkpoint 0 already confirmed, and its confirmation is skipped.
+    assert timed.n_solves == free.n_solves
     assert (timed.constraints, timed.bounds, timed.integrality) == (
         free.constraints,
         free.bounds,

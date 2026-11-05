@@ -118,6 +118,24 @@ def test_tree_has_incumbent(value, expected):
 # ── the extension itself ────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _scoped_role1_deadline():
+    """Restore the role-1 deadline after each test (#2143).
+
+    ``_extend_budget_for_incumbent`` re-arms ``_ROLE1_DEADLINE`` by design; in a
+    solve that happens inside ``solve_model``'s ``_scoped_role1_deadline``. Called
+    directly here, with a fake ``t_start``, it left an already-expired deadline in
+    the worker's context, and every later test whose heuristics arm the #2143 NLP
+    hard stop at that deadline returned no point (8 heuristic tests failed when run
+    after this file).
+    """
+    from discopt.solver import _ROLE1_DEADLINE
+
+    token = _ROLE1_DEADLINE.set(_ROLE1_DEADLINE.get())
+    yield
+    _ROLE1_DEADLINE.reset(token)
+
+
 def test_no_extension_without_an_incumbent():
     """The whole safety argument: with no incumbent the search must stop at its
     reduced deadline so the #844 fallback still gets its full reserve."""

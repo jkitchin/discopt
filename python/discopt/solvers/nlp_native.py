@@ -377,6 +377,9 @@ def solve_node_native(nb: NativeNlpBase, x0, node_lb, node_ub, options) -> "obje
         caller_limit = 30.0
     opts["max_wall_time"] = min(30.0, caller_limit)
     subsolve_wall_options(opts)  # #2120: role-2 cap -> role-1 under ``deterministic``
+    from discopt.solvers._nlp_ladder_scope import apply_ladder_scope
+
+    apply_ladder_scope(opts)  # a caller's scope cannot reach the Rust batch call
 
     node = nb.variant(node_lb, node_ub, warm)
     results = pounce.solve_nlp_batch([node], x0s=[nb.to_nl_order(warm)], options=opts)

@@ -2335,6 +2335,13 @@ _LAZY_NOT_CARRIED = frozenset(
         # #1979: ``function_domains.affine_domain_rows``'s cache, derived from the
         # model's own expressions and keyed by them -- recomputed on first use.
         "_function_domain_rows",
+        # #2143: the GDP lowering's record of each top-level disjunction's selector
+        # binaries (keyed by constraint index), read only by the root LOA proposer
+        # (``DISCOPT_GDP_LOA_PROPOSER``) of a solve that lowers in-process. A
+        # reloaded model without it reads as "no selector record": the solver
+        # treats that as ``None`` and the proposer declines, which changes no
+        # bound and no model row. Re-lowering the source model rebuilds it.
+        "_gdp_disjunct_selectors",
     }
 )
 

@@ -100,3 +100,62 @@ def test_loa_proposes_a_configuration_when_its_master_is_unbounded(monkeypatch):
     assert calls["feasibility_resolves"] >= 1
     assert r.objective == pytest.approx(1.0, abs=1e-6)
     assert r.bound is None or r.bound <= 1.0 + 1e-6
+
+
+@pytest.mark.parametrize("cmir", ["1", "0"])
+def test_driver_values_integral_nodes_at_their_point_not_their_bound(monkeypatch, cmir):
+    """#2136: the Rust driver must reach the optimum, and certify honestly, even
+    when handed the default box as finite bounds.
+
+    `_open_default_box` (above) removes the trigger at the marshaling layer.
+    This test keeps the trigger on purpose so the driver itself is tested. With
+    the box closed, the NS safe bound of an integral node came out near -752904
+    for a vertex whose cᵀx is 41907.46, and the tree recorded that BOUND as the
+    incumbent value. It then pruned against a value no point attains, lost the
+    optimum, and returned OPTIMAL 41907.46 with bound -752904 (c-MIR on), or
+    ITERATION_LIMIT at 55187.8 (c-MIR off).
+
+    The driver now promotes an integral node with its own point's value and keeps
+    the safe bound only as a floor on the dual bound (#2067's
+    `import_results_with_point_values`). Measured after the fix: 41420.27 under
+    both settings, uncertified, with the bound at or below the optimum."""
+    monkeypatch.setattr(ms, "_open_default_box", lambda lb, ub: (lb, ub))
+    monkeypatch.setenv("DISCOPT_MILP_CMIR", cmir)
+    c, a_ub, b_ub, bounds, integ = _load()
+    r = ms.solve_milp(c, a_ub, b_ub, None, None, bounds, integ, time_limit=60.0)
+    tol = 1e-6 * abs(_TRUE_OPT)
+    if r.bound is not None:
+        assert r.bound <= _TRUE_OPT + tol, f"dual bound {r.bound} crosses {_TRUE_OPT}"
+    assert r.objective == pytest.approx(_TRUE_OPT, rel=1e-6), (
+        f"incumbent {r.objective} misses the optimum {_TRUE_OPT}: pruned against a bound"
+    )
+    if r.status == SolveStatus.OPTIMAL:
+        assert r.bound is not None and r.objective - r.bound <= 1e-4 * abs(r.objective)
+    assert np.max(a_ub @ np.asarray(r.x) - b_ub) <= 1e-6
+
+
+# ── HiGHS master over the default box (highs-parity P0.4) ──────────────────
+
+
+@pytest.mark.parametrize("entry", ["solve_milp", "solve_milp_with_lazy_cuts"])
+def test_highs_master_no_false_optimum(entry):
+    """The HiGHS master certified a false optimum over the default box.
+
+    Found by the highs-parity P0.4 master replay: ``milp_highs.solve_milp`` returned
+    OPTIMAL with bound 41573.26 (primary 41595.42; the #1634 presolve-free cross-solve
+    41573.26, so the cross-check confirmed it) against the true 41420.272, a point the
+    Rust engine verifies feasible. Every HiGHS master solve now opens the default box.
+    """
+    pytest.importorskip("highspy")
+    from discopt.solvers import milp_highs
+
+    c, a_ub, b_ub, bounds, integ = _load()
+    # The lazy master with a separator that accepts every point is the plain master.
+    extra = {"lazy_callback": lambda _x: []} if entry == "solve_milp_with_lazy_cuts" else {}
+    r = getattr(milp_highs, entry)(
+        c, A_ub=a_ub, b_ub=b_ub, bounds=bounds, integrality=integ, time_limit=60.0, **extra
+    )
+    tol = 1e-6 * abs(_TRUE_OPT)
+    assert r.bound is not None and r.bound <= _TRUE_OPT + tol, (r.status, r.bound)
+    assert r.status == SolveStatus.OPTIMAL, (r.status, r.objective, r.bound)
+    assert r.objective == pytest.approx(_TRUE_OPT, abs=tol)

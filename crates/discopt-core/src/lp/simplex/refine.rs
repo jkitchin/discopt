@@ -300,6 +300,52 @@ pub fn residual_matvec_dd(cols: &[Vec<f64>], x: &[f64], rhs: &[f64], transpose: 
     }
 }
 
+/// [`residual_matvec_dd`] for a `B` given by its **sparse columns**: `cols[j]`
+/// lists the `(row, value)` nonzeros of column `j`, sorted by row (the canonical
+/// form [`super::linsolve::FeralLU`] retains in numeric-focus mode, #2153).
+///
+/// Bit-identical to the dense form on the same matrix: the dense form skips zero
+/// entries and visits each column's rows in ascending order, which is exactly the
+/// sequence of `add_prod` calls made here, so every component sees the same
+/// double-double operations in the same order. The cost is `O(nnz + m)` instead of
+/// the dense form's `O(m²)` scan, which on a 22 501-row GDP master basis is the
+/// difference between microseconds and a multi-GB sweep.
+pub fn residual_matvec_dd_sparse(
+    cols: &[Vec<(usize, f64)>],
+    x: &[f64],
+    rhs: &[f64],
+    transpose: bool,
+) -> Vec<f64> {
+    let m = cols.len();
+    if transpose {
+        (0..m)
+            .map(|i| {
+                let mut acc = Dd::zero().add_f64(rhs[i]);
+                for &(j, a) in &cols[i] {
+                    if a != 0.0 {
+                        acc = acc.add_prod(-a, x[j]);
+                    }
+                }
+                acc.to_f64()
+            })
+            .collect()
+    } else {
+        let mut acc: Vec<Dd> = rhs.iter().map(|&b| Dd::zero().add_f64(b)).collect();
+        for (j, col) in cols.iter().enumerate() {
+            let xj = x[j];
+            if xj == 0.0 {
+                continue;
+            }
+            for &(i, a) in col {
+                if a != 0.0 {
+                    acc[i] = acc[i].add_prod(-a, xj);
+                }
+            }
+        }
+        acc.iter().map(|d| d.to_f64()).collect()
+    }
+}
+
 /// The sentinel treated as `±∞` when reading variable bounds. Matches the crate's
 /// `CERT_INF` / MILP-boundary convention: a bound at or beyond this magnitude is
 /// an open side.

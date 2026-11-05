@@ -121,8 +121,12 @@ def test_differential_battery_nonlinear_equalities_under_hull(shape):
 
 
 def test_hull_solve_agrees_with_big_m():
-    r = _bilinear_eq().solve(gdp_method="hull", time_limit=60)
-    ref = _bilinear_eq().solve(gdp_method="big-m", time_limit=60)
+    # Both solves at a 1e-8 gap: the 1e-5 agreement below must follow from the two
+    # certificates. At the default rel gap (1e-4, i.e. 6.4e-4 here) a certified
+    # incumbent may sit 1.7e-5 off -- measured on the native-kernel route, which
+    # closes at its root on the reduced sub-NLP's point (#2142 x #2143).
+    r = _bilinear_eq().solve(gdp_method="hull", time_limit=60, gap_tolerance=1e-8)
+    ref = _bilinear_eq().solve(gdp_method="big-m", time_limit=60, gap_tolerance=1e-8)
     assert r.status == "optimal" and ref.status == "optimal", (r.status, ref.status)
     # x = z = 4, y = 16: -8 + 1.6
     assert ref.objective == pytest.approx(-6.4, abs=1e-5)
