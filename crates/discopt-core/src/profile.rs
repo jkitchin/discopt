@@ -636,6 +636,11 @@ counters!(
     // never fired (CLAUDE.md §6).
     ScaledNumericalUnscaledRetry,
     ScaledNumericalUnscaledRetryDecided,
+    // #2163: `ScaledProblem` solves still `Numerical` after the unscaled retry that
+    // were re-solved by the dual simplex from an all-logical basis, and how many of
+    // those it decided with a certificate checked on the original LP (CLAUDE.md §6).
+    LogicalBasisDualAttempts,
+    LogicalBasisDualDecided,
     // #1945: integral MILP-driver vertices (node LP or dive) whose original rows
     // verify but whose original columns miss their bounds, refused as incumbents
     // by `incumbent_verified` (defense in depth behind `ScaledProblem::verify`).

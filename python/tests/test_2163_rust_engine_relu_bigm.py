@@ -14,6 +14,12 @@ HiGHS certifies the optimum in a second. Two defects, one fixture each:
   a big-M row by 3e-6; the driver adopted it, ``verify_point`` refused it, and the
   solve ended ``error``. The driver now verifies the snapped point and, when that
   fails, re-solves the node LP with the integers fixed (a verified incumbent).
+* ``cuts_a`` / ``cuts_b`` -- the same networks with native Anderson cuts (#2164),
+  which run only on the Rust engine. The cut-augmented node LPs end ``Numerical``
+  on the scaled AND the unscaled data (the primal stops at a basis its final audit
+  refuses, with phase-1 artificials still basic). ``ScaledProblem`` now also solves
+  them with the dual simplex from an all-logical basis, as HiGHS starts. Before:
+  ``feasible``, gap 0.39 and 0.087.
 
 Both are 2-12-12-1 sub-networks of network A / B of the issue (the
 ``net.json`` attachments to #2156 / #2151), stored in
@@ -38,7 +44,7 @@ from discopt.ml.network import Activation, DenseLayer, NetworkDefinition  # noqa
 _NETS = json.loads((Path(__file__).parent / "data" / "relu_bigm_2163_nets.json").read_text())
 
 
-def _solve(name: str):
+def _solve(name: str, cuts: bool = False):
     d = _NETS[name]
     layers = [(np.array(lay["W"]), np.array(lay["b"])) for lay in d["layers"]]
     net = NetworkDefinition(
@@ -47,24 +53,38 @@ def _solve(name: str):
         input_bounds=(np.array(d["lo"]), np.array(d["hi"])),
     )
     m = dm.Model(f"relu_2163_{name}")
-    nn = NNFormulation(m, net, strategy="relu_bigm")
+    nn = NNFormulation(m, net, strategy="relu_bigm", ideal_cuts=cuts)
     nn.formulate()
     m.minimize(dm.sum(nn.outputs))
     # time_limit is a backstop (each solve measured ~0.3-0.6 s); determinism keeps
     # the node sequence fixed.
-    return m.solve(time_limit=60, threads=1, deterministic=True)
+    extra = {"cut_callback": nn.cut_callback} if cuts else {}
+    return m.solve(time_limit=60, threads=1, deterministic=True, **extra)
 
 
-@pytest.mark.parametrize("name", ["scaled_numerical", "snapped_incumbent"])
-def test_rust_engine_certifies_the_highs_optimum(name, monkeypatch):
+@pytest.mark.parametrize(
+    ("name", "cuts"),
+    [
+        ("scaled_numerical", False),
+        ("snapped_incumbent", False),
+        ("cuts_a", True),
+        ("cuts_b", True),
+    ],
+)
+def test_rust_engine_certifies_the_highs_optimum(name, cuts, monkeypatch):
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
+    # The oracle is the plain big-M model on HiGHS: cuts never change the optimum.
     ref = _solve(name)
     assert ref.status == "optimal", f"oracle (HiGHS route) did not certify: {ref.status}"
     assert "highs" in str(ref.algorithm_route).lower(), ref.algorithm_route
 
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    r = _solve(name)
-    assert "rust milp engine" in str(r.algorithm_route).lower(), r.algorithm_route
+    r = _solve(name, cuts)
+    route = str(r.algorithm_route).lower()
+    if cuts:
+        assert "native-relu-cuts" in route, r.algorithm_route
+    else:
+        assert "rust milp engine" in route, r.algorithm_route
 
     checks = 0
     assert r.status == "optimal", (r.status, r.objective, r.bound, r.gap)
