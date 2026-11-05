@@ -891,39 +891,85 @@ def _exact_solve(
     """``M z = rhs`` over the rationals by Gaussian elimination; ``None`` if singular, past
     ``EXACT_MAX_WORK`` bit operations, or past the caller's ``deadline``. ``spent``, a
     one-element list, accumulates the work across calls and refuses past
-    ``EXACT_MAX_TOTAL_WORK`` (#1655)."""
+    ``EXACT_MAX_TOTAL_WORK`` (#1655).
+
+    Sparse (highs-parity P2.5): rows are ``{column: Fraction}`` maps, each elimination
+    step updates only the pivot row's remaining nonzeros, and the pivot in each column is
+    the remaining row with the fewest nonzeros (a Markowitz-style choice that limits
+    fill). ``M`` here is a block of LP columns with a handful of nonzeros each, and the
+    dense form swept every column of every row it updated: on ``perold`` (a 196-column
+    correction from the Rust dual) it spent the whole 4e8 ``EXACT_MAX_TOTAL_WORK`` and
+    left the LP uncertified, where this form needs 1.9e7. The answer does not depend on
+    the elimination order: a nonsingular ``M`` has exactly one rational solution, and
+    elimination finds no pivot in some column exactly when ``M`` is singular. So every
+    system the dense form solved gets the identical ``z`` (measured: HiGHS's ``perold``
+    bounds bit-identical), and only the work counted -- entries actually updated, times
+    the operands' bit lengths -- is smaller.
+    """
     from fractions import Fraction
 
     def size(q: Fraction) -> int:
         return int(q.numerator.bit_length() + q.denominator.bit_length())
 
     n = len(rhs)
-    T = [row[:] + [rhs[i]] for i, row in enumerate(M)]
+    rows: list[dict[int, Fraction]] = []
+    colrows: dict[int, set[int]] = {}
+    for i in range(n):
+        d = {k: v for k, v in enumerate(M[i]) if v != 0}
+        for k in d:
+            colrows.setdefault(k, set()).add(i)
+        if rhs[i] != 0:
+            d[n] = rhs[i]  # the right-hand side rides along as column ``n``
+        rows.append(d)
+    remaining = set(range(n))
+    order: list[tuple[int, int]] = []
     work = 0
     for col in range(n):
         if deadline is not None and time.perf_counter() > deadline:
             return None
-        piv = next((r for r in range(col, n) if T[r][col] != 0), None)
-        if piv is None:
+        cand = [r for r in colrows.get(col, ()) if r in remaining]
+        if not cand:
             return None
-        T[col], T[piv] = T[piv], T[col]
-        p = T[col][col]
-        row_size = max(size(v) for v in T[col][col:])
-        for r in range(col + 1, n):
-            if T[r][col] != 0:
-                f = T[r][col] / p
-                step = (n + 1 - col) * (size(f) + row_size)
-                work += step
-                if work > EXACT_MAX_WORK:
+        piv = min(cand, key=lambda r: (len(rows[r]), r))
+        remaining.discard(piv)
+        prow = rows[piv]
+        p = prow[col]
+        tail = {k: v for k, v in prow.items() if k > col}
+        row_size = max([size(v) for v in tail.values()] + [size(p)])
+        for r in cand:
+            if r == piv:
+                continue
+            rr = rows[r]
+            f = rr.pop(col) / p
+            colrows[col].discard(r)
+            step = len(tail) * (size(f) + row_size)
+            work += step
+            if work > EXACT_MAX_WORK:
+                return None
+            if spent is not None:
+                spent[0] += step
+                if spent[0] > EXACT_MAX_TOTAL_WORK:
                     return None
-                if spent is not None:
-                    spent[0] += step
-                    if spent[0] > EXACT_MAX_TOTAL_WORK:
-                        return None
-                T[r] = [a - f * b for a, b in zip(T[r], T[col])]
+            for k, v in tail.items():
+                nv = rr.get(k, Fraction(0)) - f * v
+                if nv == 0:
+                    if k in rr:
+                        del rr[k]
+                        if k < n:
+                            colrows[k].discard(r)
+                else:
+                    if k < n and k not in rr:
+                        colrows.setdefault(k, set()).add(r)
+                    rr[k] = nv
+        order.append((piv, col))
     z = [Fraction(0)] * n
-    for i in reversed(range(n)):
-        z[i] = (T[i][n] - sum((T[i][k] * z[k] for k in range(i + 1, n)), Fraction(0))) / T[i][i]
+    for piv, col in reversed(order):
+        d = rows[piv]
+        acc = d.get(n, Fraction(0))
+        for k, v in d.items():
+            if col < k < n:
+                acc -= v * z[k]
+        z[col] = acc / d[col]
     return z
 
 
