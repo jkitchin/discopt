@@ -382,8 +382,14 @@ class AndersonCutSeparator:
     ``O(n_in)`` per neuron. The box is the one the input variable carries, so
     every cut is globally valid -- which is what a ``CutResult`` must be.
 
-    Use as ``model.solve(cut_callback=nn.cut_callback)``. A cut callback moves a
-    MILP onto discopt's spatial branch and bound (HiGHS has no cut hook).
+    Use as ``model.solve(cut_callback=nn.cut_callback)``. On a pure MILP the
+    solver recognises this separator (:meth:`native_milp_spec`) and separates the
+    same inequalities natively in Rust (#2157): on the default HiGHS route over
+    repeated root LP solves, the violated rows then handed to HiGHS with the
+    MILP; on the monolithic Rust MILP engine at every fractional node. Any other
+    ``cut_callback`` -- including this object wrapped in a function -- still
+    moves the MILP onto discopt's spatial branch and bound, which calls it from
+    Python at every node.
 
     Parameters
     ----------
@@ -451,6 +457,65 @@ class AndersonCutSeparator:
     def __call__(self, ctx: NodeCutContext, model: Model) -> list[CutResult]:
         self.n_calls += 1
         return self.separate(ctx.x_relaxation, model)
+
+    def native_milp_spec(self, model: Model) -> dict[str, np.ndarray] | None:
+        """The neurons as flat column-index arrays for the Rust separator (#2157).
+
+        A pure MILP whose ``cut_callback`` is this separator has the inequalities
+        separated by the native ``discopt._rust.ReluIdealSeparator`` -- at the
+        root on the HiGHS route, at every fractional node on the Rust MILP
+        engine -- instead of moving to the Python spatial tree. Columns are
+        offsets into the model's flattened variables, which are the engines'
+        structural columns. The input box is
+        deliberately *not* included: the solver takes it from the columns' own
+        bounds at solve time, so a cut can never rest on a box the model does not
+        enforce.
+
+        Returns ``None`` when a recorded variable is not in ``model`` (a
+        separator built for a different model must not address this one's
+        columns); a network with no unstable neuron gives empty arrays.
+        """
+        offsets = self._offsets(model)
+        y_cols: list[int] = []
+        q_cols: list[int] = []
+        bias: list[float] = []
+        ptr = [0]
+        x_cols: list[int] = []
+        w_all: list[float] = []
+        for rec in self._layers:
+            if id(rec.z) not in offsets or id(rec.x) not in offsets:
+                return None
+            zo = offsets[id(rec.z)]
+            xo = offsets[id(rec.x)]
+            n_in = rec.weights.shape[0]
+            for j, q in enumerate(rec.binaries):
+                if q is None:
+                    continue
+                if id(q) not in offsets:
+                    return None
+                w = np.asarray(rec.weights[:, j], dtype=np.float64)
+                if w.shape[0] != n_in:
+                    return None  # columns and weights must pair one to one
+                nz = np.flatnonzero(w != 0.0)
+                y_cols.append(zo + j)
+                q_cols.append(offsets[id(q)])
+                bias.append(float(rec.biases[j]))
+                x_cols.extend(int(xo + i) for i in nz)
+                w_all.extend(float(w[i]) for i in nz)
+                ptr.append(len(x_cols))
+        return {
+            "y": np.asarray(y_cols, dtype=np.int64),
+            "q": np.asarray(q_cols, dtype=np.int64),
+            "bias": np.asarray(bias, dtype=np.float64),
+            "ptr": np.asarray(ptr, dtype=np.int64),
+            "x": np.asarray(x_cols, dtype=np.int64),
+            "w": np.asarray(w_all, dtype=np.float64),
+        }
+
+    def record_native_counts(self, calls: int, cuts: int) -> None:
+        """Fold the Rust separator's executed-call / added-cut counts in (#2157)."""
+        self.n_calls += int(calls)
+        self.n_cuts += int(cuts)
 
 
 __all__ = [

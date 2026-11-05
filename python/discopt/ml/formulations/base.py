@@ -83,6 +83,9 @@ class NNFormulation:
         :class:`~discopt.ml.formulations.relu_partition.AndersonCutSeparator`
         for the embedded neurons, available after :meth:`formulate` as
         :attr:`cut_callback`; pass it as ``model.solve(cut_callback=...)``.
+        On a pure MILP the inequalities are then separated natively in Rust
+        (#2157): over repeated root LP solves on the default HiGHS route, at
+        every fractional node on the Rust MILP engine.
 
     Example
     -------

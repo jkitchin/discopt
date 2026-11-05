@@ -355,7 +355,14 @@ def test_ideal_cuts_through_solve():
     ref, _ = _build(net, "relu_bigm", {})
     r0 = ref.solve(time_limit=60)
     m, nn = _build(net, "relu_bigm", {"ideal_cuts": True})
-    r = m.solve(time_limit=120, cut_callback=nn.cut_callback)
+
+    # Wrapped, the separator is an ordinary Python callback and runs on the
+    # spatial tree, whose witness gate validates every cut. Passed bare, it is
+    # separated natively in Rust instead (#2157, test_2157_relu_native_cuts.py).
+    def cb(ctx, model):
+        return nn.cut_callback(ctx, model)
+
+    r = m.solve(time_limit=120, cut_callback=cb)
     assert r.status == "optimal"
     assert abs(float(r.objective) - float(r0.objective)) <= 1e-5
     assert nn.cut_callback.n_calls > 0
