@@ -14931,6 +14931,126 @@ relaxed at fractional selectors. Changing which lowering they get does not help:
 big-M one is already measured above. Data: `docs/dev/data/2142-hull-mixed/` (see its
 README).
 
+
+## 112. #2142 Part A: learned dual-proof (Farkas) rows — graduated (2026-11-05)
+
+**Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`). SCIP's advantage on cstr
+big-M comes entirely from the dual-proof constraints of its conflict analysis
+(`conflict/useinflp=d` reproduces default bit for bit; conflict off costs 2.393 -> 1.854
+at 20k nodes). Offline, appending 40 such rows, learned from discopt's own first 5k
+nodes, certifies cstr big-M at 53,051 nodes. Base is uncertified at 150k.
+
+**Implementation** (`DISCOPT_DUAL_PROOF_PROPAGATION`; Rust `bnb/dual_proof.rs`,
+`SpatialTreeConfig::dual_proof_propagation`). It is general: nothing is keyed to cstr.
+
+- **Source of the ray.** On a certified-empty node LP, take the verified Farkas ray the
+  simplex returns. Use only its **global** rows: the fixed rows and the global cut block.
+  The node-local envelope rows are dropped (SCIP `uselocalrows=false`).
+- **Multipliers.** `λ_r = max(0, -σ y_r)` for both signs `σ`.
+- **Rigour.** The rhs is rounded up and widened by each coefficient's aggregation error
+  times the column's global magnitude. A column with an infinite global bound and
+  nonzero error refuses the row.
+- **Cleanup** (as `tightenDualproof`). A continuous column whose node bound equals its
+  global bound is cancelled, and so are tiny coefficients.
+- **Keep rule.** The row must cut the node by `1e-6 (1 + |rhs|)`, have
+  nnz <= max(10, 15 % of columns), and not be a duplicate.
+- **Fallback.** When the node ray, restricted to the global rows, does not cut the node,
+  solve the feasibility LP over the global rows only on the same box and use its ray.
+  This is the offline construction of `d2_proofs.py`.
+- **Use.** A tree-global pool (LRU eviction at 2,000 rows) is propagated after the fixed
+  rows at every node. It is never an LP row.
+- **Counters.** `res["dual_proof"]` and `DualProof{Rays,GlobalLps,Learned,Tightenings,Fathoms}`.
+
+**Soundness.**
+
+- Every row is a nonnegative combination of valid rows, whatever the ray is.
+- Rust tests (`bnb::dual_proof::tests`):
+  - 190 learned rows on 400 random LPs, checked against 11,753 sampled feasible points
+    of the global box;
+  - outward rhs rounding;
+  - refusal at an unbounded error;
+  - envelope rows excluded;
+  - pool dedupe and LRU.
+- Python test `test_2142_dual_proof.py`: OFF is bit-identical to no kwarg; ON learns,
+  tightens and lifts cstr's bound, staying below the optimum.
+
+**Design pilot** (seed 0, 20k nodes, run before the entry test and disclosed as such):
+the ray restricted to global rows alone gives 1.889 (12 rows); with the fallback it gives
+2.788 (52 rows). The fallback was fixed as the design; the pilot switch was removed.
+
+**Entry experiment** (pre-registered; cstr big-M, deterministic, 20k nodes, row-permutation
+seeds as in the findings; kill: ON mean < 2.0 or any seed ON <= OFF). `entry_*.log`.
+
+| seed | 0 | 1 | 2 | 3 | mean |
+|---|---|---|---|---|---|
+| OFF (reproduces the findings' seeds) | 1.3432 | 1.7656 | 1.0210 | 1.6908 | 1.455 |
+| **ON** | **2.7875** | **2.8067** | **2.5952** | **2.6824** | **2.718** |
+| rows learned / fallback LPs | 52 / 6,975 | 49 / 7,315 | 48 / 6,673 | 44 / 6,721 | |
+
+**Passed.** ON is above the offline 40-proof arm (2.341) and SCIP default (2.393).
+
+**cstr big-M to certification.**
+
+| path | result |
+|---|---|
+| deterministic, cap 150k | **certified, 29,551 nodes, 80 s**, bound 3.06173, 54 rows |
+| default path, `time_limit=300` (GDP parity budget) | **certified, 88 s**; after graduation, with no env set: 84.7 s, 29,551 nodes |
+| default path, OFF | time limit at 300 s, bound 1.861 |
+
+**cstr hull: no effect.** At 1,000 nodes there are 20 certified-empty LPs (167
+undecided), 1 row learned and 0 tightenings, and the bound stays 0.094. See §113.
+
+**§5 panels** (`panel/`; deterministic, 120 s backstop, `--assert-unfired-identical`,
+`--jobs 2`, load 5-14 during the first three).
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74, `max_nodes=2000` | 858 / 1 (below) | tanksize | certified both, **519 -> 461 nodes** |
+| the violation, tls2 "certification lost" | | **unfired (0 rays)** | at the backstop under load 14 (OFF 103.7 s / ON 120.2 s); at load 1.5 both arms optimal, 143 nodes, identical (`rerun_tls2.log`) |
+| §107's 12 extras (11 + nous1) | 150 / 0 | st_e31, nous1 | st_e31 identical bound; **nous1 1.2849 -> 1.2900** @2000 |
+| fire screen, 59 non-corpus instances, ON only (`v4_screen.py`) | 59 runs, 0 errors | rows learned on carton7, nvs23, nvs24, st_e31 | rays without a row (tree unchanged) on ex1252a, nvs19, rbrock, st_e03, st_e07 |
+| panel over the screen's new ones (carton7, nvs19, nvs23, nvs24) | 43 / 0 | carton7, nvs24 | nvs24 411 -> 409; **carton7 looser at the wall** (below) |
+| GDP parity 24 x {big-m, hull}, `max_nodes=5000` | 96 solves, incorrect 0, crossings 0, solved-lost 0 | cstr big-m only | 0.215 -> 1.414 @5000; 19 unfired pairs at the wall, the rest bit-identical |
+
+The remaining checks:
+
+- **nous1 to certification:** 15,233 -> **12,359 nodes**. It takes 3,261 rays and 3,259
+  fallback LPs for 21 rows, which make 44,845 tightenings and 16 fathoms.
+- **carton7, three repetitions at 120 s:** OFF reaches 1317/753/1013 nodes with bounds
+  50/32.5/50; ON reaches 410/430/349 nodes with bounds 26/26/40. Neither arm certifies,
+  and ON has an incumbent where OFF has none. At an equal 1,300 nodes (`time_limit=3600`)
+  the bound is identical (26.0) and ON's wall is +12 % (one sequential pair). ON's tree on
+  this numerically pathological instance (~4.6 numerical node LPs per node) visits costlier
+  nodes. Recorded as the known cost.
+- **Timing (§9; interleaved, load-gated <= 1.5, 3 reps, all certified):**
+  - tanksize 3.31 ± 0.12 -> 3.34 ± 0.06 s;
+  - nous1 32.35 ± 0.29 -> 33.85 ± 0.52 s (+4.6 %, the fallback LPs).
+
+**Verdict: graduated** (default ON, `=0` opts out to a bit-identical tree).
+
+- *Cert-clean:* no false bound, no incumbent past an optimum, and no certification lost
+  once the load artifact is re-run.
+- *Net-positive:*
+  - +1 certification at the GDP parity budget: cstr big-M, one of the three big-M
+    instances Pyomo solves and discopt did not;
+  - −11 % nodes on tanksize at neutral wall;
+  - −19 % nodes on nous1 at +4.6 % wall;
+  - a tighter node-limited bound on nous1.
+- *Cost:* carton7's 120 s bound.
+- Unlike §107-§110, it does not cost #1970's reference instances; it improves both.
+
+Where it does not fire, the tree is OFF's bit for bit. That holds on 58 corpus and 24 GDP
+pairs checked; the others hit the wall.
+
+**Follow-ups, not built.**
+
+- The fallback LP is solved on every certified-empty node whose own ray fails (~26 % extra
+  LPs on nous1, ~36 % on cstr: 10,741 in 29,551 nodes) for a few dozen rows. A cheaper trigger is the obvious lever
+  on nous1's +4.6 % wall. Measure it against this section's arms.
+- carton7's throughput loss is unexplained beyond "a different, costlier tree".
+
+Data: `docs/dev/data/2142-dual-proof/` (README).
+
 ## 113. #2142 Part B: the AffinePow reverse step — killed at the entry check (2026-11-05)
 
 **Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`, "Hull"). SCIP certifies
