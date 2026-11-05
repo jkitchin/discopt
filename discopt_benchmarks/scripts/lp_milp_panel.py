@@ -518,7 +518,7 @@ def cmd_run(a) -> int:
     arms = a.arms.split(",")
     bad = [arm for arm in arms if arm not in (*ARM_BACKEND, "H0")]
     if bad:
-        raise SystemExit(f"unknown arms {bad}; expected a subset of R,H,H0")
+        raise SystemExit(f"unknown arms {bad}; expected a subset of R,S,H,H0")
     hdr = _header()
     hdr["load_gate"] = a.load_gate
     print("header", json.dumps(hdr), "arms", arms, "n", len(mem), flush=True)
@@ -542,7 +542,11 @@ def cmd_run(a) -> int:
         load_start = os.getloadavg()[0]
         for rnd in range(a.rounds):
             for arm in arm_order(arms, rnd):
-                if arm == "H0" and not a.h0_subprocess:
+                if arm == "S" and int(inst.is_int.sum()) > 0:
+                    # The seam arm is the pure-LP route only; a MILP on it goes to HiGHS
+                    # and would be a measurement of the wrong engine (ARM_ROUTE).
+                    r = {"skipped": "arm S is the pure-LP route; this instance has integers"}
+                elif arm == "H0" and not a.h0_subprocess:
                     r = solve_h0(inst, a.time_limit, a.gap)
                 elif arm == "H0":
                     # A fresh process per solve: HiGHS's scheduler and any state a previous
