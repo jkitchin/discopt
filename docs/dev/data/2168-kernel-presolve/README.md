@@ -21,7 +21,12 @@ cannot run is the Pyomo-model side: the NLP seed, the primal hook and the pricer
 3.0620145766187727`, the value of the verified incumbent that seed finds in the full
 solve (a real feasible value, so a sound cutoff).
 
-**The harness tracks the full solve.** The positive control `scip` (SCIP's presolved
+**Retracted (2026-11-05): "the harness tracks the full solve".** The full-solve runs
+(`gdp_panel/`) put the presolved arm at 1.6168 / 2.2395 at 10k / 20k against this harness's
+2.2822 / 2.7936, and the original arm at 0.6624 / 0.9314 against 1.4385 / 1.9044. The control
+below matched, the presolve arms did not; the seeded harness overstates the full solve, and its
+20k pass of the kill line is a harness result only. The full solve passes the cstr bar on its
+"or certifies" branch instead (certified at 41,949 nodes, 374 s). The original claim was: the positive control `scip` (SCIP's presolved
 model, `../2142-scip-presolved/cstr_homog_scippre_spec.npz`) reaches 2.9144 @10k
 (full solve 2.8834) and certifies at 12,049 nodes (full solve 12,931).
 

@@ -15887,7 +15887,7 @@ PyPI `gdplib` and the from-source install was refused in this container, so the 
 on the captured homog kernel spec (`2142-exact-hull/scip/cstr_homog_spec.npz`) with the
 solver's own main-call options (`kernel_arm.py`), and `initial_incumbent` set to the value
 of the verified incumbent the full solve's NLP seed finds (no hook, no pricer). The harness
-tracks the full solve: SCIP's presolved model reaches 2.9144 @10k here (2.8834 in the full
+tracks the full solve [**retracted below**, "Full-solve runs"]: SCIP's presolved model reaches 2.9144 @10k here (2.8834 in the full
 solve) and certifies at 12,049 nodes (12,931).
 
 **Result (deterministic):**
@@ -15957,3 +15957,28 @@ hook returned, not by length and bytes. (5) The presolve is no longer charged to
 timer. The reduced cstr spec is bit-identical before and after (so the entry stands), and the
 5 applied panel instances reproduce their ON rows exactly (`panel/corpus_review_fix.*`).
 Smoke after the fix: 4,523 passed, the same environmental `stranded_gas` failure.
+
+**Full-solve runs and the GDP parity panel (owner, `ee66d8d0`, on `ad416e98` with gdplib from
+source; `docs/dev/data/2168-kernel-presolve/gdp_panel/`, pre-registered in its `PREREG.md`).**
+
+| full `Model.solve(gdp_method="hull")`, cstr | 10k det | 20k det | uncapped, 1800 s |
+|---|---|---|---|
+| OFF | 0.6624 | 0.9314 | node limit (100k), bound 2.6136 |
+| ON | 1.6168 | 2.2395 | **certified 3.0620146 at 41,949 nodes, 374 s** |
+
+**Retraction (§11).** This section claimed the seeded kernel harness "tracks the full solve"
+and that the entry passed the kill line at 20k (2.7936 > 2.7875). The control arm matched; the
+presolve arms did not: the full solve reaches 2.2395 at 20k, below the kill line. The entry
+therefore passes only on the pre-registration's "or certifies" branch (it does certify, at
+41,949 nodes), not on the bound line. The harness's numbers stand as harness measurements and
+nothing more.
+
+GDP parity (24 instances x {big-M, hull}, 5,000 nodes, deterministic): cert-clean (0 incorrect,
+0 crossings, 0 solved lost, 27 unfired pairs bit-identical, 17 more at the wall). Fired on 4
+cells: cstr big-M better (1.4281 -> 1.4712), cstr hull worse at 5,000 nodes (0.4782 -> 0.2133;
+ON overtakes OFF by 10k), syngas big-M and hull identical (certified at 3 nodes). Solved gained
+0; better minus worse = 0 against the pre-registered >= 2. **Not graduated**: cert-clean, the cstr
+bar passes, the GDP-panel net-positive bar fails. The choice between retiring the flag (§5's
+default) and keeping it as a documented opt-out (its gain is one instance, §2, but the instance
+#2168 targets) is the owner's.
+
