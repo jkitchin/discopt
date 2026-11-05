@@ -56,8 +56,9 @@ def _stops_at_solve_deadline(fn: _F) -> _F:
     """Arm the NLP hard stop at the live solve's deadline for one heuristic call (#2143).
 
     Every NLP the heuristic poses (through its ``backend`` or its own) then ends at
-    the user's ``time_limit`` instead of running past it on a ``max_wall_time``
-    POUNCE overran (:mod:`discopt.solvers._nlp_hard_stop` has the measurements).
+    ``solve_model``'s deadline instead of running past it on a ``max_wall_time``
+    POUNCE overran (:mod:`discopt.solvers._nlp_hard_stop` has the measurements, and
+    says when that deadline is earlier than the user's ``time_limit``).
     Only work past the solve's deadline is truncated, so a solve whose deadline
     never binds is unchanged. Outside ``solve_model`` it is a no-op.
     """

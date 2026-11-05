@@ -20,7 +20,13 @@ ends at most one iteration after the deadline.
 at the ROLE-1 deadline of the live ``solve_model``
 (:data:`discopt.solver_tuning.ROLE1_DEADLINE`). It never uses a stage's or a
 heuristic's own, earlier deadline. That way the stop truncates only work that would
-otherwise run past the user's ``time_limit``. A solve whose deadline never binds runs
+otherwise run past ``solve_model``'s own deadline. That is the user's ``time_limit``
+except where ``Model.solve`` withholds a reserve: for a model in the ``lp_spatial``
+scope it keeps 35% for the #844 fallback (``modeling/core.py``), so the role-1
+deadline, and this stop, fall at ~65% of the user's limit. A heuristic NLP still
+running there used to overrun into the fallback's reserve; it is now cut off like
+any other expired role-1 work, and returns ``TIME_LIMIT`` with no point. A solve
+whose deadline never binds runs
 exactly as it did before: the hook returns ``True`` on every iteration. Outside a
 ``solve_model``, or for a solve with no ``time_limit``, arming is a no-op. Only primal
 heuristics arm it. Node NLPs, which can be bound producers, are never stopped by it.
