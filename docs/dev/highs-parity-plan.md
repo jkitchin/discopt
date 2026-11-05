@@ -1304,7 +1304,7 @@ and is re-written by P4.1.**
   - **Defect found (default path too):** the #698 adoption branch *replaced* run 1's bound
     with run 2's whenever run 2 won on the primal side, though its comment (and the
     `node_limit` branch beside it) keeps the tighter of two valid bounds. Fixed in
-    `e`-commit "P4.0 re-entry adoption keeps the tighter of the two bounds" (regression
+    `163d725a` (regression
     test fails before / passes after). It is not flag-gated: it makes the code do what its
     comment already stated, and the kept value is a bound the solve itself proved. It also
     applies to the legacy re-entry at `time_limit` >= ~21 s.
