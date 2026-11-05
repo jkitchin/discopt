@@ -38,7 +38,7 @@
 //! feasible points cut. Every endpoint below is now computed in directed rounding,
 //! so the margin is extra slack rather than the only guard.
 
-use crate::bnb::spatial_kernel::{BlfTerm, EnvTerm, SpatialKernelSpec};
+use crate::bnb::spatial_kernel::{BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec};
 use crate::presolve::directed::{
     add_down, add_up, div_down, div_up, mul_down, mul_up, powi_down, powi_up, root_down, root_up,
     sqrt_down, sqrt_up, sub_down, sub_up,
@@ -440,6 +440,45 @@ pub fn propagate_spec_fixpoint(
     cutoff: Option<f64>,
     max_rounds: usize,
 ) -> bool {
+    propagate_spec_fixpoint_with_proofs(spec, lo, hi, cutoff, max_rounds, None)
+}
+
+/// Learned dual-proof rows propagated alongside the spec (#2142,
+/// [`crate::bnb::dual_proof`]), with per-row usefulness bookkeeping.
+#[derive(Debug)]
+pub struct ProofRows<'a> {
+    /// Globally valid `<=` rows (each a nonnegative aggregation of valid rows).
+    pub rows: &'a [FixedRow],
+    /// Per row: whether it tightened a bound or proved the box empty this call.
+    pub hits: Vec<bool>,
+    /// Bound changes made by proof rows.
+    pub n_tightenings: usize,
+    /// A proof row proved the box empty.
+    pub fathomed: bool,
+}
+
+impl<'a> ProofRows<'a> {
+    /// Wrap `rows` with fresh bookkeeping.
+    pub fn new(rows: &'a [FixedRow]) -> Self {
+        Self {
+            rows,
+            hits: vec![false; rows.len()],
+            n_tightenings: 0,
+            fathomed: false,
+        }
+    }
+}
+
+/// [`propagate_spec_fixpoint`] that also propagates `proofs` (after the fixed rows,
+/// every round). `None` is exactly [`propagate_spec_fixpoint`].
+pub fn propagate_spec_fixpoint_with_proofs(
+    spec: &SpatialKernelSpec,
+    lo: &mut [f64],
+    hi: &mut [f64],
+    cutoff: Option<f64>,
+    max_rounds: usize,
+    proofs: Option<&mut ProofRows<'_>>,
+) -> bool {
     // #2011: the LP layer's infinity is the `1e20` sentinel, which interval
     // arithmetic would read as a finite bound -- a product `a * 1e20` with `|a| < 1`
     // is an ordinary number and its sum cancels smaller terms (CLAUDE.md, Key
@@ -455,7 +494,7 @@ pub fn propagate_spec_fixpoint(
             had_sentinel = true;
         }
     }
-    let live = propagate_fixpoint_rounds(spec, lo, hi, cutoff, max_rounds);
+    let live = propagate_fixpoint_rounds(spec, lo, hi, cutoff, max_rounds, proofs);
     if had_sentinel {
         for j in 0..lo.len().min(hi.len()) {
             if lo[j] == f64::NEG_INFINITY {
@@ -478,6 +517,7 @@ fn propagate_fixpoint_rounds(
     hi: &mut [f64],
     cutoff: Option<f64>,
     max_rounds: usize,
+    mut proofs: Option<&mut ProofRows<'_>>,
 ) -> bool {
     // Objective-cutoff row support, built once. Every nonzero term is kept (#1955):
     // dropping a tiny `c_j` without accounting for `c_j·x_j` can make the row prove a
@@ -505,6 +545,24 @@ fn propagate_fixpoint_rounds(
             match tighten_le(&fr.cols, &fr.coeffs, fr.rhs, lo, hi) {
                 None => return false,
                 Some(c) => changed |= c,
+            }
+        }
+        // 2b. learned dual-proof rows (#2142; none unless the tree learned some).
+        if let Some(p) = proofs.as_deref_mut() {
+            for (k, pr) in p.rows.iter().enumerate() {
+                match tighten_le(&pr.cols, &pr.coeffs, pr.rhs, lo, hi) {
+                    None => {
+                        p.hits[k] = true;
+                        p.fathomed = true;
+                        return false;
+                    }
+                    Some(true) => {
+                        p.hits[k] = true;
+                        p.n_tightenings += 1;
+                        changed = true;
+                    }
+                    Some(false) => {}
+                }
             }
         }
         // 3. affine-form products.

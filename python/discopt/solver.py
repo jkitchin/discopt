@@ -2715,6 +2715,9 @@ def _try_native_spatial_kernel(
     # ``=0`` opts out; see the helper).
     if _kernel_undecided_retry_enabled():
         solve_kwargs["undecided_unpropagated_retry"] = True
+    # #2142: learned dual-proof rows (default OFF; see the helper).
+    if _kernel_dual_proof_enabled():
+        solve_kwargs["dual_proof_propagation"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
@@ -12153,6 +12156,29 @@ def _kernel_undecided_retry_enabled() -> bool:
         "no",
         "off",
         "",
+    )
+
+
+def _kernel_dual_proof_enabled() -> bool:
+    """#2142: ``DISCOPT_DUAL_PROOF_PROPAGATION`` for the native spatial kernel
+    (``SpatialTreeConfig::dual_proof_propagation``). **Default OFF** (``=1`` opts
+    in) until its CLAUDE.md section 5 panel passes.
+
+    On every certified-infeasible node LP the kernel aggregates the verified
+    Farkas ray over the GLOBAL rows only (the spec's fixed rows and the global cut
+    block; the node-local envelope rows are dropped), cleans the row up as SCIP's
+    ``tightenDualproof`` does, and keeps it in a tree-global pool if it cuts the
+    node. The pool is propagated (never added to the LP) at every later node. Each
+    row is a nonnegative combination of valid rows with a rigorously rounded rhs,
+    so it is valid everywhere; bound-changing because propagation then tightens
+    boxes and fathoms nodes. Counters: ``res["dual_proof"]`` from the kernel.
+    Measurements: ``performance-plan.md`` section 112. Read at call time.
+    """
+    return os.environ.get("DISCOPT_DUAL_PROOF_PROPAGATION", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 

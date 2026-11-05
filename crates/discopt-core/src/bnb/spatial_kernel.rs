@@ -30,7 +30,7 @@ use crate::lp::simplex::{
 
 /// A box-independent linear constraint row `sum(coeffs[k] * x[cols[k]]) <= rhs`
 /// (senses are normalized to `<=` by the Python producer; an `==` row is two `<=`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FixedRow {
     /// Structural column indices touched by this row.
     pub cols: Vec<usize>,
@@ -306,6 +306,28 @@ pub fn assemble_node_lp_with_cuts(
     hi: &[f64],
     cuts: &[FixedRow],
 ) -> AssembledLp {
+    assemble_lp_rows(spec, lo, hi, cuts, true)
+}
+
+/// The node LP over the GLOBAL rows only (#2142): the fixed rows then `cuts`, no
+/// envelope rows, with the same column bounds as [`assemble_node_lp_with_cuts`].
+/// Its Farkas ray, when infeasible, aggregates globally valid rows only.
+pub fn assemble_global_rows_lp(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    cuts: &[FixedRow],
+) -> AssembledLp {
+    assemble_lp_rows(spec, lo, hi, cuts, false)
+}
+
+fn assemble_lp_rows(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    cuts: &[FixedRow],
+    envelopes: bool,
+) -> AssembledLp {
     let n_cols = spec.n_cols;
     assert_eq!(lo.len(), n_cols);
     assert_eq!(hi.len(), n_cols);
@@ -346,10 +368,10 @@ pub fn assemble_node_lp_with_cuts(
     for fr in &spec.fixed_rows {
         rows.push((fr.cols.clone(), fr.coeffs.clone(), fr.rhs));
     }
-    for t in &spec.terms {
+    for t in spec.terms.iter().filter(|_| envelopes) {
         t.push_rows(lo, hi, &mut rows);
     }
-    for t in &spec.blf_terms {
+    for t in spec.blf_terms.iter().filter(|_| envelopes) {
         mc::bilinear_linform_rows(
             &t.a_cols,
             &t.a_coeffs,

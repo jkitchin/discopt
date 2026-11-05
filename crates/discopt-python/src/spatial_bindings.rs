@@ -58,6 +58,7 @@ use std::time::{Duration, Instant};
     node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
     int_fix_probe=false, spatial_score=false, spatial_pscost_weight=0.0,
     spatial_midpull=0.0, undecided_unpropagated_retry=false, max_open_nodes=None,
+    dual_proof_propagation=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -128,6 +129,8 @@ pub fn solve_spatial_tree_py<'py>(
     undecided_unpropagated_retry: bool,
     // #2092: the frontier memory budget in open nodes; `None` never binds.
     max_open_nodes: Option<usize>,
+    // #2142: learned dual-proof rows (`SpatialTreeConfig::dual_proof_propagation`).
+    dual_proof_propagation: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let spec = build_spec(
         n_cols,
@@ -261,6 +264,7 @@ pub fn solve_spatial_tree_py<'py>(
         spatial_midpull,
         undecided_unpropagated_retry,
         max_open_nodes: max_open_nodes.unwrap_or(usize::MAX),
+        dual_proof_propagation,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -500,6 +504,27 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_prop_retry_decided", res.n_prop_retry_decided)?;
     // #2092: the search stopped on the frontier memory budget.
     out.set_item("frontier_capped", res.frontier_capped)?;
+    // #2142: learned dual-proof counters (all zero with the flag off).
+    let dp = &res.dual_proof;
+    let dpd = PyDict::new(py);
+    for (k, v) in [
+        ("rays", dp.n_rays),
+        ("learned", dp.n_learned),
+        ("tightened_rhs", dp.n_tightened_rhs),
+        ("duplicates", dp.n_duplicates),
+        ("reject_no_support", dp.n_reject_no_support),
+        ("reject_unbounded", dp.n_reject_unbounded),
+        ("reject_not_violated", dp.n_reject_not_violated),
+        ("reject_too_dense", dp.n_reject_too_dense),
+        ("propagations", dp.n_propagations),
+        ("tightenings", dp.n_tightenings),
+        ("fathoms", dp.n_fathoms),
+        ("evicted", dp.n_evicted),
+        ("pool_size", dp.pool_size),
+    ] {
+        dpd.set_item(k, v)?;
+    }
+    out.set_item("dual_proof", dpd)?;
     Ok(out)
 }
 

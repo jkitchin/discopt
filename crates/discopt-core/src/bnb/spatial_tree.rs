@@ -19,10 +19,13 @@
 //!   feasible point is ever lost.
 
 use crate::bnb::convex_quad_cuts::{detect_convex_quad_forms, separate_round, ConvexQuadForm};
+use crate::bnb::dual_proof::{proof_from_farkas, DualProofPool, PoolInsert, ProofReject};
 use crate::bnb::spatial_kernel::{
     solve_spatial_node_with_cuts, EnvTerm, FixedRow, SpatialKernelSpec, SpatialNodeResult,
 };
-use crate::bnb::spatial_propagate::{order_crossed_box, propagate_spec_fixpoint};
+use crate::bnb::spatial_propagate::{
+    order_crossed_box, propagate_spec_fixpoint, propagate_spec_fixpoint_with_proofs, ProofRows,
+};
 use crate::lp::basis::Basis;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
 use crate::numeric::clamp_ordered;
@@ -443,6 +446,11 @@ pub struct SpatialTreeConfig {
     /// `run_propagation = false` would solve it. Changes nothing at a node whose
     /// first LP decides. Off (the default) is the tree before it.
     pub undecided_unpropagated_retry: bool,
+    /// #2142: learn a dual-proof row from the Farkas ray of every certified-empty
+    /// node LP (global rows only, [`crate::bnb::dual_proof`]) and propagate the
+    /// tree-global pool of them at every node after the fixed rows. Never added to
+    /// the LP. Off (the default) is the tree before it, bit for bit.
+    pub dual_proof_propagation: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -476,8 +484,53 @@ impl Default for SpatialTreeConfig {
             spatial_pscost_weight: 0.0,
             spatial_midpull: 0.0,
             undecided_unpropagated_retry: false,
+            dual_proof_propagation: false,
         }
     }
+}
+
+/// #2142: learned dual-proof counters ([`SpatialTreeConfig::dual_proof_propagation`]).
+#[derive(Clone, Debug, Default)]
+pub struct DualProofStats {
+    /// Certified-empty node LPs whose Farkas ray was examined.
+    pub n_rays: usize,
+    /// Proof rows stored (new rows; duplicates excluded).
+    pub n_learned: usize,
+    /// Offered rows that tightened an existing row's rhs.
+    pub n_tightened_rhs: usize,
+    /// Offered rows already in the pool.
+    pub n_duplicates: usize,
+    /// Rays rejected: no global-row support / unbounded error / not violated / too dense.
+    pub n_reject_no_support: usize,
+    /// See `n_reject_no_support`.
+    pub n_reject_unbounded: usize,
+    /// See `n_reject_no_support`.
+    pub n_reject_not_violated: usize,
+    /// See `n_reject_no_support`.
+    pub n_reject_too_dense: usize,
+    /// Node propagations that ran with a non-empty pool.
+    pub n_propagations: usize,
+    /// Bound changes made by proof rows.
+    pub n_tightenings: usize,
+    /// Nodes a proof row proved empty.
+    pub n_fathoms: usize,
+    /// Rows evicted from the pool.
+    pub n_evicted: usize,
+    /// Rows in the pool at return.
+    pub pool_size: usize,
+}
+
+/// Counters a running tree accumulates outside the pool.
+#[derive(Clone, Debug, Default)]
+struct DpCounts {
+    s: DualProofStats,
+}
+
+fn dp_stats(pool: &DualProofPool, c: &DpCounts) -> DualProofStats {
+    let mut s = c.s.clone();
+    s.n_evicted = pool.n_evicted;
+    s.pool_size = pool.rows.len();
+    s
 }
 
 /// Result of the tree solve.
@@ -598,6 +651,8 @@ pub struct SpatialTreeResult {
     /// #2092: the search stopped because the open frontier reached
     /// [`SpatialTreeConfig::max_open_nodes`] (status [`TreeStatus::NodeLimit`]).
     pub frontier_capped: bool,
+    /// #2142: learned dual-proof counters (all zero with the flag off).
+    pub dual_proof: DualProofStats,
 }
 
 /// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
@@ -895,6 +950,10 @@ pub fn solve_spatial_tree_observed(
     let mut n_prop_retry_decided = 0usize;
     // #2092: set only on the frontier-budget exit below.
     let mut frontier_capped = false;
+    // #2142: the tree-global pool of learned dual-proof rows (empty, and never
+    // read, with the flag off).
+    let mut dp_pool = DualProofPool::with_capacity(crate::bnb::dual_proof::DEFAULT_POOL_CAP);
+    let mut dp_counts = DpCounts::default();
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -1052,6 +1111,7 @@ pub fn solve_spatial_tree_observed(
                 n_prop_retries,
                 n_prop_retry_decided,
                 frontier_capped,
+                dual_proof: dp_stats(&dp_pool, &dp_counts),
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -1105,6 +1165,7 @@ pub fn solve_spatial_tree_observed(
                 n_prop_retries,
                 n_prop_retry_decided,
                 frontier_capped,
+                dual_proof: dp_stats(&dp_pool, &dp_counts),
             };
         }
         node_count += 1;
@@ -1132,15 +1193,28 @@ pub fn solve_spatial_tree_observed(
         let observed_pre =
             (observer.is_some() && config.run_propagation).then(|| (lo.clone(), hi.clone()));
         let observed_cutoff = incumbent;
-        if config.run_propagation
-            && !propagate_spec_fixpoint(
+        let live = if !config.run_propagation {
+            true
+        } else if config.dual_proof_propagation && !dp_pool.rows.is_empty() {
+            let mut pr = ProofRows::new(&dp_pool.rows);
+            let live = propagate_spec_fixpoint_with_proofs(
                 spec,
                 &mut lo,
                 &mut hi,
                 incumbent,
                 config.propagation_rounds,
-            )
-        {
+                Some(&mut pr),
+            );
+            dp_counts.s.n_propagations += 1;
+            dp_counts.s.n_tightenings += pr.n_tightenings;
+            dp_counts.s.n_fathoms += usize::from(pr.fathomed);
+            let hits = std::mem::take(&mut pr.hits);
+            dp_pool.touch(&hits, node_count);
+            live
+        } else {
+            propagate_spec_fixpoint(spec, &mut lo, &mut hi, incumbent, config.propagation_rounds)
+        };
+        if !live {
             let contrib = incumbent.unwrap_or(f64::INFINITY).max(parent_bound);
             global_lb_closed = global_lb_closed.min(contrib);
             if node_count == 1 {
@@ -1251,6 +1325,32 @@ pub fn solve_spatial_tree_observed(
         if verdict != NodeVerdict::Bound {
             // Certified-infeasible node: empty region, contributes +inf (nothing).
             if verdict == NodeVerdict::EmptyRegion {
+                // #2142: learn a dual-proof row from the verified Farkas ray.
+                if config.dual_proof_propagation {
+                    dp_counts.s.n_rays += 1;
+                    let pilot_phase1 = std::env::var("DISCOPT_DUAL_PROOF_PHASE1_PILOT")
+                        .is_ok_and(|v| v.trim() == "1");
+                    let got = if pilot_phase1 {
+                        let (r, solved) = crate::bnb::dual_proof::proof_with_global_lp(
+                            spec, &node_cuts, &node.dual, &lo, &hi, &node_opts,
+                        );
+                        n_lp_solves += usize::from(solved);
+                        r
+                    } else {
+                        proof_from_farkas(spec, &node_cuts, &node.dual, &lo, &hi)
+                    };
+                    match got {
+                        Ok(row) => match dp_pool.insert(row, node_count) {
+                            PoolInsert::Added => dp_counts.s.n_learned += 1,
+                            PoolInsert::Tightened => dp_counts.s.n_tightened_rhs += 1,
+                            PoolInsert::Duplicate => dp_counts.s.n_duplicates += 1,
+                        },
+                        Err(ProofReject::NoGlobalSupport) => dp_counts.s.n_reject_no_support += 1,
+                        Err(ProofReject::Unbounded) => dp_counts.s.n_reject_unbounded += 1,
+                        Err(ProofReject::NotViolated) => dp_counts.s.n_reject_not_violated += 1,
+                        Err(ProofReject::TooDense) => dp_counts.s.n_reject_too_dense += 1,
+                    }
+                }
                 if node_count == 1 {
                     root_bound = f64::INFINITY;
                     root_time_s = t_tree_start.elapsed().as_secs_f64();
@@ -1534,6 +1634,7 @@ pub fn solve_spatial_tree_observed(
                                     n_prop_retries,
                                     n_prop_retry_decided,
                                     frontier_capped,
+                                    dual_proof: dp_stats(&dp_pool, &dp_counts),
                                 };
                             }
                         }
@@ -1803,6 +1904,7 @@ pub fn solve_spatial_tree_observed(
                 n_prop_retries,
                 n_prop_retry_decided,
                 frontier_capped,
+                dual_proof: dp_stats(&dp_pool, &dp_counts),
             }
         }
         None => SpatialTreeResult {
@@ -1837,6 +1939,7 @@ pub fn solve_spatial_tree_observed(
             n_prop_retries,
             n_prop_retry_decided,
             frontier_capped,
+            dual_proof: dp_stats(&dp_pool, &dp_counts),
         },
     }
 }
