@@ -858,7 +858,23 @@ impl TreeManager {
             // `trusted` was measured to cost `m3` its certificate (bound
             // 37.7999997 → none) for no soundness gain.
             let trusted = node_lb.is_finite();
+            // #2163: a node carrying an explicit hint on a column that is NOT exactly
+            // integral is one its producer has established must be branched (the
+            // #1414 class: integral within tolerance, but its integral realisation
+            // leaves a row). It is never integer-feasible here, whatever the
+            // tolerance test says, so it falls through to the hint arm of step 3.
+            // Branching is always a valid cover; only a fathom is withheld. Before,
+            // such a node had to be handed back with an UNTRUSTED bound to avoid
+            // this fathom -- which at the root (no parent to floor at) left the
+            // whole search with no dual bound.
+            let hinted_off_integer = self.branch_hints.get(&result.node_id).is_some_and(|&j| {
+                result
+                    .solution
+                    .get(j)
+                    .is_some_and(|v| v.is_finite() && *v != v.round())
+            });
             let int_feasible = trusted
+                && !hinted_off_integer
                 && (result.is_feasible
                     || is_integer_feasible(&result.solution, &self.integer_vars));
 
@@ -1431,6 +1447,18 @@ impl TreeManager {
             return true;
         }
         false
+    }
+
+    /// Whether the search has nothing left: no open node and no pending result.
+    ///
+    /// Unlike [`Self::is_finished`], which also reports `true` once the relative
+    /// gap is below a fixed `1e-8`, this never ends a search on a tolerance the
+    /// caller did not choose. #2163: the MILP driver stopped on that shortcut at a
+    /// gap of 1.7e-9 with two nodes open under `gap_tol = 1e-9`, then (rightly)
+    /// reported the uncertified result as `Feasible`; it now stops on its own gap
+    /// test or on this.
+    pub fn is_drained(&self) -> bool {
+        self.pool.open_count() == 0 && self.pending_results.is_empty()
     }
 
     /// Current relative optimality gap.
