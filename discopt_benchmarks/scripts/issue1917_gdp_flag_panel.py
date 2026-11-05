@@ -159,6 +159,11 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # default route these flags act on. Firing is shown per master by
     # ``g32/replay.py``'s counters on the captured first masters.
     "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
+    # #2168: the column-eliminating presolve of the native kernel's spec. Solve time
+    # only (lowering identical): solve ``--all`` with ``--max-nodes N --deterministic``;
+    # ``KernelPresolveApplied`` (``solver.KERNEL_PRESOLVE_STATS``, exported by
+    # ``gdp_baseline``'s worker) is 0 exactly where the main kernel call saw OFF's spec.
+    "DISCOPT_KERNEL_PRESOLVE": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -206,6 +211,7 @@ _COUNTER_FLAGS = {
     "DISCOPT_SPATIAL_VIOL_SCIP": "SpatialViolScipChanged",
     "DISCOPT_DUAL_PROOF_PROPAGATION": "DualProofLearned",
     "DISCOPT_INT_ROUND_EXACT": "IntRoundExactSnaps",
+    "DISCOPT_KERNEL_PRESOLVE": "KernelPresolveApplied",
 }
 
 
