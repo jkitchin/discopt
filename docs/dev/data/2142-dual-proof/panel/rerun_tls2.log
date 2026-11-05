@@ -1,0 +1,15 @@
+tls2                   OFF optimal                b=5.2999999145573815 n=143 DualProofLearned=0 DualProofTightenings=0 | ON optimal                b=5.2999999145573815 n=143 DualProofLearned=0 DualProofTightenings=0 fired=0 undecided None/None wall 111.1/113.1 load 1.54
+
+instances           : 1
+executed checks     : 13
+violations          : 0
+mechanism fired     : 0 on 0 instance(s) []
+unfired identical   : 1 checked, 0 skipped (wall backstop) []
+certified           : OFF 1 -> ON 1  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 143 -> ON 143
+wall  (all)         : OFF 111.1s -> ON 113.1s
+report              : docs/dev/data/2142-dual-proof/panel/rerun_tls2.json
+
+VERDICT: INCONCLUSIVE - the mechanism never fired.
