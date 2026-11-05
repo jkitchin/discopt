@@ -1110,6 +1110,21 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     MILP probe by enumerating the driver's undecided node LPs through the ladder --
     more code, narrower); (c) accept 51/53 and flip the default with the 2 listed; or
     (d) leave `"highs"` the default and move on to P3.3.
+  **Owner decision (2026-11-05): unfreeze the Farkas check.** Built
+  `lp/simplex/farkas_exact.rs` (`DISCOPT_FARKAS_EXACT_OPEN`, default OFF, audit row):
+  after the float verifier and the #1355 cleanup reject a ray, it is re-decided over the
+  rationals (`num-rational`, new dependency) -- the reduced costs selecting an open side
+  are driven to exactly zero by sparse rational elimination (P2.5's algorithm and caps),
+  then the Farkas inequality is checked exactly. Rust tests: certifies the P3.2 probe's
+  noisy ray the float check rejects; never certifies a feasible variant (4 rays);
+  refuses an unreachable zero. **With the flag ON the Rust IIS engine returns P0.6's
+  baseline on 53/53 fixtures** (`iis_engine_panel.py`; 51/53 OFF; without the
+  backend's LP-ladder fallback 51/53 even ON, so both stay), median wall **0.87x**
+  HiGHS, total 0.79 s vs 1.02 s; `test_exact_farkas_closes_the_gap`. Gates: `cargo
+  test` 992/0, clippy `-D warnings` clean (both feature sets), smoke 4506, adversarial
+  19, IIS + parity tests 639. Next: the flag's §5 corpus panel (it changes what every
+  Rust LP proves infeasible, so MINLP / MILP fathoming), then -- on a pass -- graduate
+  it and flip `iis_engine` to `"rust"`.
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with
