@@ -87,7 +87,7 @@ logs `karm_multi_10000_seeded.log` (rows only) and
 
 ## Outcome
 
-Kept as a documented opt-out (owner decision, 2026-11-05), after the owner's GDP parity panel
+**Retired (owner decision, 2026-11-05; code on branch `archive/2168-kernel-presolve`).** It was briefly recorded as kept as a documented opt-out (owner decision, 2026-11-05), after the owner's GDP parity panel
 and full-solve cstr runs (`gdp_panel/`): cert-clean throughout, cstr hull certifies with the flag
 ON (41,949 nodes, 374 s), GDP panel net 0 against a pre-registered >= 2. See the audit row in
 `docs/dev/flag-retirement-audit.md` and performance-plan §119.

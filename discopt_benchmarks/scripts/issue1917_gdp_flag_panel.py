@@ -159,10 +159,11 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # default route these flags act on. Firing is shown per master by
     # ``g32/replay.py``'s counters on the captured first masters.
     "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
-    # #2168: the column-eliminating presolve of the native kernel's spec. Solve time
-    # only (lowering identical): solve ``--all`` with ``--max-nodes N --deterministic``;
-    # ``KernelPresolveApplied`` (``solver.KERNEL_PRESOLVE_STATS``, exported by
-    # ``gdp_baseline``'s worker) is 0 exactly where the main kernel call saw OFF's spec.
+    # #2168: the column-eliminating presolve of the native kernel's spec. RETIRED by
+    # this panel (docs/dev/data/2168-kernel-presolve/gdp_panel/; code on branch
+    # archive/2168-kernel-presolve); kept so --report re-derives the verdict from the
+    # recorded rows, whose ``KernelPresolveApplied`` counter is 0 exactly where the
+    # main kernel call saw OFF's spec.
     "DISCOPT_KERNEL_PRESOLVE": ("big-m", "hull"),
     # #2144: the configuration search's feasibility-first fallback acts at solve
     # time (lowering identical): solve ``--all``. Rows carry ``feas_fallback``, the

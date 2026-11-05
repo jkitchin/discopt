@@ -169,9 +169,11 @@ _FLAGS = {
         "show": ("LpVerdictNumerical", "SubtolPivots"),
     },
     # #2168: the column-eliminating presolve of the native kernel's spec
-    # (``DISCOPT_KERNEL_PRESOLVE``, ``_relax/spatial_presolve.py``). Python-side, so
-    # its counters are ``discopt.solver.KERNEL_PRESOLVE_STATS``, exported by the
-    # runner under the names below. ``KernelPresolveApplied`` ON is where the main
+    # (``DISCOPT_KERNEL_PRESOLVE``). RETIRED on its GDP parity / cstr panels
+    # (docs/dev/data/2168-kernel-presolve/; code on branch archive/2168-kernel-presolve);
+    # kept so ``--rows`` re-derives the corpus verdict. Its counters were
+    # ``discopt.solver.KERNEL_PRESOLVE_STATS``, exported by the runner under the
+    # names below (absent on a discopt without it). ``KernelPresolveApplied`` ON is where the main
     # kernel call saw a reduced spec (anything else ran OFF's code: a kernel-free
     # route, or the presolve declined); OFF the presolve must never be called.
     "DISCOPT_KERNEL_PRESOLVE": {
@@ -232,7 +234,7 @@ t0 = time.perf_counter()
 res = model.solve(time_limit=tl, deterministic=det, **kw)
 wall = time.perf_counter() - t0
 ctrs = dict(profile_counters_py())
-# #2168: the kernel presolve's counters live in Python, not in the Rust profile.
+# #2168 (retired): the kernel presolve's counters lived in Python; absent now.
 import discopt.solver as _solver
 _kps = getattr(_solver, "KERNEL_PRESOLVE_STATS", None)
 if _kps is not None:

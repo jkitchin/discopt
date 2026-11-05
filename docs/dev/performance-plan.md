@@ -15982,6 +15982,8 @@ bar passes, the GDP-panel net-positive bar fails. The choice between retiring th
 default) and keeping it as a documented opt-out (its gain is one instance, §2, but the instance
 #2168 targets) is the owner's.
 
-**Decision (owner, 2026-11-05): kept as a documented opt-out.** Default OFF, `=1` opts in; the
+**Decision (owner, 2026-11-05): RETIRED**, superseding the opt-out recorded below the same day. Cert-clean but not net-positive beyond cstr, and §2 rejects a gain confined to one instance; the opt-out would have been a stalled graduation, not an alternative route. The flag, `_relax/spatial_presolve.py`, the solver wiring and `test_kernel_presolve.py` are deleted; the data stays; the code is on branch `archive/2168-kernel-presolve`. What this section does establish: column elimination of the kernel spec takes cstr hull from uncertified at 100k nodes to certified at 41,949, so a presolve is the right lever for that instance; what it lacked is reach. A successor needs SCIP's multi-aggregation of BLF outputs (a kernel BLF with an affine output) and a panel beyond cstr.
+
+*Superseded:* **Decision (owner, 2026-11-05): kept as a documented opt-out.** Default OFF, `=1` opts in; the
 docstring (`SolverTuning.kernel_presolve`) and the audit row state why it is not the default and
 what would change that.

@@ -272,13 +272,6 @@ def _run_discopt(
                 ("DualRebuild", "SpatialSplit", "SpatialViolScip", "DualProof", "IntRoundExact")
             )
         }
-        # #2168: the kernel presolve's counters live in Python, not the Rust profile.
-        from discopt import solver as _solver
-
-        _kps = _solver.KERNEL_PRESOLVE_STATS
-        out["counters"]["KernelPresolveCalls"] = int(_kps.get("calls", 0))
-        out["counters"]["KernelPresolveApplied"] = int(_kps.get("applied", 0))
-        out["counters"]["KernelPresolveEliminated"] = int(_kps.get("eliminated", 0))
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
     return out

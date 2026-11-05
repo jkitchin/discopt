@@ -1319,42 +1319,6 @@ class SolverTuning:
     ``docs/dev/data/2142-hda-root/``). Re-run panel (section 116): see the plan doc for
     the numbers; cert-clean and net-positive."""
 
-    kernel_presolve: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_KERNEL_PRESOLVE", default=False)
-    )
-    """Column-eliminating presolve of the native spatial kernel's spec
-    (``DISCOPT_KERNEL_PRESOLVE``, default **OFF** pending its section 5 panel;
-    bound-changing on every route that reaches the kernel; #2168).
-
-    ``_relax/spatial_presolve.py``: the kernel's own root propagation fixes columns,
-    fixed factors linearise products (a fixed term input fixes its output), and
-    doubleton equalities ``a_p x_p + a_q x_q = b`` eliminate a column into its
-    representative everywhere -- rows, BLF sides, term inputs (a monomial of an
-    affine input becomes an affine square / power) and, with ``b = 0``, product
-    outputs -- choosing the representative so that outputs, integers and objective
-    columns survive. Iterated to closure. The reduced spec goes to the MAIN kernel
-    call only; every point it hands back is expanded and verified on the model as
-    before.
-
-    **Kept as a documented opt-out (owner decision, 2026-11-05).** Measured:
-
-    * full ``Model.solve(gdp_method="hull")`` on GDPlib cstr, deterministic: bound
-      0.6624 -> 1.6168 at 10k nodes and 0.9314 -> 2.2395 at 20k; uncapped, ON
-      **certifies** (3.0620146, 41,949 nodes, 374 s) where OFF hits the 100k node
-      cap at bound 2.6136;
-    * GDP parity panel (24 x {big-M, hull}, 5,000 nodes) and the 74-instance corpus
-      panel: cert-clean; fires on 4 GDP cells and 5 corpus instances; net 0 on the
-      GDP panel (cstr big-M better, cstr hull worse at 5,000 nodes, ON overtaking by
-      10k), so the pre-registered net-positive bar failed.
-
-    **Why it is not the default:** its gain is confined to one instance (CLAUDE.md
-    section 2), and on that instance it is worse early in the tree. **What would
-    change that:** a GDP or corpus panel where it is net-positive on more than one
-    instance, e.g. after the kernel can take the multi-aggregations it cannot
-    express today (a BLF with an affine output). performance-plan section 119,
-    ``docs/dev/data/2168-kernel-presolve/`` (``gdp_panel/`` for the full-solve and
-    GDP runs). Audit row in ``docs/dev/flag-retirement-audit.md``."""
-
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )

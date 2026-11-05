@@ -3124,25 +3124,13 @@ def _try_native_spatial_kernel(
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
         )
-    # #2168: the MAIN call may see a column-eliminated spec (default OFF). ``spec``
-    # itself stays the original for the pricer's exact-lift check, the frontier
-    # budget above and every probe call; the callbacks and the returned point are
-    # mapped back through ``expand``.
-    _main_spec = spec
-    _presolve_expand = None
-    if _tuning().kernel_presolve:
-        # Pure Python, so its time stays in the python residual (no jax/rust
-        # charge); its one ``propagate_spec_py`` call charges ``rust`` itself.
-        _main_spec, _presolve_expand = _kernel_presolve_main(spec, solve_kwargs)
     _t_phase = time.perf_counter()
     with _timing.charge("rust"):
-        res = _rust.solve_spatial_tree_py(**_main_spec, **solve_kwargs)
+        res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
     _native_rust_s += time.perf_counter() - _t_phase
+    res.update(meta)
     if res is None:
         return None  # model outside the covered subset -> Python path
-    if _presolve_expand is not None:
-        res["incumbent_x"] = _presolve_expand(res)
-    res.update(meta)
     native_status = res.get("status")
     # #1153: ``node_limit`` belongs on this list for exactly the reason ``time_limit``
     # does — it is a *budgeted* exit that still carries a feasible incumbent and a
@@ -12581,73 +12569,6 @@ def _kernel_undecided_retry_enabled() -> bool:
         "off",
         "",
     )
-
-
-#: #2168: how often the kernel presolve ran on the main kernel call, and what it did
-#: (CLAUDE.md section 6 probe counter; the per-reduction counts are
-#: ``discopt._relax.spatial_presolve.PRESOLVE_STATS``).
-KERNEL_PRESOLVE_STATS: "collections.Counter[str]" = collections.Counter()
-
-
-def _kernel_presolve_main(spec: dict, solve_kwargs: dict):
-    """``(main_spec, expand)`` for the main kernel call under ``kernel_presolve`` (#2168).
-
-    Runs :func:`~discopt._relax.spatial_presolve.presolve_spec`. When it declines,
-    returns ``(spec, None)`` and leaves ``solve_kwargs`` alone. Otherwise the
-    ``incumbent_value`` and ``primal_hook`` callbacks in ``solve_kwargs`` are
-    rewrapped IN PLACE to see original-space points, and the returned ``expand``
-    maps the kernel's result's ``incumbent_x`` back: a kernel LP point is expanded,
-    a point the primal hook produced (already a model point) is returned as it is.
-    The two are told apart by the incumbent VALUE: the kernel adopts a hook point
-    together with the internal objective the hook returned for it
-    (``spatial_tree.rs``, ``incumbent = Some(v); incumbent_x = xp``), so a result
-    whose incumbent equals a value the hook returned carries that hook's point.
-    (#2171 review: a length/bytes test would mis-expand a hook point the kernel
-    ever copied or re-rounded.)
-    """
-    from discopt._relax.spatial_presolve import presolve_spec
-
-    KERNEL_PRESOLVE_STATS["calls"] += 1
-    out = presolve_spec(spec)
-    if out is None:
-        KERNEL_PRESOLVE_STATS["declined"] += 1
-        return spec, None
-    reduced, expand, info = out
-    KERNEL_PRESOLVE_STATS["applied"] += 1
-    KERNEL_PRESOLVE_STATS["eliminated"] += int(info["n_eliminated"])
-    KERNEL_PRESOLVE_STATS["fixed"] += int(info["n_fixed"])
-    hook_values: set[float] = set()
-
-    price = solve_kwargs.get("incumbent_value")
-    if price is not None:
-
-        def _price(x, lp_obj):
-            return price(expand(x), lp_obj)
-
-        solve_kwargs["incumbent_value"] = _price
-    hook = solve_kwargs.get("primal_hook")
-    if hook is not None:
-
-        def _hook(x, incumbent):
-            got = hook(expand(x), incumbent)
-            if got is not None:
-                hook_values.add(float(got[0]))
-            return got
-
-        _hook.counts = getattr(hook, "counts", None)  # type: ignore[attr-defined]
-        solve_kwargs["primal_hook"] = _hook
-
-    def _expand_result(res):
-        x = res.get("incumbent_x")
-        if x is None:
-            return x
-        arr = np.asarray(x, dtype=np.float64)
-        inc = res.get("incumbent")
-        if arr.size == 0 or (inc is not None and float(inc) in hook_values):
-            return x
-        return expand(arr)
-
-    return reduced, _expand_result
 
 
 def _kernel_dual_proof_enabled() -> bool:

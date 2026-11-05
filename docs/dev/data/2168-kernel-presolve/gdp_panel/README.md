@@ -48,3 +48,5 @@ passes the pre-registered cstr bar on its "or ON certifies" branch, not on 2.787
   graduated**. The rule's default is retire. The owner decides between retiring it and keeping
   it as a documented opt-out, since its gain is confined to one instance (CLAUDE.md §2) but that
   instance is the one #2168 targets.
+
+**Decision (owner, 2026-11-05): retired.** Flag, `_relax/spatial_presolve.py` and the solver wiring deleted; code on branch `archive/2168-kernel-presolve`.
