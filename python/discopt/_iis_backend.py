@@ -19,7 +19,7 @@ the same code whichever solver answers:
 :class:`HighsBackend` is the code ``_Engine`` ran before P3.2, moved here unchanged.
 :class:`RustBackend` is the in-house MILP driver through
 :class:`discopt.solvers.milp_handle.MilpHandle`, selected by ``iis_engine="rust"``;
-``"highs"`` stays the default until P3.2's free-column infeasibility gap closes.
+``"highs"`` is the default (P3.2).
 """
 
 from __future__ import annotations
@@ -262,8 +262,7 @@ class RustBackend:
         return OTHER
 
     def _lp_ladder(self, stop: float) -> str:
-        """An undecided pure-LP probe through the verified LP ladder (P3.2, measured
-        prototype; awaiting the owner's decision on the remaining MILP probes).
+        """An undecided pure-LP probe through the verified LP ladder (P3.2).
 
         The driver cannot certify an LP's infeasibility when its Farkas ray carries
         roundoff on a free column (``FarkasRejectOpen``, ``lp/simplex/primal.rs``);

@@ -1,5 +1,5 @@
 //! Exact Farkas certificate over open columns (highs-parity P3.2,
-//! `DISCOPT_FARKAS_EXACT_OPEN`, default OFF).
+//! `DISCOPT_FARKAS_EXACT_OPEN`, default OFF pending its §5 panel).
 //!
 //! **The gap it closes.** [`super::primal::farkas_ray_certifies_cols`] verifies a
 //! ray `y` for `{A x = b, l ≤ x ≤ u}` in floating point: each reduced cost
@@ -47,10 +47,10 @@ const MAX_WORK: u64 = 200_000_000;
 const MAX_TOTAL_WORK: u64 = 400_000_000;
 
 /// Whether the exact open-column Farkas check runs (`DISCOPT_FARKAS_EXACT_OPEN`,
-/// read once). **Default OFF:** it changes which node LPs are proven infeasible, so
-/// which nodes the MILP and spatial trees fathom -- bound-changing per CLAUDE.md §5,
-/// so it graduates only through a corpus panel (row in
-/// `docs/dev/flag-retirement-audit.md`).
+/// read once). **Default OFF** pending its §5 panel: it changes which node LPs are
+/// proven infeasible, so what the MILP / spatial trees fathom (bound-changing). The
+/// first panel (2026-11-05) was retracted -- it ran while a length check made this a
+/// no-op on the primal simplex's call site -- and is being re-run.
 pub(crate) fn farkas_exact_open_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
@@ -254,12 +254,14 @@ pub(crate) fn farkas_exact_open(
     l: &[f64],
     u: &[f64],
 ) -> bool {
-    if y.len() != m
-        || b.len() != m
-        || l.len() != n
-        || u.len() != n
-        || !y.iter().chain(b).chain(l).chain(u).all(|v| v.is_finite())
-    {
+    // The simplex passes its working box, which also carries its `m` artificial
+    // columns after the `n` real ones (`lb.len() == n + m`); like the float verifier,
+    // only the real columns' sides enter the certificate.
+    if y.len() != m || b.len() != m || l.len() < n || u.len() < n {
+        return false;
+    }
+    let (l, u) = (&l[..n], &u[..n]);
+    if !y.iter().chain(b).chain(l).chain(u).all(|v| v.is_finite()) {
         return false;
     }
     crate::profile::incr(crate::profile::Ctr::FarkasExactAttempt);
@@ -301,10 +303,21 @@ mod tests {
         let (c, m, n, b, l, u) = probe();
         // A noisy multiple of the true ray (1, 2): x1's reduced cost is ~1e-17, not 0.
         let y = vec![0.333_333_333_333_333_3, 0.666_666_666_666_666_7];
-        // The float verifier (flag unset in tests, so no exact fallback) rejects it.
-        assert!(!super::super::primal::farkas_ray_certifies_cols(
+        // The float verifier alone rejects it (the exact fallback is what certifies).
+        assert!(!super::super::primal::farkas_ray_certifies_raw(
             &y, &c, n, m, &b, &l, &u
         ));
+        assert!(farkas_exact_open(&y, &c, n, m, &b, &l, &u));
+    }
+
+    #[test]
+    fn accepts_a_working_box_that_carries_artificials() {
+        // The simplex hands its `n + m`-long box (artificials appended); the extra
+        // entries must be ignored, not make the check a silent no-op.
+        let (c, m, n, b, mut l, mut u) = probe();
+        l.extend([0.0, 0.0]);
+        u.extend([0.0, 0.0]);
+        let y = vec![0.333_333_333_333_333_3, 0.666_666_666_666_666_7];
         assert!(farkas_exact_open(&y, &c, n, m, &b, &l, &u));
     }
 

@@ -1315,7 +1315,7 @@ pub(super) fn farkas_ray_certifies_cleaned(
 }
 
 /// The rigorous verifier behind [`farkas_ray_certifies_cols`] (no cleanup retry).
-fn farkas_ray_certifies_raw(
+pub(super) fn farkas_ray_certifies_raw(
     y: &[f64],
     cols: &SparseCols,
     n: usize,

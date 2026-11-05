@@ -956,12 +956,12 @@ def milp_iis(
 
     ``iis_engine`` (highs-parity P3.2) names the MILP solver behind every probe:
     ``"highs"`` (the default) or ``"rust"``, discopt's own MILP driver through a
-    persistent :class:`~discopt.solvers.milp_handle.MilpHandle`. ``"rust"`` is not
-    the default yet: on P0.6's fixtures its driver cannot certify some LP/MILP
-    infeasibilities over free columns (the simplex's Farkas check, ``FarkasRejectOpen``),
-    so those probes stay undecided and the returned set is not proven irreducible
-    (``docs/dev/highs-parity-plan.md`` P3.2). The deletion filter, the #1634
-    presolve-on / presolve-off cross-checks, the witness repair and the
+    persistent :class:`~discopt.solvers.milp_handle.MilpHandle` (an opt-in). On
+    P0.6's fixtures the two agree with ``DISCOPT_FARKAS_EXACT_OPEN=1``; the Rust
+    driver still leaves some probes undecided where HiGHS decides them -- integrality
+    slack on big-M rows (``INT_TOL`` 1e-5) and hard combinatorial MILPs (pigeonhole)
+    -- so it is not the default (``docs/dev/highs-parity-plan.md`` P3.2). The deletion
+    filter, the #1634 presolve-on / presolve-off cross-checks, the witness repair and the
     confirmations are the same code either way (``discopt._iis_backend``).
 
     ``portfolio_wait`` (portfolio runs only): ``"fast"`` stops the other members

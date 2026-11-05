@@ -1137,6 +1137,16 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   uncertified M rows. So: sound everywhere, inert where float certification works, and
   decisive on the class it targets (the Rust IIS engine: 51/53 -> 53/53). Graduation
   is an owner call: "net-positive broadly" is met only on that class.
+  **Retracted 2026-11-05 (§11): the §5 panel above and the 53/53 IIS result measured a
+  partly inert implementation.** `farkas_exact_open` required `l.len() == n`; the primal
+  simplex calls the verifier with its working box, which carries its `m` artificial
+  columns too (`len == n + m`), so on that path the exact check returned `false` before
+  doing anything (`FarkasExactAttempt` 0 on a reproduced node LP that logged 16
+  `FarkasRejectOpen`). Only the dual simplex's call site reached it. Found when the
+  default flip broke `test_batch_and_single_filters_both_give_certified_iis` (a node LP
+  of a random MILP left uncertified). Fixed (the real columns' sides are read, as the
+  float verifier does; Rust test `accepts_a_working_box_that_carries_artificials`);
+  every P3.2 measurement is being re-run.
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with

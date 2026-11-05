@@ -327,8 +327,8 @@ def compute_iis(
     iis_engine : {"rust", "highs"}
         Only with ``include_integrality=True``. The MILP solver behind every
         probe of the matrix engine: HiGHS (``"highs"``, the default) or
-        discopt's own MILP driver (``"rust"``, an opt-in until highs-parity P3.2
-        closes its free-column infeasibility gap). The filter, cross-checks and
+        discopt's own MILP driver (``"rust"``, an opt-in; see
+        :func:`discopt._iis_milp.milp_iis`). The filter, cross-checks and
         confirmations are the same either way.
 
     Returns
