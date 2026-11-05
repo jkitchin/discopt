@@ -1,0 +1,2 @@
+RESULT cstr flag=1 nodes=5000 status=node_limit obj=3.0620145766187057 bound=0.45484745386084846 wall=74.1 {'homogenized': 5, 'convex': 0, 'not_polynomial': 0, 'perspective_rows': 5}
+executed assertions: 2

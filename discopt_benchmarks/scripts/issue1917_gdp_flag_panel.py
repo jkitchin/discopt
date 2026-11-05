@@ -122,6 +122,38 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # default route these flags act on. Firing is shown per master by
     # ``g32/replay.py``'s counters on the captured first masters.
     "DISCOPT_RUST_MILP_COEF_TIGHTEN": ("loa",),
+    # #2142 A: the absorbed exact perspective for nonlinear hull rows. RETIRED by
+    # its panel (docs/dev/data/2142-flag-panel/); kept so --report re-derives it.
+    "DISCOPT_HULL_LIFTED_PERSPECTIVE": ("hull",),
+    # #2142 B: an LP-layer flag (the warm dual's empty-ratio-test exit), RETIRED by
+    # its panel (docs/dev/data/2142-flag-panel/); kept so --report re-derives it.
+    # Lowering identical by construction, so solve ``--all`` with ``--max-nodes N
+    # --deterministic`` under ``DISCOPT_PROFILE=1``; the ``DualRebuilds`` counter
+    # says where it ran and ``--report`` asserts bit-identity everywhere else.
+    "DISCOPT_LP_DUAL_REBUILD": ("big-m", "hull"),
+    # #2142 item 3: SCIP's branching-point clamp / midpull trigger in the native
+    # spatial kernel. RETIRED by its panel (docs/dev/data/2142-branching/); kept so
+    # --report re-derives it. Acts at solve time only (lowering identical): solve ``--all``
+    # with ``--max-nodes N --deterministic``; ``SpatialSplitMoved`` says where a
+    # split point moved, and ``--report`` asserts bit-identity everywhere else.
+    "DISCOPT_SPATIAL_BRANCH_CLAMP": ("big-m", "hull"),
+    # #2142: SCIP's violation measure for the kernel's spatial score (performance-plan
+    # §108). RETIRED by its panel (docs/dev/data/2142-branching-var/); kept so
+    # --report re-derives it. Solve time only, like the entry above;
+    # ``SpatialViolScipChanged`` says where a branching column changed.
+    "DISCOPT_SPATIAL_VIOL_SCIP": ("big-m", "hull"),
+    # #2142: learned dual-proof rows in the native spatial kernel (performance-plan
+    # §112). Solve time only (lowering identical): solve ``--all`` with
+    # ``--max-nodes N --deterministic``; ``DualProofLearned`` is 0 exactly where the
+    # pool stayed empty (then the tree is OFF's, bit for bit).
+    "DISCOPT_DUAL_PROOF_PROPAGATION": ("big-m", "hull"),
+    # #2142 §114: exact integer-bound rounding in the kernel's propagation. RETIRED at
+    # its entry test (performance-plan §114); kept so --report re-derives it. Solve
+    # time only; ``IntRoundExactSnaps`` is 0 exactly where the tree is OFF's.
+    "DISCOPT_INT_ROUND_EXACT": ("big-m", "hull"),
+    # #2142 §115: the homogenized (division-free) hull of nonconvex polynomial disjunct
+    # rows. A lowering flag: the fire phase fingerprints the hull lowering OFF vs ON.
+    "DISCOPT_HULL_EXACT_PERSPECTIVE": ("hull",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
@@ -156,7 +188,20 @@ print("@@FIRE " + json.dumps(out), flush=True)
 def _env(flag: str, on: bool) -> dict:
     env = dict(os.environ)
     env[flag] = "1" if on else "0"
+    if flag in _COUNTER_FLAGS:
+        env["DISCOPT_PROFILE"] = "1"
+        env["PYTHONHASHSEED"] = "0"
     return env
+
+
+#: flag -> the profile counter that is non-zero exactly where its mechanism ran.
+_COUNTER_FLAGS = {
+    "DISCOPT_LP_DUAL_REBUILD": "DualRebuilds",
+    "DISCOPT_SPATIAL_BRANCH_CLAMP": "SpatialSplitMoved",
+    "DISCOPT_SPATIAL_VIOL_SCIP": "SpatialViolScipChanged",
+    "DISCOPT_DUAL_PROOF_PROPAGATION": "DualProofLearned",
+    "DISCOPT_INT_ROUND_EXACT": "IntRoundExactSnaps",
+}
 
 
 def _append(out: Path, rec: dict) -> None:
@@ -253,7 +298,8 @@ def phase_solve(args, names: list[str]) -> int:
         for r in _rows(args.out)
         if r.get("phase") == "solve"
     }
-    plan = [(n, m) for n in names for m in FLAG_METHODS[args.flag] if args.all or (n, m) in fired]
+    methods = [m for m in FLAG_METHODS[args.flag] if not args.methods or m in args.methods]
+    plan = [(n, m) for n in names for m in methods if args.all or (n, m) in fired]
     if not plan:
         print("nothing to solve: no instance fired (run --phase fire first)", flush=True)
         return 1
@@ -275,6 +321,8 @@ def phase_solve(args, names: list[str]) -> int:
                     name,
                     f"discopt-{method}",
                     str(args.time_limit),
+                    str(args.max_nodes),
+                    "1" if args.deterministic else "0",
                 ]
                 try:
                     proc = subprocess.run(
@@ -308,6 +356,8 @@ def phase_solve(args, names: list[str]) -> int:
                     load1=round(load, 2),
                     elapsed=round(time.perf_counter() - t0, 2),
                     time_limit=args.time_limit,
+                    max_nodes=args.max_nodes,
+                    deterministic=args.deterministic,
                 )
                 rec["verdict"] = gb.score(rec, gb_oracle().get(name))
                 _append(args.out, rec)
@@ -439,9 +489,54 @@ def report(args) -> int:
             f"net: SGM(wall, shift {shift:g} s, capped at {args.time_limit:g} s) over "
             f"{len(walls_off)} cells: OFF {sgm(walls_off):.2f} s -> ON {sgm(walls_on):.2f} s"
         )
-    if checks == 0 or incorrect or crossings or lost:
+    differs = _unfired_identity(args, cells) if args.flag in _COUNTER_FLAGS else []
+    if checks == 0 or incorrect or crossings or lost or differs:
         return 1
     return 0
+
+
+def _unfired_identity(args, cells) -> list[str]:
+    """Bound-neutral where the mechanism never ran (CLAUDE.md section 5): a pair
+    (same rep) whose ON arm's counter is 0 ran OFF's code, so with a work budget it
+    must reproduce OFF's status, objective, bound and nodes exactly. Pairs where an
+    arm reached the wall are machine-speed dependent and are counted apart."""
+    ctr = _COUNTER_FLAGS[args.flag]
+    checked, wall, fired, differs, leaks, errors = 0, [], [], [], [], []
+    for (name, method), arms in sorted(cells.items()):
+        on_by_rep = {r["rep"]: r for r in arms["on"]}
+        for off in arms["off"]:
+            on = on_by_rep.get(off["rep"])
+            if on is None:
+                continue
+            if (off.get("counters") or {}).get(ctr, 0):
+                leaks.append(f"{name} {method} rep{off['rep']}")
+            if "error" in off and "error" in on:
+                errors.append(f"{name} {method}")  # no solve in either arm: nothing ran
+                continue
+            if "counters" not in on:
+                differs.append(f"{name} {method} rep{off['rep']}: ON row has no counters")
+                continue
+            if on["counters"].get(ctr, 0) > 0:
+                fired.append((name, method, on["counters"]))
+                continue
+            limit = 0.95 * off.get("time_limit", args.time_limit)
+            if max(off.get("wall") or 0.0, on.get("wall") or 0.0) >= limit or "error" in off:
+                wall.append(f"{name} {method}")
+                continue
+            checked += 1
+            for k in ("status", "objective", "bound", "node_count"):
+                if off.get(k) != on.get(k):
+                    differs.append(
+                        f"{name} {method} rep{off['rep']}: {k} {off.get(k)} != {on.get(k)}"
+                    )
+    print(f"\n{ctr}: fired on {len(fired)} pair(s)")
+    for name, method, c in fired:
+        print(f"   {name} {method} {c}")
+    print(f"unfired bit-identity: {checked} pair(s) checked, {len(wall)} at the wall {wall}")
+    print(f"errored in both arms (no solve to compare): {errors}")
+    for d in differs + [f"OFF arm ran the mechanism: {x}" for x in leaks]:
+        print(f"   ! {d}")
+    return differs + leaks
 
 
 def _f(v) -> str:
@@ -467,8 +562,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--fire-timeout", type=float, default=900.0)
     ap.add_argument("--all", action="store_true", help="also solve instances it did not fire on")
+    ap.add_argument(
+        "--methods", default="", help="comma-separated subset of the flag's methods (a stream)"
+    )
+    ap.add_argument("--max-nodes", type=int, default=0, help="node budget per solve (0 = none)")
+    ap.add_argument("--deterministic", action="store_true", help="solve with deterministic=True")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args(argv)
+    args.methods = [m for m in args.methods.split(",") if m]
     if args.report:
         return report(args)
     from benchmarks import gdplib_runner as gr

@@ -1,0 +1,7 @@
+translation: {'n_active': 110, 'n_elim': 175, 'n_cons': 174, 'n_rows': 212, 'n_terms': 5, 'n_blf': 24, 'n_new_aux': 11}
+SCIP original: optimal obj=3.0620007624270196 nodes=7470 resid_orig=9.72e-07
+SCIP translated: optimal obj=3.0620007534058313 dual=3.0620007534058313 nodes=9367
+F2a expanded translated optimum on ORIGINAL spec: 1.67e-06
+F2b aggregation maps at the original optimum: max |viol| 0.00e+00
+F2c compressed original optimum on TRANSLATED spec: 9.72e-07
+executed assertions: 2

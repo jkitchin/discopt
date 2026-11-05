@@ -1,0 +1,226 @@
+"""#2142: ``DISCOPT_HULL_MIXED_BIGM`` -- the hull lowers a nonlinear disjunct row it
+cannot prove convex by big-M on the row's own columns, and keeps the perspective
+for a row the convexity detector proves convex.
+
+Soundness (CLAUDE.md §5, bound-changing):
+
+* the differential battery (``gdp_differential``): no sampled point of the declared
+  GDP is cut and no clearly infeasible point is admitted, under the mixed hull;
+* fixed boxes: on every assignment of the selectors the lowered model's optimum,
+  solved to certification, equals the declared disjunct's own optimum (an integer
+  point of the mixed hull is the disjunct exactly), and the relaxation's bound at
+  each fixed box never exceeds it.
+
+Every test counts what it executed and asserts the count (CLAUDE.md §6).
+"""
+
+from __future__ import annotations
+
+import math
+
+import discopt.modeling as dm
+import pytest
+from discopt._relax import gdp_reformulate as G
+from discopt._relax.gdp_reformulate import _is_linear, reformulate_gdp
+from discopt.transformations import check, create_using, model_fingerprint
+from gdp_differential import Shape, run_shape
+
+FLAG = "DISCOPT_HULL_MIXED_BIGM"
+
+
+def _bilinear_eq():
+    """Disjunct 1: ``x z == y`` (nonconvex equality); disjunct 2: a box."""
+    m = dm.Model("bilinear_eq")
+    x = m.continuous("x", lb=0, ub=4)
+    z = m.continuous("z", lb=0, ub=4)
+    y = m.continuous("y", lb=0, ub=16)
+    m.either_or([[x * z - y == 0, x >= 1], [x <= 0.5, z <= 0.5, y <= 0.5]], name="d")
+    m.minimize(-x - z + 0.1 * y)
+    return m
+
+
+def _mixed_curvature():
+    """Disjunct 1: a convex ``exp(x) <= y`` (perspective kept) and a nonconvex
+    ``x z >= 1`` (big-M); disjunct 2: a box, with ``g(0)`` of the bilinear row != 0."""
+    m = dm.Model("mixed_curvature")
+    x = m.continuous("x", lb=0, ub=2)
+    z = m.continuous("z", lb=0, ub=2)
+    y = m.continuous("y", lb=0, ub=8)
+    m.either_or([[dm.exp(x) - y <= 0, x * z - 1 >= 0], [x + z <= 0.5, y <= 0.5]], name="d")
+    m.minimize(y - x - z)
+    return m
+
+
+def _three_way():
+    """Three disjuncts, two nonconvex (``x**2 - z == 0`` twice on shifted boxes)."""
+    m = dm.Model("three_way")
+    x = m.continuous("x", lb=-2, ub=3)
+    z = m.continuous("z", lb=0, ub=9)
+    m.either_or(
+        [
+            [x * x - z == 0, x >= 1],
+            [x * x - 2 * z + 1 == 0, x <= -1],
+            [x >= -0.5, x <= 0.5, z <= 1],
+        ],
+        name="d",
+    )
+    m.minimize(z - x)
+    return m
+
+
+SHAPES = [
+    Shape(
+        "bilinear_eq",
+        _bilinear_eq,
+        lambda v, t: (
+            (abs(v["x"] * v["z"] - v["y"]) <= t and v["x"] >= 1 - t)
+            or (v["x"] <= 0.5 + t and v["z"] <= 0.5 + t and v["y"] <= 0.5 + t)
+        ),
+        points=[
+            {"x": 4.0, "z": 4.0, "y": 16.0},
+            {"x": 1.0, "z": 2.0, "y": 2.0},
+            {"x": 0.3, "z": 0.2, "y": 0.4},
+            {"x": 2.0, "z": 2.0, "y": 3.0},  # infeasible in both
+            {"x": 0.7, "z": 0.1, "y": 0.07},  # x z == y but x < 1 and x > 0.5
+        ],
+    ),
+    Shape(
+        "mixed_curvature",
+        _mixed_curvature,
+        lambda v, t: (
+            (math.exp(v["x"]) - v["y"] <= t and v["x"] * v["z"] - 1 >= -t)
+            or (v["x"] + v["z"] <= 0.5 + t and v["y"] <= 0.5 + t)
+        ),
+        points=[
+            {"x": 1.0, "z": 1.0, "y": math.e},
+            {"x": 2.0, "z": 0.5, "y": 8.0},
+            {"x": 0.2, "z": 0.2, "y": 0.1},
+            {"x": 1.0, "z": 0.5, "y": 3.0},  # x z < 1
+            {"x": 1.0, "z": 1.0, "y": 2.0},  # exp(x) > y
+        ],
+    ),
+    Shape(
+        "three_way",
+        _three_way,
+        lambda v, t: (
+            (abs(v["x"] ** 2 - v["z"]) <= t and v["x"] >= 1 - t)
+            or (abs(v["x"] ** 2 - 2 * v["z"] + 1) <= t and v["x"] <= -1 + t)
+            or (-0.5 - t <= v["x"] <= 0.5 + t and v["z"] <= 1 + t)
+        ),
+        points=[
+            {"x": 2.0, "z": 4.0},
+            {"x": -2.0, "z": 2.5},
+            {"x": 0.0, "z": 0.5},
+            {"x": 2.0, "z": 3.0},  # infeasible
+            {"x": -1.5, "z": 2.25},  # disjunct 1's row on disjunct 2's side
+        ],
+    ),
+]
+
+
+@pytest.fixture
+def mixed_on(monkeypatch):
+    monkeypatch.setenv(FLAG, "1")
+    G._HULL_MIXED_STATS.update(big_m=0, perspective=0)
+    yield
+    G._HULL_MIXED_STATS.update(big_m=0, perspective=0)
+
+
+@pytest.mark.parametrize("shape", SHAPES, ids=lambda s: s.name)
+def test_differential_battery_under_mixed_hull(shape, mixed_on):
+    rep = run_shape(shape, "hull")
+    assert rep.refused is None, rep.refused
+    assert G._HULL_MIXED_STATS["big_m"] > 0, "the mixed branch never fired"
+    assert rep.feasible_checked > 0 and rep.infeasible_checked > 0, rep
+    rep.assert_sound()
+
+
+def test_flag_is_off_by_default(monkeypatch):
+    monkeypatch.delenv(FLAG, raising=False)
+    G._HULL_MIXED_STATS.update(big_m=0, perspective=0)
+    rows = [c for c in reformulate_gdp(_bilinear_eq(), "hull")._constraints]
+    assert G._HULL_MIXED_STATS["big_m"] == 0
+    # the eps-perspective: the nonlinear rows divide by yhat
+    assert any("/" in str(c.body) for c in rows if not _is_linear(c.body))
+
+
+def test_convex_row_keeps_perspective_nonconvex_row_goes_big_m(mixed_on):
+    low = reformulate_gdp(_mixed_curvature(), "hull")
+    assert G._HULL_MIXED_STATS == {"big_m": 1, "perspective": 1}, G._HULL_MIXED_STATS
+    nl = [c for c in low._constraints if not _is_linear(c.body)]
+    persp = [c for c in nl if "/" in str(c.body)]
+    big_m = [c for c in nl if "/" not in str(c.body)]
+    assert len(persp) == 1 and len(big_m) == 1, nl
+    # the big-M row is on the ORIGINAL columns x, z, not on disaggregated copies
+    names = set(G._collect_variables(big_m[0].body))
+    assert {"x", "z"} <= names and not any("_hull_" in n and "_v_" in n for n in names), names
+
+
+def test_lowering_changes_only_with_flag(monkeypatch):
+    """The flag fires (fingerprints differ) and ``transformations.check`` runs on it."""
+    monkeypatch.setenv(FLAG, "0")
+    off = model_fingerprint(create_using("gdp.hull", _bilinear_eq()))
+    monkeypatch.setenv(FLAG, "1")
+    on = model_fingerprint(create_using("gdp.hull", _bilinear_eq()))
+    assert off != on
+    diff = check("gdp.hull", _bilinear_eq())
+    assert diff is not None
+
+
+def test_unbounded_body_refuses_loudly(mixed_on):
+    """No finite M: refuse with big-M's own error, never a sentinel-sized M."""
+    m = dm.Model("unbounded_body")
+    x = m.continuous("x", lb=0, ub=4)
+    z = m.continuous("z", lb=0, ub=4)
+    w = m.continuous("w", lb=0, ub=4)
+    # 1/w is unbounded above on [0, 4]
+    m.either_or([[z * x - 1 / (w + 0.0) >= 0], [x <= 1]], name="d")
+    m.minimize(x + z + w)
+    with pytest.raises(ValueError, match="cannot bound the body|domain"):
+        reformulate_gdp(m, "hull")
+
+
+FIXED_BOX_SHAPES = [_bilinear_eq, _mixed_curvature, _three_way]
+
+
+@pytest.mark.parametrize("build", FIXED_BOX_SHAPES, ids=lambda b: b.__name__)
+def test_fixed_selector_optimum_equals_disjunct_optimum(build, monkeypatch):
+    """At every integer point the mixed hull is the disjunct exactly: with the
+    selectors fixed, the lowered model's certified optimum equals the optimum of
+    the declared disjunct solved on its own (the true box optimum), and the
+    certified dual bound never exceeds it."""
+    monkeypatch.setenv(FLAG, "1")
+    n_disj = len(_disjunctions(build())[0].disjuncts)
+    checked = 0
+    for k in range(n_disj):
+        truth = _disjunct_alone(build, k).solve(time_limit=60)
+        low = reformulate_gdp(build(), "hull")
+        sels = [v for v in low._variables if v.name.startswith(G.GDP_AUX_PREFIX + "hull_d_")]
+        assert len(sels) == n_disj, [v.name for v in sels]
+        for j, s in enumerate(sels):
+            low.subject_to(s == (1.0 if j == k else 0.0))
+        r = low.solve(time_limit=60)
+        if truth.status == "infeasible":
+            assert r.status == "infeasible", (k, r.status)
+        else:
+            assert truth.status == "optimal" and r.status == "optimal", (truth.status, r.status)
+            assert r.objective == pytest.approx(truth.objective, abs=1e-5, rel=1e-5)
+            assert r.bound <= truth.objective + 1e-5 * max(1.0, abs(truth.objective))
+        checked += 1
+    assert checked == n_disj
+
+
+def _disjunctions(m):
+    from discopt.modeling.core import _DisjunctiveConstraint
+
+    return [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
+
+
+def _disjunct_alone(build, k):
+    """The declared model with its disjunction replaced by disjunct ``k``'s rows."""
+    m = build()
+    (dc,) = _disjunctions(m)
+    m._constraints = [c for c in m._constraints if c is not dc]
+    for row in dc.disjuncts[k]:
+        m._constraints.append(row)
+    return m

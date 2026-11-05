@@ -1,0 +1,24 @@
+fire batch_processing                     hull   fired=False off=1735 on=1735 lower_s=0.341/0.344
+fire biofuel                              hull   fired=False off=502952 on=502952 lower_s=32.882/32.943
+fire cstr                                 hull   fired=True off=597 on=597 lower_s=0.068/0.095
+fire disease_model                        hull   fired=False off=1299 on=1299 lower_s=0.191/0.186
+fire ex1_linan_2023                       hull   fired=False off=47 on=47 lower_s=0.031/0.033
+fire gdp_col                              hull   fired=True off=3594 on=3594 lower_s=0.795/1.031
+fire hda                                  hull   fired=True off=3493 on=3493 lower_s=0.503/0.564
+fire kaibel                               hull   fired=None off=ApplicationError: No executable found for solver 'ipopt' on=ApplicationError: No executable found for solver 'ipopt' lower_s=None/None
+fire med_term_purchasing                  hull   fired=False off=2586 on=2586 lower_s=0.217/0.26
+fire methanol                             hull   fired=True off=1739 on=1739 lower_s=0.223/0.249
+fire mod_hens                             hull   fired=None off=ApplicationError: No executable found for solver 'ipopt' on=ApplicationError: No executable found for solver 'ipopt' lower_s=None/None
+fire modprodnet                           hull   fired=False off=3052 on=3052 lower_s=0.412/0.441
+fire positioning                          hull   fired=False off=55 on=55 lower_s=0.11/0.108
+fire small_batch                          hull   fired=False off=109 on=109 lower_s=0.039/0.033
+fire spectralog                           hull   fired=False off=578 on=578 lower_s=0.08/0.082
+fire stranded_gas                         hull   fired=False off=47857 on=47857 lower_s=12.732/12.137
+fire syngas                               hull   fired=True off=3141 on=3141 lower_s=0.351/0.436
+fire pyomo.eight_process                  hull   fired=False off=257 on=257 lower_s=0.046/0.052
+fire pyomo.eight_process_logical          hull   fired=False off=231 on=231 lower_s=0.048/0.048
+fire pyomo.strip_packing_concrete         hull   fired=False off=250 on=250 lower_s=0.05/0.057
+fire pyomo.constrained_layout_clay0203    hull   fired=False off=192 on=192 lower_s=0.182/0.186
+fire pyomo.ex_633_trespalacios            hull   fired=True off=34 on=34 lower_s=0.132/0.165
+fire pyomo.nonconvex_hen                  hull   fired=False off=85 on=85 lower_s=0.046/0.047
+fire pyomo.jobshop_small                  hull   fired=False off=42 on=42 lower_s=0.036/0.049

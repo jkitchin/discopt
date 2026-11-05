@@ -1,0 +1,4 @@
+/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/wt/python/discopt/debug/__init__.py:100: UserWarning: Variables with very large or infinite declared bounds: x44 (lb=0, ub=inf), x45 (lb=0, ub=inf). Nonlinear tightening can adjust 4 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+nous1.nl FLAG=1 status=optimal obj=1.5670720325769771 bound=1.5669218228313893 certified=True nodes=34581 wall=79.1s
+executed assertions: 1

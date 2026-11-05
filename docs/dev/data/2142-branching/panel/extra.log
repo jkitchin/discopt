@@ -1,0 +1,26 @@
+fuel                   OFF optimal                b=8565.768206513407 n=17 SpatialSplits=9 SpatialSplitMoved=0 | ON optimal                b=8565.596963003527 n=15 SpatialSplits=8 SpatialSplitMoved=2 fired=2 undecided 0.0/0.0 wall 0.7/0.8 load 2.93
+mathopt5_8             OFF optimal                b=-0.6861213483880759 n=39 SpatialSplits=20 SpatialSplitMoved=0 | ON optimal                b=-0.6861236503161955 n=39 SpatialSplits=20 SpatialSplitMoved=17 fired=17 undecided 0.0/0.0 wall 0.6/0.5 load 2.93
+nvs20                  OFF optimal                b=230.90020678220492 n=181 SpatialSplits=70 SpatialSplitMoved=0 | ON optimal                b=230.90649861822413 n=187 SpatialSplits=72 SpatialSplitMoved=50 fired=50 undecided 0.0/0.0 wall 4.8/5.1 load 3.31
+prob10                 OFF optimal                b=3.445503794326372 n=17 SpatialSplits=1 SpatialSplitMoved=0 | ON optimal                b=3.445503794326372 n=17 SpatialSplits=1 SpatialSplitMoved=1 fired=1 undecided None/None wall 1.4/1.7 load 3.31
+rbrock                 OFF node_limit             b=-0.0002800922777428383 n=2000 SpatialSplits=1100 SpatialSplitMoved=0 | ON node_limit             b=-0.00036845347648073457 n=2000 SpatialSplits=1107 SpatialSplitMoved=1100 fired=1100 undecided 0.0/0.0 wall 1.3/1.2 load 3.60
+st_e03                 OFF optimal                b=-1161.4351936545042 n=263 SpatialSplits=132 SpatialSplitMoved=0 | ON optimal                b=-1161.4526143323958 n=267 SpatialSplits=134 SpatialSplitMoved=93 fired=93 undecided 0.0/0.0 wall 1.2/1.2 load 3.56
+st_e05                 OFF optimal                b=7048.568735055146 n=131 SpatialSplits=66 SpatialSplitMoved=0 | ON optimal                b=7048.614061774792 n=153 SpatialSplits=77 SpatialSplitMoved=72 fired=72 undecided 0.0/0.0 wall 0.6/0.6 load 3.56
+st_e07                 OFF optimal                b=-400.00000000041774 n=29 SpatialSplits=15 SpatialSplitMoved=0 | ON optimal                b=-400.03071930549265 n=25 SpatialSplits=13 SpatialSplitMoved=7 fired=7 undecided 0.0/0.0 wall 1.0/1.0 load 3.91
+ex1252a                OFF node_limit             b=128893.15416100372 n=2000 SpatialSplits=808 SpatialSplitMoved=0 | ON node_limit             b=128892.95802035695 n=2000 SpatialSplits=791 SpatialSplitMoved=476 fired=476 undecided 11.0/11.0 wall 26.2/25.1 load 3.81
+st_z                   OFF optimal                b=-5.892809130710898e-07 n=23 SpatialSplits=11 SpatialSplitMoved=0 | ON optimal                b=-2.3122713952645693e-08 n=17 SpatialSplits=8 SpatialSplitMoved=4 fired=4 undecided 0.0/0.0 wall 0.7/0.7 load 3.81
+st_e31                 OFF node_limit             b=-2.0004055215650625 n=2000 SpatialSplits=722 SpatialSplitMoved=0 | ON node_limit             b=-2.0002418108606643 n=2000 SpatialSplits=700 SpatialSplitMoved=436 fired=436 undecided 0.0/0.0 wall 26.4/24.9 load 3.15
+
+instances           : 11
+executed checks     : 129
+violations          : 0
+mechanism fired     : 2258 on 11 instance(s) ['ex1252a', 'fuel', 'mathopt5_8', 'nvs20', 'prob10', 'rbrock', 'st_e03', 'st_e05', 'st_e07', 'st_e31', 'st_z']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 8 -> ON 8  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 6700 -> ON 6720
+wall  (all)         : OFF 64.9s -> ON 62.8s
+wall  (fired)       : OFF 64.9s -> ON 62.8s over 11 instance(s)
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/bp/panel/extra.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

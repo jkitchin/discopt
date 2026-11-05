@@ -1,0 +1,25 @@
+solve: 12 (instance, method) pairs x 2 arms x 1 reps
+solve rep0 pyomo.constrained_layout_clay0203  big-m  off unsolved           status=feasible obj=41573.262522213256 bound=33830.84126271585 nodes=133 wall=120.759 load=1.58
+solve rep0 pyomo.constrained_layout_clay0203  big-m  on  solved             status=optimal obj=41573.262522213256 bound=41573.26250278103 nodes=133 wall=119.134 load=5.4
+solve rep0 pyomo.constrained_layout_clay0203  hull   on  solved             status=optimal obj=41573.26252221325 bound=41573.26249177844 nodes=109 wall=42.149 load=7.11
+solve rep0 pyomo.constrained_layout_clay0203  hull   off solved             status=optimal obj=41573.26252221325 bound=41573.26249177844 nodes=109 wall=42.329 load=6.85
+solve rep0 pyomo.ex_633_trespalacios          big-m  off solved             status=optimal obj=4.46036761713799 bound=4.460364898905878 nodes=13 wall=3.34 load=6.02
+solve rep0 pyomo.ex_633_trespalacios          big-m  on  solved             status=optimal obj=4.46036761713799 bound=4.460364898905878 nodes=13 wall=3.294 load=5.94
+solve rep0 pyomo.ex_633_trespalacios          hull   on  solved             status=optimal obj=4.460367620446746 bound=4.4603289016054015 nodes=75 wall=25.307 load=5.7
+solve rep0 pyomo.ex_633_trespalacios          hull   off solved             status=optimal obj=4.460367620446746 bound=4.4603289016054015 nodes=75 wall=25.737 load=4.88
+solve rep0 pyomo.nonconvex_hen                big-m  off solved             status=optimal obj=114384.7775876192 bound=114384.7775866238 nodes=5 wall=15.835 load=4.81
+solve rep0 pyomo.nonconvex_hen                big-m  on  solved             status=optimal obj=114384.7775876192 bound=114384.7775866238 nodes=5 wall=15.808 load=5.3
+solve rep0 pyomo.nonconvex_hen                hull   on  solved             status=optimal obj=114384.77758758067 bound=114374.91679664506 nodes=13 wall=40.224 load=5.3
+solve rep0 pyomo.nonconvex_hen                hull   off solved             status=optimal obj=114384.77758758067 bound=114374.91679664506 nodes=13 wall=40.17 load=5.31
+solve rep0 pyomo.jobshop_small                big-m  off solved             status=optimal obj=11.0 bound=10.999999999999972 nodes=1 wall=0.359 load=4.71
+solve rep0 pyomo.jobshop_small                big-m  on  solved             status=optimal obj=11.0 bound=10.999999999999972 nodes=1 wall=0.334 load=4.65
+solve rep0 pyomo.jobshop_small                hull   on  solved             status=optimal obj=11.0 bound=10.999999999999995 nodes=1 wall=0.322 load=4.65
+solve rep0 pyomo.jobshop_small                hull   off solved             status=optimal obj=11.0 bound=10.999999999999995 nodes=1 wall=0.221 load=4.44
+solve rep0 positioning                        big-m  off solved             status=optimal obj=-8.064136108923352 bound=-8.064136408630949 nodes=151 wall=28.647 load=4.57
+solve rep0 positioning                        big-m  on  solved             status=optimal obj=-8.064136108923352 bound=-8.064136408630949 nodes=151 wall=28.098 load=4.51
+solve rep0 positioning                        hull   on  solved             status=optimal obj=-8.064136108923352 bound=-8.064136408630949 nodes=151 wall=27.768 load=4.04
+solve rep0 positioning                        hull   off solved             status=optimal obj=-8.064136108923352 bound=-8.064136408630949 nodes=151 wall=28.495 load=4.45
+solve rep0 small_batch                        big-m  off solved             status=optimal obj=167427.65711470298 bound=167427.65114405897 nodes=3 wall=15.86 load=4.29
+solve rep0 small_batch                        big-m  on  solved             status=optimal obj=167427.65711470298 bound=167427.65114405897 nodes=3 wall=15.732 load=4.59
+solve rep0 small_batch                        hull   on  solved             status=optimal obj=167427.65312644903 bound=167427.650428608 nodes=3 wall=16.025 load=4.7
+solve rep0 small_batch                        hull   off solved             status=optimal obj=167427.65312644903 bound=167427.650428608 nodes=3 wall=16.04 load=4.9

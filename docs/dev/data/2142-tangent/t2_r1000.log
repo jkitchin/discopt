@@ -1,0 +1,20 @@
+[default] boxes 110; kernel-LP re-solve reproduces the tree's node obj (1e-6 rel): 110/110
+[default] max |re-solved safe bound - tree node bound|: 3.52e-07
+[default] tangent violation checks executed: 1395; undecided (dropped) rounds: 0; dual-simplex retries: 126
+[default] SCIP infeasible: 1; SCIP tighter than ours by >1e-4: 14; ours tighter by >1e-4: 10
+[default] boxes with >=1 violated tangent: 79; cuts total 328; max rounds 14
+[default] tangent gain (finite): mean 0.00031 max 0.01413; >1e-4 on 13; tangents prove infeasible: 0
+[default] GAP CLOSURE on the 14 SCIP-tighter boxes: 0.03430 / 0.03743 = 91.6%
+[default]   after tangents SCIP still tighter by >1e-4 on 1 of them
+[default] boxes where the tangent bound exceeds SCIP's by >1e-6: 16
+[default]   node   4500 ours0 0.2103 tangents 0.2244 scip 0.2244 cuts 1 rounds 1
+[default]   node  12300 ours0 1.0726 tangents 1.0824 scip 1.0824 cuts 10 rounds 2
+[default]   node  18400 ours0 2.1762 tangents 2.1762 scip 2.1793 cuts 0 rounds 0
+[default]   node   4300 ours0 0.3217 tangents 0.3244 scip 0.3244 cuts 1 rounds 1
+[default]   node   9500 ours0 0.7640 tangents 0.7661 scip 0.7661 cuts 5 rounds 3
+[default]   node  14700 ours0 1.1663 tangents 1.1682 scip 1.1682 cuts 2 rounds 2
+[default]   node  17700 ours0 1.3998 tangents 1.4006 scip 1.4006 cuts 2 rounds 2
+[default]   node  12800 ours0 1.0090 tangents 1.0098 scip 1.0098 cuts 2 rounds 2
+[default]   node  12100 ours0 0.9890 tangents 0.9896 scip 0.9896 cuts 2 rounds 2
+[default]   node  18500 ours0 1.3979 tangents 1.3985 scip 1.3985 cuts 2 rounds 1
+[default] executed comparisons: 110

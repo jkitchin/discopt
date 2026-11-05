@@ -16,14 +16,18 @@ and neither dominates. What stays pinned here:
 * the differential battery (no feasible point cut, no infeasible point admitted) on
   two nonlinear-equality shapes under hull;
 * hull solves of those shapes agree with big-M;
-* GDPlib ``cstr`` under hull is still declined by the native spatial kernel: the
-  1/yhat products make the probe-box and real-box relaxations differ in shape.
-  Marked strict ``xfail`` so a fix of that gap announces itself.
+* GDPlib ``cstr`` under hull reaches the native spatial kernel on the default route
+  (#2142: the 1/yhat products used to make the probe-box and real-box relaxations
+  differ in shape; the producer now keeps row placeholders and the kernel has an
+  ``AffinePow`` term). The kernel solves the same relaxation, so cstr-hull's bound
+  does not move. (The retired ``DISCOPT_HULL_LIFTED_PERSPECTIVE`` reached the kernel
+  here by changing the rows and failed its §5 panel; see the audit.)
 """
 
 from __future__ import annotations
 
 import discopt.modeling as dm
+import numpy as np
 import pytest
 from discopt._relax.gdp_reformulate import _is_linear, reformulate_gdp
 from gdp_differential import Shape, run_shape
@@ -91,7 +95,10 @@ EQ_SHAPES = [
 ]
 
 
-def test_nonlinear_equalities_keep_the_perspective():
+def test_nonlinear_equalities_keep_the_perspective(monkeypatch):
+    # Pinned to the eps-perspective: DISCOPT_HULL_EXACT_PERSPECTIVE is default ON
+    # since #2142 and would homogenize these bilinear rows.
+    monkeypatch.setenv("DISCOPT_HULL_EXACT_PERSPECTIVE", "0")
     for build in (_bilinear_eq, _bilinear_eq_offset):
         rows = _nonlinear_rows(reformulate_gdp(build(), "hull"))
         assert rows and all("/" in str(c.body) for c in rows), (build.__name__, rows)
@@ -100,6 +107,7 @@ def test_nonlinear_equalities_keep_the_perspective():
 def test_retired_flag_is_inert(monkeypatch):
     """Setting the retired env var changes nothing (no dead flag left behind)."""
     monkeypatch.setenv("DISCOPT_HULL_PLAIN_EQUALITY", "1")
+    monkeypatch.setenv("DISCOPT_HULL_EXACT_PERSPECTIVE", "0")  # the eps form (#2142)
     rows = _nonlinear_rows(reformulate_gdp(_bilinear_eq(), "hull"))
     assert len(rows) == 2 and all("/" in str(c.body) for c in rows), rows
 
@@ -121,12 +129,20 @@ def test_hull_solve_agrees_with_big_m():
     assert r.objective == pytest.approx(ref.objective, abs=1e-5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#1917: the eps-perspective rows of cstr's rate law make the probe-box and "
-    "real-box relaxations differ in shape, so the native spatial kernel declines it",
-)
-def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
+class _ReachedProducer(Exception):
+    """Raised by the spy at the first producer call: the route is decided there."""
+
+
+def _cstr_hull_first_kernel_spec(monkeypatch):
+    """Solve GDPlib cstr under hull up to the solver's FIRST native-kernel spec build
+    and return that spec (``None`` = declined). The solve stops there: what happens
+    after is the kernel's search (or the Python tree's), not the routing under test.
+
+    The time limit is only a backstop. It used to be 5 s, which on this model ends
+    the solve before the producer is ever asked (measured 2026-11-04: no call at
+    5 s), so the strict xfail this replaced passed on the missing call as well as
+    on the decline.
+    """
     pytest.importorskip("pyomo")
     cstr = pytest.importorskip("gdplib.cstr")
     import discopt._relax.spatial_producer as sp
@@ -137,15 +153,42 @@ def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
     specs = []
 
     def spy(*a, **k):
-        out = orig(*a, **k)
-        specs.append(out)
-        return out
+        specs.append(orig(*a, **k))
+        raise _ReachedProducer
 
     monkeypatch.setattr(sp, "build_spatial_kernel_spec", spy)
     for name in dir(solver):
         if getattr(solver, name, None) is orig:
             monkeypatch.setattr(solver, name, spy)
     model = convert_pyomo_gdp(cstr.build_model()).model
-    model.solve(gdp_method="hull", time_limit=5)
-    assert specs, "the spec producer was never called"
-    assert specs[0] is not None, "the native kernel declined cstr under hull"
+    with pytest.raises(_ReachedProducer):
+        model.solve(gdp_method="hull", time_limit=300)
+    assert len(specs) == 1
+    return specs[0]
+
+
+@pytest.mark.slow  # ~13 s locally (presolve before the producer); ~3x that on CI
+def test_cstr_hull_reaches_the_native_kernel(monkeypatch):
+    """#2142, the DEFAULT path: the homogenized hull (``DISCOPT_HULL_EXACT_PERSPECTIVE``,
+    default ON since performance-plan section 116) gives the kernel a division-free
+    spec -- no ``AffinePow`` (``yc**-1``) terms, and every finite global bound within
+    1e4 (the eps-perspective's lifted bounds reach 1e27, section 114)."""
+    monkeypatch.delenv("DISCOPT_HULL_EXACT_PERSPECTIVE", raising=False)
+    spec = _cstr_hull_first_kernel_spec(monkeypatch)
+    assert spec is not None, "the native kernel declined cstr under hull"
+    assert int((spec["term_kind"] == 4).sum()) == 0
+    lo, hi = np.asarray(spec["global_lo"]), np.asarray(spec["global_hi"])
+    fin = np.concatenate([lo[np.isfinite(lo)], hi[np.isfinite(hi)]])
+    assert float(np.max(np.abs(fin))) <= 1e4
+
+
+@pytest.mark.slow
+def test_cstr_eps_hull_reaches_the_native_kernel(monkeypatch):
+    """#2142, the ``=0`` opt-out: on the real box the eps-perspective's ``yc**-1``
+    chains reach ``_BIG`` and ``_emit_mccormick`` drops 44 rows the probe box keeps;
+    the producer holds placeholders for them and hands the ``yc**-1`` atoms to the
+    kernel as ``AffinePow`` terms, so the spec is accepted."""
+    monkeypatch.setenv("DISCOPT_HULL_EXACT_PERSPECTIVE", "0")
+    spec = _cstr_hull_first_kernel_spec(monkeypatch)
+    assert spec is not None, "the native kernel declined cstr under hull"
+    assert int((spec["term_kind"] == 4).sum()) == 20

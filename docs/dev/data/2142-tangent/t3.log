@@ -1,0 +1,16 @@
+boxes 95; SCIP propagation of K proves empty: 0; tightens >=1 column of K: 44 (columns total 879)
+kernel fixpoint re-run on K tightens >=1 column: 44; proves empty: 0
+SCIP(LP) tighter than ours(K) by >1e-4: 31; SCIP infeasible: 1
+our LP on S'∩K closes 1.30655 / 1.33987 = 97.5% of the SCIP-vs-ours gap on those boxes
+  after: SCIP still tighter by >1e-4 on 11; ours(S') tighter than SCIP on 9 boxes overall
+  node   6000 ours(K) 0.2746 ours(S') 0.5891 scip 0.5891 S'-cols 26
+  node   3100 ours(K) 0.2203 ours(S') 0.4040 scip 0.4040 S'-cols 16
+  node   3500 ours(K) 0.2101 ours(S') 0.3110 scip 0.3110 S'-cols 16
+  node   8700 ours(K) 0.4706 ours(S') 0.5702 scip 0.5702 S'-cols 16
+  node  12300 ours(K) 0.8451 ours(S') 0.9411 scip 0.9411 S'-cols 26
+  node  19900 ours(K) 1.4102 ours(S') 1.5045 scip 1.4984 S'-cols 18
+  node   8400 ours(K) 0.4457 ours(S') 0.5274 scip 0.5274 S'-cols 49
+  node   5500 ours(K) 0.3322 ours(S') 0.3993 scip 0.3993 S'-cols 16
+  node  18900 ours(K) 1.3176 ours(S') 1.3665 scip 1.3663 S'-cols 24
+  node  18500 ours(K) 1.2425 ours(S') 1.2884 scip 1.2884 S'-cols 26
+executed comparisons: 95
