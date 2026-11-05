@@ -1287,6 +1287,35 @@ and is re-written by P4.1.**
   7. **P4.8 — dimension-reducing presolve:** helps both classes, largest effort.
   8. **P4.7 — conflict analysis:** targets infeasibility-heavy search (`enlight_hard`,
      no-incumbent rows); 3/24.
+- [ ] **P4.0 — Spend the budget: re-enter on run 1's leftover.** Scope:
+  `solver._solve_milp_simplex` (#698 re-entry gate), flag `DISCOPT_MILP_REENTRY_SPEND`
+  (default OFF, audit row). The legacy gate re-enters only when the remainder exceeds run
+  1's stall slice; below the 10 s cap the slice is half the remaining time, so on any
+  `time_limit` under ~21 s the re-entry never runs (P4.1: 20/24 uncertified rows returned
+  at 10.1-11.1 s of 20 s). The flag re-enters whenever `_MILP_REENTRY_MIN_S` (1 s)
+  remains; adoption unchanged; `deterministic` keeps the legacy gate (#1116).
+  Hypothesis: strictly better primal or dual on >= 3 of the 24 rows, no row worse beyond
+  noise. Kill: < 3 → retire flag + implementation. Regime: bound-changing.
+  **Entry (2026-11-05, `docs/dev/data/highs-parity/p4.0/`, `p40_reentry_entry.py`, 20 s,
+  OFF/ON interleaved, fresh subprocess per solve, load < 1.5):**
+  - *v1* (`entry_v1_bound_replaced.*`, 1 rep): executed 48, fired 20 (the 4 others have no
+    incumbent, or used the whole budget). primal+ 4, dual+ 6, **dual- 6**. The four
+    `mik-250-20-75-*` rows reached the optimum ON but their dual gap went 0.03 → 0.12.
+  - **Defect found (default path too):** the #698 adoption branch *replaced* run 1's bound
+    with run 2's whenever run 2 won on the primal side, though its comment (and the
+    `node_limit` branch beside it) keeps the tighter of two valid bounds. Fixed in
+    `e`-commit "P4.0 re-entry adoption keeps the tighter of the two bounds" (regression
+    test fails before / passes after). It is not flag-gated: it makes the code do what its
+    comment already stated, and the kept value is a bound the solve itself proved. It also
+    applies to the legacy re-entry at `time_limit` >= ~21 s.
+  - *v2* (`entry_v2.*`, with the fix, 2 reps): executed 96, fired 40. The four `mik` rows
+    go from primal gap 0.25-0.89 to <= 0.003 (`-1`, `-2` to the optimum) on **both**
+    reps, with the dual gap unchanged (|Δ| <= 5e-4, run-1 timing noise). Other
+    dual+/dual- verdicts are |Δ| <= 0.015 in both directions on rows whose OFF arm also
+    varies between reps (`fiber`, `khb05250`, `jijia`, `neos17`): noise. Cert-clean on
+    all 144 MIPLIB rows of v1+v2 (no bound past the optimum, no incumbent below it).
+  - Entry bar met (4 rows strictly better primal, reproducibly). Next: the §5 corpus panel
+    (`flag_onoff_corpus_panel.py --time-limit 20 --reps 2`; the flag is inert above ~21 s).
 - [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a
