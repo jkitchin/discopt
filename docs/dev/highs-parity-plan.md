@@ -1210,12 +1210,74 @@ population *by magnitude* (> 1 % relative, exceeding the OFF arm's own rep-to-re
 the A14 lesson). Each graduation or retirement adds its audit row. **Order is provisional
 and is re-written by P4.1.**
 
-- [ ] **P4.1 — Re-attribution at HEAD.** Scope: `miplib_panel.py attribute`. On P0.3's
+- [x] **P4.1 — Re-attribution at HEAD.** Scope: `miplib_panel.py attribute`. On P0.3's
   unsolved R instances, classify at `gap_tol=1e-4`: no incumbent / incumbent short by
   (opt − inc)/(1+|opt|) / bound short by (opt − bound)/(1+|opt|) at 20 s and 60 s (the
   A5/A14 method, both budgets so the "frozen primal" finding is re-tested after #2107's
   c-MIR). Done: a table over every unsolved instance, and the **order of P4.2–P4.8
   rewritten here** with one line of justification each. Kill: none.
+  **Result (2026-11-05).** `miplib_panel.py attribute` (new; `classify` unit-tested):
+  the 24 instances P0.3's Rust route left uncertified, each re-solved on the Rust route
+  at 20 s and 60 s in a fresh process, classed against the published optimum by the
+  larger shortfall, `|opt − v| / (1 + |opt|)` (`p4.1/attribution.json`, 48 executed):
+
+  | instance | n / m / int | 20 s: class, primal, dual, wall | 60 s: class, primal, dual, term |
+  |---|---|---|---|
+  | `neos-1425699` | 105 / 89 / 85 | no-incumbent, —, 4.2e-05, 20.1 s | no-incumbent, —, 4.2e-05, time_limit |
+  | `mik-250-20-75-5` | 270 / 195 / 250 | primal, 0.514, 0.031, 10.6 s | dual, 5.0e-04, 0.101, time_limit |
+  | `neos-911970` | 888 / 107 / 840 | primal, 3.08, 0.565, 10.4 s | primal, 3.08, 0.565, time_limit |
+  | `mik-250-20-75-3` | 270 / 195 / 250 | primal, 0.248, 0.0292, 10.6 s | dual, 0.0026, 0.0852, time_limit |
+  | `fiber` | 1298 / 363 / 1254 | primal, 0.548, 0.541, 10.8 s | primal, 0.548, 0.276, time_limit |
+  | `khb05250` | 1350 / 101 / 24 | primal, 0.0439, 0.0244, 11.1 s | solved, 0, 1.5e-12, gap |
+  | `nexp-50-20-1-1` | 490 / 540 / 245 | primal, 0.633, 0.4, 10.3 s | primal, 0.633, 0.367, time_limit |
+  | `mik-250-20-75-2` | 270 / 195 / 250 | primal, 0.411, 0.0334, 10.6 s | dual, 1.4e-16, 0.1, time_limit |
+  | `nexp-50-20-4-2` | 1225 / 540 / 980 | dual, 0.125, 0.292, 10.5 s | dual, 0.125, 0.194, time_limit |
+  | `gt2` | 188 / 29 / 188 | primal, 0.139, 9.9e-13, 20.1 s | primal, 0.139, 9.9e-13, time_limit |
+  | `mik-250-20-75-1` | 270 / 195 / 250 | primal, 0.889, 0.0332, 10.7 s | dual, 0, 0.117, time_limit |
+  | `enlight_hard` | 200 / 100 / 200 | no-incumbent, —, 0.289, 20.0 s | no-incumbent, —, 0.263, time_limit |
+  | `sp150x300d` | 600 / 450 / 300 | dual, 0.343, 0.429, 10.5 s | dual, 0.343, 0.386, time_limit |
+  | `neos17` | 535 / 486 / 300 | primal, 0.214, 0.094, 10.4 s | primal, 0.214, 0.0459, time_limit |
+  | `beavma` | 390 / 372 / 195 | primal, 0.412, 0.396, 10.3 s | primal, 0.412, 0.367, time_limit |
+  | `neos-3611447-jijia` | 472 / 377 / 85 | primal, 0.241, 0.0278, 10.2 s | primal, 0.241, 0.0278, node_limit |
+  | `neos-3610051-istra` | 805 / 709 / 76 | primal, 0.12, 0.02, 10.4 s | primal, 0.12, 0.02, node_limit |
+  | `neos-3611689-kaihu` | 421 / 323 / 88 | primal, 0.217, 0.025, 10.2 s | primal, 0.217, 0.00833, time_limit |
+  | `neos-3610040-iskar` | 430 / 335 / 85 | primal, 0.132, 0.0263, 10.2 s | primal, 0.132, 0.0263, node_limit |
+  | `neos-2624317-amur` | 524 / 342 / 524 | no-incumbent, —, 0.779, 20.0 s | no-incumbent, —, 0.779, time_limit |
+  | `b-ball` | 100 / 30 / 88 | dual, 3.1e-15, 0.12, 10.1 s | dual, 3.1e-15, 0.12, time_limit |
+  | `bppc8-02` | 232 / 59 / 230 | dual, 0.0118, 0.0404, 10.4 s | dual, 4.5e-16, 0.0404, time_limit |
+  | `gsvm2rl3` | 241 / 180 / 60 | primal, 0.187, 0.114, 10.3 s | primal, 0.187, 0.0932, time_limit |
+  | `neos-3118745-obra` | 1131 / 144 / 1130 | primal, 0.215, 0.00391, 10.5 s | primal, 0.215, 0.00391, time_limit |
+
+  - **Counts.** 20 s: primal 17, dual 4, no-incumbent 3. 60 s: primal 12, dual 8,
+    no-incumbent 3, solved 1 (`khb05250`, 37 s).
+  - **The 20 s budget is half spent (new finding).** 20/24 stop at ~10.5 s of 20 s,
+    uncertified, `termination=None`. `_solve_milp_simplex` gives run 1 a #291 stall
+    slice of `min(0.5·remaining, 10 s)` and re-enters (#698) only when
+    `remaining > slice` -- at `time_limit=20` that is 9.6 s ≤ 9.9 s, so re-entry is
+    skipped and ~48 % of the budget is discarded; at 60 s re-entry runs. Every
+    `time_limit` up to ~21 s is affected, including P0.3's 20 s R1 measurement.
+  - **Frozen primal re-confirmed after #2107.** All 12 primal-class rows at 60 s hold
+    the *same* incumbent at 20 s and 60 s; the dual bound moves, the incumbent does
+    not. `mik-250-20-75-{1,2,3,5}` reach the optimum (or within 0.3 %) by 60 s and
+    become dual-class (bound 8–12 % short).
+  - **No incumbent:** `neos-1425699`, `enlight_hard`, `neos-2624317-amur` at both
+    budgets.
+  **Re-ordered P4 (from this data):**
+  1. **P4.0 (new) — spend the budget:** re-enter on an uncertified `feasible` whenever
+     any useful time remains (not only when it exceeds run 1's slice); 20/24 rows lose
+     ~half their time at ≤ 20 s. Cheapest, broadest; flagged + §5 panel (it changes
+     the search, though adoption is only on certification or strict improvement).
+  2. **P4.6 — feasibility jump + shifting:** 12/24 primal-dominated at 60 s with the
+     incumbent frozen 20 → 60 s, plus 3 with none -- the largest class.
+  3. **P4.2 — RENS (pre-registered bar):** same class as P4.6, an existing mechanism.
+  4. **P4.4 — tableau c-MIR / lifted cover:** 8/24 dual-dominated at 60 s, the `mik`
+     family's bound 8–12 % short with the optimum in hand.
+  5. **P4.3 — cut repair:** same dual class, cheaper than P4.4 if cuts are being
+     dropped on cleanup.
+  6. **P4.5 — root restart:** dual class; after P4.3/P4.4 change the root.
+  7. **P4.8 — dimension-reducing presolve:** helps both classes, largest effort.
+  8. **P4.7 — conflict analysis:** targets infeasibility-heavy search (`enlight_hard`,
+     no-incumbent rows); 3/24.
 - [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a
