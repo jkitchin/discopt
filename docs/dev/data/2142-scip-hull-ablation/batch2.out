@@ -6,3 +6,4 @@ DONE emu_nonlinprop_off_20k
 DONE nopre_noconf_20k
 DONE conf_graphonly
 DONE conf_dualonly
+DONE conf_nolocalrows
