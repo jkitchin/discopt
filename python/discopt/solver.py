@@ -39629,7 +39629,17 @@ def _solve_milp_simplex(
                     status = _status2
                     x_struct = _x2
                     obj = _obj2
-                    bound = _bound2
+                    # Both runs' bounds are valid lower bounds on the same problem
+                    # (the comment above): keep the tighter. Replacing it threw run
+                    # 1's away whenever run 2 won on the primal side -- measured
+                    # (highs-parity P4.0 entry, mik-250-20-75-{1,2,3,5} at 20 s): the
+                    # dual gap went 0.03 -> 0.12 while the incumbent reached the
+                    # optimum, because the restarted tree had not caught up.
+                    # A certifying run 2 closes its own gap; its bound stands as is.
+                    if _certifies or (
+                        np.isfinite(_bound2) and (not np.isfinite(bound) or _bound2 > bound)
+                    ):
+                        bound = _bound2
                     nodes = nodes + _nodes2
                     # Accumulated in the same branch as ``nodes`` and nowhere
                     # else: a work metric whose numerator counts the re-entry's

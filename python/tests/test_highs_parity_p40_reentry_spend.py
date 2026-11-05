@@ -101,3 +101,39 @@ def test_flag_spends_the_leftover(monkeypatch):
     # The re-entry got less than run 1's slice: exactly the case the legacy gate skips.
     assert seen["slices"][1] < seen["slices"][0], seen["slices"]
     assert r.objective == pytest.approx(32.0)  # the re-entry's better point
+
+
+def test_adopted_reentry_keeps_the_tighter_bound(monkeypatch):
+    """Run 2 wins on the primal side with a LOOSER bound: run 1's bound is kept.
+
+    Both are valid lower bounds on the same problem. The adoption used to replace the
+    bound outright (P4.0 entry: mik-250-20-75-* dual gap 0.03 -> 0.12 with the
+    incumbent at the optimum). Legacy re-entry path (flag OFF, ample time).
+    """
+    monkeypatch.delenv(FLAG, raising=False)
+    real = _rust.solve_milp_csc_py
+    seen = {"n": 0, "b1": None}
+
+    def scripted(*a, **kw):
+        if a[12] <= 1000:
+            return real(*a, **kw)
+        seen["n"] += 1
+        out = real(*a, **kw)
+        status, x, obj, bound, nodes, iters = out
+        if seen["n"] == 1:
+            b = list(a)
+            xl = np.array(b[7], dtype=np.float64)
+            xu = np.array(b[8], dtype=np.float64)
+            xl[: WORSE.size], xu[: WORSE.size] = WORSE, WORSE
+            b[7], b[8] = np.ascontiguousarray(xl), np.ascontiguousarray(xu)
+            w = real(*b, **kw)
+            seen["b1"] = bound  # the real (tight, valid) bound
+            return ("feasible", w[1], w[2], bound, nodes, iters)
+        return ("feasible", x, obj, bound - 10.0, nodes, iters)  # looser, still valid
+
+    monkeypatch.setattr(_rust, "solve_milp_csc_py", scripted)
+    r = _milp_route_model().solve(time_limit=60)
+    assert seen["n"] == 2, "the re-entry did not run -- the probe measured nothing"
+    assert r.objective == pytest.approx(32.0)
+    # maximize: the engine's internal bound is the negated user bound.
+    assert r.bound == pytest.approx(-seen["b1"]), (r.bound, seen["b1"])
