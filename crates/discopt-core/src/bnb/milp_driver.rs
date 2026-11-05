@@ -1493,33 +1493,13 @@ pub fn solve_milp_node_hooked(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
-    // #1296: decided on the caller's rows, before any cut changes them, over the
-    // box those rows imply (#2107; see `tiny_entry_gate_box`).
-    let (mut gate_l, mut gate_u) = if noise_relax_enabled() {
-        tiny_entry_gate_box(&csc_w, m, n, l, u, b, opts)
-    } else {
-        (l.to_vec(), u.to_vec())
-    };
-    // #2107: a noise entry whose effect is negligible on its row's own scale is
-    // relaxed into the row's slack rather than left to withdraw the certificate.
-    let mut csc_w = csc_w;
-    let mut l_relaxed: Option<Vec<f64>> = None;
-    let mut u_relaxed: Option<Vec<f64>> = None;
-    let mut n_relaxed = 0u64;
-    if noise_relax_enabled() {
-        if let Some(r) = relax_noise_entries(&csc_w, m, n, c, l, u, b, &gate_l, &gate_u, opts) {
-            n_relaxed = r.relaxed as u64;
-            csc_w = r.csc;
-            (gate_l, gate_u) = tiny_entry_gate_box(&csc_w, m, n, &r.l, &r.u, b, opts);
-            l_relaxed = Some(r.l);
-            u_relaxed = Some(r.u);
-        }
-    }
-    let l = l_relaxed.as_deref().unwrap_or(l);
-    let u = u_relaxed.as_deref().unwrap_or(u);
-    let unscalable = has_unscalable_tiny_entry(&csc_w, m, n, &gate_l, &gate_u, b);
-    let mut res =
-        solve_milp_node_search(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, node);
+    let prep = prepare_entry(csc_w, m, n, c, l, u, b, opts);
+    let l = prep.l.as_deref().unwrap_or(l);
+    let u = prep.u.as_deref().unwrap_or(u);
+    let (n_relaxed, unscalable) = (prep.n_relaxed, prep.unscalable);
+    let mut res = solve_milp_node_search(
+        prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
+    );
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
     if unscalable {
@@ -1813,6 +1793,149 @@ fn withdraw_certificate(res: &mut MilpResult) {
     res.bound = f64::NEG_INFINITY;
 }
 
+/// The root box the search starts from: integer columns rounded to integer bounds
+/// (#1287), then -- when `opts.presolve` -- root presolve's sound bound tightening.
+/// `None` when either step proves the box empty.
+struct RootBox {
+    base_l: Vec<f64>,
+    base_u: Vec<f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn root_box(
+    csc_w: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+    is_int: &[bool],
+    is_int_full: &[bool],
+) -> Option<RootBox> {
+    let ns = opts.n_struct;
+    // #1287: integer columns take integer bounds before anything reads them.
+    let mut l_round = l.to_vec();
+    let mut u_round = u.to_vec();
+    if !round_integer_bounds(&mut l_round[..ns], &mut u_round[..ns], is_int) {
+        return None;
+    }
+    // --- presolve: sound, dimension-preserving root bound tightening ---
+    // Only narrows bounds (interval/FBBT contraction), so it never cuts a
+    // feasible solution and needs no postsolve; the tightened bounds seed both
+    // the tree's global bounds and the node LPs. A proven-empty box ⇒ infeasible.
+    let (base_l, base_u) = if opts.presolve {
+        // cert:T0.3 — time root presolve bound reduction.
+        let pr = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
+            tighten_bounds_csc(
+                csc_w,
+                m,
+                n,
+                &l_round,
+                &u_round,
+                b,
+                is_int_full,
+                opts.simplex.tol,
+            )
+        };
+        if pr.infeasible {
+            return None;
+        }
+        (pr.l, pr.u)
+    } else {
+        (l_round, u_round)
+    };
+    Some(RootBox { base_l, base_u })
+}
+
+/// What a solve's root preparation concludes, without searching (highs-parity P3.1,
+/// the handle's `presolve_only()`): the same #2107 entry relaxation
+/// ([`prepare_entry`]), #1287 integer rounding and root presolve the search runs,
+/// with root presolve forced on. `true` means that box is proven empty -- the
+/// verdict a `presolve=true` solve returns as `Infeasible` with zero nodes;
+/// `false` decides nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn milp_presolve_verdict(
+    csc: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+) -> bool {
+    let mut o = opts.clone();
+    o.presolve = true;
+    let prep = prepare_entry(csc, m, n, c, l, u, b, &o);
+    let l = prep.l.as_deref().unwrap_or(l);
+    let u = prep.u.as_deref().unwrap_or(u);
+    let ns = o.n_struct;
+    let mut is_int = vec![false; ns];
+    for &j in &o.integer_cols {
+        if j < ns {
+            is_int[j] = true;
+        }
+    }
+    let mut is_int_full = vec![false; n];
+    is_int_full[..ns].copy_from_slice(&is_int);
+    root_box(&prep.csc, m, n, l, u, b, &o, &is_int, &is_int_full).is_none()
+}
+
+/// The #2107 / #1296 entry stage of [`solve_milp_node_hooked`]: the noise-entry
+/// relaxation (when enabled) and the unscalable-entry gate, on the caller's rows.
+struct PreparedEntry {
+    csc: SparseCols,
+    l: Option<Vec<f64>>,
+    u: Option<Vec<f64>>,
+    n_relaxed: u64,
+    unscalable: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_entry(
+    csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &MilpOptions,
+) -> PreparedEntry {
+    // #1296: decided on the caller's rows, before any cut changes them, over the
+    // box those rows imply (#2107; see `tiny_entry_gate_box`).
+    let (mut gate_l, mut gate_u) = if noise_relax_enabled() {
+        tiny_entry_gate_box(&csc_w, m, n, l, u, b, opts)
+    } else {
+        (l.to_vec(), u.to_vec())
+    };
+    // #2107: a noise entry whose effect is negligible on its row's own scale is
+    // relaxed into the row's slack rather than left to withdraw the certificate.
+    let mut csc_w = csc_w;
+    let mut l_relaxed: Option<Vec<f64>> = None;
+    let mut u_relaxed: Option<Vec<f64>> = None;
+    let mut n_relaxed = 0u64;
+    if noise_relax_enabled() {
+        if let Some(r) = relax_noise_entries(&csc_w, m, n, c, l, u, b, &gate_l, &gate_u, opts) {
+            n_relaxed = r.relaxed as u64;
+            csc_w = r.csc;
+            (gate_l, gate_u) = tiny_entry_gate_box(&csc_w, m, n, &r.l, &r.u, b, opts);
+            l_relaxed = Some(r.l);
+            u_relaxed = Some(r.u);
+        }
+    }
+    let unscalable = has_unscalable_tiny_entry(&csc_w, m, n, &gate_l, &gate_u, b);
+    PreparedEntry {
+        csc: csc_w,
+        l: l_relaxed,
+        u: u_relaxed,
+        n_relaxed,
+        unscalable,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_milp_node_search(
     mut csc_w: SparseCols,
@@ -1866,10 +1989,10 @@ fn solve_milp_node_search(
     let mut is_int_full = vec![false; n];
     is_int_full[..ns].copy_from_slice(&is_int);
 
-    // #1287: integer columns take integer bounds before anything reads them.
-    let mut l_round = l.to_vec();
-    let mut u_round = u.to_vec();
-    if !round_integer_bounds(&mut l_round[..ns], &mut u_round[..ns], &is_int) {
+    // #1287 integer rounding, then root presolve: one helper, shared with
+    // `milp_presolve_verdict` (highs-parity P3.1) so a handle's `presolve_only()`
+    // reports exactly the verdict this search would reach.
+    let Some(rb) = root_box(&csc_w, m, n, l, u, b, opts, &is_int, &is_int_full) else {
         return MilpResult {
             status: MilpStatus::Infeasible,
             x: vec![0.0; ns],
@@ -1882,37 +2005,8 @@ fn solve_milp_node_search(
             node_calls: 0,
             node_cuts_added: 0,
         };
-    }
-    let (l, u) = (l_round.as_slice(), u_round.as_slice());
-
-    // --- presolve: sound, dimension-preserving root bound tightening ---
-    // Only narrows bounds (interval/FBBT contraction), so it never cuts a
-    // feasible solution and needs no postsolve; the tightened bounds seed both
-    // the tree's global bounds and the node LPs. A proven-empty box ⇒ infeasible.
-    let (base_l, base_u) = if opts.presolve {
-        // cert:T0.3 — time root presolve bound reduction.
-        let pr = {
-            let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
-            tighten_bounds_csc(&csc_w, m, n, l, u, b, &is_int_full, opts.simplex.tol)
-        };
-        if pr.infeasible {
-            return MilpResult {
-                status: MilpStatus::Infeasible,
-                x: vec![0.0; ns],
-                obj: f64::INFINITY,
-                bound: f64::INFINITY,
-                nodes: 0,
-                lp_iters: 0,
-                lazy_calls: 0,
-                lazy_requeues: 0,
-                node_calls: 0,
-                node_cuts_added: 0,
-            };
-        }
-        (pr.l, pr.u)
-    } else {
-        (l.to_vec(), u.to_vec())
     };
+    let RootBox { base_l, base_u } = rb;
 
     let glb = base_l[..ns].to_vec();
     let gub = base_u[..ns].to_vec();
@@ -7533,27 +7627,27 @@ mod tests {
 /// bit-identical to the dense path (same status / obj / bound / node count) — the
 /// invariant that keeps the representation change from perturbing any dual bound.
 #[cfg(test)]
-mod sparse_milp_diff {
+pub(crate) mod sparse_milp_diff {
     use super::*;
     use crate::lp::simplex::sparse::SparseCols;
 
     /// One MILP in the panel. Owns its data so the borrowing [`LpView`] can be
     /// rebuilt per solve.
-    struct Case {
-        name: &'static str,
-        a: Vec<f64>, // row-major, m*n
-        m: usize,
-        n: usize,
-        c: Vec<f64>,
-        l: Vec<f64>,
-        u: Vec<f64>,
-        b: Vec<f64>,
-        ns: usize,
-        int_cols: Vec<usize>,
+    pub(crate) struct Case {
+        pub(crate) name: &'static str,
+        pub(crate) a: Vec<f64>, // row-major, m*n
+        pub(crate) m: usize,
+        pub(crate) n: usize,
+        pub(crate) c: Vec<f64>,
+        pub(crate) l: Vec<f64>,
+        pub(crate) u: Vec<f64>,
+        pub(crate) b: Vec<f64>,
+        pub(crate) ns: usize,
+        pub(crate) int_cols: Vec<usize>,
     }
 
     impl Case {
-        fn opts(&self) -> MilpOptions {
+        pub(crate) fn opts(&self) -> MilpOptions {
             MilpOptions {
                 n_struct: self.ns,
                 integer_cols: self.int_cols.clone(),
@@ -7625,7 +7719,7 @@ mod sparse_milp_diff {
 
     /// Panel: pure-LP, small binary knapsack, general integer, infeasible,
     /// unbounded, and a cuts-firing knapsack (branches + fires GMI cuts).
-    fn panel() -> Vec<Case> {
+    pub(crate) fn panel() -> Vec<Case> {
         vec![
             // pure LP: min -x0 s.t. x0 + s = 1, x0 in [0,1] continuous -> -1.
             Case {

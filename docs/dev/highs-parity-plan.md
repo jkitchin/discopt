@@ -1020,7 +1020,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
 
 ### Phase 3 — persistent MILP handle and IIS (R5)
 
-- [ ] **P3.1 — Rust `MilpHandle`.** Scope: new `crates/discopt-python/src/milp_handle.rs`,
+- [x] **P3.1 — Rust `MilpHandle`.** Scope: new `crates/discopt-python/src/milp_handle.rs`,
   `milp_driver.rs` (`MilpOptions.presolve: bool` already exists, `:473`, "root
   feasibility-based bound tightening"; expose it per solve on the handle),
   `python/discopt/solvers/milp_handle.py`. A pyclass holding the CSC problem with `change_col_bounds(idx, lo, hi)`,
@@ -1032,6 +1032,35 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   Kill: none — this is scaffolding; if the handle cannot avoid touching MINLP-shared
   code (`lp/simplex/*`, `tree_manager.rs`), say which code and stop (owner froze MINLP
   code). Regime: bound-neutral.
+  **Result (2026-11-05): done; no MINLP-shared code touched** (`lp/simplex/*`,
+  `tree_manager.rs` unchanged).
+  - `discopt-core` `bnb/milp_handle.rs`: `MilpHandle` owns the equality standard form
+    and edits it in place (`change_col_bounds`, `change_integrality`, `set_solution`);
+    `solve` calls `solve_milp_node_hooked` -- the function `solve_milp_csc_py` runs --
+    with no hooks on the current arrays, so each solve is a fresh driver run (no warm
+    start carried; the handle saves marshaling, not search). `presolve_only` calls the
+    new `milp_driver::milp_presolve_verdict`, which shares the driver's own entry stage
+    (`prepare_entry`: #2107 noise relaxation, #1296 gate) and root stage (`root_box`:
+    #1287 rounding + root presolve) with the search -- both extracted from
+    `solve_milp_node_hooked` / `solve_milp_node_search` as a bound-neutral refactor
+    (the two merged early `Infeasible` returns were identical structs).
+  - `discopt-python` `milp_handle.rs`: the `MilpHandle` pyclass; its options come from
+    `lp_bindings::milp_options`, now also what `solve_milp_csc_py` uses, so the same
+    keywords give the same `MilpOptions` by construction.
+  - `python/discopt/solvers/milp_handle.py`: the IIS engine's shape -- ranged rows
+    `row_lo <= A x <= row_hi`, one logical per row (`A_i x - s_i = 0`,
+    `s_i ∈ [row_lo_i, row_hi_i]`), so `change_row_bounds` is a logical's box and
+    dropping a row is `(-inf, inf)`.
+  - Evidence: Rust test `handle_after_toggles_matches_a_fresh_solve_bit_for_bit` --
+    the `sparse_milp_diff` panel + 20 random toggle sequences, **156 comparisons, all
+    bit-identical** (status, obj, bound, nodes, lp_iters, x; statuses Optimal /
+    Infeasible / Unbounded), and `presolve_only = true` ⇒ the `presolve=true` solve is
+    `Infeasible` with 0 nodes; Python `test_highs_parity_p31_milp_handle.py` -- 20
+    random toggle sequences, **120 comparisons against a fresh `solve_milp_csc_py`,
+    all bit-identical, and 120/120 toggled problems' verdict and optimum equal to
+    HiGHS** (the ranged-row layout is the intended problem). Gates: `cargo test` 988/0,
+    clippy `-D warnings` on `discopt-core` (both feature sets), smoke 4506, adversarial
+    19, the 71 Rust-MILP-route test files 1101 passed.
 - [ ] **P3.2 — `_iis_milp._Engine` on the handle, HiGHS as the opt-in.** Scope:
   `_iis_milp.py:111-470`; new `iis_engine="rust"|"highs"` kwarg on `milp_iis`/`compute_iis`
   (default `rust`), `_solve`'s presolve ladder mapped to `presolve_only()` →
