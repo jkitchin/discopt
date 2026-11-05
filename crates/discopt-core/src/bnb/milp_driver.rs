@@ -2284,6 +2284,7 @@ fn solve_milp_node_search(
             {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 let before = cuts.len();
+                let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
                 cuts = cuts
                     .iter()
                     .filter_map(|c| {
@@ -2299,6 +2300,7 @@ fn solve_milp_node_search(
                             cut_max_len,
                             opts.simplex.tol,
                             1e7,
+                            gmi_repair,
                         )
                     })
                     .collect();
@@ -4525,6 +4527,14 @@ struct BaseRows {
     /// convention), or `None` when that column is not a clean singleton for the
     /// row — in which case rows are not substitutable and the cut is dropped.
     slack_coef: Vec<Option<f64>>,
+    /// highs-parity P4.4 (`DISCOPT_MILP_ROOT_GMI_REPAIR`): for each slack-range
+    /// column `ns + t`, the row it is a clean singleton slack OF and its
+    /// coefficient, whatever that row's index. `slack_coef` assumes column `ns + r`
+    /// is row `r`'s slack; when some rows have no slack the columns shift and a
+    /// cut over them was dropped although each such column still satisfies
+    /// `s = (b_q - A_q x) / alpha` for its own row `q`. Same two conditions as
+    /// `slack_coef`: a singleton, in a row holding no other base slack.
+    slack_row: Vec<Option<(usize, f64)>>,
 }
 
 impl BaseRows {
@@ -4592,12 +4602,23 @@ impl BaseRows {
                 slack_coef[r] = Some(vals[0]);
             }
         }
+        let slack_row = (ns..n_base)
+            .map(|j| {
+                let (rows, vals) = csc.col(j);
+                (rows.len() == 1
+                    && rows[0] < m_base
+                    && vals[0] != 0.0
+                    && slacks_in_row[rows[0]] == 1)
+                    .then(|| (rows[0], vals[0]))
+            })
+            .collect();
         BaseRows {
             ptr,
             idx,
             val,
             rhs: b[..m_base].to_vec(),
             slack_coef,
+            slack_row,
         }
     }
 }
@@ -4650,6 +4671,7 @@ fn substitute_slacks_to_structural(
     max_len: usize,
     tol: f64,
     max_dynamism: f64,
+    slack_by_column: bool,
 ) -> Option<GomoryCut> {
     let mut coeffs = vec![0.0f64; ns];
     let head = ns.min(cut.coeffs.len());
@@ -4661,10 +4683,22 @@ fn substitute_slacks_to_structural(
             continue;
         }
         if j < n_base {
-            let r = j - ns;
-            let Some(alpha) = base.slack_coef.get(r).copied().flatten() else {
-                crate::profile::incr(crate::profile::Ctr::SubstDropNoSlack);
-                return None;
+            let (r, alpha) = match base.slack_coef.get(j - ns).copied().flatten() {
+                Some(alpha) => (j - ns, alpha),
+                None => {
+                    // P4.4: the column is not row `j - ns`'s slack; when the flag is
+                    // on, rewrite it through the row it IS the slack of.
+                    match base.slack_row.get(j - ns).copied().flatten() {
+                        Some((q, alpha)) if slack_by_column => {
+                            crate::profile::incr(crate::profile::Ctr::SubstSlackByColumn);
+                            (q, alpha)
+                        }
+                        _ => {
+                            crate::profile::incr(crate::profile::Ctr::SubstDropNoSlack);
+                            return None;
+                        }
+                    }
+                }
             };
             let f = a / alpha;
             for k in base.ptr[r]..base.ptr[r + 1] {
@@ -8949,6 +8983,63 @@ mod root_cut_budget_tests {
     /// `x0 - 1e-12*x1 + 0.5*x2 >= 0.3` over `x1 in [2, 3]`: the middle term is far
     /// below `100 * tol * maxabs = 1e-7` and must be gone, with the right-hand side
     /// moved by exactly that term's maximum (`a * l1`).
+    /// highs-parity P4.4: when a row has no slack the slack columns shift, so column
+    /// `ns + 0` is the slack of row 1, not row 0. The legacy rewrite (`slack_coef`,
+    /// "column ns+r is row r's slack") drops a cut over it; with `slack_by_column` the
+    /// column is rewritten through its own row, `s = (b_1 - A_1 x) / alpha`.
+    #[test]
+    fn a_shifted_slack_column_is_rewritten_through_its_own_row() {
+        // r0: x0 + x1 = 1 (no slack); r1: x0 - x1 - s = 0, s = column 2 (= ns + 0).
+        let csc = SparseCols::from_dense(&[1.0, 1.0, 0.0, 1.0, -1.0, -1.0], 2, 3);
+        let base = BaseRows::build(&csc, 2, 3, 2, &[1.0, 0.0]);
+        assert_eq!(base.slack_coef, vec![None, None], "the legacy map declines");
+        assert_eq!(base.slack_row, vec![Some((1, -1.0))]);
+        // s >= 0.5, i.e. x0 - x1 >= 0.5 over the structural columns.
+        let cut = GomoryCut {
+            coeffs: vec![0.0, 0.0, 1.0],
+            rhs: 0.5,
+        };
+        let (x, lo, up) = ([0.8, 0.2, 0.6], [0.0, 0.0, 0.0], [1.0, 1.0, 1e20]);
+        let off = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            2,
+            3,
+            &x,
+            &lo,
+            &up,
+            64,
+            1e-9,
+            1e7,
+            false,
+        );
+        assert!(off.is_none(), "flag OFF: the cut is dropped, as before");
+        let on = substitute_slacks_to_structural(
+            &cut,
+            &base,
+            &[],
+            2,
+            3,
+            &x,
+            &lo,
+            &up,
+            64,
+            1e-9,
+            1e7,
+            true,
+        )
+        .expect("flag ON: rewritten");
+        // Same half-space on the feasible set: check it pointwise on r0/r1-feasible x.
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (x0, x1) = (t, 1.0 - t); // r0 holds; r1 defines s = x0 - x1
+            let s = x0 - x1;
+            let orig = s >= 0.5 - 1e-12;
+            let new = on.coeffs[0] * x0 + on.coeffs[1] * x1 >= on.rhs - 1e-12;
+            assert_eq!(orig, new, "t = {t}: {on:?}");
+        }
+    }
+
     #[test]
     fn the_small_coefficient_cleanup_only_relaxes_the_cut() {
         let base = BaseRows {
@@ -8957,6 +9048,7 @@ mod root_cut_budget_tests {
             val: vec![],
             rhs: vec![],
             slack_coef: vec![],
+            slack_row: vec![],
         };
         let cut = GomoryCut {
             coeffs: vec![1.0, -1e-12, 0.5],
@@ -8977,6 +9069,7 @@ mod root_cut_budget_tests {
             64,
             1e-9,
             1e7,
+            false,
         )
         .expect("the cleanup must rewrite this cut, not refuse it");
         assert_eq!(
@@ -9055,6 +9148,7 @@ mod root_cut_budget_tests {
             2,
             1e-9,
             1e7,
+            false,
         )
         .expect("two terms are at their maximising bound and can be relaxed");
         let nnz = out.coeffs.iter().filter(|v| **v != 0.0).count();
@@ -9133,6 +9227,7 @@ mod root_cut_budget_tests {
                 64,
                 1e-9,
                 1e7,
+                false,
             )
             .is_none(),
             "a cut on an unexpressible slack must be dropped, not rewritten"
@@ -9175,6 +9270,7 @@ mod root_cut_budget_tests {
             64,
             1e-9,
             1e7,
+            false,
         )
         .expect("cut is expressible over structural columns");
         assert_eq!(
@@ -9227,6 +9323,7 @@ mod root_cut_budget_tests {
             64,
             1e-9,
             1e7,
+            false,
         )
         .unwrap();
         // x0: 1 + 1*2 = 3; x1: 0 + 1*3 = 3; rhs: 4 + 1*6 = 10.
@@ -9264,6 +9361,7 @@ mod root_cut_budget_tests {
             64,
             1e-9,
             1e7,
+            false,
         )
         .unwrap();
         assert!((out.coeffs[0] - 2.0).abs() < 1e-12, "got {:?}", out.coeffs);

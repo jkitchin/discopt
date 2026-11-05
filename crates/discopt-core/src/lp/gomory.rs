@@ -66,6 +66,185 @@ const FRAC_MIN: f64 = 1e-3;
 /// valid.
 const MAX_ABS_COEFF: f64 = 1e7;
 
+/// `DISCOPT_MILP_ROOT_GMI_REPAIR=1` (highs-parity P4.4): separate GMI cuts off a SHORT
+/// basis by completing it with unit columns ([`separate_on_completed_basis`]); the
+/// MILP driver's slack rewrite reads the same flag (`milp_driver::gmi_repair_enabled`).
+/// Default OFF: bound-changing (it adds cuts where none were separated).
+pub(crate) fn gmi_repair_enabled() -> bool {
+    matches!(
+        std::env::var("DISCOPT_MILP_ROOT_GMI_REPAIR").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// Work cap (`m·k²` flops) for the dense rank-revealing completion; above it the
+/// structural matching is used (and a numerically singular result is declined).
+const DENSE_COMPLETION_WORK: f64 = 5e8;
+
+/// Rows NOT chosen as pivots by Gaussian elimination with partial (row) pivoting on
+/// the dense `m × k` block of the basic columns. Completing with those rows' unit
+/// columns gives a matrix that is nonsingular by construction: the eliminated block
+/// is triangular on the pivot rows and the unit columns cover the rest. `None` when
+/// some column has no pivot above `1e-9 · ‖column‖∞` (the columns are numerically
+/// dependent: no completion is safe).
+fn pivot_complement_rows(sp: &SparseCols, m: usize, basic: &[usize]) -> Option<Vec<usize>> {
+    let k = basic.len();
+    let mut mat = vec![0.0f64; m * k]; // column-major
+    for (c, &col) in basic.iter().enumerate() {
+        let (rows, vals) = sp.col(col);
+        for (&r, &v) in rows.iter().zip(vals) {
+            mat[c * m + r] = v;
+        }
+    }
+    let mut used = vec![false; m];
+    for c in 0..k {
+        let colmax = (0..m).map(|r| mat[c * m + r].abs()).fold(0.0, f64::max);
+        let (mut pr, mut pv) = (usize::MAX, 0.0f64);
+        for r in 0..m {
+            if !used[r] && mat[c * m + r].abs() > pv {
+                pv = mat[c * m + r].abs();
+                pr = r;
+            }
+        }
+        if pr == usize::MAX || pv <= 1e-9 * colmax.max(f64::MIN_POSITIVE) {
+            return None;
+        }
+        used[pr] = true;
+        let piv = mat[c * m + pr];
+        for c2 in c + 1..k {
+            let f = mat[c2 * m + pr] / piv;
+            if f != 0.0 {
+                for r in 0..m {
+                    if !used[r] || r == pr {
+                        mat[c2 * m + r] -= f * mat[c * m + r];
+                    }
+                }
+            }
+        }
+    }
+    Some((0..m).filter(|&r| !used[r]).collect())
+}
+
+/// Rows left uncovered by a maximum bipartite matching of the basic columns to the
+/// rows of their support (Kuhn's augmenting paths, iterative). `None` when some
+/// basic column cannot be matched (the columns are structurally dependent, so no
+/// completion is nonsingular).
+fn unmatched_rows(sp: &SparseCols, m: usize, basic: &[usize]) -> Option<Vec<usize>> {
+    let mut row_match: Vec<usize> = vec![usize::MAX; m]; // row -> index into `basic`
+    let mut seen: Vec<usize> = vec![usize::MAX; m]; // row -> stamp of the last search
+    for (k, &col) in basic.iter().enumerate() {
+        // Cheap greedy first: a free row in the column's support.
+        let (rows, _) = sp.col(col);
+        if let Some(&r) = rows.iter().find(|&&r| row_match[r] == usize::MAX) {
+            row_match[r] = k;
+            continue;
+        }
+        // Augmenting path search from column k: stack of (column index, next row pos).
+        let mut stack: Vec<(usize, usize)> = vec![(k, 0)];
+        let mut path_rows: Vec<usize> = Vec::new();
+        let mut found = false;
+        while let Some(&mut (ck, ref mut pos)) = stack.last_mut() {
+            let (rows, _) = sp.col(basic[ck]);
+            if *pos >= rows.len() {
+                stack.pop();
+                path_rows.pop();
+                continue;
+            }
+            let r = rows[*pos];
+            *pos += 1;
+            if seen[r] == k {
+                continue;
+            }
+            seen[r] = k;
+            path_rows.push(r);
+            if row_match[r] == usize::MAX {
+                found = true;
+                break;
+            }
+            stack.push((row_match[r], 0));
+        }
+        if !found {
+            return None;
+        }
+        // Flip the path: stack[i] column takes path_rows[i].
+        for (i, &(ck, _)) in stack.iter().enumerate() {
+            row_match[path_rows[i]] = ck;
+        }
+    }
+    Some((0..m).filter(|&r| row_match[r] == usize::MAX).collect())
+}
+
+/// GMI separation off a basis that is SHORT (fewer than `m` basic columns), as the
+/// primal export leaves it when a degenerate artificial cannot be pivoted out of a
+/// redundant row (measured on `fiber`: 213 of 363 rows at the root, so the root got
+/// no GMI cut at all).
+///
+/// The basis is completed with the unit columns `e_r` of the rows a maximum matching
+/// leaves uncovered, appended as extra columns fixed at `[0, 0]`, continuous and
+/// BASIC, and the ordinary separator runs on that augmented system. **Soundness:**
+/// every tableau row is a linear combination of the rows of `[A | E] (x, a) = b`; a
+/// feasible `x` of the original problem satisfies `A x = b`, i.e. the augmented system
+/// with `a = 0`, which is inside the appended columns' `[0, 0]` box. So each tableau
+/// identity, and every GMI cut derived from it, holds on the original feasible set.
+/// The appended columns are basic, so the separator never gives them a coefficient;
+/// the cuts are truncated back to the `n` original columns. `None` (decline, exactly
+/// as before) when the matching or the factorization fails.
+#[allow(clippy::too_many_arguments)]
+fn separate_on_completed_basis(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    basis: &Basis,
+    integrality: &[bool],
+    tol: f64,
+    max_dynamism: f64,
+) -> Option<Vec<GomoryCut>> {
+    let k = basis.basic_vars.len();
+    let missing = if (m as f64) * (k as f64) * (k as f64) <= DENSE_COMPLETION_WORK {
+        pivot_complement_rows(sp, m, &basis.basic_vars)?
+    } else {
+        unmatched_rows(sp, m, &basis.basic_vars)?
+    };
+    if missing.len() + basis.basic_vars.len() != m {
+        return None;
+    }
+    let (cp, ri, vv) = sp.raw();
+    let mut col_ptr = cp.to_vec();
+    let mut row_idx = ri.to_vec();
+    let mut vals = vv.to_vec();
+    for &r in &missing {
+        row_idx.push(r);
+        vals.push(1.0);
+        col_ptr.push(row_idx.len());
+    }
+    let sp2 = SparseCols::from_csc(col_ptr, row_idx, vals);
+    let n2 = n + missing.len();
+    let mut l2 = l[..n].to_vec();
+    let mut u2 = u[..n].to_vec();
+    l2.resize(n2, 0.0);
+    u2.resize(n2, 0.0);
+    let mut int2 = integrality[..n].to_vec();
+    int2.resize(n2, false);
+    let mut status = basis.col_status[..n].to_vec();
+    status.resize(n2, BASIC);
+    let mut basic = basis.basic_vars.clone();
+    basic.extend(n..n2);
+    let full = Basis {
+        col_status: status,
+        basic_vars: basic,
+    };
+    crate::profile::incr(crate::profile::Ctr::SepGomoryBasisCompleted);
+    let mut cuts = separate_gomory_cols(&sp2, m, n2, &l2, &u2, b, &full, &int2, tol, max_dynamism);
+    for c in &mut cuts {
+        debug_assert!(c.coeffs[n..].iter().all(|v| *v == 0.0));
+        c.coeffs.truncate(n);
+    }
+    Some(cuts)
+}
+
 /// A generated cut `coeffs · x ≥ rhs` over the standard-form variables.
 #[derive(Debug, Clone)]
 pub struct GomoryCut {
@@ -250,6 +429,22 @@ pub fn separate_gomory_cols(
     // (degenerate phase-2 artifact the caller could not complete) is unusable —
     // decline rather than index past it. Matches the old dense path's `None`.
     if basis.basic_vars.len() != m {
+        if basis.basic_vars.len() < m && gmi_repair_enabled() {
+            if let Some(done) = separate_on_completed_basis(
+                sp,
+                m,
+                n,
+                l,
+                u,
+                b,
+                basis,
+                integrality,
+                tol,
+                max_dynamism,
+            ) {
+                return done;
+            }
+        }
         crate::profile::incr(crate::profile::Ctr::SepGomoryShortBasis);
         return cuts;
     }
@@ -926,5 +1121,167 @@ mod tests {
             dot(&cut.coeffs, &pt),
             cut.rhs
         );
+    }
+
+    // ---- highs-parity P4.4: completing a short basis ----------------------------
+
+    #[test]
+    fn unmatched_rows_finds_the_redundant_row() {
+        // Rows 0 and 1 are identical; column 1 covers both, column 2 only row 0.
+        let a = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]; // 2x3 row-major
+        let sp = SparseCols::from_dense(&a, 2, 3);
+        assert_eq!(unmatched_rows(&sp, 2, &[1]).unwrap().len(), 1);
+        assert_eq!(
+            unmatched_rows(&sp, 2, &[1, 2]).unwrap(),
+            Vec::<usize>::new()
+        );
+        // Two columns with the same single-row support cannot both be matched.
+        let b = [1.0, 1.0, 0.0, 0.0];
+        let sp2 = SparseCols::from_dense(&b, 2, 2);
+        assert!(unmatched_rows(&sp2, 2, &[0, 1]).is_none());
+        // An augmenting path is needed: col0 rows {0,1}, col1 row {0}.
+        let c = [1.0, 1.0, 1.0, 0.0];
+        let sp3 = SparseCols::from_dense(&c, 2, 2);
+        assert_eq!(
+            unmatched_rows(&sp3, 2, &[0, 1]).unwrap(),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn a_short_basis_on_a_redundant_row_is_completed_and_its_cut_is_valid() {
+        // r0: x0 + x1 + s = 1.5 and r1, an exact duplicate (no slack of its own),
+        // x0, x1 in {0,1}, s >= 0. Rank 1, so a basis of real columns is at most 1
+        // long: the primal export leaves exactly this kind of short basis.
+        let a = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let sp = SparseCols::from_dense(&a, 2, 3);
+        let (l, u, b) = ([0.0, 0.0, 0.0], [1.0, 1.0, 1e20], [1.5, 1.5]);
+        let integrality = [true, true, false];
+        let short = Basis {
+            col_status: vec![AT_UPPER, BASIC, AT_LOWER], // x = (1, 0.5, 0)
+            basic_vars: vec![1],
+        };
+        let cuts =
+            separate_on_completed_basis(&sp, 2, 3, &l, &u, &b, &short, &integrality, 1e-7, 1e9)
+                .expect("completion must succeed");
+        assert!(
+            !cuts.is_empty(),
+            "x1 = 0.5 is fractional: a GMI cut must be separated"
+        );
+        let feasible = [[0.0, 0.0, 1.5], [1.0, 0.0, 0.5], [0.0, 1.0, 0.5]];
+        for cut in &cuts {
+            assert_eq!(cut.coeffs.len(), 3, "truncated to the original columns");
+            assert!(
+                dot(&cut.coeffs, &[1.0, 0.5, 0.0]) < cut.rhs - 1e-9,
+                "cuts off the vertex"
+            );
+            for x in &feasible {
+                assert!(
+                    dot(&cut.coeffs, x) >= cut.rhs - 1e-9,
+                    "cut {cut:?} removes {x:?}"
+                );
+            }
+        }
+    }
+
+    /// Exact-enumeration soundness on seeded random MILPs whose cold LP export is
+    /// SHORT (a redundant row equal to the sum of two others): every cut separated
+    /// off the completed basis must hold at every integer-feasible point.
+    #[test]
+    fn completed_basis_cuts_never_remove_an_integer_feasible_point() {
+        use crate::lp::simplex::{solve_lp_cols_scaled, LpStatus, SimplexOptions};
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = |k: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % k
+        };
+        let (mut short_seen, mut cuts_checked, mut points_checked) = (0, 0, 0);
+        for _trial in 0..400 {
+            let ni = 3usize; // integer columns, each in [0, 3]
+                             // rows r0, r1: a_r x + s_r = b_r (slacks s0, s1 >= 0); r2 = r0 + r1, slackless.
+            let mut arow = [[0.0f64; 3]; 2];
+            let mut bv = [0.0f64; 2];
+            for r in 0..2 {
+                for j in 0..ni {
+                    arow[r][j] = (rnd(7) as f64) - 2.0;
+                }
+                bv[r] = (rnd(9) as f64) + 0.5;
+            }
+            let (m, n) = (3usize, ni + 2);
+            let mut dense = vec![0.0f64; m * n];
+            for j in 0..ni {
+                dense[j] = arow[0][j];
+                dense[n + j] = arow[1][j];
+                dense[2 * n + j] = arow[0][j] + arow[1][j];
+            }
+            dense[ni] = 1.0;
+            dense[n + ni + 1] = 1.0;
+            dense[2 * n + ni] = 1.0;
+            dense[2 * n + ni + 1] = 1.0;
+            let b = [bv[0], bv[1], bv[0] + bv[1]];
+            let mut l = vec![0.0; n];
+            let mut u = vec![3.0; n];
+            l[ni] = 0.0;
+            l[ni + 1] = 0.0;
+            u[ni] = 1e20;
+            u[ni + 1] = 1e20;
+            let c: Vec<f64> = (0..n)
+                .map(|j| if j < ni { (rnd(9) as f64) - 4.0 } else { 0.0 })
+                .collect();
+            let integrality: Vec<bool> = (0..n).map(|j| j < ni).collect();
+            let sp = SparseCols::from_dense(&dense, m, n);
+            let sol =
+                solve_lp_cols_scaled(sp.clone(), m, n, &c, &l, &u, &b, &SimplexOptions::default());
+            if sol.status != LpStatus::Optimal || sol.basis.basic_vars.len() >= m {
+                continue;
+            }
+            short_seen += 1;
+            let Some(cuts) = separate_on_completed_basis(
+                &sp,
+                m,
+                n,
+                &l,
+                &u,
+                &b,
+                &sol.basis,
+                &integrality,
+                1e-7,
+                1e9,
+            ) else {
+                continue;
+            };
+            for cut in &cuts {
+                cuts_checked += 1;
+                for x0 in 0..=3 {
+                    for x1 in 0..=3 {
+                        for x2 in 0..=3 {
+                            let xi = [x0 as f64, x1 as f64, x2 as f64];
+                            let s0 = bv[0] - dot(&arow[0], &xi);
+                            let s1 = bv[1] - dot(&arow[1], &xi);
+                            if s0 < 0.0 || s1 < 0.0 {
+                                continue;
+                            }
+                            let x = [xi[0], xi[1], xi[2], s0, s1];
+                            points_checked += 1;
+                            assert!(
+                                dot(&cut.coeffs, &x) >= cut.rhs - 1e-7 * (1.0 + cut.rhs.abs()),
+                                "cut {cut:?} removes feasible {x:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            short_seen > 0,
+            "no trial produced a short basis -- the test measured nothing"
+        );
+        assert!(
+            cuts_checked > 0 && points_checked > 0,
+            "{short_seen} {cuts_checked} {points_checked}"
+        );
+        eprintln!("short={short_seen} cuts={cuts_checked} points={points_checked}");
     }
 }

@@ -711,6 +711,12 @@ counters!(
     // small against it.
     SepGomoryCalls,
     SepGomoryShortBasis,
+    // highs-parity P4.4: a short basis completed with unit columns of its
+    // structurally unmatched rows (`DISCOPT_MILP_ROOT_GMI_REPAIR`), then separated.
+    SepGomoryBasisCompleted,
+    // highs-parity P4.4: a cut's slack coefficient rewritten through the row its
+    // slack column actually sits in, where `ns + r` is not row `r`'s own slack.
+    SubstSlackByColumn,
     SepGomorySingular,
     SepGomoryFtranFail,
     SepGomoryBtranFail,
