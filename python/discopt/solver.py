@@ -3101,10 +3101,22 @@ def _try_native_spatial_kernel(
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
         )
+    # #2168: the MAIN call may see a column-eliminated spec (default OFF). ``spec``
+    # itself stays the original for the pricer's exact-lift check, the frontier
+    # budget above and every probe call; the callbacks and the returned point are
+    # mapped back through ``expand``.
+    _main_spec = spec
+    _presolve_expand = None
+    if _tuning().kernel_presolve:
+        _t_phase = time.perf_counter()
+        _main_spec, _presolve_expand = _kernel_presolve_main(spec, solve_kwargs)
+        _native_jax_s += time.perf_counter() - _t_phase
     _t_phase = time.perf_counter()
     with _timing.charge("rust"):
-        res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
+        res = _rust.solve_spatial_tree_py(**_main_spec, **solve_kwargs)
     _native_rust_s += time.perf_counter() - _t_phase
+    if _presolve_expand is not None:
+        res["incumbent_x"] = _presolve_expand(res.get("incumbent_x"))
     res.update(meta)
     if res is None:
         return None  # model outside the covered subset -> Python path
@@ -12546,6 +12558,67 @@ def _kernel_undecided_retry_enabled() -> bool:
         "off",
         "",
     )
+
+
+#: #2168: how often the kernel presolve ran on the main kernel call, and what it did
+#: (CLAUDE.md section 6 probe counter; the per-reduction counts are
+#: ``discopt._relax.spatial_presolve.PRESOLVE_STATS``).
+KERNEL_PRESOLVE_STATS: "collections.Counter[str]" = collections.Counter()
+
+
+def _kernel_presolve_main(spec: dict, solve_kwargs: dict):
+    """``(main_spec, expand)`` for the main kernel call under ``kernel_presolve`` (#2168).
+
+    Runs :func:`~discopt._relax.spatial_presolve.presolve_spec`. When it declines,
+    returns ``(spec, None)`` and leaves ``solve_kwargs`` alone. Otherwise the
+    ``incumbent_value`` and ``primal_hook`` callbacks in ``solve_kwargs`` are
+    rewrapped IN PLACE to see original-space points, and the returned ``expand``
+    maps the kernel's ``incumbent_x`` back: a kernel LP point (length ``>= n_cols``)
+    is expanded, a point the primal hook produced (already a model point) is
+    returned as it is.
+    """
+    from discopt._relax.spatial_presolve import presolve_spec
+
+    KERNEL_PRESOLVE_STATS["calls"] += 1
+    out = presolve_spec(spec)
+    if out is None:
+        KERNEL_PRESOLVE_STATS["declined"] += 1
+        return spec, None
+    reduced, expand, info = out
+    KERNEL_PRESOLVE_STATS["applied"] += 1
+    KERNEL_PRESOLVE_STATS["eliminated"] += int(info["n_eliminated"])
+    KERNEL_PRESOLVE_STATS["fixed"] += int(info["n_fixed"])
+    n_cols = int(spec["n_cols"])
+    hook_points: set[bytes] = set()
+
+    price = solve_kwargs.get("incumbent_value")
+    if price is not None:
+
+        def _price(x, lp_obj):
+            return price(expand(x), lp_obj)
+
+        solve_kwargs["incumbent_value"] = _price
+    hook = solve_kwargs.get("primal_hook")
+    if hook is not None:
+
+        def _hook(x, incumbent):
+            got = hook(expand(x), incumbent)
+            if got is not None:
+                hook_points.add(np.asarray(got[1], dtype=np.float64).tobytes())
+            return got
+
+        _hook.counts = getattr(hook, "counts", None)  # type: ignore[attr-defined]
+        solve_kwargs["primal_hook"] = _hook
+
+    def _expand_result(x):
+        if x is None:
+            return x
+        arr = np.asarray(x, dtype=np.float64)
+        if arr.size == 0 or arr.shape[0] < n_cols or arr.tobytes() in hook_points:
+            return x
+        return expand(arr)
+
+    return reduced, _expand_result
 
 
 def _kernel_dual_proof_enabled() -> bool:

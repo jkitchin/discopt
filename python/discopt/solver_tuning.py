@@ -1319,6 +1319,25 @@ class SolverTuning:
     ``docs/dev/data/2142-hda-root/``). Re-run panel (section 116): see the plan doc for
     the numbers; cert-clean and net-positive."""
 
+    kernel_presolve: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_KERNEL_PRESOLVE", default=False)
+    )
+    """Column-eliminating presolve of the native spatial kernel's spec
+    (``DISCOPT_KERNEL_PRESOLVE``, default **OFF** pending its section 5 panel;
+    bound-changing on every route that reaches the kernel; #2168).
+
+    ``_relax/spatial_presolve.py``: the kernel's own root propagation fixes columns,
+    fixed factors linearise products (a fixed term input fixes its output), and
+    doubleton equalities ``a_p x_p + a_q x_q = b`` eliminate a column into its
+    representative everywhere -- rows, BLF sides, term inputs (a monomial of an
+    affine input becomes an affine square / power) and, with ``b = 0``, product
+    outputs -- choosing the representative so that outputs, integers and objective
+    columns survive. Iterated to closure. The reduced spec goes to the MAIN kernel
+    call only; every point it hands back is expanded and verified on the model as
+    before. Entry (GDPlib cstr hull, deterministic, ``PYTHONHASHSEED=0``):
+    performance-plan section 117 and ``docs/dev/data/2168-kernel-presolve/``.
+    Audit row in ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )
