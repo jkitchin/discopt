@@ -15053,6 +15053,12 @@ Data: `docs/dev/data/2142-dual-proof/` (README).
 
 ## 113. #2142 Part B: the AffinePow reverse step — killed at the entry check (2026-11-05)
 
+> **Retracted 2026-11-05 (§114):** the SCIP hull reference below is an artifact of
+> SCIP's `numerics/infinity` = 1e20. With a perspective binary at 0 the spec needs
+> a value of 1e24, so SCIP solved only the all-binaries-at-1 restriction. At
+> infinity 1e30, SCIP reports a false optimum (3.1302 > oracle 3.0620). The
+> "94/94 empty" record at the end of this section is explained in §114.
+
 **Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`, "Hull"). SCIP certifies
 discopt's captured cstr-hull spec in 1,772 nodes. With SCIP's nonlinear propagation off,
 its emulation reproduces discopt's 0.0940 at 10k nodes exactly. The kernel propagates the
@@ -15102,3 +15108,120 @@ in the commit after `8b552939` (§5, *Retired*); they never reached `main`.
 
 **Do not build:** a reverse step for the AffinePow perspective terms as a cstr-hull fix.
 Data: `docs/dev/data/2142-affinepow-reverse/`.
+
+## 114. #2142: the 94 "SCIP-empty" cstr-hull boxes — SCIP's 1e20 infinity, a real kernel rounding gap, and a fix killed at entry (2026-11-05)
+
+**Question (§113, recorded unexplained).** SCIP 6.3's root propagation called all 94 captured
+cstr-hull node boxes empty, ten of them with no cutoff, while the global box stayed open. Are the
+boxes truly empty, or is this an artifact of the SCIP instrument? Data:
+`docs/dev/data/2142-hull-empty/` (README). Every script verifies points with an evaluator of the
+spec that does not use SCIP (`specio.py`).
+
+**Verdict: both, for different reasons.**
+
+1. **SCIP's verdict was an instrument artifact.** SCIP's default `numerics/infinity` is 1e20. The
+   instruments also passed every spec bound >= 1e19 as infinite. When a perspective binary is 0,
+   its eps-perspective is `w = 1e8`, and the spec's lifted product of three such terms is
+   `1e8^3 = 1e24` (col 313; global bound 1.0000000000000012e24). SCIP cannot represent that
+   value, so it calls every configuration with a perspective binary at 0 infeasible:
+   - With binary 8 fixed to 0, SCIP returns "infeasible" in presolve at 1e20 (`c5`). At
+     infinity 1e30 it returns a point that passes the independent check (residual 8.5e-7,
+     objective 3.1336).
+   - Minimal empty set: one column, col 318 = w316·w317 in [~1e16, 1e16] (`c4`).
+   - The emptiness is not a thin-box effect. Widening every box by up to 1e-4 leaves 94/94 empty
+     (`c3`).
+   - Boxes 0 and 2 contain points that pass the independent check (`c6`), yet §113's
+     instrument called both empty.
+2. **91 of the 94 boxes are nevertheless truly empty**, for an exact and checkable reason
+   unrelated to SCIP (`c10`). The method:
+   - round the binaries to the box's integral range;
+   - forward-evaluate every lifted column whose operands are fixed;
+   - compare the result with the box.
+
+   In 91/94 boxes a forced value lies outside the box. For example, in box 4 binary 6 = 0 forces
+   `w296 = 1e8`, but the box has `w296 ∈ [9.517e7, 9.585e7]`.
+
+   The other three boxes: box 2 has a verified witness, and boxes 0 and 1 have free binaries
+   (box 0 has c6's witness).
+
+   SCIP at infinity 1e30 also calls exactly 91 empty. That agreement is consistent but not
+   independent.
+3. **Why discopt misses them: a rounding boundary case in the kernel.** In step 5 of
+   `propagate_spec_fixpoint`, the integer-rounding test is `floor(hi + 1e-6) < hi - EPS`, with
+   `EPS = 1e-9`. `cap_hi(.., 0)` pads a tightened upper bound of 0 to exactly
+   `EPS·(1 + 0) = 1e-9`. The test therefore compares `0 < 1e-9 - 1e-9`, which is false, so the
+   binary stays at `[0, 1e-9]`. Across the 94 boxes, 560 integer columns have a non-integral
+   bound.
+
+   The perspective `1/((1-1e-8) y + 1e-8)` turns that 1e-9 into `w ∈ [9.09e7, 1e8]`, a 10 %
+   range instead of the point 1e8. The tree then branches on it.
+
+   With the integer bounds rounded before the call, the unchanged kernel propagation empties
+   **91/94** (`c11`).
+
+**Retraction (§11).** The following statements are retracted:
+
+- `2142-scip-expert/findings.md` ("SCIP on the HULL spec", "Hull" table);
+- §113 ("SCIP certifies discopt's captured cstr-hull spec in 1,772 nodes"; "SCIP with its
+  nonlinear propagation off reproduces discopt's 0.0940");
+- §112 ("See §113").
+
+They no longer hold as comparisons. At infinity 1e20, SCIP's 1,772-node "certification"
+certified a **restricted** problem in which every perspective binary is 1. The true optimum lies
+in that restriction (x* has all four perspective binaries = 1, `c1`), so the objective matched
+by coincidence. At 1e30, SCIP default reports **"optimal 3.1302" after 0 nodes**. That is wrong:
+the oracle is 3.0620073, and `c1`'s x* passes the independent check with residual 8.9e-7
+(`c7_default_big1e29.log`). At 1e30 the emulation reaches dual **0.0** at 10k nodes, with SCIP's
+nonlinear propagation on or off (`c7_emu10k_*`). **There is no valid SCIP reference on this
+hull spec.** One SCIP setting excludes half the problem, and the other returns a false optimum.
+
+**Fix tried: `DISCOPT_INT_ROUND_EXACT`** (Rust, read once, default OFF). Step 5 snaps an integer
+bound on any strict improvement. Rounding to the integral range is exact. Rust tests:
+
+- the rule itself;
+- 200,000 sampled intervals, none of whose integer points was cut.
+
+Counter: `IntRoundExactSnaps`. Registered in both §5 panels.
+
+**Entry (pre-registered in `PREREG.md` before any run):**
+
+| check | kill | OFF | ON |
+|---|---|---|---|
+| E1: the 94 boxes, 15 rounds, no cutoff, no pre-rounding | ON < 85 empty | 0/94 | **91/94** (passed) |
+| E2: cstr hull, deterministic, 10k nodes | ON bound < 1.0 | 0.0940000 (479 undecided, 1022 s) | **0.0940000** (3,539 undecided, 839 s) |
+
+**Killed at E2.** The flag fires: 77 snaps in 1,000 nodes, and the tree differs. The bound does
+not move, because these boxes are not what pins it. At 1,000 nodes (`d1_pin_f{0,1}.log`, run
+concurrently, so node counts only):
+
+- **every node's LP bound is <= 0.0941**:
+  - OFF: 752 of 753 LP-optimal nodes, plus all 167 numerical and all 20 infeasible nodes;
+  - ON: 647 of 670 LP-optimal nodes, plus all 248 numerical nodes and the 1 infeasible node;
+- OFF has 6,089 `LpVerdictNumerical` against 2,827 optimal LP verdicts, and 21,836 Farkas rays
+  rejected on margin.
+
+The hull relaxation of this spec is near-uninformative on every box the tree reaches. Its
+eps-perspective products carry `w` up to 1e8 and lifted columns up to 1e24 (global bounds up to
+1e27, above the LP's 1e20 sentinel). Refuting the empty boxes earlier only moves the tree onto
+other boxes with the same LP floor.
+
+**Retired** in the commit after the E2 data (§5): the flag, `snap_integer_bounds`, the counter
+and the Rust tests. Kept: the panel entries, marked retired, and all scripts and logs. No §5
+panel was run; none is owed after a pre-registered entry kill.
+
+**What this implies for the hull gap.**
+
+- The question §113 left open is settled. Neither a missing propagation step nor a SCIP-only
+  deduction is the lever: corrected, SCIP is no better (0.0 at 10k) or is wrong.
+- The gap is the formulation. The eps-perspective `1/yhat` enters every product of the rate law
+  (#2142 Problem A).
+- Direction 2 of the issue is the measured next step. Replace the eps-approximation by the exact
+  perspective / conic hull of the rate law, which takes `1/yhat` out of the products.
+- The integer-rounding boundary case is real. It is recorded here; nothing ships for it, because
+  its one measured consumer showed no gain.
+- **Do not build:** more kernel propagation for cstr hull, or any comparison against SCIP on this
+  spec without a representable-magnitude check (`c5`).
+
+**#2142 status.** Big-M certifies (§112). Hull does not, and nothing in §113 or §114 changes that.
+The issue's "done means" (both formulations certify) is unmet, so the issue stays open on hull's
+Problem A.

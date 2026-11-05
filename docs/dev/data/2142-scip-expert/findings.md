@@ -87,6 +87,13 @@ fixed rows: globally valid and LP-redundant), deterministic tree:
 | control: 95 random nonneg aggregations of fixed rows (same count, nnz med 7) | 0.1603 | |
 | SCIP default | 2.3927 | ~38k nodes |
 
+> **RETRACTED 2026-11-05 (performance-plan §114, `2142-hull-empty/`).** Every hull row in this
+> file, here and in the "Hull" table below, ran SCIP at `numerics/infinity` 1e20, with bounds
+> >= 1e19 passed as infinite. With a perspective binary at 0 the spec needs 1e24 (= 1e8^3), so
+> SCIP treated every such configuration as infeasible and certified only the all-binaries-at-1
+> restriction. At infinity 1e30 SCIP default reports a false optimum, 3.1302 against the oracle
+> 3.0620. None of these numbers is a valid hull reference.
+
 ### SCIP on the HULL spec (captured the same way: py/capture.py, GDP=hull; 320 cols, 25 terms, 54 BLF, 725 rows)
 - SCIP default: **optimal, 1,772 nodes, 3.7 s**, dual 3.06200. discopt hull: 0.094 at 10k nodes (§111).
 

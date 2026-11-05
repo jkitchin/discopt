@@ -334,10 +334,6 @@ counters!(
     DualProofLearned,
     DualProofTightenings,
     DualProofFathoms,
-    // #2142 §114 `DISCOPT_INT_ROUND_EXACT`: integer-bound snaps the exact rule applied
-    // that the legacy `> EPS` rule skipped (0 OFF, by construction: the audit that OFF
-    // never takes the new branch, and ON where it acted).
-    IntRoundExactSnaps,
     // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
     // above fires only when the F2 *cap* is reached, so an LP that grinds below
     // the cap reads 0 there while 43% of its pivots take a zero-length step —

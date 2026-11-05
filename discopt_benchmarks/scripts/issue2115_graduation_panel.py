@@ -145,9 +145,11 @@ _FLAGS = {
         "show": ("DualProofLearned", "DualProofTightenings"),
     },
     # #2142 §114: exact integer-bound rounding in the spatial kernel's propagation
-    # (``DISCOPT_INT_ROUND_EXACT``). It changes the search only where it snaps a
-    # bound the legacy rule kept, so ``IntRoundExactSnaps`` ON is where it ran;
-    # OFF it must be 0.
+    # (``DISCOPT_INT_ROUND_EXACT``). RETIRED at its entry test (performance-plan §114,
+    # docs/dev/data/2142-hull-empty/); the build no longer has the IntRoundExactSnaps
+    # counter. Kept so ``--rows`` re-derives the verdict. It changes the search only
+    # where it snaps a bound the legacy rule kept, so ``IntRoundExactSnaps`` ON is
+    # where it ran; OFF it must be 0.
     "DISCOPT_INT_ROUND_EXACT": {
         "fired": lambda off, on: on["IntRoundExactSnaps"],
         "ran": lambda off, on: on["IntRoundExactSnaps"] > 0,

@@ -49,53 +49,6 @@ const INFEAS_TOL: f64 = 1e-7;
 /// Change-detection / outward-relaxation epsilon (relative).
 const EPS: f64 = 1e-9;
 
-/// `DISCOPT_INT_ROUND_EXACT` (#2142 §114; default OFF, read once): step 5 of the
-/// fixpoint snaps an integer column's bound to its integral range on ANY strict
-/// improvement, not only one larger than `EPS`. OFF is the legacy rule, under which a
-/// bound padded to exactly `EPS` past an integer (every `cap_hi(.., 0.0)`) is kept.
-fn int_round_exact_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("DISCOPT_INT_ROUND_EXACT")
-            .ok()
-            .is_some_and(|v| matches!(v.trim(), "1" | "true" | "True" | "yes" | "on"))
-    })
-}
-
-/// Step 5 of the fixpoint: round an integer column's bounds to its integral range
-/// `[ceil(lo - 1e-6), floor(hi + 1e-6)]`. Returns whether a bound moved.
-///
-/// #2142 §114: `cap_hi`/`cap_lo` pad a tightened edge by `EPS * (1 + |cap|)`, which is
-/// exactly `EPS` at a cap of 0. The legacy `> lo + EPS` / `< hi - EPS` test then never
-/// snaps a binary's `[0, 1e-9]` (or `[-1e-9, 0]`) back to 0, and an eps-perspective
-/// `w = ((1-e) y + e)^-1` of that binary keeps a ~10 % range ([9.09e7, 1e8]) instead of
-/// the point 1e8, so boxes empty for every integral `y` stay open. Rounding an integer
-/// column to its integral range is exact; with `exact` any strict improvement applies.
-#[inline]
-fn snap_integer_bounds(lo: &mut f64, hi: &mut f64, exact: bool) -> bool {
-    let nl = (*lo - 1e-6).ceil();
-    let nh = (*hi + 1e-6).floor();
-    let mut changed = false;
-    let legacy_lo = nl > *lo + EPS;
-    if legacy_lo || (exact && nl > *lo) {
-        if !legacy_lo {
-            crate::profile::incr(crate::profile::Ctr::IntRoundExactSnaps);
-        }
-        *lo = nl;
-        changed = true;
-    }
-    let legacy_hi = nh < *hi - EPS;
-    if legacy_hi || (exact && nh < *hi) {
-        if !legacy_hi {
-            crate::profile::incr(crate::profile::Ctr::IntRoundExactSnaps);
-        }
-        *hi = nh;
-        changed = true;
-    }
-    changed
-}
-
 #[inline]
 fn rel(v: f64) -> f64 {
     1.0 + v.abs()
@@ -642,7 +595,16 @@ fn propagate_fixpoint_rounds(
             if !is_int {
                 continue;
             }
-            changed |= snap_integer_bounds(&mut lo[j], &mut hi[j], int_round_exact_enabled());
+            let nl = (lo[j] - 1e-6).ceil();
+            let nh = (hi[j] + 1e-6).floor();
+            if nl > lo[j] + EPS {
+                lo[j] = nl;
+                changed = true;
+            }
+            if nh < hi[j] - EPS {
+                hi[j] = nh;
+                changed = true;
+            }
             if lo[j] > hi[j] + 1e-9 {
                 return false;
             }
@@ -687,63 +649,6 @@ pub fn order_crossed_box(lo: &mut [f64], hi: &mut [f64]) -> bool {
 mod tests {
     use super::*;
     use crate::bnb::spatial_kernel::FixedRow;
-
-    /// #2142 §114: the legacy rule keeps a binary's `[0, 1e-9]` and `[-1e-9, 1]`; the
-    /// exact rule snaps them. Neither moves an already integral bound.
-    #[test]
-    fn snap_integer_bounds_exact_removes_eps_pad_2142() {
-        for (lo0, hi0, exact, want) in [
-            (0.0, 1e-9, false, (0.0, 1e-9)),
-            (0.0, 1e-9, true, (0.0, 0.0)),
-            (-1e-9, 1.0, false, (-1e-9, 1.0)),
-            (-1e-9, 1.0, true, (0.0, 1.0)),
-            (0.0, 1.0, true, (0.0, 1.0)),
-            (1.0 - 1e-7, 1.0 + 1e-7, true, (1.0, 1.0)),
-            (0.3, 2.7, false, (1.0, 2.0)),
-        ] {
-            let (mut lo, mut hi) = (lo0, hi0);
-            let moved = snap_integer_bounds(&mut lo, &mut hi, exact);
-            assert_eq!((lo, hi), want, "[{lo0}, {hi0}] exact={exact}");
-            assert_eq!(moved, (lo, hi) != (lo0, hi0));
-        }
-    }
-
-    /// Soundness by sampling: on 200,000 random intervals (integral edges padded by
-    /// random amounts in [0, 1e-6), plus arbitrary real edges), the exact rule keeps
-    /// every integer of the input interval, and its result is integral.
-    #[test]
-    fn snap_integer_bounds_exact_keeps_every_integer_point_2142() {
-        let mut s: u64 = 0x2142_0114;
-        let mut rnd = || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            (s >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut checked = 0usize;
-        for k in 0..200_000 {
-            let a = (rnd() * 20.0 - 10.0).floor();
-            let b = a + (rnd() * 5.0).floor();
-            let (lo0, hi0) = if k % 2 == 0 {
-                (a - rnd() * 1e-6, b + rnd() * 1e-6)
-            } else {
-                (a + rnd() * 0.999, b + rnd() * 0.999)
-            };
-            let (mut lo, mut hi) = (lo0, hi0);
-            snap_integer_bounds(&mut lo, &mut hi, true);
-            assert_eq!(lo, lo.round());
-            assert_eq!(hi, hi.round());
-            let mut z = lo0.ceil() - 1.0;
-            while z <= hi0.floor() + 1.0 {
-                if z >= lo0 && z <= hi0 {
-                    assert!(z >= lo && z <= hi, "integer {z} of [{lo0}, {hi0}] cut: [{lo}, {hi}]");
-                    checked += 1;
-                }
-                z += 1.0;
-            }
-        }
-        assert!(checked > 100_000, "probe fired on {checked} integer points only");
-    }
 
     /// #1917: a crossing within round-off is widened outward to contain both edges
     /// (never collapsed onto one), a real crossing is emptiness, and an ordered box
