@@ -1,3 +1,4 @@
 header {"load": [0.91552734375, 4.16943359375, 3.7763671875], "commit": "66d916bf", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python"} instances 24
 [1/24 r0] neos-1425699           fired=False off=(no-incumbent,None,4.0882502659466255e-05,20.0s) on=(no-incumbent,None,4.119784829305061e-05,20.0s) ['dual-']
 [2/24 r0] mik-250-20-75-5        fired=True off=(primal,0.5136320416044097,0.030868293956095177,10.6s) on=(dual,0.0005045310771738498,0.11896313523679922,20.2s) ['primal+', 'dual-']
+[3/24 r0] neos-911970            fired=True off=(primal,3.0801649928263974,0.5649210903878202,10.3s) on=(primal,3.0801649928263974,0.5649210903878202,20.2s) ['tie']

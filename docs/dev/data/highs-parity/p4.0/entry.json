@@ -94,10 +94,45 @@
     "primal+",
     "dual-"
    ]
+  },
+  {
+   "name": "neos-911970",
+   "rep": 0,
+   "opt": 54.76,
+   "maximize": false,
+   "off": {
+    "class": "primal",
+    "primal_short": 3.0801649928263974,
+    "dual_short": 0.5649210903878202,
+    "primal_within_gap": false,
+    "status": "feasible",
+    "objective": 226.5099999999999,
+    "bound": 23.259999999975143,
+    "nodes": 7,
+    "wall": 10.29390964900017,
+    "termination": null,
+    "load": 1.9755859375
+   },
+   "on": {
+    "class": "primal",
+    "primal_short": 3.0801649928263974,
+    "dual_short": 0.5649210903878202,
+    "primal_within_gap": false,
+    "status": "feasible",
+    "objective": 226.5099999999999,
+    "bound": 23.259999999975143,
+    "nodes": 7,
+    "wall": 20.15247338899985,
+    "termination": "time_limit",
+    "load": 1.90576171875
+   },
+   "fired": true,
+   "verdict": []
   }
  ],
  "tally": {
   "dual-": 2,
-  "primal+": 1
+  "primal+": 1,
+  "tie": 1
  }
 }
