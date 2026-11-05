@@ -936,6 +936,29 @@ def _gdp_config_hold_back(
     }
 
 
+def _gdp_feas_fallback_due(
+    seed: Optional[np.ndarray], deferred: Optional[dict], iteration: int, tree
+) -> bool:
+    """Whether the #2144 feasibility-first fallback runs now (once per solve).
+
+    Only after every other root constructor has had its turn: the root
+    configuration constructor ran (``seed`` is its seed), its deferred call is not
+    still pending, the root batch is done (``iteration > 0``, so the pumps and the
+    LOA proposer have run), and still no incumbent exists. See
+    ``primal_heuristics.one_hot_config_feasibility_fallback`` for why it must not
+    run earlier. Gated by ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK`` (default OFF).
+    """
+    from discopt._relax.primal_heuristics import _gdp_config_feas_fallback_enabled
+
+    return (
+        seed is not None
+        and deferred is None
+        and iteration > 0
+        and tree.incumbent() is None
+        and _gdp_config_feas_fallback_enabled()
+    )
+
+
 def _gdp_config_deferred_due(held: Optional[dict], iteration: int, now: float) -> bool:
     """Whether the held-back call is due: past the root, and the search has run
     for as long as what was held back (the ski-rental rule)."""
@@ -20666,6 +20689,9 @@ def solve_model(
     # #1775 G6.2: the held-back rest of that constructor's grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` -- {"seed", "remaining", "ready_at"} -- else None.
     _gdp_cfg_deferred: Optional[dict] = None
+    # #2144: the root constructor's seed, kept for the one-shot feasibility-first
+    # fallback (``_gdp_feas_fallback_due``); None once it has run.
+    _gdp_fb_seed: Optional[np.ndarray] = None
 
     # Re-attach the captured modeler start (by name) to the post-reform working
     # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
@@ -21398,8 +21424,6 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
-                        # #2144: the sampling fallback is a constructor only.
-                        feasibility_fallback=tree.incumbent() is None,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
@@ -21423,6 +21447,44 @@ def solve_model(
                     _gdd_improved,
                     time.perf_counter() - _gdd_t0,
                 )
+
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default OFF): every root
+        # constructor has run and none found a point; sample valid configurations
+        # on an attempt budget of its own. Primal only, points verified by subnlp.
+        if _subnlp_backend_fn is not None and _gdp_feas_fallback_due(
+            _gdp_fb_seed, _gdp_cfg_deferred, iteration, tree
+        ):
+            _gfb_seed, _gdp_fb_seed = _gdp_fb_seed, None
+            from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
+
+            _gfb_stats: dict = {}
+            _gfb_t0 = time.perf_counter()
+            try:
+                _gfb_results = one_hot_config_feasibility_fallback(
+                    model,
+                    _gfb_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    stats=_gfb_stats,
+                )
+            except Exception:
+                _warn_gdp_config_raised("spatial feasibility fallback")
+                _gfb_results = []
+            _subnlp_calls += int(_gfb_stats.get("attempted", 0))
+            for _x_gf, _obj_gf in _gfb_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_gf) and _obj_gf < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(np.asarray(_x_gf).copy(), float(_obj_gf)):
+                        _subnlp_incumbent_updates += 1
+            logger.info(
+                "GDP config feasibility fallback (iteration %d): %d sub-NLP solve(s), "
+                "%d feasible point(s), %.2f s",
+                iteration,
+                int(_gfb_stats.get("attempted", 0)),
+                len(_gfb_results),
+                time.perf_counter() - _gfb_t0,
+            )
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -22893,7 +22955,7 @@ def solve_model(
         # most once per solve. Where it runs is ``_gdp_config_first_enabled()``.
         def _root_gdp_config_primal() -> None:
             nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
-            nonlocal _gdp_cfg_deferred
+            nonlocal _gdp_cfg_deferred, _gdp_fb_seed
             _loa_bound_pending = None
             if not (
                 iteration == 0
@@ -22944,6 +23006,7 @@ def solve_model(
             _gdp_cfg_deferred = _gdp_config_hold_back(
                 _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
             )
+            _gdp_fb_seed = np.asarray(_cfg_seed, dtype=np.float64).copy()
             if _gdp_cfg_deferred is not None:
                 logger.info(
                     "GDP config subNLP (root, deferred schedule): %.2f s held back",
@@ -28751,6 +28814,8 @@ def _solve_nlp_bb(
     # #1775 G6.2: the held-back rest of the root disjunct-configuration grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` (see ``_gdp_config_hold_back``), else None.
     _gdp_cfg_deferred_nb: Optional[dict] = None
+    # #2144: the root constructor's seed for the one-shot feasibility fallback.
+    _gdp_fb_seed_nb: Optional[np.ndarray] = None
 
     # --- Soundness: distinguish a PROVEN-infeasible fathom from a merely
     # UNCONVERGED one. A node whose NLP returns SolveStatus.INFEASIBLE (or whose
@@ -28932,8 +28997,6 @@ def _solve_nlp_bb(
                         model,
                         _gdd_nb["seed"],
                         evaluator=evaluator,
-                        # #2144: the sampling fallback is a constructor only.
-                        feasibility_fallback=tree.incumbent() is None,
                         deadline=_gdd_until,
                         stats=_gdd_stats,
                     )
@@ -28966,6 +29029,46 @@ def _solve_nlp_bb(
                     _gdd_improved,
                     time.perf_counter() - _gdd_t0,
                 )
+
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default OFF): the last-resort
+        # constructor, as in ``solve_model``'s loop; re-verified like the deferred call.
+        if _gdp_feas_fallback_due(_gdp_fb_seed_nb, _gdp_cfg_deferred_nb, iteration, tree):
+            _gfb_seed_nb, _gdp_fb_seed_nb = _gdp_fb_seed_nb, None
+            from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
+
+            _gfb_found: list = []
+            _gfb_stats_nb: dict = {}
+            _gfb_t0 = time.perf_counter()
+            try:
+                _gfb_found = one_hot_config_feasibility_fallback(
+                    model, _gfb_seed_nb, evaluator=evaluator, stats=_gfb_stats_nb
+                )
+            except Exception:
+                _warn_gdp_config_raised("nlp-bb feasibility fallback")
+            _subnlp_calls += int(_gfb_stats_nb.get("attempted", 0))
+            for _gfb_x, _ in _gfb_found:
+                _subnlp_feasible += 1
+                _gfb_sol = np.asarray(_gfb_x, dtype=np.float64).copy()
+                _gfb_obj = float(evaluator.evaluate_objective(_gfb_sol))
+                _gfb_feas = not cl_list or _check_constraint_feasibility(
+                    evaluator, _gfb_sol, cl_list, cu_list
+                )
+                if (
+                    np.isfinite(_gfb_obj)
+                    and _gfb_obj < _SENTINEL_THRESHOLD
+                    and _gfb_feas
+                    and _is_integer_feasible_solution(_gfb_sol, int_offsets, int_sizes)
+                ):
+                    if tree.inject_incumbent(_gfb_sol, _gfb_obj):
+                        _subnlp_incumbent_updates += 1
+            logger.info(
+                "GDP config feasibility fallback (nlp-bb, iteration %d): %d sub-NLP "
+                "solve(s), %d feasible point(s), %.2f s",
+                iteration,
+                int(_gfb_stats_nb.get("attempted", 0)),
+                len(_gfb_found),
+                time.perf_counter() - _gfb_t0,
+            )
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -29361,6 +29464,9 @@ def _solve_nlp_bb(
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
+                    _gdp_fb_seed_nb = np.asarray(
+                        result_sols[best_root_idx], dtype=np.float64
+                    ).copy()
                     logger.info(
                         "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
                         int(_cfg_stats.get("attempted", 0)),

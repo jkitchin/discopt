@@ -3025,9 +3025,10 @@ def _one_hot_feasibility_samples(
     wave's deadline. That is the lesson of #2150, which interleaved samples into
     the wave and lost either way: samples placed early took the time ``mod_hens``
     (big-M) needs to reach its ranked plan, and samples placed late got no time at
-    all. Here the samples run only after both ranked searches have found nothing,
-    so they cannot displace a ranked plan, and they are bounded by a count, so they
-    cannot be starved by a clock either. The solve's own deadline still stops them.
+    all. Here the samples run only after every other root constructor has found
+    nothing (see :func:`one_hot_config_feasibility_fallback`), so they cannot
+    displace one, and they are bounded by a count, so they cannot be starved by a
+    clock either. The solve's own deadline still stops them.
 
     Soundness: every point comes from :func:`subnlp`, which re-verifies integer-
     and constraint-feasibility. Primal only; the dual bound is never touched.
@@ -3096,6 +3097,67 @@ def _one_hot_feasibility_samples(
 
 
 @_stops_at_solve_deadline
+def one_hot_config_feasibility_fallback(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    integer_tol: float = 1e-5,
+    max_attempts: int = _FEAS_SAMPLE_ATTEMPTS,
+    stats: Optional[dict] = None,
+) -> list[tuple[np.ndarray, float]]:
+    """#2144: the last-resort GDP constructor -- sample valid configurations.
+
+    Detects the one-hot groups and residual binaries exactly as
+    :func:`one_hot_config_subnlp` does and hands them to
+    :func:`_one_hot_feasibility_samples`. The *caller* decides when this runs; the
+    B&B loops run it once, after every other root constructor (the configuration
+    wave and dive, their deferred call, the pumps, the LOA proposer) has had its
+    turn and no incumbent exists. Run any earlier and its first, usually poor,
+    point displaces the constructors that are gated on "no incumbent yet": measured
+    on GDPlib mod_hens (big-M, 120 s), firing it inside the root constructor gave
+    110441.39 where the feasibility pump finds 106766.53 a few seconds later.
+    """
+    if stats is not None:
+        stats["attempted"] = 0
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask):
+        return []
+    lb, ub = _get_variable_bounds(model)
+    n_vars = int(int_mask.size)
+    x_relax = np.asarray(x_relax, dtype=np.float64)
+    groups, decided = _prune_decided_groups(
+        _scan_one_hot_rows(model, int_mask, n_vars), *_pinned_bounds(model, lb, ub)
+    )
+    if not groups:
+        return []
+    covered = {j for g in groups for j in g} | decided
+    residual = [
+        j
+        for j in np.nonzero(int_mask)[0].tolist()
+        if j not in covered and lb[j] >= -1e-9 and ub[j] <= 1.0 + 1e-9
+    ]
+    residual_assigns = _residual_assignments(residual, x_relax, 256)
+    zero_start = x_relax.copy()
+    cont = ~int_mask
+    zero_start[cont] = np.clip(0.0, lb, ub)[cont]
+    return _one_hot_feasibility_samples(
+        model,
+        groups,
+        residual,
+        residual_assigns,
+        zero_start,
+        backend=backend,
+        nlp_options=nlp_options,
+        evaluator=evaluator,
+        integer_tol=integer_tol,
+        max_attempts=max_attempts,
+        stats=stats,
+    )
+
+
+@_stops_at_solve_deadline
 def one_hot_config_subnlp(
     model: Model,
     x_relax: np.ndarray,
@@ -3106,7 +3168,6 @@ def one_hot_config_subnlp(
     integer_tol: float = 1e-5,
     deadline: Optional[float] = None,
     stats: Optional[dict] = None,
-    feasibility_fallback: bool = True,
 ) -> list[tuple[np.ndarray, float]]:
     """Root primal *constructor* for disjunctive (GDP) models: pick one disjunct
     per disjunction, then solve the fixed-integer sub-NLP.
@@ -3188,18 +3249,11 @@ def one_hot_config_subnlp(
         deadline: Absolute ``perf_counter`` deadline; the loop stops before
             starting a configuration that cannot finish inside it.
         stats: Optional dict, filled with ``{"attempted": n}`` -- the number of
-            sub-NLP solves this call, its dive and its fallback actually issued
-            (the fallback's own count is also under ``"fallback_attempted"``). The caller
+            sub-NLP solves this call and its dive actually issued. The caller
             needs this because the return value carries only the *feasible*
             points: counting those as sub-NLP calls reports 0 on exactly the
             models where the heuristic worked hardest and found nothing, which
             is the vacuous instrument #1062 is named after (CLAUDE.md 6).
-        feasibility_fallback: Allow the #2144 fallback
-            (:func:`_one_hot_feasibility_samples`, behind
-            ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``) when the wave and the dive both
-            return nothing. A caller that already holds an incumbent passes
-            ``False``: the fallback is a constructor, and its first feasible
-            sample is rarely an improvement.
 
     Returns:
         Every feasible ``(x, obj)`` found (possibly empty). The caller injects
@@ -3437,28 +3491,6 @@ def one_hot_config_subnlp(
     )
     if stats is not None:
         stats["attempted"] = attempted + int(_dive_stats.get("attempted", 0))
-    # #2144: both ranked searches found nothing. Stop ranking and sample, on a
-    # budget of its own (see ``_one_hot_feasibility_samples`` for why it cannot
-    # share the wave's deadline).
-    if not results and feasibility_fallback and _gdp_config_feas_fallback_enabled():
-        _fb_stats: dict = {}
-        results.extend(
-            _one_hot_feasibility_samples(
-                model,
-                groups,
-                residual,
-                residual_assigns,
-                zero_start,
-                backend=backend,
-                nlp_options=nlp_options,
-                evaluator=evaluator,
-                integer_tol=integer_tol,
-                stats=_fb_stats,
-            )
-        )
-        if stats is not None:
-            stats["fallback_attempted"] = int(_fb_stats.get("attempted", 0))
-            stats["attempted"] += stats["fallback_attempted"]
     return results
 
 
