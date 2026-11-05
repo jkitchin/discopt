@@ -873,13 +873,27 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   Bixby/CPLEX crash that ignores feasibility needs a composite phase 1 that tolerates
   bound-infeasible basics -- a different task, not this hypothesis; and the wall term was
   never reachable (the whole simplex is ~35 ms of `scrs8`'s 1.2 s route wall).
-- [ ] **P2.3 — Hypersparse FTRAN/BTRAN and row-wise pricing.** Scope: `linsolve.rs`,
+- [x] **P2.3 — Hypersparse FTRAN/BTRAN and row-wise pricing. KILLED AT ENTRY 2026-11-05.** Scope: `linsolve.rs`,
   `dual.rs` (Devex pricing loop), `feral` interface. Entry: on the P2.1 instances, measure
   the density of `B⁻¹a_q` and `eᵀB⁻¹` results; hypothesis: ≥ 50 % of solves have < 10 %
   fill, so a hypersparse path pays. Flag `DISCOPT_LP_HYPERSPARSE` default OFF. Done:
   bit-identical pivot sequence (`lp_iters` golden unchanged ON vs OFF on the `cargo`
   panel) and wall −25 % on the instances where the entry held. Kill: entry < 50 % or wall
   gain < 10 % → retire. Regime: bound-neutral (exact).
+  **Result (2026-11-05): killed at entry; nothing built.** Instrument: temporary
+  profile-gated counters in `FeralLU::ftran`/`btran` (`linsolve.rs`; reverted) -- per
+  solve, nonzeros in and out (`|v| > 1e-14`) and whether the result has < 10 % fill;
+  driver `p2.3/entry_probe.py`, Rust route, 20 s. **The 13 P2.1 instances (the entry's
+  population): FTRAN results < 10 % fill on 24 % of 15,168 solves, BTRAN on 21 % of
+  25,415** -- below the 50 % entry bar (`p2.3/entry_fill_L13.json`). Extra look at the M
+  panel, where the Rust wall actually is: 60 % / 45 % of 3.0M / 4.9M solves (pooled ~50 %,
+  `p2.3/entry_fill_M.json`), the big hypersparse ones being `sp150x300d`, `issue-2446`,
+  `2122` (75–96 % low-fill FTRAN); but FTRAN/BTRAN phases are 20.4 s of 112.6 s of wall on
+  the 9 heaviest M instances (18 %, an over-count -- phases sum across threads), so even
+  halving the low-fill half saves ~5–9 % of M wall, under the 10 % kill bar. **Side
+  finding for P4.1:** the largest single phase on the M panel is **FBBT** (`gt2` 27.7 s,
+  `gesa2` 14.0 s, `bell5` 9.3 s, `p0548` 8.3 s, `dcmulti` 6.8 s of phase time), ahead of
+  the node LP solves.
 - [ ] **P2.4 — LP presolve with postsolve (row/column singletons, dominated/empty
   rows, doubleton equations), duals restored.** Scope: new `lp/simplex/lppresolve.rs`,
   `lp_std_engine.RustEngine`. Flag `DISCOPT_LP_PRESOLVE` default OFF. Entry: count
@@ -1129,7 +1143,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped) | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25 | see git log |
+| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
@@ -1223,6 +1237,12 @@ pivots by 0.06 % (strict) and 3.4 % (singleton rows allowed); it placed 1–50 c
 127–257 open rows, the rest having no in-box column. Expected: ≥ 30 % (kill < 10 %).
 Consequence: P2.2 killed, flag and implementation retired unmerged; a feasibility-ignoring
 crash would need a composite phase 1 (not scheduled).
+
+**2026-11-05 — P2.3: "≥ 50 % of FTRAN/BTRAN solves on the P2.1 instances have < 10 % fill".**
+Commit `b8d89b7f` + temporary counters, Rust route, 13 P2.1 LPs. Measured: 24 % of 15,168
+FTRAN and 21 % of 25,415 BTRAN results under 10 % fill. Expected: ≥ 50 %. Consequence: P2.3
+killed at entry, nothing built. On the M panel ~50 % are low-fill but the solves are ≤ 18 %
+of wall (≤ ~5–9 % gain, under the 10 % bar); FBBT is the larger M-panel phase (P4.1).
 
 ---
 
