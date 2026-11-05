@@ -1,0 +1,65 @@
+{
+ "header": {
+  "load": [
+   0.91552734375,
+   4.16943359375,
+   3.7763671875
+  ],
+  "commit": "66d916bf",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python"
+ },
+ "args": {
+  "baseline": "docs/dev/data/highs-parity/baseline-dcdac02/miplib.json",
+  "panel_json": "/home/user/discopt/discopt_benchmarks/data/miplib/panel.json",
+  "time_limit": 20.0,
+  "gap": 0.0001,
+  "max_nodes": 100000000,
+  "reps": 1,
+  "eps": 1e-09,
+  "instances": "",
+  "out": "docs/dev/data/highs-parity/p4.0/entry.json"
+ },
+ "rows": [
+  {
+   "name": "neos-1425699",
+   "rep": 0,
+   "opt": 3179698976.996124,
+   "maximize": false,
+   "off": {
+    "class": "no-incumbent",
+    "primal_short": null,
+    "dual_short": 4.0882502659466255e-05,
+    "primal_within_gap": false,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 3179568982.9441996,
+    "nodes": 3633,
+    "wall": 20.026410892000058,
+    "termination": "time_limit",
+    "load": 0.91552734375
+   },
+   "on": {
+    "class": "no-incumbent",
+    "primal_short": null,
+    "dual_short": 4.119784829305061e-05,
+    "primal_within_gap": false,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 3179567980.2400107,
+    "nodes": 3507,
+    "wall": 20.028525404999982,
+    "termination": "time_limit",
+    "load": 1.330078125
+   },
+   "fired": false,
+   "verdict": [
+    "dual-"
+   ]
+  }
+ ],
+ "tally": {
+  "dual-": 1
+ }
+}

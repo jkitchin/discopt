@@ -1,1 +1,2 @@
 header {"load": [0.91552734375, 4.16943359375, 3.7763671875], "commit": "66d916bf", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python"} instances 24
+[1/24 r0] neos-1425699           fired=False off=(no-incumbent,None,4.0882502659466255e-05,20.0s) on=(no-incumbent,None,4.119784829305061e-05,20.0s) ['dual-']
