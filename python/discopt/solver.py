@@ -946,7 +946,7 @@ def _gdp_feas_fallback_due(
     still pending, the root batch is done (``iteration > 0``, so the pumps and the
     LOA proposer have run), and still no incumbent exists. See
     ``primal_heuristics.one_hot_config_feasibility_fallback`` for why it must not
-    run earlier. Gated by ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK`` (default OFF).
+    run earlier. Gated by ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK`` (default ON; ``0`` opts out).
     """
     from discopt._relax.primal_heuristics import _gdp_config_feas_fallback_enabled
 
@@ -21448,13 +21448,14 @@ def solve_model(
                     time.perf_counter() - _gdd_t0,
                 )
 
-        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default OFF): every root
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default ON): every root
         # constructor has run and none found a point; sample valid configurations
         # on an attempt budget of its own. Primal only, points verified by subnlp.
         if _subnlp_backend_fn is not None and _gdp_feas_fallback_due(
             _gdp_fb_seed, _gdp_cfg_deferred, iteration, tree
         ):
             _gfb_seed, _gdp_fb_seed = _gdp_fb_seed, None
+            assert _gfb_seed is not None  # _gdp_feas_fallback_due checked it
             from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
 
             _gfb_stats: dict = {}
@@ -29030,10 +29031,11 @@ def _solve_nlp_bb(
                     time.perf_counter() - _gdd_t0,
                 )
 
-        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default OFF): the last-resort
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default ON): the last-resort
         # constructor, as in ``solve_model``'s loop; re-verified like the deferred call.
         if _gdp_feas_fallback_due(_gdp_fb_seed_nb, _gdp_cfg_deferred_nb, iteration, tree):
             _gfb_seed_nb, _gdp_fb_seed_nb = _gdp_fb_seed_nb, None
+            assert _gfb_seed_nb is not None  # _gdp_feas_fallback_due checked it
             from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
 
             _gfb_found: list = []

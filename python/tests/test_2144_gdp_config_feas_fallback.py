@@ -137,8 +137,10 @@ def test_the_solver_runs_it_last_and_only_when_switched_on(monkeypatch):
     assert not _gdp_feas_fallback_due(seed, {"ready_at": 0.0}, 5, _Tree(None))  # deferred
     assert not _gdp_feas_fallback_due(seed, None, 5, _Tree((seed, 1.0)))  # incumbent
     assert not _gdp_feas_fallback_due(None, None, 5, _Tree(None))  # ran / never armed
-    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0")
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0")  # the opt-out
     assert not _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
+    monkeypatch.delenv("DISCOPT_GDP_CONFIG_FEAS_FALLBACK")  # graduated: default ON
+    assert _gdp_feas_fallback_due(seed, None, 1, _Tree(None))
 
 
 @pytest.mark.smoke

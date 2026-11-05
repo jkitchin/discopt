@@ -2994,14 +2994,31 @@ FEAS_FALLBACK_COUNTS = {"calls": 0, "attempted": 0, "feasible": 0}
 def _gdp_config_feas_fallback_enabled() -> bool:
     """Whether the #2144 feasibility-first fallback runs (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``).
 
-    **Default OFF** until its CLAUDE.md §5 panel passes (row in
-    ``docs/dev/flag-retirement-audit.md``). See :func:`_one_hot_feasibility_samples`.
+    **Default ON** (graduated 2026-11-05, #2144, on its CLAUDE.md §5 panel); ``0``
+    opts out and restores the legacy path. Row in ``docs/dev/flag-retirement-audit.md``;
+    data in ``docs/dev/data/2144-feas-fallback-panel/``. See
+    :func:`one_hot_config_feasibility_fallback`.
+
+    Panel: ``gdp_parity`` 24 x {big-M, hull} at 120 s, three arms interleaved per
+    cell (``main``, this branch OFF, this branch ON), 144 rows (kaibel's 6 errored
+    identically in every arm, before solving: its builder needs an ipopt
+    executable the panel host lacked); plus the 74-instance in-repo ``.nl`` corpus at
+    30 s with the flag ON.
+
+    * cert-clean: 0 incorrect, 0 dual bounds past an oracle, 0 solved instances
+      lost (27 -> 27); every ON incumbent re-checked in the Pyomo model.
+    * net-positive where it can act: it fired on 2 cells, both batch_processing,
+      and both gained their first incumbent (big-M 1034233.32, hull 1019222.46; OFF
+      none). On every other cell it does not run -- it is a last resort, gated on
+      no incumbent after every root constructor -- and those cells were unchanged
+      OFF -> ON, including mod_hens big-M (106766.53, 445 nodes in both). It fired
+      on 0 of the 74 corpus instances.
     """
-    return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
