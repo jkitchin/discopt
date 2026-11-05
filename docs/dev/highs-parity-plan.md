@@ -394,7 +394,9 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   `capture-gdp`, `replay`, `recheck`, `route`, `decomp-e2e`). `DISCOPT_DECOMP_MASTER` is
   in `lp_backend.py:get_decomposition_master_solver` (test-only lever, default
   unchanged, a typo raises). Data: `docs/dev/data/highs-parity/masters-67530f14/`
-  (pre-fix) and `masters-6351f589/` (post-fix).
+  (pre-fix) and `masters-6351f589/` (post-fix). (Shrunk 2026-11-05 for `main`'s
+  `test_docs_dev_data_size` guard: `replay.json` gzipped to `replay.json.gz`, the raw
+  `replay.log` cut to its last 300 lines, `replay_tail.log`.)
   - **Kill fired (pre-fix replay, 3050 masters, 6100 compared, 1 contradiction):**
     `milp_highs.solve_milp` certified OPTIMAL with bound 41573.26 on
     `milp_default_box_clay0203_master` against the 41420.272 the Rust engine verifies
