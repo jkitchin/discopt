@@ -29,7 +29,13 @@ not certified at 300 s (30,246 nodes, bound 1.58); big-M default 2.2486 @10k, 2.
 | `nonlinear` cons propagation off | `constraints/nonlinear/propfreq=-1` | >100k | 2.57 | | |
 | all propagation off | `propagating/maxrounds[root]=0` | >100k | 0.20 | | |
 
-Pending at the time of writing (queued, logs land in this directory): `emu_20k`,
+**`emu` at 20k nodes: bound 1.6757** (`emu_20k.log`) — BELOW discopt's 2.1886 at 20k on the same
+model. With presolve (aggregation), conflict and the extra propagators off, SCIP's base loop
+(LP + cons_nonlinear/linear propagation + ENFOLP cuts + spatial branching) is no better than
+discopt's tree with its dual proofs; the whole SCIP advantage is in the switched-off
+components, of which aggregation (6.5x) and conflict (4x, which discopt already has) dominate.
+
+Pending at the time of writing (queued, logs land in this directory):
 `emu_nonlinprop_off_20k`, `nopre_noconf_20k`, `nopresolve_20k`, `noconflict_20k`,
 `donotaggr_20k` (the 20k-node bounds of the big arms, for comparison with discopt's 2.1886),
 and the conflict sub-arms `conf_graphonly` (`useinflp=c`), `conf_dualonly` (`useinflp=d`),
