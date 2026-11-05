@@ -2,3 +2,5 @@ DONE nopre_noconf
 DONE emu
 DONE emu_nonlinprop_off
 DONE emu_20k
+DONE emu_nonlinprop_off_20k
+DONE nopre_noconf_20k
