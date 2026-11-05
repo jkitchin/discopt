@@ -1,0 +1,2 @@
+ARM=viol_nopc MAX_NODES=20000 status=node_limit obj=3.062014576618532 bound=0.8292428915412606 gap_certified=False nodes=20000 wall=102.6s ctr={'SpatialViolScipPicks': 11309, 'SpatialViolScipChanged': 7839} calls=[{'spatial_score': None, 'spatial_pscost_weight': 0.0, 'spatial_midpull': None, 'spatial_viol_scip': True, 'max_nodes': 1}, {'spatial_score': True, 'spatial_pscost_weight': 0.0, 'spatial_midpull': 0.75, 'spatial_viol_scip': True, 'max_nodes': 20000}]
+executed assertions: 4
