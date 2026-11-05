@@ -858,7 +858,28 @@ impl TreeManager {
             // `trusted` was measured to cost `m3` its certificate (bound
             // 37.7999997 → none) for no soundness gain.
             let trusted = node_lb.is_finite();
+            // #2163: a node carrying an explicit hint on a column that is NOT exactly
+            // integral is one its producer has established must be branched (the
+            // #1414 class: integral within tolerance, but its integral realisation
+            // leaves a row). It is never integer-feasible here, whatever the
+            // tolerance test says, so it falls through to the hint arm of step 3.
+            // Branching is always a valid cover; only a fathom is withheld. Before,
+            // such a node had to be handed back with an UNTRUSTED bound to avoid
+            // this fathom -- which at the root (no parent to floor at) left the
+            // whole search with no dual bound.
+            // Integer columns only (#2165 review): the hint arm splits as
+            // `x <= floor(v)` / `x >= floor(v) + 1`, a valid cover of an INTEGER
+            // column alone; on a continuous one it would drop the open interval
+            // between the two.
+            let hinted_off_integer = self.branch_hints.get(&result.node_id).is_some_and(|&j| {
+                self.is_integer_col(j)
+                    && result
+                        .solution
+                        .get(j)
+                        .is_some_and(|v| v.is_finite() && *v != v.round())
+            });
             let int_feasible = trusted
+                && !hinted_off_integer
                 && (result.is_feasible
                     || is_integer_feasible(&result.solution, &self.integer_vars));
 
@@ -975,6 +996,13 @@ impl TreeManager {
                     } else {
                         *val != val.round()
                     };
+                    // #2165 review: and only on an INTEGER column. The split
+                    // below (`x <= floor(v)` / `x >= floor(v) + 1`) drops the
+                    // interval `(floor(v), floor(v) + 1)` of a continuous column,
+                    // so a hint naming one (`debug.steer.hint` forwards any column)
+                    // is ignored and ordinary selection decides instead, keeping
+                    // the "reorders branching only" contract.
+                    let actionable = actionable && self.is_integer_col(hint_idx);
                     if actionable {
                         Some((
                             Some(BranchDecision {
@@ -1433,6 +1461,18 @@ impl TreeManager {
         false
     }
 
+    /// Whether the search has nothing left: no open node and no pending result.
+    ///
+    /// Unlike [`Self::is_finished`], which also reports `true` once the relative
+    /// gap is below a fixed `1e-8`, this never ends a search on a tolerance the
+    /// caller did not choose. #2163: the MILP driver stopped on that shortcut at a
+    /// gap of 1.7e-9 with two nodes open under `gap_tol = 1e-9`, then (rightly)
+    /// reported the uncertified result as `Feasible`; it now stops on its own gap
+    /// test or on this.
+    pub fn is_drained(&self) -> bool {
+        self.pool.open_count() == 0 && self.pending_results.is_empty()
+    }
+
     /// Current relative optimality gap.
     ///
     /// gap = (incumbent - global_lb) / max(1, |incumbent|)
@@ -1791,8 +1831,18 @@ impl TreeManager {
     /// The next call to `process_evaluated` will use this variable index
     /// instead of most-fractional branching for the given node, provided
     /// the variable is actually fractional. The hint is consumed after use.
+    /// A hint on a column that is not an integer variable is ignored (#2165
+    /// review): the hint arm's integer split is not a valid cover of a continuous
+    /// column.
     pub fn set_branch_hint(&mut self, node_id: NodeId, var_index: usize) {
         self.branch_hints.insert(node_id, var_index);
+    }
+
+    /// Whether flat column `j` belongs to an integer (or binary) variable.
+    fn is_integer_col(&self, j: usize) -> bool {
+        self.integer_vars
+            .iter()
+            .any(|v| v.is_integer && j >= v.offset && j < v.offset + v.size)
     }
 
     /// Return branching candidate info for a solution vector.
@@ -3401,6 +3451,68 @@ mod tests {
             assert_eq!(tm.incumbent().unwrap().1, raw);
             assert!(!tm.stats().bound_contradicted, "raw {raw} flagged");
         }
+    }
+
+    /// #2163 / #2165 review: the step-2 gate that branches a node instead of
+    /// fathoming it applies only to a hint on an INTEGER column. The root here is
+    /// integer-feasible within tolerance (`x0 = 3 - 1e-7`, integer) with a
+    /// continuous `x1 = 4.5`, at a trusted bound. Three arms:
+    /// * no hint: fathomed (control);
+    /// * hint on the continuous `x1`: still fathomed -- the integer split
+    ///   `x1 <= 4` / `x1 >= 5` would drop `(4, 5)`, so the hint is ignored;
+    /// * hint on the integer `x0` (not exactly integral): branched, not fathomed.
+    #[test]
+    fn hint_gate_applies_to_integer_columns_only_2163() {
+        let run = |hint: Option<usize>| {
+            let mut tm = TreeManager::new(
+                2,
+                vec![0.0, 0.0],
+                vec![10.0, 10.0],
+                vec![
+                    VarBranchInfo {
+                        offset: 0,
+                        size: 1,
+                        is_integer: true,
+                    },
+                    VarBranchInfo {
+                        offset: 1,
+                        size: 1,
+                        is_integer: false,
+                    },
+                ],
+                SelectionStrategy::BestFirst,
+            );
+            tm.initialize();
+            let root = tm.export_batch(1).node_ids[0];
+            tm.import_results(&[NodeResult {
+                node_id: root,
+                lower_bound: 2.0,
+                solution: vec![3.0 - 1e-7, 4.5],
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: false,
+            }]);
+            if let Some(j) = hint {
+                tm.set_branch_hint(root, j);
+            }
+            let st = tm.process_evaluated();
+            (st.fathomed, st.branched)
+        };
+        assert_eq!(
+            run(None),
+            (1, 0),
+            "control: integer-feasible root is fathomed"
+        );
+        assert_eq!(
+            run(Some(1)),
+            (1, 0),
+            "a continuous-column hint must not split"
+        );
+        assert_eq!(
+            run(Some(0)),
+            (0, 1),
+            "an off-integral integer hint branches"
+        );
     }
 
     fn integral_result(node_id: NodeId, bound: f64) -> NodeResult {
