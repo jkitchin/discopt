@@ -51,6 +51,19 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`relu_extended` and `relu_partition` certify trained ReLU networks (#2156).**
+  Networks with many weights near 1e-6 to 1e-8 gave `relu_extended` auxiliaries whose
+  whole range was below HiGHS's feasibility tolerance. HiGHS then reported feasible
+  models infeasible, with presolve on and off, or returned a wrong optimum. A partition
+  whose range is at most `NEGLIGIBLE_PARTITION_RTOL` (1e-4) of its neuron's range is now
+  folded into the neuron's widest partition. Any partition gives the same MILP, so the
+  integer-feasible set is unchanged, and the LP loosens by at most that fraction per
+  merged partition. On the issue's network `relu_extended` now certifies −6.37458671,
+  agreeing with `relu_bigm`; before, it returned `feasible` with gap 0.69. On a
+  30-network panel of 2-32-32-1 tiny-weight nets, `relu_extended` went from 0/30
+  certified (24 wrong or no point, 8 of them `infeasible`) to 30/30 certified and equal
+  to big-M; `relu_partition` with P = 4 went from 0/30 to 30/30. Checked by
+  `python/tests/test_2156_relu_negligible_partitions.py`.
 - **The in-house simplex certifies LPs with huge-but-finite bounds (#2125).** A bounded,
   feasible multi-row LP with a finite variable bound in `[1e10, 1e20)` used to return
   `SolveStatus.ERROR` from `lp_simplex.solve_lp`. Measured on the issue's GDPlib
