@@ -14884,3 +14884,49 @@ measure, the pseudocost normalisation, and all three together have each been mea
 every arm that helps cstr costs a #1970 reference instance beyond the fixed bound.
 Do not rebuild any of them, singly or combined, without a new mechanism that explains
 the tanksize cost. Data: `docs/dev/data/2142-scip-branching/`.
+
+## 111. #2142: mixed hull — big-M for rows the detector cannot prove convex — killed at the entry test (2026-11-05)
+
+**Hypothesis.** Under hull, the eps-perspective of cstr's nonconvex disjunct rows has
+`1/yhat` factors near 1e27, which makes the relaxation vacuous while any selector is
+free. The proposed fix keeps the perspective only for rows that the convexity detector
+proves convex. Every other nonlinear row would get big-M rows on its own columns,
+with the shipped `_compute_big_m` and the same loud refusal. The disjunct's linear rows
+would still be hulled on the disaggregated copies. The intended result was a bound above
+both today's hull and big-M.
+
+**Caveat, stated before running.** If the detector proves none of cstr's rows convex,
+then the mixed form is "hull on the linear rows, big-M on the nonlinear rows". That form
+can beat big-M only through the linear rows' hull.
+
+**Kill criterion (fixed before running).** The mixed form's deterministic 20k-node bound
+must be better than big-M's 1.3432.
+
+**Convex fraction.** cstr has 75 disjunct rows in 10 hulled blocks. 70 are linear. The
+other 5 are bilinear mole-balance equalities (`rate * V`). The detector proves **0 of
+the 5** convex. A nonlinear equality cannot be convex in any case. The lowering moved all
+5 to big-M and none to the perspective (`e0_classify.log`).
+
+| arm (cstr, deterministic, `PYTHONHASHSEED=0`) | 1 node | 10k nodes | 20k nodes |
+|---|---|---|---|
+| hull (flag OFF) | 0.0 | 0.0940 (855.5 s) | not run (killed first) |
+| big-M (reproduces §108 bit for bit) | -1e-12 | 0.5568486578 (46.8 s) | 1.3431805086 (§108) |
+| **mixed hull** | -2e-11 | **0.5027153230** (90.1 s) | **1.1272313697** (142.7 s) |
+
+All arms ran with `executed assertions: 4`. The mixed arm fired on 5 rows. It beats today's hull, 0.503 against 0.094 at 10k, and is about 9x faster per node, but it is below big-M.
+
+**Verdict: killed.** At 20k nodes the mixed bound is 1.1272, below big-M's 1.3432, and
+it is below big-M at 10k as well. Hulling cstr's 70 linear rows on disaggregated copies
+does not make up for the larger model. The mixed form has the copies and their link
+rows, and it does not get big-M's `gdp.bound_pretransformation` bound rows. On a model
+whose nonlinear rows are all nonconvex equalities, the design cannot certify where
+big-M cannot. As required, it was not taken to step 2, the soundness tests or the
+panels. The flag and its implementation were removed in the commit after the one that
+added them (§5, *Retired*). They never reached `main`. Commits: `8292ded9` / `d3d59a0f`
+(flag), `bcdf1e61` (retirement).
+
+**Do not build:** any hull variant that sends cstr's bilinear equalities to big-M while
+keeping the rest of the hull. A cstr-hull fix has to change how the *nonconvex* rows are
+relaxed at fractional selectors. Changing which lowering they get does not help: the
+big-M one is already measured above. Data: `docs/dev/data/2142-hull-mixed/` (see its
+README).
