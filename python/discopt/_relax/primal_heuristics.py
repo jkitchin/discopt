@@ -38,6 +38,7 @@ from discopt.modeling.core import Model, VarType
 from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
 from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
 from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
+from discopt.solvers._nlp_ladder_scope import ladder_off
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR,
     evaluator_box,
@@ -65,7 +66,7 @@ def _stops_at_solve_deadline(fn: _F) -> _F:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with stop_at_solve_deadline():
+        with stop_at_solve_deadline(), ladder_off():
             return fn(*args, **kwargs)
 
     return cast(_F, wrapper)
