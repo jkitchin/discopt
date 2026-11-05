@@ -7,6 +7,7 @@ docs/dev/data/2142-scip-expert/py/d3_arm.py. The flag is DISCOPT_DUAL_PROOF_PROP
 Prints bound / nodes / wall / the kernel's dual-proof counters and an executed-assertion count
 (CLAUDE.md §6); exits non-zero when nothing was asserted. Asserts the loaded extension is the
 #2142 build (CLAUDE.md §8: it must accept the dual_proof_propagation kwarg)."""
+
 import os
 import sys
 import time
