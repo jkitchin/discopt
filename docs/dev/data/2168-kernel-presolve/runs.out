@@ -1,0 +1,15 @@
+orig 10000 exit 0
+pre 10000 exit 0
+orig 20000 exit 0
+pre 10000 seeded exit 0
+scip 10000 seeded exit 0
+pre 20000 exit 143
+orig 10000 seeded exit 0
+multi 10000 seeded exit 0
+pre 10000 seeded exit 0
+multi 20000 seeded exit 0
+multi(rows-only) 10000 seeded exit 0
+pre 20000 seeded exit 0
+scip 20000 seeded exit 0
+orig 20000 seeded exit 0
+QUEUE_DONE

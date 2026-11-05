@@ -15868,3 +15868,122 @@ modprodnet hull 2/2 in every arm): `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXIN
 `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`, `DISCOPT_GDP_LOA_PROPOSER_BOUND`, each with
 `=0` kept. Default build, no flags set, 120 s, load 3.4-3.8: syngas hull `optimal` at
 73.3 s, big-M `optimal` at 52.7 s (was ~99 s), bound 4668.808968 in both.
+
+## 119. #2168: a column-eliminating presolve of the kernel spec — entry passes at the kernel level, stage 4 removed (2026-11-05)
+
+Data: `docs/dev/data/2168-kernel-presolve/` (`PREREG.md`, `README.md`). Code:
+`python/discopt/_relax/spatial_presolve.py`, behind `DISCOPT_KERNEL_PRESOLVE` (default OFF)
+on the MAIN kernel call of `_try_native_spatial_kernel` only.
+
+**Hypothesis (§116 follow-up).** §116 showed discopt's tree certifies cstr hull on SCIP's
+presolved model (12,931 nodes) and that the lever is SCIP's column eliminations, not its
+deleted rows or its box. The issue's stages 1-3 (root-propagation fixings, fixed-factor
+linearisation, doubleton aggregation choosing the representative so that outputs, integers
+and objective columns survive, through term inputs, BLF sides and product outputs) should
+transfer most of it.
+
+**Harness (a deviation from the issue's entry, recorded).** GDPlib's `cstr` is not in the
+PyPI `gdplib` and the from-source install was refused in this container, so the entry runs
+on the captured homog kernel spec (`2142-exact-hull/scip/cstr_homog_spec.npz`) with the
+solver's own main-call options (`kernel_arm.py`), and `initial_incumbent` set to the value
+of the verified incumbent the full solve's NLP seed finds (no hook, no pricer). The harness
+tracks the full solve [**retracted below**, "Full-solve runs"]: SCIP's presolved model reaches 2.9144 @10k here (2.8834 in the full
+solve) and certifies at 12,049 nodes (12,931).
+
+**Result (deterministic):**
+
+| arm | 2k | 10k | 20k |
+|---|---|---|---|
+| original spec | 0.3421 | 1.4385 | 1.9044 |
+| **presolved (stages 1-3)** | 0.3412 | **2.2822** | **2.7936** |
+| SCIP's presolved model (control) | | 2.9144 | certified, 12,049 |
+
+The presolve fixes 51 columns (SCIP: 51), aggregates 112 (SCIP: 115 + 9 negated), rows
+779 -> 292, free columns 234 -> 122 (SCIP: 110), in 0.03 s. **Passes the pre-registered kill
+line** (20k > 2.7875), by 0.006, and does not certify at 20k. At 10k it closes 57 % of the
+gap to SCIP's model. Flipping the representative tie-break to SCIP's (keep the higher index)
+is neutral (2.2766).
+
+**Stage 4 (multi-aggregation) — built, falsified, removed.** SCIP's eight
+multi-aggregations on cstr eliminate an implied-free BLF *output* into its linear context
+(`w := x62 - x67 - 0.99`). The kernel cannot express that (a BLF has one output column). Its
+expressible variants, 10k seeded: a non-output column into rows and BLF sides 0.1719 (the
+side's interval becomes a sum of column intervals, loosening every envelope on it); into
+rows only 1.7415; implied-free columns only, SCIP's rule: none qualifies. All below stages
+1-3 alone (2.2822). Removed in the same PR (the arms ran at 921b450). What would reopen it:
+kernel support for a BLF whose output is an affine form.
+
+**What the gap still is.** Beyond the multi-aggregations, SCIP's model has 4 probing-derived
+aggregations (`x107 = 1 - x2` class, implied by branching on the binary, not by any row) and
+its row reductions (§116's `prerows` arm: certified at 18,943 nodes with the original rows
+mapped back, vs 12,931). Neither is in this presolve's scope.
+
+**§5 corpus panel** (`issue2115_graduation_panel.py --flag DISCOPT_KERNEL_PRESOLVE
+--deterministic --max-nodes 2000 --time-limit 120 --assert-unfired-identical --jobs 2`, 74
+in-repo `.nl` instances, run in two parts after a background time limit stopped the first;
+`docs/dev/data/2168-kernel-presolve/panel/corpus_all_summary.txt`): 800 checks, 0
+violations; certified 57 -> 57; the presolve applied on 5 instances (nvs06 7 columns
+eliminated, nvs21 5, st_e38 5, tanksize 3, st_e13 fixings only), each certifying the same
+optimum; tanksize 461 -> 391 nodes, the others node-identical; 53 unfired instances
+bit-identical; 16 at the 120 s wall backstop, among them tspn08 / tspn12, the two "looser"
+rows (presolve not applied there: a timing artifact). Cert-clean; net-positive not
+established on this corpus, which rarely reaches the kernel with equality structure.
+
+**Status: default OFF, panel owed.** The GDP parity panel (big-M + hull) and the full-solve
+cstr hull entry need gdplib from source; they decide graduation or retirement (audit row).
+
+**Verification run:**
+
+- `pytest -m smoke python/tests`: 4,523 passed, 25 skipped, 1 failed. The failure is
+  `test_gdp_bigm_argument_split.py::test_stranded_gas_lowers_by_big_m`: the PyPI `gdplib`
+  in this container ships without `stranded_gas/data.xlsx` (`FileNotFoundError`), unrelated.
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: 19 passed.
+- `python/tests/test_kernel_presolve.py`: 29 passed (the cstr entry test is env-gated,
+  `DISCOPT_RUN_2168_ENTRY=1`); `test_1345_flag_retirement_audit.py` and
+  `test_relax_module_status.py`: 31 passed.
+- `cargo test -p discopt-core --release`: ok (the only Rust change is a doc comment in
+  `discopt-python`).
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
+
+**Review fixes (#2171).** (1) A fixing that cascades (a term or BLF whose input became
+constant fixes its output while the outer substitution still held it) raised `KeyError`:
+reproduced on `x * x**2` and on a two-BLF chain, both with `x` fixed. Fixings are now queued
+and drained after the substitution, the inputs are re-read until the column is in none, and
+the rows go last. (2) Parallel-row pairing compared coefficients rounded to 12 digits; it is
+now exact, so the soundness claim holds as written. (3) A sqrt argument whose box dips below
+0 by rounding is moved inward to its domain; the kernel otherwise drops that term's envelope
+rows for the box. (4) Hook points are told apart from LP points by the incumbent value the
+hook returned, not by length and bytes. (5) The presolve is no longer charged to the `jax`
+timer. The reduced cstr spec is bit-identical before and after (so the entry stands), and the
+5 applied panel instances reproduce their ON rows exactly (`panel/corpus_review_fix.*`).
+Smoke after the fix: 4,523 passed, the same environmental `stranded_gas` failure.
+
+**Full-solve runs and the GDP parity panel (owner, `ee66d8d0`, on `ad416e98` with gdplib from
+source; `docs/dev/data/2168-kernel-presolve/gdp_panel/`, pre-registered in its `PREREG.md`).**
+
+| full `Model.solve(gdp_method="hull")`, cstr | 10k det | 20k det | uncapped, 1800 s |
+|---|---|---|---|
+| OFF | 0.6624 | 0.9314 | node limit (100k), bound 2.6136 |
+| ON | 1.6168 | 2.2395 | **certified 3.0620146 at 41,949 nodes, 374 s** |
+
+**Retraction (§11).** This section claimed the seeded kernel harness "tracks the full solve"
+and that the entry passed the kill line at 20k (2.7936 > 2.7875). The control arm matched; the
+presolve arms did not: the full solve reaches 2.2395 at 20k, below the kill line. The entry
+therefore passes only on the pre-registration's "or certifies" branch (it does certify, at
+41,949 nodes), not on the bound line. The harness's numbers stand as harness measurements and
+nothing more.
+
+GDP parity (24 instances x {big-M, hull}, 5,000 nodes, deterministic): cert-clean (0 incorrect,
+0 crossings, 0 solved lost, 27 unfired pairs bit-identical, 17 more at the wall). Fired on 4
+cells: cstr big-M better (1.4281 -> 1.4712), cstr hull worse at 5,000 nodes (0.4782 -> 0.2133;
+ON overtakes OFF by 10k), syngas big-M and hull identical (certified at 3 nodes). Solved gained
+0; better minus worse = 0 against the pre-registered >= 2. **Not graduated**: cert-clean, the cstr
+bar passes, the GDP-panel net-positive bar fails. The choice between retiring the flag (§5's
+default) and keeping it as a documented opt-out (its gain is one instance, §2, but the instance
+#2168 targets) is the owner's.
+
+**Decision (owner, 2026-11-05): RETIRED**, superseding the opt-out recorded below the same day. Cert-clean but not net-positive beyond cstr, and §2 rejects a gain confined to one instance; the opt-out would have been a stalled graduation, not an alternative route. The flag, `_relax/spatial_presolve.py`, the solver wiring and `test_kernel_presolve.py` are deleted; the data stays; the code is on branch `archive/2168-kernel-presolve`. What this section does establish: column elimination of the kernel spec takes cstr hull from uncertified at 100k nodes to certified at 41,949, so a presolve is the right lever for that instance; what it lacked is reach. A successor needs SCIP's multi-aggregation of BLF outputs (a kernel BLF with an affine output) and a panel beyond cstr.
+
+*Superseded:* **Decision (owner, 2026-11-05): kept as a documented opt-out.** Default OFF, `=1` opts in; the
+docstring (`SolverTuning.kernel_presolve`) and the audit row state why it is not the default and
+what would change that.

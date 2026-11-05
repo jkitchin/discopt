@@ -1,0 +1,4 @@
+  kernel: {'max_nodes': 20000, 'status': 'node_limit', 'bound': 0.9314422456947064, 'nodes': 20000, 'wall': 93.7}
+presolve stats: {}
+RESULT arm=off det=True max_nodes=20000 tl=7200.0 status=node_limit obj=3.0620145766185876 bound=0.9314422456947064 nodes=20000 gap_certified=False wall=113.5
+executed assertions: 7

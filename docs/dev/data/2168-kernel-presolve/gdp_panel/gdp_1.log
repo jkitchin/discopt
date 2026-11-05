@@ -1,0 +1,35 @@
+solve: 16 (instance, method) pairs x 2 arms x 1 reps
+solve rep0 batch_processing                   big-m  off unsolved           status=time_limit obj=None bound=587732.585351145 nodes=1929 wall=120.092 load=2.97
+solve rep0 batch_processing                   big-m  on  unsolved           status=time_limit obj=None bound=588367.7396924827 nodes=1959 wall=120.479 load=15.64
+solve rep0 batch_processing                   hull   on  unsolved           status=time_limit obj=None bound=617504.4893755495 nodes=1237 wall=120.69 load=10.59
+   load gate: load1 16.3 > 16, waiting
+solve rep0 batch_processing                   hull   off unsolved           status=time_limit obj=None bound=617934.1551708074 nodes=1295 wall=120.659 load=11.6
+solve rep0 biofuel                            big-m  off unsolved           status=time_limit obj=None bound=-1138736.9980920737 nodes=3 wall=122.297 load=10.3
+solve rep0 biofuel                            big-m  on  unsolved           status=time_limit obj=None bound=-1138736.9980920737 nodes=7 wall=132.119 load=14.51
+solve rep0 biofuel                            hull   on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.729 load=12.21
+solve rep0 biofuel                            hull   off unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.713 load=8.68
+solve rep0 cstr                               big-m  off unsolved           status=node_limit obj=3.0620145766185365 bound=1.4280490202862746 nodes=5000 wall=22.535 load=9.45
+solve rep0 cstr                               big-m  on  unsolved           status=node_limit obj=3.0620145766185387 bound=1.471156870941473 nodes=5000 wall=21.58 load=8.64
+solve rep0 cstr                               hull   on  unsolved           status=node_limit obj=3.0620145766185876 bound=0.21334138834945907 nodes=5000 wall=28.163 load=8.01
+solve rep0 cstr                               hull   off unsolved           status=node_limit obj=3.0620145766185876 bound=0.47824606375483214 nodes=5000 wall=43.141 load=6.82
+solve rep0 disease_model                      big-m  off solved             status=optimal obj=304.4162107198387 bound=304.3861618081923 nodes=3841 wall=21.926 load=9.48
+solve rep0 disease_model                      big-m  on  solved             status=optimal obj=304.4162107198387 bound=304.3861618081923 nodes=3841 wall=21.552 load=8.38
+solve rep0 disease_model                      hull   on  solved             status=optimal obj=304.41621071983354 bound=304.38790643001863 nodes=2769 wall=31.098 load=8.24
+solve rep0 disease_model                      hull   off solved             status=optimal obj=304.41621071983354 bound=304.38790643001863 nodes=2769 wall=31.167 load=12.77
+   load gate: load1 16.3 > 16, waiting
+solve rep0 ex1_linan_2023                     big-m  off solved             status=optimal obj=-0.9996 bound=-0.9996000000015322 nodes=9 wall=1.858 load=10.82
+solve rep0 ex1_linan_2023                     big-m  on  solved             status=optimal obj=-0.9996 bound=-0.9996000000015322 nodes=9 wall=1.88 load=10.27
+solve rep0 ex1_linan_2023                     hull   on  solved             status=optimal obj=-0.9996 bound=-0.9996000000030245 nodes=9 wall=3.699 load=10.27
+solve rep0 ex1_linan_2023                     hull   off solved             status=optimal obj=-0.9996 bound=-0.9996000000030245 nodes=9 wall=3.646 load=9.93
+solve rep0 gdp_col                            big-m  off unsolved           status=feasible obj=20392.219503856417 bound=7999.999999997203 nodes=7 wall=120.118 load=9.69
+solve rep0 gdp_col                            big-m  on  unsolved           status=feasible obj=20392.219503856417 bound=7999.999999997203 nodes=7 wall=120.123 load=7.06
+solve rep0 gdp_col                            hull   on  unsolved           status=feasible obj=20355.058459179894 bound=8736.84210510454 nodes=5 wall=120.127 load=7.53
+solve rep0 gdp_col                            hull   off unsolved           status=feasible obj=20355.058459179894 bound=8736.84210510454 nodes=5 wall=120.121 load=5.55
+solve rep0 hda                                big-m  off unsolved           status=time_limit obj=None bound=123909.3234948237 nodes=3 wall=120.167 load=7.93
+solve rep0 hda                                big-m  on  unsolved           status=unknown obj=None bound=123909.3234948237 nodes=3 wall=120.159 load=8.82
+solve rep0 hda                                hull   on  unsolved           status=feasible obj=5965.855345780326 bound=118678.92933304478 nodes=3 wall=120.272 load=6.23
+solve rep0 hda                                hull   off unsolved           status=feasible obj=5801.271944476069 bound=118678.92933304478 nodes=3 wall=120.275 load=7.56
+solve rep0 kaibel                             big-m  off unsolved           status=time_limit obj=None bound=17999.99999999999 nodes=3 wall=123.263 load=8.42
+solve rep0 kaibel                             big-m  on  unsolved           status=time_limit obj=None bound=17999.99999999999 nodes=3 wall=123.532 load=4.88
+solve rep0 kaibel                             hull   on  unsolved           status=time_limit obj=None bound=None nodes=1 wall=125.946 load=5.62
+solve rep0 kaibel                             hull   off unsolved           status=time_limit obj=None bound=None nodes=1 wall=125.912 load=5.93
