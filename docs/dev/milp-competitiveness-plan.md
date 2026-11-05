@@ -2628,6 +2628,12 @@ per-instance spread, and a threshold stated in relative terms — on an unloaded
 machine. Until such a panel passes, A14 ships default-OFF with its `=0` opt-out
 and the legacy path intact.
 
+> **Superseded 2026-11-05 (highs-parity P4.2):** the re-run this section asks for ran
+> (`highs-parity-plan.md` P4.2, `docs/dev/data/highs-parity/p4.2/`): dual side by
+> magnitude passed (0 losses), primal side passed again (10 wins / 1 loss), but solved
+> count fell 95 → 90 (all `dcmulti`), so `DISCOPT_RENS` was **retired**, flag and
+> implementation.
+
 ## 4. Success metric
 
 The §0 panel at matched `mip_rel_gap = 1e-4`, TL = 20 s. "Competitive" is

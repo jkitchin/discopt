@@ -90,7 +90,7 @@ bounds (`refine.rs`), exact dual projection (`project.rs`, #2115 graduated), FBB
 presolve (`presolve.rs`, dimension-preserving), CSC end to end (`sparse-milp-plan.md`
 T0–T4). MILP driver: cover, GMI, aggregated c-MIR (#2107, `DISCOPT_MILP_CMIR` graduated
 ON per `flag-retirement-audit.md:416`), cut selection, pseudocost + strong branching,
-diving, RINS (`DISCOPT_RINS`), RENS (`DISCOPT_RENS`, default OFF — failed bar 2c, A14),
+diving, RINS (`DISCOPT_RINS`), RENS (`DISCOPT_RENS`, retired 2026-11-05 by P4.2: failed bar 2a on `dcmulti`),
 reduced-cost fixing, node NS bound + projection, lazy-constraint entry
 (`solve_milp_lazy_csc_py`), deadline polling (51 sites).
 
@@ -177,7 +177,10 @@ measured" — it may be scheduled only with an entry experiment. From the routin
   new gate, marker updated). `cargo clippy -D warnings` is clean on `discopt-core`;
   `discopt-python` has 11 pre-existing lints in files neither side touched
   (`expr_bindings.rs`, `bnb_bindings.rs`, `convex_bindings.rs`, `decomp_bindings.rs`).
-  Next due 2026-11-06.
+  2026-11-05 (fourth, owner request "rebase on origin, and continue with P4.2"): merged
+  `origin/main` `e39975e1` (#2162, #2169) at `13880cbc`; one conflict (audit history
+  lines, both kept; the marker stays 49). It brought in #2142's fixture that exposed the
+  exact-Farkas false `Infeasible` (fixed, P3.2 retraction). Next due 2026-11-06.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
@@ -1352,12 +1355,36 @@ and is re-written by P4.1.**
   too); `test_issue1729…[shape1]` takes 14.2 s with the flag ON *and* OFF, so it crosses the
   15 s budget only under load; the other 22 pass on a quiet re-run (the full run shared
   the machine with a runaway unit test of P4.6's prototype).
-- [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
+- [x] **P4.2 — RENS re-run with the pre-registered magnitude bar. RETIRED 2026-11-05.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a
   single-draw count bar it later called noise. Done: the panel above, 3 reps, dual-side
   bar by magnitude. Graduate (default ON, audit row) or **retire flag + implementation**
   (RINS stays). Kill: bar 2 fails → retire. Regime: bound-changing.
+  **Result (2026-11-05): RETIRED (owner: "Retire per the bar").** `p42_rens_panel.py`
+  (bars pre-registered in its docstring before the run, owner's choice "A14 bars +
+  magnitude"), data `docs/dev/data/highs-parity/p4.2/`, build `56861877`: MIPLIB-38 + M
+  (62 instances; `dcmulti` is in both), 3 reps, 20 s, Rust MILP route, 372 solves,
+  functional gate passed (a garbage `DISCOPT_RENS` refused), `RensRun` 791 /
+  `RensImproved` 77. Load was high (median 1-min load 6.2 on 4 cores), so no wall claim.
+  - BAR 1 cert-clean: **pass** (372 checks, 0 problems, `RensRejected` 0).
+  - 2a solved ON >= OFF: **FAIL**, 90 vs 95. All five are `dcmulti`: OFF certifies 5/6
+    runs in 7-19 s, ON 0/6. Not budget -- its sub-MIPs used 63-120 nodes per solve --
+    but a search interaction: ON ends with a worse incumbent (primal gap 0.0043 vs 0)
+    and never closes.
+  - 2b median primal gap over the 29-instance open population 0.214 → 0.064: pass.
+  - 2c incumbent wins 10 / losses 1 (`dcmulti`): pass.
+  - 2d dual losses by magnitude 0 (cap 2): pass. A14's dual-side failure did not
+    reproduce once measured on magnitude and repetition.
+  Retired per the pre-registered kill (bar 2 fails → retire, RINS stays): `rens_enabled`,
+  `parse_rens_flag`, `rens_box`, `try_rens`, the call site and its state,
+  `SubMipKind::Rens`, `Phase::Rens`, the eight `Rens*` counters, their unit tests, the
+  two RENS integration-test binaries and their vertex-cover fixture. `cargo test` 1001/0
+  (1004 minus the three RENS unit tests), RINS arms pass. Gates after retirement: smoke 4524,
+  adversarial 19, parity/MILP/RINS tests 572, audit tests 11, clippy clean. The Python MINLP RENS (#281,
+  `primal_heuristics.py`) is a different mechanism and is untouched. Recorded: RENS was a
+  large primal win that cost a certification on one instance; a future attempt should
+  start from why its incumbent derails `dcmulti`'s search.
 - [ ] **P4.3 — Cut repair instead of rejection.** Scope: `milp_driver.rs` cut cleanup
   (the numerical gates), `cut_select.rs`. Entry: count cuts rejected by range/dynamism
   gates at the MIPLIB roots and the root bound with those cuts *repaired*

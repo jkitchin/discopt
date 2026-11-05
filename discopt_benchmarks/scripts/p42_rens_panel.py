@@ -1,5 +1,10 @@
 """highs-parity P4.2: the ``DISCOPT_RENS`` graduation panel, bars pre-registered.
 
+**Historical.** The panel ran on build ``56861877`` (data in
+``docs/dev/data/highs-parity/p4.2/``); bar 2a failed and ``DISCOPT_RENS`` was retired,
+flag and implementation. On a later build the functional gate below fails by design
+(the flag is no longer read); check out ``56861877`` to re-run it.
+
 A14 (``milp-competitiveness-plan.md``) left RENS cert-clean with a large primal win
 (median primal gap 38.7 % -> 1.6 %, 12 incumbent wins / 0 losses) but failed its
 dual-side bar, a single-draw *count* of bound losses that A14 itself showed was partly

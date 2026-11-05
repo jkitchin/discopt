@@ -1,0 +1,712 @@
+header {"load": [2.22607421875, 3.32080078125, 3.98974609375], "commit": "56861877", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python"} instances 62
+functional gate: DISCOPT_RENS garbage refused -- ok
+[1/186] neos-1425699           r0 OFF time_limit/False obj=None bnd=3179559073.671627 | ON time_limit/False obj=None bnd=3179560236.5687118 rens={'RensConsidered': 14, 'RensGated': 14, 'RensRun': 14, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 794} load=2.2/2.9
+[2/186] blend2                 r0 OFF optimal/True obj=7.598985 bnd=7.598984999991398 | ON optimal/True obj=7.598985 bnd=7.598984999991398 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 87} load=2.2/2.2
+[3/186] enlight8               r0 OFF optimal/True obj=27.0 bnd=27.0 | ON optimal/True obj=27.0 bnd=27.0 rens={'RensConsidered': 21, 'RensGated': 21, 'RensRun': 21, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 1145} load=2.5/2.9
+[4/186] p0201                  r0 OFF optimal/True obj=7614.999999999998 bnd=7614.999999991451 | ON optimal/True obj=7614.999999999998 bnd=7614.999999991451 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 30} load=3.6/3.2
+[5/186] mik-250-20-75-5        r0 OFF feasible/False obj=-51506.0 bnd=-53156.15131860019 | ON feasible/False obj=-51506.0 bnd=-53178.02593666347 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 885, 'RensSeeded': 0, 'RensBackoffSkips': 198} load=3.6/4.3
+[6/186] neos-911970            r0 OFF feasible/False obj=226.5099999999999 bnd=23.259999999974998 | ON feasible/False obj=153.78000000000003 bnd=23.259999999974998 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 22, 'RensSeeded': 1, 'RensBackoffSkips': 1} load=4.2/4.0
+[7/186] mik-250-20-75-3        r0 OFF feasible/False obj=-52106.0 bnd=-53776.41796004968 | ON feasible/False obj=-52106.0 bnd=-53961.80618768183 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 901, 'RensSeeded': 1, 'RensBackoffSkips': 126} load=4.1/4.8
+[8/186] fiber                  r0 OFF feasible/False obj=628445.84 bnd=171172.0999303698 | ON feasible/False obj=628445.84 bnd=169682.14993037126 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 25} load=5.3/4.1
+[9/186] khb05250               r0 OFF feasible/False obj=111632934.0000011 bnd=102831373.99984866 | ON feasible/False obj=111632934.0000011 bnd=102831373.99984866 rens={'RensConsidered': 2, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 18} load=5.6/6.3
+[10/186] nexp-50-20-1-1         r0 OFF feasible/False obj=48.0 bnd=17.0 | ON feasible/False obj=35.0 bnd=17.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 6, 'RensSeeded': 1, 'RensBackoffSkips': 80} load=6.3/6.0
+[11/186] mik-250-20-75-2        r0 OFF feasible/False obj=-50768.0 bnd=-52492.60576738252 | ON feasible/False obj=-50768.0 bnd=-52621.092547388325 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1039, 'RensSeeded': 1, 'RensBackoffSkips': 132} load=6.1/6.1
+[12/186] 22433                  r0 OFF optimal/True obj=21476.999999999996 bnd=21476.999999971216 | ON optimal/True obj=21476.999999999996 bnd=21476.999999971216 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 47, 'RensSeeded': 0, 'RensBackoffSkips': 16} load=6.0/6.1
+[13/186] nexp-50-20-4-2         r0 OFF feasible/False obj=80.0 bnd=50.0 | ON feasible/False obj=80.0 bnd=50.0 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 14, 'RensSeeded': 0, 'RensBackoffSkips': 12} load=6.0/6.5
+[14/186] gt2                    r0 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 19, 'RensGated': 19, 'RensRun': 19, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 1065} load=6.7/6.6
+[15/186] mik-250-20-75-1        r0 OFF feasible/False obj=-49716.0 bnd=-51375.51333599727 | ON feasible/False obj=-49716.0 bnd=-51408.540069085 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1307, 'RensSeeded': 0, 'RensBackoffSkips': 171} load=6.5/6.9
+[16/186] 23588                  r0 OFF optimal/True obj=8090.0 bnd=8089.9999999890615 | ON optimal/True obj=8090.0 bnd=8089.9999999890615 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 288, 'RensSeeded': 0, 'RensBackoffSkips': 40} load=6.8/7.1
+[17/186] flugpl                 r0 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=6.9/6.9
+[18/186] dcmulti                r0 OFF optimal/True obj=188182.0 bnd=188163.45173309272 | ON feasible/False obj=189000.40000000285 bnd=188002.9361566944 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 105, 'RensSeeded': 1, 'RensBackoffSkips': 309} load=6.5/6.9
+[19/186] enlight_hard           r0 OFF time_limit/False obj=None bnd=26.0 | ON time_limit/False obj=None bnd=25.0 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 290} load=6.9/6.5
+[20/186] sp150x300d             r0 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 4, 'RensSeeded': 1, 'RensBackoffSkips': 61} load=6.5/6.5
+[21/186] gen                    r0 OFF optimal/True obj=112313.3627180002 bnd=112303.54990817652 | ON optimal/True obj=112313.3627180002 bnd=112303.54990817652 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 22} load=6.4/6.5
+[22/186] neos17                 r0 OFF feasible/False obj=0.3960852875695731 bnd=0.03399305694202286 | ON feasible/False obj=0.3960852875695731 bnd=0.03137799200696009 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1328, 'RensSeeded': 0, 'RensBackoffSkips': 140} load=6.4/6.4
+[23/186] beavma                 r0 OFF feasible/False obj=541302.2 bnd=229410.5440910093 | ON feasible/False obj=407840.39999999997 bnd=229568.95343999914 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 4, 'RensSeeded': 1, 'RensBackoffSkips': 53} load=6.5/6.7
+[24/186] neos-3611447-jijia     r0 OFF feasible/False obj=133.0 bnd=103.99999999999984 | ON feasible/False obj=109.0 bnd=103.99999999999984 rens={'RensConsidered': 10, 'RensGated': 10, 'RensRun': 10, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 98, 'RensSeeded': 0, 'RensBackoffSkips': 347} load=7.1/6.7
+[25/186] neos-3610051-istra     r0 OFF feasible/False obj=55.0 bnd=47.99999999999994 | ON feasible/False obj=50.0 bnd=47.99999999999994 rens={'RensConsidered': 7, 'RensGated': 7, 'RensRun': 7, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1035, 'RensSeeded': 1, 'RensBackoffSkips': 178} load=7.1/7.2
+[26/186] neos-3611689-kaihu     r0 OFF feasible/False obj=145.0 bnd=114.99999999999984 | ON feasible/False obj=121.0 bnd=114.99999999999984 rens={'RensConsidered': 10, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 615, 'RensSeeded': 1, 'RensBackoffSkips': 411} load=7.3/7.2
+[27/186] neos-3610040-iskar     r0 OFF feasible/False obj=42.0 bnd=35.99999999999995 | ON feasible/False obj=37.0 bnd=35.99999999999995 rens={'RensConsidered': 12, 'RensGated': 12, 'RensRun': 12, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 674, 'RensSeeded': 1, 'RensBackoffSkips': 527} load=7.3/7.1
+[28/186] neos-5192052-neckar    r0 OFF optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 | ON optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 1, 'RensBackoffSkips': 0} load=6.7/6.7
+[29/186] neos-2624317-amur      r0 OFF time_limit/False obj=None bnd=0.0 | ON time_limit/False obj=None bnd=0.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 6} load=6.7/6.2
+[30/186] app2-2                 r0 OFF optimal/True obj=212042.49999999767 bnd=212040.35714264508 | ON optimal/True obj=212042.49999999767 bnd=212040.35714264508 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 6} load=6.2/6.3
+[31/186] b-ball                 r0 OFF feasible/False obj=-1.500000000000002 bnd=-1.8000000000032002 | ON feasible/False obj=-1.500000000000001 bnd=-1.8000000000032002 rens={'RensConsidered': 29, 'RensGated': 29, 'RensRun': 29, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 165, 'RensSeeded': 0, 'RensBackoffSkips': 1706} load=6.2/6.2
+[32/186] bppc8-02               r0 OFF feasible/False obj=513.0 bnd=486.49999999946584 | ON feasible/False obj=514.0 bnd=486.49999999945675 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 258, 'RensSeeded': 0, 'RensBackoffSkips': 92} load=6.5/6.2
+[33/186] supportcase16          r0 OFF optimal/True obj=287.99999999999994 bnd=287.99999999999994 | ON optimal/True obj=287.99999999999994 bnd=287.99999999999994 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 28} load=6.5/6.1
+[34/186] supportcase14          r0 OFF optimal/True obj=288.0 bnd=288.0 | ON optimal/True obj=288.0 bnd=288.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 3, 'RensSeeded': 0, 'RensBackoffSkips': 31} load=6.0/6.1
+[35/186] f2gap40400             r0 OFF optimal/True obj=20772.000000000004 bnd=20772.0 | ON optimal/True obj=20772.000000000004 bnd=20772.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.0/5.9
+[36/186] gsvm2rl3               r0 OFF feasible/False obj=0.5863548183028108 bnd=0.17144382640370462 | ON feasible/False obj=0.5863548183028108 bnd=0.16890767514545363 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 2172, 'RensSeeded': 2, 'RensBackoffSkips': 258} load=6.6/5.9
+[37/186] neos-3118745-obra      r0 OFF feasible/False obj=310.0 bnd=253.9999999999914 | ON feasible/False obj=279.9999999999984 bnd=253.9999999999914 rens={'RensConsidered': 7, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 272, 'RensSeeded': 0, 'RensBackoffSkips': 133} load=6.1/6.7
+[38/186] gr4x6                  r0 OFF optimal/True obj=202.34999999999988 bnd=202.34999999974602 | ON optimal/True obj=202.34999999999988 bnd=202.34999999974602 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.8
+[39/186] 1451                   r0 OFF optimal/True obj=2.0 bnd=2.0 | ON optimal/True obj=2.0 bnd=2.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.5/6.5
+[40/186] 2122                   r0 OFF time_limit/False obj=None bnd=-187604.18727168033 | ON time_limit/False obj=None bnd=-187604.19071986031 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 4} load=6.9/6.5
+[41/186] 2171                   r0 OFF optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 | ON optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 1, 'RensBackoffSkips': 5} load=6.5/6.5
+[42/186] bell5                  r0 OFF optimal/True obj=8966406.491519999 bnd=8965514.22460479 | ON optimal/True obj=8966406.491519999 bnd=8965520.061836185 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 231} load=6.6/6.5
+[43/186] bound_implied          r0 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.9/6.9
+[44/186] dcmulti                r0 OFF optimal/True obj=188182.0 bnd=188163.45173309272 | ON feasible/False obj=189000.40000000285 bnd=187762.0852186135 rens={'RensConsidered': 8, 'RensGated': 8, 'RensRun': 8, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 96, 'RensSeeded': 1, 'RensBackoffSkips': 227} load=6.3/6.9
+[45/186] egout                  r0 OFF optimal/True obj=568.1007 bnd=568.100699999418 | ON optimal/True obj=568.1007 bnd=568.100699999418 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 2, 'RensSeeded': 0, 'RensBackoffSkips': 33} load=6.3/6.4
+[46/186] fixed-binary           r0 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/6.4
+[47/186] flugpl                 r0 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=6.4/6.4
+[48/186] gesa2                  r0 OFF feasible/False obj=27279827.359579917 bnd=25553394.708929714 | ON feasible/False obj=25998362.241439648 bnd=25553873.417014368 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 40, 'RensSeeded': 0, 'RensBackoffSkips': 107} load=6.6/6.4
+[49/186] gt2                    r0 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 15, 'RensGated': 15, 'RensRun': 15, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 851} load=6.3/6.6
+[50/186] issue-2095             r0 OFF optimal/True obj=3.0 bnd=3.0 | ON optimal/True obj=3.0 bnd=3.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.8
+[51/186] issue-2173             r0 OFF optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 | ON optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 8} load=6.8/6.4
+[52/186] issue-2204             r0 OFF optimal/True obj=6.0 bnd=6.0 | ON optimal/True obj=6.0 bnd=6.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/6.8
+[53/186] issue-2290             r0 OFF optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 | ON optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/6.4
+[54/186] issue-2388             r0 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/6.4
+[55/186] issue-2446             r0 OFF time_limit/False obj=None bnd=18930.002285397146 | ON time_limit/False obj=None bnd=18930.002285397146 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/5.7
+[56/186] issue-2585             r0 OFF optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 | ON optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.4/6.4
+[57/186] lseu                   r0 OFF optimal/True obj=1120.0 bnd=1120.0 | ON optimal/True obj=1120.0 bnd=1120.0 rens={'RensConsidered': 3, 'RensGated': 3, 'RensRun': 3, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 30, 'RensSeeded': 0, 'RensBackoffSkips': 57} load=6.1/6.1
+[58/186] p01                    r0 OFF optimal/True obj=263.0 bnd=263.0 | ON optimal/True obj=263.0 bnd=263.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.1/6.1
+[59/186] p0548                  r0 OFF time_limit/False obj=None bnd=7900.52742144103 | ON time_limit/False obj=None bnd=7904.183699398496 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 49} load=5.7/5.7
+[60/186] rgn                    r0 OFF optimal/True obj=82.19999923999997 bnd=82.19999923979249 | ON optimal/True obj=82.19999923999997 bnd=82.19999923979249 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 38, 'RensSeeded': 1, 'RensBackoffSkips': 44} load=5.1/5.1
+[61/186] small_mip              r0 OFF optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 | ON optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.1/4.8
+[62/186] sp150x300d             r0 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 4, 'RensSeeded': 1, 'RensBackoffSkips': 57} load=5.2/4.8
+[63/186] neos-1425699           r1 OFF time_limit/False obj=None bnd=3179554631.063431 | ON time_limit/False obj=None bnd=3179554146.4049892 rens={'RensConsidered': 10, 'RensGated': 10, 'RensRun': 10, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 579} load=4.9/4.8
+[64/186] blend2                 r1 OFF optimal/True obj=7.598985 bnd=7.598984999991398 | ON optimal/True obj=7.598985 bnd=7.598984999991398 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 87} load=5.5/5.5
+[65/186] enlight8               r1 OFF optimal/True obj=27.0 bnd=27.0 | ON optimal/True obj=27.0 bnd=27.0 rens={'RensConsidered': 19, 'RensGated': 19, 'RensRun': 19, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 1056} load=5.6/5.5
+[66/186] p0201                  r1 OFF optimal/True obj=7614.999999999998 bnd=7614.999999991451 | ON optimal/True obj=7614.999999999998 bnd=7614.999999991451 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 30} load=5.5/5.6
+[67/186] mik-250-20-75-5        r1 OFF feasible/False obj=-51506.0 bnd=-53154.11780994658 | ON feasible/False obj=-51506.0 bnd=-53174.27366534422 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 885, 'RensSeeded': 0, 'RensBackoffSkips': 201} load=6.0/5.6
+[68/186] neos-911970            r1 OFF feasible/False obj=226.5099999999999 bnd=23.259999999975143 | ON feasible/False obj=153.78000000000003 bnd=23.259999999974998 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 22, 'RensSeeded': 1, 'RensBackoffSkips': 1} load=6.0/5.5
+[69/186] mik-250-20-75-3        r1 OFF feasible/False obj=-52106.0 bnd=-53824.576519362454 | ON feasible/False obj=-52242.0 bnd=-53844.46937796116 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 981, 'RensSeeded': 0, 'RensBackoffSkips': 165} load=5.2/5.5
+[70/186] fiber                  r1 OFF feasible/False obj=628445.84 bnd=169307.26961785828 | ON feasible/False obj=628445.84 bnd=169307.26961785828 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=5.2/5.6
+[71/186] khb05250               r1 OFF feasible/False obj=111632934.0000011 bnd=101992437.99986352 | ON feasible/False obj=111632934.0000011 bnd=102295503.99985287 rens={'RensConsidered': 2, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 16} load=5.9/5.5
+[72/186] nexp-50-20-1-1         r1 OFF feasible/False obj=48.0 bnd=17.0 | ON feasible/False obj=35.0 bnd=17.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 6, 'RensSeeded': 1, 'RensBackoffSkips': 77} load=5.8/6.1
+[73/186] mik-250-20-75-2        r1 OFF feasible/False obj=-50768.0 bnd=-52486.142312637996 | ON feasible/False obj=-50768.0 bnd=-52623.70771551139 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1063, 'RensSeeded': 1, 'RensBackoffSkips': 141} load=6.4/6.1
+[74/186] 22433                  r1 OFF optimal/True obj=21476.999999999996 bnd=21476.999999971216 | ON optimal/True obj=21476.999999999996 bnd=21476.999999971216 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 61, 'RensSeeded': 0, 'RensBackoffSkips': 16} load=6.6/6.6
+[75/186] nexp-50-20-4-2         r1 OFF feasible/False obj=80.0 bnd=50.0 | ON feasible/False obj=80.0 bnd=50.0 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 14, 'RensSeeded': 0, 'RensBackoffSkips': 8} load=6.4/6.4
+[76/186] gt2                    r1 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 17, 'RensGated': 17, 'RensRun': 17, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 942} load=6.4/6.5
+[77/186] mik-250-20-75-1        r1 OFF feasible/False obj=-49716.0 bnd=-51381.734219390026 | ON feasible/False obj=-49716.0 bnd=-51412.498484782736 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1307, 'RensSeeded': 0, 'RensBackoffSkips': 172} load=6.6/6.5
+[78/186] 23588                  r1 OFF optimal/True obj=8090.0 bnd=8089.9999999890615 | ON optimal/True obj=8090.0 bnd=8089.9999999890615 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 8, 'RensSeeded': 0, 'RensBackoffSkips': 40} load=6.7/6.6
+[79/186] flugpl                 r1 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=6.3/6.3
+[80/186] dcmulti                r1 OFF optimal/True obj=188182.0 bnd=188163.45173309272 | ON feasible/False obj=189000.40000000285 bnd=187988.70760727994 rens={'RensConsidered': 10, 'RensGated': 10, 'RensRun': 10, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 120, 'RensSeeded': 1, 'RensBackoffSkips': 314} load=6.3/6.2
+[81/186] enlight_hard           r1 OFF time_limit/False obj=None bnd=26.0 | ON time_limit/False obj=None bnd=26.0 rens={'RensConsidered': 7, 'RensGated': 7, 'RensRun': 7, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 380} load=5.6/6.2
+[82/186] sp150x300d             r1 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 4, 'RensSeeded': 1, 'RensBackoffSkips': 56} load=5.6/5.9
+[83/186] gen                    r1 OFF optimal/True obj=112313.3627180002 bnd=112303.54990817652 | ON optimal/True obj=112313.3627180002 bnd=112303.54990817652 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 22} load=5.9/5.8
+[84/186] neos17                 r1 OFF feasible/False obj=0.3960852875695731 bnd=0.034024825173790185 | ON feasible/False obj=0.3960852875695731 bnd=0.031201548450516592 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1328, 'RensSeeded': 0, 'RensBackoffSkips': 135} load=6.1/6.4
+[85/186] beavma                 r1 OFF feasible/False obj=541302.2 bnd=229338.1156494092 | ON feasible/False obj=407840.39999999997 bnd=228656.30996447607 rens={'RensConsidered': 3, 'RensGated': 3, 'RensRun': 3, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 3, 'RensSeeded': 1, 'RensBackoffSkips': 41} load=6.3/6.5
+[86/186] neos-3611447-jijia     r1 OFF feasible/False obj=133.0 bnd=103.99999999999984 | ON feasible/False obj=109.0 bnd=103.99999999999984 rens={'RensConsidered': 10, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 97, 'RensSeeded': 0, 'RensBackoffSkips': 345} load=6.4/6.2
+[87/186] neos-3610051-istra     r1 OFF feasible/False obj=55.0 bnd=47.99999999999994 | ON feasible/False obj=50.0 bnd=47.99999999999994 rens={'RensConsidered': 7, 'RensGated': 7, 'RensRun': 7, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1027, 'RensSeeded': 1, 'RensBackoffSkips': 169} load=6.6/6.4
+[88/186] neos-3611689-kaihu     r1 OFF feasible/False obj=145.0 bnd=114.99999999999984 | ON feasible/False obj=121.0 bnd=114.99999999999984 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 615, 'RensSeeded': 1, 'RensBackoffSkips': 424} load=6.5/6.9
+[89/186] neos-3610040-iskar     r1 OFF feasible/False obj=42.0 bnd=35.99999999999995 | ON feasible/False obj=37.0 bnd=35.99999999999995 rens={'RensConsidered': 10, 'RensGated': 10, 'RensRun': 10, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 664, 'RensSeeded': 1, 'RensBackoffSkips': 441} load=7.0/6.8
+[90/186] neos-5192052-neckar    r1 OFF optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 | ON optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 1, 'RensBackoffSkips': 0} load=6.8/6.4
+[91/186] neos-2624317-amur      r1 OFF time_limit/False obj=None bnd=0.0 | ON time_limit/False obj=None bnd=0.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 4} load=6.1/6.4
+[92/186] app2-2                 r1 OFF optimal/True obj=212042.49999999767 bnd=212040.35714264508 | ON optimal/True obj=212042.49999999767 bnd=212040.35714264508 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 6} load=6.5/6.1
+[93/186] b-ball                 r1 OFF feasible/False obj=-1.500000000000002 bnd=-1.8000000000032002 | ON feasible/False obj=-1.5000000000000022 bnd=-1.8000000000032002 rens={'RensConsidered': 47, 'RensGated': 47, 'RensRun': 47, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 271, 'RensSeeded': 0, 'RensBackoffSkips': 2855} load=5.9/6.1
+[94/186] bppc8-02               r1 OFF feasible/False obj=513.0 bnd=486.4999999994661 | ON feasible/False obj=514.0 bnd=486.49999999945646 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 257, 'RensSeeded': 0, 'RensBackoffSkips': 81} load=5.9/6.3
+[95/186] supportcase16          r1 OFF optimal/True obj=287.99999999999994 bnd=287.99999999999994 | ON optimal/True obj=287.99999999999994 bnd=287.99999999999994 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 28} load=6.3/6.5
+[96/186] supportcase14          r1 OFF optimal/True obj=288.0 bnd=288.0 | ON optimal/True obj=288.0 bnd=288.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 3, 'RensSeeded': 0, 'RensBackoffSkips': 31} load=6.3/6.2
+[97/186] f2gap40400             r1 OFF optimal/True obj=20772.000000000004 bnd=20772.0 | ON optimal/True obj=20772.000000000004 bnd=20772.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.3/6.3
+[98/186] gsvm2rl3               r1 OFF feasible/False obj=0.5863548183028108 bnd=0.17144382641304462 | ON feasible/False obj=0.5863548183028108 bnd=0.16960177968693804 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1856, 'RensSeeded': 2, 'RensBackoffSkips': 253} load=6.3/6.2
+[99/186] neos-3118745-obra      r1 OFF feasible/False obj=310.0 bnd=253.9999999999914 | ON feasible/False obj=288.99999999999807 bnd=253.9999999999914 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 111, 'RensSeeded': 0, 'RensBackoffSkips': 168} load=6.0/6.1
+[100/186] gr4x6                  r1 OFF optimal/True obj=202.34999999999988 bnd=202.34999999974602 | ON optimal/True obj=202.34999999999988 bnd=202.34999999974602 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.1/6.0
+[101/186] 1451                   r1 OFF optimal/True obj=2.0 bnd=2.0 | ON optimal/True obj=2.0 bnd=2.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.0/6.0
+[102/186] 2122                   r1 OFF time_limit/False obj=None bnd=-187604.19071986031 | ON time_limit/False obj=None bnd=-187604.18727168033 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 4} load=6.0/6.5
+[103/186] 2171                   r1 OFF optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 | ON optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 1, 'RensBackoffSkips': 5} load=6.2/6.2
+[104/186] bell5                  r1 OFF optimal/True obj=8966406.491519999 bnd=8965514.22460479 | ON optimal/True obj=8966406.491519999 bnd=8965520.061836185 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 231} load=6.2/6.5
+[105/186] bound_implied          r1 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.3/6.3
+[106/186] dcmulti                r1 OFF optimal/True obj=188182.0 bnd=188164.1862795976 | ON feasible/False obj=189000.40000000285 bnd=187697.40959751292 rens={'RensConsidered': 8, 'RensGated': 8, 'RensRun': 8, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 82, 'RensSeeded': 1, 'RensBackoffSkips': 215} load=6.5/6.1
+[107/186] egout                  r1 OFF optimal/True obj=568.1007 bnd=568.100699999418 | ON optimal/True obj=568.1007 bnd=568.100699999418 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 2, 'RensSeeded': 0, 'RensBackoffSkips': 33} load=6.3/6.4
+[108/186] fixed-binary           r1 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.3/6.3
+[109/186] flugpl                 r1 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=6.1/6.1
+[110/186] gesa2                  r1 OFF feasible/False obj=27279827.359579917 bnd=25555170.361238286 | ON feasible/False obj=25998362.241439648 bnd=25553191.51865301 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 40, 'RensSeeded': 0, 'RensBackoffSkips': 108} load=6.1/5.9
+[111/186] gt2                    r1 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 17, 'RensGated': 17, 'RensRun': 17, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 964} load=5.8/5.9
+[112/186] issue-2095             r1 OFF optimal/True obj=3.0 bnd=3.0 | ON optimal/True obj=3.0 bnd=3.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.8/5.8
+[113/186] issue-2173             r1 OFF optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 | ON optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 8} load=5.8/5.8
+[114/186] issue-2204             r1 OFF optimal/True obj=6.0 bnd=6.0 | ON optimal/True obj=6.0 bnd=6.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.7/5.7
+[115/186] issue-2290             r1 OFF optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 | ON optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.7/5.7
+[116/186] issue-2388             r1 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.7/5.7
+[117/186] issue-2446             r1 OFF time_limit/False obj=None bnd=18930.002285397146 | ON time_limit/False obj=None bnd=18930.002285397146 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.5/5.8
+[118/186] issue-2585             r1 OFF optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 | ON optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.5/5.5
+[119/186] lseu                   r1 OFF optimal/True obj=1120.0 bnd=1120.0 | ON optimal/True obj=1120.0 bnd=1120.0 rens={'RensConsidered': 3, 'RensGated': 3, 'RensRun': 3, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 30, 'RensSeeded': 0, 'RensBackoffSkips': 57} load=5.6/5.5
+[120/186] p01                    r1 OFF optimal/True obj=263.0 bnd=263.0 | ON optimal/True obj=263.0 bnd=263.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.6/5.6
+[121/186] p0548                  r1 OFF time_limit/False obj=None bnd=7906.070422462763 | ON time_limit/False obj=None bnd=7889.41676603651 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 46} load=5.2/5.6
+[122/186] rgn                    r1 OFF optimal/True obj=82.19999923999997 bnd=82.19999923979249 | ON optimal/True obj=82.19999923999997 bnd=82.19999923979249 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 38, 'RensSeeded': 1, 'RensBackoffSkips': 44} load=4.4/4.4
+[123/186] small_mip              r1 OFF optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 | ON optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=4.4/4.4
+[124/186] sp150x300d             r1 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 4, 'RensSeeded': 1, 'RensBackoffSkips': 52} load=4.4/4.7
+[125/186] neos-1425699           r2 OFF time_limit/False obj=None bnd=3179557480.883184 | ON time_limit/False obj=None bnd=3179556412.900539 rens={'RensConsidered': 11, 'RensGated': 11, 'RensRun': 11, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 652} load=4.4/4.7
+[126/186] blend2                 r2 OFF optimal/True obj=7.598985 bnd=7.598984999991398 | ON optimal/True obj=7.598985 bnd=7.598984999991398 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 87} load=4.9/4.9
+[127/186] enlight8               r2 OFF optimal/True obj=27.0 bnd=27.0 | ON optimal/True obj=27.0 bnd=27.0 rens={'RensConsidered': 16, 'RensGated': 16, 'RensRun': 16, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 832} load=4.9/5.5
+[128/186] p0201                  r2 OFF optimal/True obj=7614.999999999998 bnd=7614.999999991451 | ON optimal/True obj=7614.999999999998 bnd=7614.999999991451 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 30} load=5.2/5.2
+[129/186] mik-250-20-75-5        r2 OFF feasible/False obj=-51506.0 bnd=-53150.42383349634 | ON feasible/False obj=-51506.0 bnd=-53159.710114971684 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 885, 'RensSeeded': 0, 'RensBackoffSkips': 225} load=5.2/5.9
+[130/186] neos-911970            r2 OFF feasible/False obj=226.5099999999999 bnd=23.259999999975143 | ON feasible/False obj=153.78000000000003 bnd=23.259999999975143 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 44, 'RensSeeded': 1, 'RensBackoffSkips': 1} load=5.7/5.8
+[131/186] mik-250-20-75-3        r2 OFF feasible/False obj=-52106.0 bnd=-53765.9984590021 | ON feasible/False obj=-52106.0 bnd=-53879.320496470034 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 895, 'RensSeeded': 1, 'RensBackoffSkips': 149} load=5.6/5.7
+[132/186] fiber                  r2 OFF feasible/False obj=628445.84 bnd=177182.0590970076 | ON feasible/False obj=628445.84 bnd=174569.0465970221 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 29} load=6.0/5.5
+[133/186] khb05250               r2 OFF feasible/False obj=111632934.0000011 bnd=102295503.99985287 | ON feasible/False obj=111632934.0000011 bnd=102831373.99984866 rens={'RensConsidered': 2, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 17} load=5.9/5.7
+[134/186] nexp-50-20-1-1         r2 OFF feasible/False obj=48.0 bnd=17.0 | ON feasible/False obj=33.0 bnd=17.0 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 7, 'RensSeeded': 0, 'RensBackoffSkips': 70} load=5.7/5.7
+[135/186] mik-250-20-75-2        r2 OFF feasible/False obj=-50768.0 bnd=-52500.61062567688 | ON feasible/False obj=-50768.0 bnd=-52637.25133527608 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 973, 'RensSeeded': 1, 'RensBackoffSkips': 121} load=5.9/6.0
+[136/186] 22433                  r2 OFF optimal/True obj=21476.999999999996 bnd=21476.999999971216 | ON optimal/True obj=21476.999999999996 bnd=21476.999999971216 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 43, 'RensSeeded': 0, 'RensBackoffSkips': 16} load=6.1/6.1
+[137/186] nexp-50-20-4-2         r2 OFF feasible/False obj=80.0 bnd=50.0 | ON feasible/False obj=80.0 bnd=50.0 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 14, 'RensSeeded': 0, 'RensBackoffSkips': 8} load=6.0/5.5
+[138/186] gt2                    r2 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 20, 'RensGated': 20, 'RensRun': 20, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 1100} load=5.7/5.5
+[139/186] mik-250-20-75-1        r2 OFF feasible/False obj=-49716.0 bnd=-51382.10313066326 | ON feasible/False obj=-49716.0 bnd=-51407.36283282482 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1307, 'RensSeeded': 0, 'RensBackoffSkips': 178} load=5.7/5.9
+[140/186] 23588                  r2 OFF optimal/True obj=8090.0 bnd=8089.9999999890615 | ON optimal/True obj=8090.0 bnd=8089.9999999890615 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 60, 'RensSeeded': 0, 'RensBackoffSkips': 40} load=5.7/5.5
+[141/186] flugpl                 r2 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=5.9/5.9
+[142/186] dcmulti                r2 OFF optimal/True obj=188182.0 bnd=188163.45173309272 | ON feasible/False obj=189000.40000000285 bnd=187963.25578421465 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 85, 'RensSeeded': 1, 'RensBackoffSkips': 277} load=6.1/5.9
+[143/186] enlight_hard           r2 OFF time_limit/False obj=None bnd=26.0 | ON time_limit/False obj=None bnd=26.0 rens={'RensConsidered': 7, 'RensGated': 7, 'RensRun': 7, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 360} load=6.0/5.7
+[144/186] sp150x300d             r2 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 1, 'RensBackoffSkips': 75} load=5.2/5.7
+[145/186] gen                    r2 OFF optimal/True obj=112313.3627180002 bnd=112303.54990817652 | ON optimal/True obj=112313.3627180002 bnd=112303.54990817652 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 22} load=5.2/5.4
+[146/186] neos17                 r2 OFF feasible/False obj=0.3960852875695731 bnd=0.033700089909056 | ON feasible/False obj=0.3960852875695731 bnd=0.03171300699197437 rens={'RensConsidered': 4, 'RensGated': 4, 'RensRun': 4, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1328, 'RensSeeded': 0, 'RensBackoffSkips': 152} load=5.9/5.6
+[147/186] beavma                 r2 OFF feasible/False obj=541302.2 bnd=229373.90809432222 | ON feasible/False obj=407840.39999999997 bnd=229373.90809432222 rens={'RensConsidered': 4, 'RensGated': 3, 'RensRun': 3, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 3, 'RensSeeded': 1, 'RensBackoffSkips': 49} load=5.7/6.0
+[148/186] neos-3611447-jijia     r2 OFF feasible/False obj=133.0 bnd=103.99999999999984 | ON feasible/False obj=109.0 bnd=103.99999999999984 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 97, 'RensSeeded': 0, 'RensBackoffSkips': 338} load=6.7/6.2
+[149/186] neos-3610051-istra     r2 OFF feasible/False obj=55.0 bnd=47.99999999999994 | ON feasible/False obj=50.0 bnd=47.99999999999994 rens={'RensConsidered': 7, 'RensGated': 7, 'RensRun': 6, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1026, 'RensSeeded': 1, 'RensBackoffSkips': 168} load=6.4/6.9
+[150/186] neos-3611689-kaihu     r2 OFF feasible/False obj=145.0 bnd=114.99999999999984 | ON feasible/False obj=121.0 bnd=114.99999999999984 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 615, 'RensSeeded': 1, 'RensBackoffSkips': 390} load=7.3/7.1
+[151/186] neos-3610040-iskar     r2 OFF feasible/False obj=42.0 bnd=35.99999999999995 | ON feasible/False obj=37.0 bnd=35.99999999999995 rens={'RensConsidered': 10, 'RensGated': 10, 'RensRun': 10, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 668, 'RensSeeded': 1, 'RensBackoffSkips': 454} load=7.2/7.3
+[152/186] neos-5192052-neckar    r2 OFF optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 | ON optimal/True obj=-11669999.999999985 bnd=-11670000.000011679 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 1, 'RensBackoffSkips': 0} load=7.0/7.0
+[153/186] neos-2624317-amur      r2 OFF time_limit/False obj=None bnd=0.0 | ON time_limit/False obj=None bnd=0.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 7} load=7.0/6.8
+[154/186] app2-2                 r2 OFF optimal/True obj=212042.49999999767 bnd=212040.35714264508 | ON optimal/True obj=212042.49999999767 bnd=212040.35714264508 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 6} load=7.0/7.0
+[155/186] b-ball                 r2 OFF feasible/False obj=-1.5000000000000022 bnd=-1.8000000000032002 | ON feasible/False obj=-1.500000000000002 bnd=-1.8000000000032002 rens={'RensConsidered': 35, 'RensGated': 35, 'RensRun': 35, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 203, 'RensSeeded': 0, 'RensBackoffSkips': 2114} load=7.0/6.4
+[156/186] bppc8-02               r2 OFF feasible/False obj=524.0000000000001 bnd=486.49999999946573 | ON feasible/False obj=514.0 bnd=486.49999999945624 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 257, 'RensSeeded': 0, 'RensBackoffSkips': 87} load=6.5/6.3
+[157/186] supportcase16          r2 OFF optimal/True obj=287.99999999999994 bnd=287.99999999999994 | ON optimal/True obj=287.99999999999994 bnd=287.99999999999994 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 28} load=6.4/6.3
+[158/186] supportcase14          r2 OFF optimal/True obj=288.0 bnd=288.0 | ON optimal/True obj=288.0 bnd=288.0 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 3, 'RensSeeded': 0, 'RensBackoffSkips': 31} load=6.6/6.5
+[159/186] f2gap40400             r2 OFF optimal/True obj=20772.000000000004 bnd=20772.0 | ON optimal/True obj=20772.000000000004 bnd=20772.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.7/6.7
+[160/186] gsvm2rl3               r2 OFF feasible/False obj=0.5863548183028108 bnd=0.17062958837316977 | ON feasible/False obj=0.5863548183028108 bnd=0.16890767512245353 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1716, 'RensSeeded': 2, 'RensBackoffSkips': 237} load=6.7/6.7
+[161/186] neos-3118745-obra      r2 OFF feasible/False obj=310.0 bnd=253.9999999999914 | ON feasible/False obj=288.99999999999807 bnd=253.9999999999914 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 111, 'RensSeeded': 0, 'RensBackoffSkips': 181} load=6.7/6.8
+[162/186] gr4x6                  r2 OFF optimal/True obj=202.34999999999988 bnd=202.34999999974602 | ON optimal/True obj=202.34999999999988 bnd=202.34999999974602 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.7
+[163/186] 1451                   r2 OFF optimal/True obj=2.0 bnd=2.0 | ON optimal/True obj=2.0 bnd=2.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.8
+[164/186] 2122                   r2 OFF time_limit/False obj=None bnd=-187604.19071986031 | ON time_limit/False obj=None bnd=-187604.18727168033 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 3} load=6.7/6.8
+[165/186] 2171                   r2 OFF optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 | ON optimal/True obj=-22375.758546075132 bnd=-22375.758546097775 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 1, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 1, 'RensSeeded': 1, 'RensBackoffSkips': 5} load=6.6/6.5
+[166/186] bell5                  r2 OFF optimal/True obj=8966406.491519999 bnd=8965514.22460479 | ON optimal/True obj=8966406.491519999 bnd=8965520.061836185 rens={'RensConsidered': 6, 'RensGated': 6, 'RensRun': 6, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 0, 'RensBackoffSkips': 231} load=6.7/6.5
+[167/186] bound_implied          r2 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.6/6.2
+[168/186] dcmulti                r2 OFF feasible/False obj=188182.0 bnd=188114.1881895002 | ON feasible/False obj=189000.40000000285 bnd=187880.9433995714 rens={'RensConsidered': 9, 'RensGated': 9, 'RensRun': 9, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 63, 'RensSeeded': 1, 'RensBackoffSkips': 242} load=6.6/6.2
+[169/186] egout                  r2 OFF optimal/True obj=568.1007 bnd=568.100699999418 | ON optimal/True obj=568.1007 bnd=568.100699999418 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 2, 'RensSeeded': 0, 'RensBackoffSkips': 33} load=6.2/6.3
+[170/186] fixed-binary           r2 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.3/6.3
+[171/186] flugpl                 r2 OFF optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 | ON optimal/True obj=1201499.9999999988 bnd=1201499.9999986193 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 21} load=6.3/6.3
+[172/186] gesa2                  r2 OFF feasible/False obj=27279827.359579917 bnd=25553487.852163054 | ON feasible/False obj=25998362.241439648 bnd=25549697.355001006 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 2, 'RensRejected': 0, 'RensSubNodes': 33, 'RensSeeded': 0, 'RensBackoffSkips': 75} load=6.8/6.6
+[173/186] gt2                    r2 OFF feasible/False obj=24106.0 bnd=21165.999999978834 | ON feasible/False obj=24106.0 bnd=21165.999999978834 rens={'RensConsidered': 25, 'RensGated': 25, 'RensRun': 25, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 1488} load=6.8/6.7
+[174/186] issue-2095             r2 OFF optimal/True obj=3.0 bnd=3.0 | ON optimal/True obj=3.0 bnd=3.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.9/6.9
+[175/186] issue-2173             r2 OFF optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 | ON optimal/True obj=-26770.807548852565 bnd=-26770.807548899335 rens={'RensConsidered': 1, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 8} load=6.9/6.9
+[176/186] issue-2204             r2 OFF optimal/True obj=6.0 bnd=6.0 | ON optimal/True obj=6.0 bnd=6.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.9/6.9
+[177/186] issue-2290             r2 OFF optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 | ON optimal/True obj=-1.6666666666 bnd=-1.6666666666026668 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.8
+[178/186] issue-2388             r2 OFF optimal/True obj=0.0 bnd=-1e-12 | ON optimal/True obj=0.0 bnd=-1e-12 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.8
+[179/186] issue-2446             r2 OFF time_limit/False obj=None bnd=18930.002285397146 | ON time_limit/False obj=None bnd=18930.002285397146 rens={'RensConsidered': 1, 'RensGated': 1, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.8/6.1
+[180/186] issue-2585             r2 OFF optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 | ON optimal/True obj=-175.91000000000003 bnd=-175.9100000001769 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.9/6.3
+[181/186] lseu                   r2 OFF optimal/True obj=1120.0 bnd=1120.0 | ON optimal/True obj=1120.0 bnd=1120.0 rens={'RensConsidered': 3, 'RensGated': 3, 'RensRun': 3, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 30, 'RensSeeded': 0, 'RensBackoffSkips': 57} load=5.9/5.9
+[182/186] p01                    r2 OFF optimal/True obj=263.0 bnd=263.0 | ON optimal/True obj=263.0 bnd=263.0 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=6.1/6.1
+[183/186] p0548                  r2 OFF time_limit/False obj=None bnd=7900.446760384148 | ON time_limit/False obj=None bnd=7873.449633291739 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 39} load=6.1/5.6
+[184/186] rgn                    r2 OFF optimal/True obj=82.19999923999997 bnd=82.19999923979249 | ON optimal/True obj=82.19999923999997 bnd=82.19999923979249 rens={'RensConsidered': 2, 'RensGated': 2, 'RensRun': 2, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 38, 'RensSeeded': 1, 'RensBackoffSkips': 44} load=5.5/5.5
+[185/186] small_mip              r2 OFF optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 | ON optimal/True obj=3.2368421052631438 bnd=3.2368421052583805 rens={'RensConsidered': 0, 'RensGated': 0, 'RensRun': 0, 'RensImproved': 0, 'RensRejected': 0, 'RensSubNodes': 0, 'RensSeeded': 0, 'RensBackoffSkips': 0} load=5.5/5.5
+[186/186] sp150x300d             r2 OFF feasible/False obj=93.0 bnd=39.0 | ON feasible/False obj=70.0 bnd=39.0 rens={'RensConsidered': 5, 'RensGated': 5, 'RensRun': 5, 'RensImproved': 1, 'RensRejected': 0, 'RensSubNodes': 5, 'RensSeeded': 1, 'RensBackoffSkips': 86} load=4.6/5.5
+{
+ "bar1_problems": [],
+ "bar1_pass": true,
+ "bar1_checks": 372,
+ "solved": {
+  "off": 95,
+  "on": 90
+ },
+ "population": 29,
+ "median_primal": {
+  "off": 0.21398448577909518,
+  "on": 0.06406547591093847
+ },
+ "incumbent_wins": 10,
+ "incumbent_losses": 1,
+ "dual_losses": 0,
+ "dual_loss_cap": 2,
+ "bar2": {
+  "2a_solved_on_ge_off": false,
+  "2b_median_primal_lower": true,
+  "2c_wins_gt_losses": true,
+  "2d_dual_losses_le_10pct": true
+ },
+ "bar2_pass": false,
+ "graduate": false,
+ "rens_run_total": 791,
+ "rens_improved_total": 77,
+ "per_instance": {
+  "neos-1425699": {
+   "off": {
+    "primal": Infinity,
+    "dual": 4.4499845400147526e-05,
+    "primal_spread": 0.0,
+    "dual_spread": 1.397178860955669e-06
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 4.48357207935182e-05,
+    "primal_spread": 0.0,
+    "dual_spread": 1.9153271314862583e-06
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "mik-250-20-75-5": {
+   "off": {
+    "primal": 0.0005045310771738498,
+    "dual": 0.03147726330597061,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00011114208572861328
+   },
+   "on": {
+    "primal": 0.0005045310771738498,
+    "dual": 0.03186838851501405,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0003554192787492902
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-911970": {
+   "off": {
+    "primal": 3.0801649928263974,
+    "dual": 0.5649210903878202,
+    "primal_spread": 0.0,
+    "dual_spread": 2.55351295663786e-15
+   },
+   "on": {
+    "primal": 1.775824964131995,
+    "dual": 0.5649210903878228,
+    "primal_spread": 0.0,
+    "dual_spread": 2.55351295663786e-15
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "mik-250-20-75-3": {
+   "off": {
+    "primal": 0.0026032195700859445,
+    "dual": 0.029370785752152042,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0011212614199099628
+   },
+   "on": {
+    "primal": 0.0026032195700859445,
+    "dual": 0.03134047616848256,
+    "primal_spread": 0.0026032195700859445,
+    "dual_spread": 0.0022459814658551264
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "fiber": {
+   "off": {
+    "primal": 0.548141976406242,
+    "dual": 0.5783250955104081,
+    "primal_spread": 0.0,
+    "dual_spread": 0.01939908258275791
+   },
+   "on": {
+    "primal": 0.548141976406242,
+    "dual": 0.5819955000552766,
+    "primal_spread": 0.0,
+    "dual_spread": 0.012962079357311307
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "khb05250": {
+   "off": {
+    "primal": 0.043881597520839484,
+    "dual": 0.04343287956689146,
+    "primal_spread": 0.0,
+    "dual_spread": 0.007844905733977399
+   },
+   "on": {
+    "primal": 0.043881597520839484,
+    "dual": 0.038421949489140655,
+    "primal_spread": 0.0,
+    "dual_spread": 0.005010930077750803
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "nexp-50-20-1-1": {
+   "off": {
+    "primal": 0.6333333333333339,
+    "dual": 0.3999999999999998,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.20000000000000043,
+    "dual": 0.3999999999999998,
+    "primal_spread": 0.06666666666666668,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "mik-250-20-75-2": {
+   "off": {
+    "primal": 1.4331496807467992e-16,
+    "dual": 0.03396966194690682,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0002849832188715068
+   },
+   "on": {
+    "primal": 1.4331496807467992e-16,
+    "dual": 0.0365519847842459,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00031828060209487113
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "nexp-50-20-4-2": {
+   "off": {
+    "primal": 0.12500000000000022,
+    "dual": 0.2916666666666665,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.12500000000000022,
+    "dual": 0.2916666666666665,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "gt2": {
+   "off": {
+    "primal": 0.1388954504653529,
+    "dual": 9.947853420629728e-13,
+    "primal_spread": 1.174060848541103e-14,
+    "dual_spread": 1.031221847334469e-14
+   },
+   "on": {
+    "primal": 0.1388954504653529,
+    "dual": 9.947853420629728e-13,
+    "primal_spread": 1.174060848541103e-14,
+    "dual_spread": 1.031221847334469e-14
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "mik-250-20-75-1": {
+   "off": {
+    "primal": 0.0,
+    "dual": 0.033504318832391855,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00013254610426996494
+   },
+   "on": {
+    "primal": 0.0,
+    "dual": 0.034043487521069254,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00010329770416382666
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "dcmulti": {
+   "off": {
+    "primal": 0.0,
+    "dual": 9.85650505480345e-05,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0002656886652748588
+   },
+   "on": {
+    "primal": 0.00434895819496366,
+    "dual": 0.0013811046061916988,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0016235608911617009
+   },
+   "primal_win": false,
+   "primal_loss": true,
+   "dual_loss": false
+  },
+  "enlight_hard": {
+   "off": {
+    "primal": Infinity,
+    "dual": 0.2894736842105263,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 0.2894736842105263,
+    "primal_spread": 0.0,
+    "dual_spread": 0.02631578947368418
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "sp150x300d": {
+   "off": {
+    "primal": 0.34285714285714286,
+    "dual": 0.42857142857142855,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.014285714285714285,
+    "dual": 0.42857142857142855,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos17": {
+   "off": {
+    "primal": 0.21398448577909518,
+    "dual": 0.10087761778783047,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00028237785820303674
+   },
+   "on": {
+    "primal": 0.21398448577909518,
+    "dual": 0.10315158220013212,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0004447455610178952
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "beavma": {
+   "off": {
+    "primal": 0.4122696889528967,
+    "dual": 0.4015567798084923,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00018896709402405065
+   },
+   "on": {
+    "primal": 0.06406547591093847,
+    "dual": 0.4015567798084923,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0023811030810493294
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-3611447-jijia": {
+   "off": {
+    "primal": 0.24074074074074073,
+    "dual": 0.027777777777779226,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.018518518518518517,
+    "dual": 0.027777777777779226,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-3610051-istra": {
+   "off": {
+    "primal": 0.12,
+    "dual": 0.02000000000000114,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.02,
+    "dual": 0.02000000000000114,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-3611689-kaihu": {
+   "off": {
+    "primal": 0.21666666666666667,
+    "dual": 0.03333333333333464,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.016666666666666666,
+    "dual": 0.03333333333333464,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-3610040-iskar": {
+   "off": {
+    "primal": 0.13157894736842105,
+    "dual": 0.02631578947368552,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.0,
+    "dual": 0.02631578947368552,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-2624317-amur": {
+   "off": {
+    "primal": Infinity,
+    "dual": 0.778878315144748,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 0.778878315144748,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "b-ball": {
+   "off": {
+    "primal": 3.1974423109204383e-15,
+    "dual": 0.1200000000012756,
+    "primal_spread": 8.881784197001221e-17,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 3.1974423109204383e-15,
+    "dual": 0.1200000000012756,
+    "primal_spread": 4.4408920985006104e-16,
+    "dual_spread": 0.0
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "bppc8-02": {
+   "off": {
+    "primal": 0.011811023622047697,
+    "dual": 0.04035433070971248,
+    "primal_spread": 0.021653543307086846,
+    "dual_spread": 7.840950111415168e-16
+   },
+   "on": {
+    "primal": 0.013779527559055572,
+    "dual": 0.04035433070973094,
+    "primal_spread": 0.0,
+    "dual_spread": 1.0130785099704553e-15
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "gsvm2rl3": {
+   "off": {
+    "primal": 0.1869226654110228,
+    "dual": 0.12351687480488739,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0006092190557981658
+   },
+   "on": {
+    "primal": 0.1869226654110228,
+    "dual": 0.12541444234564056,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0005193342814902718
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "neos-3118745-obra": {
+   "off": {
+    "primal": 0.21484375,
+    "dual": 0.00390625000003364,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": 0.13281249999999245,
+    "dual": 0.00390625000003364,
+    "primal_spread": 0.03515624999999867,
+    "dual_spread": 0.0
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "2122": {
+   "off": {
+    "primal": Infinity,
+    "dual": 4.665684406847435e-05,
+    "primal_spread": 0.0,
+    "dual_spread": 1.8379124195760943e-08
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 4.667522319267011e-05,
+    "primal_spread": 0.0,
+    "dual_spread": 1.8379124195760943e-08
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "gesa2": {
+   "off": {
+    "primal": 0.058183835785248494,
+    "dual": 0.00878082901200917,
+    "primal_spread": 0.0,
+    "dual_spread": 6.887750707734556e-05
+   },
+   "on": {
+    "primal": 0.008475837030099872,
+    "dual": 0.00879232378119165,
+    "primal_spread": 0.0,
+    "dual_spread": 0.00016198933737881192
+   },
+   "primal_win": true,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "issue-2446": {
+   "off": {
+    "primal": Infinity,
+    "dual": 25.071820738714894,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 25.071820738714894,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  },
+  "p0548": {
+   "off": {
+    "primal": Infinity,
+    "dual": 0.09094254240209042,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0006469928760487603
+   },
+   "on": {
+    "primal": Infinity,
+    "dual": 0.09222080464375171,
+    "primal_spread": 0.0,
+    "dual_spread": 0.0035359026814032885
+   },
+   "primal_win": false,
+   "primal_loss": false,
+   "dual_loss": false
+  }
+ }
+}
+p42 panel: executed=372 rens_run=791
