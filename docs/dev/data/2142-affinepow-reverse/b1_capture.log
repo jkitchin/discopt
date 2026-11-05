@@ -1,0 +1,4 @@
+solve: node_limit 3.0620145766186386 0.09399997607851347 1000 161.3 s; kernel calls 1 observed 940 kept 94
+kernel call 0 n_cols 320 records 94 cfg: {'max_nodes': 1000, 'gap_tol': 1e+300, 'rel_gap_tol': 0.0001, 'abs_gap_tol': 1e-06, 'obj_offset': 0.0, 'time_limit_s': 3571.455287620999, 'cold_dual_start': False, 'pseudocost_branching': True, 'pseudocost_reliability': 1, 'spatial_score': True, 'spatial_pscost_weight': 1.0, 'spatial_midpull': 0.75, 'warm_start_children': True, 'warm_flip_boxed': True, 'cut_rounds_root': 30, 'cut_rounds_node': 3, 'int_fix_probe': True, 'undecided_unpropagated_retry': True, 'bound_time_extension_s': 3.0, 'max_open_nodes': 382727, 'initial_incumbent': 3.0620145765807636}
+saved /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/hull_boxes.npz boxes 94 cutoffs finite 94
+executed assertions: 4

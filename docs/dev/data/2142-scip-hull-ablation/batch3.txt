@@ -1,0 +1,3 @@
+nopresolve_20k nopresolve --node-limit 20000
+noconflict_20k default --node-limit 20000 --param conflict/enable=false
+donotaggr_20k default --node-limit 20000 --param presolving/donotaggr=true

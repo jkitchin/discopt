@@ -1,0 +1,15 @@
+cvxnonsep_psig30       OFF optimal                b=78.99179856949351 n=89 SpatialViolScipPicks=0 SpatialViolScipChanged=0 | ON optimal                b=78.99179856949351 n=89 SpatialViolScipPicks=0 SpatialViolScipChanged=0 fired=0 undecided None/None wall 93.7/92.2 load 3.46
+heatexch_gen1          OFF feasible               b=100499.9999998549 n=413 SpatialViolScipPicks=0 SpatialViolScipChanged=0 | ON feasible               b=100499.99999980767 n=413 SpatialViolScipPicks=0 SpatialViolScipChanged=0 fired=0 undecided None/None wall 120.1/120.3 load 2.36
+
+instances           : 2
+executed checks     : 21
+violations          : 0
+mechanism fired     : 0 on 0 instance(s) []
+certified           : OFF 1 -> ON 1  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 502 -> ON 502
+wall  (all)         : OFF 213.7s -> ON 212.5s
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/var/panel/rerun.json
+
+VERDICT: INCONCLUSIVE - the mechanism never fired.

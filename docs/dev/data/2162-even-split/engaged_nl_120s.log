@@ -1,0 +1,20 @@
+DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT: 6 instances, 120.0 s, 2 jobs
+[1/12] rep0 bchoco06: OFF feasible cert=False bound=0.9999845691138572 | ON feasible cert=False bound=0.9999845691138572 nodes 71/71 load 2.66/24.12 
+[2/12] rep0 4stufen: OFF time_limit cert=False bound=21567.93506018962 | ON time_limit cert=False bound=21381.16645576773 nodes 63/63 load 23.47/2.66 
+[3/12] rep0 bchoco07: OFF time_limit cert=False bound=0.9999890597015845 | ON time_limit cert=False bound=0.9999899195077674 nodes 67/67 load 17.74/16.25 
+[4/12] rep0 bchoco08: OFF time_limit cert=False bound=0.999992330283151 | ON time_limit cert=False bound=0.999992330283151 nodes 29/29 load 15.72/15.41 
+[5/12] rep0 beuster: OFF time_limit cert=False bound=19554.05865683857 | ON time_limit cert=False bound=19554.05865683857 nodes 95/95 load 12.87/22.08 
+[6/12] rep0 hda: OFF time_limit cert=False bound=-6995.660302780974 | ON time_limit cert=False bound=-6995.660302780974 nodes 7/7 load 19.3/12.42 
+[7/12] rep1 4stufen: OFF time_limit cert=False bound=21567.935060189633 | ON time_limit cert=False bound=21381.16645576773 nodes 95/95 load 11.03/32.16 
+[8/12] rep1 bchoco06: OFF feasible cert=False bound=0.9999785016359685 | ON feasible cert=False bound=0.9999785016359685 nodes 99/99 load 29.99/10.55 
+[9/12] rep1 bchoco07: OFF time_limit cert=False bound=0.9999909424951965 | ON time_limit cert=False bound=0.9999909424951965 nodes 69/69 load 20.26/11.76 
+[10/12] rep1 bchoco08: OFF time_limit cert=False bound=0.999992330283151 | ON time_limit cert=False bound=0.999992330283151 nodes 53/53 load 11.38/20.26 
+[11/12] rep1 hda: OFF time_limit cert=False bound=-6990.2625803358505 | ON time_limit cert=False bound=-6995.660302780974 nodes 7/7 load 21.88/11.41 
+[12/12] rep1 beuster: OFF time_limit cert=False bound=19554.05865683857 | ON time_limit cert=False bound=19554.05865683857 nodes 95/127 load 11.79/22.05 
+
+rows 12 | instances with a problem: 0
+certified OFF 0 -> ON 0 | gained [] | lost []
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 4
+wall 1467 s

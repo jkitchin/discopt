@@ -69,3 +69,24 @@ def test_total_scalar_variables_matches_box_size_for_array_vars():
     lo, hi = _box_bounds(m)
     assert lo.size == hi.size == 5
     assert _total_scalar_variables(m) == 5
+
+
+@pytest.mark.unit
+def test_cache_invalidated_when_the_model_grows():
+    """#2142: a classification mid-lowering memoized a box sized for the smaller
+    model; once the lowering appended variables, the next classification indexed past
+    it (``IndexError`` on GDPlib hda's hull) and the solver reported the whole model
+    convexity-unknown. Growth must invalidate the memo."""
+    from discopt._relax.convexity import classify_constraint
+
+    m = Model()
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    m.subject_to(x * x <= 1.0)
+    assert _total_scalar_variables(m) == 1  # memoized at size 1
+    y = m.continuous("y", lb=-2.0, ub=3.0)
+    m.subject_to(x * x + y * y <= 4.0)
+    assert _total_scalar_variables(m) == 2
+    lo, hi = _box_bounds(m)
+    assert np.allclose(lo, [0.0, -2.0]) and np.allclose(hi, [1.0, 3.0])
+    # Before the fix: IndexError from _extract_quadratic_terms on the stale size.
+    assert classify_constraint(m._constraints[-1], m)

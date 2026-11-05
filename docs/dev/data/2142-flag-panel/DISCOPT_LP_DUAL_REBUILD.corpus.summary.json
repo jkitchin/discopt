@@ -1,0 +1,66 @@
+{
+  "flag": "DISCOPT_LP_DUAL_REBUILD",
+  "time_limit": 120.0,
+  "deterministic": true,
+  "max_nodes": 2000,
+  "load_at_start": [
+    0.919921875,
+    3.2138671875,
+    5.05712890625
+  ],
+  "unfired_identical_checked": 48,
+  "unfired_identical_skipped_wall": [
+    "4stufen",
+    "bchoco06",
+    "bchoco08",
+    "beuster",
+    "casctanks",
+    "ex8_5_3",
+    "hda",
+    "heatexch_gen1",
+    "heatexch_gen2",
+    "heatexch_gen3",
+    "prolog",
+    "tls2",
+    "tspn08",
+    "tspn10",
+    "tspn12"
+  ],
+  "scip_blocked": true,
+  "instances": 74,
+  "executed_checks": 845,
+  "violations": [
+    "cvxnonsep_psig30: mechanism did not run but objective differs (OFF 78.99885434551412 vs ON 78.99885434551456)"
+  ],
+  "rescued": 1410,
+  "fired_on": [
+    "bchoco07",
+    "clay0303hfsg",
+    "contvar",
+    "haverly",
+    "launch",
+    "nvs01",
+    "nvs05",
+    "nvs06",
+    "nvs21",
+    "st_e36",
+    "wallfix"
+  ],
+  "certified_off": 57,
+  "certified_on": 58,
+  "certification_gained": [
+    "ex8_5_3"
+  ],
+  "bounds_tighter": [
+    "heatexch_gen1"
+  ],
+  "bounds_looser": [
+    "tls2"
+  ],
+  "bounds_tighter_where_ran": [],
+  "bounds_looser_where_ran": [],
+  "nodes_off": 6507,
+  "nodes_on": 6521,
+  "wall_off": 3721.1754091110106,
+  "wall_on": 3671.5250049709994
+}

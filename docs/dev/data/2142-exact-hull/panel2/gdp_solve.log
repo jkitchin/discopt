@@ -1,0 +1,13 @@
+solve: 6 (instance, method) pairs x 2 arms x 1 reps
+solve rep0 cstr                               hull   off unsolved           status=time_limit obj=3.0620145766186386 bound=0.09399995510978051 nodes=591 wall=120.068 load=3.34
+solve rep0 cstr                               hull   on  unsolved           status=time_limit obj=3.0620145766187727 bound=0.7226243566069621 nodes=4568 wall=120.075 load=2.51
+solve rep0 gdp_col                            hull   on  unsolved           status=feasible obj=22959.80598927661 bound=8736.84210510454 nodes=3 wall=125.979 load=2.38
+solve rep0 gdp_col                            hull   off unsolved           status=time_limit obj=None bound=999.9999999999997 nodes=3 wall=120.178 load=2.11
+solve rep0 hda                                hull   off unsolved           status=time_limit obj=None bound=121140.98250089576 nodes=3 wall=120.174 load=2.29
+solve rep0 hda                                hull   on  unsolved           status=time_limit obj=None bound=118678.92933304478 nodes=3 wall=120.145 load=2.05
+solve rep0 methanol                           hull   on  unsolved           status=time_limit obj=None bound=-4699.665321838288 nodes=3 wall=120.095 load=2.05
+solve rep0 methanol                           hull   off unsolved           status=time_limit obj=None bound=-4699.665321804744 nodes=3 wall=128.967 load=2.15
+solve rep0 syngas                             hull   off unsolved           status=time_limit obj=None bound=4347.802583492013 nodes=3 wall=124.641 load=2.3
+solve rep0 syngas                             hull   on  unsolved           status=time_limit obj=None bound=4347.802583491997 nodes=3 wall=121.518 load=1.95
+solve rep0 pyomo.ex_633_trespalacios          hull   on  solved             status=optimal obj=4.460367620446746 bound=4.460244378585243 nodes=47 wall=10.828 load=2.27
+solve rep0 pyomo.ex_633_trespalacios          hull   off solved             status=optimal obj=4.460367620446746 bound=4.4603289016054015 nodes=75 wall=21.941 load=2.21

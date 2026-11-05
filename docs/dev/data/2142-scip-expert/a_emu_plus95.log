@@ -1,0 +1,3 @@
+extra propagate-only rows: 95
+{"arm": "nocuts", "tl": 900.0, "node_limit": 20000, "status": "nodelimit", "primal_internal": 3.0620145763461215, "dual_internal": 2.4621357433300783, "primal_model": 3.0620145763461215, "dual_model": 2.4621357433300783, "nodes": 20000, "total_nodes": 20000, "nruns": 1, "conflicts": null, "wall": 44.8, "ncuts_applied": 247760, "vars": 105, "fixed_rows": 235, "terms": 5, "blf": 24, "branchings_by_class": {"binary_orig": 110, "cont_orig": 18236, "aux": 1735}, "top_branch_cols": [[56, 4091, "cont"], [20, 2273, "cont"], [36, 2076, "cont"], [30, 1635, "cont"], [42, 1133, "cont"], [50, 1130, "cont"], [32, 956, "cont"], [40, 920, "cont"], [64, 833, "cont"], [53, 702, "cont"], [94, 690, "aux"], [52, 471, "cont"]]}
+executed assertions: 1

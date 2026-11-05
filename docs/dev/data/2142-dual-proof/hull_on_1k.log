@@ -1,0 +1,3 @@
+METHOD=hull PERM_SEED=0 FLAG=1 MAX_NODES=1000 status=node_limit obj=3.0620145766186386 bound=0.09399997607851347 nodes=1000 gap_certified=False wall=159.5s
+  kernel: {'max_nodes': 1000, 'bound': 0.09399997607851347, 'nodes': 1000, 'undecided': 167, 'status': 'node_limit', 'dual_proof': {'rays': 20, 'global_lps': 16, 'learned': 1, 'tightened_rhs': 0, 'duplicates': 0, 'reject_no_support': 3, 'reject_unbounded': 0, 'reject_not_violated': 16, 'reject_too_dense': 0, 'propagations': 212, 'tightenings': 0, 'fathoms': 0, 'evicted': 0, 'pool_size': 1}, 'wall': 134.2}
+executed assertions: 2

@@ -1,0 +1,4 @@
+METHOD=big-m PERM_SEED=1 FLAG=0 MAX_NODES=20000 status=node_limit obj=3.0620145766185365 bound=1.765641011335501 nodes=20000 gap_certified=False wall=56.7s
+  kernel: {'max_nodes': 1, 'bound': -1.030553875215191e-12, 'nodes': 1, 'undecided': 0, 'status': 'node_limit', 'dual_proof': {'rays': 0, 'global_lps': 0, 'learned': 0, 'tightened_rhs': 0, 'duplicates': 0, 'reject_no_support': 0, 'reject_unbounded': 0, 'reject_not_violated': 0, 'reject_too_dense': 0, 'propagations': 0, 'tightenings': 0, 'fathoms': 0, 'evicted': 0, 'pool_size': 0}, 'wall': 0.0}
+  kernel: {'max_nodes': 20000, 'bound': 1.765641011335501, 'nodes': 20000, 'undecided': 4, 'status': 'node_limit', 'dual_proof': {'rays': 0, 'global_lps': 0, 'learned': 0, 'tightened_rhs': 0, 'duplicates': 0, 'reject_no_support': 0, 'reject_unbounded': 0, 'reject_not_violated': 0, 'reject_too_dense': 0, 'propagations': 0, 'tightenings': 0, 'fathoms': 0, 'evicted': 0, 'pool_size': 0}, 'wall': 35.0}
+executed assertions: 2

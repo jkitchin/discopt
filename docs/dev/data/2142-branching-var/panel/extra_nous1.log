@@ -1,0 +1,15 @@
+nous1                  OFF node_limit             b=1.2849430916422184 n=2000 SpatialViolScipPicks=0 SpatialViolScipChanged=0 | ON node_limit             b=0.8073525650146252 n=2000 SpatialViolScipPicks=1651 SpatialViolScipChanged=1495 fired=1495 undecided 0.0/0.0 wall 13.5/15.1 load 9.62
+
+instances           : 1
+executed checks     : 11
+violations          : 0
+mechanism fired     : 1495 on 1 instance(s) ['nous1']
+certified           : OFF 0 -> ON 0  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 1 ['nous1']  (where it ran: ['nous1'])
+nodes (all)         : OFF 2000 -> ON 2000
+wall  (all)         : OFF 13.5s -> ON 15.1s
+wall  (fired)       : OFF 13.5s -> ON 15.1s over 1 instance(s)
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/var/panel/extra_nous1.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

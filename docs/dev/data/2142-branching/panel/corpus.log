@@ -1,0 +1,237 @@
+alan                   OFF optimal                b=2.9249999996590272 n=13 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=2.9249999996590272 n=13 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/1.5 load 1.01
+4stufen                OFF time_limit             b=19947.042350769418 n=7 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=19947.042350769418 n=7 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.0/120.0 load 5.86
+bchoco06               OFF time_limit             b=0.9999887833681252 n=7 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=0.9999887833681252 n=7 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.0/120.0 load 5.71
+bchoco07               OFF time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.0/120.0 load 3.07
+bchoco08               OFF time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.0/120.1 load 3.06
+beuster                OFF time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=None n=0 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.0/120.0 load 3.08
+chance                 OFF optimal                b=29.89437815425806 n=0 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=29.89437815425806 n=0 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.4 load 3.31
+casctanks              OFF feasible               b=-90.17862337146542 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=-90.17862337146542 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 121.1/121.5 load 3.31
+clay0303hfsg           OFF optimal                b=26669.10950937612 n=203 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=26669.10950937612 n=203 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 18.7/17.7 load 3.17
+cvxnonsep_nsig30       OFF optimal                b=130.61841392487696 n=165 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=130.61841392487696 n=165 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 70.1/69.8 load 3.33
+contvar                OFF feasible               b=183652.08848688295 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=183652.08848688295 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.4/120.1 load 3.38
+cvxnonsep_psig40r      OFF optimal                b=86.53912379936298 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=86.53912379936298 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 2.7/2.6 load 3.51
+dispatch               OFF optimal                b=3155.2873921555433 n=1 SpatialSplits=1 SpatialSplitMoved=0 | ON optimal                b=3155.2873921555433 n=1 SpatialSplits=1 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.6/0.5 load 3.51
+ex1221                 OFF optimal                b=7.667180068812996 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=7.667180068812996 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.9/0.8 load 3.47
+ex1222                 OFF optimal                b=1.0765430833322536 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=1.0765430833322536 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.5 load 3.47
+ex1224                 OFF optimal                b=-0.9434705000000072 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-0.9434705000000072 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 2.0/2.0 load 3.43
+ex1225                 OFF optimal                b=30.999999999999687 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=30.999999999999687 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 7.5/7.4 load 5.08
+ex1226                 OFF optimal                b=-17.000000000000416 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-17.000000000000416 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 9.1/5.3 load 5.33
+ex14_1_7               OFF optimal                b=-1e-12 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1e-12 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 7.3/7.0 load 4.88
+ex14_1_9               OFF optimal                b=-1.9775220375077173e-16 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1.9775220375077173e-16 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.2/1.2 load 4.88
+ex4_1_5                OFF optimal                b=-1.0003715904744824e-09 n=159 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1.0003715904744824e-09 n=159 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 3.5/3.2 load 4.67
+ex7_3_1                OFF optimal                b=0.34173955312361126 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=0.34173955312361126 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.8/1.8 load 4.53
+cvxnonsep_psig30       OFF optimal                b=78.99179856949351 n=89 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=78.99179856949351 n=89 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 114.0/108.7 load 4.83
+fac2                   OFF optimal                b=331837497.545634 n=39 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=331837497.545634 n=39 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 12.6/12.1 load 4.69
+flay02m                OFF optimal                b=37.94733186412596 n=7 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=37.94733186412596 n=7 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 6.2/6.3 load 4.91
+ex8_5_3                OFF optimal                b=-0.004135874719947141 n=219 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-0.004135874719947141 n=219 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 61.1/56.1 load 5.08
+gbd                    OFF optimal                b=2.19999999902691 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=2.19999999902691 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.3 load 5.08
+gkocis                 OFF optimal                b=-1.923098742584029 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1.923098742584029 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 2.3/2.6 load 5.39
+haverly                OFF optimal                b=-400.00000015489013 n=69 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-400.00000015489013 n=69 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 9.9/11.2 load 5.52
+flay03m                OFF optimal                b=48.98979477939308 n=123 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=48.98979477939308 n=123 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 16.1/17.1 load 5.52
+hda                    OFF time_limit             b=-6995.660302789304 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=-6995.660302789304 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.3/120.2 load 3.91
+heatexch_gen1          OFF feasible               b=100499.99999980767 n=349 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=100499.99999980767 n=317 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.2/120.7 load 3.91
+heatexch_gen2          OFF feasible               b=555767.7902857299 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=555767.7902857299 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.1/120.1 load 5.58
+heatexch_gen3          OFF time_limit             b=43887.57992562059 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON time_limit             b=43887.57992562059 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 127.7/123.5 load 6.02
+launch                 OFF optimal                b=2257.7975532668443 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=2257.7975532668443 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 12.7/12.4 load 6.54
+m3                     OFF optimal                b=37.799999670024384 n=47 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=37.799999670024384 n=47 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 7.7/7.8 load 6.58
+nvs02                  OFF optimal                b=5.964184523068852 n=219 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=5.964184523068852 n=219 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.8/0.7 load 6.58
+nvs03                  OFF optimal                b=15.999999999966917 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=15.999999999966917 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.6/0.6 load 6.93
+nvs04                  OFF optimal                b=0.7199999999999773 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=0.7199999999999773 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.6/0.6 load 6.93
+nvs01                  OFF optimal                b=12.469668821568018 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=12.469668821568018 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 4.0/4.2 load 6.93
+nvs06                  OFF optimal                b=1.7703124999500992 n=1 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=1.7703124999500992 n=1 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.7/0.6 load 6.62
+nvs07                  OFF optimal                b=3.9999999999949987 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=3.9999999999949987 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.4 load 6.62
+nvs08                  OFF optimal                b=23.449727347181057 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=23.449727347181057 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.9/2.0 load 6.49
+nvs09                  OFF optimal                b=-43.13433691804334 n=31 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-43.13433691804334 n=31 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 13.5/12.4 load 6.21
+nvs10                  OFF optimal                b=-310.80000000051587 n=17 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-310.80000000051587 n=17 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.5/0.5 load 5.96
+nvs11                  OFF optimal                b=-431.020000007016 n=49 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-431.020000007016 n=49 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.2/1.1 load 5.96
+nvs12                  OFF optimal                b=-481.200000008738 n=321 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-481.200000008738 n=321 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 3.2/3.7 load 6.05
+nvs13                  OFF optimal                b=-585.2000000006469 n=23 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-585.2000000006469 n=23 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.9/1.0 load 5.80
+nvs14                  OFF optimal                b=-40358.15476930149 n=269 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-40358.15476930149 n=269 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.8/0.8 load 5.80
+nvs15                  OFF optimal                b=0.999999998393525 n=7 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=0.999999998393525 n=7 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.4 load 5.80
+nvs21                  OFF optimal                b=-5.684782500007601 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-5.684782500007601 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.7/0.8 load 5.58
+oaer                   OFF optimal                b=-1.9230985229118471 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1.9230985229118471 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.3/1.3 load 5.85
+nvs05                  OFF optimal                b=5.470712627830769 n=89 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=5.470712627830769 n=89 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 64.4/65.6 load 6.67
+st_e11                 OFF optimal                b=189.3116296865995 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=189.3116296865995 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 2.1/2.0 load 7.10
+st_e13                 OFF optimal                b=1.999999999997 n=1 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=1.999999999997 n=1 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.4/0.4 load 7.10
+st_e29                 OFF optimal                b=-0.9434705000000072 n=5 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-0.9434705000000072 n=5 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 2.0/2.1 load 7.02
+st_e36                 OFF optimal                b=-246.00000000045293 n=109 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-246.00000000045293 n=109 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 15.2/15.9 load 7.70
+st_e38                 OFF optimal                b=7197.727148009189 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=7197.727148009189 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided 0.0/0.0 wall 0.7/0.7 load 7.73
+st_miqp1               OFF optimal                b=280.9999999999998 n=9 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=280.9999999999998 n=9 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.4 load 7.73
+st_miqp2               OFF optimal                b=1.9999999996568942 n=7 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=1.9999999996568942 n=7 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.4 load 7.73
+st_miqp3               OFF optimal                b=-6.000000000017159 n=1 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-6.000000000017159 n=1 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.3 load 7.59
+st_miqp4               OFF optimal                b=-4574.000000000333 n=3 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-4574.000000000333 n=3 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.4 load 7.59
+st_miqp5               OFF optimal                b=-333.8888889023809 n=1 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-333.8888889023809 n=1 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.4 load 7.59
+st_test1               OFF optimal                b=-1.4523894940938343e-23 n=15 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-1.4523894940938343e-23 n=15 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.4/0.4 load 7.22
+st_testgr3             OFF optimal                b=-20.590707099439147 n=471 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=-20.590707099439147 n=471 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 1.0/1.1 load 7.22
+syn05hfsg              OFF optimal                b=837.7420768788216 n=2 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=837.7420768788216 n=2 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 0.3/0.3 load 7.12
+tanksize               OFF optimal                b=1.2685350436919938 n=519 SpatialSplits=256 SpatialSplitMoved=0 | ON optimal                b=1.2685189126225263 n=705 SpatialSplits=349 SpatialSplitMoved=306 fired=306 undecided 0.0/0.0 wall 4.2/4.8 load 7.09
+prolog                 OFF feasible               b=None n=325 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=None n=325 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.6/120.9 load 8.13
+tspn05                 OFF optimal                b=191.25513611344041 n=21 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=191.25513611344041 n=21 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 6.2/6.1 load 8.01
+tls2                   OFF optimal                b=5.2999999145573815 n=143 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=5.2999999145573815 n=143 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 115.9/113.0 load 6.40
+tspn08                 OFF optimal                b=290.5657895939092 n=115 SpatialSplits=0 SpatialSplitMoved=0 | ON optimal                b=290.5657895939092 n=115 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 96.6/97.1 load 6.13
+tspn10                 OFF feasible               b=165.4863326369404 n=91 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=165.4863326369404 n=65 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.1/120.1 load 4.66
+tspn12                 OFF feasible               b=207.87781126562263 n=239 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=207.87781126562263 n=213 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 120.1/120.1 load 4.11
+wallfix                OFF feasible               b=0.0 n=2003 SpatialSplits=0 SpatialSplitMoved=0 | ON feasible               b=0.0 n=2003 SpatialSplits=0 SpatialSplitMoved=0 fired=0 undecided None/None wall 51.5/50.7 load 3.51
+
+instances           : 74
+executed checks     : 858
+violations          : 148
+  ! 4stufen[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! 4stufen[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! alan[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! alan[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco06[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco06[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco07[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco07[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco08[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! bchoco08[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! beuster[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! beuster[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! casctanks[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! casctanks[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! chance[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! chance[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! clay0303hfsg[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! clay0303hfsg[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! contvar[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! contvar[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_nsig30[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_nsig30[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_psig30[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_psig30[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_psig40r[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! cvxnonsep_psig40r[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! dispatch[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! dispatch[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1221[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1221[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1222[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1222[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1224[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1224[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1225[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1225[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1226[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex1226[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex14_1_7[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex14_1_7[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex14_1_9[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex14_1_9[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex4_1_5[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex4_1_5[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex7_3_1[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex7_3_1[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex8_5_3[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! ex8_5_3[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! fac2[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! fac2[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! flay02m[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! flay02m[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! flay03m[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! flay03m[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! gbd[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! gbd[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! gkocis[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! gkocis[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! haverly[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! haverly[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! hda[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! hda[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen1[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen1[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen2[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen2[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen3[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! heatexch_gen3[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! launch[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! launch[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! m3[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! m3[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs01[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs01[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs02[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs02[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs03[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs03[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs04[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs04[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs05[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs05[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs06[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs06[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs07[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs07[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs08[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs08[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs09[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs09[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs10[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs10[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs11[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs11[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs12[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs12[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs13[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs13[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs14[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs14[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs15[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs15[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs21[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! nvs21[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! oaer[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! oaer[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! prolog[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! prolog[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e11[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e11[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e13[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e13[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e29[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e29[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e36[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e36[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e38[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_e38[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp1[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp1[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp2[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp2[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp3[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp3[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp4[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp4[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp5[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_miqp5[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_test1[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_test1[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_testgr3[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! st_testgr3[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! syn05hfsg[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! syn05hfsg[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tanksize[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tanksize[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tls2[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tls2[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn05[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn05[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn08[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn08[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn10[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn10[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn12[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! tspn12[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! wallfix[off]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+  ! wallfix[on]: build lacks ['DualRebuilds', 'DualRebuildCleared', 'DualRebuildTolerated', 'DualRebuildBails', 'DualRebuildOptimal', 'DualRebuildAuditFail']
+mechanism fired     : 306 on 1 instance(s) ['tanksize']
+unfired identical   : 57 checked, 16 skipped (wall backstop) ['4stufen', 'bchoco06', 'bchoco07', 'bchoco08', 'beuster', 'casctanks', 'contvar', 'cvxnonsep_psig30', 'hda', 'heatexch_gen1', 'heatexch_gen2', 'heatexch_gen3', 'prolog', 'tls2', 'tspn10', 'tspn12']
+certified           : OFF 59 -> ON 59  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 6705 -> ON 6807
+wall  (all)         : OFF 2453.9s -> ON 2436.6s
+wall  (fired)       : OFF 4.2s -> ON 4.8s over 1 instance(s)
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/bp/panel/corpus.json
+
+VERDICT: FAIL - cert-clean violated.

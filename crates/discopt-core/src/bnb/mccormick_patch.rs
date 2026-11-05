@@ -463,6 +463,10 @@ pub const MIN_WIDTH: f64 = 1e-12;
 pub enum Univariate {
     /// `f(t) = sqrt(t)` — concave on `t >= 0` (the coverage `tanksize` needs).
     Sqrt,
+    /// `f(t) = t^p` for an integer `p` (#2142; the producer registers only `p < 0`,
+    /// the hull eps-perspective's `1/yhat`), mirroring `uniform_relax._factor_value`
+    /// -> `_emit_1d` with `_pow_curv`'s curvature verdict.
+    Pow(i32),
 }
 
 /// Curvature of a univariate atom over its (sign-definite) box.
@@ -475,24 +479,59 @@ pub enum Curv {
 }
 
 impl Univariate {
-    /// The atom's curvature over its valid box.
-    pub fn curvature(&self) -> Curv {
-        match self {
-            Univariate::Sqrt => Curv::Concave,
+    /// The atom's curvature over the box `[t_lo, t_hi]`; `None` mirrors
+    /// `_pow_curv`'s abstention (no envelope row is sound, aux floor only).
+    pub fn curvature(&self, t_lo: f64, t_hi: f64) -> Option<Curv> {
+        match *self {
+            Univariate::Sqrt => Some(Curv::Concave),
+            Univariate::Pow(p) => {
+                let pf = p as f64;
+                if p % 2 == 0 && p > 0 {
+                    return Some(Curv::Convex);
+                }
+                if p < 0 && t_lo <= 0.0 && 0.0 <= t_hi {
+                    return None;
+                }
+                if t_lo < 0.0 && 0.0 < t_hi {
+                    return None;
+                }
+                let mut mid = 0.5 * (t_lo + t_hi);
+                if mid == 0.0 {
+                    mid = if t_hi != 0.0 { t_hi } else { t_lo };
+                }
+                if mid == 0.0 {
+                    return None;
+                }
+                let fpp = pf * (pf - 1.0) * mid.powf(pf - 2.0);
+                if !fpp.is_finite() {
+                    return None;
+                }
+                if fpp > 0.0 {
+                    Some(Curv::Convex)
+                } else if fpp < 0.0 {
+                    Some(Curv::Concave)
+                } else {
+                    None
+                }
+            }
         }
     }
 
     /// Evaluate `f(t)`.
     pub fn f(&self, t: f64) -> f64 {
-        match self {
+        match *self {
             Univariate::Sqrt => t.sqrt(),
+            // `float(t) ** e` in Python. `0.0 ** -1` is `inf` here where Python
+            // raises; both decline (the finiteness checks in `univariate_rows`).
+            Univariate::Pow(p) => t.powf(p as f64),
         }
     }
 
     /// Evaluate `f'(t)`.
     pub fn fp(&self, t: f64) -> f64 {
-        match self {
+        match *self {
             Univariate::Sqrt => 0.5 / t.sqrt(),
+            Univariate::Pow(p) => (p as f64) * t.powf(p as f64 - 1.0),
         }
     }
 }
@@ -529,12 +568,41 @@ pub fn univariate_rows(
     if !flo.is_finite() || !fhi.is_finite() {
         return None;
     }
+    // `_emit_1d` declines unless `_finite(lo, hi)` and `_finite(flo, fhi)`, where
+    // `_finite` is `isfinite and |v| < _BIG (1e19)`. A power's endpoint value is
+    // the one quantity here that reaches that range on a box the kernel visits
+    // (`1/t` with `t_lo = 1e-20`), so `Pow` mirrors the full rule. `Sqrt` keeps the
+    // plain finiteness test it was validated with (#2142 leaves that path as-is).
+    if matches!(atom, Univariate::Pow(_))
+        && !(py_finite(t_lo) && py_finite(t_hi) && py_finite(flo) && py_finite(fhi))
+    {
+        return None;
+    }
     let slope = (fhi - flo) / width;
     let mid = 0.5 * (t_lo + t_hi);
     // sign = +1 for convex, -1 for concave (mirrors _emit_1d's ±1.0 dispatch).
-    let s = match atom.curvature() {
+    let s = match atom.curvature(t_lo, t_hi)? {
         Curv::Convex => 1.0,
         Curv::Concave => -1.0,
+    };
+    // #2142 (`Pow` only): `_Builder.add_row` drops a row whose rhs or coefficient
+    // is non-finite or reaches `_BIG`, and `_tangent_row` emits nothing when
+    // `f`/`f'` at the tangent point fails `_finite`. Mirror both with a VACUOUS row
+    // (`0 <= 0`, no columns): the term keeps its 4 slots and the LP is the one the
+    // cold build solves. `Sqrt` rows pass through unguarded, as before.
+    let vacuous = EnvRow {
+        cols: [x, w, 0],
+        coeffs: [0.0, 0.0, 0.0],
+        nnz: 0,
+        rhs: 0.0,
+    };
+    let guarded = matches!(atom, Univariate::Pow(_));
+    let guard = |r: EnvRow| -> EnvRow {
+        if !guarded || (py_finite(r.rhs) && r.coeffs[..r.nnz].iter().all(|&c| py_finite(c))) {
+            r
+        } else {
+            vacuous
+        }
     };
     // #956: same outward guard as the other generators, in `t`-space — `f` is
     // monotone on the box (all covered atoms are), so `|w| <= max(|flo|, |fhi|)`.
@@ -546,15 +614,46 @@ pub fn univariate_rows(
     };
     // secant: sign*w <= sign*(flo + slope*(t - t_lo)); intercept a = flo - slope*t_lo.
     let a = flo - slope * t_lo;
-    let secant = row(-s * slope * coeff, s, s * (a + slope * cst), slope);
+    let secant = guard(row(-s * slope * coeff, s, s * (a + slope * cst), slope));
     // tangent at t0: sign*w >= sign*(f(t0) + f'(t0)*(t - t0)).
     let tangent = |t0: f64| {
         let g = atom.f(t0);
         let gp = atom.fp(t0);
+        if guarded && !(py_finite(g) && py_finite(gp)) {
+            return vacuous;
+        }
         let intercept = g - gp * t0;
-        row(s * gp * coeff, -s, -s * intercept - s * gp * cst, gp)
+        guard(row(s * gp * coeff, -s, -s * intercept - s * gp * cst, gp))
     };
     Some([secant, tangent(t_lo), tangent(mid), tangent(t_hi)])
+}
+
+/// #2142: aux bounds of `w = (coeff*x + cst)^p` over `x in [x_lo, x_hi]`, mirroring
+/// `_pow_bounds` (the interval power, outward-widened). `(-inf, inf)` for a negative
+/// power of a box that holds 0: the producer declines such a root box, and
+/// branching only shrinks the box, so the kernel never meets one.
+#[inline]
+pub fn affine_pow_aux_bounds(coeff: f64, cst: f64, x_lo: f64, x_hi: f64, p: i32) -> (f64, f64) {
+    let ta = coeff * x_lo + cst;
+    let tb = coeff * x_hi + cst;
+    let (t_lo, t_hi) = if ta <= tb { (ta, tb) } else { (tb, ta) };
+    if !t_lo.is_finite() || !t_hi.is_finite() {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    if p < 0 && t_lo <= 0.0 && 0.0 <= t_hi {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let pf = p as f64;
+    let (flo, fhi) = (t_lo.powf(pf), t_hi.powf(pf));
+    let (lo, hi) = if p > 0 && p % 2 == 0 && t_lo < 0.0 && 0.0 < t_hi {
+        (0.0, flo.max(fhi))
+    } else {
+        (flo.min(fhi), flo.max(fhi))
+    };
+    if !lo.is_finite() || !hi.is_finite() {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    widen(lo, hi)
 }
 
 /// Auxiliary-variable bounds for `w = sqrt(coeff*x + const)` over `x in [x_lo,x_hi]`
@@ -725,7 +824,12 @@ pub fn bilinear_linform_rows(
         (b_hi, a_lo, -a_lo * b_hi, -1.0),
     ];
     for (coef_a, coef_b, cc, sign) in specs {
-        if !(coef_a.is_finite() && coef_b.is_finite() && cc.is_finite()) {
+        // #2142: mirror `uniform_relax._finite` (finite AND |v| < _BIG = 1e19), so
+        // the kernel skips exactly the rows `_emit_mccormick` skips on a box whose
+        // partial-product enclosures reach 1e19 (the hull eps-perspective's
+        // `yc^-1` chains). Every quantity tested is a product of box endpoints, so
+        // on a spec admitted with no skipped row at its root box it never fires.
+        if !(py_finite(coef_a) && py_finite(coef_b) && py_finite(cc)) {
             continue;
         }
         // Accumulate coefficients per column (a and b may share columns), plus w.
@@ -758,8 +862,20 @@ pub fn bilinear_linform_rows(
         let slack = envelope_product_slack(
             coef_a, coef_b, a_lo, a_hi, b_lo, b_hi, a_const, b_const, rhs,
         );
-        out.push((cols, coeffs, relaxed_rhs(rhs, slack)));
+        let rhs = relaxed_rhs(rhs, slack);
+        // #2142: mirror `_Builder.add_row`, which drops a row whose rhs or any
+        // coefficient is non-finite or reaches `_BIG`.
+        if !py_finite(rhs) || coeffs.iter().any(|&c| !py_finite(c)) {
+            continue;
+        }
+        out.push((cols, coeffs, rhs));
     }
+}
+
+/// `uniform_relax._finite`: finite and strictly below the build's `_BIG = 1e19`.
+#[inline]
+pub fn py_finite(v: f64) -> bool {
+    v.is_finite() && v.abs() < 1e19
 }
 
 /// Auxiliary bounds for `w = A * B` — the interval product of the two forms'
@@ -994,6 +1110,216 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- #2142: `Univariate::Pow` vs the Python `_emit_1d` reference. -----------
+    //
+    // Reference rows produced by `uniform_relax._emit_1d` with `_pow_curv`'s verdict
+    // and `f = t**p`, `f' = p*t**(p-1)` (the exact lambdas `_factor_value` passes),
+    // printed with `repr` so the values are the build's own doubles, guard included.
+    // Row order is `_emit_1d`'s: secant, tangent @ t_lo, @ mid, @ t_hi.
+
+    /// Relative-tolerance row check for fixtures whose magnitudes reach 1e16, where
+    /// `assert_row_eq`'s absolute coefficient tolerance would be meaningless.
+    fn assert_row_rel(r: &EnvRow, expect_coeffs: &[f64], expect_rhs: f64) {
+        assert_eq!(r.nnz, expect_coeffs.len(), "nnz mismatch");
+        for k in 0..r.nnz {
+            let tol = 1e-12 * (1.0 + expect_coeffs[k].abs());
+            assert!(
+                (r.coeffs[k] - expect_coeffs[k]).abs() <= tol,
+                "coeff[{k}] {} != {}",
+                r.coeffs[k],
+                expect_coeffs[k]
+            );
+        }
+        let tol = 1e-12 * (1.0 + expect_rhs.abs());
+        assert!(
+            (r.rhs - expect_rhs).abs() <= tol,
+            "rhs {} != {expect_rhs}",
+            r.rhs
+        );
+    }
+
+    #[test]
+    fn pow_neg1_bare_matches_emit_1d_reference() {
+        // t = x over [1, 4]: convex, decreasing.
+        let rows = univariate_rows(0, 1, 1.0, 0.0, 1.0, 4.0, Univariate::Pow(-1)).unwrap();
+        assert_row_eq(&rows[0], &[0.25, 1.0], 1.2500000000000115);
+        assert_row_eq(&rows[1], &[-1.0, -1.0], -1.9999999999999751);
+        assert_row_eq(&rows[2], &[-0.16, -1.0], -0.7999999999999914);
+        assert_row_eq(&rows[3], &[-0.0625, -1.0], -0.4999999999999938);
+        assert_aux_widened(
+            affine_pow_aux_bounds(1.0, 0.0, 1.0, 4.0, -1),
+            (0.24999999999999994, 1.0000000000000004),
+        );
+    }
+
+    #[test]
+    fn pow_neg1_affine_matches_emit_1d_reference() {
+        // t = 2x + 1, x in [1, 4] -> t in [3, 9].
+        let rows = univariate_rows(0, 1, 2.0, 1.0, 1.0, 4.0, Univariate::Pow(-1)).unwrap();
+        assert_row_eq(&rows[0], &[0.07407407407407407, 1.0], 0.4074074074074113);
+        assert_row_eq(&rows[1], &[-0.2222222222222222, -1.0], -0.5555555555555485);
+        assert_row_eq(
+            &rows[2],
+            &[-0.05555555555555555, -1.0],
+            -0.30555555555555197,
+        );
+        assert_row_eq(
+            &rows[3],
+            &[-0.024691358024691357, -1.0],
+            -0.20987654320987298,
+        );
+    }
+
+    /// The hull eps-perspective's own atom, `1/yc` with `yc = 0.99999999*y + 1e-8`
+    /// (cstr-hull, #2142), on a sub-box and on the full `y in [0, 1]` box.
+    #[test]
+    fn pow_neg1_eps_perspective_matches_emit_1d_reference() {
+        let (c, k) = (0.99999999, 1e-8);
+        let rows = univariate_rows(0, 1, c, k, 0.25, 1.0, Univariate::Pow(-1)).unwrap();
+        assert_row_rel(&rows[0], &[3.999999840000004, 1.0], 4.999999840000051);
+        assert_row_rel(&rows[1], &[-15.99999888000005, -1.0], -7.999999599999917);
+        assert_row_rel(&rows[2], &[-2.5599999436800007, -1.0], -3.199999955199966);
+        assert_row_rel(&rows[3], &[-0.99999999, -1.0], -1.9999999899999752);
+        let rows = univariate_rows(0, 1, c, k, 0.0, 1.0, Univariate::Pow(-1)).unwrap();
+        assert_row_rel(&rows[0], &[99999999.0, 1.0], 100000000.00000107);
+        assert_row_rel(&rows[1], &[-9999999900000000.0, -1.0], -99999964.47286214);
+        assert_row_rel(&rows[2], &[-3.9999998800000025, -1.0], -3.999999564728605);
+        assert_row_rel(&rows[3], &[-0.99999999, -1.0], -1.9999996347286215);
+    }
+
+    /// A negative base flips the curvature (`1/t` is concave on `t < 0`) and with it
+    /// every row's sign, as `_pow_curv` does.
+    #[test]
+    fn pow_neg1_negative_base_is_concave() {
+        // t = -x, x in [1, 4] -> t in [-4, -1].
+        assert_eq!(
+            Univariate::Pow(-1).curvature(-4.0, -1.0),
+            Some(Curv::Concave)
+        );
+        let rows = univariate_rows(0, 1, -1.0, 0.0, 1.0, 4.0, Univariate::Pow(-1)).unwrap();
+        assert_row_eq(&rows[0], &[0.25, -1.0], 1.2500000000000115);
+        assert_row_eq(&rows[1], &[-0.0625, 1.0], -0.4999999999999938);
+        assert_row_eq(&rows[2], &[-0.16, 1.0], -0.7999999999999914);
+        assert_row_eq(&rows[3], &[-1.0, 1.0], -1.9999999999999751);
+        assert_aux_widened(
+            affine_pow_aux_bounds(-1.0, 0.0, 1.0, 4.0, -1),
+            (-1.0000000000000004, -0.24999999999999994),
+        );
+    }
+
+    #[test]
+    fn pow_neg2_matches_emit_1d_reference() {
+        let rows = univariate_rows(0, 1, 1.0, 0.0, 1.0, 4.0, Univariate::Pow(-2)).unwrap();
+        assert_row_eq(&rows[0], &[0.3125, 1.0], 1.3125000000000127);
+        assert_row_eq(&rows[1], &[-2.0, -1.0], -2.9999999999999574);
+        assert_row_eq(&rows[2], &[-0.128, -1.0], -0.47999999999999293);
+        assert_row_eq(&rows[3], &[-0.03125, -1.0], -0.18749999999999534);
+        assert_aux_widened(
+            affine_pow_aux_bounds(1.0, 0.0, 1.0, 4.0, -2),
+            (0.06249999999999997, 1.0000000000000007),
+        );
+    }
+
+    /// `_tangent_row` emits nothing when `f'(t0)` reaches `_BIG` (`1/t` at
+    /// `t = 1e-12` has slope `-1e24`): the cold build has 3 rows there. The kernel
+    /// keeps the slot as a VACUOUS row, which is the same LP.
+    #[test]
+    fn pow_neg1_tangent_past_big_is_vacuous_like_the_cold_build() {
+        let rows = univariate_rows(0, 1, 1.0, 0.0, 1e-12, 1.0, Univariate::Pow(-1)).unwrap();
+        assert_row_rel(&rows[0], &[1000000000000.0, 1.0], 1000000000001.0106);
+        assert_eq!(
+            rows[1].nnz, 0,
+            "tangent @ t_lo must be dropped (f' = -1e24)"
+        );
+        assert_eq!(rows[1].rhs, 0.0);
+        assert_row_rel(&rows[2], &[-3.9999999999919993, -1.0], -3.9964472863171707);
+        assert_row_rel(&rows[3], &[-1.0, -1.0], -1.9964472863211888);
+        // `_emit_1d` declines outright once an endpoint VALUE reaches `_BIG`.
+        assert!(univariate_rows(0, 1, 1.0, 0.0, 1e-20, 1.0, Univariate::Pow(-1)).is_none());
+    }
+
+    /// No envelope where `_pow_curv` abstains (a negative power of a box touching
+    /// or holding the pole) or the box is degenerate; the aux enclosure is open there.
+    #[test]
+    fn pow_neg_pole_or_degenerate_yields_none() {
+        assert!(univariate_rows(0, 1, 1.0, 0.0, -1.0, 2.0, Univariate::Pow(-1)).is_none());
+        assert!(univariate_rows(0, 1, 1.0, 0.0, 0.0, 2.0, Univariate::Pow(-1)).is_none());
+        assert!(univariate_rows(0, 1, 1.0, 0.0, -2.0, 0.0, Univariate::Pow(-2)).is_none());
+        assert!(univariate_rows(0, 1, 1.0, 0.0, 2.0, 2.0, Univariate::Pow(-1)).is_none());
+        assert_eq!(Univariate::Pow(-1).curvature(-1.0, 2.0), None);
+        let open = (f64::NEG_INFINITY, f64::INFINITY);
+        assert_eq!(affine_pow_aux_bounds(1.0, 0.0, -1.0, 2.0, -1), open);
+        assert_eq!(affine_pow_aux_bounds(1.0, 0.0, 0.0, 2.0, -1), open);
+        assert_eq!(
+            affine_pow_aux_bounds(1.0, 0.0, 1.0, f64::INFINITY, -1),
+            open
+        );
+    }
+
+    /// The power envelope and aux bounds contain every true point `(x, t(x)^p)` of
+    /// the box, on boxes from the eps-perspective's `[1e-8, 1]` to ordinary ones.
+    #[test]
+    fn pow_hull_contains_the_graph() {
+        let cases: [(f64, f64, f64, f64, i32); 5] = [
+            (0.99999999, 1e-8, 0.0, 1.0, -1),
+            (0.99999999, 1e-8, 0.3, 0.9, -1),
+            (2.0, 1.0, 1.0, 4.0, -1),
+            (-1.5, -0.5, 0.2, 3.0, -1),
+            (1.0, 0.0, 0.5, 6.0, -3),
+        ];
+        let n = 64;
+        let mut checked = 0usize;
+        for &(coeff, cst, li, ui, p) in &cases {
+            let rows = univariate_rows(0, 1, coeff, cst, li, ui, Univariate::Pow(p)).unwrap();
+            let (alo, ahi) = affine_pow_aux_bounds(coeff, cst, li, ui, p);
+            for k in 0..=n {
+                let x = li + (ui - li) * (k as f64) / (n as f64);
+                let w = (coeff * x + cst).powi(p);
+                for r in &rows {
+                    let res = r.residual(&[x, w]);
+                    assert!(
+                        res <= 0.0,
+                        "pow p={p} t={coeff}x+{cst}: true point x={x} cut by {res:e}"
+                    );
+                    checked += 1;
+                }
+                assert!(w >= alo && w <= ahi, "pow {w} outside aux [{alo},{ahi}]");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 5 * 65 * 5, "probe did not fire as expected");
+    }
+
+    /// #2142: `bilinear_linform_rows` skips a McCormick row exactly where
+    /// `_emit_mccormick` does -- any of `coef_a`, `coef_b`, `cc` failing `_finite`
+    /// (`|v| >= 1e19`), not only a non-finite one.
+    #[test]
+    fn bilinear_linform_skips_rows_past_big_like_emit_mccormick() {
+        // w = x0*x1, x0, x1 in [1, 1e10]: only (aH, bH) has cc = -1e20.
+        let lo = vec![1.0, 1.0, 0.0];
+        let hi = vec![1e10, 1e10, 0.0];
+        let mut out = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1], &[1.0], 0.0, 2, &lo, &hi, &mut out);
+        assert_eq!(out.len(), 3, "the cc = -1e20 row must be skipped");
+        assert!(out
+            .iter()
+            .all(|(_, c, r)| c.iter().all(|v| v.abs() < 1e19) && r.abs() < 1e19));
+        // A factor bound at 2e19 kills the rows whose `coef_b` is `aH` (and their cc).
+        let hi = vec![2e19, 2.0, 0.0];
+        let mut out = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1], &[1.0], 0.0, 2, &lo, &hi, &mut out);
+        assert_eq!(
+            out.len(),
+            2,
+            "only the two rows scaled by aL survive the 2e19 bound"
+        );
+        // Below `_BIG` nothing changes: 4 rows.
+        let hi = vec![1e9, 1e9, 0.0];
+        let mut out = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1], &[1.0], 0.0, 2, &lo, &hi, &mut out);
+        assert_eq!(out.len(), 4);
     }
 
     // --- Envelope validity / geometry (belt-and-braces over the fixture equality). ---

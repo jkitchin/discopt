@@ -1,0 +1,12 @@
+tightened columns 170
+minimal set 1
+  col 318 int=False global [1, 1e+16] box [9.99999997e+15, 1e+16]
+executed propagations: 171
+tightened columns 188
+minimal set 1
+  col 318 int=False global [1, 1e+16] box [8.26446280015e+15, 1e+16]
+executed propagations: 189
+tightened columns 261
+minimal set 1
+  col 318 int=False global [1, 1e+16] box [9.99999997e+15, 1e+16]
+executed propagations: 262

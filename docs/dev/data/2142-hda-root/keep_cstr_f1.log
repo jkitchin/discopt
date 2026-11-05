@@ -1,0 +1,2 @@
+RESULT cstr flag=1 nodes=7 status=feasible obj=4.061881684530907 bound=0.0 wall=120.1 {'homogenized': 5, 'convex': 0, 'not_polynomial': 0}
+executed assertions: 2
