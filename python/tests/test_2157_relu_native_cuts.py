@@ -244,3 +244,29 @@ def test_wrapped_separator_keeps_the_python_callback_route():
     assert abs(float(r.objective) - float(r0.objective)) <= 1e-5
     assert nn.cut_callback.n_calls > 0
     assert "ml/relu_ideal_native_cuts" not in (r.solver_stats or {})
+
+
+def test_relu_inputs_boxed_declines_the_default_box():
+    """The default box (9.999e19) means "no bound": both routes must decline the cuts.
+
+    The previous guards were ``np.isfinite`` (Rust route) and ``|x| < 1e20`` (HiGHS
+    route); both accepted the default box, which is finite and below the sentinel.
+    """
+    from discopt.constants import DEFAULT_VARIABLE_BOUND
+    from discopt.solver import _relu_inputs_boxed
+
+    lo = np.array([-1.0, -2.0])
+    hi = np.array([1.0, 3.0])
+    checks = 0
+    assert _relu_inputs_boxed(lo, hi)
+    checks += 1
+    for bad in (DEFAULT_VARIABLE_BOUND, 1e20, np.inf):
+        assert not _relu_inputs_boxed(lo, np.array([1.0, bad]))
+        assert not _relu_inputs_boxed(np.array([-bad, -2.0]), hi)
+        checks += 2
+    assert not _relu_inputs_boxed(lo, np.array([1.0, np.nan]))
+    checks += 1
+    # A large but genuine bound below the default box is kept.
+    assert _relu_inputs_boxed(lo, np.array([1.0, 1e6]))
+    checks += 1
+    assert checks == 9

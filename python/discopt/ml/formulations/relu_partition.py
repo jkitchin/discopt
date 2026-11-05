@@ -395,11 +395,13 @@ class AndersonCutSeparator:
                 if id(q) not in offsets:
                     return None
                 w = np.asarray(rec.weights[:, j], dtype=np.float64)
+                if w.shape[0] != n_in:
+                    return None  # columns and weights must pair one to one
                 nz = np.flatnonzero(w != 0.0)
                 y_cols.append(zo + j)
                 q_cols.append(offsets[id(q)])
                 bias.append(float(rec.biases[j]))
-                x_cols.extend(int(xo + i) for i in nz if i < n_in)
+                x_cols.extend(int(xo + i) for i in nz)
                 w_all.extend(float(w[i]) for i in nz)
                 ptr.append(len(x_cols))
         return {

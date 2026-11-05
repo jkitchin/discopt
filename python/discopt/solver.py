@@ -38391,6 +38391,25 @@ _RELU_ROOT_MAX_ROUNDS = 50
 _RELU_ROOT_TAIL_REL = 1e-5
 
 
+def _relu_inputs_boxed(x_l: np.ndarray, x_u: np.ndarray) -> bool:
+    """True when every ReLU input column has a genuine finite box (#2157).
+
+    The ideal inequalities put each input's bounds into the cut, so an input without
+    a real box must decline them. "Without a real box" includes the default box
+    ``DEFAULT_VARIABLE_BOUND = 9.999e19`` -- the stand-in for "no bound" -- which is
+    finite and below the LP layer's ``1e20`` sentinel, so neither ``np.isfinite`` nor
+    ``|x| < 1e20`` excludes it. HiGHS computing at that scale certified a false
+    optimum (#2146); a cut carrying it would bring the same magnitude into the LP.
+    """
+    side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    return bool(
+        np.all(np.isfinite(x_l))
+        and np.all(np.isfinite(x_u))
+        and np.all(np.abs(x_l) < side)
+        and np.all(np.abs(x_u) < side)
+    )
+
+
 def _relu_root_cut_loop(sf, n_orig: int, spec: dict, *, budget: float):
     """Separate Anderson's ideal ReLU inequalities at the root LP (#2157).
 
@@ -38431,7 +38450,7 @@ def _relu_root_cut_loop(sf, n_orig: int, spec: dict, *, budget: float):
         return None
     x_l = np.asarray(sf.xl, dtype=np.float64)[x_cols]
     x_u = np.asarray(sf.xu, dtype=np.float64)[x_cols]
-    if not (np.all(np.abs(x_l) < _HIGHS_INF) and np.all(np.abs(x_u) < _HIGHS_INF)):
+    if not _relu_inputs_boxed(x_l, x_u):
         logger.info("ideal ReLU cuts declined: an input column is unbounded (#2157)")
         return None
     sep = ReluIdealSeparator(
@@ -38959,7 +38978,7 @@ def _relu_native_engine(
         return None
     x_l = np.asarray(lp_data.x_l, dtype=np.float64)[x_cols]
     x_u = np.asarray(lp_data.x_u, dtype=np.float64)[x_cols]
-    if not (np.all(np.isfinite(x_l)) and np.all(np.isfinite(x_u))):
+    if not _relu_inputs_boxed(x_l, x_u):
         logger.info("native ReLU cuts declined: an input column is unbounded (#2157)")
         return None
     rounds = _RELU_NATIVE_ROUNDS
