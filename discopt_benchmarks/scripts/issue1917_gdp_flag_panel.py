@@ -102,6 +102,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # Kept, like the retired entries above, so ``--report`` can re-derive the
     # recorded verdict from docs/dev/data/1917-flag-panel/.
     "DISCOPT_PRESOLVE_MARGINAL_STOP": ("hull", "big-m"),
+    # Splits the root fixpoint's OBBT budget evenly across its rounds at solve time
+    # (lowering identical): solve ``--all``.
+    "DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT": ("hull", "big-m"),
     # #2143 stage 3: the root LOA proposer fires inside the solve, only when the
     # configuration wave found nothing (lowering identical): solve ``--all``.
     "DISCOPT_GDP_LOA_PROPOSER": ("hull", "big-m"),
