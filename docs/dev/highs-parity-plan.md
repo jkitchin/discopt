@@ -897,6 +897,23 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   certify in < 20 s with the ladder closing; iterations −30 % on degenerate instances;
   cert-clean L. Kill: < 10 % → retire. Regime: bound-neutral in objective (perturbation
   removed before the final verdict; the ladder certifies the unperturbed LP).
+  **Entry findings (2026-11-05) -- the failure premise does not hold; awaiting owner re-scope.**
+  (1) The plan's "three failures" (25fv47, shell, standmps) are pre-P0.3 names; all three
+  certify on the Rust route at HEAD. The one L failure now is `perold`. (2) `perold` is
+  **not a degeneracy failure**: the Rust simplex reaches the optimum (−9380.755278, equal
+  to HiGHS's) and the result is withheld at the certificate (`lp/ns_bound_missing`; the
+  pure Rust route reports "no NS safe bound from its dual", #1953). Through
+  `solve_lp_std(engine="rust")` the full ladder fails the same way: the Rust dual's worst
+  wrong-sign reduced cost on an open side is 2.9e-13 (HiGHS's: exactly 0), NS is −inf, and
+  the exact dual correction over the FBBT box grows its exact-zero set 150 → 196 columns
+  and stops at `EXACT_MAX_TOTAL_WORK` (4e8) in round 6; on HiGHS's dual it converges in 5
+  rounds at 2.2e8. One or two steps of float refinement of the Rust dual on its own basis
+  (residual 2.9e-13 → 3.4e-13 / 2.4e-13) certify on one step and not on the next: the
+  instance sits at the correction's work budget, and the cost is the correction
+  re-solving its whole growing set every round, not the dual's quality. (3) Degeneracy as
+  such: 35 % of the L panel's Rust pivots are degenerate (`p2.2/entry_phase_split.json`;
+  46–49 % on `etamacro`, `stair`) -- an iteration-only target, since the simplex is ≤ 7 %
+  of the route's wall (P2.1).
 - [ ] **P2.6 — R1-LP graduation gate → D1.** Scope: `solver.py:37494` (`_lp_milp_backend`
   split: new `DISCOPT_LP_BACKEND`, default `highs`, for the pure-LP class only;
   `DISCOPT_LP_MILP_BACKEND` keeps governing MILP), docs. Done: L panel, Rust engine via
