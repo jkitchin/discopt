@@ -159,7 +159,13 @@ measured" — it may be scheduled only with an entry experiment. From the routin
   a rebase that commit survives only in the reflog, so a run JSON's
   `header.commit` is the measurement's identity, not a branch commit. Last sync:
   2026-11-04 — a parallel session rebased the plan onto `main` and merged this branch back
-  (`ff3da5b`); this tree synced to it at `07f71bbd` after P0.3's run. Next due 2026-11-05.
+  (`ff3da5b`); this tree synced to it at `07f71bbd` after P0.3's run. 2026-11-05: synced
+  to `origin/main` `8ebd87bf` by **merge** (`e776577d`), not rebase -- the branch already
+  carries merge commits from those syncs, and `git rebase` replays every commit they
+  brought in (it stopped on a #2143 commit that is not on `main`). Conflicts resolved to
+  `main`'s side except this branch's own audit rows and panel entries; rebuilt; `cargo
+  test` 981/0, smoke 4484 passed, adversarial 19 passed. One P0.6 IIS re-pinned (below).
+  Next due 2026-11-06.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
@@ -465,6 +471,13 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   the plan's "wall ≤ 2×" bar for R5 will be judged at sub-second scale. Kill not fired.
   `test_highs_parity_p06_iis_baseline.py` pins every set exactly (54 tests, 1.5 s); data
   `docs/dev/data/highs-parity/iis-3e5dbfa3/`.
+  **Re-pinned 2026-11-05 (sync to `main` `8ebd87bf`):** `6e890b49289ca18d`. #2145 (IIS
+  exact-reduction second route) returns rows {0,1,2} + bounds {x0 upper, x2 lower} + x3
+  integrality instead of rows {0,1} + {x0 upper, x1 lower, x2 lower} + x3 integrality.
+  Both checked independently in raw HiGHS on the `from_nl` model: infeasible, and feasible
+  after dropping any single row, bound or integrality, so both are irreducible; IIS are
+  not unique. Reproduced in two fresh processes; the old set is kept in the entry's
+  `rebaselined` field. The other 52 unchanged.
 - [x] **P0.7 — Entry experiment for M-1671: the UC witness on the Rust driver.** Scope:
   `scripts`-free: run `test_1667_…::test_unit_commitment_returns_within_its_time_limit`'s
   `UC_SCRIPT` with `DISCOPT_LP_MILP_BACKEND=rust` at `time_limit` 20/60/120 s, 3 reps,
@@ -800,6 +813,34 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     ratio **R 0.351** (passes) but **H 0.600** (does **not** pass the ≥ 50 % bar; per-row
     0.47–1.05, the three ~0.08 s rows unchanged). The 1-round 0.477 was an optimistic
     draw. P2.0 stays open on the H arm.
+  - **Lazy `scipy.optimize` (2026-11-04).** `_dual_recovery` imported it at module load:
+    0.16 s of every fresh process's first solve (`-X importtime`), on a route that never
+    calls `lsq_linear`. Now imported on first use. Real for a user's first solve; **not
+    visible on the panel** (its child process has imported it before the timed solve):
+    13 rows, 3 rounds, H 0.611 (`p2.0/p20_done_13rows_lazy.json`). Test
+    `test_highs_parity_p20_lazy_scipy_optimize.py`.
+  - **(iii) done as "cheaper, identical outputs" (2026-11-04).** Three exact changes:
+    `has_factorable_work` returns False at once when the objective and every row are
+    scalar-linear over `Constant` coefficients (`affine_array.is_scalar_linear`; every
+    scan it skips is False on that grammar -- argued per scan in the code); the
+    univariate-polynomial rule caches its expansion per row instead of re-expanding every
+    round; the defined-variable rule reads a bare variable leaf's enclosure from its box
+    (`_leaf_interval`, the same object `evaluate_interval` returns). Identity, same
+    inputs, old vs new code: `tighten_nonlinear_bounds` `lb`/`ub`/stats bit-identical on
+    197 instances (L/M/INF + every in-repo `.nl`, linear and nonlinear);
+    `has_factorable_work` 225/225 (49 True in both), scan total 2.95 → 1.16 s. Test
+    `test_highs_parity_p20_linear_presolve_passes.py`.
+  - **State after (i)–(iii), 13 rows, 3 rounds, load-gated** (`p2.0/p20_done_13rows_iii.
+    json`): 26/26 verdicts identical to P0.3; median per-row wall ratio vs P0.3 **R 0.323
+    (passes), H 0.556 (misses the 0.5 bar)**. What is left on the H route, warm profile of
+    the median row: the declared-box pass is still the largest piece (the two rules that
+    fire on linear rows, `defined_variable_forward` and `separable_quadratic_upper_bound`,
+    re-scanning every row each of ~4.6 rounds), then a tail of 0.03–0.15 s items across
+    subsystems (`_is_fast_linear_quadratic_family` degree walks, the affine evaluator
+    build, `_withhold_default_box_certificate`, `find_functionally_dependent_names`,
+    `validate`, `readonly_model_repr`). **Owner question:** the H-arm bar measures the
+    HiGHS route's own Python overhead, not Rust parity; accept P2.0 at H −44 % and move
+    on, or keep cutting that tail first?
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular

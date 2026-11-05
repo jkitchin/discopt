@@ -598,17 +598,13 @@
   "6e890b49289ca18d": {
    "constraints": [
     0,
-    1
+    1,
+    2
    ],
    "bounds": [
     [
      "x0",
      "upper",
-     []
-    ],
-    [
-     "x1",
-     "lower",
      []
     ],
     [
@@ -623,7 +619,7 @@
      []
     ]
    ],
-   "n_solves": 24,
+   "n_solves": 18,
    "proven_irreducible": true,
    "complete": true,
    "n": 4,
@@ -631,7 +627,35 @@
    "n_int": 3,
    "tests": [
     "python/tests/test_iis_integrality.py::test_random_milps_iis_is_infeasible_and_certified (call)"
-   ]
+   ],
+   "rebaselined": {
+    "by": "merge of origin/main 8ebd87bf (#2145 IIS: exact-reduction second route)",
+    "old": {
+     "constraints": [
+      0,
+      1
+     ],
+     "bounds": [
+      [
+       "x0",
+       "upper",
+       []
+      ],
+      [
+       "x1",
+       "lower",
+       []
+      ],
+      [
+       "x2",
+       "lower",
+       []
+      ]
+     ],
+     "n_solves": 24
+    },
+    "verified": "both old and new sets checked in raw HiGHS on the from_nl model: infeasible, and feasible after dropping any one row, bound or integrality"
+   }
   },
   "705eb3ad205c86f3": {
    "constraints": [
