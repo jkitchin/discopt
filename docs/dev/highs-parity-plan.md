@@ -1147,6 +1147,24 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   of a random MILP left uncertified). Fixed (the real columns' sides are read, as the
   float verifier does; Rust test `accepts_a_working_box_that_carries_artificials`);
   every P3.2 measurement is being re-run.
+  **Re-measured with the fix (2026-11-05, `cb3e576f`):** (1) IIS panel, flag ON
+  (`p3.2/iis_engine_panel_exact_v2.json`): **53/53 identical** to P0.6, median wall
+  0.91x, total 0.87 s vs 1.16 s. (2) §5 corpus panel, 132 instances ON vs OFF
+  (`p3.2/farkas_exact_corpus_panel_v2.jsonl`): **0 problems**, certified 107 -> 107, no
+  gains or losses, 244 incumbent checks, no errors. (3) L/M/INF Rust route OFF vs ON
+  (`p3.2/farkas_exact_lmi_v2_flag{0,1}.json`): 130 executed, 0 incorrect, certified L
+  25 / M 18 / INF 15 both arms; node counts move only on five time-limited uncertified
+  M rows. Cert-clean everywhere; net-positive only on its class (Rust IIS 51 -> 53/53,
+  and the random-MILP IIS test's 131 -> 0 failed node certificates).
+  **The broader IIS suite on `iis_engine="rust"`** (flag ON): 13 of 639 fail. 8 test
+  HiGHS-engine internals (deadline guard, run clock, raw `Highs.run` logs, a slowed
+  `Highs.run`) and would pin `iis_engine="highs"`; 5 are behaviour: the big-M
+  `kedron_like` model (3 tests) -- the driver accepts an integer 6e-11 off
+  (`INT_TOL` 1e-5) whose slack through an 8e6 coefficient makes a removal probe look
+  feasible, the witness repair rejects it as an artifact, so the element stays
+  undecided where HiGHS proves it; and pigeonhole PHP(10,9) (1 test, plus 1 variant) --
+  the driver cannot prove it infeasible within a 6 s budget where HiGHS does (Phase 4
+  MILP strength).
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with
