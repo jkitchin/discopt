@@ -15323,3 +15323,14 @@ loss, followed by a re-run of this panel. Audit row: `docs/dev/flag-retirement-a
 **#2142 status.** Unchanged in kind. Big-M certifies (§112). Hull ON is far better than hull
 OFF on cstr (bound 0.094 -> 0.94 at 300 s under load), but it does not certify. Per §0a, the
 remaining gap is in discopt's tree on this model, not in the formulation.
+
+**Verification run.**
+
+- `pytest -m smoke python/tests`: 4,578 passed, 17 skipped.
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: 19 passed.
+- `test_2142_exact_hull.py`: 33 fast tests and 2 slow tests passed (the cstr fixture takes 55 s).
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
+- `ruff format --check`: clean except a pre-existing `skills/.../SKILL.md` that this branch did
+  not touch.
+- With the flag forced ON, the hull and nesting suites pass, except for 3 tests that assert the
+  eps-perspective shape (`/` in the row). The soundness batteries on those same shapes pass.
