@@ -14408,7 +14408,7 @@ Pinned by `test_2142_propagate_spec_binding.py`. The observer copies the box onl
 it is attached. cstr big-M at a deterministic 10k nodes gives bound
 `0.970778897578354` with the observer and without it, the same as the pre-change baseline.
 
-**Experiment.** The scripts and logs are in `docs/dev/data/2142-propagation/`.
+**Experiment.** The scripts are in `docs/dev/data/2142-propagation/` (raw logs removed; see its README).
 
 1. Capture 187 node boxes from cstr big-M (`p1_capture.py`, every 100th node of a
    deterministic 20k-node run). The capture was taken with `DISCOPT_LP_DUAL_REBUILD`
@@ -14495,7 +14495,7 @@ on the 31 boxes.
 That is the tree's node solve, with no warm start, OBBT off, and an optional cut block.
 It returns the NS safe bound. It is pinned by `test_2142_solve_spatial_node_binding.py`.
 
-The scripts and logs are in `docs/dev/data/2142-tangent/`:
+The scripts are in `docs/dev/data/2142-tangent/` (raw logs removed; see its README):
 
 - `t1_capture_lp.py` re-captures the 20k-node `DISCOPT_LP_DUAL_REBUILD`-absent run. It
   reproduces the bound 1.3431805 and the 187 boxes of the §105 capture bit for bit.

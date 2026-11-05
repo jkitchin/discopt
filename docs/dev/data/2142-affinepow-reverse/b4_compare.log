@@ -1,5 +1,0 @@
-[rinf] excess K=30080.0000 KR=30080.0000 closure=0.0000 {'boxes': 94, 'scip_empty': 94, 'K_empty': 0, 'KR_empty': 0, 'K_empty_where_scip_empty': 0, 'KR_empty_where_scip_empty': 0, 'boxes_KR_tighter_than_K': 0, 'boxes_K_tighter_than_KR': 0}
-[rinf] columns where the reverse step removed excess: []
-[r15] excess K=30080.0000 KR=30080.0000 closure=0.0000 {'boxes': 94, 'scip_empty': 94, 'K_empty': 0, 'KR_empty': 0, 'K_empty_where_scip_empty': 0, 'KR_empty_where_scip_empty': 0, 'boxes_KR_tighter_than_K': 0, 'boxes_K_tighter_than_KR': 0}
-[r15] columns where the reverse step removed excess: []
-executed column comparisons: 0

@@ -1,7 +1,0 @@
-tree box == propagate(pre, cutoff, 15): 95 / 95
-/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/tan/t4_k2.py:47: RuntimeWarning: invalid value encountered in subtract
-  print(f"{tag:12s}: boxes shrunk {int((rl > 1e-6).sum())}, max relative width shrink {rl.max():.3f}; bound gain >1e-4 on {int((bt - bK > 1e-4).sum())}; "
-K+15        : boxes shrunk 44, max relative width shrink 0.763; bound gain >1e-4 on 23; closes 0.1928/1.3399 = 14.4% of the SCIP gap on 31 boxes
-K+15cut     : boxes shrunk 44, max relative width shrink 0.763; bound gain >1e-4 on 23; closes 0.1928/1.3399 = 14.4% of the SCIP gap on 31 boxes
-pre+1000cut : boxes shrunk 44, max relative width shrink 0.975; bound gain >1e-4 on 26; closes 1.3066/1.3399 = 97.5% of the SCIP gap on 31 boxes
-executed comparisons: 95

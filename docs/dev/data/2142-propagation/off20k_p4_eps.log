@@ -1,3 +1,0 @@
-{'boxes': 165, 'k_vs_ref12': 26, 'k_vs_ref9': 0, 'ref9_vs_ref12': 26, 'kinf_vs_ref9': 0, 'ref9_vs_kinf': 0}
-worst width ratio ref12/kernel (0.0005448020158210009, {'box': 41, 'id': 4700, 'col': 76, 'k': (np.float64(-2.156556188746776e-09), np.float64(2.156556188746776e-09)), 'r12': (np.float64(-1.1748961588604984e-12), np.float64(1.1748961588604984e-12)), 'r9': (np.float64(-2.156556188746776e-09), np.float64(2.156556188746776e-09)), 'n12': 32, 'n9': 5})
-executed comparisons: 165

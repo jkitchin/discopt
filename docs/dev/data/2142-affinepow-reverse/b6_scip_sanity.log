@@ -1,7 +1,0 @@
-global box cutoff=None: status=nodelimit empty=False
-  first 10 captured boxes cutoff=None: empty 10/10
-global box cutoff=3.07: status=nodelimit empty=False
-  first 10 captured boxes cutoff=3.07: empty 10/10
-global box cutoff=3.0620145765807636: status=nodelimit empty=False
-  first 10 captured boxes cutoff=3.0620145765807636: empty 10/10
-executed propagations: 33

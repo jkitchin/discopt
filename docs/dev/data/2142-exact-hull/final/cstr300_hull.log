@@ -1,3 +1,0 @@
-{"instance": "cstr", "arm": "discopt-hull", "status": "time_limit", "objective": 3.1301981335523896, "bound": 1.6670734993989027, "node_count": 33735, "wall": 300.081}
-load (2.22607421875, 2.25537109375, 2.29736328125)
-executed assertions: 2

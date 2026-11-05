@@ -16,3 +16,7 @@ deterministic tree; not committed, 2.4 MB). The measured build is commit `feat(k
 | `panel/v4_screen.py`, `panel/screen.*` | ON-only fire screen (2000 nodes / 30 s) over §107's 60 extra instances (`python/tests/data/minlplib` not in the corpus, plus nous1 and st_m2) |
 | `panel/extra.*`, `panel/extra_nous1.*` | the panel above over the 10 instances the screen found the rule acting on (`--extra-dir python/tests/data/minlplib` / `issue_1871`) |
 | `panel/v5_one.py`, `panel/nous1_cert_{0,1}.log` | nous1 to certification (`gap_tolerance=1e-4`), both arms, concurrently |
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-branching-var/<name>.log.gz | gunzip` (or `.log`, no gunzip).

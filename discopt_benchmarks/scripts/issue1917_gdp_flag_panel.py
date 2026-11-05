@@ -164,6 +164,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # ``KernelPresolveApplied`` (``solver.KERNEL_PRESOLVE_STATS``, exported by
     # ``gdp_baseline``'s worker) is 0 exactly where the main kernel call saw OFF's spec.
     "DISCOPT_KERNEL_PRESOLVE": ("big-m", "hull"),
+    # #2144: the configuration search's feasibility-first fallback acts at solve
+    # time (lowering identical): solve ``--all``. Rows carry ``feas_fallback``, the
+    # worker's firing counter.
+    "DISCOPT_GDP_CONFIG_FEAS_FALLBACK": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

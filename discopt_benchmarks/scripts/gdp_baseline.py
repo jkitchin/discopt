@@ -254,6 +254,13 @@ def _run_discopt(
             if k.startswith("vub_cmir/") or k == "tree/undecided_nodes"
         },
     }
+    # #2144: where the configuration search's feasibility fallback fired. ``None``
+    # (not zeros) on a ``discopt`` that predates the counter, so a baseline row
+    # cannot be mistaken for one where the fallback was present and silent.
+    from discopt._relax import primal_heuristics as _ph
+
+    _fb = getattr(_ph, "FEAS_FALLBACK_COUNTS", None)
+    out["feas_fallback"] = None if _fb is None else dict(_fb)
     if profiling:
         from discopt._rust import profile_counters_py
 

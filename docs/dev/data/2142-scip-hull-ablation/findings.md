@@ -160,3 +160,7 @@ kernel pseudocost rules do not share (branching was already killed as a directio
   to the recorded `arm_aggr_10000.log.gz` value; (e) every point handed to `incumbent_value` /
   `primal_hook` has `len == n_cols` and satisfies the aggregation equalities.
 - **Counters:** `KernelAggregated` (columns), `KernelAggrRowsDropped`.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-scip-hull-ablation/<name>.log.gz | gunzip` (or `.log`, no gunzip).

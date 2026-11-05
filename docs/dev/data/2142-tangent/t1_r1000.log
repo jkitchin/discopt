@@ -1,3 +1,0 @@
-solve: node_limit 3.062014576618532 1.4448428032425578 20000 123.2 s; kernel calls 2 kept 181
-saved lp20k_r1000.npz boxes 181
-executed assertions: 3

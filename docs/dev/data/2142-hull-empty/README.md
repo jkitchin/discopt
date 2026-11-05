@@ -27,3 +27,7 @@ nothing else is filtered.
 
 `DISCOPT_INT_ROUND_EXACT` was retired in `6733a279`. `e_arm.py`, `d1_pin.py` and `c11` with
 the flag set need the build at `515cee4a`.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-hull-empty/<name>.log.gz | gunzip` (or `.log`, no gunzip).
