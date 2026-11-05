@@ -1402,6 +1402,35 @@ and is re-written by P4.1.**
   tableau-based c-MIR added; hypothesis: residual ≤ 2.5 % on mik. Flag
   `DISCOPT_MILP_TABLEAU_CMIR`. Done: panel bars; exact-enumeration soundness on small
   seeded MILPs 0 unsound cuts. Kill: mik residual > 3.5 % → retire. Regime: bound-changing.
+  **Entry (2026-11-05, in progress -- decision point).** Instrument `p44_root_gap.py`:
+  `Model.solve` on the Rust route at `max_nodes=2`, recording the FIRST driver call's bound
+  (the shipped options, root cut loop included). Two probe defects found and fixed before
+  any number was used: the solve's *reported* bound is a fallback engine's when a
+  node-capped run without an incumbent defers (`sp150x300d` read 91.6 %, worse than its
+  LP); and at `max_nodes=1` the tree's global bound is still `-inf` (root created, not
+  solved). Root gap `(opt - bound)/(1+|opt|)`, % (data `p4.4/`):
+
+  | arm | mik-1 | mik-2 | mik-3 | mik-5 | fiber | sp150x300d |
+  |---|---|---|---|---|---|---|
+  | HEAD (shipped route) | 4.11 | 3.99 | 3.79 | 4.16 | **61.55** | **50.0** |
+  | + `cmir_cuts` (#2107 separator) | 4.15 | 4.35 | 3.89 | 4.12 | 32.72 | 38.57 |
+  | `root_cuts` 2000 (= 5000 × 200 rounds) | 4.09 | 3.76 | 3.39 | 4.01 | 61.55 | 50.0 |
+  | 5000 × 200 + `cmir_cuts` | 3.46 | 3.45 | 3.19 | 3.71 | 32.72 | 38.57 |
+  | HiGHS (§2.5, Sept) | 1.84 | 1.52 | 1.76 | 1.72 | 1.95 | 0.00 |
+
+  Findings that change the premise:
+  1. **The pure-MILP route never runs c-MIR.** #2107 graduated `DISCOPT_MILP_CMIR` on the
+     OA-master path only (`milp_simplex._strong_cut_kwargs`); `_solve_milp_simplex`
+     passes no `cmir_cuts`, and every Rust entry defaults it `false`. Turning the
+     existing separator on: `fiber` 61.55 → 32.72, `sp150x300d` 50.0 → 38.57; mik flat.
+  2. **`fiber` and `sp150x300d` get ZERO root cuts at HEAD**: one round, cover finds
+     nothing, GMI declines (`SepGomoryShortBasis` -- the root basis is shorter than m).
+     Setting `expel_zero_artificials` in `milp_options` did not change it (the root basis
+     GMI receives does not come from that option's path); not yet traced.
+  3. **mik is budget-saturated, not family-starved:** GMI emits 946 cuts in 13 rounds,
+     the loop stops on the 500 generated-cut cap; 2000 helps 0.0-0.4 pp and 5000 × 200
+     adds nothing more; with c-MIR the best existing-mechanism mik residual is 3.2-3.7 %,
+     between the hypothesis (≤ 2.5 %) and the kill line (> 3.5 %).
 - [ ] **P4.5 — Root restart.** Scope: `milp_driver.rs` root loop. After the root cut loop,
   if reduced-cost fixing + FBBT fixed ≥ 10 % of columns, re-run presolve + root loop on the
   reduced problem once (HiGHS's closer on `beavma`/`dcmulti`, §2.6). Entry: count such

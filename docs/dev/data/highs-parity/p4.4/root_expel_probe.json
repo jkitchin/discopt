@@ -1,0 +1,99 @@
+{
+ "header": {
+  "load": [
+   0.88232421875,
+   3.6005859375,
+   3.0966796875
+  ],
+  "commit": "9f5fa6fd",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python"
+ },
+ "rows": [
+  {
+   "name": "mik-250-20-75-1",
+   "opt": -49716.0,
+   "driver_bound": -51756.664571574525,
+   "root_gap_pct": 4.104560958172306,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -51756.664571574525,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-2",
+   "opt": -50768.00000000001,
+   "driver_bound": -52795.15659977772,
+   "root_gap_pct": 3.9929023612395635,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -52795.15659977772,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-3",
+   "opt": -52242.0,
+   "driver_bound": -54222.410156214624,
+   "root_gap_pct": 3.790766526069759,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -54222.410156214624,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-5",
+   "opt": -51532.0,
+   "driver_bound": -53673.84424646286,
+   "root_gap_pct": 4.156257633871229,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -53673.84424646286,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "fiber",
+   "opt": 405935.18,
+   "driver_bound": 156082.51759236355,
+   "root_gap_pct": 61.54973976639294,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": 156082.51759236355,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "sp150x300d",
+   "opt": 69.0,
+   "driver_bound": 34.0,
+   "root_gap_pct": 50.0,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": 34.0,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "P44_EXPEL": "1"
+   },
+   "force_kw": {}
+  }
+ ]
+}
