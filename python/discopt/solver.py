@@ -1629,10 +1629,21 @@ def _compl_branch_enabled() -> bool:
     is bypassed (it has no such branch). Both children cover the pair's feasible
     set ``{f=0} ∪ {g=0}`` exactly, and each pair splits at most once per path.
 
-    Bound-changing per CLAUDE.md §5 (it changes which boxes are relaxed), so it is
-    default-off until a corpus panel passes; tracked in
-    ``docs/dev/flag-retirement-audit.md``. OFF, a natively lowered model is still
-    solved exactly by ordinary spatial branching on its ``f·g <= 0`` rows.
+    **Kept as a documented opt-in, not the default (#2167 panels).** Cert-clean
+    everywhere it was measured (H2: 216 checks; non-ReLU MPEC panel: 255; route
+    isolation: 38 paired certificates, 0 disagreements). On the SAME tree (both
+    arms on the Python tree) it is node-positive but modest: equal nodes on 34
+    of 45 instances, fewer on 10 (often 2-7x on the deeper trees, e.g. 93 -> 13),
+    more on 1. It is not the default because turning it on also moves the solve
+    off the native Rust spatial kernel, which has no such branch: on ReLU nets
+    that costs +27-34% median wall (H2), although the Python tree then needs
+    30-45x fewer nodes than the kernel; on the non-ReLU panel it is 0.70x wall.
+    What would change that: the dichotomy implemented in
+    ``bnb/spatial_tree.rs``, so the flag no longer changes the route; then
+    re-run ``discopt_benchmarks/scripts/compl_branch_isolation.py`` and the H2
+    panel and graduate on the usual two bars. OFF, a natively lowered model is
+    still solved exactly by ordinary spatial branching on its ``f·g <= 0`` rows.
+    Measurements: ``docs/dev/issue-2167-relu-complementarity-results.md``.
     """
     return os.environ.get("DISCOPT_COMPL_BRANCH", "0").strip().lower() in (
         "1",
