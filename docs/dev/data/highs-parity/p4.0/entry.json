@@ -57,9 +57,47 @@
    "verdict": [
     "dual-"
    ]
+  },
+  {
+   "name": "mik-250-20-75-5",
+   "rep": 0,
+   "opt": -51532.0,
+   "maximize": false,
+   "off": {
+    "class": "primal",
+    "primal_short": 0.5136320416044097,
+    "dual_short": 0.030868293956095177,
+    "primal_within_gap": false,
+    "status": "feasible",
+    "objective": -25062.999999999956,
+    "bound": -53122.73579243945,
+    "nodes": 11785,
+    "wall": 10.551170147999983,
+    "termination": null,
+    "load": 1.96923828125
+   },
+   "on": {
+    "class": "dual",
+    "primal_short": 0.0005045310771738498,
+    "dual_short": 0.11896313523679922,
+    "primal_within_gap": false,
+    "status": "feasible",
+    "objective": -51506.0,
+    "bound": -57662.527248157974,
+    "nodes": 36538,
+    "wall": 20.171487824999986,
+    "termination": "time_limit",
+    "load": 1.3603515625
+   },
+   "fired": true,
+   "verdict": [
+    "primal+",
+    "dual-"
+   ]
   }
  ],
  "tally": {
-  "dual-": 1
+  "dual-": 2,
+  "primal+": 1
  }
 }
