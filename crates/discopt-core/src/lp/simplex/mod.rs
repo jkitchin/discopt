@@ -18,6 +18,7 @@
 
 pub mod batch;
 pub mod dual;
+pub(crate) mod farkas_exact;
 pub mod linsolve;
 pub mod presolve;
 pub mod primal;

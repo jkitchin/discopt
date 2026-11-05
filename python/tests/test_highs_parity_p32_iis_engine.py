@@ -75,3 +75,23 @@ def test_known_gap_is_reported_not_hidden(panel, sha):
         assert {json.dumps(e) for e in want[k]} <= {json.dumps(e) for e in got[k]}
     assert _sig(got) != want
     assert got["proven_irreducible"] is False
+
+
+@pytest.mark.parametrize("sha", sorted(KNOWN_GAP))
+def test_exact_farkas_closes_the_gap(sha):
+    """With ``DISCOPT_FARKAS_EXACT_OPEN=1`` (read once per process, so a subprocess)
+    the driver certifies the free-column infeasibilities exactly and the Rust engine
+    returns P0.6's baseline IIS, proven irreducible."""
+    import subprocess
+
+    script = _ROOT / "discopt_benchmarks" / "scripts" / "iis_parity_panel.py"
+    env = dict(os.environ, DISCOPT_FARKAS_EXACT_OPEN="1")
+    p = subprocess.run(
+        [sys.executable, str(script), "_worker", str(_DIR / f"{sha}.mps"), "30", "rust"],
+        env=env, capture_output=True, text=True, timeout=240,
+    )  # fmt: skip
+    lines = [ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")]
+    assert p.returncode == 0 and len(lines) == 1, p.stderr[-2000:]
+    got = json.loads(lines[0][len("RESULT ") :])
+    assert _sig(got) == _sig(_EXPECTED[sha])
+    assert got["proven_irreducible"] and got["complete"]

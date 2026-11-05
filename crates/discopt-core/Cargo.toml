@@ -233,6 +233,13 @@ feral = "0.18.0"
 # "pinned to keep MSRV 1.75" rationale no longer holds -- the workspace floor is
 # 1.84 (see the note on `rust-version` in the root Cargo.toml).
 rayon = { version = "1.10", optional = true }
+# Exact rational arithmetic for the Farkas certificate on open columns
+# (`lp/simplex/farkas_exact.rs`, highs-parity P3.2, `DISCOPT_FARKAS_EXACT_OPEN`):
+# a float ray cannot certify an LP's infeasibility when it must have an exactly-zero
+# reduced cost on a free column, so that check is done over the rationals.
+num-bigint = "0.4"
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std"] }
+num-traits = "0.2"
 # libm: portable libm implementation. Provides erf() (and other special
 # functions) absent from Rust's std f64, used to evaluate the Gauss error
 # function in the expression IR. Pure-Rust, preserves clean-wheel builds.

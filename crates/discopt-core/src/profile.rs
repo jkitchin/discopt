@@ -271,6 +271,9 @@ counters!(
     RensSeeded,
     RensBackoffSkips,
     Phase1Pivots,
+    // highs-parity P3.2: exact open-column Farkas checks run / that certified.
+    FarkasExactAttempt,
+    FarkasExactRescue,
     Phase2Pivots,
     DegeneratePivots,
     BoundFlips,
