@@ -9796,8 +9796,11 @@ class Model:
             Passed through to :func:`discopt.solver.solve_model`.
         milp_backend : {"highs", "native"}, optional
             Engine for a pure LP or MILP model. The default ``None`` defers to
-            the ``DISCOPT_LP_MILP_BACKEND`` environment variable, which itself
-            defaults to HiGHS. ``"highs"`` names HiGHS with discopt-verified
+            the environment: a MILP to ``DISCOPT_LP_MILP_BACKEND`` (default
+            HiGHS), an LP to ``DISCOPT_LP_BACKEND`` (default the in-house Rust
+            simplex since highs-parity D1; an explicitly set
+            ``DISCOPT_LP_MILP_BACKEND`` still decides an LP when it is unset).
+            ``"highs"`` names HiGHS with discopt-verified
             certificates, by far the faster choice; its ``node_count`` is
             HiGHS's own ``mip_node_count``, which counts the root: ``0`` when
             HiGHS presolve settles the model, ``1`` when the root node closes

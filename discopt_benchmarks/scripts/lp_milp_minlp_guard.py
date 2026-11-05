@@ -1,5 +1,9 @@
 """H4 MINLP guard: DISCOPT_LP_MILP_BACKEND must be exactly neutral on MINLP solves.
 
+Usage: ``lp_milp_minlp_guard.py OUT.json [ENV_VAR]``. ``ENV_VAR`` (default
+``DISCOPT_LP_MILP_BACKEND``) is the variable the arms set; highs-parity D1 runs it with
+``DISCOPT_LP_BACKEND`` (the pure-LP engine) and the joint variable left unset.
+
 Arms per instance, each a fresh subprocess: R (rust), H (highs), R2 (rust again, the
 noise control). On every instance compare status / objective / bound / node_count /
 gap_certified / LP-MILP route key. A R-vs-H difference counts as drift only when R and
@@ -15,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+GUARD_ENV = sys.argv[2] if len(sys.argv) > 2 else "DISCOPT_LP_MILP_BACKEND"
 CORPUS = REPO / "python/tests/data/minlplib_nl"
 TL, MAX_NODES = 20.0, 300
 KEYS = ("status", "objective", "bound", "nodes", "gap_certified", "route", "error")
@@ -39,12 +44,10 @@ print("RESULT " + json.dumps({"status": r.status, "objective": r.objective, "bou
 
 
 def run(path, backend):
-    env = dict(
-        os.environ,
-        DISCOPT_LP_MILP_BACKEND=backend,
-        PYTHONUNBUFFERED="1",
-        GUARD_DISCOPT_SRC=str(REPO / "python"),
-    )
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DISCOPT_LP_MILP_BACKEND", "DISCOPT_LP_BACKEND")}  # fmt: skip
+    env.update({GUARD_ENV: backend, "PYTHONUNBUFFERED": "1",
+                "GUARD_DISCOPT_SRC": str(REPO / "python")})  # fmt: skip
     p = subprocess.run(
         [sys.executable, "-c", WORKER, str(path), str(TL), str(MAX_NODES)],
         env=env,

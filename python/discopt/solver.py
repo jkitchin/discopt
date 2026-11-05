@@ -13076,8 +13076,9 @@ def _scoped_highs_options(fn: _F) -> _F:
 
             warnings.warn(
                 "highs_options was not used: it applies only to a pure LP or MILP "
-                "solved on the HiGHS route (milp_backend='highs', the default), and "
-                "this solve did not take that route.",
+                "solved on the HiGHS route (a MILP's default; an LP's since "
+                "highs-parity D1 only with DISCOPT_LP_BACKEND=highs or "
+                "milp_backend='highs'), and this solve did not take that route.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -14281,15 +14282,16 @@ def solve_model(
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     milp_backend : {"highs", "native"}, optional
-        Engine for a pure LP or MILP model (#1535). The default ``None`` defers
-        to the ``DISCOPT_LP_MILP_BACKEND`` env var, which itself defaults to
-        HiGHS. ``"highs"`` names HiGHS with discopt-verified certificates, by
-        far the faster choice. ``"native"`` forces discopt's own branch and
-        bound -- the in-house LP solve (Rust simplex, POUNCE if it declines)
-        for an LP, discopt's MILP tree for a MILP -- so the search can be
-        watched: ``node_count`` is the tree's, ``strategy`` selects nodes,
-        ``branching_rule`` picks the branching variable, ``node_callback``
-        fires after every batch, and ``milp_cuts`` switches the root cut loop.
+        Engine for a pure LP or MILP model (#1535). The default ``None`` defers to the
+        environment: a MILP to ``DISCOPT_LP_MILP_BACKEND`` (default HiGHS), an LP to
+        :func:`_lp_backend` (``DISCOPT_LP_BACKEND``, default the in-house Rust simplex since
+        highs-parity D1). ``"highs"`` names HiGHS with discopt-verified certificates, by far
+        the faster choice on a MILP. ``"native"`` forces discopt's own branch and bound --
+        the in-house LP solve (Rust simplex, POUNCE if it declines) for an LP, discopt's
+        MILP tree for a MILP -- so the search can be watched: ``node_count`` is the tree's,
+        ``strategy`` selects nodes, ``branching_rule`` picks the branching variable,
+        ``node_callback`` fires after every batch, and ``milp_cuts`` switches the root cut
+        loop.
         Meant for teaching and inspection on small models, not for
         performance. ``lazy_constraints`` / ``incumbent_callback`` /
         ``cut_callback`` send a MILP to spatial branch and bound, which honours
@@ -17992,7 +17994,10 @@ def solve_model(
                     UserWarning,
                     stacklevel=2,
                 )
-            if _lpm_backend == "highs":
+            # highs-parity D1: a pure LP with no ``milp_backend`` named follows
+            # ``_lp_backend()`` (default rust); an explicit keyword still decides.
+            _lp_engine_choice = _lp_backend() if milp_backend is None else _lpm_backend
+            if _lp_engine_choice == "highs":
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
@@ -37550,6 +37555,31 @@ def _lp_milp_backend() -> str:
     if val not in ("rust", "highs"):
         raise ValueError(f"DISCOPT_LP_MILP_BACKEND={val!r}: expected 'rust' or 'highs'")
     return val
+
+
+def _lp_backend() -> str:
+    """Which engine solves a pure LP when no ``milp_backend`` is named: ``"rust"``
+    (default since highs-parity D1, 2026-11-05) or ``"highs"``.
+
+    Precedence: ``DISCOPT_LP_BACKEND`` if set; else ``DISCOPT_LP_MILP_BACKEND`` if set
+    (so every A/B run and opt-out that named the joint variable keeps its meaning); else
+    ``"rust"``. MILP is not affected -- it reads only ``DISCOPT_LP_MILP_BACKEND``
+    (:func:`_lp_milp_backend`, default ``"highs"``).
+
+    D1's evidence (``docs/dev/highs-parity-plan.md`` P2.6, ``p2.6/gate_L_INF.json``): 3
+    rounds under a load gate, 480 solves, 0 incorrect; the Rust route certifies all 25 L
+    LPs like the HiGHS route and decides every INF LP correctly, at 1.07x the HiGHS
+    route's wall on L (0.97x on INF). ``=highs`` is the opt-out, kept so the default can
+    be A/B'd. Any other value is refused loudly, like :func:`_lp_milp_backend`.
+    """
+    for var in ("DISCOPT_LP_BACKEND", "DISCOPT_LP_MILP_BACKEND"):
+        raw = os.environ.get(var)
+        if raw is not None:
+            val = raw.strip().lower()
+            if val not in ("rust", "highs"):
+                raise ValueError(f"{var}={val!r}: expected 'rust' or 'highs'")
+            return val
+    return "rust"
 
 
 #: Values the ``milp_backend=`` keyword of :func:`solve_model` accepts (#1535).

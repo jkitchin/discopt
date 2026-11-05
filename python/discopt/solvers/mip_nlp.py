@@ -341,10 +341,10 @@ def _solve_lp_like_default_route(
     """Solve a pure LP with the engine ``Model.solve()``'s default route uses.
 
     The same dispatch as the LP branch of ``solver._solve_impl``: the verified
-    HiGHS route by default, the Rust simplex (then POUNCE) under
-    ``DISCOPT_LP_MILP_BACKEND=rust``.
+    LP backend of :func:`discopt.solver._lp_backend` (the Rust simplex, then POUNCE, by
+    default since highs-parity D1; the verified HiGHS route under ``=highs``).
     """
-    if solver_module._lp_milp_backend() == "highs":
+    if solver_module._lp_backend() == "highs":
         return cast(SolveResult, solver_module._solve_lp_highs(model, t_start, time_limit))
     return cast(SolveResult, solver_module._solve_lp(model, t_start, time_limit))
 
@@ -387,7 +387,7 @@ def _try_integer_free_lp(
         shot_config=shot_config,
         selected_strategy="direct_lp",
         problem_class=ProblemClass.LP.value,
-        backend=solver_module._lp_milp_backend(),
+        backend=solver_module._lp_backend(),
     )
 
 

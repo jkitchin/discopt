@@ -1497,11 +1497,12 @@ def _apply_partition_refinement_hook(
 
 def _routes_to_verified_lp(model) -> bool:
     """Whether the default route would solve *model* on the verified HiGHS LP engine:
-    a pure LP with ``DISCOPT_LP_MILP_BACKEND`` at its ``highs`` default (#1229)."""
+    a pure LP whose LP backend (:func:`discopt.solver._lp_backend`) is ``highs`` (#1229;
+    the default is ``rust`` since highs-parity D1)."""
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
-    from discopt.solver import _lp_milp_backend
+    from discopt.solver import _lp_backend
 
-    return _lp_milp_backend() == "highs" and classify_problem(model) == ProblemClass.LP
+    return _lp_backend() == "highs" and classify_problem(model) == ProblemClass.LP
 
 
 def _normalize_partition_method(

@@ -56,6 +56,8 @@ def _presolve_settings(monkeypatch, model, **kw):
 
 @pytest.mark.parametrize("build", [_knapsack, _lp])
 def test_presolve_false_reaches_highs(monkeypatch, build):
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     r, seen = _presolve_settings(monkeypatch, build(), presolve=False)
     assert r.status == "optimal"
     assert set(seen) == {"off"}
