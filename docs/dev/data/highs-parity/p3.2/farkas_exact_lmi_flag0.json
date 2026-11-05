@@ -1,0 +1,2652 @@
+{
+ "header": {
+  "load": [
+   0.9638671875,
+   2.4755859375,
+   3.8046875
+  ],
+  "commit": "991a58e6",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python",
+  "load_gate": null,
+  "load_end": [
+   2.6953125,
+   2.60546875,
+   3.646484375
+  ]
+ },
+ "args": {
+  "cmd": "run",
+  "manifest": "discopt_benchmarks/data/lp_milp/manifest.json",
+  "panel": [
+   "L",
+   "M",
+   "INF"
+  ],
+  "instances": "",
+  "arms": "R",
+  "rounds": 1,
+  "time_limit": 20.0,
+  "gap": 0.0001,
+  "max_nodes": 100000000,
+  "out": "docs/dev/data/highs-parity/p3.2/farkas_exact_lmi_flag0.json",
+  "resume": false,
+  "h0_subprocess": false,
+  "load_gate": null
+ },
+ "complete": true,
+ "rows": [
+  {
+   "name": "25fv47",
+   "panel": "L",
+   "oracle": 5501.845888286757,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9638671875,
+    0.966796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 5501.845888286734,
+    "bound": 5501.845888286551,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 5.842082373419544e-11,
+    "wall_med": 2.544878680999318,
+    "wall_sd": 0.0,
+    "walls_all": [
+     2.544878680999318
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "adlittle",
+   "panel": "L",
+   "oracle": 225494.9631623803,
+   "oracle_status": "Optimal",
+   "load": [
+    0.966796875,
+    0.966796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 225494.96316238027,
+    "bound": 225494.96316215445,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.2737367544323206e-13,
+    "wall_med": 0.13224437499957276,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.13224437499957276
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "afiro",
+   "panel": "L",
+   "oracle": -464.75314285714285,
+   "oracle_status": "Optimal",
+   "load": [
+    0.966796875,
+    0.966796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -464.75314285714285,
+    "bound": -464.7531428576089,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.1316282072803006e-14,
+    "wall_med": 0.10224099300012313,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.10224099300012313
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "avgas",
+   "panel": "L",
+   "oracle": -7.75,
+   "oracle_status": "Optimal",
+   "load": [
+    0.966796875,
+    0.966796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -7.75,
+    "bound": -7.750000000008751,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.0853224370002863,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0853224370002863
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "blending",
+   "panel": "L",
+   "oracle": -3200.0000000000005,
+   "oracle_status": "Optimal",
+   "load": [
+    0.966796875,
+    0.966796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -3200.0,
+    "bound": -3200.000000003201,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.07696230500005186,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.07696230500005186
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "chip",
+   "panel": "L",
+   "oracle": -900.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.966796875,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -900.0,
+    "bound": -900.000000000901,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08054304100005538,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.08054304100005538
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "dD2e",
+   "panel": "L",
+   "oracle": -3000.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -3000.0,
+    "bound": -3000.000000003001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.0605169680002291,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0605169680002291
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "e226",
+   "panel": "L",
+   "oracle": -11.638929066370537,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -11.638929066370508,
+    "bound": -11.638929066373345,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.8379998644345092e-13,
+    "wall_med": 0.39411593200020434,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.39411593200020434
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "egout-ac",
+   "panel": "L",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.3322676295501878e-14,
+    "wall_med": 0.13971110599959502,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.13971110599959502
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "etamacro",
+   "panel": "L",
+   "oracle": -755.7152333005275,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -755.7152333749132,
+    "bound": -755.7152333759533,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.2440182217687833e-13,
+    "wall_med": 0.36813841400089586,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.36813841400089586
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "israel",
+   "panel": "L",
+   "oracle": -896644.8218630459,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -896644.8218630458,
+    "bound": -896644.8218639427,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.9103830456733704e-11,
+    "wall_med": 0.17665377400044235,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.17665377400044235
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "nan1",
+   "panel": "L",
+   "oracle": -1000.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -1000.0,
+    "bound": -1000.000000001001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09218088700072258,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.09218088700072258
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "no-newline-eof",
+   "panel": "L",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.9697265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.07938309999917692,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.07938309999917692
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "perold",
+   "panel": "L",
+   "oracle": -9380.755278235187,
+   "oracle_status": "Optimal",
+   "load": [
+    0.9697265625,
+    0.97216796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -9380.75527823518,
+    "bound": -9380.755278235929,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 6.490154191851616e-09,
+    "wall_med": 3.005819967000207,
+    "wall_sd": 0.0,
+    "walls_all": [
+     3.005819967000207
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "qap04",
+   "panel": "L",
+   "oracle": 32.0,
+   "oracle_status": "Optimal",
+   "load": [
+    0.97216796875,
+    0.97216796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 32.0,
+    "bound": 31.999999999966988,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.10258480699940264,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.10258480699940264
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "scrs8",
+   "panel": "L",
+   "oracle": 904.296953800792,
+   "oracle_status": "Optimal",
+   "load": [
+    0.97216796875,
+    0.97216796875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 904.2969538007917,
+    "bound": 904.2969538007616,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 1.7053025658242404e-13,
+    "wall_med": 1.0800395109999954,
+    "wall_sd": 0.0,
+    "walls_all": [
+     1.0800395109999954
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "sctest",
+   "panel": "L",
+   "oracle": 5.75,
+   "oracle_status": "Optimal",
+   "load": [
+    0.97216796875,
+    1.21484375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 5.75,
+    "bound": 5.74999999999325,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09215417500035983,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.09215417500035983
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "shell",
+   "panel": "L",
+   "oracle": 1208825346.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.21484375,
+    1.21484375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1208825346.0,
+    "bound": 1208825345.998751,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 1.0299502909992952,
+    "wall_sd": 0.0,
+    "walls_all": [
+     1.0299502909992952
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "silly-names",
+   "panel": "L",
+   "oracle": -1.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.21484375,
+    1.21484375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -1.0,
+    "bound": -1.000000000002,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08861980799974845,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.08861980799974845
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "smalllp",
+   "panel": "L",
+   "oracle": 54.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.21484375,
+    1.21484375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 54.0,
+    "bound": 53.999999999873,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09265244099970005,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.09265244099970005
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "stair",
+   "panel": "L",
+   "oracle": -251.26695119296335,
+   "oracle_status": "Optimal",
+   "load": [
+    1.21484375,
+    1.21484375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -251.26695119296357,
+    "bound": -251.26695119422482,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 4.973799150320701e-13,
+    "wall_med": 0.9010793790002936,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.9010793790002936
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standata",
+   "panel": "L",
+   "oracle": 1257.6995,
+   "oracle_status": "Optimal",
+   "load": [
+    1.21484375,
+    1.197265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.41607573200053594,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.41607573200053594
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standgub",
+   "panel": "L",
+   "oracle": 1257.6995,
+   "oracle_status": "Optimal",
+   "load": [
+    1.197265625,
+    1.197265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1257.6995,
+    "bound": 1257.6994999987412,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 2.842170943040401e-14,
+    "wall_med": 0.44170369500079687,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.44170369500079687
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "standmps",
+   "panel": "L",
+   "oracle": 1406.0175,
+   "oracle_status": "Optimal",
+   "load": [
+    1.197265625,
+    1.197265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1406.0174999999995,
+    "bound": 1406.017499998593,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 5.99945648716016e-13,
+    "wall_med": 0.44927864900000714,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.44927864900000714
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "test",
+   "panel": "L",
+   "oracle": -4.75,
+   "oracle_status": "Optimal",
+   "load": [
+    1.197265625,
+    1.197265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -4.75,
+    "bound": -4.75000000001175,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.12083247500049765,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.12083247500049765
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "1451",
+   "panel": "M",
+   "oracle": 2.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.197265625,
+    1.197265625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.07317852199957997,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.07317852199957997
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2122",
+   "panel": "M",
+   "oracle": -187612.94419439966,
+   "oracle_status": "Optimal",
+   "load": [
+    1.197265625,
+    1.6708984375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -187606.44261281335,
+    "gap_certified": false,
+    "nodes": 267,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 20.080922826999995,
+    "wall_sd": 0.0,
+    "walls_all": [
+     20.080922826999995
+    ],
+    "status_all": [
+     "time_limit"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     267
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2171",
+   "panel": "M",
+   "oracle": -22375.75854607508,
+   "oracle_status": "Optimal",
+   "load": [
+    1.6708984375,
+    1.6708984375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -22375.758546075132,
+    "bound": -22375.758546097775,
+    "gap_certified": true,
+    "nodes": 17,
+    "route": "rust",
+    "max_viol": 1.1368683772161603e-12,
+    "wall_med": 0.1481043409994527,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.1481043409994527
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     17
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bell5",
+   "panel": "M",
+   "oracle": 8966406.49152,
+   "oracle_status": "Optimal",
+   "load": [
+    1.6708984375,
+    1.9375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 8966406.491519999,
+    "bound": 8965514.22460479,
+    "gap_certified": true,
+    "nodes": 20429,
+    "route": "rust",
+    "max_viol": 1.2505552149377763e-12,
+    "wall_med": 3.8201901960001123,
+    "wall_sd": 0.0,
+    "walls_all": [
+     3.8201901960001123
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     20429
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bound_implied",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.9375,
+    1.9375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 3.293721867932805e-45,
+    "wall_med": 0.1068684720003148,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.1068684720003148
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "dcmulti",
+   "panel": "M",
+   "oracle": 188182.0,
+   "oracle_status": "Optimal",
+   "load": [
+    1.9375,
+    2.10302734375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 188182.0,
+    "bound": 188163.45173309272,
+    "gap_certified": true,
+    "nodes": 21353,
+    "route": "rust",
+    "max_viol": 9.094947017729282e-13,
+    "wall_med": 4.793760694000412,
+    "wall_sd": 0.0,
+    "walls_all": [
+     4.793760694000412
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     21353
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "egout",
+   "panel": "M",
+   "oracle": 568.1007000000001,
+   "oracle_status": "Optimal",
+   "load": [
+    2.10302734375,
+    2.25537109375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 568.1007,
+    "bound": 568.100699999418,
+    "gap_certified": true,
+    "nodes": 2439,
+    "route": "rust",
+    "max_viol": 1.4210854715202004e-14,
+    "wall_med": 0.6258971019997261,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.6258971019997261
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     2439
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "fixed-binary",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.25537109375,
+    2.25537109375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.08968591999928321,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.08968591999928321
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "flugpl",
+   "panel": "M",
+   "oracle": 1201500.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.25537109375,
+    2.25537109375
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1201499.9999999988,
+    "bound": 1201499.9999986193,
+    "gap_certified": true,
+    "nodes": 443,
+    "route": "rust",
+    "max_viol": 3.2741809263825417e-11,
+    "wall_med": 0.12401922400022158,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.12401922400022158
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     443
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gesa2",
+   "panel": "M",
+   "oracle": 25779856.371697918,
+   "oracle_status": "Optimal",
+   "load": [
+    2.25537109375,
+    2.5244140625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "feasible",
+    "objective": 27279827.359579917,
+    "bound": 25569753.20652122,
+    "gap_certified": false,
+    "nodes": 16813,
+    "route": "rust",
+    "max_viol": 4.547473508864641e-13,
+    "wall_med": 11.654296296999746,
+    "wall_sd": 0.0,
+    "walls_all": [
+     11.654296296999746
+    ],
+    "status_all": [
+     "feasible"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     16813
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gt2",
+   "panel": "M",
+   "oracle": 21166.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.5244140625,
+    2.845703125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "feasible",
+    "objective": 24106.0,
+    "bound": 21165.999999978834,
+    "gap_certified": false,
+    "nodes": 70945,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 20.16823943200052,
+    "wall_sd": 0.0,
+    "walls_all": [
+     20.16823943200052
+    ],
+    "status_all": [
+     "feasible"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     70945
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2095",
+   "panel": "M",
+   "oracle": 3.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.845703125,
+    2.845703125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 3.0,
+    "bound": 3.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.09064165100062382,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.09064165100062382
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2173",
+   "panel": "M",
+   "oracle": -26770.80754885264,
+   "oracle_status": "Optimal",
+   "load": [
+    2.845703125,
+    2.69775390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -26770.807548852565,
+    "bound": -26770.807548899335,
+    "gap_certified": true,
+    "nodes": 87,
+    "route": "rust",
+    "max_viol": 1.3926637620897964e-12,
+    "wall_med": 0.43851381900003616,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.43851381900003616
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     87
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2204",
+   "panel": "M",
+   "oracle": 6.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.69775390625,
+    2.69775390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 6.0,
+    "bound": 6.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.0870692059997964,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0870692059997964
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2290",
+   "panel": "M",
+   "oracle": -1.6666666666000012,
+   "oracle_status": "Optimal",
+   "load": [
+    2.69775390625,
+    2.69775390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -1.6666666666,
+    "bound": -1.6666666666026668,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 8.326672684688674e-17,
+    "wall_med": 0.10081336699931853,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.10081336699931853
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2388",
+   "panel": "M",
+   "oracle": 0.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.69775390625,
+    2.69775390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": -1e-12,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 5.329070518200751e-15,
+    "wall_med": 0.0948708779997105,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0948708779997105
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2446",
+   "panel": "M",
+   "oracle": -785.3552363097108,
+   "oracle_status": "Optimal",
+   "load": [
+    2.69775390625,
+    2.45556640625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 18930.002285397146,
+    "gap_certified": false,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 20.135668938999515,
+    "wall_sd": 0.0,
+    "walls_all": [
+     20.135668938999515
+    ],
+    "status_all": [
+     "time_limit"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2585",
+   "panel": "M",
+   "oracle": -175.9100000000001,
+   "oracle_status": "Optimal",
+   "load": [
+    2.45556640625,
+    2.45556640625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": -175.91000000000003,
+    "bound": -175.9100000001769,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 5.684341886080802e-14,
+    "wall_med": 0.09919391199946404,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.09919391199946404
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "lseu",
+   "panel": "M",
+   "oracle": 1120.0000000000002,
+   "oracle_status": "Optimal",
+   "load": [
+    2.45556640625,
+    2.45556640625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 1120.0,
+    "bound": 1120.0,
+    "gap_certified": true,
+    "nodes": 5551,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.8599123730000429,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.8599123730000429
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     5551
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p01",
+   "panel": "M",
+   "oracle": 263.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.45556640625,
+    2.3388671875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 263.0,
+    "bound": 263.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 0.0,
+    "wall_med": 0.16849934600031702,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.16849934600031702
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p0548",
+   "panel": "M",
+   "oracle": 8691.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.3388671875,
+    2.35400390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 8049.112691488798,
+    "gap_certified": false,
+    "nodes": 1097,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 13.075783524000144,
+    "wall_sd": 0.0,
+    "walls_all": [
+     13.075783524000144
+    ],
+    "status_all": [
+     "time_limit"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     1097
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "rgn",
+   "panel": "M",
+   "oracle": 82.19999923999991,
+   "oracle_status": "Optimal",
+   "load": [
+    2.35400390625,
+    2.35400390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 82.19999923999997,
+    "bound": 82.19999923979249,
+    "gap_certified": true,
+    "nodes": 2565,
+    "route": "rust",
+    "max_viol": 4.440892098500626e-16,
+    "wall_med": 0.25659667899981287,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.25659667899981287
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     2565
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "small_mip",
+   "panel": "M",
+   "oracle": 3.236842105263158,
+   "oracle_status": "Optimal",
+   "load": [
+    2.35400390625,
+    2.35400390625
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "optimal",
+    "objective": 3.2368421052631438,
+    "bound": 3.2368421052583805,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": 2.6645352591003757e-14,
+    "wall_med": 0.07842084399999294,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.07842084399999294
+    ],
+    "status_all": [
+     "optimal"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "sp150x300d",
+   "panel": "M",
+   "oracle": 69.0,
+   "oracle_status": "Optimal",
+   "load": [
+    2.35400390625,
+    2.71923828125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "feasible",
+    "objective": 93.0,
+    "bound": 40.0,
+    "gap_certified": false,
+    "nodes": 7475,
+    "route": "rust",
+    "max_viol": 1.0913936421275139e-11,
+    "wall_med": 10.313232466000045,
+    "wall_sd": 0.0,
+    "walls_all": [
+     10.313232466000045
+    ],
+    "status_all": [
+     "feasible"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     7475
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bgetam",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.71923828125,
+    2.71923828125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.3653063089996067,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.3653063089996067
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "box1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.71923828125,
+    2.71923828125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.16841716900034953,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.16841716900034953
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "cplex1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.71923828125,
+    2.71923828125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 2.1379869330003203,
+    "wall_sd": 0.0,
+    "walls_all": [
+     2.1379869330003203
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "ex72a",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.71923828125,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.17875147699942318,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.17875147699942318
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "forest6",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.0844500599996536,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0844500599996536
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "galenet",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.0730682829998841,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0730682829998841
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gams10am",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "presolve",
+    "max_viol": null,
+    "wall_med": 0.06006732500009093,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.06006732500009093
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "presolve"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gas11",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Unbounded",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "unbounded",
+    "objective": null,
+    "bound": null,
+    "gap_certified": false,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.3361878969999452,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.3361878969999452
+    ],
+    "status_all": [
+     "unbounded"
+    ],
+    "certified_all": [
+     false
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "infeasible-mip0",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 23,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.08428998099952878,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.08428998099952878
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     23
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "infeasible-mip1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 55,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.0921600790006778,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0921600790006778
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     55
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2402",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 3,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.11842929999966145,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.11842929999966145
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     3
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2874-3",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.58154296875
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.07948208499965403,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.07948208499965403
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     1
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "klein1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.58154296875,
+    2.6953125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.24916924299941456,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.24916924299941456
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "refinery",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.6953125,
+    2.6953125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.26525018800020916,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.26525018800020916
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "vol1",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.6953125,
+    2.6953125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.3163231939997786,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.3163231939997786
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "woodinfe",
+   "panel": "INF",
+   "oracle": null,
+   "oracle_status": "Infeasible",
+   "load": [
+    2.6953125,
+    2.6953125
+   ],
+   "wall_valid": true,
+   "executed": 1,
+   "incorrect_solves": 0,
+   "R": {
+    "status": "infeasible",
+    "objective": null,
+    "bound": null,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": "rust",
+    "max_viol": null,
+    "wall_med": 0.0750897170000826,
+    "wall_sd": 0.0,
+    "walls_all": [
+     0.0750897170000826
+    ],
+    "status_all": [
+     "infeasible"
+    ],
+    "certified_all": [
+     true
+    ],
+    "nodes_all": [
+     0
+    ],
+    "routes": [
+     "rust"
+    ],
+    "incorrect": []
+   }
+  }
+ ],
+ "executed": 65,
+ "incorrect_count": 0,
+ "executed_by_panel": {
+  "L": 25,
+  "M": 24,
+  "INF": 16
+ },
+ "walls_gated": 0,
+ "presolve_answered": {
+  "R": 1
+ }
+}

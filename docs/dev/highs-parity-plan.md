@@ -1125,6 +1125,18 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   19, IIS + parity tests 639. Next: the flag's §5 corpus panel (it changes what every
   Rust LP proves infeasible, so MINLP / MILP fathoming), then -- on a pass -- graduate
   it and flip `iis_engine` to `"rust"`.
+  **§5 panel for `DISCOPT_FARKAS_EXACT_OPEN` (2026-11-05).** (1) In-repo MINLP corpus,
+  132 instances, ON vs OFF interleaved, 20 s, 3 jobs (`flag_onoff_corpus_panel.py`,
+  `p3.2/farkas_exact_corpus_panel.jsonl`): **cert-clean** -- 0 incorrect, no bound past
+  the oracle, 244 incumbent feasibility checks, no errors; certified 108 -> 107, the one
+  "lost" (`ex1252a`) timing noise -- re-run 3x per arm interleaved both arms time out
+  uncertified (nodes 976-1505 either way) and the exact check runs **0 times** on it;
+  no gains. (2) L/M/INF on the Rust route, flag OFF vs ON (`p3.2/farkas_exact_lmi_flag
+  {0,1}.json`): 130 executed, 0 incorrect, certified L 25/25, M 18/24, INF 15/16 in
+  both arms, verdicts identical; node counts differ only on five time-limited
+  uncertified M rows. So: sound everywhere, inert where float certification works, and
+  decisive on the class it targets (the Rust IIS engine: 51/53 -> 53/53). Graduation
+  is an owner call: "net-positive broadly" is met only on that class.
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with
