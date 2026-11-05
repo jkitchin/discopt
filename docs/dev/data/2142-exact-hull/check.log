@@ -1,3 +1,23 @@
 big-M default: status=optimal obj=3.062014576618532 bound=3.0617346252232247 nodes=29551 wall=100s
 x*: 5 active reactors, recycle at [5]
 x* max violation on the original plain rows: 1.11e-16
+big-M config j=5 r=5: status=node_limit obj=3.062014576618535 bound=1.2021923155508145 nodes=2000 wall=8s
+ INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=4.163490902742678e-7 obj=9.892962381212715 acceptable_tol=1e-6 window=15 kappa=0.1
+ INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=3.289977641918825e-7 obj=9.892938200255337 acceptable_tol=1e-6 window=15 kappa=0.1
+ INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=2.6058753429867423e-7 obj=9.892887192506937 acceptable_tol=1e-6 window=15 kappa=0.1
+ INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=2.3731449024364914e-7 obj=9.89286024971573 acceptable_tol=1e-6 window=15 kappa=0.1
+spatial B&B (#1659): the incumbent fails the exit gate (constraint row 128 violated by 1.090e-05 beyond the term-scaled tolerance, declared abs tol 1e-06, 394 comparisons); reporting it UNCERTIFIED.
+big-M config j=1 r=1: status=feasible obj=9.894736842105234 bound=2.6533450330586756 nodes=577 wall=120s
+spatial B&B (#1659): the incumbent fails the exit gate (constraint row 128 violated by 1.151e-05 beyond the term-scaled tolerance, declared abs tol 1e-06, 394 comparisons); reporting it UNCERTIFIED.
+big-M config j=2 r=1: status=feasible obj=4.061881684530911 bound=2.6636755711242985 nodes=895 wall=121s
+spatial B&B (#1659): the incumbent fails the exit gate (constraint row 128 violated by 1.109e-05 beyond the term-scaled tolerance, declared abs tol 1e-06, 394 comparisons); reporting it UNCERTIFIED.
+big-M config j=3 r=3: status=feasible obj=3.3148454030723977 bound=0.26253682305348647 nodes=781 wall=120s
+
+===== arm homog =====
+lowered: vars 236 rows 597 stats {'rows': 5, 'auxes': 0, 'hull_mc_rows': 0, 'arm': 'homog'}
+[3a] x* on every lowered row: max violation 2.22e-16 (_hull_add_disjunction_YP_is_cstr_or_bypass[5]_4_d0_c0_ge)
+[3b] j=5 r=5: arm status=node_limit obj=3.0620145766185503 bound=1.0341023138206318 nodes=2000 wall=21s | big-M status=node_limit obj=3.062014576618535 bound=1.2021923155508145
+      projection on the original + selected-disjunct rows: 1.53e-16 (None)
+ INFO pounce_algorithm::conv_check::opt_error: refusing an acceptable-level termination: the error has been inside the acceptable band for the whole streak but is still moving across it, so the streak has not flattened; continuing (acceptable_progress_kappa=0 disables) nlp_err=4.0587626770616225e-7 obj=9.894549424662353 acceptable_tol=1e-6 window=15 kappa=0.1
+[3b] j=1 r=1: arm status=feasible obj=9.894736842105258 bound=3.3081474927589176 nodes=247 wall=120s | big-M status=feasible obj=9.894736842105234 bound=2.6533450330586756
+      projection on the original + selected-disjunct rows: 2.22e-16 (None)

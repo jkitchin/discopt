@@ -70,7 +70,7 @@ Weakness: the LP relaxation is plain McCormick on the copies' *global* boxes; it
 weaker than the hull of the per-disjunct McCormick (shown in §3.4). Applies to polynomial
 rows only (a non-polynomial atom cannot be homogenized).
 
-### (b) Lift-then-hull with homogenized atom definitions (`lifted`, the chosen design)
+### (b) Lift-then-hull with homogenized atom definitions (`lifted`; retired by §5)
 
 1. **Lift.** Factor the row into atoms `z_j = phi_j(children)` on `B_k` (products, squares;
    univariates in the follow-up) so the row is linear: `a^T x + b^T z <sense> rhs`.
@@ -106,8 +106,8 @@ at fractional `y` the row is no tighter than big-M. Measured in §5 as a control
 convex quadratic inequality as a smoothed cone with no division. cstr's nonlinear rows are
 nonconvex equalities, so (c) does not apply to the rows that pin cstr. In the general design
 (§6) a row the detector proves convex keeps the eps-perspective / cone — the exact convex
-hull — and only the nonconvex rows go to (b). Nothing in §111's kill applies: §111 sent the
-nonconvex rows to big-M; (b) sends them to the hull of their McCormick relaxation.
+hull — and only the nonconvex rows are homogenized. Nothing in §111's kill applies: §111
+sent the nonconvex rows to big-M; (a) and (b) keep them in the hull, division-free.
 
 ### (d) Literature not already in the catalog
 
@@ -130,7 +130,7 @@ nonconvex rows to big-M; (b) sends them to the hull of their McCormick relaxatio
 
 None gives a nonconvex-row hull beyond "relax, then hull". (b) is that construction made
 exact by the homogenized atom definitions, which is the part the literature leaves to the
-global solver's spatial branching.
+global solver's spatial branching; (a) is (b) with the atoms substituted back (§3.4a).
 
 ## 3. Soundness of (b), and of (a) as its special case
 
@@ -323,8 +323,8 @@ flag and the implementation in one PR.
   scaled by `y`, and the ratio link `v = y t` for the argument only) is the same
   construction; it is listed as the follow-up because cstr does not exercise it.
 - **Rounding at `y = 0`.** Every row must be exactly 0 at the off disjunct (the #1043
-  class). The lifted rows have no additive constant, so they are exactly 0 in floating
-  point when every column is 0; the test asserts it.
-- **Interaction with `bound_pretransformation`.** big-M gets the #1617 bound rows; the hull
-  does not. If the entry numbers show (b) below big-M at equal nodes, the next lever is to
-  give the hull those rows, not to change the perspective again.
+  class). The homogenized row has no additive constant and no `eps`, so it is exactly 0 in
+  floating point when every column is 0; the test asserts it.
+- **`bound_pretransformation` is not the difference.** big-M gets the #1775 G2.4 bound rows
+  `x <= sum_k ub_k y_k`; the hull's links and aggregation imply them, so giving the hull
+  those rows is not a lever. The difference measured in §5 is the model per node.
