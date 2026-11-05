@@ -18445,7 +18445,12 @@ def solve_model(
                     node_engine="simplex",
                     lagrangian_bound=lagrangian_bound,
                     lagrangian_frequency=lagrangian_frequency,
-                    initial_point=initial_point,
+                    # #2163: an engine that deferred an uncertified ``feasible``
+                    # leaves its verified point here; it seeds the tree (re-checked
+                    # there before injection) when the caller gave no start.
+                    initial_point=(
+                        initial_point if initial_point is not None else _deferred.get("incumbent")
+                    ),
                     incumbent_time_extension=incumbent_time_extension,
                     abs_gap_tol=abs_gap_tol,
                     node_callback=node_callback,
@@ -39434,6 +39439,37 @@ def _solve_milp_simplex(
             gap_certified=False,
         )
 
+    # #2163: an engine search that ended ``feasible`` with NO finite bound, before
+    # the clock or a node cap stopped it, finished without any certificate --
+    # the driver withdrew it (an entry the LP cannot resolve, #1296's
+    # ``MilpTinyEntryDecert``) or the bound was left unresolved. Its answer is
+    # uncertified by the engine's own account, so defer to the Python tree, which
+    # resolves the class differently (#1414) and can certify it; this is the same
+    # deferral an infeasible engine point already takes. Measured on #1380's
+    # witness ``min -x + 3z, x <= M z``, ``M = 1e12``: the driver's root vertex
+    # (``z = 1e-11``) is refused at its integral realisation, the ``z >= 1`` child's
+    # exact optimum (-7) cannot be row-verified against a 1e12-magnitude row, and
+    # the engine's honest answer is ``feasible 0.0`` with bound ``-inf``; the Python
+    # tree certifies -7. Decided by the engine's result alone, never by the clock
+    # (#912). The engine's point, when it passes the model's own rows, is handed to
+    # the tree as a warm start (re-verified there before injection), so deferring
+    # never loses the incumbent in hand.
+    if (
+        status == "feasible"
+        and not np.isfinite(bound)
+        and not _stopped_on_nodes
+        and not _debug_stop_pending
+    ):
+        logger.info(
+            "Rust simplex MILP finished feasible with no certificate (bound "
+            "withdrawn or unresolved); deferring to the Python MILP tree (#2163)"
+        )
+        if deferred is not None:
+            _xo_def = np.asarray(x_struct, dtype=np.float64)[:n_orig]
+            if _point_feasible(_xo_def):
+                deferred["incumbent"] = _xo_def.copy()
+        return None
+
     if status in ("optimal", "feasible"):
         x_arr = np.asarray(x_struct, dtype=np.float64)
         xo = x_arr[:n_orig]
@@ -39452,6 +39488,16 @@ def _solve_milp_simplex(
                 status,
             )
             return _debug_stopped_result()
+        # #2163: report the point the gate just verified -- its integral
+        # realisation (#1380) -- not the engine's raw vertex, whose binaries can sit
+        # inside the integrality tolerance (``z = 1 - 1.9e-15`` from a basic column
+        # on a fixed box). A reported integer variable is exactly an integer.
+        if int_idx:
+            from discopt.validation.feasibility import snap_integer_columns
+
+            x_arr = x_arr.copy()
+            x_arr[:n_orig] = snap_integer_columns(xo, int_idx)
+            xo = x_arr[:n_orig]
         x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
