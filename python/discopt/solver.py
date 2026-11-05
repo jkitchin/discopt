@@ -92,7 +92,6 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
-from discopt.solvers._nlp_ladder_scope import apply_ladder_scope, ladder_off
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
@@ -21844,22 +21843,19 @@ def solve_model(
         _score_pts: dict[int, np.ndarray] = {}
         _score_on = _py_tree_spatial_score_enabled()
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        _active_evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        _active_cb,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=_exclusion_mask,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                _active_evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                _active_cb,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=_exclusion_mask,
+            )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
@@ -22279,17 +22275,16 @@ def solve_model(
                     else:
                         lb_clipped, ub_clipped = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        _active_evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -23268,7 +23263,7 @@ def solve_model(
                         # its starts ran from 86 s to 160 s of a 120 s solve.
                         from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
 
-                        with stop_at_solve_deadline(), ladder_off():
+                        with stop_at_solve_deadline():
                             _root_relax = _solve_root_node_multistart(
                                 _active_evaluator,
                                 np.array(batch_lb[best_root_idx]),
@@ -29225,22 +29220,19 @@ def _solve_nlp_bb(
         t_jax_start = time.perf_counter()
 
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        constraint_bounds,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=result_excl,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=result_excl,
+            )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
             # not a valid lower bound, so decertify the gap rather than trust
@@ -29333,17 +29325,16 @@ def _solve_nlp_bb(
                     else:
                         lb_c, ub_c = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_c + ub_c)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            constraint_bounds,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -31208,9 +31199,6 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
-    # The wave runs in POUNCE's Rust pool, outside any Python contextvar read, so
-    # a caller's ladder scope (``solvers._nlp_ladder_scope``) is applied here.
-    apply_ladder_scope(batch_opts)
     # The caller's ``max_wall_time`` is what is left of its budget; the whole
     # wave, not each instance, must end by then.
     _batch_deadline = time.perf_counter() + caller_limit
