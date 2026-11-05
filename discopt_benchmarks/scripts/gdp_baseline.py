@@ -210,7 +210,9 @@ def _run_pyomo(model, arm: str, time_limit: float) -> dict:
     }
 
 
-def _run_discopt(model, arm: str, time_limit: float) -> dict:
+def _run_discopt(
+    model, arm: str, time_limit: float, max_nodes: int = 0, deterministic: bool = False
+) -> dict:
     import warnings
 
     from discopt.pyomo.gdp import convert_pyomo_gdp
@@ -221,12 +223,24 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
     conv = convert_pyomo_gdp(model)
     options = LOA_OPTION_ARMS.get(arm)
     method = "loa" if options is not None else arm.split("-", 1)[1]
+    # A node budget + deterministic mode make the solve a function of the model
+    # (the #2142 LP-flag panel); the defaults reproduce the historical call.
+    extra: dict = {"deterministic": True} if deterministic else {}
+    if max_nodes > 0:
+        extra["max_nodes"] = max_nodes
+    profiling = os.environ.get("DISCOPT_PROFILE", "") not in ("", "0")
+    if profiling:
+        from discopt._rust import profile_reset_py
+
+        profile_reset_py()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if options is not None:
-            r = conv.model.solve(gdp_method=method, gdp_options=options, time_limit=time_limit)
+            r = conv.model.solve(
+                gdp_method=method, gdp_options=options, time_limit=time_limit, **extra
+            )
         else:
-            r = conv.model.solve(gdp_method=method, time_limit=time_limit)
+            r = conv.model.solve(gdp_method=method, time_limit=time_limit, **extra)
     out = {
         "status": r.status,
         "objective": None if r.objective is None else float(r.objective),
@@ -237,9 +251,20 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
         "stats": {
             k: v
             for k, v in (getattr(r, "solver_stats", None) or {}).items()
-            if k.startswith("vub_cmir/")
+            if k.startswith("vub_cmir/") or k == "tree/undecided_nodes"
         },
     }
+    if profiling:
+        from discopt._rust import profile_counters_py
+
+        ctrs = dict(profile_counters_py())
+        out["counters"] = {
+            k: int(v)
+            for k, v in ctrs.items()
+            if k.startswith(
+                ("DualRebuild", "SpatialSplit", "SpatialViolScip", "DualProof", "IntRoundExact")
+            )
+        }
     if r.x is not None and r.objective is not None:
         out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
     return out
@@ -271,7 +296,9 @@ def _provenance(discopt_file: str) -> dict:
     return out
 
 
-def worker(name: str, arm: str, time_limit: float) -> dict:
+def worker(
+    name: str, arm: str, time_limit: float, max_nodes: int = 0, deterministic: bool = False
+) -> dict:
     import discopt
 
     rec: dict = {"instance": name, "arm": arm, "discopt": discopt.__file__}
@@ -283,7 +310,7 @@ def worker(name: str, arm: str, time_limit: float) -> dict:
     if arm in PYOMO_ARMS:
         rec.update(_run_pyomo(model, arm, time_limit))
     else:
-        rec.update(_run_discopt(model, arm, time_limit))
+        rec.update(_run_discopt(model, arm, time_limit, max_nodes, deterministic))
     rec["wall"] = round(time.perf_counter() - t0, 3)
     return rec
 
@@ -639,8 +666,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--worker":
         name, arm, tl = argv[1], argv[2], float(argv[3])
+        max_nodes = int(argv[4]) if len(argv) > 4 else 0
+        det = len(argv) > 5 and argv[5] == "1"
         try:
-            rec = worker(name, arm, tl)
+            rec = worker(name, arm, tl, max_nodes, det)
         except Exception as e:  # noqa: BLE001  -- recorded, never silent
             rec = {"instance": name, "arm": arm, "error": f"{type(e).__name__}: {e}"[:400]}
         print("@@RESULT " + json.dumps(rec, default=str), flush=True)

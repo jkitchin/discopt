@@ -1,0 +1,3 @@
+appending 40 proof rows
+ARM proofs=d2_proofs20k.npz maxid=5000 nrows=40 MAX_NODES=150000 status=optimal obj=3.062014576618535 bound=3.061711905970091 nodes=53051 wall=136.0s kernel_calls=[(1, -2.1249077383152888e-11, 1, 0), (150000, 3.061711905970091, 53051, 0)]
+executed assertions: 3

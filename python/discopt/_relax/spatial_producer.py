@@ -20,10 +20,11 @@ come from the relaxation's own interval propagation (finite), which the safe-bou
 evaluation requires.
 
 Covered term families: bilinear products, integer-power monomials, affine squares,
-and univariate ``sqrt`` — the atoms the Rust kernel implements (``EnvTerm``). A model
-using any other lifted family (trilinear / multilinear / ratio / composite convex /
-non-``sqrt`` univariate) returns ``None`` here, and the caller keeps the trusted
-Python path. Soundness: the produced spec drives the same uniform McCormick
+univariate ``sqrt``, and negative integer powers of an affine single-column base
+(``(c*x + k)**p``, #2142) — the atoms the Rust kernel implements (``EnvTerm``). A
+model using any other lifted family (trilinear / multilinear / ratio / composite
+convex / non-``sqrt`` univariate) returns ``None`` here, and the caller keeps the
+trusted Python path. Soundness: the produced spec drives the same uniform McCormick
 relaxation; the Rust patcher reproduces its envelope rows byte-for-byte (its
 differential fixtures), so the native relaxation is bound-neutral with the build.
 """
@@ -135,6 +136,44 @@ def _blf_full_support_enabled() -> bool:
     return _env_flag("DISCOPT_KERNEL_BLF_FULL_SUPPORT", default=True)
 
 
+def _affine_pow_enabled() -> bool:
+    """#2142: ``DISCOPT_KERNEL_AFFINE_POW`` -- route negative integer powers of an
+    affine single-column base (``w = (c*x + k)**p``, ``p < 0``) to the kernel's
+    ``AffinePow`` term (kind 4), and compare the two producer builds with row
+    placeholders (``build_uniform_relaxation(keep_row_shape=True)``). **Default
+    ON; a documented opt-out, kept as a debugging lever, not a graduation
+    candidate.** ``=0`` restores the pre-#2142 producer exactly (no kind-4 term,
+    no placeholders), so a kernel-vs-Python discrepancy on such a model can be
+    bisected to this routing in one run.
+
+    Why it is not a §5 flag: it adds no relaxation and removes none. The kernel's
+    rows for these terms are the cold build's ``_emit_1d`` rows (Rust fixtures in
+    ``mccormick_patch.rs``), and the ``_BIG`` rule the placeholders stand for is
+    mirrored in ``bilinear_linform_rows``, so an admitted model solves the same
+    relaxation on either engine. On every spec the kernel accepted before, the
+    switch is bound-neutral: a spec was accepted only if no row was skipped at its
+    root box, so no placeholder is emitted, no ``AffinePow`` term exists (its rows
+    are box-dependent and failed the fixed-row check), and the ``_BIG`` guard
+    never fires on a sub-box. What it changes is the engine on models that used to
+    decline (cstr's hull reformulation: the eps-perspective's ``yc**-1`` chains
+    reach ``1e27``, so ``_emit_mccormick`` skipped 44 rows on the real box only).
+    What would retire it: nothing to graduate; delete it once nobody has needed it
+    to bisect a kernel-routed GDP hull model.
+
+    Measured 2026-11-04 (base = ``130d8f1``): the producer's spec, at the declared
+    box and at the solver's presolved box, is byte-identical with and without this
+    change on all 74 in-repo corpus ``.nl`` files (117 builds; 16 / 4 accepted on
+    both trees, none newly admitted or declined); deterministic 1500-node solves
+    of the 17 instances accepted at either box and of cstr big-M are identical in
+    status, objective, bound and node count. cstr hull is admitted (20 kind-4
+    terms) and its bound does not move (0.094 at 300 nodes): with a ``y`` free the
+    ``yc**-3`` chain's rows are the dropped ones, on either engine.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_KERNEL_AFFINE_POW", default=True)
+
+
 #: The Rust LP layer's infinite bound. ``f64::INFINITY`` is never passed there.
 _LP_INF = 1e20
 
@@ -183,6 +222,11 @@ def build_spatial_kernel_spec(
     else:
         lb, ub = flat_variable_bounds(model)
 
+    # #2142: with the flag on, BOTH builds hold a placeholder wherever a row is
+    # dropped, so their row indices correspond even when the real box's
+    # partial-product enclosures reach ``_BIG`` and drop rows the probe keeps.
+    _affine_pow = _affine_pow_enabled()
+
     def _build(box_lb, box_ub):
         # Skip the separable objective floor and convex-lift OA rows: both are
         # box-dependent rows the closed-form kernel patcher does NOT regenerate (the
@@ -204,6 +248,7 @@ def build_spatial_kernel_spec(
             skip_separable_floor=True,
             skip_convex_lift=True,
             abort_deadline=deadline,
+            keep_row_shape=_affine_pow,
         )
 
     # STRUCTURE is identified on a PROBE box with distinct, strictly sign-matched
@@ -229,6 +274,12 @@ def build_spatial_kernel_spec(
         rel = _build(lb_p, ub_p)
         milp = rel.model
         if milp._A_ub is None or not getattr(milp, "_objective_bound_valid", True):
+            return None
+        # #2142: the PROBE box is where structure is read, so it must have every
+        # row. A placeholder there is a row the probe build dropped: no term can
+        # claim it, and its real-box counterpart would be compared against an
+        # empty row. Decline rather than reason about which.
+        if rel.shape_placeholder_rows:
             return None
         rel_real = _build(lb, ub)
     except RelaxationBuildAborted:
@@ -277,6 +328,17 @@ def build_spatial_kernel_spec(
         ta = float(_coeff) * float(lb[int(_var)]) + float(_cst)
         tb = float(_coeff) * float(ub[int(_var)]) + float(_cst)
         if min(ta, tb) <= 0.0:  # sqrt: f'(t) = 0.5/sqrt(t) diverges at t = 0
+            return None
+    # #2142: a negative power has a pole at t = 0. A real box whose base touches
+    # or holds it has no envelope (``_pow_curv`` abstains) and an aux enclosure
+    # open on at least one side, which the infinite-bound check above already
+    # declines; say so explicitly rather than lean on it. Sub-boxes cannot reach
+    # the pole from a root box that excludes it.
+    affine_pow_specs = list(rel.affine_pow_kernel_specs) if _affine_pow else []
+    for _w, _var, _coeff, _cst, _p in affine_pow_specs:
+        ta = float(_coeff) * float(lb[int(_var)]) + float(_cst)
+        tb = float(_coeff) * float(ub[int(_var)]) + float(_cst)
+        if not (np.isfinite(ta) and np.isfinite(tb)) or min(ta, tb) <= 0.0 <= max(ta, tb):
             return None
 
     A = sp.csr_matrix(milp._A_ub, dtype=np.float64)
@@ -435,6 +497,23 @@ def build_spatial_kernel_spec(
         if not rows:
             return None
         _push(3, var, -1, w, 0, coeff, cst, rows)
+    # #2142: negative integer powers of an affine single-column base (kind 4). The
+    # build registered only atoms whose 4 ``_emit_1d`` rows it emitted on the probe
+    # box; the kernel regenerates them per box (``Univariate::Pow``). Every one of
+    # those rows has a nonzero coefficient on BOTH ``var`` and ``w`` (the base is
+    # strictly monotone there), so a row on ``w`` alone is a lifted model
+    # constraint, not an envelope row: it stays a fixed row, and anything other
+    # than exactly 4 full-support rows declines (the #861 / #2015 rule).
+    for w, var, coeff, cst, p in affine_pow_specs:
+        if int(w) in claimed_aux:
+            continue
+        rows = _claim(w, (var,), None)
+        if rows is None:
+            return None
+        rows = [r for r in rows if _row_support(r) == {int(var), int(w)}]
+        if len(rows) != 4:
+            return None
+        _push(4, var, -1, w, int(p), coeff, cst, rows)
 
     # SOUNDNESS VALIDATION: every non-envelope row MUST be box-independent — that is
     # the whole premise of passing it through as a fixed row while the kernel

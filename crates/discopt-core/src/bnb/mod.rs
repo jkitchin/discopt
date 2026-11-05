@@ -3,6 +3,7 @@
 pub mod branching;
 pub mod convex_kernel;
 pub mod convex_quad_cuts;
+pub mod dual_proof;
 pub mod in_tree_presolve;
 pub mod mccormick_patch;
 pub mod milp_driver;

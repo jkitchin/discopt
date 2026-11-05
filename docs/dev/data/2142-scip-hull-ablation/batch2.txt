@@ -1,0 +1,9 @@
+nopre_noconf nopresolve --param conflict/enable=false
+emu default --param presolving/maxrounds=0 conflict/enable=false separating/maxrounds=0 separating/maxroundsroot=0 propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 propagating/symmetry/freq=-1
+emu_nonlinprop_off default --param presolving/maxrounds=0 conflict/enable=false separating/maxrounds=0 separating/maxroundsroot=0 propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 propagating/symmetry/freq=-1 constraints/nonlinear/propfreq=-1
+emu_20k default --node-limit 20000 --param presolving/maxrounds=0 conflict/enable=false separating/maxrounds=0 separating/maxroundsroot=0 propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 propagating/symmetry/freq=-1
+emu_nonlinprop_off_20k default --node-limit 20000 --param presolving/maxrounds=0 conflict/enable=false separating/maxrounds=0 separating/maxroundsroot=0 propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 propagating/symmetry/freq=-1 constraints/nonlinear/propfreq=-1
+nopre_noconf_20k nopresolve --node-limit 20000 --param conflict/enable=false
+conf_graphonly default --param conflict/useinflp=c
+conf_dualonly default --param conflict/useinflp=d
+conf_nolocalrows default --param conflict/uselocalrows=false

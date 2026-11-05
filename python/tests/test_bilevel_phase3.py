@@ -105,7 +105,14 @@ def test_strong_duality_solves_linear_bilevel_to_true_optimum():
     m, x, y, bl = _bard_lp()
     bl.formulate(method="strong_duality")
     r = m.solve(time_limit=5)
-    assert r.status in ("optimal", "feasible"), f"unexpected status {r.status}"
+    # The run always ends on its budget with an incumbent. The Python tree reports
+    # that as ``feasible``; the native spatial kernel, which takes this model since
+    # #2142 (its AffinePow route; DISCOPT_KERNEL_AFFINE_POW=0 restores the tree),
+    # reports ``time_limit``. ``SolveResult`` documents the two as equivalent
+    # (``time_limit``: "As ``feasible``"). Measured at 5 s: tree 9 nodes, gap 0.80,
+    # obj -6.999999999985762; kernel 11,889 nodes, gap 0.62, obj -7.0. The
+    # incumbent assertions below are unchanged.
+    assert r.status in ("optimal", "feasible", "time_limit"), f"unexpected status {r.status}"
     assert r.objective is not None, "no incumbent returned"
     xv, yv = float(r.value(x)), float(r.value(y))
     # True optimistic optimum.

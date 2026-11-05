@@ -1,0 +1,16 @@
+nous1                  OFF node_limit             b=1.2849430916422184 n=2000 DualProofLearned=0 DualProofTightenings=0 | ON node_limit             b=1.2899520505781759 n=2000 DualProofLearned=4 DualProofTightenings=1616 fired=4 undecided 0.0/0.0 wall 14.3/14.6 load 2.11
+
+instances           : 1
+executed checks     : 11
+violations          : 0
+mechanism fired     : 4 on 1 instance(s) ['nous1']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 0 -> ON 0  gained []
+bounds tighter      : 1 ['nous1']  (where it ran: ['nous1'])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 2000 -> ON 2000
+wall  (all)         : OFF 14.3s -> ON 14.6s
+wall  (fired)       : OFF 14.3s -> ON 14.6s over 1 instance(s)
+report              : docs/dev/data/2142-dual-proof/panel/extra_nous1.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

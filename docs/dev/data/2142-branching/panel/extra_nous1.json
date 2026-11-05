@@ -1,0 +1,115 @@
+{
+  "flag": "DISCOPT_SPATIAL_BRANCH_CLAMP",
+  "time_limit": 120.0,
+  "deterministic": true,
+  "max_nodes": 2000,
+  "load_at_start": [
+    3.0576171875,
+    3.51806640625,
+    3.75732421875
+  ],
+  "unfired_identical_checked": 0,
+  "unfired_identical_skipped_wall": [],
+  "scip_blocked": true,
+  "instances": 1,
+  "executed_checks": 11,
+  "violations": [],
+  "rescued": 777,
+  "fired_on": [
+    "nous1"
+  ],
+  "certified_off": 0,
+  "certified_on": 0,
+  "certification_gained": [],
+  "bounds_tighter": [],
+  "bounds_looser": [
+    "nous1"
+  ],
+  "bounds_tighter_where_ran": [],
+  "bounds_looser_where_ran": [
+    "nous1"
+  ],
+  "nodes_off": 2000,
+  "nodes_on": 2000,
+  "wall_off": 16.521476490999703,
+  "wall_on": 17.227438867000274,
+  "rows": [
+    {
+      "instance": "nous1",
+      "off": {
+        "module": "/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/wt-bp/python/discopt/__init__.py",
+        "status": "node_limit",
+        "objective": 1.5670720269948721,
+        "bound": 1.2849430916422184,
+        "gap_certified": false,
+        "nodes": 2000,
+        "wall": 16.521476490999703,
+        "verified": true,
+        "minimize": true,
+        "undecided": 0.0,
+        "missing_counters": [
+          "DualRebuilds",
+          "DualRebuildCleared",
+          "DualRebuildTolerated",
+          "DualRebuildBails",
+          "DualRebuildOptimal",
+          "DualRebuildAuditFail"
+        ],
+        "NodeNsProjectTry": 0,
+        "NodeNsProjectRescue": 0,
+        "NodeNsProjectSingular": 0,
+        "NodeNsAbstain": 0,
+        "SubtolPivots": 0,
+        "LpVerdictNumerical": 4,
+        "WarmSubtolRepairFailed": 0,
+        "UnboundedRejectObjective": 0,
+        "DualRebuilds": 0,
+        "DualRebuildCleared": 0,
+        "DualRebuildTolerated": 0,
+        "DualRebuildBails": 0,
+        "DualRebuildOptimal": 0,
+        "DualRebuildAuditFail": 0,
+        "SpatialSplits": 1461,
+        "SpatialSplitMoved": 0
+      },
+      "on": {
+        "module": "/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/wt-bp/python/discopt/__init__.py",
+        "status": "node_limit",
+        "objective": 1.5670720269948721,
+        "bound": 1.2744240437550372,
+        "gap_certified": false,
+        "nodes": 2000,
+        "wall": 17.227438867000274,
+        "verified": true,
+        "minimize": true,
+        "undecided": 0.0,
+        "missing_counters": [
+          "DualRebuilds",
+          "DualRebuildCleared",
+          "DualRebuildTolerated",
+          "DualRebuildBails",
+          "DualRebuildOptimal",
+          "DualRebuildAuditFail"
+        ],
+        "NodeNsProjectTry": 0,
+        "NodeNsProjectRescue": 0,
+        "NodeNsProjectSingular": 0,
+        "NodeNsAbstain": 0,
+        "SubtolPivots": 0,
+        "LpVerdictNumerical": 14,
+        "WarmSubtolRepairFailed": 0,
+        "UnboundedRejectObjective": 0,
+        "DualRebuilds": 0,
+        "DualRebuildCleared": 0,
+        "DualRebuildTolerated": 0,
+        "DualRebuildBails": 0,
+        "DualRebuildOptimal": 0,
+        "DualRebuildAuditFail": 0,
+        "SpatialSplits": 1588,
+        "SpatialSplitMoved": 777
+      },
+      "load1": 3.0576171875,
+      "time_limit": 120.0
+    }
+  ]
+}

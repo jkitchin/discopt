@@ -1291,6 +1291,34 @@ class SolverTuning:
     arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
     ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    hull_exact_perspective: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_EXACT_PERSPECTIVE", default=True)
+    )
+    """Hull a nonconvex polynomial disjunct row by the homogenized perspective
+    (``DISCOPT_HULL_EXACT_PERSPECTIVE``, default **ON** -- graduated 2026-11-05 by the
+    section 5 panel, performance-plan section 116; ``=0`` opts out and restores the
+    eps-perspective lowering byte for byte; bound-changing on the ``"hull"`` route;
+    #2142).
+
+    For ``g(x) = sum_m c_m prod x_i <sense> rhs`` of degree ``d`` the hull emits
+    ``sum_m c_m prod v_i * y^(d - |m|) <sense> rhs * y^d`` instead of the
+    eps-perspective ``yhat g(v / yhat) - eps g(0) (1 - y)``: no division, no eps,
+    exact at ``y in {0, 1}``, a relaxation of the disjunction between them
+    (``_relax/gdp_reformulate.py`` ``_homogenized_hull_row``). A row the convexity
+    detector proves convex keeps the eps-perspective / cone (its exact convex hull);
+    a non-polynomial row (exp, log, division, fractional power, Parameter) is
+    unchanged. Entry (GDPlib cstr, deterministic, ``PYTHONHASHSEED=0``): the lifted
+    spec's largest bound 1e27 -> 1e3, 10k-node bound 0.094 -> 1.611
+    (``docs/dev/data/2142-exact-hull/proposal.md`` section 5; SCIP certifies the
+    lowered model in 7,470 nodes, section 0a). Audit row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    Section 115 kept it OFF on a misreading: hda's root bound 121140.98 -> 118678.93
+    was recorded as "looser", but hda MAXIMIZES, so that is a tighter upper bound
+    (the pure McCormick LP at the declared box gives the same pair,
+    ``docs/dev/data/2142-hda-root/``). Re-run panel (section 116): see the plan doc for
+    the numbers; cert-clean and net-positive."""
+
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )
