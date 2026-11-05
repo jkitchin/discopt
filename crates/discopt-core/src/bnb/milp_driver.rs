@@ -3777,7 +3777,7 @@ fn solve_node(
             // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
             // so its original rows AND bounds must hold verifiably. One that fails is
             // handled like a failed LP: its bound and point are both untrusted.
-            if feasible && !incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
+            if feasible && !point_verified(ctx, &full_l, &full_u, &sol.x) {
                 out.basis = None;
                 out.result = NodeResult {
                     node_id: id,
@@ -3788,6 +3788,55 @@ fn solve_node(
                     sentinel_is_exclusion: false,
                 };
                 return out;
+            }
+            // #2163 (the driver side of #1414): the vertex verifies as computed,
+            // but the point it CLAIMS is its integral realisation, and that one
+            // may miss a row -- a binary at `1 - 5.3e-6` on a big-M row with
+            // `M ~ 30` buys ~3e-6 of slack. Fathoming here certified the slack:
+            // on a CMIR-augmented knapsack the driver reported `Optimal` at
+            // 36.929960309 against a true optimum of 36.929960372, and on a trained
+            // ReLU big-M MILP the adopted vertex was refused by `verify_point` and
+            // the solve came back `feasible`. Do what the Python tree does for the
+            // same class: offer the fixed-integer polish of the vertex as an
+            // incumbent (verified, exact integers), and hand the node back
+            // UNTRUSTED with a branch hint on the column whose rounding moved
+            // furthest. The tree then cannot fathom or promote it (it floors the
+            // bound at the parent's) and honours a hint on any value that is not
+            // exactly integral, so the child that fixes the column settles it with
+            // its own LP. Branching is always a valid cover; the domain strictly
+            // shrinks, so the search terminates.
+            if feasible {
+                if let Some(zs) = snap_integral(ctx, &sol.x) {
+                    if !point_verified(ctx, &full_l, &full_u, &zs) {
+                        crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
+                        let mut col = None;
+                        let mut moved = 0.0f64;
+                        for (j, (&is_int, (&zj, &xj))) in
+                            ctx.is_int.iter().zip(zs.iter().zip(&sol.x)).enumerate()
+                        {
+                            let d = (zj - xj).abs();
+                            if is_int && d > moved {
+                                moved = d;
+                                col = Some(j);
+                            }
+                        }
+                        if let Some(j) = col {
+                            out.incumbent =
+                                polish_integral_vertex(ctx, &full_l, &full_u, &sol.x, &sol.basis)
+                                    .map(|(xp, vp)| (xp[..ctx.ns].to_vec(), vp));
+                            out.branch_hint = Some(j);
+                            out.result = NodeResult {
+                                node_id: id,
+                                lower_bound: f64::NEG_INFINITY,
+                                solution: xs.to_vec(),
+                                is_feasible: false,
+                                certified_infeasible: false,
+                                sentinel_is_exclusion: false,
+                            };
+                            return out;
+                        }
+                    }
+                }
             }
             // Past the deadline, skip every optional per-node effort below. The
             // LP bound (above) is already computed and valid; the heuristic,
@@ -5608,6 +5657,45 @@ const ROW_ROUNDOFF_CAP: f64 = 1e-3;
 /// refuses a scaled `Optimal` that fails the original audit; this keeps the tree
 /// from adopting a point that is out of bounds whatever produced it.
 fn incumbent_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> bool {
+    if !point_verified(ctx, l, u, z) {
+        return false;
+    }
+    // #2163: the point a near-integral vertex CLAIMS is its integral realisation --
+    // the dive returns it rounded and `verify_point` judges it snapped (#1380) --
+    // so that point must verify too, not just the vertex as computed. A binary at
+    // `1 - 5.3e-6` (inside `INT_TOL`) on a big-M row with `M ~ 30` buys ~3e-6 of
+    // slack: the vertex verifies and its realisation misses the row. A point whose
+    // integers are already exact snaps to itself and is judged exactly as before.
+    match snap_integral(ctx, z) {
+        Some(zs) => {
+            let ok = point_verified(ctx, l, u, &zs);
+            if !ok {
+                crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
+            }
+            ok
+        }
+        None => true,
+    }
+}
+
+/// `z` with every structural integer column rounded to its nearest integer, or
+/// `None` when that moves nothing (the point is already its own realisation).
+fn snap_integral(ctx: &NodeCtx<'_>, z: &[f64]) -> Option<Vec<f64>> {
+    let k = ctx.is_int.len().min(z.len());
+    if (0..k).all(|j| !ctx.is_int[j] || z[j] == z[j].round()) {
+        return None;
+    }
+    let mut zs = z.to_vec();
+    for (zj, &is_int) in zs.iter_mut().zip(ctx.is_int) {
+        if is_int {
+            *zj = zj.round();
+        }
+    }
+    Some(zs)
+}
+
+/// The original rows and the original columns' bounds hold at `z`.
+fn point_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> bool {
     if !rows_verified(ctx.csc_rc, ctx.n_w, ctx.n_orig_rows, ctx.b_w, z) {
         return false;
     }
@@ -5617,6 +5705,66 @@ fn incumbent_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> boo
         crate::profile::incr(crate::profile::Ctr::DriverIncumbentBoundsRefused);
     }
     ok
+}
+
+/// #2163: the fixed-integer polish of a near-integral node vertex whose integral
+/// realisation misses a row (the driver side of the Python dive's #1414 repair).
+/// Fix every structural integer column at its rounded value (inside the node's
+/// box, else `None`) and re-solve the node LP warm from the vertex's own basis, so
+/// the continuous columns move to a point that satisfies the rows at exact
+/// integers. Returns the polished full working vector (original space) and its
+/// objective `cᵀx + const` when that solve is `Optimal` and the point verifies;
+/// `None` otherwise.
+///
+/// Used only as an incumbent CANDIDATE: a verified point of the node's box (rows
+/// and bounds in original units, integers exact), offered to `inject_incumbent`
+/// like any heuristic point. It never fathoms the node and never touches a bound.
+fn polish_integral_vertex(
+    ctx: &NodeCtx<'_>,
+    full_l: &[f64],
+    full_u: &[f64],
+    x: &[f64],
+    basis: &Basis,
+) -> Option<(Vec<f64>, f64)> {
+    crate::profile::incr(crate::profile::Ctr::DriverPolishAttempts);
+    let mut fl = full_l.to_vec();
+    let mut fu = full_u.to_vec();
+    for j in 0..ctx.ns {
+        if ctx.is_int[j] {
+            let r = x[j].round();
+            if r < full_l[j] || r > full_u[j] {
+                return None;
+            }
+            fl[j] = r;
+            fu[j] = r;
+        }
+    }
+    let mut sol = ctx.problem.solve_warm(&fl, &fu, basis, ctx.simplex);
+    if sol.status != LpStatus::Optimal {
+        return None;
+    }
+    if let Some(s) = ctx.scaling {
+        s.unscale_x(&mut sol.x);
+    }
+    // Exact integers: the solve's own value for a fixed column is its bound, but
+    // write it explicitly so no rounding of the unscale can leave a residue.
+    for ((xj, &fj), &is_int) in sol.x.iter_mut().zip(&fl).zip(ctx.is_int) {
+        if is_int {
+            *xj = fj;
+        }
+    }
+    if !point_verified(ctx, full_l, full_u, &sol.x) {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::DriverPolishVerified);
+    let value = sol
+        .x
+        .iter()
+        .zip(ctx.c_w.iter())
+        .map(|(x, c)| x * c)
+        .sum::<f64>()
+        + ctx.obj_const;
+    Some((sol.x, value))
 }
 
 fn rows_verified(csc: &SparseCols, n_cols: usize, n_rows: usize, b: &[f64], z: &[f64]) -> bool {
