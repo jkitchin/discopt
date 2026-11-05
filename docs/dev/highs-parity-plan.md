@@ -1287,7 +1287,7 @@ and is re-written by P4.1.**
   7. **P4.8 — dimension-reducing presolve:** helps both classes, largest effort.
   8. **P4.7 — conflict analysis:** targets infeasibility-heavy search (`enlight_hard`,
      no-incumbent rows); 3/24.
-- [ ] **P4.0 — Spend the budget: re-enter on run 1's leftover.** Scope:
+- [x] **P4.0 — Spend the budget: re-enter on run 1's leftover. GRADUATED 2026-11-05.** Scope:
   `solver._solve_milp_simplex` (#698 re-entry gate), flag `DISCOPT_MILP_REENTRY_SPEND`
   (default OFF, audit row). The legacy gate re-enters only when the remainder exceeds run
   1's stall slice; below the 10 s cap the slice is half the remaining time, so on any
@@ -1324,7 +1324,10 @@ and is re-written by P4.1.**
   swapping between reps (`beuster` 6352 ↔ 6372): timing noise. The three corpus instances
   on the native MILP route (`nvs02`, `nvs07`, `nvs14`) certify early and are identical.
   Net-positive evidence is the MIPLIB entry (4/24 rows reproducibly 25-89 % → <= 0.3 %
-  primal gap, cert-clean on 144 rows). **Graduation is the owner's call (decision point).**
+  primal gap, cert-clean on 144 rows). **Graduated 2026-11-05 (owner: "Graduate, then
+  P4.6")**: default ON, `DISCOPT_MILP_REENTRY_SPEND=0` restores the legacy gate; audit
+  row Graduated, live-gate marker 50 → 49. After the flip: smoke 4518 passed (444 s vs
+  474 s before), adversarial 19, re-entry/audit/MILP tests 62 passed.
 - [ ] **P4.2 — RENS re-run with the pre-registered magnitude bar.** Scope:
   `DISCOPT_RENS` (`milp_driver.rs`), no new code unless the bar demands a sub-MIP budget
   cap. A14 left RENS cert-clean, 12 incumbent wins / 0 losses, failing only a

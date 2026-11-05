@@ -83,7 +83,7 @@ def _script(monkeypatch):
 
 def test_legacy_condition_discards_the_leftover(monkeypatch):
     """Flag OFF: the leftover is smaller than run 1's slice, so no re-entry."""
-    monkeypatch.delenv(FLAG, raising=False)
+    monkeypatch.setenv(FLAG, "0")  # the opt-out restores the legacy gate
     seen = _script(monkeypatch)
     r = _milp_route_model().solve(time_limit=3)
     assert (r.algorithm_route or "").startswith("native-milp"), r.algorithm_route
@@ -91,9 +91,14 @@ def test_legacy_condition_discards_the_leftover(monkeypatch):
     assert r.objective == pytest.approx(8.0)  # run 1's scripted point (maximize)
 
 
-def test_flag_spends_the_leftover(monkeypatch):
-    """Flag ON: the re-entry runs on the leftover and its better point is adopted."""
-    monkeypatch.setenv(FLAG, "1")
+@pytest.mark.parametrize("value", [None, "1"], ids=["default", "explicit"])
+def test_flag_spends_the_leftover(monkeypatch, value):
+    """Flag ON (the default since graduation): the re-entry runs on the leftover and
+    its better point is adopted."""
+    if value is None:
+        monkeypatch.delenv(FLAG, raising=False)
+    else:
+        monkeypatch.setenv(FLAG, value)
     seen = _script(monkeypatch)
     r = _milp_route_model().solve(time_limit=3)
     assert (r.algorithm_route or "").startswith("native-milp"), r.algorithm_route
@@ -110,7 +115,7 @@ def test_adopted_reentry_keeps_the_tighter_bound(monkeypatch):
     bound outright (P4.0 entry: mik-250-20-75-* dual gap 0.03 -> 0.12 with the
     incumbent at the optimum). Legacy re-entry path (flag OFF, ample time).
     """
-    monkeypatch.delenv(FLAG, raising=False)
+    monkeypatch.setenv(FLAG, "0")
     real = _rust.solve_milp_csc_py
     seen = {"n": 0, "b1": None}
 

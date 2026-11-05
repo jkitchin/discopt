@@ -39142,10 +39142,15 @@ def _milp_reentry_spend_enabled() -> bool:
     taken, and the tighter of the two valid bounds is kept.
 
     Changes the search, so gated per CLAUDE.md section 5; read at call time.
-    Default OFF pending the panel recorded in ``docs/dev/highs-parity-plan.md``
-    (P4.0) and ``docs/dev/flag-retirement-audit.md``.
+    **Graduated (default ON, 2026-11-05, owner).** §5 panel
+    (``docs/dev/data/highs-parity/p4.0``): in-repo MINLP corpus ON vs OFF at 20 s, 2
+    reps, cert-clean (148 rows, 0 problems, certified 112 = 112, 260 incumbent checks)
+    and neutral there; MIPLIB-38 uncertified rows at 20 s, 2 reps, cert-clean on 144
+    rows and net-positive: the four ``mik-250-20-75-*`` rows go from a 25-89 % primal
+    gap to <= 0.3 % on both reps. ``DISCOPT_MILP_REENTRY_SPEND=0`` restores the legacy
+    gate.
     """
-    return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "1") != "0"
 
 
 def _milp_engine_full_budget_enabled() -> bool:
