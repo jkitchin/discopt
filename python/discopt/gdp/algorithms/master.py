@@ -766,9 +766,9 @@ def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> Mast
         terms = _extract_body_terms(con.body, lowered, n)
         if terms is None:
             continue
-        coeffs, off = terms
-        idx = np.array(sorted(k for k, v in coeffs.items() if v != 0.0), dtype=np.intp)
-        val = np.array([coeffs[int(k)] for k in idx], dtype=np.float64)
+        row_terms, off = terms
+        idx = np.array(sorted(k for k, v in row_terms.items() if v != 0.0), dtype=np.intp)
+        val = np.array([row_terms[int(k)] for k in idx], dtype=np.float64)
         sense = con.sense if isinstance(con.sense, str) else getattr(con.sense, "value", con.sense)
         master.add_row(_SparseRow(idx, val, n), str(sense), float(con.rhs) - float(off))
     return master
