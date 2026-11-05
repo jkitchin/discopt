@@ -3640,6 +3640,10 @@ def _root_pump_skip_enabled() -> bool:
     4669.0235 at about 59 s; the tree reached 7 nodes and bound 4347.80. ON: 29
     nodes, bound 4666.75. At 600 s, both arms certify with the same 27 nodes and
     bound; ON in 178 s, OFF in 224 s.
+
+    #2170: the skip is taken only when the incumbent's gap to the tree's dual bound
+    is already closed (:func:`_root_pump_skip_decision`), not whenever an incumbent
+    exists. See that function for the measurement.
     """
     return os.environ.get("DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT", "1").strip().lower() not in (
         "0",
@@ -3647,6 +3651,40 @@ def _root_pump_skip_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _root_pump_skip_decision(
+    tree: Any, gap_tolerance: float, abs_gap_tol: float
+) -> tuple[bool, str]:
+    """Whether the root pumps are skipped, and why, under :func:`_root_pump_skip_enabled`.
+
+    Skip only when the tree holds an incumbent whose gap to the tree's global lower
+    bound already meets the solve's own termination test
+    (:func:`_gap_values_converged` with ``gap_tolerance``/``abs_gap_tol``). The
+    pumps inject only a strict improvement, so once the gap is closed nothing they
+    find can change the certificate, and their time is pure cost. With the gap open,
+    an incumbent says nothing about whether a pump can still improve it.
+
+    #2170: the rule was "any incumbent". Measured on GDPlib ``methanol`` hull,
+    120 s: the LOA proposer's verified point 645.51 reached the tree with the dual
+    bound at -4699.67 (gap about 830 %), the rule skipped both pumps, and the solve
+    ended at 645.51 while the pump the legacy path runs finds -1793.43 (BARON's best
+    known). The #2143 gain this flag was graduated on (``syngas`` hull) is the
+    closed-gap case: LOA's bound 4668.809 against its optimum 4669.0235, a relative
+    gap of 4.6e-5, inside the default ``gap_tolerance`` of 1e-4.
+
+    The tree's lower bound is the right reference: it includes a bound installed by
+    :meth:`PyTreeManager.seed_root_bound` (the LOA proposer's), which the batch
+    minimum of the root relaxations does not.
+    """
+    inc = tree.incumbent()
+    if inc is None or not np.isfinite(float(inc[1])):
+        return False, "no incumbent"
+    ub = float(inc[1])
+    lb = float(tree.stats().get("global_lower_bound", float("-inf")))
+    if _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol):
+        return True, f"the incumbent {ub:.10g} meets the gap test against the bound {lb:.10g}"
+    return False, f"the incumbent {ub:.10g} is open against the bound {lb:.10g}"
 
 
 def _presolve_bound_propagation_enabled() -> bool:
@@ -23157,9 +23195,14 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            _fp_skip = _root_pump_skip_enabled() and tree.incumbent() is not None
-            if _fp_skip:
-                logger.info("Feasibility pump (root): skipped, an incumbent exists")
+            # #2170: skip on a CLOSED gap, not on an incumbent's mere existence.
+            _fp_skip = False
+            if _root_pump_skip_enabled():
+                _fp_skip, _fp_why = _root_pump_skip_decision(tree, gap_tolerance, abs_gap_tol)
+                if _fp_skip:
+                    logger.info("Feasibility pump (root): skipped, %s", _fp_why)
+                elif tree.incumbent() is not None:
+                    logger.info("Feasibility pump (root): runs, %s", _fp_why)
             if best_root_idx is not None and not _fp_skip and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
