@@ -1,0 +1,135 @@
+{'b': 0, 'id': 10, 'e19': True, 'e29': False, 'nocut_status': 'optimal', 'nocut_witness': True, 'nocut_resid': 2.523785624930497e-09, 'nocut_obj': 3.53337701273773, 'cut_status': 'infeasible', 'cut_witness': False}
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-11 without GMP - using 1e-10.
+Cannot set feasibility tolerance to small value 1e-12 without GMP - using 1e-10.
+{'b': 1, 'id': 20, 'e19': True, 'e29': False, 'nocut_status': 'optimal', 'nocut_witness': False, 'nocut_resid': 42.0, 'nocut_obj': 3.3148454647446637, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 2, 'id': 30, 'e19': True, 'e29': False, 'nocut_status': 'optimal', 'nocut_witness': True, 'nocut_resid': 9.310501258852355e-09, 'nocut_obj': 4.061882145188552, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 3, 'id': 40, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 4, 'id': 50, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 5, 'id': 60, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 6, 'id': 70, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 7, 'id': 80, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 8, 'id': 90, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 9, 'id': 100, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 10, 'id': 110, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 11, 'id': 120, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 12, 'id': 140, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 13, 'id': 150, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 14, 'id': 160, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 15, 'id': 170, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 16, 'id': 180, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 17, 'id': 190, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 18, 'id': 200, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 19, 'id': 210, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 20, 'id': 220, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 21, 'id': 230, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 22, 'id': 240, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 23, 'id': 250, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 24, 'id': 270, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 25, 'id': 280, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 26, 'id': 290, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 27, 'id': 300, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 28, 'id': 320, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 29, 'id': 330, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 30, 'id': 340, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 31, 'id': 350, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 32, 'id': 360, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 33, 'id': 370, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 34, 'id': 380, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 35, 'id': 390, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 36, 'id': 400, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 37, 'id': 410, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 38, 'id': 420, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 39, 'id': 430, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 40, 'id': 440, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 41, 'id': 450, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 42, 'id': 460, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 43, 'id': 470, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 44, 'id': 480, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 45, 'id': 490, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 46, 'id': 500, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 47, 'id': 510, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 48, 'id': 520, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 49, 'id': 530, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 50, 'id': 540, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 51, 'id': 550, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 52, 'id': 560, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 53, 'id': 570, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 54, 'id': 580, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 55, 'id': 590, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 56, 'id': 600, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 57, 'id': 610, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 58, 'id': 620, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 59, 'id': 640, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 60, 'id': 650, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 61, 'id': 660, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 62, 'id': 680, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 63, 'id': 700, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 64, 'id': 710, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 65, 'id': 720, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 66, 'id': 730, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 67, 'id': 740, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 68, 'id': 750, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 69, 'id': 760, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 70, 'id': 770, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 71, 'id': 780, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 72, 'id': 790, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 73, 'id': 800, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 74, 'id': 810, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 75, 'id': 820, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 76, 'id': 830, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 77, 'id': 840, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 78, 'id': 850, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 79, 'id': 860, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 80, 'id': 870, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 81, 'id': 880, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 82, 'id': 890, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 83, 'id': 900, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 84, 'id': 910, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 85, 'id': 920, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 86, 'id': 930, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 87, 'id': 940, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 88, 'id': 950, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 89, 'id': 960, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 90, 'id': 970, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 91, 'id': 980, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 92, 'id': 990, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+{'b': 93, 'id': 1000, 'e19': True, 'e29': True, 'nocut_status': 'infeasible', 'nocut_witness': False, 'cut_status': 'infeasible', 'cut_witness': False}
+boxes 94: §113-instrument empty 94, corrected-instrument empty 91
+verified feasible witness (no cutoff): 2/94; of those, §113 called empty: 2
+verified witness under the box's cutoff: 0/94; SCIP status counts (cut): {'infeasible': 94}
+executed searches: 188
