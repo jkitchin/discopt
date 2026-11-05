@@ -156,6 +156,18 @@ _FLAGS = {
         "leak": lambda off: off["IntRoundExactSnaps"],
         "show": ("IntRoundExactSnaps",),
     },
+    # #2142 §115: the homogenized hull of nonconvex polynomial GDP disjunct rows
+    # (``DISCOPT_HULL_EXACT_PERSPECTIVE``). It acts only inside the GDP hull lowering,
+    # which a ``.nl`` instance never reaches (the format carries no disjunction), so on
+    # this corpus it cannot run: ``ran`` is False everywhere and
+    # ``--assert-unfired-identical`` asserts every instance bit-identical ON vs OFF.
+    # The GDP parity panel (issue1917_gdp_flag_panel.py) is where it fires.
+    "DISCOPT_HULL_EXACT_PERSPECTIVE": {
+        "fired": lambda off, on: 0,
+        "ran": lambda off, on: False,
+        "leak": lambda off: 0,
+        "show": ("LpVerdictNumerical", "SubtolPivots"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",

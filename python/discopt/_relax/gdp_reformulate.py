@@ -2966,6 +2966,7 @@ def _reformulate_disjunction_hull(
     child_cones: set[int] = set()
     child_ratio: set[str] = set()
     conic = _hull_conic_quadratic_enabled()
+    exact_persp = _hull_exact_perspective_enabled()
     for k, disjunct in enumerate(dc.disjuncts):
         rows_k: list[Constraint] = []
         local_k: dict[str, Variable] = {}
@@ -3187,6 +3188,19 @@ def _reformulate_disjunction_hull(
                     con.body, {vname: disagg[k][vname] for vname in all_vars}, y_k
                 )
                 rhs_expr = _wrap(con.rhs) * y_k
+            elif (
+                exact_persp
+                and (
+                    homog := _homogenized_hull_row(
+                        con, y_k, {**{n: disagg[k][n] for n in all_vars}, **local[k]}, model
+                    )
+                )
+                is not None
+            ):
+                # #2142 (DISCOPT_HULL_EXACT_PERSPECTIVE): a polynomial row the
+                # detector does not prove convex gets the homogenized perspective --
+                # no 1/yhat, no eps, exact at y in {0, 1} (_homogenized_hull_row).
+                hull_body, rhs_expr = homog
             else:
                 # Nonlinear: the Furman-Sawaya-Grossmann eps-perspective
                 # (Furman2020 in docs/references.bib), for g(x) = body - rhs <= 0:
@@ -3526,6 +3540,166 @@ def _hull_conic_quadratic_enabled() -> bool:
     from discopt.solver_tuning import current as _tuning
 
     return bool(_tuning().hull_conic_quadratic)
+
+
+def _hull_exact_perspective_enabled() -> bool:
+    """Is the homogenized (division-free) perspective of nonconvex polynomial hull rows
+    on? (``DISCOPT_HULL_EXACT_PERSPECTIVE``, #2142; see ``SolverTuning``.)"""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().hull_exact_perspective)
+
+
+#: #2142: what the homogenized perspective did, per lowering row (CLAUDE.md §6: a run
+#: can prove the branch fired). ``homogenized`` rows emitted; ``convex`` rows left to
+#: the eps-perspective because the detector proves them convex; ``not_polynomial``
+#: rows it cannot homogenize. Cumulative over the process; reset by the caller.
+_HULL_EXACT_STATS: dict[str, int] = {"homogenized": 0, "convex": 0, "not_polynomial": 0}
+
+#: Monomial-expansion caps: a row whose expansion exceeds either is left to the
+#: eps-perspective (a declined row, counted as ``not_polynomial``), so a product of
+#: long sums cannot blow the lowering up.
+_POLY_MAX_TERMS = 512
+_POLY_MAX_POWER = 8
+
+
+class _NotPolynomial(ValueError):
+    pass
+
+
+def _polynomial_monomials(body: Expression) -> Optional[dict[tuple[str, ...], float]]:
+    """``body`` as ``{sorted tuple of scalar-variable names: coefficient}``, or ``None``.
+
+    Handles scalar variables, scalar constants, ``+``, ``-``, ``*``, unary ``neg``,
+    ``Σ``-sums and a nonnegative integer constant power ``** k`` (``k <= 8``). Anything
+    else -- a division, a function call, an array variable, an ``IndexExpression``,
+    a ``Parameter`` (its coefficient must stay live, #1862) -- returns ``None``. Zero
+    coefficients (exact cancellation) are dropped, so ``x*y - y*x`` is ``{}``.
+    """
+    try:
+        return _monomials(body)
+    except _NotPolynomial:
+        return None
+
+
+def _mono_mul(a: dict, b: dict) -> dict[tuple[str, ...], float]:
+    out: dict[tuple[str, ...], float] = {}
+    for ka, ca in a.items():
+        for kb, cb in b.items():
+            key = tuple(sorted(ka + kb))
+            out[key] = out.get(key, 0.0) + ca * cb
+    if len(out) > _POLY_MAX_TERMS:
+        raise _NotPolynomial("too many monomials")
+    return {key: c for key, c in out.items() if c != 0.0}
+
+
+def _monomials(expr: Expression) -> dict[tuple[str, ...], float]:
+    if isinstance(expr, Variable):
+        if expr.shape != ():
+            raise _NotPolynomial(f"array variable {expr.name}")
+        return {(expr.name,): 1.0}
+    if isinstance(expr, Constant):
+        v = np.asarray(expr.value, dtype=float)
+        if v.size != 1:
+            raise _NotPolynomial("array constant")
+        c = float(v.ravel()[0])
+        if not np.isfinite(c):
+            raise _NotPolynomial("non-finite constant")
+        return {(): c} if c != 0.0 else {}
+    if isinstance(expr, UnaryOp) and expr.op in ("neg", "-"):
+        return {key: -c for key, c in _monomials(expr.operand).items()}
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            out = dict(_monomials(expr.left))
+            sign = 1.0 if expr.op == "+" else -1.0
+            for key, c in _monomials(expr.right).items():
+                out[key] = out.get(key, 0.0) + sign * c
+            return {key: c for key, c in out.items() if c != 0.0}
+        if expr.op == "*":
+            return _mono_mul(_monomials(expr.left), _monomials(expr.right))
+        if expr.op == "**" and isinstance(expr.right, Constant):
+            p = np.asarray(expr.right.value, dtype=float)
+            if p.size != 1:
+                raise _NotPolynomial("array exponent")
+            pf = float(p.ravel()[0])
+            if not (pf.is_integer() and 0 <= pf <= _POLY_MAX_POWER):
+                raise _NotPolynomial(f"exponent {pf!r}")
+            base = _monomials(expr.left)
+            out = {(): 1.0}
+            for _ in range(int(pf)):
+                out = _mono_mul(out, base)
+            return out
+        raise _NotPolynomial(f"operator {expr.op!r}")
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        out = {}
+        for t in terms:
+            for key, c in _monomials(t).items():
+                out[key] = out.get(key, 0.0) + c
+        return {key: c for key, c in out.items() if c != 0.0}
+    raise _NotPolynomial(type(expr).__name__)
+
+
+def _homogenized_hull_row(
+    con: Constraint,
+    y_k: Expression,
+    copies: dict[str, Variable],
+    model: Model,
+) -> Optional[tuple[Expression, Expression]]:
+    """#2142: the homogenized perspective of a nonconvex polynomial disjunct row.
+
+    For ``g(x) = sum_m c_m prod_{i in m} x_i <sense> rhs`` of degree ``d`` this returns
+    ``(sum_m c_m prod_{i in m} v_i * y^(d - |m|), rhs * y^d)``: the perspective
+    ``y g(v / y)`` multiplied through by ``y^(d-1)``. No division and no aux column;
+    every product is between disjunct ``k``'s copies (box within the disjunct's and
+    0) and ``y in [0, 1]``, so the relaxation stack sees bounded magnitudes (the
+    eps-perspective's ``v / yhat`` reaches ``ub / eps`` and its products 1e27 on
+    GDPlib cstr, performance-plan §114).
+
+    Exact at integer points: ``y = 1`` gives the row itself on the copies (which equal
+    ``x``); ``y = 0`` pins every copy to 0 (bound links), and the row reads ``0
+    <sense> 0`` -- exactly 0 in floating point, there is no additive constant (the
+    #1043 class). For ``y > 0`` it is ``y^d (g(t) - rhs) <sense> 0`` with ``t = v/y``,
+    the perspective's solution set, so every convex combination of disjunct points
+    is feasible (``docs/dev/data/2142-exact-hull/proposal.md`` §3).
+
+    Returns ``None`` (the caller keeps the eps-perspective / cone) when the row is not
+    a polynomial (:func:`_polynomial_monomials`), when its rhs is not a scalar, or
+    when the convexity detector proves it convex: the eps-perspective is that row's
+    exact convex hull, and only nonconvex rows change.
+    """
+    rhs_arr = np.asarray(con.rhs, dtype=float)
+    mono = _polynomial_monomials(con.body) if rhs_arr.size == 1 else None
+    if mono is None or any(n not in copies for key in mono for n in key):
+        _HULL_EXACT_STATS["not_polynomial"] += 1
+        return None
+    from discopt._relax.convexity import classify_constraint
+
+    if classify_constraint(con, model):
+        _HULL_EXACT_STATS["convex"] += 1
+        return None
+    # d >= 1: a row that cancels to a constant still needs ``c y <sense> rhs y`` so it
+    # reads 0 <sense> 0 when the disjunct is off.
+    d = max(1, max((len(key) for key in mono), default=0))
+    body: Expression = _wrap(0.0)
+    for key, c in mono.items():
+        factors: list[Expression] = [copies[n] for n in key]
+        factors.append(_y_power(y_k, d - len(key)))
+        term = factors[0]
+        for f in factors[1:]:
+            term = term * f
+        body = body + _wrap(c) * term
+    _HULL_EXACT_STATS["homogenized"] += 1
+    return body, _wrap(float(rhs_arr.ravel()[0])) * _y_power(y_k, d)
+
+
+def _y_power(y: Expression, p: int) -> Expression:
+    """``1 * y * ... * y`` (``p`` factors of ``y``), as a product chain the kernel
+    factors into bilinear terms (an ``** p`` would be a monomial power term)."""
+    out: Expression = _wrap(1.0)
+    for _ in range(p):
+        out = out * y
+    return out
 
 
 def _sumover_as_chain(expr: Expression) -> Expression:

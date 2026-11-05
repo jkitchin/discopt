@@ -1291,6 +1291,26 @@ class SolverTuning:
     arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
     ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    hull_exact_perspective: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_EXACT_PERSPECTIVE", default=False)
+    )
+    """Hull a nonconvex polynomial disjunct row by the homogenized perspective
+    (``DISCOPT_HULL_EXACT_PERSPECTIVE``, default OFF while its §5 panel decides;
+    bound-changing on the ``"hull"`` route; #2142).
+
+    For ``g(x) = sum_m c_m prod x_i <sense> rhs`` of degree ``d`` the hull emits
+    ``sum_m c_m prod v_i * y^(d - |m|) <sense> rhs * y^d`` instead of the
+    eps-perspective ``yhat g(v / yhat) - eps g(0) (1 - y)``: no division, no eps,
+    exact at ``y in {0, 1}``, a relaxation of the disjunction between them
+    (``_relax/gdp_reformulate.py`` ``_homogenized_hull_row``). A row the convexity
+    detector proves convex keeps the eps-perspective / cone (its exact convex hull);
+    a non-polynomial row (exp, log, division, fractional power, Parameter) is
+    unchanged. Entry (GDPlib cstr, deterministic, ``PYTHONHASHSEED=0``): the lifted
+    spec's largest bound 1e27 -> 1e3, 10k-node bound 0.094 -> 1.611
+    (``docs/dev/data/2142-exact-hull/proposal.md`` §5; SCIP certifies the lowered
+    model in 7,470 nodes, §0a). Audit row in ``docs/dev/flag-retirement-audit.md``;
+    the panel result is recorded in performance-plan §115."""
+
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )

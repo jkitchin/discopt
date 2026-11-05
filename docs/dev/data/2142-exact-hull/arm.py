@@ -4,7 +4,8 @@
       python -u arm.py ARM MAX_NODES [TIME_LIMIT] [det|nodet]
 
 ARM: hull (shipped eps-perspective) | bigm (shipped default) | ratio | homog | lifted (the
-prototype lowerings of exact_hull_proto.py, installed by monkeypatch before the solve).
+prototype lowerings of exact_hull_proto.py, installed by monkeypatch before the solve) |
+flag (the shipped implementation: hull with DISCOPT_HULL_EXACT_PERSPECTIVE=1, no monkeypatch).
 Records every kernel call (status, bound, nodes, undecided, wall), the largest |global bound|
 of the spatial spec the kernel was handed (the §114 magnitude), the node-status histogram of
 the main tree call, and the LP-verdict counters. Asserts the loaded extension is this tree's
@@ -34,6 +35,11 @@ det = (sys.argv[4] if len(sys.argv) > 4 else "det") == "det"
 method = {"hull": "hull", "bigm": "big-m"}.get(arm, "hull")
 if arm in ("ratio", "homog", "lifted", "both"):
     P.install(arm)
+if arm == "flag":
+    os.environ["DISCOPT_HULL_EXACT_PERSPECTIVE"] = "1"
+else:
+    os.environ.pop("DISCOPT_HULL_EXACT_PERSPECTIVE", None)
+import discopt._relax.gdp_reformulate as G  # noqa: E402
 
 calls, recs = [], []
 spec_mag = [0.0]
@@ -84,6 +90,11 @@ assert calls, "the kernel never ran"; n_assert += 1
 assert res.bound is None or res.bound <= 3.0620073 + 1e-6, "bound above the oracle"; n_assert += 1
 if arm in ("homog", "lifted", "both"):
     assert P.STATS["rows"] == 5, P.STATS; n_assert += 1
+if arm == "flag":
+    print(f"exact-hull stats: {G._HULL_EXACT_STATS}")
+    assert G._HULL_EXACT_STATS["homogenized"] == 5, G._HULL_EXACT_STATS; n_assert += 1
+else:
+    assert sum(G._HULL_EXACT_STATS.values()) == 0, G._HULL_EXACT_STATS; n_assert += 1
 if res.objective is not None:
     assert res.objective >= 3.0620073 - 1e-5, "incumbent below the oracle"; n_assert += 1
 print(f"RESULT arm={arm} nodes={max_nodes} bound={res.bound!r} status={res.status} "

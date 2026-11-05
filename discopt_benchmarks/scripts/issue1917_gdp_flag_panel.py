@@ -115,6 +115,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # its entry test (performance-plan §114); kept so --report re-derives it. Solve
     # time only; ``IntRoundExactSnaps`` is 0 exactly where the tree is OFF's.
     "DISCOPT_INT_ROUND_EXACT": ("big-m", "hull"),
+    # #2142 §115: the homogenized (division-free) hull of nonconvex polynomial disjunct
+    # rows. A lowering flag: the fire phase fingerprints the hull lowering OFF vs ON.
+    "DISCOPT_HULL_EXACT_PERSPECTIVE": ("hull",),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.
