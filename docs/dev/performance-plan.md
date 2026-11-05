@@ -14852,3 +14852,35 @@ a time — the point rule (§107), the violation measure (§108), the pseudocost
 normalisation (this section). Each moves cstr toward certification and each costs a
 reference instance of #1970. Data: `docs/dev/data/2142-pscost-norm/`.
 
+
+## 110. #2142: the three SCIP branching components combined — killed at the entry test
+
+**Hypothesis:** §107-§109 each measured one SCIP branching component and each helped
+cstr while hurting a #1970 reference instance. SCIP uses them together; the harm of
+each might come from pairing it with the other two components' #1970 counterparts, so
+the combination (point rule + violation measure + pseudocost normalisation, one flag
+`DISCOPT_SPATIAL_BRANCH_SCIP`) might keep the cstr gain without the reference cost.
+This was the one final bounded test approved for the branching item.
+
+**Kill criterion (fixed before running, not to be relaxed):** worse than base by more
+than 10% in nodes to certification on either tanksize (519) or nous1 (15,233) → stop,
+retire, no flag committed beyond a revert.
+
+| arm (deterministic, to certification) | tanksize nodes | nous1 nodes |
+|---|---|---|
+| base (flag OFF; reproduces §109's base bit for bit) | 519 | 15,233 |
+| all three SCIP components | 1,087 (**+109%**) | 11,603 (−24%) |
+
+All four runs certified (`executed assertions` 1 OFF / 2 ON). With the flag on the
+scored rule made 540 / 5,799 picks (475 / 5,223 differing from #1970's) and the point
+rule moved 518 / 3,460 splits, so the arm was live. The combination is the best nous1
+arm of the series, but tanksize is worse than any single component (§109's worst was
++43%): the components' tanksize costs compound rather than cancel. The criterion
+fails, so cstr and the §5 panels were not run, and the flag was retired in the commit
+after the one that introduced it (§5, *Retired*).
+
+**Status of item 3 (branching):** closed as a direction. The point rule, the violation
+measure, the pseudocost normalisation, and all three together have each been measured;
+every arm that helps cstr costs a #1970 reference instance beyond the fixed bound.
+Do not rebuild any of them, singly or combined, without a new mechanism that explains
+the tanksize cost. Data: `docs/dev/data/2142-scip-branching/`.
