@@ -1291,6 +1291,21 @@ class SolverTuning:
     arm's: clay0303 certified 28351.42 against the optimum 26669.11 (#2088), which
     ON certifies correctly. Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
+    hull_mixed_bigm: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_MIXED_BIGM", default=False)
+    )
+    """Under ``gdp_method="hull"``, lower a nonlinear disjunct row the convexity
+    detector cannot prove convex by big-M instead of the eps-perspective
+    (``DISCOPT_HULL_MIXED_BIGM``, default **OFF**; bound-changing on the ``"hull"``
+    route; #2142).
+
+    The eps-perspective of a nonconvex row is exact at every integer point but its
+    ``1/yhat`` factors make the factorable relaxation vacuous while the selector is
+    fractional (GDPlib cstr: root bound 0.094 against the optimum 3.062). See
+    :func:`discopt._relax.gdp_reformulate._hull_mixed_big_m_rows` for the
+    construction and why it is exact. Audit row in
+    ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)
     )
