@@ -51,6 +51,19 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The HiGHS MILP route no longer certifies a feasible model infeasible (#2156).**
+  HiGHS's MIP answered `kInfeasible` on feasible models with continuous columns of width
+  `0 < xu - xl < 1e-6`, and the route certified it, because each cross-check (the
+  presolve-free solve, the other form, the coefficient-tightened form) ran the same MIP
+  code. With every integer fixed at a feasible point, HiGHS still answered
+  `kInfeasible` after zero LP iterations: domain propagation decided it. A HiGHS-only
+  infeasible label on such a model is now reported as `error`, uncertified, with the
+  reason. A Farkas proof of the root relaxation is still certified, and no `optimal`
+  is affected. On the 30-network panel below, the unmerged `relu_extended` encoding
+  had 8 false certified-infeasible results and now has none. The 89 correct
+  certificates on the same panel are all kept. Checked by
+  `python/tests/test_2156_highs_sub_tolerance_infeasible.py`, which includes a
+  canary that fails once HiGHS stops mislabelling a shipped 13-row sub-model.
 - **`relu_extended` and `relu_partition` certify trained ReLU networks (#2156).**
   Networks with many weights near 1e-6 to 1e-8 gave `relu_extended` auxiliaries whose
   whole range was below HiGHS's feasibility tolerance. HiGHS then reported feasible

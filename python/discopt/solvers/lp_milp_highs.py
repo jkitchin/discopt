@@ -2512,6 +2512,8 @@ def _coefficient_tightening_rescue(
             return out
     # The primary's user start is a point of ``sf`` and so of the tightened form too.
     ct = _certified_milp(sf_ct, kw2)
+    # #2156: the tightened solve's infeasible label is a HiGHS label too.
+    ct = _sub_tolerance_infeasible_guard(sf_ct, ct)
     if ct.gap_certified and ct.status == "optimal":
         ct = _tighten_feasibility_artefact(sf_ct, ct, kw2, time.monotonic())
     out.stats["milp/coef_tighten_ran"] = 1.0
@@ -2646,6 +2648,7 @@ def solve_milp_std(
         and out.labels.get("milp/infeasible_provenance") == "highs"
     ):
         out = _cross_form_infeasible_check(sf, out, kw, t0)
+    out = _sub_tolerance_infeasible_guard(sf, out)
     if out.gap_certified and out.status == "optimal":
         out = _tighten_feasibility_artefact(sf, out, kw, t0)
     if (
@@ -2728,6 +2731,77 @@ def _cross_form_infeasible_check(
         },
         labels=labels,
     )
+
+
+#: HiGHS's default ``mip_feasibility_tolerance``, the tolerance its MIP domain
+#: propagation works to; the route passes the same value (``feasibility_tolerance``).
+HIGHS_MIP_FEAS_TOL = 1e-6
+
+
+def sub_tolerance_columns(sf: StdForm, tol: float = HIGHS_MIP_FEAS_TOL) -> int:
+    """Continuous columns whose finite box is open but narrower than ``tol`` (#2156).
+
+    ``0 < xu - xl < tol``: a column HiGHS's MIP domain propagation cannot resolve
+    from a fixed one. An exactly fixed column (``xl == xu``) is not counted.
+    """
+    width = sf.xu - sf.xl
+    cont = np.ones(sf.n, dtype=bool)
+    cont[sf.int_idx] = False
+    finite = (sf.xl > -INF) & (sf.xu < INF)
+    return int(np.count_nonzero(cont & finite & (width > 0.0) & (width < tol)))
+
+
+def _sub_tolerance_infeasible_guard(sf: StdForm, out: HighsOutcome) -> HighsOutcome:
+    """Withdraw a HiGHS-only ``infeasible`` on a model with sub-tolerance columns (#2156).
+
+    HiGHS's MIP answers ``kInfeasible`` on feasible models of this class, and no
+    cross-check catches it, because every one of them runs the same MIP code.
+    Measured on the #2156 panel: on the unmerged ``relu_extended`` encoding of
+    30 tiny-weight 2-32-32-1 networks, 8 came back ``infeasible`` with
+    ``gap_certified=True``. The presolve-free solve and the other form agreed in
+    each case. ``verify_point`` accepts an exact point of the seed-0 model.
+
+    On that model HiGHS still answers ``kInfeasible`` in each of these runs:
+    with every integer fixed at the feasible point's values (zero LP iterations;
+    domain propagation decides it at the first node), with presolve off, at any
+    ``mip_feasibility_tolerance`` from 1e-4 to 1e-9, and on every sound
+    relaxation tried. Those relaxations were tiny entries absorbed up to 1e-6
+    and narrow columns widened or rescaled. So no input
+    transformation makes the label trustworthy. A 13-row sub-model found by
+    delta debugging (every candidate kept the known point feasible) was the
+    smallest such model. On it, widening the columns with ``0 < xu - xl < 1e-6``,
+    or fixing them at the point, gives ``kOptimal``, and at 1e-7 neither does.
+    Those columns are the trigger this guard tests.
+
+    Only the infeasible label is withdrawn. On the same panel every false HiGHS
+    ``optimal`` was already refuted by the #1509/#1634 checks. 72 of the 89
+    correct certificates (big-M, merged extended, merged P = 4) sit on models with
+    such columns, and with this guard all 89 are still certified. A Farkas proof of the root relaxation is the route's own
+    certificate and stands. The withdrawn label becomes ``error``, the #1295
+    treatment of an unverified ``kInfeasible``.
+    """
+    if not (out.status == "infeasible" and out.gap_certified):
+        return out
+    if out.labels.get("milp/infeasible_provenance") not in ("highs", "highs-root-feasible"):
+        return out
+    k = sub_tolerance_columns(sf)
+    out.stats["milp/sub_tolerance_columns"] = float(k)
+    if k == 0:
+        return out
+    why = (
+        f"{k} continuous column(s) have 0 < xu - xl < {HIGHS_MIP_FEAS_TOL:g}, where "
+        "HiGHS's MIP has labelled feasible models infeasible (#2156)"
+    )
+    logger.warning("HiGHS MILP route: infeasible label not certified: %s", why)
+    labels = dict(out.labels)
+    labels.pop("milp/infeasible_provenance", None)
+    labels["milp/certificate"] = "declined"
+    labels["milp/infeasible_label_declined"] = why
+    out.status, out.gap_certified, out.bound = "error", False, None
+    out.message = f"HiGHS reported infeasible, unverified: {why}"
+    out.labels = labels
+    out.stats["milp/infeasible_label_declined_sub_tolerance"] = 1.0
+    return out
 
 
 def _concurrent_cross_enabled() -> bool:
