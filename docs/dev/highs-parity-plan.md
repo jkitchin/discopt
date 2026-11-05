@@ -757,7 +757,7 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     every L row is ≥ 93 % Python; then P2.2 (cold-start basis: Rust needs 2–4× HiGHS's
     iterations) > P2.5 (degeneracy, same symptom) > P2.3 (hypersparse; FTRAN/BTRAN are
     ≤ 3 % of wall here) > P2.4 (LP presolve; the route already presolves in Python).
-- [ ] **P2.0 — Python overhead on the pure LP/MILP route (bound-neutral; inserted by
+- [x] **P2.0 — Python overhead on the pure LP/MILP route (bound-neutral; inserted by
   P2.1).** Scope: `solver.py` (`_highs_takes_pure_lp_milp`, the Rust LP/MILP dispatch,
   `_declared_box_tightening`), `modeling/core.py` (`_withhold_unverified_certificate`),
   `_affine_evaluator.py`. (i) The Rust LP route skips root presolve exactly when the HiGHS
@@ -841,6 +841,8 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     `validate`, `readonly_model_repr`). **Owner question:** the H-arm bar measures the
     HiGHS route's own Python overhead, not Rust parity; accept P2.0 at H −44 % and move
     on, or keep cutting that tail first?
+  - **Closed 2026-11-05 by owner decision:** accepted at R −68 % / H −44 % (the H bar is
+    the HiGHS route's own overhead, not Rust parity); the remaining tail is not pursued.
 - [ ] **P2.2 — Cold-start basis and dual-slack warm start for the LP route.** Scope:
   `milp_driver.rs::dual_slack_basis`, `lp/simplex/primal.rs`, `basis.rs`. Hypothesis
   (test in Entry on the P2.1 instances): a crash basis (slack basis + triangular
@@ -1066,7 +1068,7 @@ and is re-written by P4.1.**
 | P0.6 | [x] | 53 IIS fixtures (38 with integers), deterministic 53/53, all proven irreducible; MIPcc27 absent | see git log |
 | P0.7 / D0 | [x] / **awaiting owner** | Rust: no incumbent on the witness at 20/60/120 s (bound gap 0.40 %), overruns its limit by up to 47 % (driver defers to the Python tree); HiGHS 9.9 s certified; 0 violations | see git log |
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
-| P2.1–P2.6 / D1 | P2.1 [x] | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening); P2.0 inserted first | see git log |
+| P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x] | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s | see git log |
 | P3.1–P3.3 | [ ] | | |
 | P4.1–P4.9 / D2 | [ ] | | |
 | P5.1–P5.3 / D3 | [ ] | | |
