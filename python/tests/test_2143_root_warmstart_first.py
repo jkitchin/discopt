@@ -38,6 +38,10 @@ def _model():
 def _solve(monkeypatch, flag: str):
     """The order of the root's sub-NLP / pump calls, and the result."""
     monkeypatch.setenv(_FLAG, flag)
+    # The pumps are this test's ordering marker. Since #2143 graduated
+    # DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT they are skipped once the warm start has
+    # produced an incumbent, so they are pinned on here to keep the marker.
+    monkeypatch.setenv("DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT", "0")
     events: list[str] = []
     real_sub, real_pump = PH.subnlp, PH.feasibility_pump
 
@@ -57,8 +61,10 @@ def _solve(monkeypatch, flag: str):
     return events, r
 
 
-def test_flag_is_default_off(monkeypatch):
+def test_flag_is_default_on(monkeypatch):
     monkeypatch.delenv(_FLAG, raising=False)
+    assert S._root_warm_start_first_enabled() is True  # graduated 2026-11-05 (#2143)
+    monkeypatch.setenv(_FLAG, "0")
     assert S._root_warm_start_first_enabled() is False
     monkeypatch.setenv(_FLAG, "1")
     assert S._root_warm_start_first_enabled() is True
