@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import specio  # noqa: E402
 import discopt._rust as R  # noqa: E402
 
-print("rust", R.__file__)
+print("rust", R.__file__, "DISCOPT_INT_ROUND_EXACT=", os.environ.get("DISCOPT_INT_ROUND_EXACT", ""))
 d, kw = specio.load(sys.argv[1])
 rounds = int(sys.argv[2]) if len(sys.argv) > 2 else int(d["prop_rounds"])
 integ = np.asarray(kw["integrality"]).astype(bool)
