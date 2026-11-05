@@ -329,6 +329,140 @@ def test_eliminated_columns_have_no_occurrence():
     _same_optimum(spec, red, expand)
 
 
+# --- #2171 review: cascading fixings, exact pairs, the sqrt domain, hook points ---------
+
+
+def test_cascading_fix_through_a_term_chain():
+    """``x * x**2`` (kind 1 then kind 0 on its output) with ``x`` fixed: fixing ``x``
+    fixes ``w1 = x**2``, whose substitution pops the product and linearises it while
+    ``x`` is still being substituted. Recursing from inside that loop raised
+    ``KeyError`` (#2171 review); the fixing is now queued."""
+    from discopt._relax.spatial_presolve import _Problem
+
+    spec = make_spec(
+        [-3, 0, -INF],
+        [3, 9, INF],
+        [({2: 1.0}, 50.0)],
+        c=[0.0, 0.0, 1.0],
+        terms=[dict(kind=1, i=0, out=1, p=2), dict(kind=0, i=0, j=1, out=2)],
+        n_orig=1,
+    )
+    prob = _Problem(spec)
+    prob.fix(0, 2.0)
+    assert prob.lo[1] == prob.hi[1] == 4.0
+    assert not prob.terms
+    assert not prob.col_rows.get(0) and not prob.col_rows.get(1)
+    # through presolve_spec, with the box fixing x
+    spec["global_lo"][0] = spec["global_hi"][0] = 2.0
+    red, expand, info = _check_maps(spec, np.array([2.0, 4.0, 8.0]))
+    assert red["global_lo"][2] == red["global_hi"][2] == 8.0
+    _same_optimum(spec, red, expand)
+
+
+def test_cascading_fix_through_a_blf_chain():
+    """The BLF variant: ``w1 = x * x`` and ``w2 = (x + 1) * w1`` as BLFs, ``x`` fixed:
+    both sides of the second become constant only after the first fixes ``w1``."""
+    from discopt._relax.spatial_presolve import _Problem
+
+    spec = make_spec(
+        [-3, 0, -INF],
+        [3, 9, INF],
+        [({2: 1.0}, 50.0)],
+        c=[0.0, 0.0, 1.0],
+        blfs=[
+            (({0: 1.0}, 0.0), ({0: 1.0}, 0.0), 1),
+            (({0: 1.0}, 1.0), ({1: 1.0}, 0.0), 2),
+        ],
+        n_orig=1,
+    )
+    prob = _Problem(spec)
+    prob.fix(0, 2.0)
+    assert prob.lo[1] == prob.hi[1] == 4.0
+    assert not prob.blfs
+    spec["global_lo"][0] = spec["global_hi"][0] = 2.0
+    red, expand, info = _check_maps(spec, np.array([2.0, 4.0, 12.0]))
+    assert red["global_lo"][2] == red["global_hi"][2] == 12.0
+    _same_optimum(spec, red, expand)
+
+
+def test_cascade_to_an_inconsistent_value_declines():
+    # the same chain with w2 <= 5: the cascade fixes w2 = 8 and must decline, not raise
+    spec = make_spec(
+        [2, 0, -INF],
+        [2, 9, INF],
+        [({2: 1.0}, 5.0)],
+        c=[0.0, 0.0, 1.0],
+        terms=[dict(kind=1, i=0, out=1, p=2), dict(kind=0, i=0, j=1, out=2)],
+        n_orig=1,
+    )
+    assert presolve_spec(spec) is None
+
+
+def test_near_parallel_rows_are_not_an_equality():
+    # x0 - x1 <= 0 and -x0 + (1 + 1e-13) x1 <= 0: equal to 12 significant digits, but
+    # not exact negatives, so no aggregation (the 1e-12 rounding used to pair them)
+    spec = make_spec(
+        [0, 0],
+        [4, 4],
+        [({0: 1.0, 1: -1.0}, 0.0), ({0: -1.0, 1: 1.0 + 1e-13}, 0.0)],
+        c=[1.0, 0.0],
+    )
+    assert presolve_spec(spec) is None
+
+
+def test_sqrt_argument_kept_in_its_domain():
+    """``s = sqrt(x - 0.1)`` with ``x = 3 z - 0.2`` aggregated (``x`` eliminated) and
+    ``x`` in ``[0.1, 2]``: ``z``'s lower end ``(0.1 + 0.2) / 3`` rounds outward, and
+    the composed argument ``3 z + 0.2 - 0.1 ... `` may dip below 0 by rounding. Every
+    sqrt argument on the reduced box must be >= 0."""
+    for x_lo in (0.1, 0.3, 1.0 / 3.0, 0.7):
+        spec = make_spec(
+            [x_lo, -5, -INF],
+            [2.0, 5, INF],
+            [("eq", {0: 1.0, 1: -3.0}, -0.2)],
+            c=[0.0, 1.0, 1.0],
+            terms=[dict(kind=3, i=0, out=2, coeff=1.0, cst=-x_lo)],
+            n_orig=2,
+        )
+        red, expand, info = presolve_spec(spec)
+        assert info["eliminated"] == [0]
+        (t,) = range(len(red["term_kind"]))
+        assert int(red["term_kind"][t]) == 3 and int(red["term_i"][t]) == 1
+        a, c = red["term_coeff"][t], red["term_cst"][t]
+        lo, hi = red["global_lo"][1], red["global_hi"][1]
+        assert min(a * lo + c, a * hi + c) >= 0.0, (x_lo, a * lo + c)
+
+
+def test_hook_points_are_not_expanded():
+    """``_kernel_presolve_main``'s result map: a kernel LP point is expanded; the point
+    the primal hook returned (a model point, with the value the kernel adopted it
+    at) is passed through unchanged."""
+    import discopt.solver as S
+
+    spec = make_spec(
+        [0, 0, 0],
+        [5, 5, 2],
+        [("eq", {0: 1.0, 1: -1.0}, 0.0), ({0: 1.0, 2: 1.0}, 3.0)],
+        c=[0.0, -1.0, -1.0],
+    )
+    model_point = [1.25, 1.25, 1.75]
+
+    def hook(x, incumbent):
+        return (-3.0, model_point)
+
+    kw = {"incumbent_value": lambda x, lp: float(lp), "primal_hook": hook}
+    reduced, expand_result = S._kernel_presolve_main(spec, kw)
+    assert expand_result is not None and reduced is not spec
+    lp_point = np.array([0.0, 2.5, 0.5, 9.0])  # one envelope column past n_cols
+    assert kw["primal_hook"](lp_point, None) == (-3.0, model_point)
+    # an LP incumbent: x0 restored from its representative, the tail untouched
+    np.testing.assert_allclose(
+        expand_result({"incumbent": -3.0 + 1.0, "incumbent_x": lp_point}), [2.5, 2.5, 0.5, 9.0]
+    )
+    # the hook's incumbent: returned as it is
+    assert expand_result({"incumbent": -3.0, "incumbent_x": model_point}) is model_point
+
+
 # --- (e) differential: planted points and kernel optima -----------------------------------
 
 

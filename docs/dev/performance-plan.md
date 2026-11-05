@@ -15944,3 +15944,16 @@ cstr hull entry need gdplib from source; they decide graduation or retirement (a
 - `cargo test -p discopt-core --release`: ok (the only Rust change is a doc comment in
   `discopt-python`).
 - `mypy python/discopt/`: clean. `ruff check python/`: clean.
+
+**Review fixes (#2171).** (1) A fixing that cascades (a term or BLF whose input became
+constant fixes its output while the outer substitution still held it) raised `KeyError`:
+reproduced on `x * x**2` and on a two-BLF chain, both with `x` fixed. Fixings are now queued
+and drained after the substitution, the inputs are re-read until the column is in none, and
+the rows go last. (2) Parallel-row pairing compared coefficients rounded to 12 digits; it is
+now exact, so the soundness claim holds as written. (3) A sqrt argument whose box dips below
+0 by rounding is moved inward to its domain; the kernel otherwise drops that term's envelope
+rows for the box. (4) Hook points are told apart from LP points by the incumbent value the
+hook returned, not by length and bytes. (5) The presolve is no longer charged to the `jax`
+timer. The reduced cstr spec is bit-identical before and after (so the entry stands), and the
+5 applied panel instances reproduce their ON rows exactly (`panel/corpus_review_fix.*`).
+Smoke after the fix: 4,523 passed, the same environmental `stranded_gas` failure.

@@ -58,7 +58,9 @@ the verifier's index space is stable) with box ``[0, 0]``, integrality 0, object
 back by replaying the eliminations in reverse.
 
 **Soundness.** Every substitution is an equality implied by globally valid rows or
-by an exact fixing of the global box, so the reduced problem equals the original
+by an exact fixing of the global box (an equality is a pair of rows whose normalised
+coefficients and right-hand sides are exact negatives, compared as floats with no
+tolerance), so the reduced problem equals the original
 on that box: the reduced optimum is the original optimum, and the reduced spec's
 relaxation at a box is a relaxation of the original's restricted to the same
 equalities. The caller re-verifies every expanded point against the model
@@ -80,8 +82,6 @@ import numpy as np
 _INF = 1e20
 #: Aggregation multipliers outside ``[1/_MAX_SCALE, _MAX_SCALE]`` are refused.
 _MAX_SCALE = 1e3
-#: Relative tolerance under which two right-hand sides of a parallel pair agree.
-_EQ_TOL = 1e-12
 #: Closure iterations (each one propagates, substitutes and aggregates).
 _MAX_ROUNDS = 25
 
@@ -197,6 +197,8 @@ class _Problem:
             self._add_blf(sides[0], sides[1], int(spec["blf_w"][t]))
         self.obbt = [int(j) for j in np.asarray(spec["obbt_candidates"]).tolist()]
         self._obbt_set = set(self.obbt)
+        self._pending: list[tuple[int, float]] = []  # queued fixings (see ``fix``)
+        self._depth = 0  # substitution nesting; fixings drain at depth 0
         self.fixed: set[int] = set()  # columns with lo == hi, substituted out
         self.dead: set[int] = set()  # eliminated columns
         self.elim: list[tuple[int, dict[int, float], float]] = []
@@ -297,20 +299,40 @@ class _Problem:
 
         With ``eliminate`` the column is also removed from term/BLF outputs (the
         caller checked that this is expressible), from the objective and the box.
+
+        A fixing this exposes (a term whose input became constant fixes its output)
+        is queued and applied after this substitution finishes, never recursively
+        from inside it: a recursive fixing pops terms and BLFs this loop still holds,
+        and can add rows over ``x_j`` after its rows were rewritten (#2171 review,
+        ``x * x**2`` with ``x`` fixed raised ``KeyError``). So the inputs are
+        re-read until ``x_j`` is in none, and the rows go last.
         """
+        self._depth += 1
+        try:
+            self._substitute(j, form, b, eliminate=eliminate)
+        finally:
+            self._depth -= 1
+        if self._depth == 0:
+            self._drain()
+
+    def _substitute(self, j: int, form: dict, b: float, *, eliminate: bool) -> None:
+        while True:
+            uses = self._uses(j)
+            if not uses["b_in"] and not uses["t_in"]:
+                break
+            for t in uses["b_in"]:
+                d = self.blfs[t]
+                for side in (d["A"], d["B"]):
+                    if j in side[0]:
+                        self._subst_form(side, j, form, b)
+                if not d["A"][0] or not d["B"][0]:
+                    # a constant side: w = const * (affine form) is linear
+                    self.blfs.pop(t)
+                    self._linearise_product(d["A"], d["B"], d["w"])
+            for t in uses["t_in"]:
+                self._subst_term_input(t, j, form, b)
+        # last: the linearisations above may have added rows over x_j
         self._subst_rows(j, form, b)
-        uses = self._uses(j)
-        for t in uses["b_in"]:
-            d = self.blfs[t]
-            for side in (d["A"], d["B"]):
-                if j in side[0]:
-                    self._subst_form(side, j, form, b)
-            if not d["A"][0] or not d["B"][0]:
-                # a constant side: w = const * (affine form) is linear
-                self.blfs.pop(t)
-                self._linearise_product(d["A"], d["B"], d["w"])
-        for t in uses["t_in"]:
-            self._subst_term_input(t, j, form, b)
         if eliminate:
             ((k, a),) = form.items()  # aggregation is into one representative
             for t in self._uses(j)["t_out"]:
@@ -332,6 +354,7 @@ class _Problem:
                     self.c[k2] += self.c[j] * s
                 self.c[j] = 0.0
             self._intersect_box(j, form, b)
+            self._clamp_sqrt_domain(k)
             if self.integ[j]:
                 for k2 in form:
                     self.integ[k2] = True
@@ -421,8 +444,58 @@ class _Problem:
             nlo = nhi = 0.5 * (nlo + nhi)
         self.lo[k], self.hi[k] = float(nlo), float(nhi)
 
+    def _clamp_sqrt_domain(self, k: int) -> None:
+        """Keep every sqrt argument on ``k``'s box nonnegative.
+
+        ``_intersect_box`` rounds the representative's box outward, so a sqrt input
+        ``u = coeff * x_k + cst`` that was ``>= 0`` on the eliminated column's box can
+        dip below 0 by rounding at an end of ``k``'s. The kernel then emits no sqrt
+        envelope rows at all for that box (``EnvTerm::push_rows``: an undefined base
+        box gives the aux floor only) -- sound, but the envelope is silently lost.
+        Any feasible point has ``u >= 0`` (the term's domain), so moving such an end
+        inward until ``u >= 0`` holds exactly is valid. Only rounding-level dips are
+        moved; a genuine one is the kernel's to handle as before (#2171 review).
+        """
+        for d in self.terms.values():
+            if d["kind"] != 3 or d["i"] != k or d["coeff"] == 0.0:
+                continue
+            a, c = d["coeff"], d["cst"]
+            end = "lo" if a > 0 else "hi"  # the end where u is smallest
+            x = self.lo[k] if end == "lo" else self.hi[k]
+            if abs(x) >= _INF:
+                continue
+            u = a * x + c
+            if u >= 0.0 or u < -1e-12 * (1.0 + abs(c) + abs(a * x)):
+                continue
+            step = np.inf if end == "lo" else -np.inf
+            for _ in range(64):
+                x = float(np.nextafter(x, step))
+                if a * x + c >= 0.0:
+                    break
+            else:
+                continue
+            if end == "lo":
+                self.lo[k] = min(x, self.hi[k])
+            else:
+                self.hi[k] = max(x, self.lo[k])
+            self.stats["sqrt_domain_clamped"] += 1
+
     def fix(self, j: int, v: float) -> None:
-        """Fix column ``j`` to ``v`` and substitute it into rows, forms and inputs."""
+        """Fix column ``j`` to ``v`` and substitute it into rows, forms and inputs.
+
+        Inside a substitution the fixing is queued (see :meth:`substitute`)."""
+        self._pending.append((j, v))
+        if self._depth == 0:
+            self._drain()
+
+    def _drain(self) -> None:
+        while self._pending:
+            j, v = self._pending.pop(0)
+            self._fix_now(j, v)
+
+    def _fix_now(self, j: int, v: float) -> None:
+        if j in self.dead:
+            raise _Infeasible(f"a fixing reached the eliminated column {j}")
         if j in self.fixed:
             if abs(self.lo[j] - v) > 1e-9 * (1.0 + abs(v)):
                 raise _Infeasible(f"column {j} fixed to two values")
@@ -445,9 +518,12 @@ class _Problem:
 
     @staticmethod
     def _key(row: dict, sign: float) -> tuple:
+        """The row's coefficients scaled by ``sign / |a_k0|`` (``k0`` its first
+        column), exactly: no rounding, so two rows match only when their normalised
+        coefficients are the same floats (#2171 review)."""
         k0 = min(row)
         s = sign / abs(row[k0])
-        return tuple((k, float(f"{a * s:.12g}")) for k, a in sorted(row.items()))
+        return tuple((k, a * s) for k, a in sorted(row.items()))
 
     def equalities(self, max_support: int) -> list:
         """Pairs of opposite parallel rows of support <= ``max_support``: equalities."""
@@ -467,8 +543,10 @@ class _Problem:
             row2, rhs2 = self.rows[r2]
             k0 = min(row)
             s = abs(row2[k0]) / abs(row[k0])  # row2 == -s * row
-            if abs(rhs2 + s * rhs) > _EQ_TOL * (1.0 + abs(rhs2) + abs(s * rhs)):
-                continue  # a range, not an equality
+            # exact: every coefficient and the rhs are -s times row's, so the pair is
+            # the equality row.x == rhs, not a thin range
+            if any(row2[k] != -s * a for k, a in row.items()) or rhs2 != -s * rhs:
+                continue
             seen.update((r, r2))
             out.append((r, r2, dict(row), dict(row2), rhs))
         return out
@@ -631,12 +709,13 @@ class _Problem:
 
 
 def _propagate(spec: dict) -> Optional[tuple[np.ndarray, np.ndarray]]:
-    from discopt import _rust
+    from discopt import _rust, _timing
 
     kw = dict(spec)
     lo = np.array(spec["global_lo"], dtype=np.float64)
     hi = np.array(spec["global_hi"], dtype=np.float64)
-    live, plo, phi = _rust.propagate_spec_py(**kw, lo=lo, hi=hi, cutoff=None, rounds=15)
+    with _timing.charge("rust"):
+        live, plo, phi = _rust.propagate_spec_py(**kw, lo=lo, hi=hi, cutoff=None, rounds=15)
     if not live:
         return None
     return np.asarray(plo, dtype=np.float64), np.asarray(phi, dtype=np.float64)
