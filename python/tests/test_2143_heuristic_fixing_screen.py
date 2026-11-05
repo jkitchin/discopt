@@ -88,8 +88,10 @@ def _count_implied(monkeypatch) -> list[int]:
 # ── the flag ──────────────────────────────────────────────────────────────
 
 
-def test_flag_is_default_off(monkeypatch):
+def test_flag_is_default_on(monkeypatch):
     monkeypatch.delenv(_FLAG, raising=False)
+    assert PH._heur_fixing_screen_enabled() is True  # graduated 2026-11-05 (#2143)
+    monkeypatch.setenv(_FLAG, "0")
     assert PH._heur_fixing_screen_enabled() is False
     monkeypatch.setenv(_FLAG, "1")
     assert PH._heur_fixing_screen_enabled() is True

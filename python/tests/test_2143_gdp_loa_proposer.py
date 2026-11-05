@@ -53,8 +53,10 @@ def _toy():
     return m
 
 
-def test_flag_defaults_off(monkeypatch):
+def test_flag_defaults_on(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
+    assert S._gdp_loa_proposer_enabled() is True  # graduated 2026-11-05 (#2143)
+    monkeypatch.setenv(FLAG, "0")
     assert S._gdp_loa_proposer_enabled() is False
     monkeypatch.setenv(FLAG, "1")
     assert S._gdp_loa_proposer_enabled() is True

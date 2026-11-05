@@ -110,6 +110,10 @@ def test_the_deferred_call_runs_with_the_rest_of_the_grant(build, monkeypatch):
         calls.append((t, k["deadline"] - t))
         return real(*a, **k)
 
+    # #2143: with the root wave forced empty, the (default-ON) LOA proposer fires and
+    # LOA's own subproblem solves run the wave too, adding calls this spy would count.
+    # This test is about the deferral, so the proposer is pinned off.
+    monkeypatch.setenv("DISCOPT_GDP_LOA_PROPOSER", "0")
     monkeypatch.setattr(PH, "one_hot_config_subnlp", spy)
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
     # A zero root share makes the root call stop on its deadline, so the rest is

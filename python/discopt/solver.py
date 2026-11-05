@@ -984,7 +984,9 @@ def _root_warm_start_first_enabled() -> bool:
 
     ``DISCOPT_ROOT_WARMSTART_FIRST``.
 
-    **Default OFF** pending its CLAUDE.md §5 panel; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panel and the owner's #2143
+    rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the legacy
+    path. Row in
     ``docs/dev/flag-retirement-audit.md``.
 
     The root already poses ONE ``subnlp`` from the modeler's start (GAMS ``x.l``
@@ -1002,18 +1004,20 @@ def _root_warm_start_first_enabled() -> bool:
     certificate is lost (the earlier incumbent changes what the stages after it
     prune or improve).
     """
-    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_ROOT_WARMSTART_FIRST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
 def _gdp_loa_proposer_enabled() -> bool:
     """Whether the root runs LOA as a configuration proposer when the wave fails (#2143).
 
-    **Default OFF** pending its CLAUDE.md §5 panels; ``1`` turns it on. Row in
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Row in
     ``docs/dev/flag-retirement-audit.md``.
 
     It fires at the root of a solve whose model came out of a GDP lowering, when
@@ -1054,11 +1058,11 @@ def _gdp_loa_proposer_enabled() -> bool:
     modprodnet hull, eight_process, ex_633, nonconvex_hen, clay0203), or an instance
     where the proposer spends its budget without an incumbent and OFF had one.
     """
-    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -1120,6 +1124,110 @@ def _place_loa_configuration(
     return placed
 
 
+def _gdp_loa_proposer_bound_enabled() -> bool:
+    """Whether the root LOA proposer's proved bound floors the search (#2143).
+
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Acts only
+    when :func:`_gdp_loa_proposer_enabled` also fires. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    The proposer runs :class:`~discopt.gdp.algorithms.loa.LOA` on the source GDP.
+    LOA puts OA cuts only on rows certified convex and solves each configuration's
+    subproblem globally, so its ``bound`` (published only when ``bound_valid``) is a
+    valid bound on the source GDP's optimum: the same certificate
+    ``gdp_method="loa"`` returns. The lowered model this search runs on is a
+    reformulation of that GDP that is exact at integer selectors (big-M takes M
+    from finite variable bounds and refuses an infinite one; the hull's
+    Furman-Sawaya-Grossmann rows ``yhat g(v/yhat) - eps g(0)(1 - y) <= 0`` are the row
+    itself at ``y = 1`` and identically 0 at ``y = 0``, and a row with no finite
+    ``g(0)`` gets the exact eps-free lifted form or is refused), so its optimum is no
+    better than the GDP's and LOA's bound floors it. ON installs it with
+    :meth:`PyTreeManager.seed_root_bound`, the hook for externally proved root
+    bounds.
+
+    Two guards, both refusals:
+
+    * sign and offset: the bound is used only when LOA's incumbent objective and
+      the verified incumbent the proposer posed from it agree to
+      :data:`_GDP_LOA_BOUND_OBJ_RTOL` in this search's internal minimization sense,
+      so a lowering that negated, shifted or scaled the objective is caught;
+    * invariant: a bound above the tree's incumbent is refused with a warning
+      (it would be a false certificate), never installed.
+
+    Measured on GDPlib ``syngas`` hull, the four other #2143 flags ON, 120 s: LOA
+    proves 4669.0235 optimal at ~67 s with master bound 4668.809 (gap 4.6e-5), the
+    bound the hull tree itself only reaches after 27 nodes at about 180-224 s.
+    """
+    return os.environ.get("DISCOPT_GDP_LOA_PROPOSER_BOUND", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+#: Relative agreement (internal sense) required between LOA's incumbent objective
+#: and the verified point the proposer posed from it before LOA's bound is used.
+_GDP_LOA_BOUND_OBJ_RTOL = 1e-6
+
+
+def _seed_loa_proposer_bound(tree: Any, work: Model, loa: Any, found_obj: float) -> bool:
+    """Floor ``tree``'s dual bound with the root LOA proposer's proved bound (#2143).
+
+    ``loa`` is LOA's ``SolveResult`` on the source GDP (user sense); ``found_obj`` is
+    the objective, in this search's internal minimization sense, of the verified
+    point the proposer posed from LOA's incumbent. See
+    :func:`_gdp_loa_proposer_bound_enabled` for why the bound is valid here and for
+    the two guards. Returns whether the bound was installed; every outcome is logged.
+    """
+    if loa is None or not getattr(loa, "bound_valid", False):
+        logger.info("GDP LOA proposer bound: LOA kept no valid bound; not used")
+        return False
+    bound, loa_obj = loa.bound, loa.objective
+    if bound is None or loa_obj is None or not (np.isfinite(bound) and np.isfinite(loa_obj)):
+        logger.info("GDP LOA proposer bound: LOA bound/objective not finite; not used")
+        return False
+    from discopt.modeling.core import ObjectiveSense as _Sense
+
+    if work._objective is None:
+        logger.info("GDP LOA proposer bound: the model has no objective; not used")
+        return False
+    sign = -1.0 if work._objective.sense == _Sense.MAXIMIZE else 1.0
+    seed, loa_int = sign * float(bound), sign * float(loa_obj)
+    if abs(loa_int - float(found_obj)) > _GDP_LOA_BOUND_OBJ_RTOL * max(1.0, abs(loa_int)):
+        logger.info(
+            "GDP LOA proposer bound: LOA objective %.12g (internal) and the posed point's "
+            "%.12g disagree beyond %g; the objective did not map, bound not used",
+            loa_int,
+            float(found_obj),
+            _GDP_LOA_BOUND_OBJ_RTOL,
+        )
+        return False
+    inc = tree.incumbent()
+    if inc is not None and np.isfinite(inc[1]):
+        tol = _DEFAULT_ABS_GAP_TOL + 1e-9 * max(1.0, abs(float(inc[1])))
+        if seed > float(inc[1]) + tol:
+            logger.warning(
+                "GDP LOA proposer bound %.12g lies above the incumbent %.12g (internal "
+                "sense); refused, it would be a false certificate",
+                seed,
+                float(inc[1]),
+            )
+            return False
+        seed = min(seed, float(inc[1]))
+    tree.seed_root_bound(float(seed))
+    logger.info(
+        "GDP LOA proposer bound: LOA %s, bound %.12g installed as the root dual bound "
+        "(internal %.12g)",
+        loa.status,
+        float(bound),
+        seed,
+    )
+    return True
+
+
 def _gdp_loa_root_proposal(
     src: Model,
     work: Model,
@@ -1130,8 +1238,12 @@ def _gdp_loa_root_proposal(
     backend: Any,
     nlp_options: Optional[dict],
     deadline: float,
+    out: Optional[dict] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """A point for ``work`` from LOA run on its source GDP ``src`` (#2143).
+
+    ``out``, when given, receives ``out["loa"]``: LOA's ``SolveResult`` (its status,
+    ``bound`` and ``bound_valid``), for :func:`_gdp_loa_proposer_bound_enabled`.
 
     Runs :class:`discopt.gdp.algorithms.loa.LOA` on ``src`` until its first
     verified incumbent, under the time left before ``deadline`` minus a
@@ -1152,8 +1264,9 @@ def _gdp_loa_root_proposal(
 
     It is then posed through :func:`~discopt._relax.primal_heuristics.subnlp` on ``work``. That
     returns only a point verified on ``work``'s own evaluator, and the caller's
-    ``_inject_incumbent`` verifies it again. Primal only: nothing LOA proves reaches
-    the search's bound.
+    ``_inject_incumbent`` verifies it again. LOA's proved bound reaches the search
+    only through :func:`_seed_loa_proposer_bound` (``out["loa"]``), under
+    ``DISCOPT_GDP_LOA_PROPOSER_BOUND``.
 
     Returns ``None``, with the reason logged at INFO, when the budget is too small,
     the variables do not line up, LOA finds no point, or the sub-NLP fails.
@@ -1188,6 +1301,8 @@ def _gdp_loa_root_proposal(
         r = alg.run()
     finally:
         _IN_GDP_LOA_PROPOSER.reset(token)
+    if out is not None:
+        out["loa"] = r
     logger.info(
         "GDP LOA proposer (root): LOA %s after %d iteration(s), %.1f s, objective %s",
         r.status,
@@ -3478,6 +3593,37 @@ def _node_probe_max_vars() -> int:
 # wiring so it cannot silently disconnect again. Process-global, reset at the
 # top of ``solve_model``; read via ``_in_tree_presolve_global_calls()``.
 _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
+
+
+def _root_pump_skip_enabled() -> bool:
+    """Whether the root feasibility pumps are skipped once an incumbent exists (#2143).
+
+    **Default ON** (graduated 2026-11-05, #2143, on its CLAUDE.md §5 panels and the owner's
+    #2143 rule: syngas hull certifies at 120 s and nothing is lost); ``0`` opts out to the
+    legacy path. Row in
+    ``docs/dev/flag-retirement-audit.md``.
+
+    At the end of the root batch two pumps run back to back: the LP-vertex pump
+    (``feasibility_pump`` from the root relaxation point) and the NLP-relaxation
+    pump (one root NLP multistart to seed a second pump). Both are primal only:
+    they inject a point only when it strictly improves the incumbent. When an
+    incumbent already exists, ON skips both, so the time goes to the root
+    reduce fixpoint and the tree instead. The integer local search after them
+    still runs. Nothing about the bound changes; only which primal heuristics run.
+
+    Measured on GDPlib syngas hull, the four other #2143 flags ON, wall clock at
+    120 s (``time_probe``, 1 rep each arm, run side by side): OFF the pumps took
+    15.0 s plus a 23.9 s root multistart, after LOA had already found the optimum
+    4669.0235 at about 59 s; the tree reached 7 nodes and bound 4347.80. ON: 29
+    nodes, bound 4666.75. At 600 s, both arms certify with the same 27 nodes and
+    bound; ON in 178 s, OFF in 224 s.
+    """
+    return os.environ.get("DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def _presolve_bound_propagation_enabled() -> bool:
@@ -22652,6 +22798,7 @@ def solve_model(
         def _root_gdp_config_primal() -> None:
             nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
             nonlocal _gdp_cfg_deferred
+            _loa_bound_pending = None
             if not (
                 iteration == 0
                 and not _gdp_cfg_ran
@@ -22733,6 +22880,7 @@ def solve_model(
                 and not _IN_GDP_LOA_PROPOSER.get()
             ):
                 _subnlp_calls += 1
+                _loa_out: dict = {}
                 try:
                     _loa_pt = _gdp_loa_root_proposal(
                         _gdp_src,
@@ -22743,6 +22891,7 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         deadline=_deadline,
+                        out=_loa_out,
                     )
                 except Exception as _e:
                     # A proposer failure costs only its point; logged, not hidden.
@@ -22750,12 +22899,17 @@ def solve_model(
                     _loa_pt = None
                 if _loa_pt is not None:
                     _cfg_results = [_loa_pt]
+                    if _gdp_loa_proposer_bound_enabled():
+                        _loa_bound_pending = (_loa_out.get("loa"), float(_loa_pt[1]))
             for _x_cf, _obj_cf in _cfg_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
                     if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
                         _subnlp_incumbent_updates += 1
                         logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+            if _loa_bound_pending is not None:
+                _seed_loa_proposer_bound(tree, model, *_loa_bound_pending)
+                _loa_bound_pending = None
 
         def _root_warm_start_subnlp() -> None:
             """ONE root ``subnlp`` from the modeler's start, if there is one.
@@ -22843,7 +22997,10 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
+            _fp_skip = _root_pump_skip_enabled() and tree.incumbent() is not None
+            if _fp_skip:
+                logger.info("Feasibility pump (root): skipped, an incumbent exists")
+            if best_root_idx is not None and not _fp_skip and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
 
@@ -22889,6 +23046,7 @@ def solve_model(
                 if (
                     _mc_lp_relaxer is not None
                     and not _model_is_convex
+                    and not _fp_skip
                     and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
                     # Taken BEFORE the try: ``_observe_heur_nlp`` in the
