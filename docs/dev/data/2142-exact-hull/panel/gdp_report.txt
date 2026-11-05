@@ -1,0 +1,17 @@
+== DISCOPT_HULL_EXACT_PERSPECTIVE: ../docs/dev/data/2142-exact-hull/panel/gdp_hull.jsonl
+fire: 24 lowerings checked; fired on 6; identical on 16; lowering error on 2
+   error kaibel hull: OFF=ApplicationError: No executable found for solver 'ipopt' ON=ApplicationError: No executable found for solver 'ipopt'
+   error mod_hens hull: OFF=ApplicationError: No executable found for solver 'ipopt' ON=ApplicationError: No executable found for solver 'ipopt'
+
+instance                           method OFF solved ON solved  OFF wall   ON wall OFF nodes  ON nodes  verdicts
+cstr                               hull        0/1       0/1       120.1     120.1       496      4130  unsolved
+gdp_col                            hull        0/1       0/1       120.2     126.4         3         3  unsolved
+hda                                hull        0/1       0/1       120.2     120.2         3         3  unsolved
+methanol                           hull        0/1       0/1       120.1     120.8         3         3  unsolved
+pyomo.ex_633_trespalacios          hull        1/1       1/1        22.6      11.4        75        47  solved
+syngas                             hull        0/1       0/1       121.1     120.3         3         3  unsolved
+
+executed solves: 12
+cert-clean: incorrect=0 bound-crossings=0 solved-lost=0
+net: solved-gained=0 []
+net: SGM(wall, shift 10 s, capped at 120 s) over 6 cells: OFF 93.24 s -> ON 86.23 s

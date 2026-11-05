@@ -1,0 +1,30 @@
+{"instance": "pooling_bental5tp", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1, "SpatialSplitMoved": 0}
+{"instance": "portfol_roundlot", "status": "optimal", "nodes": 3, "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "prob02", "status": "optimal", "nodes": 37, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "prob03", "status": "optimal", "nodes": 7, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "prob06", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "prob10", "status": "optimal", "nodes": 17, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 1, "SpatialSplitMoved": 1}
+{"instance": "rbrock", "status": "node_limit", "nodes": 2000, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1107, "SpatialSplitMoved": 1100}
+{"instance": "st_e01", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e02", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e03", "status": "optimal", "nodes": 267, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 134, "SpatialSplitMoved": 93}
+{"instance": "st_e04", "status": "optimal", "nodes": 9, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e05", "status": "optimal", "nodes": 153, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 77, "SpatialSplitMoved": 72}
+{"instance": "st_e06", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e07", "status": "optimal", "nodes": 25, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 13, "SpatialSplitMoved": 7}
+{"instance": "st_e08", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1, "SpatialSplitMoved": 0}
+{"instance": "st_e09", "status": "optimal", "nodes": 7, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e15", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e17", "status": "optimal", "nodes": 0, "route": "convex-nlp: single pounce NLP solve (continuous model proved convex)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e18", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1, "SpatialSplitMoved": 0}
+{"instance": "st_e27", "status": "optimal", "nodes": 3, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e31", "status": "optimal", "nodes": 1911, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 629, "SpatialSplitMoved": 433}
+{"instance": "st_e35", "status": "time_limit", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_e40", "status": "optimal", "nodes": 9, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_ph10", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "st_z", "status": "optimal", "nodes": 17, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 8, "SpatialSplitMoved": 4}
+{"instance": "syn05m", "status": "optimal", "nodes": 3, "route": "convex-kernel: discopt Rust convex LP-OA branch-and-cut kernel (big-M)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "trig", "status": "optimal", "nodes": 63, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialSplits": 0, "SpatialSplitMoved": 0}
+{"instance": "util", "status": "optimal", "nodes": 401, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1, "SpatialSplitMoved": 0}
+{"instance": "nous1", "status": "node_limit", "nodes": 2000, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1588, "SpatialSplitMoved": 777}
+{"instance": "st_m2", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialSplits": 1, "SpatialSplitMoved": 0}

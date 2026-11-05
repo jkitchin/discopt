@@ -1,0 +1,24 @@
+[constraints/nonlinear/propfreq=-1] boxes 95; kernel-LP re-solve reproduces the tree's node obj (1e-6 rel): 94/95
+[constraints/nonlinear/propfreq=-1] max |re-solved safe bound - tree node bound|: inf
+[constraints/nonlinear/propfreq=-1] tangent violation checks executed: 0; undecided (dropped) rounds: 0; dual-simplex retries: 46
+[constraints/nonlinear/propfreq=-1] SCIP infeasible: 1; SCIP tighter than ours by >1e-4: 18; ours tighter by >1e-4: 16
+[constraints/nonlinear/propfreq=-1] boxes with >=1 violated tangent: 0; cuts total 0; max rounds 0
+/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/tan/t2_tangent.py:127: RuntimeWarning: invalid value encountered in subtract
+  gain = np.where(fT, oT - o0, np.nan)
+[constraints/nonlinear/propfreq=-1] tangent gain (finite): mean 0.00000 max 0.00000; >1e-4 on 0; tangents prove infeasible: 1
+[constraints/nonlinear/propfreq=-1] GAP CLOSURE on the 18 SCIP-tighter boxes: 0.00000 / 0.04572 = 0.0%
+/tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/tan/t2_tangent.py:135: RuntimeWarning: invalid value encountered in subtract
+  print(f"[{TAG}]   after tangents SCIP still tighter by >1e-4 on {int(((sc - np.where(fT, oT, np.inf))[sel] > 1e-4).sum())} of them")
+[constraints/nonlinear/propfreq=-1]   after tangents SCIP still tighter by >1e-4 on 18 of them
+[constraints/nonlinear/propfreq=-1] boxes where the tangent bound exceeds SCIP's by >1e-6: 17
+[constraints/nonlinear/propfreq=-1]   node  11200 ours0 0.9381 tangents 0.9381 scip 0.9483 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  20000 ours0 1.4217 tangents 1.4217 scip 1.4299 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  13000 ours0 0.9083 tangents 0.9083 scip 0.9144 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  13900 ours0 0.9597 tangents 0.9597 scip 0.9645 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  18500 ours0 1.2425 tangents 1.2425 scip 1.2464 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  16900 ours0 1.1524 tangents 1.1524 scip 1.1551 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  15600 ours0 1.1845 tangents 1.1845 scip 1.1861 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node   6400 ours0 0.2712 tangents 0.2712 scip 0.2725 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  16400 ours0 1.1048 tangents 1.1048 scip 1.1060 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1]   node  12300 ours0 0.8451 tangents 0.8451 scip 0.8462 cuts 0 rounds 0
+[constraints/nonlinear/propfreq=-1] executed comparisons: 95

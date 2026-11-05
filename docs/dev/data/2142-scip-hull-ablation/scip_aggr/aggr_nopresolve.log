@@ -1,0 +1,8 @@
+# SCIP 6.3.0 on cstr_homog_aggr_spec.npz (homog hull spec with the 106 arm_aggr aggregations applied),
+# presolving/maxrounds=0, --tl 600 --node-limit 100000.
+# NO RESULT: the process ran 27 min wall / 26 min CPU without returning (the 600 s SCIP time limit
+# did not stop it), and was killed by the coordinator at 15:00 on 2026-11-05. Cause not diagnosed.
+# For comparison, the same spec with presolve ON (aggr_default.log) certified in 8,672 nodes / 20.9 s.
+# Reading: no fast certification without SCIP presolve even on the pre-aggregated model, so SCIP's
+# presolve contributes more than the doubleton aggregations emulated in arm_aggr.py. Not a measured
+# node count; treat as unresolved.

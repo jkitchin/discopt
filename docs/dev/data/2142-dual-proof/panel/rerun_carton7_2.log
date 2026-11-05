@@ -1,0 +1,16 @@
+carton7                OFF time_limit             b=49.99999999994891 n=1013 DualProofLearned=0 DualProofTightenings=0 | ON time_limit             b=39.999999999959 n=349 DualProofLearned=4 DualProofTightenings=477 fired=4 undecided 50.0/3.0 wall 120.1/120.0 load 0.99
+
+instances           : 1
+executed checks     : 5
+violations          : 0
+mechanism fired     : 4 on 1 instance(s) ['carton7']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 0 -> ON 0  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 1 ['carton7']  (where it ran: ['carton7'])
+nodes (all)         : OFF 1013 -> ON 349
+wall  (all)         : OFF 120.1s -> ON 120.0s
+wall  (fired)       : OFF 120.1s -> ON 120.0s over 1 instance(s)
+report              : docs/dev/data/2142-dual-proof/panel/rerun_carton7_2.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

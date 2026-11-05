@@ -1,0 +1,6 @@
+hull_noconf|default|conflict/enable=false
+hull_nopre|default|presolving/maxrounds=0
+hull_nocuts|nocuts|
+hull_emu|nocuts|presolving/maxrounds=0 conflict/enable=false propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 misc/usesymmetry=0
+hull_emu_conf|nocuts|presolving/maxrounds=0 propagating/obbt/freq=-1 propagating/genvbounds/freq=-1 propagating/redcost/freq=-1 propagating/rootredcost/freq=-1 propagating/vbounds/freq=-1 propagating/probing/freq=-1 misc/usesymmetry=0
+hull_noprop|default|propagating/maxrounds=0

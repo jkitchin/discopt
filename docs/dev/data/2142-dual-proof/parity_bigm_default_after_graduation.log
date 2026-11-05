@@ -1,0 +1,4 @@
+METHOD=big-m TL=300.0 status=optimal obj=3.062014576618532 bound=3.0617346252232247 nodes=29551 gap_certified=True wall=84.7s
+  kernel: (1, 'node_limit', -1.0048710780435234e-12, 1, {'rays': 0, 'global_lps': 0, 'learned': 0, 'tightened_rhs': 0, 'duplicates': 0, 'reject_no_support': 0, 'reject_unbounded': 0, 'reject_not_violated': 0, 'reject_too_dense': 0, 'propagations': 0, 'tightenings': 0, 'fathoms': 0, 'evicted': 0, 'pool_size': 0})
+  kernel: (100000, 'optimal', 3.0617346252232247, 29551, {'rays': 10752, 'global_lps': 10741, 'learned': 54, 'tightened_rhs': 0, 'duplicates': 0, 'reject_no_support': 0, 'reject_unbounded': 0, 'reject_not_violated': 10686, 'reject_too_dense': 12, 'propagations': 29516, 'tightenings': 201380, 'fathoms': 123, 'evicted': 0, 'pool_size': 54})
+executed assertions: 2

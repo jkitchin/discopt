@@ -1,0 +1,19 @@
+nvs19                  OFF optimal                b=-1098.4395024134813 n=145 DualProofLearned=0 DualProofTightenings=0 | ON optimal                b=-1098.4395024134813 n=145 DualProofLearned=0 DualProofTightenings=0 fired=0 undecided 0.0/0.0 wall 9.5/8.5 load 2.07
+nvs23                  OFF optimal                b=-1125.232039764857 n=211 DualProofLearned=0 DualProofTightenings=0 | ON optimal                b=-1125.232039764857 n=211 DualProofLearned=0 DualProofTightenings=0 fired=0 undecided 0.0/0.0 wall 20.9/21.3 load 2.63
+nvs24                  OFF optimal                b=-1033.2853472509064 n=411 DualProofLearned=0 DualProofTightenings=0 | ON optimal                b=-1033.2853472509064 n=409 DualProofLearned=1 DualProofTightenings=179 fired=1 undecided 0.0/0.0 wall 36.2/36.6 load 3.15
+carton7                OFF time_limit             b=49.99999999994892 n=1317 DualProofLearned=0 DualProofTightenings=0 | ON time_limit             b=25.999999999993044 n=410 DualProofLearned=7 DualProofTightenings=141 fired=7 undecided 21.0/89.0 wall 120.1/119.1 load 1.37
+
+instances           : 4
+executed checks     : 43
+violations          : 0
+mechanism fired     : 8 on 2 instance(s) ['carton7', 'nvs24']
+unfired identical   : 2 checked, 0 skipped (wall backstop) []
+certified           : OFF 3 -> ON 3  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 1 ['carton7']  (where it ran: ['carton7'])
+nodes (all)         : OFF 2084 -> ON 1175
+wall  (all)         : OFF 186.6s -> ON 185.5s
+wall  (fired)       : OFF 156.3s -> ON 155.8s over 2 instance(s)
+report              : docs/dev/data/2142-dual-proof/panel/screenfired.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

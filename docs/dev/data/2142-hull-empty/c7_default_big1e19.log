@@ -1,0 +1,3 @@
+BIG 1e+19 numerics/infinity 1e+20
+{"arm": "default", "tl": 900.0, "node_limit": 20000, "status": "optimal", "primal_internal": 3.061999937440447, "dual_internal": 3.061999937440447, "primal_model": 3.061999937440447, "dual_model": 3.061999937440447, "nodes": 1772, "total_nodes": 1772, "nruns": 1, "conflicts": null, "wall": 3.8, "ncuts_applied": 16215, "vars": 320, "fixed_rows": 725, "terms": 25, "blf": 54, "branchings_by_class": {"binary_orig": 248, "cont_orig": 8960, "aux": 1084}, "top_branch_cols": [[162, 378, "cont"], [161, 378, "cont"], [142, 378, "cont"], [141, 378, "cont"], [122, 378, "cont"], [121, 378, "cont"], [102, 378, "cont"], [101, 378, "cont"], [82, 378, "cont"], [81, 378, "cont"], [66, 378, "cont"], [65, 378, "cont"]]}
+executed assertions: 1

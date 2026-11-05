@@ -3072,6 +3072,10 @@ def _try_native_spatial_kernel(
     # ``=0`` opts out; see the helper).
     if _kernel_undecided_retry_enabled():
         solve_kwargs["undecided_unpropagated_retry"] = True
+    # #2142: learned dual-proof rows (default ON since its section 5 panel; ``=0``
+    # opts out; see the helper).
+    if _kernel_dual_proof_enabled():
+        solve_kwargs["dual_proof_propagation"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
@@ -12536,6 +12540,41 @@ def _kernel_undecided_retry_enabled() -> bool:
     Read at call time.
     """
     return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_dual_proof_enabled() -> bool:
+    """#2142: ``DISCOPT_DUAL_PROOF_PROPAGATION`` for the native spatial kernel
+    (``SpatialTreeConfig::dual_proof_propagation``).
+
+    **Graduated (default ON, 2026-11-05, #2142); ``=0`` opts out** and restores the
+    tree before it bit for bit.
+
+    On every certified-infeasible node LP the kernel aggregates the verified
+    Farkas ray over the GLOBAL rows only (the spec's fixed rows and the global cut
+    block; the node-local envelope rows are dropped) -- or, when that ray does not
+    cut the node, the ray of the global-rows feasibility LP on the same box --
+    cleans the row up as SCIP's ``tightenDualproof`` does, and keeps it in a
+    tree-global pool if it cuts the node. The pool is propagated (never added to
+    the LP) at every later node. Each row is a nonnegative combination of valid
+    rows with a rigorously rounded rhs, so it is valid everywhere. Counters:
+    ``res["dual_proof"]`` from the kernel, ``DualProof*`` under ``DISCOPT_PROFILE``.
+
+    Section 5 panels (deterministic, ``max_nodes=2000`` / 5000 for GDP, 120 s
+    backstop): in-repo corpus (74), section 107's 12 extras, a 59-instance fire
+    screen, GDP parity 24 x {big-m, hull}: cert-clean (the one flagged row, tls2,
+    is unfired and identical at low load). cstr big-M certifies (29,551 nodes,
+    88 s; OFF ends at the 300 s parity budget with bound 1.861); tanksize 519 ->
+    461 nodes (wall neutral); nous1 15,233 -> 12,359 nodes (+4.6 % wall). Known
+    cost: carton7's 120 s bound is looser (3/3 reps; same bound at equal nodes).
+    ``performance-plan.md`` section 112. Read at call time.
+    """
+    return os.environ.get("DISCOPT_DUAL_PROOF_PROPAGATION", "1").strip().lower() not in (
         "0",
         "false",
         "no",

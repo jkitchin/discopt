@@ -329,6 +329,14 @@ counters!(
     // healthy majority — so the guard's action is auditable and its
     // bound-neutrality (same optimum, cold path) is measurable.
     DualStallTrips,
+    // #2142 learned dual-proof rows (`SpatialTreeConfig::dual_proof_propagation`):
+    // certified-empty node LPs examined, global-rows fallback LPs solved, rows
+    // stored, and proof-row bound changes / fathoms during node propagation.
+    DualProofRays,
+    DualProofGlobalLps,
+    DualProofLearned,
+    DualProofTightenings,
+    DualProofFathoms,
     // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
     // above fires only when the F2 *cap* is reached, so an LP that grinds below
     // the cap reads 0 there while 43% of its pivots take a zero-length step —
@@ -483,6 +491,39 @@ counters!(
     // control flow.
     DualUnstablePivotRecoveries,
     DualUnstablePivotBails,
+    // #2142 B0: every remaining `None` exit of `run_dual` (each one becomes a
+    // `DualColdFallbacks` on the `reoptimize` route). Before these, 493 of 534
+    // cold fallbacks on GDPlib cstr big-M left the warm dual through an exit with
+    // no counter, so "which breakdown fires" could only be guessed. Split by site:
+    // the wall-clock deadline without banking; the exact x_B / reduced-cost
+    // recompute's solve failing (`?` exits); the optimality confirmation finding
+    // the exact reduced costs dual-INfeasible (a drifted pivot); the pivot-row
+    // btran; an uncertified Farkas ray on an empty ratio test; the entering
+    // column's ftran; the bound-flip RHS ftran; the refactorization after an FT
+    // failure or the interval cap; and the pivot-budget (stall/iteration) cap.
+    DualExitDeadline,
+    DualExitXbSolveFail,
+    DualExitRcSolveFail,
+    DualExitDualInfeasAtOptimum,
+    DualExitRhoBtranFail,
+    DualExitFarkasUncertified,
+    DualExitAlphaFtranFail,
+    DualExitFlipFtranFail,
+    DualExitRefacFail,
+    DualExitPivotCap,
+    // #2142 B0: the cold primal's `Err(Numerical)` exits that had no counter.
+    // `assemble`'s audit refusals are already split (`LpAudit*`), as is the
+    // subtol budget (`SubtolCapNumerical`); these are the linear-algebra and
+    // ratio-test failures that end the loop before `assemble` is reached.
+    PrimalExitSubtolFtranFail,
+    PrimalExitConfirmBtranFail,
+    PrimalExitXbInitFail,
+    PrimalExitPriceBtranFail,
+    PrimalExitAlphaFtranFail,
+    PrimalExitRayNoRescue,
+    PrimalExitRefacFail,
+    PrimalExitXbAfterRefacFail,
+    PrimalExitXbRefreshFail,
     // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
     // Python spatial engine's per-node LPs come through, and it can return without
     // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above

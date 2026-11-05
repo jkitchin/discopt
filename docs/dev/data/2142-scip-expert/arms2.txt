@@ -1,0 +1,6 @@
+c_graphonly|default|conflict/useinflp=c
+c_rayonly|default|conflict/useinflp=d
+c_nolocalrows|default|conflict/uselocalrows=false
+c_nosep|default|conflict/separate=false
+c_noallowlocal|default|conflict/allowlocal=false
+c_norepro|default|conflict/repropagate=false
