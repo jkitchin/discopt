@@ -42,7 +42,7 @@ bound, and not certified).
 | `scip` (SCIP's presolved model, control), seeded | | 2.9144 | certified at 12,049 |
 | `orig`, unseeded | | 1.1888 | 1.6651 |
 
-**Verdict: passes the kill line**, by 0.006 (2.7936 > 2.7875). It does not certify at
+**Verdict (harness only; see the retraction above): passes the kill line**, by 0.006 (2.7936 > 2.7875). It does not certify at
 20k; SCIP's model does. At 10k the presolve recovers 0.84 of the 1.48 bound gap
 between the original spec and SCIP's model (57 %); at 20k, 0.89 of at least 1.16
 (SCIP's model has certified by then, so at most 77 %).
@@ -84,3 +84,10 @@ logs `karm_multi_10000_seeded.log` (rows only) and
 - `probe_rep.py`, `probe_rep_10000.log` — the tie-break probe.
 - `panel/` — the CLAUDE.md §5 corpus panel (`issue2115_graduation_panel.py --flag
   DISCOPT_KERNEL_PRESOLVE`).
+
+## Outcome
+
+Kept as a documented opt-out (owner decision, 2026-11-05), after the owner's GDP parity panel
+and full-solve cstr runs (`gdp_panel/`): cert-clean throughout, cstr hull certifies with the flag
+ON (41,949 nodes, 374 s), GDP panel net 0 against a pre-registered >= 2. See the audit row in
+`docs/dev/flag-retirement-audit.md` and performance-plan §119.

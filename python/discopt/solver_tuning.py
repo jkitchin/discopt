@@ -1336,16 +1336,24 @@ class SolverTuning:
     call only; every point it hands back is expanded and verified on the model as
     before.
 
-    Entry (pre-registered; kernel level, the captured cstr homog-hull spec with the
-    solver's main-call options, seeded, deterministic): 20k-node bound 1.9044 ->
-    2.7936 against the kill line 2.7875 -- passes, not certified (SCIP's presolved
-    model certifies at 12,049 nodes in the same harness). Corpus panel (74
-    instances, 2,000 nodes): cert-clean, 800 checks, certified 57 -> 57, applied on
-    5, tanksize 461 -> 391 nodes. **Why it is still OFF:** the GDP parity panel and a
-    full-solve cstr hull run were not possible where it was built (GDPlib ``cstr``
-    needs gdplib from source); running them decides graduation or retirement.
-    performance-plan section 119, ``docs/dev/data/2168-kernel-presolve/``. Audit row
-    in ``docs/dev/flag-retirement-audit.md``."""
+    **Kept as a documented opt-out (owner decision, 2026-11-05).** Measured:
+
+    * full ``Model.solve(gdp_method="hull")`` on GDPlib cstr, deterministic: bound
+      0.6624 -> 1.6168 at 10k nodes and 0.9314 -> 2.2395 at 20k; uncapped, ON
+      **certifies** (3.0620146, 41,949 nodes, 374 s) where OFF hits the 100k node
+      cap at bound 2.6136;
+    * GDP parity panel (24 x {big-M, hull}, 5,000 nodes) and the 74-instance corpus
+      panel: cert-clean; fires on 4 GDP cells and 5 corpus instances; net 0 on the
+      GDP panel (cstr big-M better, cstr hull worse at 5,000 nodes, ON overtaking by
+      10k), so the pre-registered net-positive bar failed.
+
+    **Why it is not the default:** its gain is confined to one instance (CLAUDE.md
+    section 2), and on that instance it is worse early in the tree. **What would
+    change that:** a GDP or corpus panel where it is net-positive on more than one
+    instance, e.g. after the kernel can take the multi-aggregations it cannot
+    express today (a BLF with an affine output). performance-plan section 119,
+    ``docs/dev/data/2168-kernel-presolve/`` (``gdp_panel/`` for the full-solve and
+    GDP runs). Audit row in ``docs/dev/flag-retirement-audit.md``."""
 
     gdp_enumerate_cutoff: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_ENUMERATE_CUTOFF", default=True)

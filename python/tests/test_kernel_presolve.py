@@ -647,7 +647,9 @@ _ENTRY = os.environ.get("DISCOPT_RUN_2168_ENTRY") == "1"
 def test_f_cstr_homog_presolved_beats_bigm_line_at_20k():
     """The captured cstr homog-hull spec, presolved, seeded with the verified incumbent
     value, 20,000 deterministic kernel nodes: the bound passes the big-M default's 20k
-    line 2.7875 (the pre-registered kill line; measured 2.7936, original spec 1.9044)."""
+    line 2.7875 (the pre-registered kill line; measured 2.7936, original spec 1.9044).
+    A kernel-harness pin only: the full solve reaches 2.2395 at 20k and passes the cstr
+    bar by certifying instead (performance-plan section 119)."""
     script = (
         Path(__file__).resolve().parents[2] / "docs/dev/data/2168-kernel-presolve/kernel_arm.py"
     )

@@ -15982,3 +15982,6 @@ bar passes, the GDP-panel net-positive bar fails. The choice between retiring th
 default) and keeping it as a documented opt-out (its gain is one instance, §2, but the instance
 #2168 targets) is the owner's.
 
+**Decision (owner, 2026-11-05): kept as a documented opt-out.** Default OFF, `=1` opts in; the
+docstring (`SolverTuning.kernel_presolve`) and the audit row state why it is not the default and
+what would change that.
