@@ -185,15 +185,23 @@ def _reset_stats():
 
 
 @pytest.mark.parametrize("name", sorted(BUILDERS))
-@pytest.mark.parametrize("off", ["unset", "0"])
-def test_flag_off_is_byte_identical_to_before(monkeypatch, name, off):
-    if off == "unset":
-        monkeypatch.delenv(FLAG, raising=False)
-    else:
-        monkeypatch.setenv(FLAG, "0")
+def test_flag_off_is_byte_identical_to_before(monkeypatch, name):
+    """``=0`` (the opt-out since the flag graduated) restores the eps-perspective
+    lowering byte for byte."""
+    monkeypatch.setenv(FLAG, "0")
     low = reformulate_gdp(BUILDERS[name](), "hull")
     assert _fp(low) == PRE_FLAG_FINGERPRINTS[name]
     assert G._HULL_EXACT_STATS == {"homogenized": 0, "convex": 0, "not_polynomial": 0}
+
+
+@pytest.mark.parametrize("name", sorted(BUILDERS))
+def test_default_is_the_homogenized_lowering(monkeypatch, name):
+    """Graduated default ON (#2142, performance-plan section 116): an unset flag lowers
+    exactly as ``=1``."""
+    monkeypatch.setenv(FLAG, "1")
+    on = _fp(reformulate_gdp(BUILDERS[name](), "hull"))
+    monkeypatch.delenv(FLAG, raising=False)
+    assert _fp(reformulate_gdp(BUILDERS[name](), "hull")) == on
 
 
 @pytest.mark.parametrize("name", ["linear_only", "convex_quartic"])

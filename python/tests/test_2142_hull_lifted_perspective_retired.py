@@ -105,7 +105,11 @@ def test_differential_battery_under_hull(shape):
 
 
 @pytest.mark.parametrize("build", [_exp_eq, _const_term_eq])
-def test_rows_keep_the_eps_perspective(build):
+def test_rows_keep_the_eps_perspective(build, monkeypatch):
+    # Pinned to the eps-perspective lowering: since #2142 graduated
+    # DISCOPT_HULL_EXACT_PERSPECTIVE, a nonconvex polynomial row is homogenized by
+    # default; this test is about the eps form, so it opts out.
+    monkeypatch.setenv("DISCOPT_HULL_EXACT_PERSPECTIVE", "0")
     rows = [c for c in reformulate_gdp(build(), "hull")._constraints if not _is_linear(c.body)]
     assert rows and all("/" in str(c.body) for c in rows), rows
 
