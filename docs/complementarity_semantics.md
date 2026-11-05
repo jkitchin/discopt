@@ -118,7 +118,7 @@ available: `Expression.__eq__` builds a `Constraint`.)
 | field | meaning |
 |---|---|
 | `f`, `g` | the **source** operands, never rewritten by a lowering or a pass |
-| `role` | `ComplementarityRole`: `NCP_PAIR`, `BOX_MCP`, `FROM_KKT`, `FROM_DISJUNCT` |
+| `role` | `ComplementarityRole`: `NCP_PAIR`, `BOX_MCP`, `FROM_KKT`, `FROM_DISJUNCT`, `FROM_ACTIVATION` |
 | `f_bounds`, `g_bounds` | the bounds the *relation* declares — its semantics, not the operand's interval enclosure, which presolve moves |
 | `scale` | characteristic residual magnitude, for a meaningful tolerance when the operands carry unrelated physical magnitudes; `effective_scale` derives one from the declared bounds when it is not given |
 | `parent` | identity of the construct that generated the relation (the lower-level row for a KKT pair, the disjunction for a disjunct pair) |
@@ -136,6 +136,13 @@ semantics.
 
 `FROM_DISJUNCT` is reserved vocabulary with no in-tree producer yet — exactly as
 `DisjunctionSemantics.OR` was defined by #1124 before any lowering emitted it.
+
+`FROM_ACTIVATION` is produced by the `relu_complementarity` strategy of
+`discopt.ml.NNFormulation` (#2167): one pair `0 <= y ⊥ s >= 0`, with
+`y - s = z`, per unstable ReLU neuron; `parent` names the layer and `index` the
+neuron. The strategy registers the pairs on the model without lowering them, so
+`Model.solve()` refuses until `solve_mpec` (or `reformulate_gdp` /
+`reformulate_sos1`) lowers them.
 
 The lowering marks — **and the method** — live on the model
 (`Model._lowered_complementarities`, an identity map from relation to method),

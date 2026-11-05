@@ -14,7 +14,7 @@ The package was named `discopt.nn` before the 0.9.0 rename (issue #1219). The de
 - **Frozen** — a *trained* predictor becomes constraints and you optimize *over* it; its weights are constants. This is `NetworkDefinition` / `TreeEnsembleDefinition` + `NNFormulation` / `TreeFormulation`, or the `add_predictor()` dispatcher.
 - **Trainable** — the surrogate's weights are decision `Variable` objects, so it is *trained* jointly with a physics model (e.g. a neural rate law inside a collocation DAE). This is `trainable.py` (`TrainableNetwork`, `TrainableDense`, `TrainableKernelExpansion`, `train()`) and `surrogate.py`, used mainly through `discopt.dae.fit`. `TrainableNetwork.freeze()` / `from_definition()` bridge the two: train, freeze, then optimize.
 
-Note that not every encoding is a MIP: `relu_bigm.py`, `relu_partition.py` (the `relu_partition` and `relu_extended` strategies) and `formulations/tree_ensemble.py` emit binaries, while `full_space.py` emits smooth activation equalities and `reduced_space.py` emits nested expressions with zero binaries.
+Note that not every encoding is a MIP: `relu_bigm.py`, `relu_partition.py` (the `relu_partition` and `relu_extended` strategies) and `formulations/tree_ensemble.py` emit binaries, while `full_space.py` emits smooth activation equalities, `reduced_space.py` emits nested expressions with zero binaries, and `relu_complementarity.py` emits one `mpec.Complementarity` relation `0 <= y ⊥ s >= 0` (with `y - s = z`) per unstable ReLU neuron and no binaries (#2167).
 
 ## Your Expertise
 
@@ -59,7 +59,7 @@ m = dm.Model("ml_opt")
 f = NNFormulation(
     m,
     net,
-    strategy="relu_bigm",  # or "relu_partition", "relu_extended", "full_space", "reduced_space"
+    strategy="relu_bigm",  # or "relu_partition", "relu_extended", "relu_complementarity", "full_space", "reduced_space"
     scaling=OffsetScaling(  # optional
         x_offset=mu_x,
         x_factor=sd_x,
@@ -128,6 +128,7 @@ net = surrogate.freeze(result)  # -> NetworkDefinition, back to the frozen path
 - `python/discopt/ml/formulations/full_space.py` — smooth activations, one constraint per neuron.
 - `python/discopt/ml/formulations/relu_bigm.py` — ReLU with binaries and big-M.
 - `python/discopt/ml/formulations/relu_partition.py` — stronger ReLU MILPs (#2134): `relu_partition` (Tsay et al. 2021, `n_partitions` between big-M at P=1 and the hull), `relu_extended` (Anderson et al. 2020 per-neuron convex hull), and `AndersonCutSeparator`, the ideal-cut `cut_callback` that `NNFormulation(..., ideal_cuts=True).cut_callback` returns.
+- `python/discopt/ml/formulations/relu_complementarity.py` — `relu_complementarity` (#2167): ReLU as declared complementarity relations (role `FROM_ACTIVATION`), exposed as `nn.relations`. Not lowered on declaration, so `m.solve()` refuses; solve with `discopt.mpec.solve_mpec(m, nn.relations, method="sos1" | "gdp")` (exact, certified; reproduces `relu_bigm`) or `method="scholtes"` (local, `local_*` status, no certificate). Needs no `input_bounds` (the exact lowerings still need finite operand bounds).
 - `python/discopt/ml/formulations/reduced_space.py` — nested expressions, no binaries.
 - `python/discopt/ml/formulations/tree_ensemble.py` — tree/ensemble per-leaf encoding.
 - `python/discopt/ml/readers/` — ONNX, scikit-learn and PyTorch importers.

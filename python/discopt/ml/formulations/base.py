@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, Union
 from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml.formulations.relu_complementarity import ReluComplementarityFormulation
 from discopt.ml.formulations.relu_partition import (
     AndersonCutSeparator,
     PartitionFn,
@@ -31,6 +32,7 @@ _StrategyCls = Union[
     type[ReducedSpaceFormulation],
     type[ReluPartitionFormulation],
     type[ReluExtendedFormulation],
+    type[ReluComplementarityFormulation],
 ]
 
 _STRATEGIES: dict[str, _StrategyCls] = {
@@ -39,6 +41,7 @@ _STRATEGIES: dict[str, _StrategyCls] = {
     "reduced_space": ReducedSpaceFormulation,
     "relu_partition": ReluPartitionFormulation,
     "relu_extended": ReluExtendedFormulation,
+    "relu_complementarity": ReluComplementarityFormulation,
 }
 
 #: Strategies that encode ReLU neurons with indicator binaries, and so can carry
@@ -67,6 +70,13 @@ class NNFormulation:
         2020), or ``"reduced_space"`` (nested expressions, no intermediate
         variables). The three ``relu_*`` MILPs have the same integer-feasible
         set; their LP relaxations are ordered big-M <= partition <= extended.
+        ``"relu_complementarity"`` (#2167) encodes each unstable ReLU neuron as a
+        complementarity relation ``0 <= y ⊥ s >= 0`` with ``y - s = z``, with no
+        binary and no big-M; it needs no ``input_bounds``. The relations are
+        declared, not lowered: pass :attr:`relations` to
+        :func:`discopt.mpec.solve_mpec` with ``method="sos1"``/``"gdp"`` (exact)
+        or ``"scholtes"`` (local, no certificate). ``Model.solve()`` refuses the
+        model until then.
     prefix : str
         Name prefix for created variables and constraints.
     scaling : OffsetScaling or None
@@ -135,7 +145,20 @@ class NNFormulation:
         self._strategy_cls: _StrategyCls = _STRATEGIES[strategy]
         self._inputs: Variable | None = None
         self._outputs: Variable | None = None
+        self._relations: list = []
         self._formulated = False
+
+    @property
+    def relations(self) -> list:
+        """The complementarity relations the strategy declared (#2167).
+
+        One :class:`~discopt.mpec.Complementarity` per unstable ReLU neuron for
+        ``strategy="relu_complementarity"``, in layer-then-neuron order; empty for
+        every other strategy. Hand them to :func:`discopt.mpec.solve_mpec`.
+        """
+        if not self._formulated:
+            raise RuntimeError("Call formulate() before accessing relations")
+        return list(self._relations)
 
     @property
     def inputs(self) -> Variable:
@@ -163,6 +186,7 @@ class NNFormulation:
             self._model, self._network, self._prefix, self._scaling, **self._strategy_kwargs
         )
         self._inputs, self._outputs = strategy.build()
+        self._relations = list(getattr(strategy, "relations", []))
         if self._ideal_cuts:
             self._cut_callback = AndersonCutSeparator(getattr(strategy, "relu_layers", []))
         self._formulated = True

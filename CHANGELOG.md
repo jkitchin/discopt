@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`relu_complementarity` strategy for ReLU networks (#2167, slice 1).**
+  `NNFormulation(m, net, strategy="relu_complementarity")` encodes each unstable ReLU
+  neuron as `y - s == z` with a declared complementarity relation `0 <= y ⊥ s >= 0`
+  (new role `ComplementarityRole.FROM_ACTIVATION`, `parent` = layer, `index` = neuron)
+  instead of an indicator binary and big-M rows; the relations are on `nn.relations`.
+  They are registered but not lowered, so `Model.solve()` refuses until
+  `solve_mpec(m, nn.relations, method=...)` picks `"sos1"`/`"gdp"` (exact; reproduces
+  `relu_bigm`'s certified objective) or `"scholtes"` (local). The strategy needs no
+  `input_bounds`. Checked by `python/tests/test_2167_relu_complementarity.py`.
 - **The GAMS link reads a `discopt.opt` option file.** With `optfile = 1`, the link
   reads GAMS's usual solver option file and accepts three keys: `tol` and
   `constr_viol_tol`, forwarded to every POUNCE NLP the solve runs (as

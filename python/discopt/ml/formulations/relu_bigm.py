@@ -83,14 +83,29 @@ class ReluBigMFormulation:
         self._prefix = prefix
         self._scaling = scaling
 
-        if network.input_bounds is None:
-            raise ValueError("ReluBigMFormulation requires input_bounds for big-M constants")
+        self._require_input_bounds()
 
         unsupported = {
             layer.activation for layer in network.layers if layer.activation not in _SUPPORTED
         }
         if unsupported:
             raise ValueError(f"Unsupported activations: {[a.value for a in unsupported]}")
+
+    def _require_input_bounds(self) -> None:
+        """Refuse a network without an input box: big-M needs finite constants."""
+        if self._network.input_bounds is None:
+            raise ValueError("ReluBigMFormulation requires input_bounds for big-M constants")
+
+    def _input_box(self) -> tuple[np.ndarray, np.ndarray]:
+        """The ``(lb, ub)`` box the input variables are declared on."""
+        lb, ub = self._network.input_bounds  # type: ignore[misc]
+        return lb, ub
+
+    def _propagate(
+        self, *, input_bounds: tuple[np.ndarray, np.ndarray] | None
+    ) -> list[LayerBounds]:
+        """Per-layer interval bounds over ``input_bounds`` (default: the network's)."""
+        return propagate_bounds(self._network, input_bounds=input_bounds)
 
     def build(self) -> tuple[Variable, Variable]:
         """Add variables and constraints to the model.
@@ -102,7 +117,7 @@ class ReluBigMFormulation:
         pfx = self._prefix
 
         # Create input variables
-        lb, ub = net.input_bounds  # type: ignore[misc]
+        lb, ub = self._input_box()
         inputs = m.continuous(f"{pfx}_input", shape=(net.input_size,), lb=lb, ub=ub)
 
         # Handle input scaling. The ReLU big-M constants must come from the box
@@ -114,7 +129,7 @@ class ReluBigMFormulation:
             s_ub = (ub - sc.x_offset) / sc.x_factor
             s_lo = np.minimum(s_lb, s_ub)
             s_hi = np.maximum(s_lb, s_ub)
-            layer_bounds = propagate_bounds(net, input_bounds=(s_lo, s_hi))
+            layer_bounds = self._propagate(input_bounds=(s_lo, s_hi))
             scaled_in = m.continuous(
                 f"{pfx}_scaled_input", shape=(net.input_size,), lb=s_lo, ub=s_hi
             )
@@ -125,7 +140,7 @@ class ReluBigMFormulation:
             prev_z = scaled_in
             in_lo, in_hi = s_lo, s_hi
         else:
-            layer_bounds = propagate_bounds(net)
+            layer_bounds = self._propagate(input_bounds=None)
             prev_z = inputs
             in_lo = np.asarray(lb, dtype=np.float64)
             in_hi = np.asarray(ub, dtype=np.float64)
