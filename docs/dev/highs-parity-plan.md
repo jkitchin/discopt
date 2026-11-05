@@ -165,7 +165,10 @@ measured" — it may be scheduled only with an entry experiment. From the routin
   brought in (it stopped on a #2143 commit that is not on `main`). Conflicts resolved to
   `main`'s side except this branch's own audit rows and panel entries; rebuilt; `cargo
   test` 981/0, smoke 4484 passed, adversarial 19 passed. One P0.6 IIS re-pinned (below).
-  Next due 2026-11-06.
+  2026-11-05 (later, owner request): merged `origin/main` `db232311` (#2143 landed on
+  `main`, #2149/#2159/#2160/#2161) at `fe28c7bc`; conflicts resolved to `main`'s side
+  plus this branch's two audit rows; rebuilt; `cargo test` 984/0, smoke 4506, adversarial
+  19, audit/inventory/parity/route tests 530 passed. Next due 2026-11-06.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
