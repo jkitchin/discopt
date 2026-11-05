@@ -16,6 +16,7 @@ matrix rather than discopt's own extraction.
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt import _iis_backend as _bk
 from discopt.infeasibility import compute_iis
 
 highspy = pytest.importorskip("highspy")
@@ -215,7 +216,7 @@ def test_every_infeasible_verdict_is_cross_checked_without_presolve(monkeypatch)
     m.minimize(0 * x[0])
     res = milp_iis(m, confirm="each")
 
-    INF = highspy.HighsModelStatus.kInfeasible
+    INF = highspy.HighsModelStatus.kInfeasible  # raw HiGHS statuses, logged from Highs.run
     claims = [i for i, (pre, st) in enumerate(log) if pre != "off" and st == INF]
     assert claims, "no presolve-on infeasibility claim was exercised"
     for i in claims:
@@ -315,16 +316,16 @@ def test_final_confirmation_catches_a_false_infeasible_verdict(monkeypatch):
     from discopt import _iis_milp
     from discopt._iis_milp import milp_iis
 
-    MS = highspy.HighsModelStatus
+    MS = _bk  # backend statuses (highs-parity P3.2)
     real_solve = _iis_milp._Engine._solve
     lies = {"n": 0}
 
     def lying_solve(self, presolve, stop_at=None):
         st = real_solve(self, presolve, stop_at)
         # Once, in the final-mode engine only, report a FEASIBLE probe as infeasible.
-        if not self.confirm_each and presolve == "choose" and st == MS.kOptimal and not lies["n"]:
+        if not self.confirm_each and presolve == "choose" and st == MS.OPTIMAL and not lies["n"]:
             lies["n"] += 1
-            return MS.kInfeasible
+            return MS.INFEASIBLE
         return st
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", lying_solve)
@@ -372,7 +373,7 @@ def test_default_confirmation_is_final_and_the_output_is_two_config_infeasible(m
     m.minimize(0 * x[0])
     res = milp_iis(m)
     assert res.confirm == "final" and not res.fallback
-    INF = highspy.HighsModelStatus.kInfeasible
+    INF = highspy.HighsModelStatus.kInfeasible  # raw HiGHS statuses, logged from Highs.run
     assert [p for p, _ in log[-2:]] == ["choose", "off"]
     assert all(st == INF for _, st in log[-2:])
     assert compute_iis(m, include_integrality=True).confirm_fallback is False
@@ -428,7 +429,7 @@ def test_tolerance_artifact_is_not_a_feasible_witness():
     assert eng.n_repairs == 1 and eng.n_artifacts == 1
     # A well-conditioned feasible configuration does yield an exact-integer witness.
     eng._configure({1}, {(1, "lower"), (1, "upper")}, {0})
-    assert eng._solve("off") == highspy.HighsModelStatus.kOptimal
+    assert eng._solve("off") == _bk.OPTIMAL
     w = eng._witness()
     assert w is not None and w[0] == round(w[0])
 

@@ -260,6 +260,7 @@ def compute_iis(
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
+    iis_engine: str = "highs",
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -323,6 +324,12 @@ def compute_iis(
         member -- the smallest set, at up to the whole ``total_time_limit``.
         Measured on MIPcc27 at 600 s, ``"fast"`` returned 100-200 s earlier on
         the slow instances, with one set 4% larger (jjliu_clique 277 vs 266).
+    iis_engine : {"rust", "highs"}
+        Only with ``include_integrality=True``. The MILP solver behind every
+        probe of the matrix engine: HiGHS (``"highs"``, the default) or
+        discopt's own MILP driver (``"rust"``, an opt-in until highs-parity P3.2
+        closes its free-column infeasibility gap). The filter, cross-checks and
+        confirmations are the same either way.
 
     Returns
     -------
@@ -349,6 +356,7 @@ def compute_iis(
             portfolio=portfolio,
             workers=workers,
             portfolio_wait=portfolio_wait,
+            iis_engine=iis_engine,
         )
     if portfolio is not None or workers is not None:
         raise ValueError("portfolio/workers require include_integrality=True")
@@ -492,6 +500,7 @@ def _compute_iis_with_integrality(
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
+    iis_engine: str = "highs",
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
     from discopt._iis_milp import milp_iis
@@ -504,6 +513,7 @@ def _compute_iis_with_integrality(
         portfolio=portfolio,
         workers=workers,
         portfolio_wait=portfolio_wait,
+        iis_engine=iis_engine,
     )
 
     # Flat column -> (variable, multi-index).

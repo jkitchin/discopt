@@ -113,7 +113,7 @@ def iis_signature(res, model) -> dict:
     }
 
 
-def _worker(path: str, time_limit: float) -> dict:
+def _worker(path: str, time_limit: float, engine: str = "highs") -> dict:
     import lp_milp_loader as L  # noqa: N812
     from discopt.infeasibility import compute_iis
     from discopt.modeling.core import from_nl
@@ -124,7 +124,9 @@ def _worker(path: str, time_limit: float) -> dict:
         L.write_nl(inst, nl)
         model = from_nl(nl)
     t = time.perf_counter()
-    res = compute_iis(model, include_integrality=True, time_limit=time_limit)
+    # ``engine`` (highs-parity P3.2): the P0.6 baseline was captured on HiGHS, the
+    # engine before P3.2, so that stays this worker's default.
+    res = compute_iis(model, include_integrality=True, time_limit=time_limit, iis_engine=engine)
     wall = time.perf_counter() - t
     return {
         **iis_signature(res, model),
@@ -139,8 +141,8 @@ def _worker(path: str, time_limit: float) -> dict:
     }
 
 
-def _run_one(path: str, time_limit: float) -> dict:
-    p = subprocess.run([sys.executable, str(HERE), "_worker", path, str(time_limit)],
+def _run_one(path: str, time_limit: float, engine: str = "highs") -> dict:
+    p = subprocess.run([sys.executable, str(HERE), "_worker", path, str(time_limit), engine],
                        capture_output=True, text=True, timeout=10 * time_limit + 120)  # fmt: skip
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")]
     if p.returncode != 0 or len(lines) != 1:
@@ -202,7 +204,7 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "_worker":
-        res = _worker(sys.argv[2], float(sys.argv[3]))
+        res = _worker(sys.argv[2], float(sys.argv[3]), *(sys.argv[4:5] or ["highs"]))
         print("RESULT " + json.dumps(res), flush=True)
     else:
         sys.exit(main())

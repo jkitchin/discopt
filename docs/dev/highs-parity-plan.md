@@ -1071,6 +1071,45 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   (a kept element is removable, checked by one extra probe) → correctness defect; a
   differing but valid IIS on a fixture P0.6 flagged non-deterministic is accepted and
   listed. Regime: bound-neutral (verdict-identical).
+  **Progress (2026-11-05): engine ported; kill criterion hit on 2/53 fixtures -- awaiting
+  the owner.**
+  - `discopt/_iis_backend.py`: the engine's solver calls behind one interface
+    (`configure`, `set_cols`, `run(presolve, stop, max_nodes)`, `presolve_only`,
+    `point`, `last_nodes`, `mip_tol`, `lp_tolerance`). `HighsBackend` is the pre-P3.2
+    code moved verbatim (interrupt guard, run-clock offset, node cap, tolerance swap);
+    `RustBackend` is P3.1's `MilpHandle` (+ bulk `set_col_bounds_all` /
+    `set_integrality_all`, one Rust call per probe). `_iis_reduce.reduced_infeasible`
+    takes `engine=` for its reduced-model solve. `iis_engine="rust"|"highs"` on
+    `milp_iis` / `milp_iis_arrays` / `compute_iis`, carried into portfolio children.
+  - **Refactor neutral:** with `iis_engine="highs"` P0.6's baseline passes 54/54
+    element for element; the 272 `test_iis*` / `test_1634*` / mipcc tests pass (10 that
+    reached into `eng.h` / HiGHS status enums now use `eng.backend.h` / backend
+    statuses).
+  - **Rust engine, first run:** 31/53 identical; all 22 others a strict superset of the
+    baseline with a removable bound (validated independently in raw HiGHS; the baseline
+    sets validate as IIS), each reported `proven_irreducible=False` -- never a false
+    claim. Root cause: the driver cannot certify an LP infeasibility whose Farkas ray
+    carries roundoff on a free column (`FarkasRejectOpen` x60, `LpInfeasUncertified`,
+    in `lp/simplex/primal.rs::farkas_ray_certifies` -- frozen MINLP-shared code), so it
+    returns `node_limit` with bound `-inf` after 1 node and the probe is undecided.
+  - **Fallback outside the frozen code** (in `RustBackend`): an undecided probe with no
+    integer column goes through the verified LP ladder, `solve_lp_std(engine="rust")`
+    (phase-1 proof + P2.5's exact correction; certificates only). Panel
+    (`iis_engine_panel.py`, 3 reps interleaved, `p3.2/iis_engine_panel.json`):
+    **51/53 identical**; the 2 left (`1ec8e0a9f8f1c72c`, `97083706a8966d15`) keep a
+    removable bound -- integer probes, decided by the driver's B&B whose node LPs hit
+    the same frozen check. Wall: median Rust/HiGHS **1.01x**, max 4.7x on a 0.01 s
+    fixture, total 1.31 s vs 1.05 s (bar ≤ 2x holds on the median and total).
+  - Default stays **`"highs"`** until decided; `"rust"` is an opt-in. Tests
+    `test_highs_parity_p32_iis_engine.py` (the 2 known-gap fixtures are pinned as
+    "superset, still infeasible, not claimed irreducible").
+  - **Owner decision needed:** (a) unfreeze `lp/simplex/primal.rs` for an exact
+    Farkas correction on open columns (closes the class at its source; bound-changing
+    for MINLP fathoming → its own §5 panel); (b) keep the frozen code and extend the
+    backend fallback to integer probes (e.g. HiGHS-free cross-check of an undecided
+    MILP probe by enumerating the driver's undecided node LPs through the ladder --
+    more code, narrower); (c) accept 51/53 and flip the default with the 2 listed; or
+    (d) leave `"highs"` the default and move on to P3.3.
 - [ ] **P3.3 — IIS time bounding.** Scope: `_iis_milp.py` `_GRACE_S`, interrupt callback
   plumbing. The handle polls its deadline, so the HiGHS-specific overrun guard
   (`:64-69`) becomes route-specific. Done: a test that gives the Rust engine a probe with

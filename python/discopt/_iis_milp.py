@@ -49,6 +49,8 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import numpy as np
 
+from discopt import _iis_backend as _bk
+
 if TYPE_CHECKING:
     from discopt.modeling.core import Model
 
@@ -165,10 +167,10 @@ class _Engine:
         confirm_each=True,
         deadline: Optional[float] = None,
         reserve_confirm: bool = False,
+        engine: str = "highs",
     ):
-        import highspy
+        from discopt._iis_backend import make_backend
 
-        self.hs = highspy
         self.A = A.tocsr()
         self.row_lo, self.row_hi = row_lo, row_hi
         self.col_lb, self.col_ub = col_lb, col_ub
@@ -210,43 +212,11 @@ class _Engine:
         # Held-integer columns and their declared box in the current configuration.
         self._held = np.zeros(0, dtype=np.int64)
         self._cfg: tuple[np.ndarray, ...] = ()
-        n, m = col_lb.size, row_lo.size
-        inf = highspy.kHighsInf
-        self._inf = inf
-        h = highspy.Highs()
-        h.silent()
-        mn = h.getOptionValue("mip_max_nodes")
-        self._default_max_nodes = int(mn[1] if isinstance(mn, tuple) else mn)
-        h.setOptionValue("output_flag", False)
-        lp = highspy.HighsLp()
-        lp.num_col_, lp.num_row_ = n, m
-        lp.col_cost_ = np.zeros(n)
-        lp.col_lower_ = np.where(col_lb <= -_INF, -inf, col_lb)
-        lp.col_upper_ = np.where(col_ub >= _INF, inf, col_ub)
-        lp.row_lower_ = np.where(row_lo <= -_INF, -inf, row_lo)
-        lp.row_upper_ = np.where(row_hi >= _INF, inf, row_hi)
-        csc = A.tocsc()
-        lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
-        lp.a_matrix_.start_ = csc.indptr.astype(np.int32)
-        lp.a_matrix_.index_ = csc.indices.astype(np.int32)
-        lp.a_matrix_.value_ = csc.data.astype(np.float64)
-        lp.a_matrix_.num_col_, lp.a_matrix_.num_row_ = n, m
-        lp.integrality_ = [
-            highspy.HighsVarType.kInteger if b else highspy.HighsVarType.kContinuous for b in is_int
-        ]
-        h.passModel(lp)
-        self.h = h
-
-        # Wall-clock guard on every run: HiGHS's own ``time_limit`` was measured
-        # overrunning 7-10x on presolve-free re-solves, so a budget is enforced
-        # here too. An interrupted run is a non-proof status (inconclusive).
-        def _guard(event) -> None:
-            # Set the flag both ways: HiGHS keeps a raised interrupt across runs.
-            event.interrupt(time.perf_counter() > self._stop)
-
-        h.cbMipInterrupt.subscribe(_guard)
-        h.cbSimplexInterrupt.subscribe(_guard)
-        h.cbIpmInterrupt.subscribe(_guard)
+        # highs-parity P3.2: the solver behind every probe (``discopt._iis_backend``):
+        # the in-house MILP driver by default, HiGHS as the opt-in.
+        self.backend = make_backend(engine, A, row_lo, row_hi, col_lb, col_ub, is_int)
+        self.engine = engine
+        self._inf = self.backend.inf
 
     def _configure(
         self,
@@ -254,8 +224,8 @@ class _Engine:
         active_bounds: set[tuple[int, str]],
         active_int: set[int],
     ) -> None:
-        """Load one probe's rows, bounds and integrality into the HiGHS model."""
-        h, inf = self.h, self._inf
+        """Load one probe's rows, bounds and integrality into the solver."""
+        inf = self._inf
         n, m = self.col_lb.size, self.row_lo.size
         rlo = np.full(m, -inf)
         rhi = np.full(m, inf)
@@ -283,19 +253,13 @@ class _Engine:
         ub = np.where(ub >= _INF, inf, ub)
         self._held = held
         self._cfg = (rlo, rhi, lb, ub)  # what this probe imposes, for witness checks
-        idx_m = np.arange(m, dtype=np.int32)
-        idx_n = np.arange(n, dtype=np.int32)
-        if m:
-            h.changeRowsBounds(m, idx_m, rlo, rhi)
-        if n:
-            h.changeColsBounds(n, idx_n, lb, ub)
-            vt = self.hs.HighsVarType
-            h.changeColsIntegrality(
-                n, idx_n, np.array([vt.kInteger if b else vt.kContinuous for b in integ])
-            )
+        self.backend.configure(rlo, rhi, lb, ub, integ)
 
-    def _solve(self, presolve: str, stop_at: Optional[float] = None):
-        """Solve the configured probe from scratch; returns the HiGHS model status.
+    def _solve(
+        self, presolve: str, stop_at: Optional[float] = None, max_nodes: Optional[int] = None
+    ):
+        """Solve the configured probe from scratch; returns the backend status
+        (``discopt._iis_backend``: ``OPTIMAL`` / ``INFEASIBLE`` / ...).
 
         The run's budget is the per-probe limit, cut to ``self.deadline``; a
         caller-given ``stop_at`` is its own budget and replaces the per-probe
@@ -309,7 +273,6 @@ class _Engine:
         full models need 63 s and 90 s presolve-off: nothing was ever
         confirmed, and both runs ended in TimeoutError with no answer.
         """
-        h = self.h
         now = time.perf_counter()
         stop = now + float(self.probe_tl) if stop_at is None else math.inf
         hard = self.deadline
@@ -323,28 +286,17 @@ class _Engine:
                 stop = min(stop, lim)
         if stop - now < _MIN_SOLVE_S:
             raise _OutOfTime
-        h.clearSolver()
-        # HiGHS's run clock is cumulative over this object's lifetime and LP
-        # solves compare it with ``time_limit``, so a relative budget made every
-        # LP solve return "Time limit reached" (0 iterations) once the engine had
-        # run longer than one budget. Offset by the clock; the wall guard below
-        # enforces the real budget whichever clock HiGHS consults.
-        h.setOptionValue("time_limit", h.getRunTime() + (stop - now))
-        h.setOptionValue("presolve", presolve)
         self.n_solves += 1
-        self._stop = stop + _GRACE_S
         try:
-            h.run()
+            status = self.backend.run(presolve, stop, max_nodes)
         finally:
-            self._stop = math.inf
             self._recent.append(time.perf_counter() - now)
-        status = h.getModelStatus()
-        if status == self.hs.HighsModelStatus.kInterrupt:
+        if status == _bk.INTERRUPTED:
             self.n_interrupted += 1
         return status
 
     def _point(self) -> np.ndarray:
-        return np.array(self.h.getSolution().col_value, dtype=np.float64)
+        return self.backend.point()
 
     def _witness(self, stop_at: Optional[float] = None) -> Optional[np.ndarray]:
         """An exact-integer feasible point behind the ``Optimal`` status just
@@ -370,10 +322,8 @@ class _Engine:
         if held.size == 0:
             return x
         self.n_repairs += 1
-        h, vt = self.h, self.hs.HighsVarType
         xr = np.round(x[held])
-        mip_tol = h.getOptionValue("mip_feasibility_tolerance")
-        mip_tol = mip_tol[1] if isinstance(mip_tol, tuple) else mip_tol
+        mip_tol = self.backend.mip_tol()
         # Rounding often breaks nothing: then the rounded point itself is the
         # exact-integer witness, checked here by arithmetic. (The repair LP can
         # misjudge exactly this case: on dell an integral point meeting its rows
@@ -392,22 +342,16 @@ class _Engine:
             )
         if viol <= mip_tol:
             return y0
-        idx = held.astype(np.int32)
-        h.changeColsBounds(idx.size, idx, xr, xr)
-        h.changeColsIntegrality(idx.size, idx, np.array([vt.kContinuous] * idx.size))
-        lp_tol = h.getOptionValue("primal_feasibility_tolerance")
-        # (status, value) tuples in some highspy versions
-        lp_tol = lp_tol[1] if isinstance(lp_tol, tuple) else lp_tol
-        h.setOptionValue("primal_feasibility_tolerance", mip_tol)
+        be = self.backend
+        be.set_cols(held, xr, xr, integer=False)
         try:
-            ok = self._solve("off", stop_at) == self.hs.HighsModelStatus.kOptimal
-            y = self._point() if ok else None
+            with be.lp_tolerance(mip_tol):
+                ok = self._solve("off", stop_at) == _bk.OPTIMAL
+                y = self._point() if ok else None
         finally:
-            h.setOptionValue("primal_feasibility_tolerance", lp_tol)
             lo = np.where(self.col_lb[held] <= -_INF, -self._inf, self.col_lb[held])
             hi = np.where(self.col_ub[held] >= _INF, self._inf, self.col_ub[held])
-            h.changeColsBounds(idx.size, idx, lo, hi)
-            h.changeColsIntegrality(idx.size, idx, np.array([vt.kInteger] * idx.size))
+            be.set_cols(held, lo, hi, integer=True)
         if y is None:
             self.n_artifacts += 1
             return None
@@ -429,14 +373,13 @@ class _Engine:
         caller MUST confirm the final subsystem with :meth:`confirm_infeasible`.
         """
         self._configure(active_cons, active_bounds, active_int)
-        MS = self.hs.HighsModelStatus
         ms = self._solve("choose")
-        if ms == MS.kOptimal:
+        if ms == _bk.OPTIMAL:
             x = self._witness()
             return (False, x) if x is not None else (None, None)
-        if ms not in (MS.kInfeasible, MS.kUnboundedOrInfeasible):
+        if ms not in (_bk.INFEASIBLE, _bk.UNBOUNDED_OR_INFEASIBLE):
             return None, None
-        if ms == MS.kInfeasible and not self.confirm_each:
+        if ms == _bk.INFEASIBLE and not self.confirm_each:
             self._record_proven(active_cons, active_bounds, active_int)
             return True, None
         # An infeasibility claim is what lets the filter DROP an element, so it
@@ -447,14 +390,14 @@ class _Engine:
         # objective; the presolve-free solve decides it, in either mode.)
         self.n_cross_checks += 1
         ms2 = self._solve("off")
-        if ms2 == MS.kInfeasible:
-            if ms == MS.kInfeasible:  # the presolve-on proof stands: on record
+        if ms2 == _bk.INFEASIBLE:
+            if ms == _bk.INFEASIBLE:  # the presolve-on proof stands: on record
                 self._record_proven(active_cons, active_bounds, active_int)
             return True, None
-        if ms2 == MS.kOptimal:
+        if ms2 == _bk.OPTIMAL:
             x = self._witness()
             if x is not None:
-                if ms == MS.kInfeasible:
+                if ms == _bk.INFEASIBLE:
                     self.n_refuted += 1
                 return False, x
         # Undecided: presolve-off neither agreed nor produced an exact-integer
@@ -463,10 +406,9 @@ class _Engine:
         return None, None
 
     def presolve_proves(self, active_cons, active_bounds, active_int, stop_at=None) -> bool:
-        """Does HiGHS presolve ALONE prove the set infeasible? (The ladder's first
-        rung: cheap, incomplete, and a presolve-on claim like any other.)"""
+        """Does presolve ALONE prove the set infeasible? (The ladder's first rung:
+        cheap, incomplete, and a presolve-on claim like any other.)"""
         self._configure(active_cons, active_bounds, active_int)
-        h = self.h
         now = time.perf_counter()
         stop = now + float(self.probe_tl)
         for lim in (self.deadline, stop_at):
@@ -474,12 +416,8 @@ class _Engine:
                 stop = min(stop, lim)
         if stop - now < _MIN_SOLVE_S:
             raise _OutOfTime
-        h.clearSolver()
-        h.setOptionValue("time_limit", h.getRunTime() + (stop - now))
-        h.setOptionValue("presolve", "choose")
         self.n_presolve += 1
-        h.presolve()
-        return bool(h.getModelPresolveStatus() == self.hs.HighsPresolveStatus.kInfeasible)
+        return bool(self.backend.presolve_only(stop))
 
     def capped_proves(self, active_cons, active_bounds, active_int, max_nodes: int) -> bool:
         """Does a presolve-on MIP solve limited to ``max_nodes`` branch-and-bound
@@ -487,13 +425,7 @@ class _Engine:
         limit, so which elements the rung drops does not depend on machine speed
         (#912); the overall deadline still stops it.)"""
         self._configure(active_cons, active_bounds, active_int)
-        h = self.h
-        h.setOptionValue("mip_max_nodes", int(max_nodes))
-        try:
-            st = self._solve("choose")
-        finally:
-            h.setOptionValue("mip_max_nodes", self._default_max_nodes)
-        return bool(st == self.hs.HighsModelStatus.kInfeasible)
+        return bool(self._solve("choose", max_nodes=int(max_nodes)) == _bk.INFEASIBLE)
 
     def _record_proven(self, active_cons, active_bounds, active_int) -> None:
         """Record this exact set's presolve-on ``Infeasible`` -- only when the
@@ -526,7 +458,6 @@ class _Engine:
         "feasible" status whose point is a tolerance artifact). ``presolve``
         restricts the check to configurations not already proven for this set."""
         self._configure(active_cons, active_bounds, active_int)
-        MS = self.hs.HighsModelStatus
         all_infeasible = True
         for p in presolve:
             if p == "off":
@@ -544,9 +475,9 @@ class _Engine:
                     # in 60-300 s (MIPcc27 dijle / dingo / dives).
                     continue
             st = self._solve(p, stop_at)
-            if st == MS.kOptimal and self._witness(stop_at) is not None:
+            if st == _bk.OPTIMAL and self._witness(stop_at) is not None:
                 return False
-            ok = st == MS.kInfeasible
+            ok = st == _bk.INFEASIBLE
             if not ok and p == "off":
                 # Presolve-off could not answer (on big-M sets it returns
                 # "Optimal" points whose integers are 1e-11 off and do not
@@ -587,7 +518,9 @@ class _Engine:
             h.cbIpmInterrupt.subscribe(_g)
 
         self.n_reduced += 1
-        verdict = reduced_infeasible(self.A, rlo, rhi, lb, ub, held, stop, guard)
+        verdict = reduced_infeasible(
+            self.A, rlo, rhi, lb, ub, held, stop, guard, engine=self.engine
+        )
         if verdict is True:
             self.n_reduced_confirmed += 1
         return verdict
@@ -1017,8 +950,19 @@ def milp_iis(
     portfolio: Optional[Sequence[str]] = None,
     workers: Optional[int] = None,
     portfolio_wait: str = "fast",
+    iis_engine: str = "highs",
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
+
+    ``iis_engine`` (highs-parity P3.2) names the MILP solver behind every probe:
+    ``"highs"`` (the default) or ``"rust"``, discopt's own MILP driver through a
+    persistent :class:`~discopt.solvers.milp_handle.MilpHandle`. ``"rust"`` is not
+    the default yet: on P0.6's fixtures its driver cannot certify some LP/MILP
+    infeasibilities over free columns (the simplex's Farkas check, ``FarkasRejectOpen``),
+    so those probes stay undecided and the returned set is not proven irreducible
+    (``docs/dev/highs-parity-plan.md`` P3.2). The deletion filter, the #1634
+    presolve-on / presolve-off cross-checks, the witness repair and the
+    confirmations are the same code either way (``discopt._iis_backend``).
 
     ``portfolio_wait`` (portfolio runs only): ``"fast"`` stops the other members
     shortly after one completes, ``"all"`` waits for every member (the smallest
@@ -1136,6 +1080,7 @@ def milp_iis(
         t_start=t_start,
         grace=grace,
         grace_window=grace_window,
+        iis_engine=iis_engine,
     )
 
 
@@ -1155,6 +1100,7 @@ def milp_iis_arrays(
     t_start: Optional[float] = None,
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
+    iis_engine: str = "highs",
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -1178,7 +1124,12 @@ def milp_iis_arrays(
         max_batch=max_batch,
         confirm=confirm,
         sat_candidate=sat_candidate,
+        engine=iis_engine,
     )
+    from discopt._iis_backend import ENGINES
+
+    if iis_engine not in ENGINES:
+        raise ValueError(f"iis_engine={iis_engine!r}: expected one of {ENGINES}")
     if workers is not None and portfolio is None:
         raise ValueError("workers= needs portfolio=; a single order runs in-process")
     if portfolio is not None:
@@ -1233,6 +1184,7 @@ def _milp_iis_arrays(
     order: str,
     total_time_limit: Optional[float],
     t_start: Optional[float] = None,
+    engine: str = "highs",
 ) -> MilpIIS:
     """:func:`milp_iis` on the extracted matrix, with one deletion order."""
     if t_start is None:
@@ -1261,6 +1213,7 @@ def _milp_iis_arrays(
         confirm == "each",
         deadline=deadline,
         reserve_confirm=confirm == "final",
+        engine=engine,
     )
     cons = set(row_groups)
     ints_active = set(int(j) for j in np.flatnonzero(is_int))
@@ -1328,8 +1281,7 @@ def _milp_iis_arrays(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"
         ) from None
     eng.probe_tl = time_limit
-    info = eng.h.getInfo()
-    base_nodes = int(getattr(info, "mip_node_count", 0) or 0)
+    base_nodes = eng.backend.last_nodes()
     if base is None and eng.deadline is not None and time.perf_counter() >= eng.deadline:
         raise TimeoutError(
             "compute_iis: total_time_limit ran out before the model was proven infeasible"

@@ -113,6 +113,16 @@ class MilpHandle:
         lo_r, hi_r = _rust_side(np.array([lo, hi]))
         self._h.change_col_bounds(self.n_struct + int(i), float(lo_r), float(hi_r))
 
+    def configure(self, row_lo: Any, row_hi: Any, col_lb: Any, col_ub: Any, is_int: Any) -> None:
+        """Replace every row range, column box and integrality flag at once (the IIS
+        engine's per-probe configuration): two Rust calls, no per-element Python."""
+        lb = np.concatenate([np.ravel(col_lb), np.ravel(row_lo)])
+        ub = np.concatenate([np.ravel(col_ub), np.ravel(row_hi)])
+        if lb.shape != (self.n,):
+            raise ValueError(f"configure: {lb.size} bounds for {self.n} columns")
+        self._h.set_col_bounds_all(_rust_side(lb), _rust_side(ub))
+        self._h.set_integrality_all(np.asarray(is_int, dtype=bool).ravel())
+
     def change_integrality(self, j: int, is_int: bool) -> None:
         """Make structural column ``j`` integer or continuous."""
         self._h.change_integrality(int(j), bool(is_int))

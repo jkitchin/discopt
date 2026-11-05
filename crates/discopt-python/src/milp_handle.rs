@@ -115,6 +115,24 @@ impl PyMilpHandle {
             .map_err(PyValueError::new_err)
     }
 
+    /// Replace every column's box (structural and logical) at once.
+    fn set_col_bounds_all(
+        &mut self,
+        lb: PyReadonlyArray1<'_, f64>,
+        ub: PyReadonlyArray1<'_, f64>,
+    ) -> PyResult<()> {
+        self.inner
+            .set_col_bounds_all(lb.as_slice()?, ub.as_slice()?)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Replace the structural columns' integrality at once.
+    fn set_integrality_all(&mut self, is_int: PyReadonlyArray1<'_, bool>) -> PyResult<()> {
+        self.inner
+            .set_integrality_all(is_int.as_slice()?)
+            .map_err(PyValueError::new_err)
+    }
+
     /// Seed (`x` over the structural columns) or clear (`None`) the incumbent the
     /// next solves start from. Validated by the driver, never trusted.
     #[pyo3(signature = (x=None))]

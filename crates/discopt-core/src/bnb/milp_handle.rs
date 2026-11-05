@@ -136,6 +136,38 @@ impl MilpHandle {
         Ok(())
     }
 
+    /// Replace every column's box at once (the IIS engine re-configures a whole
+    /// probe; one call instead of `n` keeps the marshaling O(n) in Rust).
+    pub fn set_col_bounds_all(&mut self, l: &[f64], u: &[f64]) -> Result<(), String> {
+        if l.len() != self.n || u.len() != self.n {
+            return Err(format!(
+                "set_col_bounds_all: got {} / {} bounds for n={}",
+                l.len(),
+                u.len(),
+                self.n
+            ));
+        }
+        for j in 0..self.n {
+            check_box(l[j], u[j], &format!("set_col_bounds_all: column {j}"))?;
+        }
+        self.l.copy_from_slice(l);
+        self.u.copy_from_slice(u);
+        Ok(())
+    }
+
+    /// Replace the structural columns' integrality at once (length `n_struct`).
+    pub fn set_integrality_all(&mut self, is_int: &[bool]) -> Result<(), String> {
+        if is_int.len() != self.n_struct {
+            return Err(format!(
+                "set_integrality_all: got {} flags for n_struct={}",
+                is_int.len(),
+                self.n_struct
+            ));
+        }
+        self.is_int.copy_from_slice(is_int);
+        Ok(())
+    }
+
     /// Seed (or clear) the incumbent the next solves start from. The driver
     /// validates it against the bounds, integrality and rows of that solve and
     /// ignores it otherwise ([`MilpOptions::initial_incumbent`]).
@@ -468,6 +500,30 @@ mod tests {
         // The feasible knapsack is not refuted.
         let k = &panel()[1];
         assert!(!handle_of(k).presolve_only(&k.opts()));
+    }
+
+    #[test]
+    fn bulk_setters_equal_one_edit_per_column() {
+        let case = &panel()[5];
+        let base = case.opts();
+        let (mut a, mut b) = (handle_of(case), handle_of(case));
+        let mut l = case.l.clone();
+        let mut u = case.u.clone();
+        l[0] = 1.0;
+        u[2] = 0.0;
+        a.set_col_bounds_all(&l, &u).unwrap();
+        b.change_col_bounds(0, 1.0, case.u[0]).unwrap();
+        b.change_col_bounds(2, case.l[2], 0.0).unwrap();
+        let mut ints = vec![true; case.ns];
+        ints[1] = false;
+        a.set_integrality_all(&ints).unwrap();
+        b.change_integrality(1, false).unwrap();
+        let (ra, rb) = (a.solve(&base), b.solve(&base));
+        assert_eq!(ra.status, rb.status);
+        assert_eq!(ra.obj.to_bits(), rb.obj.to_bits());
+        assert_eq!(ra.nodes, rb.nodes);
+        assert!(a.set_col_bounds_all(&l[1..], &u).is_err());
+        assert!(a.set_integrality_all(&ints[1..]).is_err());
     }
 
     #[test]

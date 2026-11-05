@@ -500,7 +500,9 @@ _MIN_SHRINK = 0.8
 REDUCE_CAP_S = 10.0
 
 
-def reduced_infeasible(A, rlo, rhi, lb, ub, held, stop_at, guard=None) -> bool | None:
+def reduced_infeasible(
+    A, rlo, rhi, lb, ub, held, stop_at, guard=None, engine: str = "highs"
+) -> bool | None:
     """True iff the exact reduction proves the system infeasible, by itself or
     with presolve-free HiGHS on the reduced model; None otherwise (no
     conclusion: a feasible or undecided reduced model, a reduction that ran out
@@ -508,10 +510,12 @@ def reduced_infeasible(A, rlo, rhi, lb, ub, held, stop_at, guard=None) -> bool |
 
     ``stop_at`` (``time.perf_counter()``) bounds both steps; None means no
     budget beyond :data:`REDUCE_CAP_S` for the reduction. ``guard(h, stop)``
-    installs the caller's wall-clock interrupt on the HiGHS object."""
+    installs the caller's wall-clock interrupt on the HiGHS object. ``engine``
+    (highs-parity P3.2) picks who solves the reduced model presolve-free:
+    ``"highs"`` or ``"rust"`` (the in-house MILP driver, which honours the budget
+    itself and takes no guard); the reduction and every check before it are the
+    same either way."""
     import time
-
-    import highspy
 
     now = time.perf_counter()
     cap = now + REDUCE_CAP_S
@@ -547,13 +551,35 @@ def reduced_infeasible(A, rlo, rhi, lb, ub, held, stop_at, guard=None) -> bool |
         # HiGHS reads |v| >= 1e20 as infinite and is numerically untrustworthy
         # well below that. No conclusion (the caller's other routes run).
         return None
+    left = None if stop_at is None else stop_at - time.perf_counter()
+    if left is not None and left <= 0.05:
+        return None
+    if engine == "rust":
+        return _rust_reduced(Ar, rl, rh, lo, hi, hd, left)
+    if engine != "highs":
+        raise ValueError(f"engine={engine!r}: expected 'rust' or 'highs'")
+    return _highs_reduced(Ar, rl, rh, lo, hi, hd, left, stop_at, guard)
+
+
+def _rust_reduced(Ar, rl, rh, lo, hi, hd, left) -> bool | None:
+    """The reduced model, presolve-free, on the in-house MILP driver: True when it
+    proves it infeasible, else None."""
+    from discopt.solvers.milp_handle import MilpHandle
+
+    n = Ar.shape[1]
+    h = MilpHandle(np.zeros(n), Ar, rl, rh, lo, hi, np.asarray(hd, dtype=bool))
+    r = h.solve(presolve=False, time_limit=left)
+    return True if r.status == "infeasible" else None
+
+
+def _highs_reduced(Ar, rl, rh, lo, hi, hd, left, stop_at, guard) -> bool | None:
+    """The reduced model, presolve-free, on HiGHS (the pre-P3.2 code)."""
+    import highspy
+
     h = highspy.Highs()
     h.silent()
     h.setOptionValue("presolve", "off")
-    left = None if stop_at is None else stop_at - time.perf_counter()
     if left is not None:
-        if left <= 0.05:
-            return None
         h.setOptionValue("time_limit", left)
     if guard is not None:
         guard(h, stop_at)
