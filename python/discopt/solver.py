@@ -225,18 +225,19 @@ def _improver_within_contingent(
     *,
     budget_on: bool,
     tree,
-    heur_state: dict[str, float],
+    heur_state: dict[str, Any],
     success_gain: float,
     offset: float,
     quot: float,
     key: Optional[str] = None,
-    now: Optional[float] = None,
+    node_wall: Optional[float] = None,
 ) -> bool:
     """Whether an improver-role heuristic costing ``cost`` fits the contingent.
 
-    ``key``/``now`` (#2176): under :func:`_heur_wall_cost_enabled` (``heur_state``
-    carries ``walls``) and once ``key`` has a measured call, the test runs in
-    seconds; see that function. Otherwise it is the fixed-cost test, unchanged.
+    ``key``/``node_wall`` (#2176): under :func:`_heur_wall_cost_enabled` (``heur_state``
+    carries ``walls``), once ``key`` has a measured call and the caller passes the
+    search's node-processing wall, the test runs in seconds; see that function.
+    Otherwise it is the fixed-cost test, unchanged.
 
     The finder role is never gated: with no incumbent yet, securing the first one
     (for pruning) takes priority. Once an incumbent exists the call is an improver
@@ -259,18 +260,17 @@ def _improver_within_contingent(
     _weight = success_gain * (heur_state["found"] + 1) / (heur_state["calls"] + 1)
     _contingent = offset + quot * _nodes * _weight
     _walls = heur_state.get("walls")
-    if key is not None and _walls is not None and _walls.get(key):
+    if key is not None and node_wall is not None and _walls is not None and _walls.get(key):
         # #2176 (``DISCOPT_HEUR_WALL_COST``): the same contingent with both sides
-        # in seconds. One cost unit is one node's measured wall (the search's
-        # non-improver wall per processed node), and the call is priced at the mean
-        # measured wall of this heuristic's own earlier calls.
-        _now = time.perf_counter() if now is None else float(now)
-        _search = max(0.0, _now - float(heur_state["t0"]) - float(heur_state["wall"]))
+        # in seconds. One cost unit is one node's measured processing wall, and the
+        # call is priced at the mean measured wall of this heuristic's own earlier
+        # calls.
         if _nodes <= 0:
             return False
         _expected = sum(_walls[key]) / len(_walls[key])
-        return float(heur_state["wall"]) + _expected <= _contingent * (_search / _nodes)
-    return (heur_state["cost"] + cost) <= _contingent
+        _unit = max(0.0, float(node_wall)) / _nodes
+        return bool(float(heur_state["wall"]) + _expected <= _contingent * _unit)
+    return bool(float(heur_state["cost"]) + cost <= _contingent)
 
 
 def _heur_wall_cost_enabled() -> bool:
@@ -285,10 +285,16 @@ def _heur_wall_cost_enabled() -> bool:
     ``spent + cost <= offset + quot * nodes * weight``. ``cost`` is a fixed
     per-heuristic number (``_HEUR_COST``: RINS 5, local branching 10, enumeration
     12), meant as node-equivalents. Nothing checks that the call actually costs
-    that. ON keeps the formula and measures both sides. One unit is the search's
-    own non-improver wall per processed node. A heuristic's price is the mean wall
-    of its earlier calls in this solve. Its first call, with nothing measured yet,
-    takes the fixed-cost test as before.
+    that. ON keeps the formula and measures both sides:
+
+    * one unit is the search's **node-processing wall** per processed node -- the
+      ``rust_time + jax_time`` each loop already accumulates (batch export, node
+      relaxation / NLP solves, import and processing), which excludes the root
+      heuristics (LOA proposer, pumps, multistart, OBBT) and the improvers;
+    * a heuristic's price is the mean wall of its earlier calls in this solve,
+      timed from :func:`_improver_clock_start` at the call to
+      :func:`_record_improver_run`;
+    * a first call, with nothing measured yet, takes the fixed-cost test as before.
 
     Why: GDPlib ``batch_processing`` hull, NLP-BB, with the #2144 incumbent, 159
     nodes, profiled: 6 RINS calls took 54.8 s and improved nothing. The contingent
@@ -305,13 +311,27 @@ def _heur_wall_cost_enabled() -> bool:
     )
 
 
+def _new_heur_state() -> dict[str, Any]:
+    """A fresh improver-governor state (#1344); with the #2176 timing fields when ON."""
+    st: dict[str, Any] = {"calls": 0, "found": 0, "cost": 0.0}
+    if _heur_wall_cost_enabled():
+        st.update(walls={}, wall=0.0, started={})
+    return st
+
+
+def _improver_clock_start(heur_state: dict[str, Any], key: str) -> None:
+    """Start timing ``key``'s call, at the heuristic call itself (#2176). No-op when OFF."""
+    started = heur_state.get("started")
+    if started is not None:
+        started[key] = time.perf_counter()
+
+
 def _record_improver_run(
-    heur_state: dict[str, float],
+    heur_state: dict[str, Any],
     cost: float,
     improved: bool,
     *,
     key: Optional[str] = None,
-    wall: Optional[float] = None,
 ) -> None:
     """Charge an improver-role run against the contingent and note success.
 
@@ -320,18 +340,25 @@ def _record_improver_run(
     "mirrored from solve_model". ``heur_state`` is mutated in place, exactly as
     the closed-over dict was.
 
-    ``key``/``wall`` (#2176, ``DISCOPT_HEUR_WALL_COST``): the call's measured wall,
-    kept per heuristic in ``heur_state["walls"]`` and summed in
-    ``heur_state["wall"]``. Ignored when the state carries no ``walls`` (flag OFF).
+    ``key`` (#2176, ``DISCOPT_HEUR_WALL_COST``): the wall since this key's
+    :func:`_improver_clock_start` is kept per heuristic in ``heur_state["walls"]`` and
+    summed in ``heur_state["wall"]``. A record with no running clock for ``key``
+    charges no wall. Ignored when the state
+    carries no ``walls`` (flag OFF).
     """
     heur_state["calls"] += 1
     heur_state["cost"] += cost
     if improved:
         heur_state["found"] += 1
-    _walls = heur_state.get("walls")
-    if _walls is not None and key is not None and wall is not None:
-        _walls.setdefault(key, []).append(max(0.0, float(wall)))
-        heur_state["wall"] = float(heur_state["wall"]) + max(0.0, float(wall))
+    walls = heur_state.get("walls")
+    if walls is None or key is None:
+        return
+    t = heur_state["started"].pop(key, None)
+    if t is None:
+        return
+    wall = max(0.0, time.perf_counter() - float(t))
+    walls.setdefault(key, []).append(wall)
+    heur_state["wall"] = float(heur_state["wall"]) + wall
 
 
 def _validate_injected_candidate(x, evaluator, cl, cu, int_offsets, int_sizes):
@@ -3719,7 +3746,7 @@ def _root_pump_skip_enabled() -> bool:
 
 
 def _root_pump_skip_decision(
-    tree: Any, gap_tolerance: float, abs_gap_tol: float
+    tree: Any, gap_tolerance: float, abs_gap_tol: float, root_lb: float = float("-inf")
 ) -> tuple[bool, str]:
     """Whether the root pumps are skipped, and why, under :func:`_root_pump_skip_enabled`.
 
@@ -3738,9 +3765,12 @@ def _root_pump_skip_decision(
     closed-gap case: LOA's bound 4668.809 against its optimum 4669.0235, a relative
     gap of 4.6e-5, inside the default ``gap_tolerance`` of 1e-4.
 
-    The tree's lower bound is the right reference: it includes a bound installed by
-    :meth:`PyTreeManager.seed_root_bound` (the LOA proposer's), which the batch
-    minimum of the root relaxations does not.
+    The bound is ``max(tree global lower bound, root_lb)``. The tree's bound includes
+    a bound installed by :meth:`PyTreeManager.seed_root_bound` (the LOA proposer's).
+    The pump site runs before the root batch is imported into the tree, though, so the
+    caller also passes ``root_lb``: the root batch's own minimum relaxation bound,
+    the ``_batch_relax_lb`` that ``_root_optimum_proven`` already reads at the same
+    point.
     Panel (CLAUDE.md §5, old rule vs this one, ``gdp_parity`` x {big-M, hull} at 120 s,
     ``docs/dev/data/2170-pump-skip-gap-gate/``): cert-clean, 24 -> 24 solved, and
     methanol hull the only objective that moved. On the certified cells where the pumps
@@ -3752,6 +3782,8 @@ def _root_pump_skip_decision(
         return False, "no incumbent"
     ub = float(inc[1])
     lb = float(tree.stats().get("global_lower_bound", float("-inf")))
+    if np.isfinite(root_lb):
+        lb = max(lb, float(root_lb))
     if _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol):
         return True, f"the incumbent {ub:.10g} meets the gap test against the bound {lb:.10g}"
     return False, f"the incumbent {ub:.10g} is open against the bound {lb:.10g}"
@@ -20876,15 +20908,12 @@ def solve_model(
     # ``nonlocal`` dance. ``cost`` is sub-NLP-solve-equivalents already spent on
     # the (improver-role) heuristics; ``found`` counts those that strictly
     # improved the incumbent — the success signal in the contingent.
-    _heur_state: dict[str, Any] = {"calls": 0, "found": 0, "cost": 0.0}
-    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF): measured walls, and when each
-    # admitted call started. Absent with the flag OFF, which keeps the fixed-cost test.
-    if _heur_wall_cost_enabled():
-        _heur_state.update(walls={}, wall=0.0, t0=time.perf_counter(), started={})
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF) adds the timing fields.
+    _heur_state = _new_heur_state()
 
     def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
-        ok = _improver_within_contingent(
+        return _improver_within_contingent(
             cost,
             budget_on=_heur_budget_on,
             tree=tree,
@@ -20893,18 +20922,13 @@ def solve_model(
             offset=_HEUR_BUDGET_OFFSET,
             quot=_HEUR_BUDGET_QUOT,
             key=key,
+            # #2176: the node-processing wall this loop accumulates.
+            node_wall=rust_time + jax_time,
         )
-        if ok and key is not None and "started" in _heur_state:
-            _heur_state["started"][key] = time.perf_counter()
-        return ok
 
     def _record_improver(cost: float, improved: bool, key: Optional[str] = None) -> None:
         """Bind this solve's heuristic state to the shared recorder (#1344)."""
-        _wall = None
-        if key is not None and "started" in _heur_state:
-            _t = _heur_state["started"].pop(key, None)
-            _wall = None if _t is None else time.perf_counter() - _t
-        _record_improver_run(_heur_state, cost, improved, key=key, wall=_wall)
+        _record_improver_run(_heur_state, cost, improved, key=key)
 
     if subnlp_enabled:
         try:
@@ -23280,7 +23304,9 @@ def solve_model(
             # #2170: skip on a CLOSED gap, not on an incumbent's mere existence.
             _fp_skip = False
             if _root_pump_skip_enabled():
-                _fp_skip, _fp_why = _root_pump_skip_decision(tree, gap_tolerance, abs_gap_tol)
+                _fp_skip, _fp_why = _root_pump_skip_decision(
+                    tree, gap_tolerance, abs_gap_tol, root_lb=_batch_relax_lb
+                )
                 if _fp_skip:
                     logger.info("Feasibility pump (root): skipped, %s", _fp_why)
                 elif tree.incumbent() is not None:
@@ -23737,6 +23763,7 @@ def solve_model(
             else:
                 _enum_seed = 0.5 * np.add(*_clip_start_box(lb, ub))
             _enum_stats: dict = {}
+            _improver_clock_start(_heur_state, "enumerate")
             try:
                 _enum_results = enumerate_binary_seeds_subnlp(
                     model,
@@ -23921,6 +23948,7 @@ def solve_model(
                 ):
                     _rins_obj0 = float(_lns_inc[1])
                     _rins_improved = False
+                    _improver_clock_start(_heur_state, "rins")
                     try:
                         from discopt._relax.primal_heuristics import rins
 
@@ -24008,6 +24036,7 @@ def solve_model(
                     )
                     _lb_obj0 = float(_lns_inc[1])
                     _lb_improved = False
+                    _improver_clock_start(_heur_state, "lbranch")
                     try:
                         from discopt._relax.primal_heuristics import local_branching
 
@@ -29026,15 +29055,12 @@ def _solve_nlp_bb(
     _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))
     _HEUR_SUCCESS_GAIN = 3.0
     _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
-    _heur_state: dict[str, Any] = {"calls": 0, "found": 0, "cost": 0.0}
-    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF): measured walls, and when each
-    # admitted call started. Absent with the flag OFF, which keeps the fixed-cost test.
-    if _heur_wall_cost_enabled():
-        _heur_state.update(walls={}, wall=0.0, t0=time.perf_counter(), started={})
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF) adds the timing fields.
+    _heur_state = _new_heur_state()
 
     def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
-        ok = _improver_within_contingent(
+        return _improver_within_contingent(
             cost,
             budget_on=_heur_budget_on,
             tree=tree,
@@ -29043,18 +29069,13 @@ def _solve_nlp_bb(
             offset=_HEUR_BUDGET_OFFSET,
             quot=_HEUR_BUDGET_QUOT,
             key=key,
+            # #2176: the node-processing wall this loop accumulates.
+            node_wall=rust_time + jax_time,
         )
-        if ok and key is not None and "started" in _heur_state:
-            _heur_state["started"][key] = time.perf_counter()
-        return ok
 
     def _record_improver(cost: float, improved: bool, key: Optional[str] = None) -> None:
         """Bind this solve's heuristic state to the shared recorder (#1344)."""
-        _wall = None
-        if key is not None and "started" in _heur_state:
-            _t = _heur_state["started"].pop(key, None)
-            _wall = None if _t is None else time.perf_counter() - _t
-        _record_improver_run(_heur_state, cost, improved, key=key, wall=_wall)
+        _record_improver_run(_heur_state, cost, improved, key=key)
 
     from discopt import debug as _debug
 
@@ -29983,6 +30004,7 @@ def _solve_nlp_bb(
                     ):
                         _rins_obj0 = float(_lns_inc[1])
                         _rins_improved = False
+                        _improver_clock_start(_heur_state, "rins")
                         try:
                             from discopt._relax.primal_heuristics import rins
 
@@ -30030,6 +30052,7 @@ def _solve_nlp_bb(
                         )
                         _lb_obj0 = float(_lns_inc[1])
                         _lb_improved = False
+                        _improver_clock_start(_heur_state, "lbranch")
                         try:
                             from discopt._relax.primal_heuristics import local_branching
 

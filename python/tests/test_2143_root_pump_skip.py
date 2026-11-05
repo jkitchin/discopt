@@ -113,15 +113,78 @@ def test_on_skips_the_pumps_when_the_gap_is_closed(monkeypatch, caplog):
 def test_on_runs_the_pumps_when_the_incumbent_gap_is_open(monkeypatch, caplog):
     """#2170: an incumbent far from the bound no longer suppresses the pumps.
 
-    On ``_model`` the start's incumbent sits above the root bound by more than the
-    gap tolerance, so ON runs the pumps exactly as ``=0`` does.
+    The gap is open by construction, not by when the root batch reaches the tree:
+    the start's objective (-1.502) is worse than ``_model``'s optimum (-2.399), so
+    no valid bound can close it (the optimum itself leaves a 37 % gap). ON runs the
+    pumps exactly as ``=0`` does, and says why.
     """
     n_off, _, r_off = _solve(monkeypatch, caplog, "0", start=True)
-    n_on, skipped, r_on = _solve(monkeypatch, caplog, "1", start=True)
-    assert not skipped
-    assert n_off >= 1 and n_on == n_off
+    monkeypatch.setenv(_FLAG, "1")
+    monkeypatch.setenv("DISCOPT_ROOT_WARMSTART_FIRST", "1")
+    calls: list[int] = []
+    real_pump = PH.feasibility_pump
+
+    def pump(*a, **k):
+        calls.append(1)
+        return real_pump(*a, **k)
+
+    monkeypatch.setattr(PH, "feasibility_pump", pump)
+    m, x0 = _model()
+    with caplog.at_level(logging.INFO, logger="discopt.solver"):
+        r_on = m.solve(time_limit=30, initial_solution=x0)
+    gate = [
+        rec.getMessage() for rec in caplog.records if "Feasibility pump (root):" in rec.getMessage()
+    ]
+    assert gate and "is open against the bound" in gate[0], gate
+    assert r_on.objective < -2.39  # the start (-1.502) was not optimal
+    assert n_off >= 1 and len(calls) == n_off
     assert r_on.status == r_off.status == "optimal"
     assert r_on.objective == pytest.approx(r_off.objective, abs=1e-6)
+
+
+def test_the_gate_logs_a_finite_closed_bound_at_the_root(monkeypatch, caplog):
+    """At the pump site the root batch is not yet imported into the tree, so the gate
+    also takes the batch's own relaxation bound (``root_lb``; review on
+    jkitchin/discopt#2175).
+
+    Measured: on this model the tree already holds a finite root bound there (2.0,
+    seeded before the batch), so this end-to-end check passes with or without
+    ``root_lb``. It pins the observable outcome, a finite closed bound and a skip.
+    ``test_skip_decision_takes_the_larger_of_tree_and_root_bound`` pins ``root_lb``
+    itself (it fails when the decision ignores it).
+    """
+    monkeypatch.setenv(_FLAG, "1")
+    monkeypatch.setenv("DISCOPT_ROOT_WARMSTART_FIRST", "1")
+    m, x0 = _closed_model()
+    with caplog.at_level(logging.INFO, logger="discopt.solver"):
+        m.solve(time_limit=30, initial_solution=x0)
+    gate = [
+        rec.getMessage() for rec in caplog.records if "Feasibility pump (root):" in rec.getMessage()
+    ]
+    assert gate == [
+        "Feasibility pump (root): skipped, the incumbent 2 meets the gap test against the bound 2"
+    ], gate
+
+
+def test_the_gate_reads_a_seeded_bound_in_a_real_tree():
+    """The LOA-seeded case on the Rust tree, in the state the pump site sees.
+
+    Root exported, not yet imported; an incumbent injected; a bound installed with
+    ``seed_root_bound``, the proposer's hook. The syngas hull numbers: the hull's root
+    relaxation (4347.80) leaves the gap open, LOA's bound (4668.809) closes it.
+    """
+    import numpy as np
+    from discopt._rust import PyTreeManager
+
+    t = PyTreeManager(2, [0.0, 0.0], [1.0, 1.0], [0], [2], "best_first")
+    t.initialize()
+    t.export_batch(1)
+    t.inject_incumbent(np.array([1.0, 0.5]), 4669.023485)
+    skip, why = S._root_pump_skip_decision(t, 1e-4, 1e-6, root_lb=4347.80)
+    assert not skip and "open" in why
+    t.seed_root_bound(4668.808968)
+    skip, why = S._root_pump_skip_decision(t, 1e-4, 1e-6, root_lb=4347.80)
+    assert skip and "4668.808968" in why
 
 
 class _Tree:
@@ -152,6 +215,14 @@ def test_skip_decision_is_the_gap_test(inc, glb, skip):
     assert why
 
 
+def test_skip_decision_takes_the_larger_of_tree_and_root_bound():
+    tree = _Tree(4669.0235, float("-inf"))  # root batch not yet imported
+    assert S._root_pump_skip_decision(tree, 1e-4, 1e-6, root_lb=4668.809)[0] is True
+    assert S._root_pump_skip_decision(tree, 1e-4, 1e-6, root_lb=4347.80)[0] is False
+    seeded = _Tree(4669.0235, 4668.809)  # a seeded bound above the root batch wins
+    assert S._root_pump_skip_decision(seeded, 1e-4, 1e-6, root_lb=4347.80)[0] is True
+
+
 def test_on_runs_the_pumps_without_an_incumbent(monkeypatch, caplog):
     """MINLPLib ``ex1221`` reaches both root pumps with no incumbent: ON runs them."""
     from pathlib import Path
@@ -173,3 +244,45 @@ def test_on_runs_the_pumps_without_an_incumbent(monkeypatch, caplog):
     assert not any(_SKIP_LOG in rec.getMessage() for rec in caplog.records)
     assert len(calls) == 2  # the LP-vertex pump and the NLP-relaxation pump
     assert r.status == "optimal"
+
+
+def test_a_loa_seeded_closed_gap_skips_the_pumps_end_to_end(monkeypatch, caplog):
+    """The syngas path, end to end, on the #2143 proposer toy (optimum 2.0).
+
+    The root wave is forced to fail, so the LOA proposer fires and its point (2.0)
+    is injected. Its bound is then installed through the real
+    ``PyTreeManager.seed_root_bound``. On this toy LOA stops at its first incumbent
+    with bound 1.017, so the value is pinned to the toy's proved optimum 2.0, a valid
+    floor. The gate must read that seed through the tree and skip the pumps.
+    """
+    pytest.importorskip("pounce")
+    from test_2143_gdp_loa_proposer_bound import TOY_OPT, _toy
+
+    monkeypatch.setenv(_FLAG, "1")
+    monkeypatch.setenv("DISCOPT_GDP_LOA_PROPOSER", "1")
+    monkeypatch.setenv("DISCOPT_SUBNLP_REDUCED", "1")
+    monkeypatch.setattr(PH, "one_hot_config_subnlp", lambda *a, **k: [])
+    seeded: list[float] = []
+
+    def seed(tree, work, loa, found_obj):
+        b = min(float(found_obj), TOY_OPT)
+        tree.seed_root_bound(b)
+        seeded.append(b)
+        return True
+
+    monkeypatch.setattr(S, "_seed_loa_proposer_bound", seed)
+    calls: list[int] = []
+    real_pump = PH.feasibility_pump
+
+    def pump(*a, **k):
+        calls.append(1)
+        return real_pump(*a, **k)
+
+    monkeypatch.setattr(PH, "feasibility_pump", pump)
+    with caplog.at_level(logging.INFO, logger="discopt.solver"):
+        r = _toy().solve(gdp_method="hull", time_limit=60)
+    gate = [m.getMessage() for m in caplog.records if "Feasibility pump (root):" in m.getMessage()]
+    assert seeded == [pytest.approx(TOY_OPT)]
+    assert gate and gate[0].startswith("Feasibility pump (root): skipped, "), gate
+    assert calls == []
+    assert r.objective == pytest.approx(TOY_OPT, abs=1e-6)
