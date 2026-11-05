@@ -1,5 +1,5 @@
 """#2142 Part B: SCIP 6.3 root propagation (2142-propagation/scip_prop.py, BASE_PARAMS) of every
-captured box.  python -u b3_scip.py BOXES.npz OUT.npz"""
+captured box.  python -u b3_scip.py BOXES.npz OUT.npz [scip/param=value ...]"""
 
 import math, os, sys
 import numpy as np
@@ -17,7 +17,12 @@ SPEC_KEYS = (
     "obbt_candidates"
 ).split()
 kw = {k: (int(d[k]) if d[k].ndim == 0 else d[k]) for k in SPEC_KEYS}
-sp = scip_prop.ScipProp(kw)
+params = {}
+for kv in sys.argv[3:]:  # optional SCIP params k=v (diagnostic arms)
+    k, v = kv.split("=", 1)
+    vv = {"true": True, "false": False}.get(v.lower())
+    params[k] = vv if vv is not None else (float(v) if "." in v else int(v))
+sp = scip_prop.ScipProp(kw, params)
 n = kw["n_cols"]
 L, H, live = [], [], []
 for b in range(len(d["rec_id"])):
