@@ -991,18 +991,18 @@ impl TreeManager {
                     // `z <= 0` and `z >= 1` (a sound, exhaustive cover) and each
                     // child fixes the column, so the discrete domain strictly
                     // shrinks and termination is preserved.
+                    let actionable = if frac > 1e-5 && frac < 1.0 - 1e-5 {
+                        true
+                    } else {
+                        *val != val.round()
+                    };
                     // #2165 review: and only on an INTEGER column. The split
                     // below (`x <= floor(v)` / `x >= floor(v) + 1`) drops the
                     // interval `(floor(v), floor(v) + 1)` of a continuous column,
                     // so a hint naming one (`debug.steer.hint` forwards any column)
                     // is ignored and ordinary selection decides instead, keeping
                     // the "reorders branching only" contract.
-                    let actionable = self.is_integer_col(hint_idx)
-                        && if frac > 1e-5 && frac < 1.0 - 1e-5 {
-                            true
-                        } else {
-                            *val != val.round()
-                        };
+                    let actionable = actionable && self.is_integer_col(hint_idx);
                     if actionable {
                         Some((
                             Some(BranchDecision {
