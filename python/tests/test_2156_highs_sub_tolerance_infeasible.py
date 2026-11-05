@@ -8,10 +8,13 @@ same MIP code. Measured on 30 such 2-32-32-1 networks: 8 came back
 
 Checked here:
 
-* End to end: that model, with the #2156 partition merge switched off, is not
-  certified infeasible. A point built from ``net.forward`` passes
+* End to end (slow lane): that model, with the #2156 partition merge switched
+  off, is not certified infeasible. A point built from ``net.forward`` passes
   ``verify_point``. That point is an independent oracle that the model is
   feasible.
+* Wiring (fast lane): a HiGHS-only certified infeasible pushed through
+  ``solve_milp_std`` and through the coefficient-tightening rescue comes out
+  uncertified.
 * The guard's scope: it withdraws a HiGHS-only label, leaves a Farkas proof and a
   model without sub-tolerance columns alone, and never touches ``optimal``.
 * Canary: on the shipped 13-row sub-model, raw HiGHS still answers
@@ -79,8 +82,16 @@ def _exact_point(m: Model, net: NetworkDefinition, x_in: np.ndarray) -> np.ndarr
 SEED0_OPTIMUM = 0.04328811180858727
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_unmerged_extended_model_is_not_certified_infeasible(monkeypatch):
     """Before #2156 this returned ``infeasible`` with ``gap_certified=True``.
+
+    Slow lane: 2.9 s locally but 22.8 s on CI, over the 15 s fast-lane budget. No
+    smaller instance reproduces the class: 84 solves of 2-h-h-1 nets with h = 8..24
+    (12 seeds each, merge off, guard disabled) gave no certified ``infeasible``.
+    The fast lane keeps the two wiring tests below, which push a HiGHS-only label
+    through both of the guard's call sites.
 
     Feasibility is shown without a second solve: the forward pass at any input is an
     exact point of the model (two inputs are checked). The big-M reference solve was
@@ -163,6 +174,53 @@ def test_guard_scope(status, provenance, width, withdrawn):
         n += 1
         assert got.labels.get("milp/infeasible_provenance") == provenance
         n += 1
+    assert n == 2
+
+
+def _infeasible_narrow_sf() -> R.StdForm:
+    """``x0 + x1 = 0.5``, ``x0 in [0, 5e-7]``, ``x1`` integer in ``[0, 1]``: truly
+    infeasible (so no cross-check can refute it), with one sub-tolerance column."""
+    return _sf_with_width(5e-7)
+
+
+def _fake_highs_infeasible(*_a, **_k) -> R.HighsOutcome:
+    return R.HighsOutcome(
+        "infeasible",
+        gap_certified=True,
+        highs_status="kInfeasible",
+        labels={"milp/infeasible_provenance": "highs"},
+    )
+
+
+def test_guard_is_applied_by_solve_milp_std(monkeypatch):
+    """A HiGHS-only certified infeasible from the certified pipeline leaves
+    ``solve_milp_std`` uncertified when the model has a sub-tolerance column."""
+    monkeypatch.setattr(R, "_certified_milp", _fake_highs_infeasible)
+    sf = _infeasible_narrow_sf()
+    assert R.sub_tolerance_columns(sf) == 1
+    out = R.solve_milp_std(sf, time_limit=30.0, gap_tolerance=1e-4, max_nodes=1000)
+    n = 0
+    assert not (out.status == "infeasible" and out.gap_certified), (out.status, out.labels)
+    n += 1
+    assert out.stats.get("milp/infeasible_label_declined_sub_tolerance") == 1.0
+    n += 1
+    assert n == 2
+
+
+def test_guard_is_applied_in_the_coefficient_tightening_rescue(monkeypatch):
+    """The #1654 rescue adopts a certified infeasible of the tightened form; that
+    label is HiGHS's too, so the guard must see it."""
+    sf = _infeasible_narrow_sf()
+    monkeypatch.setattr(R, "coefficient_tightened", lambda sf_, **_k: (sf_, 1))
+    monkeypatch.setattr(R, "_certified_milp", _fake_highs_infeasible)
+    primary = R.HighsOutcome("error", message="primary not certified")
+    kw = {"time_limit": 30.0, "gap_tolerance": 1e-4, "abs_gap_tolerance": None}
+    out = R._coefficient_tightening_rescue(sf, primary, kw, __import__("time").monotonic())
+    n = 0
+    assert not (out.status == "infeasible" and out.gap_certified), (out.status, out.labels)
+    n += 1
+    assert out.labels.get("milp/coef_tighten_status") == "error"
+    n += 1
     assert n == 2
 
 
