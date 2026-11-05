@@ -39121,6 +39121,33 @@ _MILP_ENGINE_FRONTIER_BYTES = 2 << 30
 _MILP_ENGINE_UNCAPPED_NODES = min(1 << 62, sys.maxsize)
 
 
+#: Least wall (seconds) worth a re-entry under ``DISCOPT_MILP_REENTRY_SPEND``: below
+#: it a restarted search re-solves little more than its root.
+_MILP_REENTRY_MIN_S = 1.0
+
+
+def _milp_reentry_spend_enabled() -> bool:
+    """``DISCOPT_MILP_REENTRY_SPEND`` gate (highs-parity P4.0): re-enter on an
+    uncertified ``feasible`` whenever at least ``_MILP_REENTRY_MIN_S`` remains.
+
+    Without it the #698 re-entry runs only when the remaining time exceeds run 1's
+    stall slice (``_milp_budget``). That slice is half the remaining time below the
+    10 s cap, so for any ``time_limit`` under about 20 s the remainder after run 1 is
+    *always* smaller than the slice and the re-entry never runs: measured on the
+    MIPLIB-38 rows the Rust route leaves uncertified at ``time_limit=20``
+    (``docs/dev/data/highs-parity/p4.1``), 20 of 24 returned at 10.1-11.1 s. The
+    premise "a restart with less budget cannot beat it" ignores that run 2 starts
+    from run 1's incumbent (and the #280 swap reseed). Adoption is unchanged: only a
+    certified or strictly better result whose point passes ``_point_feasible`` is
+    taken, and the tighter of the two valid bounds is kept.
+
+    Changes the search, so gated per CLAUDE.md section 5; read at call time.
+    Default OFF pending the panel recorded in ``docs/dev/highs-parity-plan.md``
+    (P4.0) and ``docs/dev/flag-retirement-audit.md``.
+    """
+    return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "0") == "1"
+
+
 def _milp_engine_full_budget_enabled() -> bool:
     """``DISCOPT_MILP_ENGINE_FULL_BUDGET`` gate (#1874): let the native MILP
     engine use the caller's budget instead of stopping on the 100k-node default.
@@ -39522,7 +39549,13 @@ def _solve_milp_simplex(
             )
         if _run2_nodes <= 0:
             _stopped_on_nodes = True
-        elif _reentry_remaining > _milp_budget + 1e-9:
+        elif _reentry_remaining > (
+            # #1116: under ``deterministic`` a wall-clock-decided restart would make
+            # the search machine-dependent, so the legacy condition stands there.
+            _MILP_REENTRY_MIN_S
+            if _milp_reentry_spend_enabled() and not _tuning().deterministic
+            else _milp_budget + 1e-9
+        ):
             _stopped_on_nodes = False
             _xo1 = np.asarray(x_struct, dtype=np.float64)[:n_orig]
             _seed2 = None

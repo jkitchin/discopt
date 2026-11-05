@@ -168,7 +168,16 @@ measured" — it may be scheduled only with an entry experiment. From the routin
   2026-11-05 (later, owner request): merged `origin/main` `db232311` (#2143 landed on
   `main`, #2149/#2159/#2160/#2161) at `fe28c7bc`; conflicts resolved to `main`'s side
   plus this branch's two audit rows; rebuilt; `cargo test` 984/0, smoke 4506, adversarial
-  19, audit/inventory/parity/route tests 530 passed. Next due 2026-11-06.
+  19, audit/inventory/parity/route tests 530 passed. 2026-11-05 (third, owner request
+  "rebase first, then 4.0"): merged `origin/main` `a0b3b5e1` (#2158/#2163-#2166) at
+  `0912f6c6` -- by merge, for the reason above; one conflict, `run_milp_hooked` in
+  `lp_bindings.rs`, kept `main`'s ReLU-separator guard and this branch's shared
+  `milp_options` builder (no `MilpOptions` field differs). `cargo test` 986/0, smoke
+  4518, adversarial 19, parity/IIS/audit tests 618 passed (the one failure was P4.0's
+  new gate, marker updated). `cargo clippy -D warnings` is clean on `discopt-core`;
+  `discopt-python` has 11 pre-existing lints in files neither side touched
+  (`expr_bindings.rs`, `bnb_bindings.rs`, `convex_bindings.rs`, `decomp_bindings.rs`).
+  Next due 2026-11-06.
 - **Checkpoint PRs to `main`** (each independently reviewable, CI-green): the P0
   harness; each bound-neutral port once its exact-identity gate is green; each flag that
   *graduates* (default flip + audit row) or *retires* (deletion + audit row); the P6
