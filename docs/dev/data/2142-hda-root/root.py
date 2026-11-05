@@ -12,6 +12,9 @@ name = sys.argv[3] if len(sys.argv) > 3 else "hda"
 m = convert_pyomo_gdp(_spec(name).builder()).model
 t = time.perf_counter()
 r = m.solve(gdp_method="hull", deterministic=True, max_nodes=int(sys.argv[2]), time_limit=float(os.environ.get("TL", "120")))
-print(f"RESULT {name} flag={sys.argv[1]} nodes={r.node_count} status={r.status} obj={r.objective} bound={r.bound!r} wall={time.perf_counter()-t:.1f}", G._HULL_EXACT_STATS, flush=True)
+print(f"RESULT {name} flag={sys.argv[1]} nodes={r.node_count} status={r.status} obj={r.objective} bound={r.bound!r} root_bound={getattr(r, "root_bound", None)!r} wall={time.perf_counter()-t:.1f}", G._HULL_EXACT_STATS, flush=True)
 n = 1 + (1 if sys.argv[1] == "1" and G._HULL_EXACT_STATS["homogenized"] > 0 else 0) + (1 if sys.argv[1] == "0" and sum(G._HULL_EXACT_STATS.values()) == 0 else 0)
 print("executed assertions:", n)
+import json
+st = getattr(r, "solver_stats", None) or {}
+print("STATS", json.dumps({k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v)[:120]) for k, v in sorted(st.items())}, default=str))
