@@ -269,7 +269,7 @@ fn aggregate(
         minact = add_down(minact, mul_down(c, b));
     }
     let viol = (minact - rhs) / (1.0 + rhs.abs());
-    if !(viol > KEEP_MARGIN) {
+    if viol.is_nan() || viol <= KEEP_MARGIN {
         return Err(ProofReject::NotViolated);
     }
     if support.len() > max_nnz {
