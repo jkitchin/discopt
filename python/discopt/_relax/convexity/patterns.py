@@ -107,8 +107,28 @@ def clear_declared_box_cache(model: Model) -> None:
         delattr(model, _DECLARED_BOX_CACHE_ATTR)
 
 
-def _total_scalar_variables(model: Model) -> int:
+def _declared_box_cached(model: Model):
+    """The memoized ``(n_scalar, lo, hi, n_var_objects)``, or ``None`` when absent or
+    stale.
+
+    #2142: the cache is also invalidated by the model GROWING. A lowering that
+    classifies a row (``gdp_reformulate._homogenized_hull_row`` calls
+    ``classify_constraint`` mid-hull) and then appends variables used to leave a box
+    sized for the smaller model; the next classification then indexed past it
+    (``IndexError: index 801 is out of bounds for axis 0 with size 801`` on GDPlib
+    hda's hull) and the solver's catch-all reported the WHOLE model
+    convexity-unknown. Variables are only ever appended or removed, never
+    reordered, so the object count detects every such change; declared-bound
+    edits keep their explicit :func:`clear_declared_box_cache` calls.
+    """
     cached = getattr(model, _DECLARED_BOX_CACHE_ATTR, None)
+    if cached is None or cached[3] != len(model._variables):
+        return None
+    return cached
+
+
+def _total_scalar_variables(model: Model) -> int:
+    cached = _declared_box_cached(model)
     if cached is not None:
         return int(cached[0])
     return sum(v.size for v in model._variables)
@@ -272,7 +292,7 @@ def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
     recognizers. The cache stores ``(n_scalar, lo, hi)`` so ``_total_scalar_variables``
     shares it, and is invalidated by :func:`clear_declared_box_cache`.
     """
-    cached = getattr(model, _DECLARED_BOX_CACHE_ATTR, None)
+    cached = _declared_box_cached(model)
     if cached is not None:
         return cached[1], cached[2]
     los: list[np.ndarray] = []
@@ -295,7 +315,11 @@ def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
     # box is simply rebuilt on the next call -- same arrays, only slower. Anything
     # else is a defect and propagates.
     try:
-        setattr(model, _DECLARED_BOX_CACHE_ATTR, (int(lo_arr.size), lo_arr, hi_arr))
+        setattr(
+            model,
+            _DECLARED_BOX_CACHE_ATTR,
+            (int(lo_arr.size), lo_arr, hi_arr, len(model._variables)),
+        )
     except AttributeError as exc:
         logger.debug("declared box not memoized: %s: %s", type(exc).__name__, exc)
     return lo_arr, hi_arr
