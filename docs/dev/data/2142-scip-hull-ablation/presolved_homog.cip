@@ -1,0 +1,469 @@
+STATISTICS
+  Problem name     : t_cstr_homog_spec
+  Variables        : 110 (9 binary, 0 integer, 0 implicit integer, 101 continuous)
+  Constraints      : 174 initial, 174 maximal
+OBJECTIVE
+  Sense            : minimize
+VARIABLES
+  [binary] <t_x2>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x4>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x6>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x8>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x10>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x12>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x14>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x16>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [binary] <t_x18>: obj=0, global bounds=[-0,1], local bounds=[-0,1]
+  [continuous] <t_x31>: obj=0, global bounds=[1,10], local bounds=[1,10]
+  [continuous] <t_x32>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x33>: obj=0, global bounds=[0.00999991299587144,10], local bounds=[0.00999991299587144,10]
+  [continuous] <t_x41>: obj=0, global bounds=[1,10], local bounds=[1,10]
+  [continuous] <t_x42>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x43>: obj=0, global bounds=[0.00999993499690355,10], local bounds=[0.00999993499690355,10]
+  [continuous] <t_x51>: obj=0, global bounds=[1,10], local bounds=[1,10]
+  [continuous] <t_x52>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x53>: obj=0, global bounds=[0.00999995699793566,10], local bounds=[0.00999995699793566,10]
+  [continuous] <t_x62>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x63>: obj=0, global bounds=[0.00999997899896776,10], local bounds=[0.00999997899896776,10]
+  [continuous] <t_x66>: obj=1, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x70>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x71>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x72>: obj=0, global bounds=[0,9.80000000000002], local bounds=[0,9.80000000000002]
+  [continuous] <t_x73>: obj=0, global bounds=[0,9.95171948603009], local bounds=[0,9.95171948603009]
+  [continuous] <t_x75>: obj=0, global bounds=[0,8.20000000000005], local bounds=[0,8.20000000000005]
+  [continuous] <t_x77>: obj=0, global bounds=[1,10], local bounds=[1,10]
+  [continuous] <t_x79>: obj=0, global bounds=[0.00999991299587144,10], local bounds=[0.00999991299587144,10]
+  [continuous] <t_x80>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x97>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x98>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x99>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x100>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10]
+  [continuous] <t_x102>: obj=1, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x108>: obj=0, global bounds=[0,0.990000006002003], local bounds=[0,0.990000006002003]
+  [continuous] <t_x109>: obj=0, global bounds=[0,0.0100000041352306], local bounds=[0,0.0100000041352306]
+  [continuous] <t_x112>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x117>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x118>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x119>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x120>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10]
+  [continuous] <t_x122>: obj=1, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x128>: obj=0, global bounds=[0,0.990000004002002], local bounds=[0,0.990000004002002]
+  [continuous] <t_x129>: obj=0, global bounds=[0,0.010000003067093], local bounds=[0,0.010000003067093]
+  [continuous] <t_x132>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x137>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x138>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x139>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x140>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10]
+  [continuous] <t_x142>: obj=1, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x148>: obj=0, global bounds=[0,0.990000002002002], local bounds=[0,0.990000002002002]
+  [continuous] <t_x149>: obj=0, global bounds=[0,0.0100000020220232], local bounds=[0,0.0100000020220232]
+  [continuous] <t_x152>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x157>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x158>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x159>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x160>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10]
+  [continuous] <t_x162>: obj=1, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x168>: obj=0, global bounds=[0,0.990000001], local bounds=[0,0.990000001]
+  [continuous] <t_x169>: obj=0, global bounds=[0,0.0100000009999999], local bounds=[0,0.0100000009999999]
+  [continuous] <t_x172>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x177>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011]
+  [continuous] <t_x179>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791]
+  [continuous] <t_x181>: obj=0, global bounds=[0,9], local bounds=[0,9]
+  [continuous] <t_x183>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x185>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x187>: obj=0, global bounds=[0,9.80000000000002], local bounds=[0,9.80000000000002]
+  [continuous] <t_x189>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001]
+  [continuous] <t_x191>: obj=0, global bounds=[0,9.4972710733779], local bounds=[0,9.4972710733779]
+  [continuous] <t_x193>: obj=0, global bounds=[0,9], local bounds=[0,9]
+  [continuous] <t_x195>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x197>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x199>: obj=0, global bounds=[0,9.80000000000001], local bounds=[0,9.80000000000001]
+  [continuous] <t_x201>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001]
+  [continuous] <t_x203>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791]
+  [continuous] <t_x205>: obj=0, global bounds=[0,9], local bounds=[0,9]
+  [continuous] <t_x207>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x209>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x211>: obj=0, global bounds=[0,9.80000000000001], local bounds=[0,9.80000000000001]
+  [continuous] <t_x213>: obj=0, global bounds=[0,9.50000000000007], local bounds=[0,9.50000000000007]
+  [continuous] <t_x215>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791]
+  [continuous] <t_x217>: obj=0, global bounds=[0,9], local bounds=[0,9]
+  [continuous] <t_x219>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x221>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x223>: obj=0, global bounds=[0,9.8], local bounds=[0,9.8]
+  [continuous] <t_x225>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011]
+  [continuous] <t_x227>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791]
+  [continuous] <t_x229>: obj=0, global bounds=[0,9], local bounds=[0,9]
+  [continuous] <t_x231>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x233>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x235>: obj=0, global bounds=[0,9.80000000000001], local bounds=[0,9.80000000000001]
+  [continuous] <t_x251>: obj=0, global bounds=[1,100], local bounds=[1,100]
+  [continuous] <t_x252>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x253>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x254>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x255>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x258>: obj=0, global bounds=[-10.4900000870042,0], local bounds=[-10.4900000870042,0]
+  [continuous] <t_x262>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x267>: obj=0, global bounds=[0,82.0000000000005], local bounds=[0,82.0000000000005]
+  [continuous] <t_x269>: obj=0, global bounds=[0,77.9000000000006], local bounds=[0,77.9000000000006]
+  [continuous] <t_x275>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x276>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x277>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x278>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x279>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x280>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x281>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x282>: obj=0, global bounds=[0,100], local bounds=[0,100]
+  [continuous] <t_x283>: obj=0, global bounds=[0,10], local bounds=[0,10]
+  [continuous] <t_x284>: obj=0, global bounds=[0,100], local bounds=[0,100]
+FIXED
+  [continuous] <t_x234>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x232>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x230>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x222>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x220>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x218>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x210>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x208>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x206>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x198>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x196>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x194>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x186>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x184>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x182>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x175>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x174>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x173>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x171>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x170>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x166>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x155>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x154>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x153>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x151>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x150>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x146>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x135>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x134>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x133>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x131>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x130>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x126>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x115>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x114>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x113>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x111>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x110>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x106>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x95>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x94>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x93>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x92>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x91>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x90>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x89>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x88>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x87>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [continuous] <t_x86>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [binary] <t_x1>: obj=0, global bounds=[-0,-0], local bounds=[-0,-0], fixed:-0
+  [binary] <t_x0>: obj=0, global bounds=[1,1], local bounds=[1,1], fixed:1
+  [binary] <t_x3>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x2>
+  [binary] <t_x5>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x4>
+  [binary] <t_x7>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x6>
+  [binary] <t_x9>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x8>
+  [binary] <t_x11>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x10>
+  [binary] <t_x13>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x12>
+  [binary] <t_x15>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x14>
+  [binary] <t_x17>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x16>
+  [binary] <t_x19>: obj=0, global bounds=[-0,1], local bounds=[-0,1], negated: 1 - <t_x18>
+  [continuous] <t_x78>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x275>
+  [continuous] <t_x236>: obj=0, global bounds=[1,100], local bounds=[1,100], aggregated: +1<t_x251>
+  [continuous] <t_x237>: obj=0, global bounds=[0,100], local bounds=[0,100], aggregated: +1<t_x252>
+  [continuous] <t_x238>: obj=0, global bounds=[0,100], local bounds=[0,100], aggregated: +1<t_x253>
+  [continuous] <t_x239>: obj=0, global bounds=[0,100], local bounds=[0,100], aggregated: +1<t_x254>
+  [continuous] <t_x240>: obj=0, global bounds=[0,100], local bounds=[0,100], aggregated: +1<t_x255>
+  [continuous] <t_x256>: obj=0, global bounds=[-10.4900000000001,9.01000000000001], local bounds=[-10.4900000000001,9.01000000000001], aggregated: -0.99 +1<t_x62> -1<t_x225>
+  [continuous] <t_x257>: obj=0, global bounds=[-9.50727107337791,9.98999999999999], local bounds=[-9.50727107337791,9.98999999999999], aggregated: -0.01 +1<t_x63> -1<t_x227>
+  [continuous] <t_x259>: obj=0, global bounds=[-19.5000000000001,10], local bounds=[-19.5000000000001,10], aggregated: +1<t_x32> -1<t_x189> -1<t_x42>
+  [continuous] <t_x260>: obj=0, global bounds=[-19.5000000000001,10], local bounds=[-19.5000000000001,10], aggregated: +1<t_x42> -1<t_x201> -1<t_x52>
+  [continuous] <t_x261>: obj=0, global bounds=[-19.5000000000001,10], local bounds=[-19.5000000000001,10], aggregated: +1<t_x52> -1<t_x213> -1<t_x62>
+  [continuous] <t_x263>: obj=0, global bounds=[-19.4972710733779,10], local bounds=[-19.4972710733779,10], aggregated: +1<t_x33> -1<t_x191> -1<t_x43>
+  [continuous] <t_x264>: obj=0, global bounds=[-19.4972710733779,10], local bounds=[-19.4972710733779,10], aggregated: +1<t_x43> -1<t_x203> -1<t_x53>
+  [continuous] <t_x265>: obj=0, global bounds=[-19.4972710733779,10], local bounds=[-19.4972710733779,10], aggregated: +1<t_x53> -1<t_x215> -1<t_x63>
+  [continuous] <t_x266>: obj=0, global bounds=[0,82.0000000000005], local bounds=[0,82.0000000000005], aggregated: +1<t_x267>
+  [continuous] <t_x268>: obj=0, global bounds=[0,77.9000000000006], local bounds=[0,77.9000000000006], aggregated: +1<t_x269>
+  [continuous] <t_x74>: obj=0, global bounds=[0,7.79000000000005], local bounds=[0,7.79000000000005], aggregated: +0.95<t_x75>
+  [continuous] <t_x116>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x120>
+  [continuous] <t_x136>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x140>
+  [continuous] <t_x121>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x122>
+  [continuous] <t_x56>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x66>
+  [continuous] <t_x228>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x229>
+  [continuous] <t_x250>: obj=0, global bounds=[-0,100], local bounds=[-0,100], aggregated: +1<t_x284>
+  [continuous] <t_x188>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x189>
+  [continuous] <t_x141>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x142>
+  [continuous] <t_x21>: obj=0, global bounds=[1,10], local bounds=[1,10], aggregated: +1<t_x77>
+  [continuous] <t_x190>: obj=0, global bounds=[0,9.4972710733779], local bounds=[0,9.4972710733779], aggregated: +1<t_x191>
+  [continuous] <t_x22>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x275>
+  [continuous] <t_x23>: obj=0, global bounds=[0.00999991299587144,10], local bounds=[0.00999991299587144,10], aggregated: +1<t_x79>
+  [continuous] <t_x192>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x193>
+  [continuous] <t_x24>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x80>
+  [continuous] <t_x204>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x205>
+  [continuous] <t_x165>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x229>
+  [continuous] <t_x224>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x225>
+  [continuous] <t_x50>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x140>
+  [continuous] <t_x274>: obj=0, global bounds=[-200,0], local bounds=[-200,0], aggregated: -2<t_x284>
+  [continuous] <t_x156>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x160>
+  [continuous] <t_x161>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x162>
+  [continuous] <t_x241>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x275>
+  [continuous] <t_x242>: obj=0, global bounds=[0,100], local bounds=[0,100], aggregated: +1<t_x276>
+  [continuous] <t_x54>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10], aggregated: +1<t_x140>
+  [continuous] <t_x270>: obj=0, global bounds=[-200,0], local bounds=[-200,0], aggregated: -2<t_x276>
+  [continuous] <t_x76>: obj=0, global bounds=[-10,0], local bounds=[-10,0], aggregated: -1<t_x80>
+  [continuous] <t_x243>: obj=0, global bounds=[-0,10], local bounds=[-0,10], aggregated: +1<t_x277>
+  [continuous] <t_x34>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10], aggregated: +1<t_x100>
+  [continuous] <t_x226>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x227>
+  [continuous] <t_x202>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x203>
+  [continuous] <t_x244>: obj=0, global bounds=[-0,100], local bounds=[-0,100], aggregated: +1<t_x278>
+  [continuous] <t_x245>: obj=0, global bounds=[-0,10], local bounds=[-0,10], aggregated: +1<t_x279>
+  [continuous] <t_x212>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x213>
+  [continuous] <t_x64>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10], aggregated: +1<t_x160>
+  [continuous] <t_x214>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x215>
+  [continuous] <t_x216>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x217>
+  [continuous] <t_x176>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x177>
+  [continuous] <t_x178>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x179>
+  [continuous] <t_x180>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x181>
+  [continuous] <t_x246>: obj=0, global bounds=[-0,100], local bounds=[-0,100], aggregated: +1<t_x280>
+  [continuous] <t_x200>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x201>
+  [continuous] <t_x271>: obj=0, global bounds=[-200,0], local bounds=[-200,0], aggregated: -2<t_x278>
+  [continuous] <t_x96>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x100>
+  [continuous] <t_x48>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x203>
+  [continuous] <t_x101>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x102>
+  [continuous] <t_x247>: obj=0, global bounds=[-0,10], local bounds=[-0,10], aggregated: +1<t_x281>
+  [continuous] <t_x60>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x160>
+  [continuous] <t_x248>: obj=0, global bounds=[-0,100], local bounds=[-0,100], aggregated: +1<t_x282>
+  [continuous] <t_x249>: obj=0, global bounds=[-0,10], local bounds=[-0,10], aggregated: +1<t_x283>
+  [continuous] <t_x103>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x189>
+  [continuous] <t_x164>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x227>
+  [continuous] <t_x104>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x191>
+  [continuous] <t_x49>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x205>
+  [continuous] <t_x105>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x193>
+  [continuous] <t_x40>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: -1<t_x120>
+  [continuous] <t_x44>: obj=0, global bounds=[-1.00010311343728e-09,10], local bounds=[-1.00010311343728e-09,10], aggregated: +1<t_x120>
+  [continuous] <t_x123>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x201>
+  [continuous] <t_x124>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x203>
+  [continuous] <t_x125>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x205>
+  [continuous] <t_x163>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x225>
+  [continuous] <t_x167>: obj=0, global bounds=[0,1], local bounds=[0,1], aggregated: 1 -1<t_x8>
+  [continuous] <t_x147>: obj=0, global bounds=[0,1], local bounds=[0,1], aggregated: 1 -1<t_x6>
+  [continuous] <t_x127>: obj=0, global bounds=[0,1], local bounds=[0,1], aggregated: 1 -1<t_x4>
+  [continuous] <t_x107>: obj=0, global bounds=[0,1], local bounds=[0,1], aggregated: 1 -1<t_x2>
+  [continuous] <t_x35>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x101>
+  [continuous] <t_x45>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x121>
+  [continuous] <t_x55>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x141>
+  [continuous] <t_x65>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x161>
+  [continuous] <t_x68>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x226>
+  [continuous] <t_x69>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x228>
+  [continuous] <t_x273>: obj=0, global bounds=[-200,0], local bounds=[-200,0], aggregated: -2<t_x248>
+  [continuous] <t_x272>: obj=0, global bounds=[-200,0], local bounds=[-200,0], aggregated: -2<t_x246>
+  [continuous] <t_x46>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x56>
+  [continuous] <t_x67>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x163>
+  [continuous] <t_x20>: obj=0, global bounds=[-10,0], local bounds=[-10,0], aggregated: +1<t_x76>
+  [continuous] <t_x57>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x212>
+  [continuous] <t_x58>: obj=0, global bounds=[0,9.49727107337788], local bounds=[0,9.49727107337788], aggregated: +1<t_x214>
+  [continuous] <t_x59>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x216>
+  [continuous] <t_x27>: obj=0, global bounds=[0,9.49999999999985], local bounds=[0,9.49999999999985], aggregated: +1<t_x176>
+  [continuous] <t_x28>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x178>
+  [continuous] <t_x29>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x180>
+  [continuous] <t_x143>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x212>
+  [continuous] <t_x30>: obj=0, global bounds=[-10,1.00010311343728e-09], local bounds=[-10,1.00010311343728e-09], aggregated: +1<t_x96>
+  [continuous] <t_x144>: obj=0, global bounds=[0,9.49727107337788], local bounds=[0,9.49727107337788], aggregated: +1<t_x214>
+  [continuous] <t_x145>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x216>
+  [continuous] <t_x37>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x103>
+  [continuous] <t_x38>: obj=0, global bounds=[0,9.4972710733779], local bounds=[0,9.4972710733779], aggregated: +1<t_x104>
+  [continuous] <t_x39>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x105>
+  [continuous] <t_x47>: obj=0, global bounds=[0,9.5000000000001], local bounds=[0,9.5000000000001], aggregated: +1<t_x200>
+  [continuous] <t_x83>: obj=0, global bounds=[0,9.50000000000011], local bounds=[0,9.50000000000011], aggregated: +1<t_x27>
+  [continuous] <t_x84>: obj=0, global bounds=[0,9.49727107337791], local bounds=[0,9.49727107337791], aggregated: +1<t_x28>
+  [continuous] <t_x85>: obj=0, global bounds=[0,9], local bounds=[0,9], aggregated: +1<t_x29>
+  [continuous] <t_x61>: obj=0, global bounds=[1,10], local bounds=[1,10], aggregated: 1 +1<t_x69>
+  [continuous] <t_x36>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x46>
+  [continuous] <t_x26>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x36>
+  [continuous] <t_x82>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x26>
+  [continuous] <t_x81>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x82>
+  [continuous] <t_x25>: obj=0, global bounds=[0,10], local bounds=[0,10], aggregated: +1<t_x81>
+CONSTRAINTS
+  [varbound] <fix419>: <t_x158>[C] -10<t_x8>[B] <= 0;
+  [varbound] <fix417>: <t_x157>[C] -10<t_x8>[B] <= 0;
+  [varbound] <fix441>: <t_x169>[C] +0.0100000009999999<t_x8>[B] <= 0.0100000009999999;
+  [varbound] <fix425>: <t_x162>[C] -10<t_x8>[B] <= 0;
+  [varbound] <fix421>: <t_x159>[C] -10<t_x8>[B] <= 0;
+  [varbound] <fix424>: <t_x160>[C] +1.00010311343728e-09<t_x8>[B] >= -0;
+  [varbound] <fix439>: <t_x168>[C] +0.990000001<t_x8>[B] <= 0.990000001;
+  [varbound] <fix423>: <t_x160>[C] -10<t_x8>[B] <= 0;
+  [varbound] <fix447>: <t_x172>[C] +10<t_x8>[B] <= 10;
+  [varbound] <fix339>: <t_x138>[C] -10<t_x6>[B] <= 0;
+  [varbound] <fix344>: <t_x140>[C] +1.00010311343728e-09<t_x6>[B] >= -0;
+  [varbound] <fix367>: <t_x152>[C] +10<t_x6>[B] <= 10;
+  [varbound] <fix361>: <t_x149>[C] +0.0100000020220232<t_x6>[B] <= 0.0100000020220232;
+  [varbound] <fix343>: <t_x140>[C] -10<t_x6>[B] <= 0;
+  [varbound] <fix341>: <t_x139>[C] -10<t_x6>[B] <= 0;
+  [varbound] <fix337>: <t_x137>[C] -10<t_x6>[B] <= 0;
+  [varbound] <fix359>: <t_x148>[C] +0.990000002002002<t_x6>[B] <= 0.990000002002002;
+  [varbound] <fix345>: <t_x142>[C] -10<t_x6>[B] <= 0;
+  [varbound] <fix185>: <t_x102>[C] -10<t_x2>[B] <= 0;
+  [varbound] <fix181>: <t_x99>[C] -10<t_x2>[B] <= 0;
+  [varbound] <fix179>: <t_x98>[C] -10<t_x2>[B] <= 0;
+  [varbound] <fix176>: <t_x100>[C] -10<t_x2>[B] <= 0;
+  [varbound] <fix175>: <t_x100>[C] +1.00010311343728e-09<t_x2>[B] >= -0;
+  [varbound] <fix701>: <t_x231>[C] +10<t_x18>[B] <= 10;
+  [varbound] <fix651>: <t_x219>[C] +10<t_x16>[B] <= 10;
+  [varbound] <fix551>: <t_x195>[C] +10<t_x12>[B] <= 10;
+  [varbound] <fix501>: <t_x183>[C] +10<t_x10>[B] <= 10;
+  [varbound] <fix261>: <t_x119>[C] -10<t_x4>[B] <= 0;
+  [varbound] <fix259>: <t_x118>[C] -10<t_x4>[B] <= 0;
+  [varbound] <fix256>: <t_x120>[C] -10<t_x4>[B] <= 0;
+  [varbound] <fix255>: <t_x120>[C] +1.00010311343728e-09<t_x4>[B] >= -0;
+  [varbound] <fix199>: <t_x108>[C] +0.990000006002003<t_x2>[B] <= 0.990000006002003;
+  [varbound] <fix177>: <t_x97>[C] -10<t_x2>[B] <= 0;
+  [varbound] <fix267>: <t_x122>[C] -10<t_x4>[B] <= 0;
+  [varbound] <fix201>: <t_x109>[C] +0.0100000041352306<t_x2>[B] <= 0.0100000041352306;
+  [varbound] <fix709>: <t_x235>[C] +9.80000000000001<t_x18>[B] <= 9.80000000000001;
+  [varbound] <fix705>: <t_x233>[C] +10<t_x18>[B] <= 10;
+  [varbound] <fix697>: <t_x229>[C] -9<t_x18>[B] <= 0;
+  [varbound] <fix433>: <t_x229>[C] -9<t_x8>[B] <= 0;
+  [varbound] <fix691>: <t_x227>[C] -9.49727107337791<t_x18>[B] <= 0;
+  [varbound] <fix431>: <t_x227>[C] -9.49727107337791<t_x8>[B] <= 0;
+  [varbound] <fix429>: <t_x225>[C] -9.50000000000011<t_x8>[B] <= 0;
+  [varbound] <fix687>: <t_x225>[C] -9.5000000000001<t_x18>[B] <= 0;
+  [varbound] <fix659>: <t_x223>[C] +9.8<t_x16>[B] <= 9.8;
+  [varbound] <fix655>: <t_x221>[C] +10<t_x16>[B] <= 10;
+  [varbound] <fix353>: <t_x217>[C] -9<t_x6>[B] <= 0;
+  [varbound] <fix645>: <t_x217>[C] -9<t_x16>[B] <= 0;
+  [varbound] <fix641>: <t_x215>[C] -9.49727107337791<t_x16>[B] <= 0;
+  [varbound] <fix351>: <t_x215>[C] -9.49727107337788<t_x6>[B] <= 0;
+  [varbound] <fix637>: <t_x213>[C] -9.50000000000011<t_x16>[B] <= 0;
+  [varbound] <fix349>: <t_x213>[C] -9.50000000000011<t_x6>[B] <= 0;
+  [varbound] <fix559>: <t_x199>[C] +9.80000000000001<t_x12>[B] <= 9.80000000000001;
+  [varbound] <fix555>: <t_x197>[C] +10<t_x12>[B] <= 10;
+  [varbound] <fix193>: <t_x193>[C] -9<t_x2>[B] <= 0;
+  [varbound] <fix545>: <t_x193>[C] -9<t_x12>[B] <= 0;
+  [varbound] <fix191>: <t_x191>[C] -9.49727107337791<t_x2>[B] <= 0;
+  [varbound] <fix541>: <t_x191>[C] -9.4972710733779<t_x12>[B] <= 0;
+  [varbound] <fix189>: <t_x189>[C] -9.5000000000001<t_x2>[B] <= 0;
+  [varbound] <fix539>: <t_x189>[C] -9.5000000000001<t_x12>[B] <= 0;
+  [varbound] <fix509>: <t_x187>[C] +9.80000000000002<t_x10>[B] <= 9.80000000000002;
+  [varbound] <fix505>: <t_x185>[C] +10<t_x10>[B] <= 10;
+  [varbound] <fix497>: <t_x181>[C] -9<t_x10>[B] <= 0;
+  [varbound] <fix491>: <t_x179>[C] -9.49727107337791<t_x10>[B] <= 0;
+  [varbound] <fix487>: <t_x177>[C] -9.50000000000011<t_x10>[B] <= 0;
+  [varbound] <fix287>: <t_x132>[C] +10<t_x4>[B] <= 10;
+  [varbound] <fix281>: <t_x129>[C] +0.010000003067093<t_x4>[B] <= 0.010000003067093;
+  [varbound] <fix279>: <t_x128>[C] +0.990000004002002<t_x4>[B] <= 0.990000004002002;
+  [varbound] <fix257>: <t_x117>[C] -10<t_x4>[B] <= 0;
+  [varbound] <fix207>: <t_x112>[C] +10<t_x2>[B] <= 10;
+  [varbound] <fix273>: <t_x205>[C] -9<t_x4>[B] <= 0;
+  [varbound] <fix271>: <t_x203>[C] -9.49727107337791<t_x4>[B] <= 0;
+  [varbound] <fix269>: <t_x201>[C] -9.5000000000001<t_x4>[B] <= 0;
+  [varbound] <fix609>: <t_x211>[C] +9.80000000000001<t_x14>[B] <= 9.80000000000001;
+  [varbound] <fix605>: <t_x209>[C] +10<t_x14>[B] <= 10;
+  [varbound] <fix601>: <t_x207>[C] +10<t_x14>[B] <= 10;
+  [varbound] <fix593>: <t_x203>[C] -9.49727107337791<t_x14>[B] <= 0;
+  [varbound] <fix587>: <t_x201>[C] -9.5000000000001<t_x14>[B] <= 0;
+  [varbound] <fix595>: <t_x205>[C] -9<t_x14>[B] <= 0;
+  [setppc] <fix74>: <~t_x6>[B] +<t_x8>[B] <= 1;
+  [setppc] <fix61>: <~t_x2>[B] +<t_x12>[B] <= 1;
+  [setppc] <fix73>: <~t_x4>[B] +<t_x6>[B] <= 1;
+  [setppc] <fix63>: <~t_x6>[B] +<t_x16>[B] <= 1;
+  [setppc] <fix64>: <~t_x8>[B] +<t_x18>[B] <= 1;
+  [setppc] <fix67>: <t_x10>[B] +<t_x12>[B] +<t_x14>[B] +<t_x16>[B] +<t_x18>[B] == 1;
+  [setppc] <fix72>: <~t_x2>[B] +<t_x4>[B] <= 1;
+  [setppc] <fix62>: <~t_x4>[B] +<t_x14>[B] <= 1;
+  [linear] <fix239>:  -<t_x42>[C] +<t_x118>[C] +<t_x128>[C] == -0;
+  [linear] <fix481>:  -<t_x71>[C] +<t_x179>[C] +<t_x185>[C] == -0;
+  [linear] <fix585>:  -<t_x72>[C] +<t_x205>[C] +<t_x211>[C] == -0;
+  [linear] <fix399>:  -<t_x62>[C] +<t_x158>[C] +<t_x168>[C] == -0;
+  [linear] <fix42>: <t_x71>[C] +0.95<t_x75>[C] -<t_x79>[C] == -0;
+  [linear] <fix44>: <t_x72>[C] +<t_x75>[C] -<t_x77>[C] == -0;
+  [linear] <fix581>:  -<t_x71>[C] +<t_x203>[C] +<t_x209>[C] == -0;
+  [linear] <fix485>:  -<t_x72>[C] +<t_x181>[C] +<t_x187>[C] == -0;
+  [linear] <fix167>:  -<t_x66>[C] +<t_x102>[C] +<t_x112>[C] == -0;
+  [linear] <fix677>:  -<t_x70>[C] +<t_x225>[C] +<t_x231>[C] == -0;
+  [linear] <fix577>:  -<t_x70>[C] +<t_x201>[C] +<t_x207>[C] == -0;
+  [linear] <fix401>:  -<t_x63>[C] +<t_x159>[C] +<t_x169>[C] == -0;
+  [linear] <fix319>:  -<t_x52>[C] +<t_x138>[C] +<t_x148>[C] == -0;
+  [linear] <fix627>:  -<t_x70>[C] +<t_x213>[C] +<t_x219>[C] == -0;
+  [linear] <fix531>:  -<t_x71>[C] +<t_x191>[C] +<t_x197>[C] == -0;
+  [linear] <fix321>:  -<t_x53>[C] +<t_x139>[C] +<t_x149>[C] == -0;
+  [linear] <fix16>: <t_x32>[C] +<t_x177>[C] +<t_x258>[C] -<t_x275>[C] == -0;
+  [linear] <fix750>:  -10<t_x77>[C] +<t_x251>[C] <= 0;
+  [linear] <fix407>:  -<t_x66>[C] +<t_x162>[C] +<t_x172>[C] == -0;
+  [linear] <fix159>:  -<t_x32>[C] +<t_x98>[C] +<t_x108>[C] == -0;
+  [linear] <fix535>:  -<t_x72>[C] +<t_x193>[C] +<t_x199>[C] == -0;
+  [linear] <fix40>: <t_x70>[C] +<t_x73>[C] -<t_x275>[C] == -0;
+  [linear] <fix241>:  -<t_x43>[C] +<t_x119>[C] +<t_x129>[C] == -0;
+  [linear] <fix749>: <t_x77>[C] -<t_x251>[C] <= -0;
+  [linear] <fix24>: <t_x33>[C] -<t_x79>[C] +<t_x179>[C] +<t_x262>[C] == -0;
+  [linear] <fix631>:  -<t_x71>[C] +<t_x215>[C] +<t_x221>[C] == -0;
+  [linear] <fix527>:  -<t_x70>[C] +<t_x189>[C] +<t_x195>[C] == -0;
+  [linear] <fix681>:  -<t_x71>[C] +<t_x227>[C] +<t_x233>[C] == -0;
+  [linear] <fix327>:  -<t_x66>[C] +<t_x142>[C] +<t_x152>[C] == -0;
+  [linear] <fix161>:  -<t_x33>[C] +<t_x99>[C] +<t_x109>[C] == -0;
+  [linear] <fix247>:  -<t_x66>[C] +<t_x122>[C] +<t_x132>[C] == -0;
+  [linear] <fix635>:  -<t_x72>[C] +<t_x217>[C] +<t_x223>[C] == -0;
+  [linear] <fix32>: <t_x31>[C] -<t_x77>[C] +<t_x181>[C] == -0;
+  [linear] <fix477>:  -<t_x70>[C] +<t_x177>[C] +<t_x183>[C] == -0;
+  [linear] <fix754>:  -10<t_x79>[C] +<t_x276>[C] <= 0;
+  [linear] <fix685>:  -<t_x72>[C] +<t_x229>[C] +<t_x235>[C] == -0;
+  [linear] <fix778>:  -10<t_x159>[C] +<t_x284>[C] <= 0;
+  [linear] <fix776>:  -<t_x158>[C] +<t_x283>[C] <= 0;
+  [linear] <fix774>:  -10<t_x157>[C] +<t_x255>[C] <= 0;
+  [linear] <fix397>: <t_x8>[B] -<t_x157>[C] +<t_x229>[C] == -0;
+  [linear] <fix772>:  -10<t_x139>[C] +<t_x282>[C] <= 0;
+  [linear] <fix770>:  -<t_x138>[C] +<t_x281>[C] <= 0;
+  [linear] <fix768>:  -10<t_x137>[C] +<t_x254>[C] <= 0;
+  [linear] <fix766>:  -10<t_x119>[C] +<t_x280>[C] <= 0;
+  [linear] <fix764>:  -<t_x118>[C] +<t_x279>[C] <= 0;
+  [linear] <fix762>:  -10<t_x117>[C] +<t_x253>[C] <= 0;
+  [linear] <fix760>:  -10<t_x99>[C] +<t_x278>[C] <= 0;
+  [linear] <fix758>:  -<t_x98>[C] +<t_x277>[C] <= 0;
+  [linear] <fix756>:  -10<t_x97>[C] +<t_x252>[C] <= 0;
+  [linear] <fix317>: <t_x6>[B] +<t_x51>[C] -<t_x137>[C] == 1;
+  [linear] <fix157>: <t_x2>[B] +<t_x31>[C] -<t_x97>[C] == 1;
+  [linear] <fix237>: <t_x4>[B] +<t_x41>[C] -<t_x117>[C] == 1;
+  [linear] <fix34>:  -<t_x31>[C] +<t_x41>[C] +<t_x193>[C] == -0;
+  [linear] <fix36>:  -<t_x41>[C] +<t_x51>[C] +<t_x205>[C] == -0;
+  [linear] <fix38>: <t_x51>[C] -<t_x217>[C] -<t_x229>[C] == 1;
+  [nonlinear] <term0>: -(<t_x77>)^2+<t_x251> == 0;
+  [nonlinear] <term1>: -(<t_x97>)^2+<t_x252> == 0;
+  [nonlinear] <term2>: -(<t_x117>)^2+<t_x253> == 0;
+  [nonlinear] <term3>: -(<t_x137>)^2+<t_x254> == 0;
+  [nonlinear] <term4>: -(<t_x157>)^2+<t_x255> == 0;
+  [nonlinear] <blf0>: -0.99+<t_x62>+<t_x66>*<t_x160>-<t_x225> == 0;
+  [nonlinear] <blf1>: 0.01-<t_x63>+<t_x66>*<t_x160>+<t_x227> == -0;
+  [nonlinear] <blf2>: <t_x66>*<t_x80>+<t_x258> == 0;
+  [nonlinear] <blf3>: <t_x32>-<t_x42>+<t_x66>*<t_x100>-<t_x189> == 0;
+  [nonlinear] <blf4>: <t_x42>-<t_x52>+<t_x66>*<t_x120>-<t_x201> == 0;
+  [nonlinear] <blf5>: <t_x52>-<t_x62>+<t_x66>*<t_x140>-<t_x213> == 0;
+  [nonlinear] <blf6>: -<t_x66>*<t_x80>+<t_x262> == 0;
+  [nonlinear] <blf7>: -<t_x33>+<t_x43>+<t_x66>*<t_x100>+<t_x191> == -0;
+  [nonlinear] <blf8>: -<t_x43>+<t_x53>+<t_x66>*<t_x120>+<t_x203> == -0;
+  [nonlinear] <blf9>: -<t_x53>+<t_x63>+<t_x66>*<t_x140>+<t_x215> == -0;
+  [nonlinear] <blf10>: -<t_x73>*<t_x77>+<t_x267> == 0;
+  [nonlinear] <blf11>: <t_x267>-<t_x75>*<t_x275> == 0;
+  [nonlinear] <blf12>: -0.95*<t_x75>*<t_x77>+<t_x269> == 0;
+  [nonlinear] <blf13>: -<t_x75>*<t_x79>+<t_x269> == 0;
+  [nonlinear] <blf14>: <t_x80>*<t_x251>-2*<t_x276> == 0;
+  [nonlinear] <blf15>: <t_x100>*<t_x252>-2*<t_x278> == 0;
+  [nonlinear] <blf16>: <t_x120>*<t_x253>-2*<t_x280> == 0;
+  [nonlinear] <blf17>: <t_x140>*<t_x254>-2*<t_x282> == 0;
+  [nonlinear] <blf18>: <t_x160>*<t_x255>-2*<t_x284> == 0;
+  [nonlinear] <blf28>: -<t_x159>*<t_x283>+<t_x284> == 0;
+  [nonlinear] <blf20>: -<t_x79>*<t_x275>+<t_x276> == 0;
+  [nonlinear] <blf21>: -<t_x2>*<t_x98>+<t_x277> == 0;
+  [nonlinear] <blf22>: -<t_x99>*<t_x277>+<t_x278> == 0;
+  [nonlinear] <blf23>: -<t_x4>*<t_x118>+<t_x279> == 0;
+  [nonlinear] <blf24>: -<t_x119>*<t_x279>+<t_x280> == 0;
+  [nonlinear] <blf25>: -<t_x6>*<t_x138>+<t_x281> == 0;
+  [nonlinear] <blf26>: -<t_x139>*<t_x281>+<t_x282> == 0;
+  [nonlinear] <blf27>: -<t_x8>*<t_x158>+<t_x283> == 0;
+END
