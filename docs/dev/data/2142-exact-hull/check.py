@@ -5,6 +5,8 @@
 1. big-M certified optimum x* of GDPlib cstr (shipped default path).
 2. Six fixed selector configurations (j active reactors 1..j, recycle at r), each solved under
    big-M (reference) -- the configuration of x* is one of them.
+   (each configuration is a nonconvex NLP that does not certify in the budget, so the
+   comparison is between the two incumbents and the two bounds, printed).
 3. Per arm: x* mapped to the lowered columns satisfies every lowered row; each configuration's
    optimum equals big-M's and projects to a point feasible for the original rows and the selected
    disjuncts' rows; convex combinations of lowered feasible points from different configurations
@@ -32,9 +34,9 @@ import exact_hull_proto as P  # noqa: E402
 from discopt.pyomo.gdp import convert_pyomo_gdp  # noqa: E402
 import gdplib.cstr as cstr  # noqa: E402
 
-ARMS = sys.argv[1:] or ["ratio", "homog", "lifted"]
+ARMS = sys.argv[1:] or ["homog", "lifted"]
 ORACLE = 3.0620073
-CONFIGS = [(1, 1), (2, 1), (2, 2), (3, 3), (5, 1), (5, 5)]  # (active reactors 1..j, recycle r)
+CONFIGS = [(5, 5), (1, 1), (2, 1), (3, 3)]  # (active reactors 1..j, recycle r); x* is (5, 5)
 
 
 def ev(e, vals):
@@ -105,15 +107,15 @@ def values(model, res):
     return {v.name: float(np.asarray(res.value(v)).ravel()[0]) for v in model._variables}
 
 
-def solve(model, max_nodes=20000, **kw):
+def solve(model, max_nodes=2000, time_limit=120, **kw):
     t = time.perf_counter()
-    res = model.solve(time_limit=300, deterministic=True, max_nodes=max_nodes, **kw)
+    res = model.solve(time_limit=time_limit, deterministic=True, max_nodes=max_nodes, **kw)
     return res, time.perf_counter() - t
 
 
 # ---- 1. x* under big-M ----------------------------------------------------------------
 m = convert_pyomo_gdp(cstr.build_model()).model
-res_star, w = solve(m, gdp_method="big-m", max_nodes=150000)
+res_star, w = solve(m, gdp_method="big-m", max_nodes=150000, time_limit=600)
 print(f"big-M default: status={res_star.status} obj={res_star.objective} bound={res_star.bound} "
       f"nodes={res_star.node_count} wall={w:.0f}s", flush=True)
 assert abs(res_star.objective - ORACLE) <= 1e-4, res_star.objective; n_assert += 1

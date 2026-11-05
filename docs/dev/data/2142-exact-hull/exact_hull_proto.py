@@ -15,6 +15,9 @@ disjunct's copies ``v_i`` (pinned to 0 when ``y = 0`` by the bound links) and ``
 * ``homog``  -- the homogenized perspective (candidate (a)): with d = max monomial degree,
   ``sum_m c_m prod v_i * y^(d - |m|) <sense> rhs * y^d``. No aux, no division. Exact at
   y in {0, 1}; at fractional y it is ``y^d g(t)``, the perspective's solution set.
+* ``both``   -- ``lifted``'s auxes, static hull-envelope rows and linear row, PLUS ``homog``'s
+  homogenized row on the copies (both exact, both relaxations; the first gives root
+  tightness, the second per-node McCormick tightness on the branched copies).
 * ``lifted`` -- lift-then-hull (candidate (b) + (a) for the aux definitions): each monomial
   of degree >= 2 is factored left to right into auxes ``w_1 = v_i1 * v_i2``, ``w_j = w_{j-1}
   * v_ij`` on the ratio scale (``w_j = y * prod t``), each defined by the homogenized
@@ -155,11 +158,19 @@ def _hook(con, y_k, owned, bounds_k, cache, model, stem, new_vars, new_cons, ori
     mono = monomials(con.body)
     rhs = float(np.max(con.rhs))
     STATS["rows"] += 1
-    if arm == "homog":
+    if arm in ("homog", "both"):
         d = max((len(k) for k in mono), default=0)
         body = _wrap(0.0)
         for k, c in mono.items():
             body = body + _wrap(c) * _prod([copies[n] for n in k] + [_ypow(y_k, d - len(k))])
+        if arm == "both":
+            STATS["arm"] = "lifted"
+            STATS["rows"] -= 1
+            lb_, lr_ = _hook(con, y_k, owned, bounds_k, cache, model, stem, new_vars, new_cons,
+                             origin_exc)
+            STATS["arm"] = "both"
+            new_cons.append(Constraint(body=lb_ - lr_, sense=con.sense, rhs=0.0,
+                                       name=f"_hull_{stem}_lifted_row"))
         return body, _wrap(rhs) * _ypow(y_k, d)
     assert arm == "lifted", arm
     box = {n: G._lifted_bounds(n, v, bounds_k) for n, v in owned}  # t's box = disjunct box
@@ -205,7 +216,7 @@ def _body_at_zero(expr, all_vars):
 
 
 def install(arm: str) -> None:
-    assert arm in ("ratio", "homog", "lifted"), arm
+    assert arm in ("ratio", "homog", "lifted", "both"), arm
     STATS.update(rows=0, auxes=0, hull_mc_rows=0, arm=arm)
     G._body_at_zero = _body_at_zero
     G._origin_free_hull_row = _hook

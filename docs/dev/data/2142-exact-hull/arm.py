@@ -32,7 +32,7 @@ max_nodes = int(sys.argv[2])
 tl = float(sys.argv[3]) if len(sys.argv) > 3 else 7200.0
 det = (sys.argv[4] if len(sys.argv) > 4 else "det") == "det"
 method = {"hull": "hull", "bigm": "big-m"}.get(arm, "hull")
-if arm in ("ratio", "homog", "lifted"):
+if arm in ("ratio", "homog", "lifted", "both"):
     P.install(arm)
 
 calls, recs = [], []
@@ -82,7 +82,7 @@ print("counters:", {k: v for k, v in ctr.items() if k in (
     "FarkasRejectMargin", "DualProofLearned", "DualProofTightenings", "DualProofFathoms")})
 assert calls, "the kernel never ran"; n_assert += 1
 assert res.bound is None or res.bound <= 3.0620073 + 1e-6, "bound above the oracle"; n_assert += 1
-if arm in ("homog", "lifted"):
+if arm in ("homog", "lifted", "both"):
     assert P.STATS["rows"] == 5, P.STATS; n_assert += 1
 if res.objective is not None:
     assert res.objective >= 3.0620073 - 1e-5, "incumbent below the oracle"; n_assert += 1

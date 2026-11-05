@@ -255625,3 +255625,11 @@
   SepGomoryBtranFail          0
   SepGomoryCutsEmitted          0
   SepGomoryCutNnz             0
+ARM=ratio METHOD=hull DET=True MAX_NODES=10000 TL=7200.0 status=node_limit obj=3.062014576618645 bound=0.25735709222584857 nodes=10000 gap_certified=False wall=550.4s
+proto stats: {'rows': 0, 'auxes': 0, 'hull_mc_rows': 0, 'arm': 'ratio'}
+spec max |global bound|: 1.200e+03
+  kernel: {'max_nodes': 10000, 'status': 'node_limit', 'bound': 0.25735709222584857, 'nodes': 10000, 'undecided': 11, 'n_cols': 310, 'wall': 518.8}
+node status histogram: {'optimal': 6090, 'infeasible': 1046, 'numerical': 11}
+counters: {'DualProofLearned': 38, 'DualProofTightenings': 127838, 'DualProofFathoms': 299, 'LpVerdictOptimal': 2944, 'LpVerdictInfeasible': 499, 'LpVerdictNumerical': 12064, 'LpInfeasUncertified': 5035, 'FarkasRejectMargin': 40865}
+RESULT arm=ratio nodes=10000 bound=0.25735709222584857 status=node_limit wall=550.4 spec_mag=1.200e+03 numerical=12064
+executed assertions: 5
