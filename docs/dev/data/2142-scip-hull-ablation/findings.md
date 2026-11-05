@@ -99,7 +99,13 @@ Kill: 20k bound <= 2.7875. Logs: `arm_aggr_10000.log`, `arm_aggr_20000.log`,
 (+0.089; big-M 2.2486); 106 of the 111 aggregations expressible (5 skipped: non-identity
 kind-1 term inputs), 118 rows dropped, incumbent 3.0620146 feasible on the original spec
 (5 executed assertions), `LpVerdictNumerical` 2,430 (base 1,122). A small gain, far from the
-big-M line; the 20k arm (kill at <= 2.7875) and the base 10k control are still running.
+big-M line; The base 10k control reproduces **1.6107840610272945 bit for bit** (`arm_base_10000.log`,
+§8 satisfied). The 20k arm (kill at <= 2.7875) is still running; at 10k the gain is 4 % of
+the way from homog to big-M, so the pre-registered kill is the expected outcome — if it kills,
+the spec-level aggregation does NOT transfer SCIP's 6.5x to discopt's tree, and the proposal
+in §5 should not be built as-is: SCIP's aggregation acts through its branching-candidate
+scoring and pseudocosts on the merged columns, which discopt's `widest_original_col` /
+kernel pseudocost rules do not share (branching was already killed as a direction, §107-§110).
 
 ## 5. Implementation proposal (for the agent that builds it)
 
