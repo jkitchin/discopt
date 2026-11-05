@@ -1,7 +1,0 @@
-kind-4 terms: 20 p: [-1] coeff/cst: [(0.99999999, 1e-08)]
-w hi over boxes: min 1 median 1e+08 max 1e+08
-w lo over boxes: min 1 max 1e+08
-boxes x terms where 1/w_hi > t_lo + 1e-9 (reverse could tighten x_lo): 0 of 1880
-boxes x terms where 1/w_lo < t_hi - 1e-9 (could tighten x_hi): 0 of 1880
-x (selector) fixed at 0 / 1 / free: 930 485 465
-executed probes: 1880

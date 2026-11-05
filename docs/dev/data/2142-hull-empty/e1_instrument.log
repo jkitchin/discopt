@@ -1,8 +1,0 @@
-rust /home/user/discopt/python/discopt/_rust.abi3.so DISCOPT_INT_ROUND_EXACT= 0
-rounds 15, no cutoff: kernel-empty as captured 0/94, with integer bounds pre-rounded 91/94
-integer columns with a non-integral bound across boxes: 560
-executed propagations: 188
-rust /home/user/discopt/python/discopt/_rust.abi3.so DISCOPT_INT_ROUND_EXACT= 1
-rounds 15, no cutoff: kernel-empty as captured 91/94, with integer bounds pre-rounded 91/94
-integer columns with a non-integral bound across boxes: 560
-executed propagations: 188

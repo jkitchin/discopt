@@ -1,2 +1,0 @@
-ARM=lp_clamp MAX_NODES=20000 status=node_limit obj=3.062014576618532 bound=1.4798409783222999 gap_certified=False nodes=20000 wall=58.4s calls=[{'spatial_midpull': 0.0, 'spatial_clamp': 0.2, 'spatial_midpull_reldomtrig': None, 'scale_free_branching': None, 'spatial_score': None, 'max_nodes': 1}, {'spatial_midpull': 0.0, 'spatial_clamp': 0.2, 'spatial_midpull_reldomtrig': None, 'scale_free_branching': None, 'spatial_score': True, 'max_nodes': 20000}]
-executed assertions: 4

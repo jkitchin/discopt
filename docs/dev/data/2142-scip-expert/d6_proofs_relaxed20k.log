@@ -1,3 +1,0 @@
-appending 95 proof rows
-ARM proofs=d6_proofs_relaxed.npz maxid=99999999 nrows=95 MAX_NODES=20000 status=node_limit obj=3.062014576618534 bound=1.6846565935948339 nodes=20000 wall=107.9s kernel_calls=[(1, -2.13842283627736e-11, 1, 0), (20000, 1.6846565935948339, 20000, 108)]
-executed assertions: 3

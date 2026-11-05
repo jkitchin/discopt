@@ -12,3 +12,7 @@ regenerate them with `b1_capture.py OUT.npz 1000 10`.
 | `b4_compare.py`, `b4_compare.log` | the pre-registered closure: 0.000 at both round caps |
 | `b5_probe.log` | why: 0 of 1,880 (term, box) pairs where `1/w_hi` exceeds the base's lower bound |
 | `b6_scip_sanity.py`, `b6_scip_sanity.log` | SCIP calls captured boxes empty even with no cutoff (unexplained, recorded) |
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-affinepow-reverse/<name>.log.gz | gunzip` (or `.log`, no gunzip).

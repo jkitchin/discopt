@@ -83,3 +83,7 @@ The presolve is NOT built on #2142. The design for the agent that builds it is i
 `followup_issue.md` (drafted, not filed). #2142's closing target moves to: big-M certifies
 cstr on default (done, §112) and hull reaches the native kernel with bounded magnitudes on
 the default path; full hull certification of cstr moves to the follow-up.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-scip-presolved/<name>.log.gz | gunzip` (or `.log`, no gunzip).

@@ -1,2 +1,0 @@
-nous1.nl FLAG=1 status=optimal obj=1.5670720269948721 bound=1.5669174161149935 nodes=12359 wall=34.3s {'DualProofRays': 3261, 'DualProofGlobalLps': 3259, 'DualProofLearned': 21, 'DualProofTightenings': 44845, 'DualProofFathoms': 16, 'LpVerdictNumerical': 194}
-executed assertions: 1
