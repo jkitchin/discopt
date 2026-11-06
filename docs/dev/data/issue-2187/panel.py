@@ -187,6 +187,9 @@ def main() -> int:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--perms", type=int, default=5)
     ap.add_argument("--n-random", type=int, default=12)
+    ap.add_argument("--only", default="", help="comma-separated instance names to run")
+    ap.add_argument("--results", default="results.jsonl", help="file (in --out) to write")
+    ap.add_argument("--judge-only", action="store_true", help="judge every results*.jsonl")
     a = ap.parse_args()
     if a.worker:
         worker()
@@ -194,6 +197,19 @@ def main() -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     print("uptime:", subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip())
     insts = make_instances(a.nets, a.out / "instances", a.perms, a.n_random)
+    if a.judge_only:
+        # Chunked runs (a run killed at a wall limit is resumed by --only): every
+        # (instance, form) pair counts only if all three arms completed it.
+        rows = [json.loads(ln) for f in sorted(a.out.glob("results*.jsonl")) for ln in open(f)]
+        n = {}
+        for r in rows:
+            n[(r["instance"], r["form"])] = n.get((r["instance"], r["form"]), 0) + 1
+        rows = [r for r in rows if n[(r["instance"], r["form"])] == 3]
+        print(
+            f"{len(rows)} rows in complete triples; dropped {sum(v for v in n.values() if v != 3)}"
+        )
+        return judge(rows, insts, a.out)
+    run = [ins for ins in insts if not a.only or ins["name"] in a.only.split(",")]
     here = str(Path(__file__).resolve())
     repo_py = str(Path(__file__).resolve().parents[4] / "python")
     arms = {
@@ -219,9 +235,9 @@ def main() -> int:
         print(f"arm {arm}: {hello['hello']} marker={hello['marker']}", flush=True)
         procs[arm] = p
     rows = []
-    rows_f = open(a.out / "results.jsonl", "w")
+    rows_f = open(a.out / a.results, "w")
     order = list(arms)
-    for i, ins in enumerate(insts):
+    for i, ins in enumerate(run):
         for form in FORMS:
             rot = (
                 order[(i + list(FORMS).index(form)) % 3 :]
@@ -251,7 +267,7 @@ def main() -> int:
     for p in procs.values():
         p.stdin.close()
         p.wait()
-    return judge(rows, insts, a.out)
+    return 0 if a.only else judge(rows, insts, a.out)
 
 
 def judge(rows: list[dict], insts: list[dict], out: Path) -> int:
