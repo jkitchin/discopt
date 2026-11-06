@@ -1713,6 +1713,19 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
         info = h.getInfo()
         stats["lp/iters"] = stats.get("lp/iters", 0.0) + float(info.simplex_iteration_count)
         if run_st == highspy.HighsStatus.kError:
+            if not presolve_off and not relaxed:
+                # #2187: a HiGHS error is not a verdict on the LP. Measured on the
+                # fixed-integer LP of a 2-32-32-1 ``relu_bigm`` net with Anderson cuts
+                # (matrix entries down to 2e-8, "excessively small column bounds"):
+                # the presolved LP solves, postsolve hands dual simplex a start with
+                # objective -3.3e15, and HiGHS aborts ("excessive dual values").
+                # Without presolve the same LP solves to -38.1894282 in a few
+                # iterations. So the one presolve-free re-solve below also covers an
+                # error; whatever it returns passes the same checks as any other.
+                presolve_off = True
+                last_reason = f"HiGHS run() error ({name})"
+                stats["lp/presolve_off_error_resolve"] = 1.0
+                continue
             return done(
                 HighsOutcome("error", message=f"HiGHS run() error ({name})", highs_status=name)
             )
@@ -3131,22 +3144,42 @@ def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -
     again = _certified_milp(sf, kw2)
     out.stats["milp/refuted_tight_resolve_ran"] = 1.0
     out.stats["milp/refuted_tight_resolve_time"] = float(again.wall_time)
-    why = None
-    best = (np.asarray(out.x, dtype=np.float64), float(out.objective))
-    if not (again.gap_certified and again.status == "optimal" and again.bound is not None):
-        why = f"tight re-solve status {again.status}"
-    else:
-        b = float(again.bound)
-        thr = REFUTED_ADOPT_ABS + REFUTED_ADOPT_REL * abs(b)
-        own = _verified_mip_point(sf, again.x)
-        for p in [best] + ([own] if own is not None else []):
-            if b - p[1] > thr:
-                why = f"tight bound {b:.12g} is above a verified point's objective {p[1]:.12g}"
-                break
-        if own is not None and own[1] < best[1]:
-            best = own
-        if why is None and not _gap_closed(best[1], min(b, best[1]), kw):
-            why = f"tight bound {b:.12g} does not close the gap to {best[1]:.12g}"
+    best0 = (np.asarray(out.x, dtype=np.float64), float(out.objective))
+    why, best = _tight_adoption_problem(sf, again, best0, kw)
+    provenance = f"mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} after a refutation (#2151)"
+    if (
+        why is not None
+        and not again.gap_certified
+        and again.refuted_by == "own-integers"
+        and _refuted_presolve_free_enabled()
+    ):
+        # #2187: the tight re-solve was refuted over its OWN integers again, so the
+        # tolerance was not the cause; HiGHS's presolve is. Measured on a 2-32-32-1
+        # ``relu_extended`` net: with presolve on, HiGHS's bound is 1.097e-6 above
+        # the LP over its own integers at every mip_feasibility_tolerance (1e-6, 1e-9)
+        # and every stop rule (mip_rel_gap 1e-4 or 0); with presolve off at 1e-9 the
+        # bound is 1.7e-13 from that point. The concurrent presolve-free arm of the
+        # re-solve above is stopped as soon as its primary fails, so it never gets
+        # to answer. Here it runs on its own. It passes the per-solve checks (root
+        # cross-check, #1509 refutation, #1621 rescaling) and the same adoption test
+        # as the tight re-solve. #1634's presolve cross-check has no presolve to
+        # compare against here.
+        rem = cap - float(again.wall_time)
+        if rem <= 0.0:
+            out.stats["milp/refuted_presolve_free_skipped"] = 1.0
+        else:
+            free = _solve_milp_scaled(sf, presolve=False, **dict(kw2, time_limit=rem))
+            out.stats["milp/refuted_presolve_free_ran"] = 1.0
+            out.stats["milp/refuted_presolve_free_time"] = float(free.wall_time)
+            why_free, best_free = _tight_adoption_problem(sf, free, best0, kw)
+            if why_free is None:
+                why, best, again = None, best_free, free
+                provenance = (
+                    f"presolve-free, mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} "
+                    "after a refutation (#2151, #2187)"
+                )
+            else:
+                why = f"{why}; presolve-free re-solve: {why_free}"
     if why is not None:
         out.labels["milp/refuted_tight_resolve_declined"] = why
         return out
@@ -3155,11 +3188,13 @@ def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -
     old_stats = _as_history(out.stats, ())
     old_labels = _as_history(out.labels, _DECLINE_LABELS)
     again.stats = {**old_stats, **again.stats, "milp/refuted_tight_resolve_adopted": 1.0}
+    if "presolve-free" in provenance:
+        again.stats["milp/refuted_presolve_free_adopted"] = 1.0
     again.labels = {
         **old_labels,
         **again.labels,
         "milp/bound_provenance": f"{again.labels.get('milp/bound_provenance', 'highs-fp')}, "
-        f"mip_feasibility_tolerance={REFUTED_TIGHT_FEAS_TOL:g} after a refutation (#2151)",
+        f"{provenance}",
     }
     again.x, again.objective = best
     again.bound = min(float(again.bound), best[1])  # type: ignore[arg-type]
@@ -3174,6 +3209,115 @@ def _tight_resolve_refuted(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -
         again.bound,
     )
     return again
+
+
+def _tight_adoption_problem(
+    sf: StdForm,
+    again: HighsOutcome,
+    best: tuple[np.ndarray, float],
+    kw: dict[str, Any],
+) -> tuple[Optional[str], tuple[np.ndarray, float]]:
+    """#2151's adoption test for a re-solve after a refutation, factored out (#2187).
+
+    Returns ``(why, best)``. ``why`` is ``None`` when ``again`` may replace the refuted
+    result: a certified ``optimal`` whose bound lies below every verified point in hand
+    (``best`` and ``again``'s own incumbent) within
+    ``REFUTED_ADOPT_ABS + REFUTED_ADOPT_REL |bound|``, and that closes the route's gap
+    on the better of the two points. ``best`` is that better point.
+    """
+    if not (again.gap_certified and again.status == "optimal" and again.bound is not None):
+        return f"tight re-solve status {again.status}", best
+    why = None
+    b = float(again.bound)
+    thr = REFUTED_ADOPT_ABS + REFUTED_ADOPT_REL * abs(b)
+    own = _verified_mip_point(sf, again.x)
+    for p in [best] + ([own] if own is not None else []):
+        if b - p[1] > thr:
+            why = f"tight bound {b:.12g} is above a verified point's objective {p[1]:.12g}"
+            break
+    if own is not None and own[1] < best[1]:
+        best = own
+    if why is None and not _gap_closed(best[1], min(b, best[1]), kw):
+        why = f"tight bound {b:.12g} does not close the gap to {best[1]:.12g}"
+    return why, best
+
+
+def _refuted_presolve_free_enabled() -> bool:
+    """``DISCOPT_MILP_REFUTED_PRESOLVE_FREE`` (#2187, default ON; ``=0`` leaves a
+    refuted #2151 tight re-solve declined, as before #2187).
+
+    Gates the presolve-free stage of :func:`_tight_resolve_refuted`, which runs only
+    after the tight re-solve was itself refuted over its own integers. The panel is
+    recorded in ``docs/dev/flag-retirement-audit.md``. The opt-out keeps the
+    pre-#2187 route reachable for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_REFUTED_PRESOLVE_FREE", "1") != "0"
+
+
+def _tree_below_root_repair_enabled() -> bool:
+    """``DISCOPT_MILP_TREE_BELOW_ROOT_REPAIR`` (#2187, default ON; ``=0`` returns
+    ``error`` when HiGHS's tree bound is below the NS-safe root bound, as before #2187).
+
+    The panel is recorded in ``docs/dev/flag-retirement-audit.md``. The opt-out keeps
+    the pre-#2187 route reachable for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_TREE_BELOW_ROOT_REPAIR", "1") != "0"
+
+
+def _repair_tree_below_root(
+    out: HighsOutcome,
+    root: float,
+    labels: dict[str, str],
+    stats: dict[str, float],
+    gap_kw: dict[str, Any],
+) -> None:
+    """#2187: HiGHS's tree bound is below the NS-safe root bound; publish the root bound.
+
+    A lower bound below a valid lower bound is weaker, not false, so this was never a
+    soundness failure. The tree bound is dropped, not trusted: HiGHS's tree may have
+    solved something other than this relaxation, so nothing it derived is kept. What
+    remains is a certificate that never depended on HiGHS's tree: the NS-safe root
+    bound plus the verified incumbent. It certifies only if it closes the gap by the
+    route's own stop rule. The later checks (#1410 root duals, #1509 refutation, #1634
+    presolve cross-check) still run on it.
+
+    Measured on a 2-32-32-1 ``relu_extended`` net: HiGHS stops at its root, at its
+    defaults (``mip_feasibility_tolerance`` 1e-6, ``mip_rel_gap`` 1e-4). Its bound
+    20.5560727 is its own root LP, solved within that tolerance, and it sits 5.4e-5
+    (2.6e-6 relative) below the exact LP's NS bound 20.5561267. At
+    ``mip_feasibility_tolerance`` 1e-9 the tree bound is above the root bound on every
+    stop rule. The 1e-6 (1 + |b|) threshold of the check is tighter than a 1e-6
+    feasibility tolerance can keep to on this matrix, so the route used to return
+    ``error``, with no objective and no bound, for a result the root LP alone
+    certifies (relative gap 5.7e-7).
+    """
+    tree = float(out.bound)  # type: ignore[arg-type]
+    stats["milp/tree_bound_below_root"] = root - tree
+    labels["milp/tree_bound_below_root"] = (
+        f"tree bound {tree:.12g} below the NS-safe root bound {root:.12g}; tree bound dropped"
+    )
+    labels["milp/bound_provenance"] = "root-ns"
+    out.bound = root if out.objective is None else min(root, float(out.objective))
+    if out.objective is not None and root - float(out.objective) > CERT_ABS + CERT_REL * abs(root):
+        # No exactly feasible point beats a valid lower bound, so an incumbent below
+        # the NS root bound by more than the route's LP yardstick bought its objective
+        # with row tolerance (the #1612 class). Measured on the presolve-free arm of the
+        # same net: objective 20.5560762, 5.1e-5 under the root bound. It stays an
+        # uncertified ``feasible``; nothing is certified on it.
+        stats["milp/incumbent_below_root"] = root - float(out.objective)
+        labels["milp/certificate"] = "declined"
+        out.gap_certified = False
+        if out.status == "optimal":
+            out.status = "feasible"
+    elif out.status == "optimal":
+        closed = out.objective is not None and _gap_closed(
+            float(out.objective), float(out.bound), gap_kw
+        )
+        out.gap_certified = closed
+        if not closed:
+            out.status = "feasible"
+            labels["milp/certificate"] = "declined"
+    logger.info("HiGHS MILP route: %s (#2187)", labels["milp/tree_bound_below_root"])
 
 
 #: Labels that mark a result as declined; on adoption they are moved to history.
@@ -3579,7 +3723,23 @@ def _weaker_bound(
     cross bound sits below the optimum by about ``mip_feasibility_tolerance`` times a
     row coefficient, the same order as the 1e-6 absolute gap, so at 1e-6 it can reopen
     a gap on a correct certificate.
+
+    #2187: a certificate whose bound is the NS-safe root LP
+    (:func:`_repair_tree_below_root`) has no presolved tree bound in it. It is that
+    bound plus the verified incumbent, and neither went through HiGHS's presolve, so
+    there is nothing for the presolve-free solve to confirm or weaken. It stands as it
+    is, and the cross-solve's incumbent is not adopted. On the #2187 net that incumbent
+    was 5.1e-5 below the root bound, i.e. a row-tolerance artefact.
     """
+    if (
+        out.status == "optimal"
+        and out.gap_certified
+        and "milp/tree_bound_below_root" in out.stats
+        and out.labels.get("milp/bound_provenance") == "root-ns"
+    ):
+        out.stats["milp/presolve_cross_moot_root_bound"] = 1.0
+        out.labels["milp/presolve_cross_status"] = cross.status
+        return out
     if not (cross.gap_certified and cross.status == out.status):
         out.stats["milp/presolve_cross_check_no_verdict"] = 1.0
         out.labels["milp/presolve_cross_status"] = cross.status
@@ -4279,12 +4439,20 @@ def _solve_milp_std(
             return done(out)
         stats["milp/root_ns_bound"] = float(lp.bound)
         if out.bound is not None and lp.bound > out.bound + 1e-6 * (1.0 + abs(out.bound)):
-            out.status, out.gap_certified = "error", False
-            out.message = (
-                f"tree bound {out.bound:.12g} below the safe root bound {lp.bound:.12g}: "
-                "the MILP HiGHS solved is not the model's relaxation"
+            if not _tree_below_root_repair_enabled():
+                out.status, out.gap_certified = "error", False
+                out.message = (
+                    f"tree bound {out.bound:.12g} below the safe root bound {lp.bound:.12g}: "
+                    "the MILP HiGHS solved is not the model's relaxation"
+                )
+                return done(out)
+            _repair_tree_below_root(
+                out,
+                float(lp.bound),
+                labels,
+                stats,
+                {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance},
             )
-            return done(out)
         # #1410: the cross-check above compares two NUMBERS and so only catches a tree
         # bound that is already wrong at the root. The failure it misses is the opposite
         # shape: a root bound that is perfectly valid while HiGHS prunes the true optimum
