@@ -8,7 +8,8 @@ missed the true value by ~``|x| * 1e-16`` -- ``sin(1e15)`` came back as the poin
 certified objective 1 where 0 is optimal (and called the ``y``-free variant
 infeasible).
 
-Reference values were computed with mpmath at 50 digits. The randomized check
+The point reference values were computed with mpmath at 50 digits (the separate
+audit in ``docs/dev/data/2190-trig-audit/`` uses 60). The randomized check
 uses an exact-in-double reference: on an interval that holds no critical point
 the image is ``[min, max]`` of the endpoint values, which ``math.sin`` computes
 correctly rounded-or-faithful, so the enclosure's ends must bracket them.
@@ -173,7 +174,7 @@ def test_periodic_window_spans_a_true_period():
         assert Fraction(lo) - Fraction(start) >= two_pi_up, lo
 
     rule = PeriodicVariableBoundRule()
-    m = dm_model_cos_only()
+    m = _dm_model_cos_only()
     md = build_flat_variable_metadata(m)
     for lb, ub in (([-1e20], [1e20]), ([1e12], [1e20]), ([-1e20], [-3.0]), ([0.0], [100.0])):
         nlb, nub = rule.tighten(m, np.array(lb, float), np.array(ub, float), md)
@@ -181,7 +182,7 @@ def test_periodic_window_spans_a_true_period():
         assert nlb[0] >= lb[0] and nub[0] <= ub[0]  # never leaves the incoming box
 
 
-def dm_model_cos_only():
+def _dm_model_cos_only():
     import discopt.modeling as dm
 
     m = dm.Model("periodic_2190")
