@@ -537,3 +537,30 @@ or +2 certified) fails. Median 1-min load 7.2 on 4 cores (two analysis agents ra
 alongside): arms were interleaved under the same load, but `dcmulti` certifies near the
 20 s line, so the loss may be partly budget. Not retired yet: the RINS scheduling/budget
 question goes to the HiGHS-expert review first.
+
+**6. Expert R1 entry checks (2026-11-06).**
+
+*(a) Where HiGHS's incumbents come from.* Read from the ablation logs; see
+`highs-parity-d2-highs-ablation.md` §C.5. With HiGHS defaults the final incumbent comes from
+a sub-MIP (`L`) on 20/25 of the rows Rust fails. With every heuristic off, HiGHS still
+certifies 25/25, with final incumbents from tree-node LPs (`T`/`B` 17, `S` 7). The expert
+review's letter key read `S` as RINS. The source says `S` is "Solve LP" and `L` is sub-MIP;
+this is corrected in the review. **Consequence for RINS:** a sub-MIP is not what certifies
+these rows, so L3a cannot close D2. The primal lever to test is dives from tree nodes.
+
+*(b) What an objective cutoff in the dual simplex could save.* Probe
+`d2-analysis/r1_cutoff_entry.{py,jsonl}`, profile counters `NodeLp*`, direct driver, 20 s,
+20 of the 25 rows. It measures the share of node-LP pivots spent on `Optimal` nodes whose bound
+reached the dispatch-time incumbent; a cutoff can save at most a fraction of those.
+
+- Pooled share: **8.2 %**.
+- Zero on 13/20 rows: all four `mik`, `b-ball`, `iskar`, `kaihu`, `nexp-*`, `gsvm2rl3`,
+  `sp150x300d`, `beavma`, `neos-911970`. On these the incumbent sits far from every node
+  bound.
+- High only where the incumbent is already close: `bppc8-02` 40 %, `fiber` 22 %, `jijia`
+  13 %, `istra` 2 %.
+
+**Verdict:** the cutoff is not a standalone lever on the failure set. It pays only after
+the primal side delivers good incumbents, so it moves behind the plunge/dive prototype in
+the build order. The `NodeLp*` counters stay: they are profile-gated and bound-neutral.
+

@@ -132,7 +132,20 @@ hybrid estimate (`pool.rs:82`) should be the queue order with a best-bound pop e
 tabulate the *source letter* of every incumbent it logs (`T` evaluateNode, `B` branching, `R`
 randomised rounding, `S` sub-MIP, `F` pump, …). Hypothesis: on ≥ 7/10 the final incumbent
 comes from a dive/branching node (`T`/`B`) or RINS (`S`), i.e. from inside the plunge, not from
-a root heuristic. Then a 2-day prototype (plunge depth ≤ 100, no cutoff yet) on the same rows:
+a root heuristic.
+
+> **Correction (2026-11-06, §11).** The letters above are misread. In HiGHS 1.15.1
+> (`mip/HighsMipSolverData.cpp:89-160`, `solutionSourceToString`) **`S` is "Solve LP"** (an
+> integral LP solution) and **`L` is "Sub-MIP"** (RINS/RENS, `HighsPrimalHeuristics.cpp:238`).
+> `T` is "Evaluate node", `B` "Branching", `R` "Randomized rounding", `J` "Feasibility jump",
+> `C` "Central rounding". **Entry result** (`d2-ablation/ablation_phase1.jsonl.gz`, the 25 rows
+> Rust fails, 20 s, threads=1): with HiGHS defaults the final incumbent is `L` on 20/25 and `T`
+> on 5/25. With every heuristic off (`heur_all_off`: effort 0, FJ/RINS/RENS/root-rc off) HiGHS
+> still certifies **25/25**, and the final incumbent is `T` 15, `S` 7, `B` 2, `R` 1. So the
+> tree's own node LPs (`T`/`B`, 17/25) supply the incumbent once the sub-MIPs are removed.
+> Sub-MIP heuristics are *where* HiGHS's incumbents come from by default, but they are not what
+> certifies. The hypothesis holds under both readings (L counts as "RINS"). It points the
+> primal lever at the plunge (R1), not at a sub-MIP (R2(i)). Then a 2-day prototype (plunge depth ≤ 100, no cutoff yet) on the same rows:
 count incumbent improvements per 10k nodes and nodes/s vs HEAD. **Kill:** < 4/10 rows improve
 their incumbent within 20 s *and* nodes/s < 1.5× HEAD → the plunge is not the lever; fall back
 to R2 and R4 only. Verification regime: bound-changing (search order changes the certified set),

@@ -739,3 +739,28 @@ Rust one: C.2 step 1 plus a clique-table propagator (`presolve/cliques.rs` edges
 `clique_propagate` pass inside `tighten_bounds_csc_with_row`, bound-neutral by construction)
 measured on `gt2`'s 70 k-node tree: bar ≤ 0.25× nodes with the same bound; kill: no change on
 `gt2`, `nexp-50-20-1-1`, `fiber`.
+
+### C.5 Where HiGHS's incumbents come from (added 2026-11-06, from the phase-1 logs)
+
+Each row's `log.sol_sources` records HiGHS's source letter for every improving solution
+(`mip/HighsMipSolverData.cpp:89-160`: `L` sub-MIP, `T` evaluate node, `B` branching, `S` solve
+LP, `R` randomized rounding, `J` feasibility jump, `C` central rounding). This table gives the
+final incumbent's source over the 25 rows, at 20 s:
+
+| arm | certified | final-incumbent source |
+|---|---|---|
+| `base` / `base_tdef` | 24 | `L` 20, `T` 5 |
+| `presolve_off` | 24 | `L` 17, `T` 8 |
+| `restart_off` | 24 | `L` 18, `T` 4, `B` 2, `S` 1 |
+| `node_cuts_off` | 23 | `L` 21, `T` 3, `S` 1 |
+| `cuts_throttle` | 22 | `L` 21, `T` 4 |
+| `heur_all_off` | **25** | `T` 15, `S` 7, `B` 2, `R` 1 |
+
+What the table shows:
+
+- Sub-MIPs supply the incumbent whenever they run.
+- Sub-MIPs are not what certifies. Without any heuristic, HiGHS certifies all 25 from
+  tree-node LPs (`T`/`B` 17, `S` 7).
+- This sharpens §0: the sub-MIP heuristic (C.3) changes node counts, not the certified set.
+- The expert review's R1 entry ("final incumbent from inside the plunge") holds. Its letter
+  key misread `S` as RINS; that is corrected there.

@@ -351,6 +351,50 @@ fn parse_dive_stride(raw: &str) -> Result<usize, String> {
 /// §5 differential panel graduates it.
 const DIVE_STRIDE_DEFAULT: usize = 0;
 
+/// Batch stride for the **improving dive** (highs-parity D2, expert review R1), read
+/// once from `DISCOPT_MILP_IMPROVE_DIVE`. `0` (the default) is off and leaves the
+/// driver byte-identical.
+///
+/// `n > 0` grants the dive slot to the first (best-bound) node of every `n`-th batch
+/// **once the tree holds an incumbent**, the regime `DISCOPT_MILP_DIVE_STRIDE` leaves
+/// alone. The dive runs in improve mode ([`try_dive_repair`] with `improve = true`):
+/// it propagates (FBBT) after every fix, so one fixing settles the columns it
+/// implies, and abandons the dive as soon as its LP objective reaches the
+/// dispatch-time incumbent, since nothing below that point can improve on it.
+///
+/// Why: on the D2 primal populations (A1/A2: `gt2`, `iskar`, `istra`, `kaihu`, ...)
+/// the Rust driver's incumbent can change after the root only when a best-first node
+/// is integral (`b4_60s.jsonl`: the same incumbent at 20 s and 60 s on 12/12 rows),
+/// while HiGHS with every heuristic switched off still certifies all 25 failing rows
+/// from incumbents found at tree nodes (`T`/`B` 17/25,
+/// `docs/dev/highs-parity-d2-highs-ablation.md` §C.5). This is the cheapest test of
+/// whether tree-node dives are the primal lever. It is primal-only: the dive never
+/// changes a node's bound, but a new incumbent changes pruning, so it is
+/// bound-changing under §5 and ships default-OFF.
+fn improve_dive_stride() -> usize {
+    static STRIDE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *STRIDE.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_IMPROVE_DIVE").unwrap_or_default();
+        parse_improve_dive(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`improve_dive_stride`]; garbage is refused, not defaulted.
+fn parse_improve_dive(raw: &str) -> Result<usize, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(0);
+    }
+    t.parse::<usize>().map_err(|_| {
+        format!("DISCOPT_MILP_IMPROVE_DIVE: expected a non-negative integer, got {t:?}")
+    })
+}
+
+/// Does this batch get an improving dive? Pure, so the schedule is asserted directly.
+fn improve_dive_batch_eligible(stride: usize, batch_index: usize, has_incumbent: bool) -> bool {
+    stride > 0 && has_incumbent && batch_index % stride == 0
+}
+
 /// Does this batch get a continuous-repair dive away from the root?
 ///
 /// Pure so the schedule can be asserted directly rather than inferred from a
@@ -2647,6 +2691,13 @@ fn solve_milp_node_search(
         if dive_batch {
             nonroot_dives += 1;
         }
+        // D2 R1 prototype: the improving dive, once an incumbent exists.
+        let improve_batch = improve_dive_batch_eligible(
+            improve_dive_stride(),
+            this_batch,
+            tm.incumbent().is_some(),
+        );
+        let dive_batch = dive_batch || improve_batch;
 
         let outputs: Vec<NodeOutput> = {
             let ctx = NodeCtx {
@@ -2674,6 +2725,7 @@ fn solve_milp_node_search(
                 simplex: &node_simplex,
                 sb_active,
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
+                improve_dive: improve_batch,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -3275,6 +3327,8 @@ struct NodeCtx<'a> {
     sb_active: bool,
     /// Incumbent value at batch start (for the strong-branch prunable check).
     inc_snapshot: Option<f64>,
+    /// This batch's dive slot is an improving dive (`DISCOPT_MILP_IMPROVE_DIVE`).
+    improve_dive: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -3613,6 +3667,15 @@ fn solve_node(
             if ns_node_bound_enabled() {
                 crate::profile::incr(crate::profile::Ctr::NodeNsBound);
             }
+            crate::profile::incr(crate::profile::Ctr::NodeLpOptimal);
+            crate::profile::incr_by(crate::profile::Ctr::NodeLpIters, sol.iters as u64);
+            if ctx
+                .inc_snapshot
+                .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
+            {
+                crate::profile::incr(crate::profile::Ctr::NodeLpOverInc);
+                crate::profile::incr_by(crate::profile::Ctr::NodeLpItersOverInc, sol.iters as u64);
+            }
             let feasible = ctx
                 .is_int
                 .iter()
@@ -3766,7 +3829,14 @@ fn solve_node(
                 // for the model — and `inject_incumbent` re-validates it besides.
                 if out.incumbent.is_none() && (is_root || dive_slot) {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::DiveRepair);
-                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis);
+                    let improve = ctx.improve_dive && !is_root;
+                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis, improve);
+                    if improve {
+                        crate::profile::incr(crate::profile::Ctr::ImproveDiveRuns);
+                        if out.incumbent.is_some() {
+                            crate::profile::incr(crate::profile::Ctr::ImproveDiveHits);
+                        }
+                    }
                     if !is_root {
                         crate::profile::incr(crate::profile::Ctr::DiveOffRoot);
                         if out.incumbent.is_some() {
@@ -5345,8 +5415,18 @@ fn try_dive_repair(
     ub_k: &[f64],
     x_start: &[f64],
     start_basis: &Basis,
+    improve: bool,
 ) -> Option<(Vec<f64>, f64)> {
     let ns = ctx.ns;
+    // Improve mode (`DISCOPT_MILP_IMPROVE_DIVE`): the dive can only matter if it ends
+    // below the incumbent, and its LP objective never decreases as columns are fixed,
+    // so a step whose objective reaches the dispatch-time incumbent ends the dive.
+    // The incumbent includes `obj_const`, like the tree's.
+    let cutoff = if improve {
+        ctx.inc_snapshot.filter(|v| v.is_finite())
+    } else {
+        None
+    };
     // Structural bounds, progressively fixed; slacks keep their bounds.
     let mut l = lb_k.to_vec();
     let mut u = ub_k.to_vec();
@@ -5441,13 +5521,46 @@ fn try_dive_repair(
             full_u[j] = v;
             full_l[ns..].copy_from_slice(ctx.slack_l);
             full_u[ns..].copy_from_slice(ctx.slack_u);
+            // Improve mode: propagate the fixing (FBBT over the working rows) so
+            // the columns it implies are fixed with it; an empty box is the same
+            // verdict as an infeasible LP for this value. Sound as a restriction:
+            // FBBT only removes points that violate a row, so the dive's box
+            // still contains every feasible completion of the fixing.
+            if improve {
+                let pr = tighten_bounds_csc(
+                    ctx.csc_rc,
+                    ctx.m_w,
+                    ctx.n_w,
+                    &full_l,
+                    &full_u,
+                    ctx.b_w,
+                    ctx.is_int_full,
+                    ctx.opts.simplex.tol,
+                );
+                if pr.infeasible {
+                    crate::profile::incr(crate::profile::Ctr::ImproveDivePropInfeas);
+                    continue;
+                }
+                full_l = pr.l;
+                full_u = pr.u;
+            }
             // #1945: verified against the ORIGINAL data, like every node solve.
             let mut sol = ctx
                 .problem
                 .solve_warm(&full_l, &full_u, &cur_basis, ctx.simplex);
             if sol.status == LpStatus::Optimal {
+                if let Some(c) = cutoff {
+                    if sol.obj + ctx.obj_const >= c {
+                        crate::profile::incr(crate::profile::Ctr::ImproveDiveCutoff);
+                        return None;
+                    }
+                }
                 if let Some(s) = ctx.scaling {
                     s.unscale_x(&mut sol.x);
+                }
+                if improve {
+                    l.copy_from_slice(&full_l[..ns]);
+                    u.copy_from_slice(&full_u[..ns]);
                 }
                 l[j] = v;
                 u[j] = v;
@@ -6576,6 +6689,24 @@ mod tests {
         for bad in ["-1", "eight", "1.5", "8x"] {
             assert!(parse_dive_stride(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn improve_dive_parse_and_schedule() {
+        // Unset is off (the driver stays byte-identical); garbage is refused.
+        assert_eq!(parse_improve_dive("").unwrap(), 0);
+        assert_eq!(parse_improve_dive(" 4 ").unwrap(), 4);
+        for bad in ["-1", "on", "1.5"] {
+            assert!(parse_improve_dive(bad).is_err(), "{bad:?} must be refused");
+        }
+        // Off at stride 0, and never without an incumbent (that regime belongs to
+        // DISCOPT_MILP_DIVE_STRIDE); with one, every `stride`-th batch.
+        assert!((0..64).all(|b| !improve_dive_batch_eligible(0, b, true)));
+        assert!((0..64).all(|b| !improve_dive_batch_eligible(4, b, false)));
+        let on: Vec<usize> = (0..12)
+            .filter(|&b| improve_dive_batch_eligible(4, b, true))
+            .collect();
+        assert_eq!(on, vec![0, 4, 8]);
     }
 
     #[test]

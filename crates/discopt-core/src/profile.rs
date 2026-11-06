@@ -310,6 +310,19 @@ counters!(
     ConflictInfeasNodes,
     ConflictLocalBoundsSum,
     ConflictSmall,
+    // D2 R1 entry (objective cutoff): warm/cold node-LP pivots on `Optimal` nodes,
+    // and the share spent on nodes whose bound reached the dispatch-time incumbent
+    // (pruned anyway; the pivots an objective limit in the dual simplex could save).
+    NodeLpOptimal,
+    NodeLpIters,
+    NodeLpOverInc,
+    NodeLpItersOverInc,
+    // D2 R1 prototype (`DISCOPT_MILP_IMPROVE_DIVE`): improving dives run, dives that
+    // returned a point, dives ended by the incumbent cutoff, fixings refused by FBBT.
+    ImproveDiveRuns,
+    ImproveDiveHits,
+    ImproveDiveCutoff,
+    ImproveDivePropInfeas,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
