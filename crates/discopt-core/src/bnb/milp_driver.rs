@@ -2571,7 +2571,9 @@ fn solve_milp_node_search(
             // Dedup this node's cuts against the shared pool *in order*, with the
             // same room check the serial path applied, so the pool is identical.
             if !out.found_cuts.is_empty() && pool_sigs.len() < node_cut_cap {
-                pending_cuts.extend(dedup_new_cuts(out.found_cuts, &mut pool_sigs, node_cut_cap));
+                let fresh = dedup_new_cuts(out.found_cuts, &mut pool_sigs, node_cut_cap);
+                crate::profile::incr_by(crate::profile::Ctr::NodeCutsFolded, fresh.len() as u64);
+                pending_cuts.extend(fresh);
             }
             // Lazy separation of this node's OWN relaxation solution. The point
             // has to be screened here, before `import_results`, because

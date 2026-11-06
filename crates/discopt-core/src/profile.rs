@@ -307,6 +307,9 @@ counters!(
     NodeSepCalls,
     NodeSepRaw,
     NodeSepCuts,
+    // Node cuts (any separator) that passed dedup and the pool cap and were folded
+    // into the shared matrix.
+    NodeCutsFolded,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
