@@ -127,49 +127,29 @@ class TestKnowhowLayout:
 
 
 # ──────────────────────────────────────────────────────────
-# pounce-expert: one agent, shipped by both discopt and pounce
+# discopt-expert: its hand-off table names agents that exist
 # ──────────────────────────────────────────────────────────
 
-_POUNCE_EXPERT = "pounce-expert.md"
-_POUNCE_CANONICAL = Path(".claude") / "agents" / _POUNCE_EXPERT
+# Agents discopt-expert hands off to that ship from another repository.
+_EXTERNAL_AGENTS = {"pounce-expert"}  # jkitchin/pounce, .claude/agents/
 
 
-def _pounce_checkout() -> Path | None:
-    """A pounce source checkout: ``$POUNCE_SRC``, else a sibling ``../pounce``."""
-    import os
+def test_discopt_expert_hands_off_only_to_agents_that_exist():
+    """The generalist's routing table must not send a reader to a missing agent.
 
-    for cand in (os.environ.get("POUNCE_SRC"), _REPO_ROOT.parent / "pounce"):
-        if cand and (Path(cand) / _POUNCE_CANONICAL).is_file():
-            return Path(cand)
-    return None
-
-
-class TestPounceExpertIsShared:
-    """``pounce-expert`` ships from discopt and from pounce under one name.
-
-    knowhow installs a subagent to ``agents/<name>.md``, so the two copies must be
-    byte-identical: then installing it from both repositories leaves one agent, and
-    which source a lock file records does not matter. pounce's copy is canonical."""
-
-    def test_ships_in_the_bundle(self):
-        names = {Path(str(p)).name for p in skills.iter_agents()}
-        assert _POUNCE_EXPERT in names
-        text = (Path(str(skills.agents_dir())) / _POUNCE_EXPERT).read_text()
-        assert _frontmatter(Path(str(skills.agents_dir())) / _POUNCE_EXPERT)["name"] == (
-            "pounce-expert"
-        )
-        assert str(_POUNCE_CANONICAL) in text, "the file must name its canonical copy"
-
-    def test_pounce_expert_matches_pounce(self):
-        root = _pounce_checkout()
-        if root is None:
-            pytest.skip("no pounce checkout (set POUNCE_SRC or clone it beside discopt)")
-        ours = (Path(str(skills.agents_dir())) / _POUNCE_EXPERT).read_bytes()
-        theirs = (root / _POUNCE_CANONICAL).read_bytes()
-        assert ours == theirs, (
-            f"python/discopt/skills/agents/{_POUNCE_EXPERT} differs from "
-            f"{root / _POUNCE_CANONICAL}; edit pounce's copy and copy it here"
-        )
+    ``discopt-expert`` routes questions to the bundle's specialists by name. An
+    agent renamed or removed from ``skills/agents/`` would leave that table
+    pointing nowhere, and nothing else checks it."""
+    agents_dir = Path(str(skills.agents_dir()))
+    text = (agents_dir / "discopt-expert.md").read_text()
+    named = set(re.findall(r"`([a-z0-9-]+-expert)`", text))
+    assert len(named) >= 10, f"probe found only {sorted(named)}: the table moved"
+    shipped = {Path(str(p)).stem for p in skills.iter_agents()}
+    missing = named - shipped - _EXTERNAL_AGENTS
+    assert not missing, f"discopt-expert hands off to agents that do not ship: {missing}"
+    # every specialist in the bundle is reachable from the generalist
+    unrouted = shipped - named - {"discopt-expert"}
+    assert not unrouted, f"agents discopt-expert never routes to: {unrouted}"
 
 
 # ──────────────────────────────────────────────────────────
