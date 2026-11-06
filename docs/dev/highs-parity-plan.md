@@ -1570,6 +1570,16 @@ and is re-written by P4.1.**
   panel bars; the postsolved incumbent re-verified on the **original** rows; the #1634
   question (§4) answered in the task record. Kill: entry fails → retire. Regime:
   bound-changing.
+  **Entry (2026-11-06, decision point).** `p48_presolve_entry.py` (data
+  `p4.8/entry_highs_presolve.json`): HiGHS's own MILP presolve on the same converted arrays,
+  MIPLIB-38 + M (58), as an UPPER BOUND on what a dimension-reducing presolve removes.
+  **29 of 58 lose >= 20 % of rows** (bar: >= 8): `mik-*` 62 % (195 → 75), `neos-1425699`
+  70 %, `neos-2624317-amur` 64 %, `supportcase14` 81 %, `gen` 50 %, `nexp-50-20-1-1`
+  50 %, `2122` 55 %, `issue-2446` 56 %; several small M instances vanish entirely. Against
+  it: the reductions are HiGHS's, not a discopt implementation (P2.4's LP reductions were
+  never built -- not pursued); HiGHS's own ablation puts presolve at <= 2 instances / 1.7x
+  (§1c); and §2.5(a) measured it at ~0-3 pp of root gap. A from-scratch presolve with
+  postsolve is the largest P4 item.
 - [ ] **P4.9 — R1-MILP graduation gate → D2.** Scope: `solver.py:37494`. Done: MIPLIB-38
   ≥ 34/38, total wall ≤ 2× H, M panel ≥ 23/24 at geomean ≤ 3.0, 0 incorrect, INF 18/18;
   the Rust MILP route passes the routing plan's §3.2 incumbent verification and
