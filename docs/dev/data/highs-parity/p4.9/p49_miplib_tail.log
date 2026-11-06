@@ -1,0 +1,43 @@
+header {"load": [1.826171875, 0.60205078125, 0.21240234375], "commit": "d8d40da0", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 4.0} arms ['R', 'H'] n 38
+[run 1/38] MIPLIB neos-1425699             {'R': ('optimal', 1, 3179698976.9999995, '0.174'), 'H': ('optimal', 1, 3179698977.0, '0.299')}
+[run 2/38] MIPLIB blend2                   {'R': ('optimal', 8487, 7.598985, '2.768'), 'H': ('optimal', 72, 7.598985, '3.437')}
+[run 3/38] MIPLIB enlight8                 {'R': ('optimal', 123666, 27.0, '8.028'), 'H': ('optimal', 412, 27.0, '2.919')}
+[run 4/38] MIPLIB p0201                    {'R': ('optimal', 607, 7614.999999999998, '0.505'), 'H': ('optimal', 5, 7615.0, '1.151')}
+[run 5/38] MIPLIB mik-250-20-75-5          {'R': ('feasible', 61732, -51506.0, '20.131'), 'H': ('optimal', 159, -51532.0, '8.082')}
+[run 6/38] MIPLIB neos-911970              {'R': ('feasible', 29, 113.54000000000002, '20.102'), 'H': ('optimal', 1077, 54.76, '12.438')}
+[run 7/38] MIPLIB mik-250-20-75-3          {'R': ('feasible', 59518, -52106.0, '20.141'), 'H': ('optimal', 433, -52242.0, '10.445')}
+[run 8/38] MIPLIB fiber                    {'R': ('feasible', 27, 532885.75, '20.275'), 'H': ('optimal', 7, 405935.18, '1.700')}
+[run 9/38] MIPLIB khb05250                 {'R': ('optimal', 419, 106940226.00000362, '9.360'), 'H': ('optimal', 1, 106940226.0, '1.975')}
+[run 10/38] MIPLIB nexp-50-20-1-1           {'R': ('feasible', 9051, 38.0, '20.161'), 'H': ('optimal', 1, 29.0, '0.368')}
+[run 11/38] MIPLIB mik-250-20-75-2          {'R': ('feasible', 58910, -50768.0, '20.143'), 'H': ('optimal', 91, -50768.0, '4.641')}
+[run 12/38] MIPLIB 22433                    {'R': ('optimal', 149, 21476.999999999996, '0.703'), 'H': ('optimal', 4, 21477.0, '2.659')}
+[run 13/38] MIPLIB nexp-50-20-4-2           {'R': ('feasible', 18096, 86.0, '20.225'), 'H': ('optimal', 1, 71.0, '1.981')}
+[run 14/38] MIPLIB gt2                      {'R': ('feasible', 79777, 24106.0, '20.139'), 'H': ('optimal', 1, 21166.0, '0.243')}
+[run 15/38] MIPLIB mik-250-20-75-1          {'R': ('feasible', 64476, -49716.0, '20.149'), 'H': ('optimal', 453, -49716.0, '11.253')}
+[run 16/38] MIPLIB 23588                    {'R': ('optimal', 3455, 8090.0, '1.688'), 'H': ('optimal', 997, 8090.0, '13.630')}
+[run 17/38] MIPLIB flugpl                   {'R': ('optimal', 319, 1201499.9999999984, '0.115'), 'H': ('optimal', 51, 1201500.0, '0.187')}
+[run 18/38] MIPLIB dcmulti                  {'R': ('optimal', 5287, 188182.00000000183, '2.928'), 'H': ('optimal', 3, 188182.0, '2.344')}
+[run 19/38] MIPLIB enlight_hard             {'R': ('time_limit', 5721, None, '20.008'), 'H': ('optimal', 2303, 37.0, '12.285')}
+[run 20/38] MIPLIB sp150x300d               {'R': ('time_limit', 1987, None, '20.030'), 'H': ('optimal', 1, 69.0, '1.038')}
+[run 21/38] MIPLIB gen                      {'R': ('optimal', 987, 112313.36271800013, '2.718'), 'H': ('optimal', 1, 112313.362718, '0.660')}
+[run 22/38] MIPLIB neos17                   {'R': ('time_limit', 249, None, '20.597'), 'H': ('optimal', 1524, 0.15000257742257753, '9.757')}
+[run 23/38] MIPLIB beavma                   {'R': ('feasible', 441, 480592.30000000005, '20.193'), 'H': ('optimal', 1, 383285.0, '0.679')}
+[run 24/38] MIPLIB neos-3611447-jijia       {'R': ('feasible', 104810, 124.0, '20.105'), 'H': ('optimal', 384, 107.0, '2.809')}
+[run 25/38] MIPLIB neos-3610051-istra       {'R': ('feasible', 24383, 53.0, '20.164'), 'H': ('optimal', 288, 49.0, '9.948')}
+[run 26/38] MIPLIB neos-3611689-kaihu       {'R': ('feasible', 96554, 141.0, '20.107'), 'H': ('optimal', 283, 119.0, '3.108')}
+[run 27/38] MIPLIB neos-3610040-iskar       {'R': ('feasible', 119376, 41.0, '20.113'), 'H': ('optimal', 380, 37.0, '7.801')}
+[run 28/38] MIPLIB neos-5192052-neckar      {'R': ('optimal', 15, -11669999.999999993, '0.206'), 'H': ('optimal', 1, -11670000.0, '0.357')}
+[run 29/38] MIPLIB neos-2624317-amur        {'R': ('time_limit', 609, None, '20.033'), 'H': ('feasible', 2474, 7.4855968, '13.098')}
+[run 30/38] MIPLIB app2-2                   {'R': ('optimal', 225, 212042.49999999767, '0.651'), 'H': ('optimal', 1, 212040.5, '1.420')}
+[run 31/38] MIPLIB b-ball                   {'R': ('feasible', 208207, -1.5, '20.103'), 'H': ('optimal', 101, -1.5, '0.280')}
+[run 32/38] MIPLIB bppc8-02                 {'R': ('feasible', 11577, 515.9999999999999, '20.169'), 'H': ('optimal', 152, 507.0, '0.662')}
+[run 33/38] MIPLIB supportcase16            {'R': ('optimal', 105, 287.99999999999994, '1.637'), 'H': ('optimal', 1, 288.0, '0.391')}
+[run 34/38] MIPLIB supportcase14            {'R': ('optimal', 191, 287.99999999999983, '1.991'), 'H': ('optimal', 1, 288.0, '0.291')}
+[run 35/38] MIPLIB f2gap40400               {'R': ('optimal', 1, 20772.000000000004, '0.231'), 'H': ('optimal', 1, 20772.0, '0.216')}
+[run 36/38] MIPLIB gsvm2rl3                 {'R': ('feasible', 100998, 0.5863548183028108, '20.123'), 'H': ('optimal', 2547, 0.3365275339619651, '8.906')}
+[run 37/38] MIPLIB neos-3118745-obra        {'R': ('feasible', 25681, 327.0, '20.116'), 'H': ('feasible', 3340, 255.99999999999997, '20.122')}
+[run 38/38] MIPLIB gr4x6                    {'R': ('optimal', 109, 202.34999999999994, '0.512'), 'H': ('optimal', 1, 202.35000000000002, '0.149')}
+run: panel=MIPLIB executed=228
+run: presolve_answered={}
+run: executed=228 incorrect_count=0 walls_gated=0/38 load_end=(1.89111328125, 2.54833984375, 2.31591796875)
+MIPLIB_EXIT 0

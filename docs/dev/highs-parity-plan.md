@@ -1583,13 +1583,35 @@ and is re-written by P4.1.**
   **Deferred (owner, 2026-11-06: "Defer; go to P4.9 gate").** Entry met on the HiGHS proxy,
   but the expected value is small (§1c, §2.5a) against a from-scratch build; revisit if
   P4.9 shows presolve-shaped losses. Nothing built.
-- [ ] **P4.9 — R1-MILP graduation gate → D2.** Scope: `solver.py:37494`. Done: MIPLIB-38
+- [x] **P4.9 — R1-MILP graduation gate → D2. GATE MISSED 2026-11-06 → D2.** Scope: `solver.py:37494`. Done: MIPLIB-38
   ≥ 34/38, total wall ≤ 2× H, M panel ≥ 23/24 at geomean ≤ 3.0, 0 incorrect, INF 18/18;
   the Rust MILP route passes the routing plan's §3.2 incumbent verification and
   root-bound cross-check **through P1.1's seam on the Rust engine** (the verifier is
   engine-independent; the tree bound stays labelled `rust-fp`). Then flip
   `DISCOPT_LP_MILP_BACKEND` default to `rust`, keep `=highs`, audit rows, H4 guard
   drift=0, and record M-1671 route (a) as met if D0 chose it. Kill: bar missed → **D2**.
+  **Result (2026-11-06): the gate is missed; `DISCOPT_LP_MILP_BACKEND` stays `highs`; D2 is
+  open.** Build `d8d40da0` (all Phase 4 graduations in: P4.0 re-entry, P4.4 root GMI
+  repair; P3.2 Farkas margin fix), `miplib_panel.py run --arms R,H --rounds 3
+  --time-limit 20 --load-gate 4` and `lp_milp_panel.py run --panel M --panel INF` (same
+  arms/rounds), every wall under the load gate (38/38, 40/40), data `p4.9/`:
+
+  | bar | required | R (Rust) | H (HiGHS route) | |
+  |---|---|---|---|---|
+  | MIPLIB-38 certified | >= 34/38 | **16/38** | 36/38 | miss |
+  | MIPLIB total wall (median of 3) | <= 2x H | **2.75x** (477.5 / 173.7 s) | | miss |
+  | M certified | >= 23/24 | **18/24** | 24/24 | miss |
+  | M geomean wall R/H | <= 3.0 | 2.12 | | met |
+  | incorrect | 0 | **0** (468 solves) | 0 | met |
+  | INF | all correct | **16/16** (15 infeasible, `gas11` unbounded as H) | 16/16 | met |
+
+  The INF panel holds 16 instances, not the 18 this task names (plan drift; the manifest
+  is the record). P0.3's R baseline certified 14/38; Phase 4 moved it to 16/38. The R
+  losses are the P4.1 classes: frozen primal (`mik-*` hold the optimum and still miss
+  the bound at 20 s, `jijia`/`kaihu`/`iskar`/`istra`, `b-ball`, `bppc8-02`), weak root
+  bound (`sp150x300d`, `beavma`, `gt2`, `neos17`, `p0548`, `issue-2446`, `gesa2`) and no
+  incumbent (`enlight_hard`, `neos-2624317-amur`, `neos17`). Per the kill clause the
+  decision passes to **D2** (owner).
 
 ### Phase 5 — masters (R2a/R2b)
 
