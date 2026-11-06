@@ -3310,13 +3310,17 @@ def _tree_below_root_repair_enabled() -> bool:
 
 
 def _repair_tree_below_root(
+    sf: StdForm,
     out: HighsOutcome,
     root: float,
     labels: dict[str, str],
     stats: dict[str, float],
     gap_kw: dict[str, Any],
-) -> None:
+    time_limit: Optional[float],
+) -> bool:
     """#2187: HiGHS's tree bound is below the NS-safe root bound; publish the root bound.
+
+    Returns ``True`` when ``out`` became an ``error`` and the caller should stop.
 
     A lower bound below a valid lower bound is weaker, not false, so this was never a
     soundness failure. The tree bound is dropped, not trusted: HiGHS's tree may have
@@ -3335,6 +3339,19 @@ def _repair_tree_below_root(
     feasibility tolerance can keep to on this matrix, so the route used to return
     ``error``, with no objective and no bound, for a result the root LP alone
     certifies (relative gap 5.7e-7).
+
+    An incumbent below the root bound by more than the LP yardstick is not a point: no
+    exactly feasible point beats a valid lower bound, so it bought its objective with row
+    tolerance (the #1612 class). It is replaced by the verified point of the LP over its
+    own integers (:func:`_fixed_integer_lp`) when that point is not itself below the
+    bound, and certified only if the root bound closes the gap on it. Measured on
+    highspy 1.11.0, where HiGHS's own incumbent on the net above is 20.5560762 (5.05e-5
+    under the bound): the LP over its integers gives 20.5561384254, the ``relu_bigm``
+    optimum. With no such point the incumbent is withdrawn, and a ``kOptimal`` becomes
+    the ``error`` it was before #2187. Measured on ``test_1447``'s tree ensemble pinned
+    exactly on a split threshold (``split_eps`` = 1e-6, infeasible by exactly the
+    tolerance): HiGHS's 1.0 sits 4e-6 under the root bound and the LP over its integers
+    is infeasible.
     """
     tree = float(out.bound)  # type: ignore[arg-type]
     stats["milp/tree_bound_below_root"] = root - tree
@@ -3342,64 +3359,50 @@ def _repair_tree_below_root(
         f"tree bound {tree:.12g} below the NS-safe root bound {root:.12g}; tree bound dropped"
     )
     labels["milp/bound_provenance"] = "root-ns"
-    out.bound = root if out.objective is None else min(root, float(out.objective))
-    if out.objective is not None and root - float(out.objective) > CERT_ABS + CERT_REL * abs(root):
-        # No exactly feasible point beats a valid lower bound, so an incumbent below
-        # the NS root bound by more than the route's LP yardstick bought its objective
-        # with row tolerance (the #1612 class). Measured on the presolve-free arm of the
-        # same net: objective 20.5560762, 5.1e-5 under the root bound. Nothing is
-        # certified on it. A kOptimal result is marked for :func:`_rederive_below_root`,
-        # which the #1509 check calls with the LP over these same integers.
+    logger.info("HiGHS MILP route: %s (#2187)", labels["milp/tree_bound_below_root"])
+    thr = CERT_ABS + CERT_REL * abs(root)
+    was_optimal = out.status == "optimal"
+    if out.objective is not None and root - float(out.objective) > thr:
         stats["milp/incumbent_below_root"] = root - float(out.objective)
-        labels["milp/certificate"] = "declined"
-        out.gap_certified = False
-        if out.status == "optimal":
-            out.status = "feasible"
-            stats["milp/incumbent_below_root_pending"] = 1.0
-    elif out.status == "optimal" and out.objective is None:
-        # HiGHS reports a point with every kOptimal, so this is not reached today. An
-        # "optimal" with no incumbent has nothing to certify, and "feasible" would claim
-        # a point that does not exist (review of #2189).
-        out.status, out.gap_certified = "error", False
-        out.message = "HiGHS MILP kOptimal without an incumbent"
-        labels["milp/certificate"] = "declined"
-    elif out.status == "optimal":
-        closed = _gap_closed(float(out.objective), float(out.bound), gap_kw)  # type: ignore[arg-type]
+        pt = None
+        if out.x is not None and sf.int_idx.size and (time_limit is None or time_limit > 0.0):
+            fx = _fixed_integer_lp(sf, out.x, time_limit)
+            pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+            if pt is not None and root - float(pt[1]) > thr:
+                pt = None
+        if pt is None:
+            stats["milp/incumbent_below_root_withdrawn"] = 1.0
+            labels["milp/certificate"] = "declined"
+            out.x, out.objective, out.gap_certified = None, None, False
+            out.bound = root
+            if was_optimal:
+                out.status = "error"
+                out.message = (
+                    f"HiGHS MILP kOptimal: incumbent below the NS-safe root bound {root:.12g} "
+                    "and no point over its integers reaches the bound"
+                )
+                return True
+            return False
+        stats["milp/incumbent_rederived_below_root"] = 1.0
+        out.x, out.objective = np.asarray(pt[0], dtype=np.float64), float(pt[1])
+    if out.objective is None:
+        out.bound = root
+        if was_optimal:
+            # HiGHS reports a point with every kOptimal, so this is not reached today. An
+            # "optimal" with no incumbent has nothing to certify (review of #2189).
+            out.status, out.gap_certified = "error", False
+            out.message = "HiGHS MILP kOptimal without an incumbent"
+            labels["milp/certificate"] = "declined"
+            return True
+        return False
+    out.bound = min(root, float(out.objective))
+    if was_optimal:
+        closed = _gap_closed(float(out.objective), float(out.bound), gap_kw)
         out.gap_certified = closed
         if not closed:
             out.status = "feasible"
             labels["milp/certificate"] = "declined"
-    logger.info("HiGHS MILP route: %s (#2187)", labels["milp/tree_bound_below_root"])
-
-
-def _rederive_below_root(
-    out: HighsOutcome,
-    pt: tuple[np.ndarray, float],
-    labels: dict[str, str],
-    stats: dict[str, float],
-    gap_kw: dict[str, Any],
-) -> None:
-    """#2187: replace an incumbent :func:`_repair_tree_below_root` proved artefactual.
-
-    ``pt`` is the verified point of the LP over the incumbent's OWN integers (the #1509
-    check's ``own-integers`` candidate). The incumbent sits below a valid lower bound, so
-    its continuous part is not a real point. The LP point is an exactly feasible point with
-    the same integers, so it is published instead, and the result is certified again only if
-    the NS root bound closes the gap on it. Measured on highspy 1.11.0, where HiGHS's own
-    primary incumbent on the #2187 ``relu_extended`` net is the artefact (20.5560762,
-    5.05e-5 under the root bound 20.5561267): the LP over its integers gives 20.5561384254,
-    the ``relu_bigm`` optimum. An LP point that is itself below the root bound is not used.
-    """
-    stats.pop("milp/incumbent_below_root_pending", None)
-    root = out.root_bound
-    if root is None or root - float(pt[1]) > CERT_ABS + CERT_REL * abs(root):
-        return
-    out.x, out.objective = np.asarray(pt[0], dtype=np.float64), float(pt[1])
-    out.bound = min(root, out.objective)
-    stats["milp/incumbent_rederived_below_root"] = 1.0
-    if _gap_closed(out.objective, out.bound, gap_kw):
-        out.status, out.gap_certified = "optimal", True
-        labels.pop("milp/certificate", None)
+    return False
 
 
 #: Labels that mark a result as declined; on adoption they are moved to history.
@@ -4428,14 +4431,6 @@ def _solve_milp_std(
             else:
                 cands.append(pt)
                 kinds.append("own-integers")
-                if stats.get("milp/incumbent_below_root_pending"):
-                    _rederive_below_root(
-                        out,
-                        pt,
-                        labels,
-                        stats,
-                        {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance},
-                    )
                 # #1612: the incumbent's own integers, re-optimised by a separate LP; the
                 # distance from HiGHS's objective is what its feasibility tolerance bought
                 # (read by :func:`_tighten_feasibility_artefact`).
@@ -4605,13 +4600,16 @@ def _solve_milp_std(
                     "the MILP HiGHS solved is not the model's relaxation"
                 )
                 return done(out)
-            _repair_tree_below_root(
+            if _repair_tree_below_root(
+                sf,
                 out,
                 float(lp.bound),
                 labels,
                 stats,
                 {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance},
-            )
+                remaining(),
+            ):
+                return done(out)
         # #1410: the cross-check above compares two NUMBERS and so only catches a tree
         # bound that is already wrong at the root. The failure it misses is the opposite
         # shape: a root bound that is perfectly valid while HiGHS prunes the true optimum

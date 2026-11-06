@@ -210,54 +210,102 @@ def test_lp_run_error_without_presolve_stays_an_error(monkeypatch):
 GAP_KW = {"abs_gap_tolerance": None, "gap_tolerance": 1e-4}
 
 
+def _line_sf(base: float, y_hi: float = 1e20) -> StdForm:
+    """``min y  s.t.  y - z = base``, ``z`` in {0, 1}: the LP over ``z = 0`` gives ``y = base``."""
+    return StdForm.from_arrays(
+        c=np.array([0.0, 1.0]),
+        A=np.array([[-1.0, 1.0]]),
+        b=np.array([base]),
+        xl=np.array([0.0, -1e20]),
+        xu=np.array([1.0, y_hi]),
+        int_idx=np.array([0]),
+    )
+
+
 def _tree_out(objective: float | None, bound: float, status: str = "optimal") -> HighsOutcome:
     return HighsOutcome(
         status,
-        x=None if objective is None else np.zeros(1),
+        x=None if objective is None else np.array([0.0, objective]),
         objective=objective,
         bound=bound,
         gap_certified=status == "optimal",
     )
 
 
+def _repair(sf, out, root):
+    labels: dict = {}
+    stats: dict = {}
+    stop = lp_milp_highs._repair_tree_below_root(sf, out, root, labels, stats, GAP_KW, 10.0)
+    return stop, labels, stats
+
+
 def test_repair_certifies_when_the_root_bound_closes_the_gap():
-    out, labels, stats = _tree_out(20.5561384254, 20.5560726712), {}, {}
-    lp_milp_highs._repair_tree_below_root(out, 20.5561266974, labels, stats, GAP_KW)
-    assert out.status == "optimal" and out.gap_certified
+    out = _tree_out(20.5561384254, 20.5560726712)
+    stop, labels, stats = _repair(_line_sf(20.5561384254), out, 20.5561266974)
+    assert not stop and out.status == "optimal" and out.gap_certified
     assert out.bound == 20.5561266974
     assert labels["milp/bound_provenance"] == "root-ns"
     assert stats["milp/tree_bound_below_root"] == pytest.approx(5.40262e-5, rel=1e-4)
+    assert "milp/incumbent_below_root" not in stats
 
 
 def test_repair_declines_when_the_root_bound_leaves_the_gap_open():
-    out, labels, stats = _tree_out(25.0, 19.0), {}, {}
-    lp_milp_highs._repair_tree_below_root(out, 20.0, labels, stats, GAP_KW)
-    assert out.status == "feasible" and not out.gap_certified
+    out = _tree_out(25.0, 19.0)
+    stop, labels, _ = _repair(_line_sf(25.0), out, 20.0)
+    assert not stop and out.status == "feasible" and not out.gap_certified
     assert out.bound == 20.0 and labels["milp/certificate"] == "declined"
 
 
-def test_repair_never_certifies_an_incumbent_below_the_root_bound():
-    """The presolve-free arm's point on the s404 net: 20.5560762, 5.1e-5 under the NS
-    root bound. No exactly feasible point beats a valid lower bound."""
-    out, labels, stats = _tree_out(20.5560761659, 20.5560726712), {}, {}
-    lp_milp_highs._repair_tree_below_root(out, 20.5561266974, labels, stats, GAP_KW)
-    assert out.status == "feasible" and not out.gap_certified
-    assert out.bound <= out.objective
-    assert labels["milp/certificate"] == "declined"
+def test_repair_replaces_a_below_root_incumbent_by_the_lp_over_its_integers():
+    """highspy 1.11.0 on the s404 net: HiGHS's own incumbent 20.5560762 is 5.05e-5 under
+    the root bound; the LP over its integers gives the bigm optimum 20.5561384254."""
+    out = _tree_out(20.5560761659, 20.5560726712)
+    stop, labels, stats = _repair(_line_sf(20.5561384254), out, 20.5561266974)
+    assert not stop and out.status == "optimal" and out.gap_certified
+    assert out.objective == pytest.approx(20.5561384254, abs=1e-12)
+    assert out.bound == 20.5561266974 and out.bound <= out.objective
     assert stats["milp/incumbent_below_root"] == pytest.approx(5.05315e-5, rel=1e-4)
+    assert stats["milp/incumbent_rederived_below_root"] == 1.0
+
+
+def test_repair_withdraws_a_below_root_incumbent_with_no_real_point():
+    """test_1447's tree ensemble pinned on a split threshold: HiGHS's 1.0 sits 4e-6 under
+    the root bound and the LP over its integers is infeasible. The result is the
+    ``error`` it was before #2187, not a ``feasible`` at an artefact."""
+    out = _tree_out(1.0, 1.0)
+    stop, labels, stats = _repair(_line_sf(1.000004, y_hi=1.0), out, 1.000004)
+    assert stop and out.status == "error" and not out.gap_certified
+    assert out.x is None and out.objective is None
+    assert stats["milp/incumbent_below_root_withdrawn"] == 1.0
+    assert labels["milp/certificate"] == "declined"
+
+
+def test_repair_refuses_an_lp_point_that_is_also_below_the_bound():
+    out = _tree_out(15.0, 14.0)
+    stop, _, stats = _repair(_line_sf(19.0), out, 20.0)
+    assert stop and out.status == "error" and out.objective is None
+    assert stats["milp/incumbent_below_root_withdrawn"] == 1.0
+
+
+def test_repair_on_a_limit_exit_withdraws_an_artefact_but_keeps_its_status():
+    out = _tree_out(15.0, 14.0, status="time_limit")
+    stop, _, _ = _repair(_line_sf(19.0), out, 20.0)
+    assert not stop and out.status == "time_limit" and out.objective is None
+    assert out.bound == 20.0
 
 
 def test_repair_of_an_optimal_without_an_incumbent_is_an_error():
-    out, labels, stats = _tree_out(None, 10.0), {}, {}
-    lp_milp_highs._repair_tree_below_root(out, 12.0, labels, stats, GAP_KW)
-    assert out.status == "error" and not out.gap_certified
+    out = _tree_out(None, 10.0)
+    stop, labels, _ = _repair(_line_sf(0.0), out, 12.0)
+    assert stop and out.status == "error" and not out.gap_certified
     assert labels["milp/certificate"] == "declined"
 
 
 def test_repair_on_a_limit_exit_only_raises_the_bound():
-    out, labels, stats = _tree_out(30.0, 10.0, status="time_limit"), {}, {}
-    lp_milp_highs._repair_tree_below_root(out, 12.0, labels, stats, GAP_KW)
-    assert out.status == "time_limit" and not out.gap_certified and out.bound == 12.0
+    out = _tree_out(30.0, 10.0, status="time_limit")
+    stop, _, _ = _repair(_line_sf(30.0), out, 12.0)
+    assert not stop and out.status == "time_limit" and not out.gap_certified
+    assert out.bound == 12.0
 
 
 # ── #1634 is moot for a root-bound certificate ───────────────────────────────
@@ -407,48 +455,6 @@ def test_presolve_free_stage_opt_out(monkeypatch):
     calls = _fakes(monkeypatch, _tight_refuted_again(), HighsOutcome("error"))
     res = lp_milp_highs._tight_resolve_refuted(_sf2(), _refuted(), dict(KW))
     assert not calls and res.status == "feasible"
-
-
-# ── an artefactual incumbent is replaced by the LP over its own integers ─────
-
-
-def _pending(objective: float, root: float) -> tuple[HighsOutcome, dict, dict]:
-    out = HighsOutcome(
-        "feasible", x=np.zeros(1), objective=objective, bound=objective, root_bound=root
-    )
-    labels = {"milp/certificate": "declined", "milp/bound_provenance": "root-ns"}
-    stats = {
-        "milp/incumbent_below_root": root - objective,
-        "milp/incumbent_below_root_pending": 1.0,
-    }
-    return out, labels, stats
-
-
-def test_rederive_below_root_publishes_the_lp_point_and_certifies():
-    """highspy 1.11.0 on the s404 net: HiGHS's own incumbent 20.5560762 is 5.05e-5 under
-    the root bound; the LP over its integers gives the bigm optimum 20.5561384254."""
-    out, labels, stats = _pending(20.5560761659, 20.5561266974)
-    pt = (np.ones(1), 20.5561384254)
-    lp_milp_highs._rederive_below_root(out, pt, labels, stats, GAP_KW)
-    assert out.objective == 20.5561384254 and out.x[0] == 1.0
-    assert out.bound == 20.5561266974 and out.bound <= out.objective
-    assert out.status == "optimal" and out.gap_certified
-    assert "milp/certificate" not in labels
-    assert "milp/incumbent_below_root_pending" not in stats
-
-
-def test_rederive_below_root_keeps_the_gap_test():
-    out, labels, stats = _pending(15.0, 20.0)
-    lp_milp_highs._rederive_below_root(out, (np.ones(1), 25.0), labels, stats, GAP_KW)
-    assert out.objective == 25.0 and out.bound == 20.0
-    assert out.status == "feasible" and not out.gap_certified
-    assert labels["milp/certificate"] == "declined"
-
-
-def test_rederive_below_root_refuses_an_lp_point_also_below_the_bound():
-    out, labels, stats = _pending(15.0, 20.0)
-    lp_milp_highs._rederive_below_root(out, (np.ones(1), 19.0), labels, stats, GAP_KW)
-    assert out.objective == 15.0 and out.status == "feasible" and not out.gap_certified
 
 
 # ── #1678 adoption takes the RE-DERIVED cross point, never the raw one ───────
