@@ -71,17 +71,21 @@ const MAX_ABS_COEFF: f64 = 1e7;
 /// MILP driver's slack rewrite reads the same flag (`substitute_slacks_to_structural`'s
 /// `slack_by_column`).
 ///
-/// **Graduated (default ON, 2026-11-06, owner).** §5 panel, bars pre-registered in
-/// `discopt_benchmarks/scripts/p44_gmi_repair_panel.py` (data
-/// `docs/dev/data/highs-parity/p4.4/`): MIPLIB-38 + M panel, 3 reps, 20 s, 372 solves --
-/// cert-clean; certified 96 -> 99; nodes over the always-certified instances -19 %;
-/// 1 dual-bound loss (`neos17`) against a cap of 2. MINLP corpus: 0 problems,
-/// certified 56 = 56. Exact enumeration: 0 violations over 319 cuts x 4193 points.
-/// `DISCOPT_MILP_ROOT_GMI_REPAIR=0` restores the legacy refusal and `ns + r` rewrite.
+/// **Default OFF again (2026-11-06, owner).** It was graduated earlier the same day on a
+/// §5 panel whose pre-registered bars passed (`p44_gmi_repair_panel.py`, data
+/// `docs/dev/data/highs-parity/p4.4/`: cert-clean, certified 96 -> 99, nodes on the
+/// always-certified set -19 %, 1 dual loss of a cap of 2). That panel's own rows also
+/// show what the bars did not score: the incumbent LOST in every rep on `nexp-50-20-4-2`,
+/// `sp150x300d` and `neos17`, and node throughput collapsed on the open population
+/// (`fiber` median 2058 -> 13 nodes, `beavma` 5455 -> 35). Cause: the completed-basis
+/// cuts are dense after the slack rewrite (`fiber` ~297 nonzeros per cut on a matrix with
+/// ~8 per row), so every node LP carries them (`docs/dev/highs-parity-d2-analysis.md`).
+/// What would re-graduate it: a density gate on these cuts and a re-run panel that also
+/// bars incumbent loss and per-node cost on the open population. `=1` opts in.
 pub(crate) fn gmi_repair_enabled() -> bool {
-    !matches!(
+    matches!(
         std::env::var("DISCOPT_MILP_ROOT_GMI_REPAIR").as_deref(),
-        Ok("0") | Ok("false") | Ok("no")
+        Ok("1") | Ok("true") | Ok("yes")
     )
 }
 

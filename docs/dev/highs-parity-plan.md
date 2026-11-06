@@ -1491,8 +1491,9 @@ and is re-written by P4.1.**
   certified count, nodes on the ALWAYS-certified set, dual losses -- passed (96 -> 99,
   -19 %, 1 loss), but incumbent loss and per-node cost on the OPEN population were not
   bars. "Dual gains on fiber/beavma/..." above is true and is not the whole result.
-  The flag stays default ON pending the owner's call; the analysis's lever L2 (a density
-  gate on these cuts) is the proposed fix.
+  **Owner decision (2026-11-06): back to default OFF** (`=1` opts in) until the density
+  gate (D2 lever L2) and a panel that also bars incumbent loss and per-node cost on the
+  open population. `test_1236`'s `prob03` is restored (its premise holds again).
   Gates after the flip: `cargo test` 1005/0, clippy clean, smoke 4532 + 2 failures, adversarial
   19, MILP/IIS/cut tests 1872 + 1 failure. All three failures trace to the flip:
   `test_1236[prob03]` (its lifted model now certifies at the root, 1 node vs 5 -- removed
