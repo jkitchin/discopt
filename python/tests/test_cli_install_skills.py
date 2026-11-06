@@ -127,6 +127,52 @@ class TestKnowhowLayout:
 
 
 # ──────────────────────────────────────────────────────────
+# pounce-expert: one agent, shipped by both discopt and pounce
+# ──────────────────────────────────────────────────────────
+
+_POUNCE_EXPERT = "pounce-expert.md"
+_POUNCE_CANONICAL = Path(".claude") / "agents" / _POUNCE_EXPERT
+
+
+def _pounce_checkout() -> Path | None:
+    """A pounce source checkout: ``$POUNCE_SRC``, else a sibling ``../pounce``."""
+    import os
+
+    for cand in (os.environ.get("POUNCE_SRC"), _REPO_ROOT.parent / "pounce"):
+        if cand and (Path(cand) / _POUNCE_CANONICAL).is_file():
+            return Path(cand)
+    return None
+
+
+class TestPounceExpertIsShared:
+    """``pounce-expert`` ships from discopt and from pounce under one name.
+
+    knowhow installs a subagent to ``agents/<name>.md``, so the two copies must be
+    byte-identical: then installing it from both repositories leaves one agent, and
+    which source a lock file records does not matter. pounce's copy is canonical."""
+
+    def test_ships_in_the_bundle(self):
+        names = {Path(str(p)).name for p in skills.iter_agents()}
+        assert _POUNCE_EXPERT in names
+        text = (Path(str(skills.agents_dir())) / _POUNCE_EXPERT).read_text()
+        assert _frontmatter(Path(str(skills.agents_dir())) / _POUNCE_EXPERT)["name"] == (
+            "pounce-expert"
+        )
+        assert str(_POUNCE_CANONICAL) in text, "the file must name its canonical copy"
+
+    def test_pounce_expert_matches_pounce(self):
+        root = _pounce_checkout()
+        if root is None:
+            pytest.skip("no pounce checkout (set POUNCE_SRC or clone it beside discopt)")
+        ours = (Path(str(skills.agents_dir())) / _POUNCE_EXPERT).read_bytes()
+        theirs = (root / _POUNCE_CANONICAL).read_bytes()
+        assert ours == theirs, (
+            f"python/discopt/skills/agents/{_POUNCE_EXPERT} differs from "
+            f"{root / _POUNCE_CANONICAL}; edit pounce's copy and copy it here"
+        )
+
+
+# ──────────────────────────────────────────────────────────
 # install-skills CLI
 # ──────────────────────────────────────────────────────────
 

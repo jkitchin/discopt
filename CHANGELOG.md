@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **A `pounce-expert` subagent**, shared with pounce. It knows where pounce's
+  source lives, how a solve flows through its crates (routing, the IPM loop,
+  restoration, the second-opinion ladder), where options and statuses come
+  from, how to diagnose a solve, and how discopt calls pounce. It reads the
+  source rather than answering from memory. It ships in the skills bundle
+  (`discopt install-skills`, or `uvx knowhow add jkitchin/discopt --list`) and
+  is byte-identical to pounce's `.claude/agents/pounce-expert.md`, so
+  installing it from both repositories gives one agent, not a conflict.
+
 - **`relu_complementarity` strategy for ReLU networks (#2167, slice 1).**
   `NNFormulation(m, net, strategy="relu_complementarity")` encodes each unstable ReLU
   neuron as `y - s == z` with a declared complementarity relation `0 <= y ⊥ s >= 0`

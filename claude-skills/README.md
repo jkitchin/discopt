@@ -12,7 +12,7 @@ The repository root has `commands/`, `agents/` and `skills/` symlinks into
 [knowhow](https://github.com/jkitchin/knowhow) (v0.3+) discovers:
 
 ```bash
-uvx knowhow add jkitchin/discopt --list          # 8 commands, 17 agents, 1 skill
+uvx knowhow add jkitchin/discopt --list          # 8 commands, 18 agents, 1 skill
 uvx knowhow add jkitchin/discopt --all           # install everything
 uvx knowhow add jkitchin/discopt --skill discopt # just the overview skill (any agent)
 uvx knowhow check / update / remove ...          # lock-file managed
@@ -71,13 +71,19 @@ plugin: `discopt-doe-install-skill`.)
 
 ### Agents (`~/.claude/agents/`)
 
-17 domain-expert subagents covering modeling and the solver stack:
+18 domain-expert subagents covering modeling and the solver stack:
 `amp-expert`, `benchmarking-expert`, `convex-relaxation-expert`,
 `convexity-detection-expert`, `differentiability-expert`, `estimation-expert`, `heuristics-expert`,
 `highs-expert`, `ipopt-expert`,
 `llm-feature-expert`, `minlp-solver-expert`,
 `modeling-expert`, `multiobjective-expert`, `ml-embedding-expert`,
-`presolve-expert`, `robust-opt-expert`, `scip-expert`.
+`pounce-expert`, `presolve-expert`, `robust-opt-expert`, `scip-expert`.
+
+`pounce-expert` is shared with [pounce](https://github.com/jkitchin/pounce), where its
+canonical copy is `.claude/agents/pounce-expert.md`. The two files are kept byte-identical,
+so installing it from either repository gives the same agent. Edit pounce's copy, then copy
+it here; `test_pounce_expert_matches_pounce` checks the two against a pounce checkout when
+one is present.
 
 The source of truth for these files is `python/discopt/skills/commands/`,
 `python/discopt/skills/agents/` and `python/discopt/skills/skills/`. Edit them there; downstream users
