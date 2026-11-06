@@ -1486,7 +1486,13 @@ and is re-written by P4.1.**
   net, so the node separator is never called -- that test pins `=0` to keep exercising the
   node path), and `test_1940[ex1264]` (passes 3/3 at low load with and without the flag;
   the flag makes the file 6.6 s vs 3.5 s, so under load the lift can miss its slice --
-  watch it in CI).
+  watch it in CI). **Root-caused 2026-11-06:** under load (4 concurrent copies) it failed
+  4/4 with the flag and passed 4/4 with `=0`. The lift's first engine run no longer
+  certified inside the 2.47 s slice (`feasible`, 4411 nodes); P4.0's re-entry then
+  certified it (1705 nodes), so `solve_model` returned `optimal` and the test read its
+  premise as met and demanded the legacy tree (10377). The test now reads the premise
+  off the lift arm's FIRST driver run (`lift_runs[0]`); 4/4 pass under the same load,
+  and the four wide-margin instances still assert the exact tree.
   Tableau c-MIR (the original P4.4
   scope) is deferred: with the repair, `mik` stays at 3.8-4.2 %; its limiter is the
   500-cut cap (2000 helps 0-0.4 pp), not a missing family.
