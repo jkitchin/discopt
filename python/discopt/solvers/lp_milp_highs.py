@@ -2234,7 +2234,11 @@ def _fixprop_start(
 
 
 def _rederived_point(
-    sf: "StdForm", x: Optional[np.ndarray], time_limit: Optional[float], stats: dict
+    sf: "StdForm",
+    x: Optional[np.ndarray],
+    time_limit: Optional[float],
+    stats: dict,
+    rederived: Optional[list] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """A verified point carrying ``x``'s integers, re-derived by the fixed-integer LP.
 
@@ -2249,6 +2253,10 @@ def _rederived_point(
     the best one those integers admit, and it replaces ``x``'s. When the LP gives no
     verified point, ``x``'s own point is kept, so the falsifier never has less
     evidence than before.
+
+    #2187: ``rederived``, when given, receives the LP point only when the LP produced
+    one, so a caller that must not use a raw point (#1678 adoption) can tell the two
+    outcomes apart without solving the LP again.
     """
     pt = _verified_mip_point(sf, x)
     if pt is None or not sf.int_idx.size:
@@ -2261,6 +2269,8 @@ def _rederived_point(
         stats["milp/cross_point_rederive_failed"] = 1.0
         return pt
     stats["milp/cross_point_rederived_shift"] = float(lp_pt[1] - pt[1])
+    if rederived is not None:
+        rederived.append(lp_pt)
     return lp_pt
 
 
@@ -3669,7 +3679,8 @@ def _judge_presolve_cross(
     ``out`` against the presolve-free ``cross``. ``kw["time_limit"]`` is the budget
     left before the cross-solve's wall time is charged, unless ``kw`` says it already
     was (``_cross_wall_charged``, the concurrent path of :func:`_certified_milp`)."""
-    pt = _rederived_point(sf, cross.x, kw["time_limit"], out.stats)
+    rederived: list = []
+    pt = _rederived_point(sf, cross.x, kw["time_limit"], out.stats, rederived)
     refuted = None
     if pt is not None:
         if out.status == "infeasible":
@@ -3679,7 +3690,8 @@ def _judge_presolve_cross(
             if claim is not None and claim - pt[1] > CERT_ABS + CERT_REL * abs(claim):
                 refuted = f"bound {claim:.12g} is above a verified point's objective {pt[1]:.12g}"
     if refuted is None or pt is None:
-        return _weaker_bound(sf, out, cross, kw)
+        # #2187: the #1678 adoption uses this re-derived point, never the raw one.
+        return _weaker_bound(sf, out, cross, dict(kw, _cross_rederived=rederived[:1]))
     logger.warning(
         "HiGHS MILP route: the %s certificate is refuted by a presolve-free HiGHS solve "
         "(%s); reporting the verified point uncertified (#1634)",
@@ -3733,7 +3745,7 @@ def _gap_closed(obj: float, bound: float, kw: dict[str, Any]) -> bool:
 
 
 def _adopt_better_cross_incumbent(
-    sf: StdForm, out: HighsOutcome, cross: HighsOutcome, time_limit: Optional[float]
+    sf: StdForm, out: HighsOutcome, cross: HighsOutcome, rederived: Optional[list]
 ) -> None:
     """#1678 II.19: publish the cross-solve's incumbent when it is verified and better.
 
@@ -3764,8 +3776,11 @@ def _adopt_better_cross_incumbent(
     (a hidden-neuron permutation of #2187's ``s406_p0``): the raw cross point verified at
     -38.1894713, 4.34e-5 "better" than the primary's, while the network's exact value at
     its inputs is -38.1894279, and so is the LP over its integers. The route certified
-    -38.1894713 with that as its bound. With no budget left for the LP, or no verified
-    LP point, nothing is adopted.
+    -38.1894713 with that as its bound. ``rederived`` is the LP point
+    :func:`_judge_presolve_cross` already re-derived (``[point]``), ``[]`` when that LP
+    gave none or had no budget (nothing is adopted), or ``None`` when no caller
+    re-derived it (a direct call): then the LP is solved here, unbudgeted. The judge's
+    point is reused so the LP is not solved twice, and nothing runs outside its budget.
     """
     if out.objective is None:
         return
@@ -3777,11 +3792,11 @@ def _adopt_better_cross_incumbent(
         return
     pt = raw
     if sf.int_idx.size:
-        if time_limit is not None and time_limit <= 0.0:
-            out.stats["milp/presolve_cross_incumbent_not_rederived"] = 1.0
-            return
-        fx = _fixed_integer_lp(sf, raw[0], time_limit)
-        lp_pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+        if rederived is None:
+            fx = _fixed_integer_lp(sf, raw[0], None)
+            lp_pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+        else:
+            lp_pt = rederived[0] if rederived else None
         if lp_pt is None:
             out.stats["milp/presolve_cross_incumbent_not_rederived"] = 1.0
             return
@@ -3852,7 +3867,7 @@ def _weaker_bound(
     if out.status != "optimal" or out.bound is None or cross.bound is None:
         return out
     out.stats["milp/presolve_cross_bound"] = float(cross.bound)
-    _adopt_better_cross_incumbent(sf, out, cross, kw.get("time_limit"))
+    _adopt_better_cross_incumbent(sf, out, cross, kw.get("_cross_rederived"))
     if cross.bound >= out.bound:
         if out.objective is not None and out.bound > out.objective:
             out.bound = out.objective
@@ -3922,6 +3937,7 @@ def _tight_cross_bound(
     if obj is None:
         return False
     kw = dict(kw)
+    kw.pop("_cross_rederived", None)  # #2187: the #1678 adoption's, not a solve option
     charged = kw.pop("_cross_wall_charged", False)
     if kw["time_limit"] is not None:
         # ``kw`` already had the primary's wall time taken off by the caller

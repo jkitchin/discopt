@@ -499,7 +499,7 @@ def test_adopt_uses_the_lp_point_not_the_raw_cross_point(monkeypatch):
     flagged = _verifier_accepting(monkeypatch, -20.5)  # raw: 0.5 "better" than truth
     out = HighsOutcome("optimal", x=np.array([1.0, 9.0, 0.0]), objective=-19.0, gap_certified=True)
     cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
-    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 10.0)
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, None)
     assert flagged["raw"] == 1, "the raw cross point was never offered"
     assert out.stats["milp/presolve_cross_incumbent_adopted"] == 1.0
     assert out.objective == pytest.approx(-20.0, abs=1e-9)  # the LP point, not -20.5
@@ -511,17 +511,40 @@ def test_adopt_declines_when_the_lp_point_is_no_better(monkeypatch):
     flagged = _verifier_accepting(monkeypatch, -20.5)
     out = HighsOutcome("optimal", x=np.array([0.0, 10.0, 0.0]), objective=-20.0, gap_certified=True)
     cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
-    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 10.0)
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, None)
     assert flagged["raw"] == 1, "the raw cross point was never offered"
     assert out.objective == -20.0
     assert "milp/presolve_cross_incumbent_adopted" not in out.stats
 
 
-def test_adopt_without_budget_adopts_nothing(monkeypatch):
+def _no_lp(monkeypatch) -> None:
+    def fail(*a, **k):
+        raise AssertionError("the fixed-integer LP was solved again")
+
+    monkeypatch.setattr(lp_milp_highs, "_fixed_integer_lp", fail)
+
+
+def test_adopt_reuses_the_judges_rederived_point(monkeypatch):
+    """The judge already re-derived the cross point; adoption takes it, no second LP."""
     sf = _two_point_sf()
-    _verifier_accepting(monkeypatch, -20.5)
+    flagged = _verifier_accepting(monkeypatch, -20.5)
+    _no_lp(monkeypatch)
     out = HighsOutcome("optimal", x=np.array([1.0, 9.0, 0.0]), objective=-19.0, gap_certified=True)
     cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
-    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 0.0)
+    lp_pt = (np.array([0.0, 10.0, 0.0]), -20.0)
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, [lp_pt])
+    assert flagged["raw"] == 1
+    assert out.objective == -20.0 and out.stats["milp/presolve_cross_incumbent_adopted"] == 1.0
+
+
+def test_adopt_without_a_rederived_point_adopts_nothing(monkeypatch):
+    """The judge's LP gave no point (or had no budget): nothing is adopted, and the LP is
+    not tried again outside the judge's budget."""
+    sf = _two_point_sf()
+    _verifier_accepting(monkeypatch, -20.5)
+    _no_lp(monkeypatch)
+    out = HighsOutcome("optimal", x=np.array([1.0, 9.0, 0.0]), objective=-19.0, gap_certified=True)
+    cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, [])
     assert out.objective == -19.0
     assert out.stats["milp/presolve_cross_incumbent_not_rederived"] == 1.0
