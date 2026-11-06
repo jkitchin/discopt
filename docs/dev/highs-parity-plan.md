@@ -1681,12 +1681,42 @@ and is re-written by P4.1.**
   both engines (`test_1614` parametrized; `test_p04` default; `test_1680`'s two #1634
   cross-solve guards pin `=highs`). Gates: smoke 4557, adversarial 19, every test file
   that touches decomposition (21 files) 229 passed.
-- [ ] **P5.3 — The independent confirmation question → D3.** Scope: memo only.
+- [x] **P5.3 — The independent confirmation question → D3. MEMO 2026-11-06.** Scope: memo only.
   `_confirm_lazy_master_independently` (`milp_highs.py:1260`) confirms HiGHS with Rust
   (then SCIP). With Rust primary: confirm with HiGHS when installed, else with a
   Rust re-solve at a different seed and presolve off (weaker). Present the measured
   false-certificate catch rate of each option on the #2069/#2115 captured masters and
   stop at **D3**.
+
+  **Memo (2026-11-06; probe `p53_confirm_probe.py`, data `p5.3/confirm_probe.json`).**
+  Each captured master solved once per configuration, 60 s, no seed: `R` (the Rust
+  simplex B&B as the primary calls it), `R_alt` (the same driver, presolve and
+  heuristics OFF -- the "Rust re-solve, different configuration" confirmer; the driver
+  has no seed knob), `H_on` / `H_off` (one HiGHS solve, presolve on / off).
+
+  | master | R | R_alt | H_on | H_off | truth |
+  |---|---|---|---|---|---|
+  | `clay0203` (#2069) | opt 41420.27, 0.1 s | opt 41420.27 | opt 41420.27 | opt 41420.27 | 41420.27 (SCIP) |
+  | `fac2_master0` (#1236) | opt 3.31837e8 | opt | opt | opt | agreed |
+  | `m6_final_master_2115` | opt 82.2569, 5.8 s | opt, 3.1 s | opt, 0.7 s | opt, 0.9 s | 82.26 (SCIP) |
+  | `rsyn0830m_master0` | opt -695.917, 2.5 s | **node_limit, bound -941.0 at 60 s** | opt, 0.9 s | opt, 0.5 s | agreed |
+  | `tls2_master0` | opt 3.1 | opt | opt | opt | agreed |
+
+  **Finding: on the captured set there is nothing left to catch.** No configuration,
+  Rust or HiGHS, produces a false certificate on any of the five masters at HEAD --
+  including `clay0203`, where #2069 recorded HiGHS 1.10-1.15 returning 55015-56725
+  with presolve on; HiGHS 1.15.1 on this build returns the SCIP optimum. The catch rate
+  is therefore not measurable here (0 positives). The only false certificate this
+  session measured on a master is HiGHS's own, P5.2's `decomp__299_00642` (`x = 4.4e-9`
+  on a 7.86e8 big-M row), which the Rust B&B gets right.
+  **What each option costs:** HiGHS as the confirmer of a Rust primary confirms 5/5,
+  each in <= 0.9 s, but needs `highspy`. `R_alt` confirms 4/5 and on `rsyn0830m` would
+  withdraw a correct certificate (a lost certification, never a false one); it is
+  weaker as an engine, not as a check. Neither is independent in the #2069 sense of a
+  different code base unless HiGHS (or SCIP) is present. **For D3:** keep the confirmation
+  chain as an engine-independent *option* -- HiGHS (or SCIP) when installed, otherwise
+  `R_alt` with the understanding that it trades certification for nothing on soundness --
+  and re-test on a larger captured set before relying on a catch rate.
 
 ### Phase 6 — HiGHS optional, then removable
 

@@ -1,0 +1,143 @@
+{
+ "rows": [
+  {
+   "master": "clay0203_master",
+   "R": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 41420.2719511956,
+    "bound": 41420.27194881725,
+    "wall": 0.1326096889999917
+   },
+   "R_alt": {
+    "status": "optimal",
+    "obj": 41420.27195119567,
+    "bound": 41420.271949359034,
+    "wall": 0.0868796330000805
+   },
+   "H_on": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 41420.27195120923,
+    "bound": 41420.27195120923,
+    "wall": 0.08559118099992702
+   },
+   "H_off": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 41420.27195093109,
+    "bound": 41420.27195093109,
+    "wall": 0.09168232199999693
+   }
+  },
+  {
+   "master": "fac2_master0",
+   "R": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 331837498.17676723,
+    "bound": 331837498.1761139,
+    "wall": 0.09646107100002155
+   },
+   "R_alt": {
+    "status": "optimal",
+    "obj": 331837498.176769,
+    "bound": 331837498.1761157,
+    "wall": 0.09990912500006743
+   },
+   "H_on": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 331837498.1767695,
+    "bound": 331837498.1767695,
+    "wall": 0.06553675600002862
+   },
+   "H_off": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 331837498.1767622,
+    "bound": 331837498.1767622,
+    "wall": 0.08725567700003012
+   }
+  },
+  {
+   "master": "m6_final_master_2115",
+   "R": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 82.25687691365584,
+    "bound": 82.2568769129019,
+    "wall": 5.779955126000004
+   },
+   "R_alt": {
+    "status": "optimal",
+    "obj": 82.25687691365586,
+    "bound": 82.25687691294512,
+    "wall": 3.070394596999904
+   },
+   "H_on": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 82.25687691365582,
+    "bound": 82.25687691365582,
+    "wall": 0.6514281380000284
+   },
+   "H_off": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 82.25687691365455,
+    "bound": 82.25687691365454,
+    "wall": 0.8780321149999963
+   }
+  },
+  {
+   "master": "rsyn0830m_master0",
+   "R": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": -695.9172553140303,
+    "bound": -695.9172553288294,
+    "wall": 2.534244332000071
+   },
+   "R_alt": {
+    "status": "node_limit",
+    "obj": Infinity,
+    "bound": -941.0245783537216,
+    "wall": 60.098773633000064
+   },
+   "H_on": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": -695.9172532710062,
+    "bound": -695.9172532710062,
+    "wall": 0.9287697600000229
+   },
+   "H_off": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": -695.9172532710056,
+    "bound": -695.9172532710056,
+    "wall": 0.46920156700002735
+   }
+  },
+  {
+   "master": "tls2_master0",
+   "R": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 3.0999999982310764,
+    "bound": 3.0999999982310764,
+    "wall": 0.02933019600004627
+   },
+   "R_alt": {
+    "status": "optimal",
+    "obj": 3.0999999999999996,
+    "bound": 3.0999999999999996,
+    "wall": 0.01622756599999775
+   },
+   "H_on": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 3.1,
+    "bound": 3.1,
+    "wall": 0.00648062100003699
+   },
+   "H_off": {
+    "status": "SolveStatus.OPTIMAL",
+    "obj": 3.1,
+    "bound": 3.1,
+    "wall": 0.015020837000065512
+   }
+  }
+ ],
+ "truth": {
+  "clay0203_master": 41420.27,
+  "m6_final_master_2115": 82.26
+ }
+}
