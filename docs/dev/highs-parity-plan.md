@@ -1563,7 +1563,7 @@ and is re-written by P4.1.**
   instance and the class the task names has no infeasible nodes; the change (conflict
   pool + propagation + panel) is not justified by this measurement. Nothing was built;
   the `Conflict*` counters stay (bound-neutral, profile-gated).
-- [ ] **P4.8 — Dimension-reducing MILP presolve with postsolve** *(≤ 3 iterations, last:
+- [x] **P4.8 — Dimension-reducing MILP presolve with postsolve. DEFERRED 2026-11-06 (owner).** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag
   `DISCOPT_MILP_PRESOLVE_REDUCE`. Entry: reductions ≥ 20 % of rows on ≥ 8 instances. Done:
@@ -1580,6 +1580,9 @@ and is re-written by P4.1.**
   never built -- not pursued); HiGHS's own ablation puts presolve at <= 2 instances / 1.7x
   (§1c); and §2.5(a) measured it at ~0-3 pp of root gap. A from-scratch presolve with
   postsolve is the largest P4 item.
+  **Deferred (owner, 2026-11-06: "Defer; go to P4.9 gate").** Entry met on the HiGHS proxy,
+  but the expected value is small (§1c, §2.5a) against a from-scratch build; revisit if
+  P4.9 shows presolve-shaped losses. Nothing built.
 - [ ] **P4.9 — R1-MILP graduation gate → D2.** Scope: `solver.py:37494`. Done: MIPLIB-38
   ≥ 34/38, total wall ≤ 2× H, M panel ≥ 23/24 at geomean ≤ 3.0, 0 incorrect, INF 18/18;
   the Rust MILP route passes the routing plan's §3.2 incumbent verification and
