@@ -857,3 +857,27 @@ conflict analysis unnecessary: the pool was still on.
 
 Entry: the expert's arms and kill criterion. If `istra` gains < +0.3 (to 48.62) and `iskar`
 gains < +0.3 (to 36.49) over OFF, and neither certifies, kill it.
+
+**16. Global-pool node GMI (`7aaa376e`), entry: first certifications on the
+`neos-361*` class.**
+
+*Direct driver* (`b1p_gmi_pool_direct.log`, 20 s, unrounded bounds):
+
+- `kaihu` **certifies optimal 119** in 13k nodes (OFF bound 117.42).
+- `iskar` 36.18 -> 36.58 (+0.40, past the expert's kill bar) and finds the optimal
+  incumbent 37.
+- `istra` 48.31 -> 48.47 (+0.17).
+
+*Route* (`b1p_gmi_pool_entry.json`; 11 rows, 2 reps, 20 s, load ~7). Cert-clean.
+
+- **`kaihu` and `iskar` certify in both reps** (OFF: neither).
+- `jijia`'s bound reaches its optimum, 107 (OFF 104), in both reps, but the incumbent does
+  not.
+- `b-ball` -1.800 -> -1.696.
+- `istra` stays at 48: throughput drops to 5-5.6k nodes from 13.5-16.4k.
+- `mik`: mixed bound changes (`mik-1` better, `mik-3` slightly worse), at ~35 % fewer
+  nodes.
+- `sp150x300d` gets no pool cuts.
+
+Open levers: NS abstains on 3-8k node solves (`NodeGmiNsAbstain`), and the per-node pool
+scan and local solve cost throughput. Next is the full §5 panel (MIPLIB-38 + M, 3 reps).
