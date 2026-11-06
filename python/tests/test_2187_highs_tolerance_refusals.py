@@ -398,3 +398,45 @@ def test_presolve_free_stage_opt_out(monkeypatch):
     calls = _fakes(monkeypatch, _tight_refuted_again(), HighsOutcome("error"))
     res = lp_milp_highs._tight_resolve_refuted(_sf2(), _refuted(), dict(KW))
     assert not calls and res.status == "feasible"
+
+
+# ── an artefactual incumbent is replaced by the LP over its own integers ─────
+
+
+def _pending(objective: float, root: float) -> tuple[HighsOutcome, dict, dict]:
+    out = HighsOutcome(
+        "feasible", x=np.zeros(1), objective=objective, bound=objective, root_bound=root
+    )
+    labels = {"milp/certificate": "declined", "milp/bound_provenance": "root-ns"}
+    stats = {
+        "milp/incumbent_below_root": root - objective,
+        "milp/incumbent_below_root_pending": 1.0,
+    }
+    return out, labels, stats
+
+
+def test_rederive_below_root_publishes_the_lp_point_and_certifies():
+    """highspy 1.11.0 on the s404 net: HiGHS's own incumbent 20.5560762 is 5.05e-5 under
+    the root bound; the LP over its integers gives the bigm optimum 20.5561384254."""
+    out, labels, stats = _pending(20.5560761659, 20.5561266974)
+    pt = (np.ones(1), 20.5561384254)
+    lp_milp_highs._rederive_below_root(out, pt, labels, stats, GAP_KW)
+    assert out.objective == 20.5561384254 and out.x[0] == 1.0
+    assert out.bound == 20.5561266974 and out.bound <= out.objective
+    assert out.status == "optimal" and out.gap_certified
+    assert "milp/certificate" not in labels
+    assert "milp/incumbent_below_root_pending" not in stats
+
+
+def test_rederive_below_root_keeps_the_gap_test():
+    out, labels, stats = _pending(15.0, 20.0)
+    lp_milp_highs._rederive_below_root(out, (np.ones(1), 25.0), labels, stats, GAP_KW)
+    assert out.objective == 25.0 and out.bound == 20.0
+    assert out.status == "feasible" and not out.gap_certified
+    assert labels["milp/certificate"] == "declined"
+
+
+def test_rederive_below_root_refuses_an_lp_point_also_below_the_bound():
+    out, labels, stats = _pending(15.0, 20.0)
+    lp_milp_highs._rederive_below_root(out, (np.ones(1), 19.0), labels, stats, GAP_KW)
+    assert out.objective == 15.0 and out.status == "feasible" and not out.gap_certified

@@ -3302,13 +3302,15 @@ def _repair_tree_below_root(
         # No exactly feasible point beats a valid lower bound, so an incumbent below
         # the NS root bound by more than the route's LP yardstick bought its objective
         # with row tolerance (the #1612 class). Measured on the presolve-free arm of the
-        # same net: objective 20.5560762, 5.1e-5 under the root bound. It stays an
-        # uncertified ``feasible``; nothing is certified on it.
+        # same net: objective 20.5560762, 5.1e-5 under the root bound. Nothing is
+        # certified on it. A kOptimal result is marked for :func:`_rederive_below_root`,
+        # which the #1509 check calls with the LP over these same integers.
         stats["milp/incumbent_below_root"] = root - float(out.objective)
         labels["milp/certificate"] = "declined"
         out.gap_certified = False
         if out.status == "optimal":
             out.status = "feasible"
+            stats["milp/incumbent_below_root_pending"] = 1.0
     elif out.status == "optimal":
         closed = out.objective is not None and _gap_closed(
             float(out.objective), float(out.bound), gap_kw
@@ -3318,6 +3320,36 @@ def _repair_tree_below_root(
             out.status = "feasible"
             labels["milp/certificate"] = "declined"
     logger.info("HiGHS MILP route: %s (#2187)", labels["milp/tree_bound_below_root"])
+
+
+def _rederive_below_root(
+    out: HighsOutcome,
+    pt: tuple[np.ndarray, float],
+    labels: dict[str, str],
+    stats: dict[str, float],
+    gap_kw: dict[str, Any],
+) -> None:
+    """#2187: replace an incumbent :func:`_repair_tree_below_root` proved artefactual.
+
+    ``pt`` is the verified point of the LP over the incumbent's OWN integers (the #1509
+    check's ``own-integers`` candidate). The incumbent sits below a valid lower bound, so
+    its continuous part is not a real point. The LP point is an exactly feasible point with
+    the same integers, so it is published instead, and the result is certified again only if
+    the NS root bound closes the gap on it. Measured on highspy 1.11.0, where HiGHS's own
+    primary incumbent on the #2187 ``relu_extended`` net is the artefact (20.5560762,
+    5.05e-5 under the root bound 20.5561267): the LP over its integers gives 20.5561384254,
+    the ``relu_bigm`` optimum. An LP point that is itself below the root bound is not used.
+    """
+    stats.pop("milp/incumbent_below_root_pending", None)
+    root = out.root_bound
+    if root is None or root - float(pt[1]) > CERT_ABS + CERT_REL * abs(root):
+        return
+    out.x, out.objective = np.asarray(pt[0], dtype=np.float64), float(pt[1])
+    out.bound = min(root, out.objective)
+    stats["milp/incumbent_rederived_below_root"] = 1.0
+    if _gap_closed(out.objective, out.bound, gap_kw):
+        out.status, out.gap_certified = "optimal", True
+        labels.pop("milp/certificate", None)
 
 
 #: Labels that mark a result as declined; on adoption they are moved to history.
@@ -4277,6 +4309,14 @@ def _solve_milp_std(
                 return False
             cands.append(pt)
             kinds.append("own-integers")
+            if stats.get("milp/incumbent_below_root_pending"):
+                _rederive_below_root(
+                    out,
+                    pt,
+                    labels,
+                    stats,
+                    {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance},
+                )
             # #1612: the incumbent's own integers, re-optimised by a separate LP; the
             # distance from HiGHS's objective is what its feasibility tolerance bought
             # (read by :func:`_tighten_feasibility_artefact`).
