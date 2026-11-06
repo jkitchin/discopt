@@ -12,7 +12,8 @@ about 30 nodes' worth. ON keeps the formula and measures both sides:
   ``_improver_clock_start`` at the call;
 * a first call keeps the fixed-cost test.
 
-Default OFF; with no ``walls`` in the state, every function behaves exactly as before.
+Default ON since 2026-11-06 (#2176 panel); ``=0`` drops ``walls`` from the state and every
+function behaves exactly as before.
 """
 
 from __future__ import annotations
@@ -52,18 +53,18 @@ def _measured(st, key, wall):
         S.time.perf_counter = real
 
 
-def test_flag_is_default_off(monkeypatch):
+def test_flag_is_default_on(monkeypatch):
     monkeypatch.delenv("DISCOPT_HEUR_WALL_COST", raising=False)
+    assert S._heur_wall_cost_enabled() is True  # graduated 2026-11-06 (#2176)
+    assert set(S._new_heur_state()) == {"calls", "found", "cost", "walls", "wall", "started"}
+    monkeypatch.setenv("DISCOPT_HEUR_WALL_COST", "0")
     assert S._heur_wall_cost_enabled() is False
     assert S._new_heur_state() == {"calls": 0, "found": 0, "cost": 0.0}
-    monkeypatch.setenv("DISCOPT_HEUR_WALL_COST", "1")
-    assert S._heur_wall_cost_enabled() is True
-    assert set(S._new_heur_state()) == {"calls", "found", "cost", "walls", "wall", "started"}
 
 
 def test_off_state_ignores_the_clock_and_the_key(monkeypatch):
-    """Flag OFF: no ``walls``, so the clock is a no-op and the test is fixed-cost."""
-    monkeypatch.delenv("DISCOPT_HEUR_WALL_COST", raising=False)
+    """Flag OFF (``=0``): no ``walls``, so the clock is a no-op and the test is fixed-cost."""
+    monkeypatch.setenv("DISCOPT_HEUR_WALL_COST", "0")
     st = S._new_heur_state()
     S._improver_clock_start(st, "rins")
     S._record_improver_run(st, 5.0, False, key="rins")

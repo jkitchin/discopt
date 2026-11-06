@@ -276,9 +276,8 @@ def _improver_within_contingent(
 def _heur_wall_cost_enabled() -> bool:
     """Whether the improver governor prices heuristics by measured wall (#2176).
 
-    **Default OFF** (CLAUDE.md §5: changes which primal heuristics run, so which
-    nodes a time-limited tree reaches); ``1`` opts in. Row in
-    ``docs/dev/flag-retirement-audit.md``.
+    **Default ON** (graduated 2026-11-06, #2176, on its CLAUDE.md §5 panel); ``0`` opts
+    out to the fixed-cost test. Row in ``docs/dev/flag-retirement-audit.md``.
 
     The #1344 contingent (:func:`_improver_within_contingent`) admits an
     improver-role call (RINS, local branching, the binary-seed enumeration) while
@@ -302,12 +301,22 @@ def _heur_wall_cost_enabled() -> bool:
     node NLPs. At a fixed node count the bound is the same with and without the
     incumbent (317 nodes: 592238.9435633742 in both arms), so that wall bought
     nothing (``docs/dev/data/2172-batch-processing-dual-gap/``).
+
+    Panel (``docs/dev/data/2176-heur-wall-cost-panel/``, ON vs OFF): the 74 in-repo
+    ``.nl`` at 60 s x 2 reps, certified 116 -> 116, 260 incumbent checks, 0 errors,
+    total wall 2466 -> 2449 s; gdp_parity x {big-M, hull} at 120 s, 0 incorrect, 0
+    bound crossings, SGM wall 37.42 -> 36.71 s. Where it acts: ``positioning`` 151 ->
+    305 nodes, 9.7-10.1 s -> 6.8-7.1 s, same optimum, both lowerings, 3 reps each;
+    ``batch_processing`` bound big-M 557177 -> 566697 and hull 588573 -> 602199 (885 and
+    541 nodes vs 503 and 255). The one cell the panel reported lost (syngas hull, 119.2
+    s OFF vs a 120 s limit) never reached a wall-priced decision; a 3-rep interleaved
+    re-run certified it in both arms (112.7-113.8 s).
     """
-    return os.environ.get("DISCOPT_HEUR_WALL_COST", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_HEUR_WALL_COST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -20947,7 +20956,7 @@ def solve_model(
     # ``nonlocal`` dance. ``cost`` is sub-NLP-solve-equivalents already spent on
     # the (improver-role) heuristics; ``found`` counts those that strictly
     # improved the incumbent — the success signal in the contingent.
-    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF) adds the timing fields.
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default ON; ``0`` opts out) adds the timing fields.
     _heur_state = _new_heur_state()
 
     def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:
@@ -29094,7 +29103,7 @@ def _solve_nlp_bb(
     _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))
     _HEUR_SUCCESS_GAIN = 3.0
     _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
-    # #2176 (``DISCOPT_HEUR_WALL_COST``, default OFF) adds the timing fields.
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default ON; ``0`` opts out) adds the timing fields.
     _heur_state = _new_heur_state()
 
     def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:

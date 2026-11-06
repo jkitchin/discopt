@@ -1,0 +1,8 @@
+[148/148] rep1 tspn12: OFF feasible cert=False bound=205.0594347808767 | ON feasible cert=False bound=205.0594347808767 nodes 95/93 load 5.31/4.48 
+
+rows 148 | instances with a problem: 0
+certified OFF 116 -> ON 116 | gained [] | lost []
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 260
+wall 2537 s
