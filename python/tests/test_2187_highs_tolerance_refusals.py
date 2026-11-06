@@ -280,6 +280,27 @@ def test_repair_withdraws_a_below_root_incumbent_with_no_real_point():
     assert labels["milp/certificate"] == "declined"
 
 
+@pytest.mark.parametrize(
+    "status_in, status_out, stop",
+    [
+        ("optimal", "error", True),
+        ("feasible", "error", True),
+        ("time_limit", "time_limit", False),
+        ("node_limit", "node_limit", False),
+        ("iteration_limit", "iteration_limit", False),
+    ],
+)
+def test_withdrawal_never_leaves_a_feasible_without_a_point(status_in, status_out, stop):
+    """Review of #2189: a ``feasible`` input (a limit exit HiGHS mapped to ``feasible``)
+    whose incumbent is withdrawn has no point, so it is an ``error``; a limit status
+    without an incumbent is still the limit it is."""
+    out = _tree_out(1.0, 1.0, status=status_in)
+    got_stop, _, stats = _repair(_line_sf(1.000004, y_hi=1.0), out, 1.000004)
+    assert stats["milp/incumbent_below_root_withdrawn"] == 1.0
+    assert out.x is None and out.objective is None and not out.gap_certified
+    assert out.status == status_out and got_stop is stop
+
+
 def test_repair_refuses_an_lp_point_that_is_also_below_the_bound():
     out = _tree_out(15.0, 14.0)
     stop, _, stats = _repair(_line_sf(19.0), out, 20.0)

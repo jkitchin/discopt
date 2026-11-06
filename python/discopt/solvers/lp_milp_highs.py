@@ -3375,11 +3375,15 @@ def _repair_tree_below_root(
             labels["milp/certificate"] = "declined"
             out.x, out.objective, out.gap_certified = None, None, False
             out.bound = root
-            if was_optimal:
+            if was_optimal or out.status == "feasible":
+                # The route's rule for a result without a point: "feasible" only with
+                # one (``"feasible" if out.x is not None else "error"``). A limit exit
+                # with no incumbent stays the limit it is (review of #2189).
+                status_in = out.status
                 out.status = "error"
                 out.message = (
-                    f"HiGHS MILP kOptimal: incumbent below the NS-safe root bound {root:.12g} "
-                    "and no point over its integers reaches the bound"
+                    f"HiGHS MILP {status_in}: incumbent below the NS-safe root bound "
+                    f"{root:.12g} and no point over its integers reaches the bound"
                 )
                 return True
             return False
