@@ -814,3 +814,46 @@ SCIP certifies `istra` with tree-only Gomory in ~1,600 nodes. So either our node
 are much weaker than SCIP's in-tree Gomory cuts, or the bound that matters is not
 reaching the frontier minimum. This goes to the HiGHS/SCIP-expert consult (standing
 instruction) before more building.
+
+**15. RETRACTION (§11) and the expert's answer: our node GMI cuts are not too weak; they
+never leave the subtree.**
+
+*Retracted from follow-ups 11 and 13.* "SCIP's in-tree Gomory cuts are local" is false.
+SCIP 10 emitted 28,786 global rows and 0 local rows on `istra`: branched binaries sit at
+bounds that are also their global bounds. Also retracted: "gomory + X alone stalls"
+(`b1_scip_pairs.py`). In SCIP 10, `gomory` emits nothing when `gomorymi` and `strongcg`
+are both off, so those arms had no Gomory cuts at all.
+
+*Expert consult* (`highs-parity-d2-node-gmi-expert.md`; scripts and log tails in
+`d2-analysis/expert2/`). Our GMI formula was run as a Python separator inside SCIP, with
+only the cut lifetime varied, 60 s per arm:
+
+| arm | `iskar` | `istra` |
+|---|---|---|
+| global pool | certifies, 8.1k nodes | certifies, 10.6k nodes |
+| subtree-only (global bounds) | 35.90 | 47.63 |
+| subtree-only (local bounds, i.e. B1' as built) | 36.14 | 47.56 |
+| pool off, conflict on | certifies | certifies |
+| pool and conflict both off | 36.49 | **48.31** |
+
+The last row matches discopt (48.32). The validity probe checked 17k cuts against a known
+optimum: 0 violations.
+
+What makes SCIP certify is sharing node cuts globally, through the cut pool or through
+conflict dual proofs; either alone suffices. That is why the earlier leave-one-out found
+conflict analysis unnecessary: the pool was still on.
+
+*Implemented* (this commit, still `DISCOPT_MILP_NODE_GMI`):
+
+- `gomory::separate_gomory_cols_global`: the node's tableau complemented at the global
+  bounds, which makes each cut globally valid. The plain path is bit-identical.
+  `global_gmi_cuts_hold_on_the_whole_global_box` checks 333 cuts x 11,161 global-box
+  integer points with 0 violations. The plain local separator on the same LPs is caught
+  removing a globally feasible point 70 times, so the check has power.
+- A global, deduplicated, aging pool (cap 2,000, age 30 batches). Each node appends the
+  <= 20 most efficacious pool cuts its point violates to a node-local copy and
+  NS-verifies the bound. Slot nodes separate new global cuts into the pool.
+- Subtree inheritance is removed.
+
+Entry: the expert's arms and kill criterion. If `istra` gains < +0.3 (to 48.62) and `iskar`
+gains < +0.3 (to 36.49) over OFF, and neither certifies, kill it.

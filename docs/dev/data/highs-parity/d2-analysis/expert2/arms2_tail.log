@@ -1,0 +1,9 @@
+istra {"mode": "G-pool"} -> {'status': 'optimal', 'nodes': 10641, 't': 33.4, 'bound': 49.0, 'calls': 815, 'cuts': 1417, 'nodes_sep': 225, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1426}
+istra {"mode": "G-sub"} -> {'status': 'timelimit', 'nodes': 25221, 't': 60.0, 'bound': 47.6305, 'calls': 1110, 'cuts': 3926, 'nodes_sep': 296, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 3930}
+istra {"mode": "L-sub"} -> {'status': 'timelimit', 'nodes': 15487, 't': 60.0, 'bound': 47.5595, 'calls': 1367, 'cuts': 24924, 'nodes_sep': 319, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 217}
+executed 3
+iskar {"mode": "G-pool", "maxcuts": 20, "maxrounds": 3} -> {'status': 'optimal', 'nodes': 14706, 't': 17.4, 'bound': 37.0, 'calls': 472, 'cuts': 1091, 'nodes_sep': 190, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1111}
+iskar {"mode": "L-sub", "freq": 1, "maxcuts": 20, "maxrounds": 3} -> {'status': 'timelimit', 'nodes': 17673, 't': 60.0, 'bound': 35.7908, 'calls': 4551, 'cuts': 42722, 'nodes_sep': 1714, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 146}
+istra {"mode": "G-pool", "maxcuts": 20, "maxrounds": 3} -> {'status': 'optimal', 'nodes': 12090, 't': 34.3, 'bound': 49.0, 'calls': 682, 'cuts': 1257, 'nodes_sep': 278, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1258}
+istra {"mode": "L-sub", "freq": 1, "maxcuts": 20, "maxrounds": 3} -> {'status': 'timelimit', 'nodes': 13633, 't': 60.0, 'bound': 47.485, 'calls': 1861, 'cuts': 25560, 'nodes_sep': 728, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 202}
+executed 4

@@ -1,0 +1,4 @@
+istra {"mode": "G-pool", "extra": {"separating/poolfreq": -1, "conflict/enable": false}} -> {'status': 'timelimit', 'nodes': 29222, 't': 60.0, 'bound': 48.3075, 'calls': 1215, 'cuts': 3064, 'nodes_sep': 329, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 3070}
+istra {"mode": "G-pool", "extra": {"conflict/enable": false}} -> {'status': 'optimal', 'nodes': 14287, 't': 37.7, 'bound': 49.0, 'calls': 829, 'cuts': 1349, 'nodes_sep': 252, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1359}
+istra {"mode": "G-pool", "extra": {"separating/poolfreq": -1}} -> {'status': 'optimal', 'nodes': 27409, 't': 58.0, 'bound': 49.0, 'calls': 1054, 'cuts': 2462, 'nodes_sep': 299, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 2465}
+executed 3

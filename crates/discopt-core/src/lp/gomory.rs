@@ -432,7 +432,7 @@ pub fn separate_gomory_cols(
     tol: f64,
     max_dynamism: f64,
 ) -> Vec<GomoryCut> {
-    let mut cuts = Vec::new();
+    let cuts = Vec::new();
     crate::profile::incr(crate::profile::Ctr::SepGomoryCalls);
     if m == 0 {
         return cuts;
@@ -460,7 +460,100 @@ pub fn separate_gomory_cols(
         crate::profile::incr(crate::profile::Ctr::SepGomoryShortBasis);
         return cuts;
     }
+    gomory_rows(
+        sp,
+        m,
+        n,
+        l,
+        u,
+        None,
+        b,
+        basis,
+        integrality,
+        tol,
+        max_dynamism,
+    )
+}
 
+/// GMI cuts that are valid for the **whole tree**, separated at a B&B node
+/// (highs-parity D2, `DISCOPT_MILP_NODE_GMI`).
+///
+/// The tableau rows come from the node's optimal basis and the vertex from its
+/// **local** bounds `l`/`u`. Each nonbasic column is then complemented at its
+/// **global** bound on the same side (`gl` for at-lower, `gu` for at-upper), with
+/// `x̃_j = |x*_j − bound|` and `β = x_B + Σ α_j x̃_j`. The tableau identity
+/// `x_B + Σ α_j x̃_j = β` holds for every point with `A x = b`, and `x̃ ≥ 0` on the
+/// global box, so the GMI cut `Σ ψ_j x̃_j ≥ 1` (with `f0 = frac(β)`) is globally valid.
+/// This is how SCIP's in-tree Gomory cuts reach its global pool. Its integer
+/// strengthening applies only to integer columns whose complementing *global* bound is
+/// integral.
+///
+/// Columns `n_global..n` exist only in the node's local LP copy (rows appended there).
+/// A cut with a nonzero coefficient on one of them is refused, and the cuts returned
+/// are truncated to length `n_global`. A complementing global bound at the `1e20`
+/// sentinel also refuses the cut (no finite `x̃`).
+#[allow(clippy::too_many_arguments)]
+pub fn separate_gomory_cols_global(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    gl: &[f64],
+    gu: &[f64],
+    n_global: usize,
+    b: &[f64],
+    basis: &Basis,
+    integrality: &[bool],
+    tol: f64,
+    max_dynamism: f64,
+) -> Vec<GomoryCut> {
+    crate::profile::incr(crate::profile::Ctr::SepGomoryCalls);
+    if m == 0 || basis.basic_vars.len() != m || gl.len() < n || gu.len() < n {
+        return Vec::new();
+    }
+    let mut cuts = gomory_rows(
+        sp,
+        m,
+        n,
+        l,
+        u,
+        Some((gl, gu, n_global)),
+        b,
+        basis,
+        integrality,
+        tol,
+        max_dynamism,
+    );
+    for c in &mut cuts {
+        c.coeffs.truncate(n_global);
+    }
+    cuts
+}
+
+/// The GMI row loop shared by [`separate_gomory_cols`] (`global = None`: complement at
+/// `l`/`u`, bit-identical to the historical body) and
+/// [`separate_gomory_cols_global`] (`global = Some((gl, gu, n_global))`).
+#[allow(clippy::too_many_arguments)]
+fn gomory_rows(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    global: Option<(&[f64], &[f64], usize)>,
+    b: &[f64],
+    basis: &Basis,
+    integrality: &[bool],
+    tol: f64,
+    max_dynamism: f64,
+) -> Vec<GomoryCut> {
+    let mut cuts = Vec::new();
+    // Complementing bounds: the global ones when separating globally valid cuts.
+    let (cl, cu) = match global {
+        Some((gl, gu, _)) => (gl, gu),
+        None => (l, u),
+    };
     let mut lu = FeralLU::new();
     let bcols: Vec<Vec<(usize, f64)>> = basis
         .basic_vars
@@ -505,9 +598,13 @@ pub fn separate_gomory_cols(
         if !integrality[bi] {
             continue; // only integer basic variables yield cuts
         }
-        let f0 = xb[i] - xb[i].floor();
-        if !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f0) {
-            continue; // integral, or too close to integral for a safe cut
+        if global.is_none() {
+            let f0 = xb[i] - xb[i].floor();
+            if !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f0) {
+                continue; // integral, or too close to integral for a safe cut
+            }
+        } else if (xb[i] - xb[i].round()).abs() < FRAC_MIN {
+            continue; // an integral basic value: nothing to separate at this vertex
         }
 
         // Row i of B⁻¹: refined solve of Bᵀ w = e_i (one btran + refinement).
@@ -520,6 +617,48 @@ pub fn separate_gomory_cols(
                 continue;
             }
         };
+
+        // Global complementation: β = x_B + Σ α_j x̃_j with x̃_j = |x*_j − bound_j|
+        // at the GLOBAL bound on the LP's side. With `global = None` every x̃_j is 0
+        // and β is x_B exactly (the historical f0).
+        let f0 = match global {
+            None => xb[i] - xb[i].floor(),
+            Some((_, _, n_global)) => {
+                let mut beta = xb[i];
+                let mut refuse = false;
+                for j in 0..n {
+                    if basis.col_status[j] == BASIC {
+                        continue;
+                    }
+                    let at_upper = basis.col_status[j] == AT_UPPER;
+                    let local = if at_upper { u[j] } else { l[j] };
+                    let bound = if at_upper { cu[j] } else { cl[j] };
+                    let abar: f64 = sp.dot(j, &w);
+                    if abar == 0.0 {
+                        continue;
+                    }
+                    if j >= n_global || bound.abs() >= 1e20 {
+                        refuse = true;
+                        break;
+                    }
+                    let xt = if at_upper {
+                        bound - local
+                    } else {
+                        local - bound
+                    };
+                    let alpha = if at_upper { -abar } else { abar };
+                    beta += alpha * xt;
+                }
+                if refuse || !beta.is_finite() {
+                    crate::profile::incr(crate::profile::Ctr::SepGomoryGlobalRefused);
+                    continue;
+                }
+                beta - beta.floor()
+            }
+        };
+        if global.is_some() && !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f0) {
+            continue;
+        }
 
         // GMI cut Σ ψ_j x̃_j ≥ 1, accumulated into original-variable space.
         let mut coeffs = vec![0.0_f64; n];
@@ -560,7 +699,7 @@ pub fn separate_gomory_cols(
             // fractional bound, that premise fails and the integer ψ can cut the
             // true optimum — fall back to the continuous formula, which is
             // always valid (a weaker but sound cut).
-            let pinned = if at_upper { u[j] } else { l[j] };
+            let pinned = if at_upper { cu[j] } else { cl[j] };
             let use_integer = integrality[j] && (pinned - pinned.round()).abs() <= tol;
             let psi = if use_integer {
                 let fj = alpha - alpha.floor();
@@ -607,21 +746,21 @@ pub fn separate_gomory_cols(
             // only case the flag was ever meant to name.
             let tiny = psi.abs() <= tol || (use_integer && snap_eligible);
             if tiny {
-                let range = u[j] - l[j];
+                let range = cu[j] - cl[j];
                 // Charge the term to the rhs only when its MAXIMUM contribution
                 // over the box is itself negligible (<= tol): a bounded
                 // weakening. Otherwise keep the exact coefficient.
-                if u[j] < 1e20 && l[j] > -1e20 && range.is_finite() && psi * range <= tol {
+                if cu[j] < 1e20 && cl[j] > -1e20 && range.is_finite() && psi * range <= tol {
                     rhs -= psi * range;
                     continue;
                 }
             }
             if at_upper {
                 coeffs[j] = -psi;
-                rhs -= psi * u[j];
+                rhs -= psi * cu[j];
             } else {
                 coeffs[j] = psi;
-                rhs += psi * l[j];
+                rhs += psi * cl[j];
             }
             max_c = max_c.max(psi.abs());
             // #1236: a tiny coefficient kept EXACTLY -- because its range was
@@ -1313,5 +1452,118 @@ mod tests {
             "{short_seen} {cuts_checked} {points_checked}"
         );
         eprintln!("short={short_seen} cuts={cuts_checked} points={points_checked}");
+    }
+
+    /// `separate_gomory_cols_global` (highs-parity D2): cuts separated at a node with
+    /// LOCAL bounds but complemented at the GLOBAL bounds must hold at every integer-
+    /// feasible point of the GLOBAL box. Control arm: the plain separator on the same
+    /// local LPs is NOT globally valid, and the check must catch it at least once,
+    /// otherwise this test could not tell a valid global cut from an invalid one.
+    #[test]
+    fn global_gmi_cuts_hold_on_the_whole_global_box() {
+        use crate::lp::simplex::{solve_lp_cols_scaled, LpStatus, SimplexOptions};
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |k: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % k
+        };
+        let (mut global_cuts, mut points, mut local_invalid) = (0usize, 0usize, 0usize);
+        for _trial in 0..600 {
+            let ni = 3usize;
+            let mut arow = [[0.0f64; 3]; 2];
+            let mut bv = [0.0f64; 2];
+            for r in 0..2 {
+                for j in 0..ni {
+                    arow[r][j] = (rnd(7) as f64) - 2.0;
+                }
+                bv[r] = (rnd(9) as f64) + 0.5;
+            }
+            let (m, n) = (2usize, ni + 2);
+            let mut dense = vec![0.0f64; m * n];
+            for j in 0..ni {
+                dense[j] = arow[0][j];
+                dense[n + j] = arow[1][j];
+            }
+            dense[ni] = 1.0;
+            dense[n + ni + 1] = 1.0;
+            let b = [bv[0], bv[1]];
+            let gl = vec![0.0; n];
+            let mut gu = vec![3.0; n];
+            gu[ni] = 1e20;
+            gu[ni + 1] = 1e20;
+            // A node box: one integer column branched up or down.
+            let (mut l, mut u) = (gl.clone(), gu.clone());
+            let j0 = rnd(ni as u64) as usize;
+            if rnd(2) == 0 {
+                l[j0] = (1 + rnd(2)) as f64;
+            } else {
+                u[j0] = (1 + rnd(2)) as f64;
+            }
+            let c: Vec<f64> = (0..n)
+                .map(|j| if j < ni { (rnd(9) as f64) - 4.0 } else { 0.0 })
+                .collect();
+            let integrality: Vec<bool> = (0..n).map(|j| j < ni).collect();
+            let sp = SparseCols::from_dense(&dense, m, n);
+            let sol =
+                solve_lp_cols_scaled(sp.clone(), m, n, &c, &l, &u, &b, &SimplexOptions::default());
+            if sol.status != LpStatus::Optimal || sol.basis.basic_vars.len() != m {
+                continue;
+            }
+            let glob = separate_gomory_cols_global(
+                &sp,
+                m,
+                n,
+                &l,
+                &u,
+                &gl,
+                &gu,
+                n,
+                &b,
+                &sol.basis,
+                &integrality,
+                1e-7,
+                1e9,
+            );
+            let loc =
+                separate_gomory_cols(&sp, m, n, &l, &u, &b, &sol.basis, &integrality, 1e-7, 1e9);
+            let feasible = |xi: [f64; 3]| -> Option<[f64; 5]> {
+                let s0 = bv[0] - dot(&arow[0], &xi);
+                let s1 = bv[1] - dot(&arow[1], &xi);
+                (s0 >= 0.0 && s1 >= 0.0).then_some([xi[0], xi[1], xi[2], s0, s1])
+            };
+            for x0 in 0..=3 {
+                for x1 in 0..=3 {
+                    for x2 in 0..=3 {
+                        let Some(x) = feasible([x0 as f64, x1 as f64, x2 as f64]) else {
+                            continue;
+                        };
+                        points += 1;
+                        for cut in &glob {
+                            assert!(
+                                dot(&cut.coeffs, &x) >= cut.rhs - 1e-7 * (1.0 + cut.rhs.abs()),
+                                "global cut {cut:?} removes feasible {x:?} (node box l={l:?} u={u:?})"
+                            );
+                        }
+                        for cut in &loc {
+                            if dot(&cut.coeffs, &x) < cut.rhs - 1e-6 * (1.0 + cut.rhs.abs()) {
+                                local_invalid += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            global_cuts += glob.len();
+        }
+        assert!(
+            global_cuts > 0 && points > 0,
+            "{global_cuts} {points}: the test measured nothing"
+        );
+        assert!(
+            local_invalid > 0,
+            "the local separator never removed a globally feasible point: the check has no power"
+        );
+        eprintln!("global_cuts={global_cuts} points={points} local_invalid={local_invalid}");
     }
 }

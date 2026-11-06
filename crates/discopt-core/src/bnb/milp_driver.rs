@@ -439,140 +439,156 @@ const NODE_GMI_ROUNDS: usize = 3;
 /// Cuts kept per round after selection.
 const NODE_GMI_MAX_CUTS: usize = 20;
 
-/// Cap on the local rows one node may carry (inherited plus its own).
-const NODE_GMI_MAX_LOCAL_ROWS: usize = 100;
+/// Global GMI pool (`DISCOPT_MILP_NODE_GMI`): most cuts kept, batches a cut may go
+/// unused before it ages out, and pool cuts appended per node.
+const NODE_GMI_POOL_CAP: usize = 2000;
+const NODE_GMI_POOL_AGE: u32 = 30;
+const NODE_GMI_POOL_PER_NODE: usize = 20;
 
 /// What [`node_local_gmi_bound`] proved at one node.
 struct LocalGmi {
-    /// Best NS-verified bound over the node box with the local rows (no `obj_const`).
+    /// Best NS-verified bound over the node box with the appended rows (no `obj_const`).
     bound: Option<f64>,
     /// Pivots spent.
     pivots: usize,
-    /// The local rows the node's children inherit: the inherited ones, then this node's.
-    rows: Vec<GomoryCut>,
+    /// New globally valid cuts separated at this node, for the shared pool (over the
+    /// working columns, length `ctx.n_w`).
+    new_cuts: Vec<GomoryCut>,
 }
 
-/// Node-local Gomory rows (`DISCOPT_MILP_NODE_GMI`).
+/// One node-local step: append `add` to the local LP, warm re-solve from `basis`
+/// extended, NS-verify over the augmented matrix. `None` = the solve or its
+/// verification failed; `Some(improved)` otherwise.
+struct LocalLp {
+    csc: SparseCols,
+    b: Vec<f64>,
+    c: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    is_int: Vec<bool>,
+    m: usize,
+    n: usize,
+    x: Vec<f64>,
+    basis: Basis,
+    best: Option<f64>,
+    pivots: usize,
+}
+
+impl LocalLp {
+    fn step(&mut self, add: &[GomoryCut], simplex: &SimplexOptions) -> Option<bool> {
+        let (nc, nm, nn) = augment_csc_with_cuts(
+            &self.csc,
+            &mut self.b,
+            &mut self.c,
+            &mut self.l,
+            &mut self.u,
+            &mut self.is_int,
+            self.m,
+            self.n,
+            add,
+        );
+        self.csc = nc;
+        self.m = nm;
+        self.n = nn;
+        let start = extend_basis(self.basis.clone(), self.n);
+        let lp = LpView {
+            a: &[],
+            m: self.m,
+            n: self.n,
+            c: &self.c,
+            l: &self.l,
+            u: &self.u,
+        };
+        let sol = solve_lp_warm_scaled_csc(&lp, &self.b, &start, simplex, &self.csc);
+        self.pivots += sol.iters;
+        if sol.status != LpStatus::Optimal {
+            crate::profile::incr(crate::profile::Ctr::NodeGmiLpFail);
+            return None;
+        }
+        let (cp, ri, vals) = self.csc.raw();
+        let Some(g) = ns_safe_bound_csc(
+            &sol.dual, &self.c, cp, ri, vals, self.m, self.n, &self.b, &self.l, &self.u,
+        ) else {
+            crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
+            return None;
+        };
+        let g = g.min(sol.obj);
+        let prev = self.best.unwrap_or(f64::NEG_INFINITY);
+        if g > prev {
+            self.best = Some(g);
+        }
+        self.x = sol.x;
+        self.basis = sol.basis;
+        Some(g > prev + 1e-9 * prev.abs().max(1.0))
+    }
+}
+
+/// Node-local LP with global-pool rows (`DISCOPT_MILP_NODE_GMI`).
 ///
-/// 1. Re-solve the node LP with the rows inherited from its ancestors appended (each
-///    was derived on an ancestor's box, which contains this node's box, so each is
-///    valid here).
-/// 2. When `rounds > 0`, separate up to `rounds` further rounds of GMI from the
-///    current basis with this node's bounds.
+/// 1. Re-solve the node LP with `pool_rows` appended: the pool cuts the node's point
+///    violates. Each is globally valid.
+/// 2. When `rounds > 0`, separate up to `rounds` rounds of **globally valid** GMI
+///    ([`crate::lp::gomory::separate_gomory_cols_global`]: the node's tableau,
+///    complemented at the global bounds), append and re-solve. The cuts go to the pool.
 ///
-/// Every solve is warm from the node's plain optimal basis, extended over the new rows,
+/// Every solve is warm from the node's plain optimal basis extended over the new rows,
 /// and every bound is NS-verified over the augmented matrix. The shared LP is never
-/// touched.
-#[allow(clippy::too_many_arguments)]
+/// touched; the pool is updated by the caller between batches.
 fn node_local_gmi_bound(
     ctx: &NodeCtx<'_>,
     full_l: &[f64],
     full_u: &[f64],
     x0: &[f64],
     basis0: &Basis,
-    inherited: &[GomoryCut],
+    pool_rows: &[GomoryCut],
     rounds: usize,
 ) -> LocalGmi {
     let tol = ctx.opts.simplex.tol;
-    let mut csc = ctx.csc_rc.clone();
-    let mut b = ctx.b_w.to_vec();
-    let mut c = ctx.c_w.to_vec();
-    let mut l = full_l.to_vec();
-    let mut u = full_u.to_vec();
-    let mut is_int = ctx.is_int_full.to_vec();
-    let (mut m, mut n) = (ctx.m_w, ctx.n_w);
-    let mut x = x0.to_vec();
-    let mut basis = basis0.clone();
-    let mut best: Option<f64> = None;
-    let mut pivots = 0usize;
-    let mut rows: Vec<GomoryCut> = inherited.to_vec();
-    // One step: append `add`, warm re-solve, NS-verify. `None` = the solve or its
-    // verification failed; `Some(improved)` otherwise.
-    let step = |add: &[GomoryCut],
-                csc: &mut SparseCols,
-                b: &mut Vec<f64>,
-                c: &mut Vec<f64>,
-                l: &mut Vec<f64>,
-                u: &mut Vec<f64>,
-                is_int: &mut Vec<bool>,
-                m: &mut usize,
-                n: &mut usize,
-                x: &mut Vec<f64>,
-                basis: &mut Basis,
-                best: &mut Option<f64>,
-                pivots: &mut usize|
-     -> Option<bool> {
-        let (nc, nm, nn) = augment_csc_with_cuts(csc, b, c, l, u, is_int, *m, *n, add);
-        *csc = nc;
-        *m = nm;
-        *n = nn;
-        let start = extend_basis(basis.clone(), *n);
-        let lp = LpView {
-            a: &[],
-            m: *m,
-            n: *n,
-            c,
-            l,
-            u,
-        };
-        let sol = solve_lp_warm_scaled_csc(&lp, b, &start, ctx.simplex, csc);
-        *pivots += sol.iters;
-        if sol.status != LpStatus::Optimal {
-            crate::profile::incr(crate::profile::Ctr::NodeGmiLpFail);
-            return None;
-        }
-        let (cp, ri, vals) = csc.raw();
-        let Some(g) = ns_safe_bound_csc(&sol.dual, c, cp, ri, vals, *m, *n, b, l, u) else {
-            crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
-            return None;
-        };
-        let g = g.min(sol.obj);
-        let prev = best.unwrap_or(f64::NEG_INFINITY);
-        if g > prev {
-            *best = Some(g);
-        }
-        *x = sol.x;
-        *basis = sol.basis;
-        Some(g > prev + 1e-9 * prev.abs().max(1.0))
+    let mut lp = LocalLp {
+        csc: ctx.csc_rc.clone(),
+        b: ctx.b_w.to_vec(),
+        c: ctx.c_w.to_vec(),
+        l: full_l.to_vec(),
+        u: full_u.to_vec(),
+        is_int: ctx.is_int_full.to_vec(),
+        m: ctx.m_w,
+        n: ctx.n_w,
+        x: x0.to_vec(),
+        basis: basis0.clone(),
+        best: None,
+        pivots: 0,
     };
-    if !inherited.is_empty() {
+    let mut new_cuts: Vec<GomoryCut> = Vec::new();
+    if !pool_rows.is_empty() {
         crate::profile::incr(crate::profile::Ctr::NodeGmiInheritSolves);
-        let r = step(
-            inherited,
-            &mut csc,
-            &mut b,
-            &mut c,
-            &mut l,
-            &mut u,
-            &mut is_int,
-            &mut m,
-            &mut n,
-            &mut x,
-            &mut basis,
-            &mut best,
-            &mut pivots,
-        );
-        if r.is_none() {
+        if lp.step(pool_rows, ctx.simplex).is_none() {
             return LocalGmi {
-                bound: best,
-                pivots,
-                rows,
+                bound: lp.best,
+                pivots: lp.pivots,
+                new_cuts,
             };
         }
     }
     for _ in 0..rounds {
-        if rows.len() >= NODE_GMI_MAX_LOCAL_ROWS
-            || ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        if ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             break;
         }
-        let cuts = separate_gomory_cols(&csc, m, n, &l, &u, &b, &basis, &is_int, tol, 1e7);
+        // Global bounds over the augmented columns: the working columns' own, and the
+        // appended rows' slacks at [0, inf) (a cut touching one is refused anyway).
+        let mut gl = ctx.l_w.to_vec();
+        let mut gu = ctx.u_w.to_vec();
+        gl.resize(lp.n, 0.0);
+        gu.resize(lp.n, INF);
+        let cuts = crate::lp::gomory::separate_gomory_cols_global(
+            &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
+            tol, 1e7,
+        );
         crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
-        let room = NODE_GMI_MAX_LOCAL_ROWS - rows.len();
+        // The cuts are truncated to the working columns; select on the point there.
         let sel = select_cuts(
             cuts,
-            &x,
-            NODE_GMI_MAX_CUTS.min(room),
+            &lp.x[..ctx.n_w],
+            NODE_GMI_MAX_CUTS,
             CUT_MIN_EFFICACY,
             CUT_MAX_PARALLEL,
         );
@@ -580,36 +596,24 @@ fn node_local_gmi_bound(
             break;
         }
         crate::profile::incr_by(crate::profile::Ctr::NodeGmiCuts, sel.len() as u64);
-        let r = step(
-            &sel,
-            &mut csc,
-            &mut b,
-            &mut c,
-            &mut l,
-            &mut u,
-            &mut is_int,
-            &mut m,
-            &mut n,
-            &mut x,
-            &mut basis,
-            &mut best,
-            &mut pivots,
-        );
-        match r {
-            Some(improved) => {
-                rows.extend(sel);
-                if !improved {
-                    break;
-                }
-            }
-            // The rows that broke the solve are not handed down.
-            None => break,
+        let padded: Vec<GomoryCut> = sel
+            .iter()
+            .map(|k| {
+                let mut coeffs = k.coeffs.clone();
+                coeffs.resize(lp.n, 0.0);
+                GomoryCut { coeffs, rhs: k.rhs }
+            })
+            .collect();
+        let r = lp.step(&padded, ctx.simplex);
+        new_cuts.extend(sel);
+        if r != Some(true) {
+            break;
         }
     }
     LocalGmi {
-        bound: best,
-        pivots,
-        rows,
+        bound: lp.best,
+        pivots: lp.pivots,
+        new_cuts,
     }
 }
 
@@ -1943,10 +1947,12 @@ fn solve_milp_node_search(
     // D2 B1': node-local Gomory rounds (no lazy separator: a lazy callback screens
     // points against the shared LP, and the local rows are invisible to it).
     let node_gmi_on = node_gmi_enabled() && lazy.is_none();
-    // Local Gomory rows per pending node, inherited down the subtree. They reference the
-    // working matrix's column layout, so a fold of global cuts (which appends columns)
-    // clears the map: the descendants then fall back to their inherited bound floor.
-    let mut local_rows: HashMap<NodeId, std::sync::Arc<Vec<GomoryCut>>> = HashMap::new();
+    // Global GMI pool (`DISCOPT_MILP_NODE_GMI`): globally valid cuts separated at nodes,
+    // with the batches since each was last used. Not folded into the shared matrix; each
+    // node appends the ones its point violates to a node-local copy.
+    let mut gmi_pool: Vec<GomoryCut> = Vec::new();
+    let mut gmi_pool_age: Vec<u32> = Vec::new();
+    let mut gmi_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
@@ -2582,7 +2588,7 @@ fn solve_milp_node_search(
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 improve_dive: improve_batch,
                 node_gmi: node_gmi_on,
-                local_rows: &local_rows,
+                gmi_pool: &gmi_pool,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -2646,20 +2652,15 @@ fn solve_milp_node_search(
 
         // --- sequential reduce: apply tree mutations in batch order ---
         let mut hit_unbounded = false;
-        // D2 B1': local Gomory rows produced this batch, keyed by the node that solved.
-        let mut produced_rows: HashMap<NodeId, std::sync::Arc<Vec<GomoryCut>>> = HashMap::new();
+        // D2 B1': global GMI cuts separated this batch, and pool cuts the batch used.
+        let mut batch_new_gmi: Vec<GomoryCut> = Vec::new();
+        let mut batch_used_gmi: Vec<usize> = Vec::new();
         for (k, mut out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
             improve_dive_iters += out.dive_iters;
-            if !out.deferred {
-                // A solved node no longer needs its inherited rows; its children get
-                // its (possibly extended) set below.
-                local_rows.remove(&id);
-                if let Some(r) = out.local_rows.take() {
-                    produced_rows.insert(id, r);
-                }
-            }
+            batch_new_gmi.append(&mut out.gmi_new);
+            batch_used_gmi.append(&mut out.gmi_used);
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
@@ -2931,15 +2932,48 @@ fn solve_milp_node_search(
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
-        // D2 B1': hand each branched node's local rows to the children just created.
-        if !produced_rows.is_empty() {
-            for k in tm.last_created() {
-                let child = NodeId(k);
-                if let Some(parent) = tm.node_lineage(child).and_then(|lin| lin.parent) {
-                    if let Some(r) = produced_rows.get(&parent) {
-                        local_rows.insert(child, r.clone());
+        // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
+        // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
+        // then drop cuts past the age limit and the oldest beyond the cap.
+        if node_gmi_on {
+            for a in gmi_pool_age.iter_mut() {
+                *a = a.saturating_add(1);
+            }
+            for k in batch_used_gmi {
+                if let Some(a) = gmi_pool_age.get_mut(k) {
+                    *a = 0;
+                }
+            }
+            for cut in batch_new_gmi {
+                if gmi_pool_sigs.insert(cut_signature(&cut)) {
+                    gmi_pool.push(cut);
+                    gmi_pool_age.push(0);
+                    crate::profile::incr(crate::profile::Ctr::NodeGmiPoolAdded);
+                }
+            }
+            let over = gmi_pool.len().saturating_sub(NODE_GMI_POOL_CAP);
+            let mut order: Vec<usize> = (0..gmi_pool.len()).collect();
+            order.sort_by_key(|&k| std::cmp::Reverse(gmi_pool_age[k]));
+            let mut drop = vec![false; gmi_pool.len()];
+            for (rank, &k) in order.iter().enumerate() {
+                if gmi_pool_age[k] > NODE_GMI_POOL_AGE || rank < over {
+                    drop[k] = true;
+                }
+            }
+            if drop.iter().any(|&d| d) {
+                let mut keep_pool = Vec::with_capacity(gmi_pool.len());
+                let mut keep_age = Vec::with_capacity(gmi_pool.len());
+                for (k, cut) in gmi_pool.drain(..).enumerate() {
+                    if drop[k] {
+                        gmi_pool_sigs.remove(&cut_signature(&cut));
+                        crate::profile::incr(crate::profile::Ctr::NodeGmiPoolDropped);
+                    } else {
+                        keep_pool.push(cut);
+                        keep_age.push(gmi_pool_age[k]);
                     }
                 }
+                gmi_pool = keep_pool;
+                gmi_pool_age = keep_age;
             }
         }
 
@@ -2991,8 +3025,6 @@ fn solve_milp_node_search(
         // Stored node bases are extended lazily on their next solve, so children
         // warm-start through the dual simplex from the cut-augmented basis.
         if !pending_cuts.is_empty() {
-            // The local rows reference the pre-fold column layout.
-            local_rows.clear();
             let (nw_csc, nm, nn) = augment_csc_with_cuts(
                 &csc_w,
                 &mut b_w,
@@ -3160,8 +3192,9 @@ struct NodeCtx<'a> {
     improve_dive: bool,
     /// `DISCOPT_MILP_NODE_GMI` is on (the per-node slot is `solve_node`'s `gmi_slot`).
     node_gmi: bool,
-    /// Local Gomory rows each pending node inherited from its ancestors.
-    local_rows: &'a HashMap<NodeId, std::sync::Arc<Vec<GomoryCut>>>,
+    /// The global GMI pool (`DISCOPT_MILP_NODE_GMI`), over the working columns at the
+    /// time each cut was separated (shorter than `n_w` after a fold: pad with zeros).
+    gmi_pool: &'a [GomoryCut],
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -3212,8 +3245,9 @@ struct NodeOutput {
     iters: usize,
     /// Pivots spent by an improving dive at this node (0 otherwise).
     dive_iters: usize,
-    /// `DISCOPT_MILP_NODE_GMI`: the local rows this node's children inherit.
-    local_rows: Option<std::sync::Arc<Vec<GomoryCut>>>,
+    /// `DISCOPT_MILP_NODE_GMI`: new global cuts for the pool, and pool indices used.
+    gmi_new: Vec<GomoryCut>,
+    gmi_used: Vec<usize>,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
     /// #2136: the objective of `result.solution` when `result.is_feasible` (an
@@ -3281,7 +3315,8 @@ fn solve_node(
             point_value: f64::NAN,
             deferred: true,
             dive_iters: 0,
-            local_rows: None,
+            gmi_new: Vec::new(),
+            gmi_used: Vec::new(),
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -3338,7 +3373,8 @@ fn solve_node(
                 point_value: f64::NAN,
                 deferred: false,
                 dive_iters: 0,
-                local_rows: None,
+                gmi_new: Vec::new(),
+                gmi_used: Vec::new(),
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -3457,7 +3493,8 @@ fn solve_node(
         point_value: f64::NAN,
         deferred: false,
         dive_iters: 0,
-        local_rows: None,
+        gmi_new: Vec::new(),
+        gmi_used: Vec::new(),
     };
 
     match sol.status {
@@ -3755,9 +3792,32 @@ fn solve_node(
             // bound. Skipped when the node is already prunable at the dispatch-time
             // incumbent (nothing to gain) and at integral vertices.
             let mut node_lp_bound = node_lp_bound;
-            let inherited = ctx.local_rows.get(&id);
+            // Pool cuts this node's point violates (top by efficacy), padded to the
+            // current working width.
+            let mut pool_pick: Vec<(f64, usize)> = Vec::new();
+            if ctx.node_gmi && !feasible && !ctx.gmi_pool.is_empty() {
+                for (k, cut) in ctx.gmi_pool.iter().enumerate() {
+                    let mut act = 0.0;
+                    let mut nrm = 0.0;
+                    for (j, &a) in cut.coeffs.iter().enumerate() {
+                        if a != 0.0 {
+                            act += a * sol.x[j];
+                            nrm += a * a;
+                        }
+                    }
+                    let viol = cut.rhs - act;
+                    if nrm > 0.0 && viol > 0.0 {
+                        let eff = viol / nrm.sqrt();
+                        if eff >= CUT_MIN_EFFICACY {
+                            pool_pick.push((eff, k));
+                        }
+                    }
+                }
+                pool_pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                pool_pick.truncate(NODE_GMI_POOL_PER_NODE);
+            }
             if ctx.node_gmi
-                && (gmi_slot || inherited.is_some())
+                && (gmi_slot || !pool_pick.is_empty())
                 && !feasible
                 && !time_up
                 && !ctx
@@ -3768,13 +3828,26 @@ fn solve_node(
                 if gmi_slot {
                     crate::profile::incr(crate::profile::Ctr::NodeGmiNodes);
                 }
+                let rows: Vec<GomoryCut> = pool_pick
+                    .iter()
+                    .map(|&(_, k)| {
+                        let mut coeffs = ctx.gmi_pool[k].coeffs.clone();
+                        coeffs.resize(ctx.n_w, 0.0);
+                        GomoryCut {
+                            coeffs,
+                            rhs: ctx.gmi_pool[k].rhs,
+                        }
+                    })
+                    .collect();
+                crate::profile::incr_by(crate::profile::Ctr::NodeGmiPoolUsed, rows.len() as u64);
+                out.gmi_used = pool_pick.iter().map(|&(_, k)| k).collect();
                 let lg = node_local_gmi_bound(
                     ctx,
                     &full_l,
                     &full_u,
                     &sol.x,
                     &sol.basis,
-                    inherited.map(|r| r.as_slice()).unwrap_or(&[]),
+                    &rows,
                     if gmi_slot { NODE_GMI_ROUNDS } else { 0 },
                 );
                 out.iters += lg.pivots;
@@ -3784,12 +3857,7 @@ fn solve_node(
                         node_lp_bound = g;
                     }
                 }
-                if !lg.rows.is_empty() {
-                    out.local_rows = Some(match inherited {
-                        Some(r) if r.len() == lg.rows.len() => r.clone(),
-                        _ => std::sync::Arc::new(lg.rows),
-                    });
-                }
+                out.gmi_new = lg.new_cuts;
             }
             out.result = NodeResult {
                 node_id: id,

@@ -316,6 +316,13 @@ counters!(
     NodeGmiLifted,
     // Nodes that re-solved with rows inherited from an ancestor.
     NodeGmiInheritSolves,
+    // Global GMI rows refused: a nonzero tableau entry on a node-local column or at an
+    // infinite complementing global bound.
+    SepGomoryGlobalRefused,
+    // The global GMI pool: cuts admitted, dropped (age/cap), and appended at nodes.
+    NodeGmiPoolAdded,
+    NodeGmiPoolDropped,
+    NodeGmiPoolUsed,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
