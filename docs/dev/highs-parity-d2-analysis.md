@@ -475,3 +475,39 @@ identity gate; L7 stays deferred.
   September panels, and was never decided on. Single rep, loaded host (2 concurrent), so this is an
   *entry* result, not a graduation; the P4-standard panel (3 reps, interleaved, cert-clean +
   net-positive with the A12 wall bar) is the next step and needs no code.
+
+
+---
+
+## Follow-up measurements (2026-11-06, after the analysis; data `docs/dev/data/highs-parity/d2-analysis/`)
+
+**1. The "September 21/38 vs November 14/38" comparison mixed two entry points -- retracted
+as an engine regression.** The September A14 panel (`scratchpad/a14/rens_panel.py`) called
+the Rust driver DIRECTLY (`solve_milp_py`, whole 20 s budget, `root_cuts=500,
+cut_rounds=50, cut_select, root_cut_time_s=10`); P0.3/P4.9/P6.6 measured the shipped ROUTE
+(`Model.solve` -> `_solve_milp_simplex`: a `min(0.5 rem, 10 s)` first slice, then re-entry or
+deferral). Today's driver called the September way
+(`discopt_benchmarks/scripts/d2_direct_driver_panel.py`, `direct_driver_head.json`):
+**17/38, 0 incorrect.** So:
+- the route wrapper costs ~3 certifications at 20 s (`neos-1425699`, `khb05250`, `jijia`
+  certify direct, not via the route);
+- the remaining September -> HEAD difference on direct calls is ~4 (`gt2`, `fiber`, `kaihu`,
+  `bppc8-02`); on this 4-core host `kaihu` and `fiber` certify in NEITHER build, so only
+  `gt2` and `bppc8-02` reproduce.
+
+**2. Per-node cost did not regress.** `Model.solve` at a 20,000-node cap, September build
+(`c55bb170`, own worktree + venv, `discopt.__file__` asserted) vs HEAD: nodes/s HEAD/Sept =
+`gt2` 3.8x, `fiber` 1.7x, `beavma` 2.0x, `sp150x300d` 1.9x -- HEAD is faster per node.
+
+**3. The `gt2` "regression" bisects to a 1-ulp butterfly, not a lost capability.**
+`git bisect` over the 140 `crates/` commits (predicate: `gt2` certifies within 20 s, direct
+call) converges on `2ee4fc7d` ("Rust LP presolve FBBT encloses the whole activity-sum
+error", a #1955-class soundness fix). With presolve OFF both sides fail identically; with it
+ON the two root boxes differ only by ONE ULP on 9 continuous columns (outward rounding,
+e.g. `3.000000000000009` vs `3.0000000000000093`), and that alone moves `gt2` from
+certified-in-13,893-nodes to open-after-200,000 with the incumbent frozen at 31,661
+(optimum 21,166). Nothing to revert: the fix is correct, and the search is chaotic in the
+root vertex. This **falsifies lever L1 (bisect) for `gt2`** and sharpens the diagnosis: the
+engine's primal side cannot recover from an unlucky trajectory (no improvement heuristic
+runs once an incumbent exists; RINS is off). Lever L3a/L3b (RINS, improvement diving) is
+the one that addresses this class.
