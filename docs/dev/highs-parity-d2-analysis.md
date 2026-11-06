@@ -766,3 +766,32 @@ matrix and the other nodes of the batch are untouched. That is the next build (B
 - **`DISCOPT_MILP_REENTRY_CUTS`:** kept default-OFF, re-scoped so that run 2 inherits run
   1's root cuts instead of re-separating.
 - **`DISCOPT_MILP_NODE_SEP`:** retired, flag and implementation.
+
+**13. B1' entry (`DISCOPT_MILP_NODE_GMI`, node-local Gomory rounds, children inherit the
+bound floor only).**
+
+Setup: `d2-analysis/b1p_node_gmi_entry.json`, the 10 B0 rows, 2 reps, route, 20 s. Cert-
+clean, 44 solves; 98k mechanism events.
+
+- **Moves `b-ball`:** -1.800 -> -1.706 in both reps (optimum -1.5). This is the first
+  Phase B movement on this row.
+- **Moves all four `mik`:** the bound rises 35-70 units in both reps. Most treated nodes
+  are lifted (about 1,100 of 1,400 per run).
+- **No lifts on `sp150x300d`.**
+- **No crossing on `neos-361*`.** The direct-driver probe (no lattice rounding,
+  `b1p_node_gmi_direct.{py,log}`) shows the unrounded bound is not raised at all:
+
+  | row | OFF | ON |
+  |---|---|---|
+  | `istra` | 48.31 | 48.27 |
+  | `iskar` | 36.19 | 36.14 |
+  | `kaihu` | 117.47 | 117.34 |
+
+  ON is 20-25 % fewer nodes, although 1,300-2,900 nodes per run were lifted.
+
+**Reading.** A lifted node's children re-solve on the shared matrix without its cuts, so
+the subtree only keeps a floor, and the frontier is set by those weaker child LPs. SCIP
+keeps local cuts in the LP for the whole subtree, so branching compounds on the stronger
+relaxation. The next increment is **subtree inheritance of the local rows**. On the route
+the shared matrix is constant during the search (no node, lazy or hook cuts are folded;
+`node_cuts` off), so the local-row column positions are stable.
