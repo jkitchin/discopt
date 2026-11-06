@@ -130,7 +130,8 @@ def test_decomp_master_env_forces_the_engine(monkeypatch):
     monkeypatch.setenv("DISCOPT_DECOMP_MASTER", "highs")
     assert lp_backend.get_decomposition_master_solver()[1] == "HiGHS"
     monkeypatch.delenv("DISCOPT_DECOMP_MASTER")
-    assert lp_backend.get_decomposition_master_solver()[1] == "HiGHS"  # default unchanged
+    # highs-parity P5.2: the default master is the in-house simplex B&B.
+    assert lp_backend.get_decomposition_master_solver()[1] == "the discopt simplex B&B"
     monkeypatch.setenv("DISCOPT_DECOMP_MASTER", "higs")
     with pytest.raises(ValueError, match="DISCOPT_DECOMP_MASTER"):
         lp_backend.get_decomposition_master_solver()

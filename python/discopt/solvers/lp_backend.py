@@ -239,31 +239,26 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     )
 
 
-def _highspy_available() -> bool:
-    try:
-        import highspy  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def get_decomposition_master_solver() -> tuple[Callable, str]:
     """``(solve_milp, engine_name)`` for a decomposition MASTER (#1614 D-26/D-27).
 
     The Benders / GBD / Lagrangian masters are linear MILPs whose objective is the
     reported dual bound, so they need an exact-vertex engine (#986: not the POUNCE
-    IPM B&B). HiGHS is one, and on MIP masters it is the measurably stronger one
-    (#1060: rsyn0840m's OA master closes 86.1% of the root gap on HiGHS vs 0% on
-    the in-house tree). It is a core dependency, so it is the default here;
-    the in-house simplex B&B remains the fallback for an install without
-    ``highspy`` and is then named in the route.
+    IPM B&B). Since highs-parity P5.2 (2026-11-06) the default is the in-house
+    simplex B&B, with HiGHS as the opt-in (``DISCOPT_DECOMP_MASTER=highs``). The
+    replay of every captured decomposition master and the vendored GDP masters
+    (``docs/dev/data/highs-parity/p5.2/``, 3 rounds, both engines on each master):
+    identical certified sets (3040/3040 decomposition, 52/52 GDP), SGM wall
+    simplex/HiGHS 0.085 and 0.305, totals 3.8 vs 44.8 s and 0.9 vs 3.1 s. The one
+    disagreement (``decomp__299_00642``, a two-variable big-M master) is HiGHS's:
+    it returned ``x = 4.4e-9`` -- integral within tolerance, but the 7.9e8 coefficient
+    turns that into 3.46 of slack -- while the simplex B&B returns the true optimum
+    ``x = 1`` (exact enumeration). HiGHS stays measurably stronger on large OA
+    masters (#1060), which this selector does not serve.
 
-    ``DISCOPT_DECOMP_MASTER`` (``highs`` | ``simplex``) forces one engine. It is a
-    measurement lever for the HiGHS-parity master baselines
-    (``docs/dev/highs-parity-plan.md`` P0.4), not a tuning knob: unset, the choice
-    above is unchanged; ``highs`` without ``highspy`` raises at call time like any
-    HiGHS master; any other value raises here, so a typo cannot silently measure
-    the default engine.
+    ``DISCOPT_DECOMP_MASTER`` (``simplex`` | ``highs``) forces one engine; unset is
+    the simplex B&B. ``highs`` without ``highspy`` raises at call time like any HiGHS
+    master; any other value raises here, so a typo cannot silently pick an engine.
     """
     forced = os.environ.get("DISCOPT_DECOMP_MASTER")
     if forced is not None:
@@ -273,8 +268,6 @@ def get_decomposition_master_solver() -> tuple[Callable, str]:
         if val == "simplex":
             return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
         raise ValueError(f"DISCOPT_DECOMP_MASTER={forced!r}: expected 'highs' or 'simplex'")
-    if _highspy_available():
-        return _milp_highs(), "HiGHS"  # type: ignore[return-value]
     return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
 
 

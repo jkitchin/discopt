@@ -1649,12 +1649,38 @@ and is re-written by P4.1.**
   **D3 (owner, 2026-11-06): open, deferred to the end of the plan** together with D2 --
   "we will have to return to D2 and D3 to either bridge the gaps or accept them". The
   plan continues (P5.2 onward); tasks gated on D2/D3 record the dependency.
-- [ ] **P5.2 — Decomposition masters default to Rust.** Scope: `lp_backend.py:249-262`
+- [x] **P5.2 — Decomposition masters default to Rust. DONE 2026-11-06.** Scope: `lp_backend.py:249-262`
   (`get_decomposition_master_solver` → Rust first; HiGHS when `DISCOPT_DECOMP_MASTER=
   highs`), `names_decomposition_route`. Done: P0.4's R2b table re-run: identical certified
   set, SGM ≤ 1.0, total ≤ 1.5× (counter ≥ masters × 2). Kill: SGM > 1.0 → keep HiGHS
   default when importable; record. Regime: bound-neutral per master (same optimum) —
   wall-gated.
+  **Result (2026-11-06): done -- the in-house simplex B&B is the default decomposition
+  master; `DISCOPT_DECOMP_MASTER=highs` is the opt-in.** P0.4's R2b table re-run at
+  `d8d40da0`+: masters re-captured (`capture-decomp` 3042, `capture-gdp` 54) and
+  replayed through both engines, 3 rounds (`p5.2/replay.json.gz`): **6192 compared**
+  (>= 2 x 3096), raised 0.
+
+  | set (n) | certified H / S | identical set | SGM wall S/H | total H / S |
+  |---|---|---|---|---|
+  | decomposition (3042) | 3040 / 3040 | yes | **0.085** | 44.8 / 3.8 s |
+  | GDP, vendored Pyomo (54) | 52 / 52 | yes | **0.305** | 3.1 / 0.9 s |
+
+  **The replay's 2 contradictions are HiGHS's, not Rust's.** `decomp__299_00642` (and its
+  duplicate `00645`) is `min eta` s.t. `eta >= -7.86e8 x - 9.4e-9`, `eta >= 1.845 x -
+  3.464`, `x in {0..3}`: exact enumeration gives -1.6188 at `x = 1`, which the simplex
+  B&B returns. HiGHS's presolved bound was -9.4e-9 (above the optimum); its #1634
+  presolve-free cross-solve "lowered" it to -3.464 at `x = 4.4e-9` -- integral within
+  tolerance, but the 7.86e8 coefficient turns that into 3.46 of slack (the big-M
+  INT_TOL class P3.2 recorded). The replay's verifier accepted that point within its
+  integrality tolerance, so it flagged the correct engine's bound. End to end
+  (`decomp-e2e`, 132 decomposition tests per forced engine): simplex 132/132; the two
+  HiGHS-forced differences are P0.4's (`test_pounce_only_no_highspy` raises by design;
+  the Lagrangian isolation hazard after it). Code: `get_decomposition_master_solver`
+  defaults to simplex (the dead `_highspy_available` removed); tests updated to cover
+  both engines (`test_1614` parametrized; `test_p04` default; `test_1680`'s two #1634
+  cross-solve guards pin `=highs`). Gates: smoke 4557, adversarial 19, every test file
+  that touches decomposition (21 files) 229 passed.
 - [ ] **P5.3 — The independent confirmation question → D3.** Scope: memo only.
   `_confirm_lazy_master_independently` (`milp_highs.py:1260`) confirms HiGHS with Rust
   (then SCIP). With Rust primary: confirm with HiGHS when installed, else with a

@@ -229,6 +229,11 @@ def _count_highs_solves(monkeypatch):
 def test_lagrangian_cross_solves_only_improving_iterations(monkeypatch):
     from discopt.decomposition.lagrangian.solver import solve_lagrangian
 
+    # These guard the HiGHS master's #1634 presolve-free cross-solve; since
+    # highs-parity P5.2 the default decomposition master is the in-house simplex B&B,
+    # so the HiGHS master is pinned to keep exercising that path.
+    monkeypatch.setenv("DISCOPT_DECOMP_MASTER", "highs")
+
     n = _count_highs_solves(monkeypatch)
     r = solve_lagrangian(_gap(), time_limit=120)
     assert n[True] > 0, "probe did not fire"
@@ -249,6 +254,10 @@ def test_lagrangian_bound_is_never_an_unconfirmed_presolve_bound(monkeypatch):
     import discopt.solvers.milp_highs as H
     from discopt.decomposition.lagrangian.solver import solve_lagrangian
 
+    # These guard the HiGHS master's #1634 presolve-free cross-solve; since
+    # highs-parity P5.2 the default decomposition master is the in-house simplex B&B,
+    # so the HiGHS master is pinned to keep exercising that path.
+    monkeypatch.setenv("DISCOPT_DECOMP_MASTER", "highs")
     once = H._solve_milp_once
     fired = []
 
