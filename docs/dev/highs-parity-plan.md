@@ -1817,7 +1817,7 @@ and is re-written by P4.1.**
     presolve" while the MILP default is HiGHS.
   The owner's direction (2026-11-06): carry the plan to its end, then return to D2/D3.
   A D2 path analysis was commissioned the same day.
-- [ ] **P6.6 — Final gate → D4.** Re-run every §1.3 panel at the final commit, fill §6,
+- [x] **P6.6 — Final gate → D4. RUN 2026-11-06; D4 awaiting owner.** (Results: §6 "Final gate".) Re-run every §1.3 panel at the final commit, fill §6,
   and stop for D4.
 
 ---
@@ -1836,9 +1836,9 @@ and is re-written by P4.1.**
 | P1.1–P1.4 | [x] (P1.3 killed; P1.4 state 3) | P1.1: seam; HiGHS 37/37 byte-identical; Rust L 24/25, INF 12/12. P1.2: #1611 rescue Rust-first (3/3 identical); #1537 (1/94 differs) and #1869 (24/85) stay HiGHS-first. P1.3 killed: Rust dual looser on 3/60 R4 LPs. P1.4: Rust root cuts cert-clean, bounds 11/11, wall 1.078x → opt-out; HiGHS-less installs now get root cuts | see git log |
 | P2.1–P2.6 / D1 | P2.1 [x], P2.0 [x], P2.2 killed, P2.5 [x] (re-scoped), P2.3 killed at entry, P2.4 not pursued (owner), P2.6 [x] → **D1: flipped** | P2.1: 93–100 % of the Rust LP route is Python (root presolve, post-solve re-check, declared-box tightening). P2.0 (owner-accepted 2026-11-05): 13 slowest L rows vs P0.3, R 0.323 / H 0.556, 26/26 verdicts identical; L Rust wall 47.4 → 12.0 s. P2.2 killed: feasibility-preserving triangular crash −3.4 % pivots (bar −10 %). P2.5 (re-scoped): sparse exact dual correction, `perold` certifies, Rust L 25/25. P2.3 killed at entry: 24 % / 21 % low-fill FTRAN/BTRAN on the P2.1 rows (bar 50 %) | see git log |
 | P3.1–P3.3 | P3.1 [x], P3.2 [x] (gaps), P3.3 [x] | P3.1: Rust `MilpHandle`, 276 fresh-solve comparisons bit-identical, 120/120 vs HiGHS. P3.2: IIS engine behind a backend; `DISCOPT_FARKAS_EXACT_OPEN` graduated (corpus cert-clean, Rust IIS 53/53 vs P0.6, median wall 0.91x); IIS default stays HiGHS (big-M slack, pigeonhole → Phase 4). P3.3: Rust probe 0.5 s budget returns ≤ 0.58 s; HiGHS `n_solves` pinned, refactor-neutral 53/53 | see git log |
-| P4.1–P4.9 / D2 | [ ] | | |
-| P5.1–P5.3 / D3 | [ ] | | |
-| P6.1–P6.6 / D4 | [ ] | | |
+| P4.0–P4.9 / D2 | all [x]; **D2 reopened** | P4.0 re-entry graduated; P4.4 root GMI repair graduated then **back to default OFF** (incumbent loss the bars missed); P4.2/4.3/4.5/4.6/4.7 retired or killed at entry; P4.8 deferred; P4.9 gate missed (16/38 then, 14/38 at P6.6) | see git log |
+| P5.1–P5.3 / D3 | all [x]; **D3 open** | P5.1 Rust route master cert-clean but loses (92→87 route, 29→19 syn/rsyn) → documented opt-out; P5.2 decomposition masters default Rust (identical sets, SGM 0.09); P5.3 memo: nothing left to catch on the captured masters | `71231ae7`, `441ffdcd`, `4ab19793` |
+| P6.1–P6.6 / D4 | P6.1 [x], P6.2 [x] (roles recorded), P6.3–P6.5 blocked (D2/D3/D4), P6.6 [x] → **D4 awaiting owner** | `_optional_highs.py` + 12-reach inventory; HiGHS-less corpus guard: 47/74 solve, 27 need HiGHS (23 route master, 5 seam), 0 unknown reaches; final gate below | see git log |
 
 Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 
@@ -1849,6 +1849,48 @@ Baselines (filled by P0.3/P0.4/P0.7; walls carry the load-gate verdict):
 | INF (16) | R / H / H0 | 16 / 16 / 16 verdicts (cert 15 / 15 / —; `gas11` unbounded uncertified) | 23.25 / 5.39 / 0.38 s | 0.192 / 0.264 / 0.003 s | — | 0 / 0 / 0 | 11/16 valid → indicative |
 | MIPLIB-38 | R / H / H0 | 14 / 35 / 35 (cert 14 / 35 / —) | 344.89 / 253.17 / 171.04 s | 2.023 / 3.602 / 1.358 s | 708,937 / 14,015 / 18,685 | 0 / 0 / 0 | 12/38 valid → indicative |
 | UC witness (P0.7) | R @ 20/60/120 s; H @ 20 s | R 0/3 at every limit (no incumbent); H 3/3 certified | R 21 / 61–88 / 141–147 s; H 9.9–10.5 s | — | R 3 / 63–95 / 159; H 7 | 0 | idle (load 0.0) |
+
+### Final gate (P6.6, 2026-11-06, merged `main` at `0e39d8cf`; data `p6.6/`)
+
+Every wall under the load gate (4.0); 0 incorrect anywhere.
+
+| Role | Bar | Rust | HiGHS | Verdict |
+|---|---|---|---|---|
+| R1-LP (L, 25) | 25/25, geomean <= 3.0 | **25/25**, geomean **1.06**, total 13.0 s | 25/25, 10.5 s | **met** |
+| INF (16) | all correct | 16/16 (15 infeasible, `gas11` unbounded) | 16/16 | **met** |
+| R1-MILP small (M, 24) | >= 23/24, geomean <= 3.0 | **18/24**, geomean 1.97, total 126.7 s | 24/24, 19.1 s | missed -- D2 |
+| R1-MILP (MIPLIB-38) | >= 34/38, wall <= 2x | **14/38**, total **2.70x** (508.2 / 188.5 s) | 35/38 | missed -- D2 |
+| R2a route master (94) | certified >= H, 0 lost, wall <= 1.25x | 87 (5 lost), **1.81x** | 92 | missed -- D3 |
+| R2a syn/rsyn routed (47, kernel ON) | same | 19 (10 lost), **1.31x** | 29 | missed -- D3 |
+| R2b decomposition + GDP masters (3096, replay) | identical set, SGM <= 1.0, total <= 1.5x | 3040 + 52, SGM **0.088 / 0.298**, total 4.2 / 1.0 s | 3040 + 52, 47.9 / 3.3 s | **met** (the 2 contradictions are HiGHS's `x = 4.4e-9` artifact, P5.2) |
+| R5 IIS (53 fixtures) | identical sets, wall <= 2x | **53/53 identical**, median wall ratio **0.88** | baseline | **met** (default still `iis_engine="highs"`: big-M INT_TOL / pigeonhole gaps, P3.2) |
+| Package (HiGHS-less corpus guard) | 0 attempts on the default path | **47/74 solve; 27 raise `MissingHighsError`**: 23 via the route master (D3), 5 via the `solve_lp_std` seam default; 0 unknown reaches | -- | missed -- D3 + seam |
+| R3 / R4 / R6 | (§1.3) | not re-run at P6.6: last measured in P1.x (R3 kept as opt-out, Rust root LP 1.35x on `tls2`; R4 killed -- Rust duals looser on 3/60; R6 #1611 Rust-first, #1537/#1869 HiGHS-first) | -- | as in P1 |
+
+### Remaining gaps before the in-house engines are the path forward (for D2/D3/D4)
+
+1. **D2 -- pure MILP (the dominant gap).** 14/38 vs 35/38 on MIPLIB-38 and 18/24 vs
+   24/24 on M. Diagnosis and ranked levers: `docs/dev/highs-parity-d2-analysis.md`
+   (two populations: 17 rows short of per-node STRENGTH -- frozen incumbents, mik's
+   2.7-3.2 % root residual; 7 rows short of per-node COST -- unbudgeted root dive,
+   uncapped strong-branch probes, LP-engine stalls). Also measured there: a September
+   build certified 21/38 on the same panel; per-node cost rose 10-50x between
+   2026-09-06 and 2026-11-04 (correctness fixes whose costs were never measured), so a
+   bisect is the first lever. Owner direction (2026-11-06): HiGHS independence, no
+   fallback; review HiGHS's MIP code for what it does differently.
+2. **D3 -- the convex-route OA master.** The Rust lazy master is cert-clean but loses
+   5/94 and 10/47 certifications at 1.3-1.8x wall; it is the same MILP engine, so it
+   largely inherits D2's per-node gap. It is also the largest single HiGHS reach left
+   on the default MINLP path (23 of the guard's 27).
+3. **The `solve_lp_std` seam default** (`DISCOPT_LP_STD_ENGINE=highs`): 5 corpus
+   instances reach HiGHS only through it. R1-LP parity is met, so this is the cheapest
+   remaining removal (a flip + the P1.x identity checks).
+4. **IIS default** (`iis_engine="highs"`): parity on the fixtures is met (53/53); the
+   default stays HiGHS for the big-M INT_TOL and pigeonhole gaps recorded in P3.2.
+5. **`discopt.mipcc`**: a HiGHS-specific tool (MPS reader + checker) with no substitute.
+
+**D4 (owner):** whether the HiGHS-only flags and paths are removed or kept as documented
+opt-outs (P6.4), given that D2/D3 are reopened, not accepted.
 
 ---
 
@@ -1936,6 +1978,23 @@ killed at entry, nothing built. On the M panel ~50 % are low-fill but the solves
 of wall (≤ ~5–9 % gain, under the 10 % bar); FBBT is the larger M-panel phase (P4.1).
 
 ---
+
+**2026-11-05 — P3.2: "the exact open-column Farkas check is cert-clean" (graduated).** Commit
+`0c2b59ed` (fix). `main`'s #2142 fixture `captured_cstr_bigm_node_lp_stays_undecided_2142`:
+the check certified an LP feasible within tolerance (infeasible by ~1e-8) as `Infeasible`;
+HiGHS solves it. Expected: no false `Infeasible`. Consequence: the certificate now requires
+`g > sum|y| tol + sum|rc| tol` with the solver's own `AUDIT_FEAS`; Rust IIS still 53/53; corpus
+56 = 56. Retraction of: "cert-clean" as a statement about the mechanism (it held for the panel).
+
+**2026-11-06 — P4.4: "the root GMI repair is net-positive" (graduated).** Commits `1190dbbf`
+(graduation), `af15af55` (retraction), default OFF again after the owner's decision. Its own
+panel (`p4.4/p44_panel.json`): incumbents lost in every rep on `nexp-50-20-4-2` (3/3 -> 0/3),
+`sp150x300d` (6/6 -> 0/6), `neos17` (3/3 -> 0/3); node throughput on the open population
+collapsed (`fiber` 2058 -> 13, `beavma` 5455 -> 35). Expected: net-positive. The pre-registered
+bars did not score incumbent loss or per-node cost on the open population. Consequence:
+default OFF, `=1` opt-in, D2 lever L2 (density gate). Retraction of: the graduation report's
+"dual gains" as the whole result.
+
 
 ## §8 Facts in this plan that contradict the brief it was written from
 
