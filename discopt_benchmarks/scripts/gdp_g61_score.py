@@ -24,6 +24,11 @@ import statistics
 import sys
 from pathlib import Path
 
+#: Spec §1.2 bar 3: the SGM ratio <= 1.0 **and** the upper end of its bootstrap 95 % CI
+#: <= 1.10. This script tested the CI against 1.0 until #2182; the 2026-11-05
+#: correction in docs/dev/gdp-parity-baseline.md applied 1.10 by hand.
+RATIO_BAR, CI_UPPER_BAR = 1.0, 1.10
+
 FAMILIES = {
     "big-m": ("discopt-big-m", "pyomo-bigm"),
     "hull": ("discopt-hull", "pyomo-hull"),
@@ -79,7 +84,8 @@ def main(argv: list[str]) -> int:
     rng = random.Random(0)
     print(
         f"\n{'family':10s} {'solved d/p':>10s} {'inc d/p':>8s} {'SGM d':>7s} {'SGM p':>7s} "
-        f"{'ratio':>6s} {'95% CI':>15s} {'per-rep ratios':>16s}  gate: point / CI-upper <= 1"
+        f"{'ratio':>6s} {'95% CI':>15s} {'per-rep ratios':>16s}  "
+        f"gate: point <= {RATIO_BAR} / CI-upper <= {CI_UPPER_BAR}"
     )
     for da, pa in FAMILIES.values():
 
@@ -116,8 +122,8 @@ def main(argv: list[str]) -> int:
         idd = sum(r1[(i, da)]["verdict"] == "incorrect" for i in insts)
         ip = sum(r1[(i, pa)]["verdict"] == "incorrect" for i in insts)
         base = idd == 0 and sd >= sp
-        pt = "PASS" if base and ratio <= 1.0 else "FAIL"
-        ci = "PASS" if base and hi <= 1.0 else "FAIL"
+        pt = "PASS" if base and ratio <= RATIO_BAR else "FAIL"
+        ci = "PASS" if base and hi <= CI_UPPER_BAR else "FAIL"
         reps_s = " ".join(f"{x:.2f}" for x in per_rep)
         fam = da.removeprefix("discopt-")
         print(
@@ -125,7 +131,9 @@ def main(argv: list[str]) -> int:
             f"{ratio:6.2f} [{lo:5.2f},{hi:5.2f}] {reps_s:>16s}  {pt} / {ci}"
         )
 
-    # jobs=4 vs jobs=1 inflation on runs that were solved both ways and took >= 1 s.
+    # The run's concurrency vs jobs=1 on runs that were solved both ways and took >= 1 s.
+    # The label reads ``jobs`` off the rows (jobs=4 in #2149, jobs=3 in #2182).
+    jobs = sorted({r.get("jobs") for rep in reps for r in rep.values() if r.get("jobs")})
     logs: dict[str, list[float]] = {"discopt": [], "pyomo": []}
     for k, s in serial.items():
         for rep in reps:
@@ -134,7 +142,8 @@ def main(argv: list[str]) -> int:
     allv = logs["discopt"] + logs["pyomo"]
     checks += len(allv)
     print(
-        f"\nserial control, jobs=4 / jobs=1 wall: gm {math.exp(statistics.mean(allv)):.2f} "
+        f"\nserial control, jobs={'/'.join(map(str, jobs)) or '?'} / jobs=1 wall: "
+        f"gm {math.exp(statistics.mean(allv)):.2f} "
         f"(sd log {statistics.stdev(allv):.2f}, n {len(allv)}); "
         + "; ".join(
             f"{side} gm {math.exp(statistics.mean(v)):.2f} n {len(v)}"

@@ -228,9 +228,12 @@ not when a first increment lands. The lifecycle:
 
 ## Canonical planning documents
 
-- `docs/dev/certification-gap-plan.md` — the performance roadmap (per-node engine,
-  branch-and-reduce, cuts, structure). Its §0 is a binding implementation contract;
-  its §14 is the executable task list.
+- `docs/dev/certification-gap-plan.md` — the July 2026 performance roadmap (per-node
+  engine, branch-and-reduce, cuts, structure). Its §0 is a binding implementation
+  contract. Its phase list and §14 task list are a **July snapshot**: they predate the
+  native spatial kernel and #1873, and its Phase 5 (the JAX residual) is moot. See the
+  status note at its top. Current performance work is planned and recorded in
+  `performance-plan.md`.
 - `docs/dev/correctness-issues.md` — the prioritized correctness backlog (tracking
   issue #396). Loop-executable per its §0 protocol; fix P0/P1 items before
   performance work that touches the same layer.

@@ -3,6 +3,26 @@
 **Date:** 2026-07-02
 **Status:** proposed (evidence-grounded; every phase carries an entry experiment and a
 measurable exit gate)
+
+> **Status note (2026-11-06, #2182): this plan's phase structure is historical.** It was
+> last revised as a plan in early September (the §2b audit; one row added 2026-10-27).
+> Two of its premises no longer hold:
+>
+> * **Phase 5, "the JAX residual," is moot.** Since #1873 JAX is off the default solve
+>   path and an optional extra (CLAUDE.md, Project Overview). Its `jax_time_fraction`
+>   exit gate measures nothing on a default solve.
+> * **Phases 1-2 target the Python node loop.** The native spatial kernel (Rust,
+>   `_try_native_spatial_kernel`, default ON since 2026-07-31) now runs the tree for the
+>   models its spec builder admits, and this plan does not mention it. Where the Python
+>   tree still runs is set by what the kernel declines. For the GDP lowerings measured in
+>   #2182, that was every one, for five distinct reasons (`performance-plan.md` §120).
+>
+> The live record of performance work is `docs/dev/performance-plan.md`: its numbered
+> sections, the latest §120, carry every hypothesis, measurement and falsification since.
+> The kernel's scope lives in `issue-764-native-node-kernel-scope.md`. This document's §0
+> implementation contract stays binding. Its §1 diagnosis method and §2b audit remain
+> useful as reference. Read its phase list and §14 task list as a July snapshot, not as
+> the current plan.
 **Scope:** the end-to-end *certification loop* — everything between "incumbent found"
 and "optimality proved": per-node relaxation cost, root/in-tree range reduction, cut
 separation, and the structure the relaxation is built from. General mechanisms only;

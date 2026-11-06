@@ -1,0 +1,13 @@
+== /tmp/claude-0/-home-user-discopt/7dc8155b-ccf3-5b20-9dd0-fc10a1fe7043/scratchpad/shortlim/gdp_tl10.jsonl: time_limit=10.0, 48 cells
+  incumbent lost ON: 0 []
+  incumbent gained ON: 0 []
+  both have one: same 32, ON better 0, ON worse 0
+  solved lost ON: []; solved gained ON: []
+  incorrect rows: 0
+== /tmp/claude-0/-home-user-discopt/7dc8155b-ccf3-5b20-9dd0-fc10a1fe7043/scratchpad/shortlim/gdp_tl20.jsonl: time_limit=20.0, 48 cells
+  incumbent lost ON: 0 []
+  incumbent gained ON: 0 []
+  both have one: same 36, ON better 0, ON worse 0
+  solved lost ON: []; solved gained ON: []
+  incorrect rows: 0
+executed comparisons: 96

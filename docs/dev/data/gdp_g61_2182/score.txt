@@ -1,0 +1,14 @@
+timing-rep rows [172, 172]; verdict flips vs rep 1: [(('positioning', 'discopt-lbb'), 'solved', 'unsolved'), (('positioning', 'discopt-lbb'), 'solved', 'unsolved')]
+discopt incorrect/unverified rows, all reps: []
+
+family     solved d/p  inc d/p   SGM d   SGM p  ratio          95% CI   per-rep ratios  gate: point <= 1.0 / CI-upper <= 1.1
+big-m        15/17      0/0     38.58   10.59   3.42 [ 2.15, 5.81]   3.44 3.42 3.39  FAIL / FAIL
+hull         15/17      0/0     47.09   10.88   4.05 [ 2.38, 7.17]   3.97 4.10 4.08  FAIL / FAIL
+loa          13/11      0/2     35.21   37.44   0.94 [ 0.51, 1.54]   0.90 0.97 0.96  PASS / FAIL
+gloa         13/11      0/3     34.57   40.00   0.87 [ 0.47, 1.46]   0.87 0.85 0.88  PASS / FAIL
+ric          11/11      0/2     59.38   35.32   1.66 [ 1.25, 2.31]   1.67 1.66 1.66  FAIL / FAIL
+enumerate    10/10      0/1     65.37   42.92   1.51 [ 1.10, 2.18]   1.51 1.51 1.52  FAIL / FAIL
+lbb          13/14      0/0     69.41   35.55   1.93 [ 1.40, 2.74]   1.94 1.93 1.91  FAIL / FAIL
+
+serial control, jobs=3 / jobs=1 wall: gm 1.41 (sd log 0.32, n 78); discopt gm 1.63 n 42; pyomo gm 1.20 n 36
+comparisons: 590
