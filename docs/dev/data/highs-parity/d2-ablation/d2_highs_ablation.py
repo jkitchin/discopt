@@ -158,6 +158,27 @@ ARMS: dict[str, dict] = {
         "mip_heuristic_run_rins": False, "mip_heuristic_run_rens": False,
         "mip_heuristic_run_root_reduced_cost": False,
     },
+    # ---- phase 4 (Phase B entry B0, 2026-11-06): which part of `keep_cuts` certifies?
+    # `keep_cuts` minus node separation; minus aging (LP age at its maximum, pool age
+    # at its maximum, pool soft limit at its maximum, so rows are effectively never
+    # removed).
+    "keep_cuts_no_nodesep": {
+        "presolve": "off", "mip_allow_restart": False, "mip_detect_symmetry": False,
+        "mip_heuristic_effort": 0.0, "mip_heuristic_run_feasibility_jump": False,
+        "mip_heuristic_run_rins": False, "mip_heuristic_run_rens": False,
+        "mip_heuristic_run_root_reduced_cost": False,
+        "mip_pscost_minreliable": 0,
+        "mip_allow_cut_separation_at_nodes": False,
+    },
+    "keep_cuts_no_aging": {
+        "presolve": "off", "mip_allow_restart": False, "mip_detect_symmetry": False,
+        "mip_heuristic_effort": 0.0, "mip_heuristic_run_feasibility_jump": False,
+        "mip_heuristic_run_rins": False, "mip_heuristic_run_rens": False,
+        "mip_heuristic_run_root_reduced_cost": False,
+        "mip_pscost_minreliable": 0,
+        "mip_lp_age_limit": 32767, "mip_pool_age_limit": 1000,
+        "mip_pool_soft_limit": 2147483647,
+    },
     # ---- phase 2: root-only (mip_max_nodes=1) bound/incumbent decomposition
     "root_only": {"mip_max_nodes": 1},
     "root_only+cuts_throttle": {"mip_max_nodes": 1, "mip_pool_soft_limit": 1,
