@@ -28,32 +28,34 @@ def tan_range(lb: float, ub: float) -> Optional[tuple[float, float]]:
             return None
     if abs(math.cos(lb)) < 1e-3 or abs(math.cos(ub)) < 1e-3:
         return None
-    vals = [math.tan(lb), math.tan(ub)]
-    if not all(np.isfinite(v) for v in vals):
+    # The asymptote scan above uses the rounded ``pi/2 + k*pi``, whose error grows
+    # with ``|k|``; the sound enclosure decides the branch and rounds outward (#2190).
+    from discopt._relax.convexity import interval as iv
+
+    enc = iv.tan(iv.Interval(np.asarray(float(lb)), np.asarray(float(ub))))
+    lo, hi = float(enc.lo), float(enc.hi)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
         return None
-    return min(vals), max(vals)
+    return lo, hi
 
 
 def trig_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, float]]:
-    """Compute exact continuous range bounds for supported trig functions."""
+    """Sound enclosure of ``sin``/``cos``/``tan`` over ``[lb, ub]`` (``None`` = abstain)."""
     if lb > ub:
         lb, ub = ub, lb
     if func_name == "tan":
         return tan_range(lb, ub)
-    if not (np.isfinite(lb) and np.isfinite(ub)):
+    if func_name not in ("sin", "cos"):
         return None
-    if ub - lb >= 2.0 * math.pi:
-        return -1.0, 1.0
+    # Sound enclosure (#2190). The inline version this replaced located the
+    # extrema with an absolute 1e-12 tolerance on rounded multiples of pi and did
+    # not round outward, so it missed the true range by up to ~5e-7 at
+    # ``|x| ~ 1e12``.
+    from discopt._relax.convexity import interval as iv
 
-    points = [lb, ub]
-    if func_name == "sin":
-        points.extend(critical_points_in_interval(math.pi / 2.0, math.pi, lb, ub))
-    elif func_name == "cos":
-        points.extend(critical_points_in_interval(0.0, math.pi, lb, ub))
-    else:
-        return None
-    vals = [trig_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
-    return min(vals), max(vals)
+    fn = iv.sin if func_name == "sin" else iv.cos
+    enc = fn(iv.Interval(np.asarray(float(lb)), np.asarray(float(ub))))
+    return float(enc.lo), float(enc.hi)
 
 
 def trig_value(func_name: str, x: float) -> float:
