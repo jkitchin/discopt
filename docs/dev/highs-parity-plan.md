@@ -1739,7 +1739,7 @@ and is re-written by P4.1.**
   default (pure LP D1, decomposition masters P5.2, convex node bound, WASM fallbacks), 1
   automatic (NLP-BB root cuts), the rest gated on D2 (pure MILP), D3 (route master), the
   `solve_lp_std` seam default and the IIS default. Gates: ruff/mypy clean, smoke 4560.
-- [ ] **P6.2 — CI lane "Python without highspy" + corpus guard.** Scope:
+- [x] **P6.2 — CI lane "Python without highspy" + corpus guard. GUARD BUILT; KILL FIRED (roles recorded); LANE DEFERRED 2026-11-06.** Scope:
   `.github/workflows/ci.yml` (clone of the `:780` lane), new
   `python/tests/test_highs_optional.py` mirroring `test_1873_jax_optional.py` (import
   blocker that **records the stack of every attempt**; the 74-file corpus + the M-panel
@@ -1748,6 +1748,27 @@ and is re-written by P4.1.**
   `MissingHighsError` naming the extra. Kill: an attempt recorded on the default path →
   that site is a remaining role; add it to §1.1 and schedule its port before proceeding.
   Regime: packaging.
+  **Result (2026-11-06): the guard is built and its kill clause fired, as expected with D2/D3
+  open.** `python/tests/test_highs_optional.py` (mirrors `test_1873_jax_optional.py`): an
+  import finder refuses `highspy` and records the stack of every attempt; each attempt is
+  attributed to the discopt function that made it. Availability probes
+  (`highs_available`) are not reaches; attempts from the remaining roles
+  (`ROLE_CALLERS`, each tied to an inventory row) are reported; any other attempt FAILS.
+  Corpus run (74 in-repo `.nl`, 10 s each, one HiGHS-less interpreter; data
+  `p6.2/guard.json`): **47 solve, 27 raise `MissingHighsError`, 0 unknown reaches**, 2
+  probe attempts. Remaining roles on the default MINLP path:
+  - `_convex_route_oa_master` -- **23** instances (`clay0303hfsg`, `cvxnonsep_*`, `fac2`,
+    `flay02m/03m`, `gbd`, ...): the convex-route OA master (inventory #4, **D3**);
+  - `HighsEngine.solve` (the `solve_lp_std` seam default, inventory #3) -- **5**
+    (`ex14_1_7`, `ex7_3_1`, `ex8_5_3`, `launch`, `prolog`): a MINLP-path verified LP
+    solve, removable by flipping `DISCOPT_LP_STD_ENGINE` (P6.4).
+  The pure-MILP route (D2) does not appear because the in-repo corpus is MINLP; it is
+  reach #1 by construction. Per the kill clause these are the remaining roles (§1.1
+  rows R1, R2a and the seam). **The CI lane is NOT added yet:** with `highspy`
+  uninstalled, `pytest -m smoke` fails on the MILP-route and route-master tests by
+  construction until D2/D3 close, and a lane that is red by design measures nothing.
+  The named-error check (`test_a_highs_only_call_raises_the_named_error`) is smoke and
+  runs in every lane now; the corpus guard is `slow`.
 - [ ] **P6.3 — Packaging flip.** Scope: `pyproject.toml:44` (remove `highspy` from
   `dependencies`), `:73` (real `highs` extra; `dev` and `all` include it), `cli.py:76`,
   docs, `CLAUDE.md` Architecture note, the R7 docstrings. Done: `pip install .` without
