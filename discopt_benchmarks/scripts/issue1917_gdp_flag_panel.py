@@ -172,6 +172,10 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # #2176: the improver contingent priced by measured wall acts at solve time in
     # both governors (lowering identical): solve ``--all``.
     "DISCOPT_HEUR_WALL_COST": ("big-m", "hull"),
+    # #2182: the GDP-config constructor's root share under the ski-rental rule acts
+    # at solve time (lowering identical): solve ``--all``. Pre-registered rule:
+    # docs/dev/data/2182-root-ski/prereg.md.
+    "DISCOPT_GDP_CONFIG_ROOT_SKI": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

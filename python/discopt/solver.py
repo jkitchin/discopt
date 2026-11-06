@@ -998,6 +998,48 @@ def _gdp_config_defer_enabled() -> bool:
     )
 
 
+def _gdp_config_root_ski_enabled() -> bool:
+    """Whether the root share itself follows the ski-rental rule
+    (``DISCOPT_GDP_CONFIG_ROOT_SKI``, #2182; default **OFF**, ``=1`` opts in; BC: it
+    changes which incumbents are found and when, never a bound).
+
+    Under ``DISCOPT_GDP_CONFIG_DEFER`` the root call gets a fixed
+    ``_GDP_CONFIG_DEFER_ROOT_S`` = 1.5 s and the rest of the grant is held back
+    until the search has run as long as that rest. The 1.5 s is a constant, so on a
+    small GDP it is most of the solve. Measured on the 15 ``gdp_parity`` instances
+    both sides solved in the #2149 G6.1 run (#2182 task 2): the constructor's 1.5 s
+    is 50-70 % of the root on small_batch, ex1_linan_2023, ex_633_trespalacios and
+    nonconvex_hen (big-M), and on ex_633 big-M it found the final optimum at 0.022 s,
+    then spent 1.45 s re-solving the same 4 configurations (57 sub-NLPs).
+
+    ON, the root share is ``min(_GDP_CONFIG_DEFER_ROOT_S, time the solve spent
+    before the constructor)``: the same rule the held-back rest already follows,
+    applied to the root share. A solve whose root work is cheap pays the
+    constructor that much at the root; the rest is held back as before, so a solve
+    that runs long enough still spends the whole grant (the deferred call), and one
+    that finishes sooner never pays it. A solve whose root work before the
+    constructor exceeds 1.5 s is unchanged.
+
+    Why the obvious alternatives were not built (#2182 entry experiment, recorded
+    in ``docs/dev/gdp-parity-baseline.md``): stopping the dive once every
+    configuration has been seen fires on 1 of 15 instances (the others have 27 to
+    3.4e7 configurations); stopping on stagnation loses late improvements (the
+    final point came at 1.1-1.5 s on eight_process_logical, ex1_linan_2023 hull,
+    clay0203 and positioning).
+
+    Off under ``deterministic`` because ``_gdp_config_defer_enabled`` is. Default
+    OFF until its §5 panel; the row in ``docs/dev/flag-retirement-audit.md`` has the
+    entry measurement and the panel's state. Only ``1``/``true``/``yes``/``on``
+    turn it on.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_ROOT_SKI", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _gdp_config_root_until(full_deadline: float, now: float, solve_start: float) -> float:
     """The root call's deadline: the whole grant, or its first share when deferring.
 
@@ -1007,12 +1049,19 @@ def _gdp_config_root_until(full_deadline: float, now: float, solve_start: float)
     arm): the root work before the constructor takes ~43 s, the root never
     finishes inside the limit (0 nodes), so a held-back rest was never spent and
     the incumbent was 19880.18 against 19346.12 with the full grant.
+
+    Under ``DISCOPT_GDP_CONFIG_ROOT_SKI`` (#2182) the root share is also capped by
+    that elapsed time (:func:`_gdp_config_root_ski_enabled`).
     """
     if not _gdp_config_defer_enabled():
         return full_deadline
-    if now - solve_start >= full_deadline - now:
+    elapsed = now - solve_start
+    if elapsed >= full_deadline - now:
         return full_deadline
-    return min(full_deadline, now + _GDP_CONFIG_DEFER_ROOT_S)
+    share = _GDP_CONFIG_DEFER_ROOT_S
+    if _gdp_config_root_ski_enabled():
+        share = min(share, max(0.0, elapsed))
+    return min(full_deadline, now + share)
 
 
 def _gdp_config_hold_back(
