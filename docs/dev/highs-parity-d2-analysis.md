@@ -564,3 +564,21 @@ reached the dispatch-time incumbent; a cutoff can save at most a fraction of tho
 the primal side delivers good incumbents, so it moves behind the plunge/dive prototype in
 the build order. The `NodeLp*` counters stay: they are profile-gated and bound-neutral.
 
+*(c) Improving-dive prototype entry (`DISCOPT_MILP_IMPROVE_DIVE=1`, no effort cap).* Setup:
+`d2_flag_panel.py`, the 10 A1/A2 rows, 1 rep, 20 s, load 5-7, data
+`d2-analysis/r1_improve_dive_entry.json`. Cert-clean (22 checks); no incumbent lost.
+
+- **Better incumbent on 7/10 rows:**
+  - `istra` 0.120 -> 0, `iskar` 0.132 -> 0 (the optimum; the dual gap of 2-3 % remains);
+  - `gt2` 0.139 -> 0.028, and its second panel copy certifies;
+  - `jijia` 0.241 -> 0.065, `kaihu` 0.217 -> 0.075, `obra` 0.215 -> 0.137,
+    `gesa2` 0.058 -> 0.046.
+- **Worse:** `bppc8-02` 0.012 -> 0.022.
+- **Unchanged:** `b-ball`; `2122` has no incumbent in either arm.
+- Median primal gap 0.135 -> 0.037.
+
+**The expert's kill criterion (< 4/10 improve) is not met: the primal half of R1 is
+confirmed.** The cost is throughput where dives are long: `gesa2` 10,975 -> 2,431 nodes,
+`obra` 15,231 -> 7,188. So the graduation candidate carries an effort cap,
+`IMPROVE_DIVE_EFFORT = 0.1` of the tree's LP pivots (HiGHS budgets its heuristics as a
+share of LP iterations). That panel follows.

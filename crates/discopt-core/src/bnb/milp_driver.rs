@@ -390,9 +390,26 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
     })
 }
 
+/// Share of the search's LP pivots (node LPs + strong branching) the improving dive may
+/// spend: a batch is granted a dive only while the dives' pivots so far are at most this
+/// fraction of the tree's. HiGHS budgets its heuristics the same way, as a share of LP
+/// iterations (`mip_heuristic_effort`). Without a cap the entry run showed throughput
+/// collapse where dives are long and rarely useful (`gesa2`: 10,975 -> 2,431 nodes at
+/// 20 s, stride 1).
+const IMPROVE_DIVE_EFFORT: f64 = 0.1;
+
 /// Does this batch get an improving dive? Pure, so the schedule is asserted directly.
-fn improve_dive_batch_eligible(stride: usize, batch_index: usize, has_incumbent: bool) -> bool {
-    stride > 0 && has_incumbent && batch_index % stride == 0
+fn improve_dive_batch_eligible(
+    stride: usize,
+    batch_index: usize,
+    has_incumbent: bool,
+    dive_iters: usize,
+    lp_iters: usize,
+) -> bool {
+    stride > 0
+        && has_incumbent
+        && batch_index % stride == 0
+        && dive_iters as f64 <= IMPROVE_DIVE_EFFORT * lp_iters as f64
 }
 
 /// Does this batch get a continuous-repair dive away from the root?
@@ -2014,6 +2031,9 @@ fn solve_milp_node_search(
     }
 
     let mut lp_iters = 0usize;
+    // Pivots spent by improving dives (`DISCOPT_MILP_IMPROVE_DIVE`), budgeted against
+    // `lp_iters` by `improve_dive_batch_eligible`.
+    let mut improve_dive_iters = 0usize;
     let mut unbounded = false;
     // False once the SEARCH was truncated (deadline deferral, node/time limit,
     // debugger stop): the driver then reports a limit/feasible status, never
@@ -2696,6 +2716,8 @@ fn solve_milp_node_search(
             improve_dive_stride(),
             this_batch,
             tm.incumbent().is_some(),
+            improve_dive_iters,
+            lp_iters,
         );
         let dive_batch = dive_batch || improve_batch;
 
@@ -2789,6 +2811,7 @@ fn solve_milp_node_search(
         for (k, mut out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
+            improve_dive_iters += out.dive_iters;
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
@@ -3377,6 +3400,8 @@ struct NodeOutput {
     tightened: Option<(Vec<f64>, Vec<f64>)>,
     /// Simplex pivots spent on this node (LP solve + strong-branch probes).
     iters: usize,
+    /// Pivots spent by an improving dive at this node (0 otherwise).
+    dive_iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
     /// #2136: the objective of `result.solution` when `result.is_feasible` (an
@@ -3442,6 +3467,7 @@ fn solve_node(
             unbounded: false,
             point_value: f64::NAN,
             deferred: true,
+            dive_iters: 0,
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -3497,6 +3523,7 @@ fn solve_node(
                 unbounded: false,
                 point_value: f64::NAN,
                 deferred: false,
+                dive_iters: 0,
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -3614,6 +3641,7 @@ fn solve_node(
         unbounded: false,
         point_value: f64::NAN,
         deferred: false,
+        dive_iters: 0,
     };
 
     match sol.status {
@@ -3830,7 +3858,12 @@ fn solve_node(
                 if out.incumbent.is_none() && (is_root || dive_slot) {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::DiveRepair);
                     let improve = ctx.improve_dive && !is_root;
-                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis, improve);
+                    let mut piv = 0usize;
+                    out.incumbent =
+                        try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis, improve, &mut piv);
+                    if improve {
+                        out.dive_iters = piv;
+                    }
                     if improve {
                         crate::profile::incr(crate::profile::Ctr::ImproveDiveRuns);
                         if out.incumbent.is_some() {
@@ -5416,6 +5449,7 @@ fn try_dive_repair(
     x_start: &[f64],
     start_basis: &Basis,
     improve: bool,
+    pivots: &mut usize,
 ) -> Option<(Vec<f64>, f64)> {
     let ns = ctx.ns;
     // Improve mode (`DISCOPT_MILP_IMPROVE_DIVE`): the dive can only matter if it ends
@@ -5548,6 +5582,7 @@ fn try_dive_repair(
             let mut sol = ctx
                 .problem
                 .solve_warm(&full_l, &full_u, &cur_basis, ctx.simplex);
+            *pivots += sol.iters;
             if sol.status == LpStatus::Optimal {
                 if let Some(c) = cutoff {
                     if sol.obj + ctx.obj_const >= c {
@@ -6701,12 +6736,16 @@ mod tests {
         }
         // Off at stride 0, and never without an incumbent (that regime belongs to
         // DISCOPT_MILP_DIVE_STRIDE); with one, every `stride`-th batch.
-        assert!((0..64).all(|b| !improve_dive_batch_eligible(0, b, true)));
-        assert!((0..64).all(|b| !improve_dive_batch_eligible(4, b, false)));
+        assert!((0..64).all(|b| !improve_dive_batch_eligible(0, b, true, 0, 100)));
+        assert!((0..64).all(|b| !improve_dive_batch_eligible(4, b, false, 0, 100)));
         let on: Vec<usize> = (0..12)
-            .filter(|&b| improve_dive_batch_eligible(4, b, true))
+            .filter(|&b| improve_dive_batch_eligible(4, b, true, 0, 100))
             .collect();
         assert_eq!(on, vec![0, 4, 8]);
+        // The effort budget: dives may spend at most IMPROVE_DIVE_EFFORT of the
+        // tree's pivots.
+        assert!(improve_dive_batch_eligible(1, 3, true, 10, 100));
+        assert!(!improve_dive_batch_eligible(1, 3, true, 11, 100));
     }
 
     #[test]
