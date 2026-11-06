@@ -1627,6 +1627,11 @@ and is re-written by P4.1.**
   bound (`sp150x300d`, `beavma`, `gt2`, `neos17`, `p0548`, `issue-2446`, `gesa2`) and no
   incumbent (`enlight_hard`, `neos-2624317-amur`, `neos17`). Per the kill clause the
   decision passes to **D2** (owner).
+  **Owner standing instruction (2026-11-06):** when in doubt, or on any significant
+  performance-parity gap, consult the HiGHS expert (`python/discopt/skills/agents/
+  highs-expert.md`, run as an agent with the local read-only HiGHS 1.15.1 source) on what
+  discopt is doing wrong, before building. The owner's target is full HiGHS independence
+  -- no HiGHS fallback.
   **D2 (owner, 2026-11-06): HiGHS stays the MILP default for now; the gap is REOPENED, not
   accepted.** `DISCOPT_LP_MILP_BACKEND` stays `highs` (`=rust` remains the opt-in). The
   owner's goal is still to drop HiGHS: the plan is carried to its end, then D2 (and D3)
