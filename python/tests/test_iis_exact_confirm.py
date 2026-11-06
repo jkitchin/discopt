@@ -96,10 +96,10 @@ def _verified_certificates(model, res, tol=1e-6) -> set:
     )
     assert set(res.certificates) <= members, set(res.certificates) - members
 
-    def violation(key, x) -> float:
+    def violation(key, x, act) -> float:
         if key[0] == "constraint":
             r = key[1]
-            act = float(A[r] @ x)
+            act = float(act[r])
             s = lin.sense[r]
             v = 0.0
             if s in (">=", "=="):
@@ -118,11 +118,12 @@ def _verified_certificates(model, res, tol=1e-6) -> set:
     n_checked = 0
     for key, x in res.certificates.items():
         x = np.asarray(x, float)
-        rest = [violation(k, x) for k in members if k != key]
+        act = np.asarray(A @ x).ravel()
+        rest = [violation(k, x, act) for k in members if k != key]
         # A held integer column keeps its box even when it is not a bound member.
         rest += [max(lb[j] - x[j], x[j] - ub[j]) for j in held]
         n_checked += 1
-        if max(rest, default=0.0) <= tol and violation(key, x) > tol:
+        if max(rest, default=0.0) <= tol and violation(key, x, act) > tol:
             ok.add(key)
     assert n_checked == len(res.certificates)
     return ok
