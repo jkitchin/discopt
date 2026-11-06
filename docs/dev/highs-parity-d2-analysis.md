@@ -708,3 +708,54 @@ defined by a single equality, `z = 24 + sum(binaries)` on `istra`. The default-O
 The direct probe writes equality rows as inequality pairs (follow-up 4), so the
 substitution declines there (`ObjLatticeSubst` = 0; `istra` bound 48.31 unrounded). This
 is a probe artifact, not a route defect. For lattice rows, panels must use the route.
+
+**11. B1 entry (`DISCOPT_MILP_NODE_SEP`, original-row c-MIR at nodes): at the kill line.
+SCIP shows the lever is in-tree Gomory (tableau) cuts.**
+
+*B1 entry* (`d2-analysis/b1_node_sep_entry.json`; the 10 B0 rows, 2 reps, route, 20 s,
+load ~7). Cert-clean, 44 solves.
+
+- `kaihu` crosses one integer in both reps (115 -> 116; optimum 119).
+- `sp150x300d` 39 -> 40 on two of three runs.
+- `istra` and `iskar` stay at 48 and 36; `mik` moves at noise level; `b-ball` finds no
+  cuts.
+- Node throughput is -25 % to -75 %.
+
+The route never passes `max_pool_cuts`, so node cuts are capped at **128 for the whole
+solve** (`node_cut_cap = min(2m, 128)`). A scratch build without that cap folded 538-1,148
+cuts (`b1_node_sep_cap8_scratch.json`, new counter `NodeCutsFolded`). Result: `istra` and
+`iskar` unchanged, `kaihu` the same +1, `sp150x300d` 39 -> 42, `mik-1` slightly better,
+and 2-6x fewer nodes. **The cap is not what limits the target rows: original-row c-MIR is
+the wrong family for them.**
+
+*Which family certifies them?* SCIP 10 via pyscipopt 6.3, presolve off, 30 s, on `iskar`
+and `istra`. Data: `b1_scip_separators.jsonl` (default run, applied cuts per separator) and
+`b1_scip_gomory_ablation.log` (from `b1_scip_loo.py` and `b1_scip_pairs.py`).
+
+- **Leave one out** from all-on: dropping **`gomory`** is the only change that stops
+  certification on both rows (35.97 / 47.98). Dropping `aggregation` costs ~3x the nodes
+  but still certifies. Dropping `zerohalf`, `impliedbounds`, `clique`, `intobj`,
+  `rapidlearning`, `cmir`, `flowcover`, `mcf`, `knapsackcover`, `strongcg`, `oddcycle` or
+  conflict analysis changes nothing.
+- **Where Gomory runs:**
+  - root only: `iskar` stalls at 36; `istra` needs 11,440 nodes;
+  - tree only: both certify in ~1,600 nodes;
+  - `gomory`+`gomorymi` alone: both certify;
+  - `gomory` with any one of `aggregation`, `intobj`, `zerohalf` or `strongcg`+`cmir`
+    (all else off): stalls at the no-cut bound.
+- **Aggregation-only with presolve off is the Rust situation**, and it stalls where Rust
+  stalls (36 / 48).
+
+This agrees with HiGHS, whose node separation includes its tableau separator: without it,
+HiGHS loses both rows (follow-up 10).
+
+**Consequence for Phase B.** The lever on the `neos-361*` class is **Gomory cuts from the
+node's own tableau**, applied in rounds at the node. SCIP marks them local (node bounds),
+so they do not belong in the shared global pool. The Phase B review's "GMI never goes to
+nodes" holds only for global cuts.
+
+The batched tree can take them as **node-local separation rounds**: separate GMI from the
+node basis with the node's bounds, append the rows to a node-local copy of the LP,
+re-solve warm, and repeat for 2-3 rounds. The node keeps the stronger (NS-verified) bound,
+the children inherit it as their floor, and the rows are dropped with the node. The shared
+matrix and the other nodes of the batch are untouched. That is the next build (B1').
