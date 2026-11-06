@@ -582,3 +582,50 @@ confirmed.** The cost is throughput where dives are long: `gesa2` 10,975 -> 2,43
 `obra` 15,231 -> 7,188. So the graduation candidate carries an effort cap,
 `IMPROVE_DIVE_EFFORT = 0.1` of the tree's LP pivots (HiGHS budgets its heuristics as a
 share of LP iterations). That panel follows.
+
+**7. `DISCOPT_MILP_IMPROVE_DIVE=1` §5 panel (effort cap 0.1): cert-clean, primal gap halved,
+certified count unchanged -- bar 2b missed, does not graduate.**
+
+Setup: `d2_flag_panel.py --flag DISCOPT_MILP_IMPROVE_DIVE --fired ImproveDiveRuns`,
+MIPLIB-38 + M, 3 reps, 20 s, 372 solves, median 1-min load 6.4 on 4 cores, arms
+interleaved. Data: `d2-analysis/r1_improve_dive_panel.json.gz`. Code under test: the Rust
+of `0facf021`. The panel header names `e9e5d1b9` because the build preceded the commit;
+the extension was rebuilt from the effort-cap source and checked for the flag string
+before launch.
+
+Results:
+
+- **BAR 1:** cert-clean, 372 checks.
+- **2a:** certified 96 = 96, with no instance changing its certified count.
+- **2b fails:** nodes on the 30 always-certified instances are 148,395 OFF vs 151,167 ON
+  (+1.9 %), against a bar of -15 % or +2 certified.
+- **2c:** 0 dual losses (cap 2).
+- **2d:** no incumbent lost.
+- **2e:** median primal gap over the 28 open instances **0.214 -> 0.100**.
+
+Primal per instance (median of 3 reps):
+
+- **Better on 13 rows:**
+  - `istra` 0.120 -> 0 and `iskar` 0.132 -> 0 (the optimum);
+  - `kaihu` 0.217 -> 0.025, `jijia` 0.241 -> 0.065, `obra` 0.215 -> 0.086;
+  - `gt2` 0.139 -> 0.056, `neos17` 0.214 -> 0.114, `nexp-50-20-1-1` 0.633 -> 0.333;
+  - `fiber` 0.548 -> 0.301, `neos-911970` 3.08 -> 1.31, `khb05250` 0.044 -> 0.013;
+  - `gesa2` 0.058 -> 0.027, `sp150x300d` 0.343 -> 0.314.
+- **Worse on 1:** `bppc8-02` 0.012 -> 0.014.
+
+**Reading.** The primal half of the expert's R1 diagnosis is confirmed at panel scale:
+tree-node dives with propagation and a cutoff recover incumbents the batched best-first
+search never finds. But on the target rows the remaining gap is now **dual**.
+
+- `istra` and `iskar` hold the optimum and stay open at a 2-3 % dual gap: the bound is one
+  objective unit short, e.g. 48 vs 49.
+- `kaihu` and `jijia` are within 2-7 % primal with a 3 % dual gap.
+- With the effort cap, `gt2` no longer certifies (the uncapped entry certified one copy).
+
+What closes the dual gap on these rows is what the HiGHS ablation names: cuts (C.1, 23/25
+alone) and presolve/restart (C.2). So the dive is necessary for D2 but not sufficient. Its
+certification value can only show once the dual side moves.
+
+**Decision pending (owner):** either retire the flag now, or keep it default-OFF owned by
+D2 and re-panel it together with Phase B (tableau cuts with node separation), with the
+same pre-registered bars. The bars are not changed after the fact.
