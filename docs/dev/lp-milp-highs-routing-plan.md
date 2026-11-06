@@ -1563,3 +1563,16 @@ Measured (highspy 1.15.1, `docs/dev/data/2183-fixed-int-bounded/`):
   still catches rests on `test_1509`'s injected false answer.
 - gdp_parity big-M/hull, 14 of 24 instances buildable here: med_term big-M is the only
   cell that changes.
+- *Platform dependence (review of #2188).* On macOS with highspy 1.15.1 the same
+  fixed-integer LP comes back `optimal`. The old arm settles the check there, and the
+  end-to-end med_term test passes on the old code too. The monkeypatched unit tests are
+  the platform-independent guard. The end-to-end test asserts which arm settled the
+  check.
+- *Why an unclosed fixed-LP NS gap is not evidence against HiGHS's bound.* #1320 refuses
+  a check that produced no verdict, and this one produces one. Whether HiGHS's arithmetic
+  on the matrix certifies its LPs is the #1410 root-dual check's question, and that check
+  runs first: root dual violation 7.5e-17 on med_term. The 0.00139 gap is NS round-off.
+  Reduced costs of 1e-14 to 1e-15 charged against `1e20` sentinel upper bounds give
+  5.0e6 over the declared box, and exact dual correction leaves 0.00139. The same LP,
+  re-solved later in that solve, returns `optimal` with an FBBT-box gap of 4.3e-7 at the
+  identical objective.

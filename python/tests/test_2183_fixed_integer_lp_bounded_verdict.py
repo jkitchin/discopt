@@ -62,22 +62,34 @@ def _medterm() -> tuple[StdForm, dict]:
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_medterm_bigm_milp_is_certified():
-    """The issue's instance. Before the fix (highspy 1.13 through 1.15.1) the route
-    returned ``feasible`` with the 'fixed-integer LP check was inconclusive' decline.
-    The time limit is a backstop: the solve measured 6.0 s on a dev machine."""
+    """The issue's instance, end to end. The time limit is a backstop: the solve
+    measured 6.0 s on a dev machine.
+
+    Platform-dependent: whether HiGHS's fixed-integer LP comes back ``feasible`` (NS gap
+    unclosed) or ``optimal`` depends on the build. On Linux with highspy 1.13 through
+    1.15.1 it is ``feasible``, and this test fails on the pre-#2183 code. On macOS with
+    highspy 1.15.1 it is ``optimal``, the old arm settles the check, and the test also
+    passes on the old code there. The fast monkeypatched tests below are the
+    platform-independent regression guard. This one asserts that SOME arm settled the
+    check, and names the arm in its failure messages (CLAUDE.md §6)."""
     sf, kw = _medterm()
     assert (sf.n, sf.m, sf.int_idx.size) == (1206, 924, 216)
     out = solve_milp_std(sf, time_limit=240.0, max_nodes=100_000, **kw)
     assert out.stats.get("milp/fixed_int_check_ran") == 1.0
     assert not out.stats.get("milp/fixed_int_check_inconclusive"), out.message
-    assert out.status == "optimal" and out.gap_certified, out.message
+    bounded = bool(out.stats.get("milp/fixed_int_check_bounded"))
+    optimal_arm = "milp/fixed_int_objective" in out.stats
+    # The probe fired: exactly one arm gave the check its verdict.
+    assert bounded != optimal_arm, (bounded, optimal_arm, out.stats)
+    arm = "bounded (#2183)" if bounded else "optimal-LP (pre-#2183 arm)"
+    assert out.status == "optimal" and out.gap_certified, (arm, out.message)
     assert out.objective == pytest.approx(MEDTERM_OPT, rel=1e-9)
     # Certificate invariant against the oracle (min sense): bound <= objective and
     # bound never above the true optimum.
     assert out.bound is not None
     assert out.bound <= out.objective
     assert out.bound <= MEDTERM_OPT + 1e-6 * (1.0 + abs(MEDTERM_OPT))
-    if out.stats.get("milp/fixed_int_check_bounded"):
+    if bounded:
         # The new arm settled the check: its NS bound is on the safe side of the bound,
         # and the merely-feasible LP point never posed as the LP optimum.
         ns = out.stats["milp/fixed_int_ns_bound"]
@@ -173,15 +185,17 @@ def test_feasible_lp_with_unverified_point_still_declines(monkeypatch):
 
 def test_bound_cannot_refute_helper_edges():
     """The predicate itself: only ``feasible`` LPs with a finite NS bound inside the
-    yardstick and a verified point qualify."""
+    yardstick and a verified point qualify, and it returns that verified point."""
     sf = _knapsack_sf()
     x = np.array([10.0, 0.0])
     f = lp_milp_highs._fixed_integer_lp_cannot_refute
     ok = HighsOutcome("feasible", x=x, objective=-10.0, bound=-10.0)
-    assert f(sf, ok, -10.0)
-    assert f(sf, ok, -10.0 + 0.5 * CERT_ABS)  # inside the yardstick
-    assert not f(sf, ok, -9.0)  # bound above ns by more than the yardstick
-    assert not f(sf, HighsOutcome("optimal", x=x, objective=-10.0, bound=-10.0), -10.0)
-    assert not f(sf, HighsOutcome("feasible", x=x, objective=-10.0, bound=None), -10.0)
-    assert not f(sf, HighsOutcome("feasible", x=x, objective=-10.0, bound=-np.inf), -10.0)
-    assert not f(sf, HighsOutcome("feasible", x=None, objective=-10.0, bound=-10.0), -10.0)
+    got = f(sf, ok, -10.0)
+    assert got is not None
+    assert got[1] == -10.0 and np.array_equal(got[0], x)
+    assert f(sf, ok, -10.0 + 0.5 * CERT_ABS) is not None  # inside the yardstick
+    assert None is f(sf, ok, -9.0)  # bound above ns by more than the yardstick
+    assert None is f(sf, HighsOutcome("optimal", x=x, objective=-10.0, bound=-10.0), -10.0)
+    assert None is f(sf, HighsOutcome("feasible", x=x, objective=-10.0, bound=None), -10.0)
+    assert None is f(sf, HighsOutcome("feasible", x=x, objective=-10.0, bound=-np.inf), -10.0)
+    assert None is f(sf, HighsOutcome("feasible", x=None, objective=-10.0, bound=-10.0), -10.0)
