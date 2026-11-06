@@ -629,3 +629,11 @@ certification value can only show once the dual side moves.
 **Decision pending (owner):** either retire the flag now, or keep it default-OFF owned by
 D2 and re-panel it together with Phase B (tableau cuts with node separation), with the
 same pre-registered bars. The bars are not changed after the fact.
+
+**8. Owner decisions (2026-11-06).**
+
+- `DISCOPT_MILP_IMPROVE_DIVE` stays default-OFF, owned by D2. It is re-panelled together
+  with Phase B (tableau cuts with node separation and aging), with the same pre-registered
+  bars.
+- **`DISCOPT_RINS` is retired** (flag and implementation; see the audit row).
+- Next build is Phase B, with a HiGHS-expert design consult first.

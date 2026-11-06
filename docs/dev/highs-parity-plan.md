@@ -90,7 +90,7 @@ bounds (`refine.rs`), exact dual projection (`project.rs`, #2115 graduated), FBB
 presolve (`presolve.rs`, dimension-preserving), CSC end to end (`sparse-milp-plan.md`
 T0–T4). MILP driver: cover, GMI, aggregated c-MIR (#2107, `DISCOPT_MILP_CMIR` graduated
 ON per `flag-retirement-audit.md:416`), cut selection, pseudocost + strong branching,
-diving, RINS (`DISCOPT_RINS`), RENS (`DISCOPT_RENS`, retired 2026-11-05 by P4.2: failed bar 2a on `dcmulti`),
+diving, RINS (`DISCOPT_RINS`, retired 2026-11-06 by D2: certified 96 = 96, `dcmulti` lost; superseded by `DISCOPT_MILP_IMPROVE_DIVE`), RENS (`DISCOPT_RENS`, retired 2026-11-05 by P4.2: failed bar 2a on `dcmulti`),
 reduced-cost fixing, node NS bound + projection, lazy-constraint entry
 (`solve_milp_lazy_csc_py`), deadline polling (51 sites).
 
