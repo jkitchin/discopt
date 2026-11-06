@@ -1612,10 +1612,11 @@ and is re-written by P4.1.**
   bound (`sp150x300d`, `beavma`, `gt2`, `neos17`, `p0548`, `issue-2446`, `gesa2`) and no
   incumbent (`enlight_hard`, `neos-2624317-amur`, `neos17`). Per the kill clause the
   decision passes to **D2** (owner).
-  **D2 decided (owner, 2026-11-06): keep HiGHS as the MILP default and stop the MILP
-  track.** `DISCOPT_LP_MILP_BACKEND` stays `highs` (`=rust` remains the opt-in); the
-  narrower "HiGHS optional for R1 by class" end state is not pursued. Phase 6's
-  packaging flip must therefore keep `highspy` for pure MILP (the R1 route).
+  **D2 (owner, 2026-11-06): HiGHS stays the MILP default for now; the gap is REOPENED, not
+  accepted.** `DISCOPT_LP_MILP_BACKEND` stays `highs` (`=rust` remains the opt-in). The
+  owner's goal is still to drop HiGHS: the plan is carried to its end, then D2 (and D3)
+  are revisited to either bridge the gap or accept it. Until then Phase 6 work that
+  depends on the R1 route not needing `highspy` is blocked on D2 and recorded as such.
 
 ### Phase 5 — masters (R2a/R2b)
 
@@ -1645,6 +1646,9 @@ and is re-written by P4.1.**
   fired on every row (`master=highs` / `master=simplex`). Per the kill clause the flag is
   **kept as a documented opt-out** for installs without HiGHS (it needs no highspy), not
   graduated; whether to continue the master track is **D3**.
+  **D3 (owner, 2026-11-06): open, deferred to the end of the plan** together with D2 --
+  "we will have to return to D2 and D3 to either bridge the gaps or accept them". The
+  plan continues (P5.2 onward); tasks gated on D2/D3 record the dependency.
 - [ ] **P5.2 — Decomposition masters default to Rust.** Scope: `lp_backend.py:249-262`
   (`get_decomposition_master_solver` → Rust first; HiGHS when `DISCOPT_DECOMP_MASTER=
   highs`), `names_decomposition_route`. Done: P0.4's R2b table re-run: identical certified
