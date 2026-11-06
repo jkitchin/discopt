@@ -425,6 +425,54 @@ pub fn create_children_spatial(
     (left, right)
 }
 
+/// Create the two children of a complementarity dichotomy (#2167).
+///
+/// For a pair `0 <= y ⊥ s >= 0` the feasible set is `{y = 0} ∪ {s = 0}`, so the
+/// two children `ub(y) = 0` and `ub(s) = 0` cover every feasible point of the
+/// parent: the split is exact, not a bisection, and each pair can be split at
+/// most once on any root-to-leaf path (a child has one side fixed at 0 and the
+/// selector skips it), so the tree is finite. Both children are pure bound
+/// changes, and like spatial children they carry no simplex basis.
+///
+/// The caller guarantees `lb(y) <= 0 <= ub(y)` and `lb(s) <= 0 <= ub(s)` in the
+/// parent, so neither child box is empty by construction.
+pub fn create_children_complementarity(
+    parent: &Node,
+    y_col: usize,
+    s_col: usize,
+    mut next_id: impl FnMut() -> NodeId,
+) -> (Node, Node) {
+    let parent_sol = parent.parent_solution.clone();
+    let inherited_lb = parent.local_lower_bound;
+    let shared = parent_shared_box(parent);
+    let mut child = |col: usize, base: Arc<SharedBox>| Node {
+        id: next_id(),
+        parent: Some(parent.id),
+        depth: parent.depth + 1,
+        branch: Some(BranchRecord {
+            var: col,
+            up: false,
+            value: 0.0,
+        }),
+        lb: Vec::new(),
+        ub: Vec::new(),
+        pending_box: Some(PendingBox {
+            base,
+            var: col,
+            upper: true,
+            value: 0.0,
+        }),
+        local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
+        status: NodeStatus::Pending,
+        parent_solution: parent_sol.clone(),
+        basis: None,
+    };
+    let off = child(y_col, shared.clone());
+    let on = child(s_col, shared);
+    (off, on)
+}
+
 /// Minimum relative domain width for a continuous variable to be eligible
 /// for spatial branching.  Prevents infinite bisection.
 const SPATIAL_MIN_WIDTH: f64 = 1e-6;
