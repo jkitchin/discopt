@@ -1,0 +1,21 @@
+# #2187 panel summary
+new   n=90 {'feasible': 2, 'optimal': 88} wall total=3468.0s median=0.53s
+off   n=90 {'error': 6, 'feasible': 4, 'optimal': 80} wall total=3452.7s median=0.53s
+base  n=90 {'error': 6, 'feasible': 5, 'optimal': 79} wall total=3432.8s median=0.53s
+executed checks: 9331
+violations: 3
+rosenbrock_Bh_lam1.0_s406_p0_perm4 ext new: f(x)=-38.18942789076539 != obj -38.189471319792816
+rosenbrock_Bh_lam1.0_s406_p0_perm4 ext off: f(x)=-38.18942789076539 != obj -38.189471319792816
+rosenbrock_Bh_lam1.0_s406_p0_perm4 ext base: f(x)=-38.18942789076539 != obj -38.189471319792816
+instance/form pairs where arms differ: 11
+random_s3 ext: base feasible obj=-0.11403800051763976 bound=-0.49705111997220286 nodes=22185; off feasible obj=-0.11403800051763976 bound=-0.49725453865644165 nodes=22087; new feasible obj=-0.11403800051763976 bound=-0.4951525027008842 nodes=22130
+random_s8 ext: base feasible obj=-0.5370270299910969 bound=-2.68444013235808 nodes=22182; off feasible obj=-0.06904824605303675 bound=-3.394355681766942 nodes=14025; new feasible obj=-0.5370270299910969 bound=-2.298474116060758 nodes=23960
+rosenbrock_Bh_lam1.0_s406_p0 cuts: base feasible obj=-38.189427890765295 bound=-640.8688295858543 nodes=10; off optimal obj=-38.18942789076535 bound=-38.1894289858037 nodes=10; new optimal obj=-38.18942789076535 bound=-38.1894289858037 nodes=10
+rosenbrock_Bh_lam1.0_s413_p1 ext: base feasible obj=-54.52486635101366 bound=-638.3557354768134 nodes=7; off feasible obj=-54.52486635101366 bound=-638.3557354768134 nodes=7; new optimal obj=-54.52486635101366 bound=-54.52486635101366 nodes=16
+rosenbrock_Bh_lam1.0_s413_p1_perm0 ext: base feasible obj=-54.524866351013834 bound=-638.3557354768135 nodes=9; off feasible obj=-54.524866351013834 bound=-638.3557354768135 nodes=9; new optimal obj=-54.524866351013834 bound=-54.524866362392245 nodes=18
+rosenbrock_Bm_lam3.0_s404_p0 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.556138425406 bound=20.55612669735196 nodes=1
+rosenbrock_Bm_lam3.0_s404_p0_perm0 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.556138425405976 bound=20.556128867305503 nodes=1
+rosenbrock_Bm_lam3.0_s404_p0_perm1 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.55613842540599 bound=20.55612886730554 nodes=1
+rosenbrock_Bm_lam3.0_s404_p0_perm2 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.556138425405976 bound=20.556126682177144 nodes=1
+rosenbrock_Bm_lam3.0_s404_p0_perm3 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.556138425405976 bound=20.55612886730554 nodes=1
+rosenbrock_Bm_lam3.0_s404_p0_perm4 ext: base error obj=None bound=None nodes=1; off error obj=None bound=None nodes=1; new optimal obj=20.556138425405994 bound=20.556126682177112 nodes=1
