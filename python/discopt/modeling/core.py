@@ -530,11 +530,36 @@ _UNSET_SHAPE: Any = object()
 #: sentinel at the end of that list -- by then every listed node has been written.
 #: While one is open, nodes reduce plainly: their children are already memoised.
 #:
-#: A pickle that raises partway leaves its scope open on that thread. That costs
-#: nothing in correctness -- an expression then simply pickles the plain recursive
-#: way it did before this mechanism existed -- and a per-node record (tried first:
-#: a weakref per node) made every model pickle about 50% slower to avoid it.
+#: A pickle that raises partway never reaches its sentinel. The sentinel then
+#: closes the scope when it is freed (``_ChildrenFirstEnd.__del__``), which is when
+#: the pickler drops the list on unwinding; so does a reduce result that is built
+#: and discarded unpickled. Before that, a raised pickle left its scope open on the
+#: thread for good, and every later expression on that thread pickled the plain
+#: recursive way -- a ``RecursionError`` past a few thousand nested nodes. Under
+#: xdist that made deep-pickle tests fail whenever an earlier test on the same
+#: worker had pickled something unpicklable on purpose. (A per-node record, tried
+#: first -- a weakref per node -- made every model pickle about 50% slower.)
+#:
+#: The count lives in a per-thread ``_ScopeCount`` cell that each sentinel holds, so
+#: a sentinel freed on another thread closes the scope of the thread that opened it.
 _PICKLE_SCOPES = _threading.local()
+
+
+class _ScopeCount:
+    """One thread's number of open children-first pickling scopes."""
+
+    __slots__ = ("n",)
+
+    def __init__(self) -> None:
+        self.n = 0
+
+
+def _scope_count() -> _ScopeCount:
+    c = getattr(_PICKLE_SCOPES, "count", None)
+    if c is None:
+        c = _PICKLE_SCOPES.count = _ScopeCount()
+    return c
+
 
 #: Layout of what ``Model.__getstate__`` writes and ``Model.__setstate__`` reads.
 #: Bump it with any change to either; an unpickle across a different value is
@@ -543,12 +568,20 @@ _MODEL_PICKLE_FORMAT = 1
 
 
 def _children_first_scope_open() -> bool:
-    return bool(getattr(_PICKLE_SCOPES, "open", 0))
+    c = getattr(_PICKLE_SCOPES, "count", None)
+    return c is not None and c.n > 0
+
+
+def _open_children_first_scopes() -> int:
+    """Children-first pickling scopes open on this thread (0 between pickles)."""
+    c = getattr(_PICKLE_SCOPES, "count", None)
+    return 0 if c is None else c.n
 
 
 def _open_children_first_scope() -> "_ChildrenFirstEnd":
-    _PICKLE_SCOPES.open = getattr(_PICKLE_SCOPES, "open", 0) + 1
-    return _ChildrenFirstEnd()
+    c = _scope_count()
+    c.n += 1
+    return _ChildrenFirstEnd(c)
 
 
 def _unpickled_scope_end() -> None:
@@ -578,13 +611,27 @@ def _new_after_children(cls: "type[Expression]", _children_first: list) -> "Expr
 
 
 class _ChildrenFirstEnd:
-    """Last item of a children-first node list; closes its scope when pickled."""
+    """Last item of a children-first node list; closes its scope when pickled, or
+    when freed unpickled (the pickle raised, or the reduce result was discarded).
+    Closes at most once."""
 
-    __slots__ = ()
+    __slots__ = ("_count",)
+
+    def __init__(self, count: _ScopeCount) -> None:
+        self._count: Optional[_ScopeCount] = count
+
+    def _close(self) -> None:
+        c = self._count
+        if c is not None:
+            self._count = None
+            c.n = max(0, c.n - 1)
 
     def __reduce__(self):
-        _PICKLE_SCOPES.open = max(0, getattr(_PICKLE_SCOPES, "open", 0) - 1)
+        self._close()
         return (_unpickled_scope_end, ())
+
+    def __del__(self) -> None:
+        self._close()
 
 
 def _descendants_children_first(root: "Expression", skip: "Optional[dict]" = None) -> list:

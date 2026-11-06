@@ -668,8 +668,10 @@ class TestTorchReader:
         import torch.nn as nn
         from discopt.ml.readers.torch_reader import load_torch_sequential
 
-        model = nn.Sequential(nn.Linear(2, 3), nn.GELU(), nn.Linear(3, 1))
-        with pytest.raises(ValueError, match="Unsupported layer type"):
+        # Not GELU: exact nn.GELU is embedded since #2135
+        # (test_2135_parameterized_activations.py), which left this test stale.
+        model = nn.Sequential(nn.Linear(2, 3), nn.LayerNorm(3), nn.Linear(3, 1))
+        with pytest.raises(ValueError, match="Unsupported layer type: LayerNorm"):
             load_torch_sequential(model)
 
     def test_add_predictor_with_torch(self):

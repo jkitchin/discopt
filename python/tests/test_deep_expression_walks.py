@@ -145,8 +145,9 @@ def test_unpickling_a_node_takes_no_python_setstate():
         rv = e.__reduce_ex__(protocol)
         assert rv[0] is core._new_after_children, protocol
         assert rv[2] == object.__reduce_ex__(e, protocol)[2], protocol
-        # The scope the reduce opened closes only when the sentinel is pickled.
-        core._PICKLE_SCOPES.open = 0
+        # The scope the reduce opened closes when its sentinel is freed unpickled.
+        del rv
+        assert core._open_children_first_scopes() == 0, protocol
 
 
 def test_a_pre_wp7_lone_expression_pickle_loses_its_list_on_the_next_copy():
@@ -214,9 +215,63 @@ def test_copy_copy_of_an_expression_stays_shallow():
 
 def test_children_first_scopes_close():
     """Every scope a pickle opens is closed by the time it returns."""
-    open_before = getattr(core._PICKLE_SCOPES, "open", 0)
+    open_before = core._open_children_first_scopes()
     m, e = _chain(2000)
     for _ in range(3):
         pickle.loads(pickle.dumps(e))
         pickle.loads(pickle.dumps(m))
-    assert getattr(core._PICKLE_SCOPES, "open", 0) == open_before
+    assert core._open_children_first_scopes() == open_before
+
+
+class _Unpicklable:
+    def __reduce__(self):
+        raise TypeError("unpicklable on purpose")
+
+
+def _assert_deep_pickles_after(fail) -> None:
+    """Run *fail* (a pickle that must raise), then pickle a 5000-deep chain."""
+    with pytest.raises(TypeError, match="unpicklable on purpose"):
+        fail()
+    assert core._open_children_first_scopes() == 0
+    _, deep = _chain(5000)
+    c = pickle.loads(pickle.dumps(deep))
+    assert dt._canon(c) == dt._canon(deep)
+
+
+def test_a_failed_expression_pickle_closes_its_scope():
+    """A pickle that raises before its sentinel must not leave the thread's scope open.
+
+    Before the fix the count stayed at 1, so every later expression on that thread
+    pickled recursively and a 5000-deep chain raised ``RecursionError``; under
+    xdist that failed this file's deep-pickle tests whenever an earlier test on
+    the same worker had pickled something unpicklable.
+    """
+    _, e = _chain(10)
+    e.left._probe = _Unpicklable()  # on a child: raises before the sentinel is written
+    _assert_deep_pickles_after(lambda: pickle.dumps(e))
+
+
+def test_a_failed_model_pickle_closes_its_scope():
+    m, e = _chain(10)
+    e.left._probe = _Unpicklable()
+    _assert_deep_pickles_after(lambda: pickle.dumps(m))
+
+
+def test_a_scope_freed_on_another_thread_closes_the_opener_thread():
+    """The sentinel closes the count of the thread that opened it, not the freer's."""
+    import threading
+
+    _, e = _chain(50)
+    held = [e.__reduce_ex__(4)]
+    assert core._open_children_first_scopes() == 1
+    seen: list[int] = []
+
+    def free_it() -> None:
+        held.clear()
+        seen.append(core._open_children_first_scopes())
+
+    t = threading.Thread(target=free_it)
+    t.start()
+    t.join()
+    assert seen == [0]  # the other thread never had a scope open
+    assert core._open_children_first_scopes() == 0
