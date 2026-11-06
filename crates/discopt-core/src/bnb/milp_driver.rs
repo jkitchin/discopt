@@ -390,6 +390,143 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
     })
 }
 
+/// Whether node-local Gomory separation is on (highs-parity D2 Phase B, step B1'), read
+/// once from `DISCOPT_MILP_NODE_GMI`. Default OFF; an unrecognized value is refused.
+///
+/// ON gives the [`NODE_GMI_PER_BATCH`] best-bound fractional nodes of every batch up to
+/// [`NODE_GMI_ROUNDS`] rounds of **local** Gomory separation:
+///
+/// 1. separate GMI cuts from the node's optimal basis, with the node's own bounds;
+/// 2. append the selected ones to a node-local copy of the working LP;
+/// 3. warm re-solve the copy and NS-verify the bound over the augmented matrix.
+///
+/// The node keeps the larger of its own bound and that verified bound, and its children
+/// inherit it as a floor (`process_evaluated` takes the max). The cut rows are dropped
+/// with the node: the shared matrix, the pool and every other node are untouched. The
+/// cuts are valid only for the node's box, which is all a node bound claims.
+///
+/// Why: on `neos-3610040-iskar` / `neos-3610051-istra`, SCIP certifies both with
+/// in-tree Gomory and cannot with Gomory at the root only (`iskar` stuck at 36); with
+/// every other separator dropped one at a time, only dropping `gomory` stops
+/// certification. HiGHS without node separation loses both rows. Original-row c-MIR at
+/// nodes (the retired `DISCOPT_MILP_NODE_SEP`) moved neither
+/// (`highs-parity-d2-analysis.md` follow-ups 10-11). Bound-changing: default OFF
+/// pending its §5 panel.
+fn node_gmi_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_NODE_GMI").unwrap_or_default();
+        parse_node_gmi(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`node_gmi_enabled`]; garbage is refused, not defaulted.
+fn parse_node_gmi(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_NODE_GMI={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// Best-bound nodes per batch that run node-local Gomory rounds.
+const NODE_GMI_PER_BATCH: usize = 8;
+/// Separation rounds per node (SCIP's in-tree `gomory/maxrounds` is 5).
+const NODE_GMI_ROUNDS: usize = 3;
+/// Cuts kept per round after selection.
+const NODE_GMI_MAX_CUTS: usize = 20;
+
+/// Node-local Gomory rounds (`DISCOPT_MILP_NODE_GMI`). Returns the best NS-verified bound
+/// the rounds proved over the node box (without `obj_const`), or `None` when no round
+/// produced a verified bound, plus the pivots spent. Never touches the shared LP.
+#[allow(clippy::too_many_arguments)]
+fn node_local_gmi_bound(
+    ctx: &NodeCtx<'_>,
+    full_l: &[f64],
+    full_u: &[f64],
+    x0: &[f64],
+    basis0: &Basis,
+) -> (Option<f64>, usize) {
+    let tol = ctx.opts.simplex.tol;
+    let mut csc = ctx.csc_rc.clone();
+    let mut b = ctx.b_w.to_vec();
+    let mut c = ctx.c_w.to_vec();
+    let mut l = full_l.to_vec();
+    let mut u = full_u.to_vec();
+    let mut is_int = ctx.is_int_full.to_vec();
+    let (mut m, mut n) = (ctx.m_w, ctx.n_w);
+    let mut x = x0.to_vec();
+    let mut basis = basis0.clone();
+    let mut best: Option<f64> = None;
+    let mut pivots = 0usize;
+    for _ in 0..NODE_GMI_ROUNDS {
+        if ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
+        }
+        let cuts = separate_gomory_cols(&csc, m, n, &l, &u, &b, &basis, &is_int, tol, 1e7);
+        crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
+        let sel = select_cuts(
+            cuts,
+            &x,
+            NODE_GMI_MAX_CUTS,
+            CUT_MIN_EFFICACY,
+            CUT_MAX_PARALLEL,
+        );
+        if sel.is_empty() {
+            break;
+        }
+        crate::profile::incr_by(crate::profile::Ctr::NodeGmiCuts, sel.len() as u64);
+        let (nc, nm, nn) = augment_csc_with_cuts(
+            &csc,
+            &mut b,
+            &mut c,
+            &mut l,
+            &mut u,
+            &mut is_int,
+            m,
+            n,
+            &sel,
+        );
+        csc = nc;
+        m = nm;
+        n = nn;
+        let start = extend_basis(basis.clone(), n);
+        let lp = LpView {
+            a: &[],
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let sol = solve_lp_warm_scaled_csc(&lp, &b, &start, ctx.simplex, &csc);
+        pivots += sol.iters;
+        if sol.status != LpStatus::Optimal {
+            crate::profile::incr(crate::profile::Ctr::NodeGmiLpFail);
+            break;
+        }
+        let (cp, ri, vals) = csc.raw();
+        let Some(g) = ns_safe_bound_csc(&sol.dual, &c, cp, ri, vals, m, n, &b, &l, &u) else {
+            crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
+            break;
+        };
+        let g = g.min(sol.obj);
+        let improved = best.is_none_or(|bb| g > bb + 1e-9 * bb.abs().max(1.0));
+        if g > best.unwrap_or(f64::NEG_INFINITY) {
+            best = Some(g);
+        }
+        x = sol.x;
+        basis = sol.basis;
+        if !improved {
+            break;
+        }
+    }
+    (best, pivots)
+}
+
 /// Share of the search's LP pivots (node LPs + strong branching) the improving dive may
 /// spend: a batch is granted a dive only while the dives' pivots so far are at most this
 /// fraction of the tree's. HiGHS budgets its heuristics the same way, as a share of LP
@@ -1717,6 +1854,9 @@ fn solve_milp_node_search(
     const NODE_CUT_MAX_DENSITY: f64 = 0.5;
     let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
     let node_cut_cap = (2 * n_orig_rows).min(opts.max_pool_cuts);
+    // D2 B1': node-local Gomory rounds (no lazy separator: a lazy callback screens
+    // points against the shared LP, and the local rows are invisible to it).
+    let node_gmi_on = node_gmi_enabled() && lazy.is_none();
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
@@ -2351,6 +2491,7 @@ fn solve_milp_node_search(
                 sb_active,
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 improve_dive: improve_batch,
+                node_gmi: node_gmi_on,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -2376,6 +2517,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
+                                k < NODE_GMI_PER_BATCH,
                             )
                         })
                         .collect()
@@ -2388,6 +2530,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
+                                k < NODE_GMI_PER_BATCH,
                             )
                         })
                         .collect()
@@ -2403,6 +2546,7 @@ fn solve_milp_node_search(
                             &batch.ub[k],
                             &ctx,
                             dive_batch && k == 0,
+                            k < NODE_GMI_PER_BATCH,
                         )
                     })
                     .collect()
@@ -2900,6 +3044,8 @@ struct NodeCtx<'a> {
     inc_snapshot: Option<f64>,
     /// This batch's dive slot is an improving dive (`DISCOPT_MILP_IMPROVE_DIVE`).
     improve_dive: bool,
+    /// `DISCOPT_MILP_NODE_GMI` is on (the per-node slot is `solve_node`'s `gmi_slot`).
+    node_gmi: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -2984,6 +3130,7 @@ fn solve_node(
     ub_k: &[f64],
     ctx: &NodeCtx<'_>,
     dive_slot: bool,
+    gmi_slot: bool,
 ) -> NodeOutput {
     // Deadline guard BEFORE the expensive LP solve. The loop-top check only stops
     // *dispatching* new batches; a single batch of N nodes whose per-node LP costs
@@ -3482,6 +3629,29 @@ fn solve_node(
                     .map(|(x, c)| x * c)
                     .sum::<f64>()
                     + ctx.obj_const;
+            }
+            // D2 B1' (`DISCOPT_MILP_NODE_GMI`): node-local Gomory rounds lift the node's
+            // bound. Skipped when the node is already prunable at the dispatch-time
+            // incumbent (nothing to gain) and at integral vertices.
+            let mut node_lp_bound = node_lp_bound;
+            if ctx.node_gmi
+                && gmi_slot
+                && !feasible
+                && !time_up
+                && !ctx
+                    .inc_snapshot
+                    .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                crate::profile::incr(crate::profile::Ctr::NodeGmiNodes);
+                let (g, piv) = node_local_gmi_bound(ctx, &full_l, &full_u, &sol.x, &sol.basis);
+                out.iters += piv;
+                if let Some(g) = g {
+                    if g > node_lp_bound {
+                        crate::profile::incr(crate::profile::Ctr::NodeGmiLifted);
+                        node_lp_bound = g;
+                    }
+                }
             }
             out.result = NodeResult {
                 node_id: id,
@@ -6271,6 +6441,19 @@ mod tests {
         assert_eq!(parse_dive_stride(" 12 ").unwrap(), 12);
         for bad in ["-1", "eight", "1.5", "8x"] {
             assert!(parse_dive_stride(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn node_gmi_parse_refuses_garbage() {
+        for off in ["", " ", "0", "false", "NO"] {
+            assert!(!parse_node_gmi(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " yes "] {
+            assert!(parse_node_gmi(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["2", "on", "y"] {
+            assert!(parse_node_gmi(bad).is_err(), "{bad:?} must be refused");
         }
     }
 

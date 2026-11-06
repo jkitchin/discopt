@@ -305,6 +305,15 @@ counters!(
     // Node cuts (any separator) that passed dedup and the pool cap and were folded
     // into the shared matrix.
     NodeCutsFolded,
+    // D2 B1' (`DISCOPT_MILP_NODE_GMI`): nodes that ran local Gomory rounds, raw and kept
+    // cuts, rounds whose LP failed or whose NS check abstained, and nodes whose bound
+    // the rounds lifted.
+    NodeGmiNodes,
+    NodeGmiRaw,
+    NodeGmiCuts,
+    NodeGmiLpFail,
+    NodeGmiNsAbstain,
+    NodeGmiLifted,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
