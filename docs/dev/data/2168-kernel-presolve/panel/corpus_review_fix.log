@@ -1,0 +1,20 @@
+nvs06                  OFF optimal                b=1.7703124999500992 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.770312499998338 n=1 KernelPresolveApplied=1 KernelPresolveEliminated=7 fired=7 undecided 0.0/0.0 wall 0.8/0.7 load 0.54
+nvs21                  OFF optimal                b=-5.684782500007601 n=5 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-5.684782500007609 n=5 KernelPresolveApplied=1 KernelPresolveEliminated=5 fired=5 undecided 0.0/0.0 wall 1.0/1.0 load 0.54
+st_e13                 OFF optimal                b=1.999999999997 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.999999999997 n=1 KernelPresolveApplied=1 KernelPresolveEliminated=0 fired=0 undecided 0.0/0.0 wall 0.5/0.5 load 0.54
+st_e38                 OFF optimal                b=7197.727148009189 n=3 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=7197.727148062646 n=3 KernelPresolveApplied=1 KernelPresolveEliminated=5 fired=5 undecided 0.0/0.0 wall 0.9/0.9 load 0.54
+tanksize               OFF optimal                b=1.2685218386975698 n=461 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.2685225629276122 n=391 KernelPresolveApplied=1 KernelPresolveEliminated=3 fired=3 undecided 0.0/0.0 wall 6.1/6.1 load 0.71
+
+instances           : 5
+executed checks     : 60
+violations          : 0
+mechanism fired     : 20 on 4 instance(s) ['nvs06', 'nvs21', 'st_e38', 'tanksize']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 5 -> ON 5  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 471 -> ON 401
+wall  (all)         : OFF 9.3s -> ON 9.2s
+wall  (fired)       : OFF 9.3s -> ON 9.2s over 5 instance(s)
+report              : docs/dev/data/2168-kernel-presolve/panel/corpus_review_fix.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

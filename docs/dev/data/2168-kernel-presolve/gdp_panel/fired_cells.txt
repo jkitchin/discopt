@@ -1,0 +1,5 @@
+cstr    big-m  OFF status=node_limit obj=3.0620145766185365 bound=1.4280490202862746 nodes=5000 wall=22.535 | ON status=node_limit obj=3.0620145766185387 bound=1.471156870941473 nodes=5000 wall=21.58
+cstr    hull   OFF status=node_limit obj=3.0620145766185876 bound=0.47824606375483214 nodes=5000 wall=43.141 | ON status=node_limit obj=3.0620145766185876 bound=0.21334138834945907 nodes=5000 wall=28.163
+syngas  big-m  OFF status=optimal obj=4669.0234990053505 bound=4668.808968189199 nodes=3 wall=83.911 | ON status=optimal obj=4669.0234990053505 bound=4668.808968189199 nodes=3 wall=79.145
+syngas  hull   OFF status=optimal obj=4669.02349872477 bound=4668.808968189199 nodes=3 wall=98.546 | ON status=optimal obj=4669.02349872477 bound=4668.808968189199 nodes=3 wall=105.715
+cells compared: 4

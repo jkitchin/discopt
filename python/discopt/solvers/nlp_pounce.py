@@ -26,7 +26,6 @@ from discopt.solvers._nlp_hard_stop import (
     armed_deadline,
     expired_result,
 )
-from discopt.solvers._nlp_ladder_scope import apply_ladder_scope
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #75: importing this at module scope pulls jax on every solve, because
@@ -439,9 +438,6 @@ def solve_nlp(
 
     opts = dict(options) if options else {}
     opts.setdefault("print_level", 0)
-    # A heuristic or nonconvex-node NLP drops POUNCE's infeasibility retry
-    # ladder under DISCOPT_NLP_LADDER_SCOPED=1 (``_nlp_ladder_scope``). Off: no-op.
-    apply_ladder_scope(opts)
     # #2120: under ``deterministic`` a per-solve ``max_wall_time`` is a role-2 cap
     # (POUNCE times it in Rust, beyond any Python-side guard); swap it for the
     # role-1 remainder. A no-op otherwise.

@@ -1,0 +1,38 @@
+nvs05                  OFF optimal                b=5.470712627830769 n=89 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=5.470712627830769 n=89 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 74.3/74.0 load 3.61
+st_e11                 OFF optimal                b=189.3116296865995 n=5 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=189.3116296865995 n=5 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 2.7/2.7 load 4.12
+st_e13                 OFF optimal                b=1.999999999997 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.999999999997 n=1 KernelPresolveApplied=1 KernelPresolveEliminated=0 fired=0 undecided 0.0/0.0 wall 0.4/0.5 load 4.12
+st_e29                 OFF optimal                b=-0.9434705000000072 n=5 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-0.9434705000000072 n=5 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 2.4/2.4 load 4.19
+st_e36                 OFF optimal                b=-246.00000000045293 n=109 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-246.00000000045293 n=109 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 16.6/16.2 load 4.34
+st_e38                 OFF optimal                b=7197.727148009189 n=3 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=7197.727148062646 n=3 KernelPresolveApplied=1 KernelPresolveEliminated=5 fired=5 undecided 0.0/0.0 wall 0.9/0.9 load 4.23
+st_miqp1               OFF optimal                b=280.9999999999998 n=9 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=280.9999999999998 n=9 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.4 load 4.23
+st_miqp2               OFF optimal                b=1.9999999996568942 n=7 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.9999999996568942 n=7 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.4 load 4.69
+st_miqp3               OFF optimal                b=-6.000000000017159 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-6.000000000017159 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.3 load 4.69
+st_miqp4               OFF optimal                b=-4574.000000000333 n=3 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-4574.000000000333 n=3 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.4 load 4.69
+st_miqp5               OFF optimal                b=-333.8888889023809 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-333.8888889023809 n=1 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.5 load 5.28
+st_test1               OFF optimal                b=-1.4523894940938343e-23 n=15 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-1.4523894940938343e-23 n=15 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.4/0.4 load 5.28
+st_testgr3             OFF optimal                b=-20.590707099439147 n=471 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=-20.590707099439147 n=471 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 1.2/1.2 load 4.94
+syn05hfsg              OFF optimal                b=837.7420768788216 n=2 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=837.7420768788216 n=2 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 0.3/0.4 load 4.94
+tanksize               OFF optimal                b=1.2685218386975698 n=461 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=1.2685225629276122 n=391 KernelPresolveApplied=1 KernelPresolveEliminated=3 fired=3 undecided 0.0/0.0 wall 5.6/5.9 load 4.43
+prolog                 OFF feasible               b=None n=299 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=None n=299 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 122.5/120.5 load 4.20
+tspn05                 OFF optimal                b=191.25513611344041 n=21 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON optimal                b=191.25513611344041 n=21 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 6.8/6.8 load 3.71
+tls2                   OFF feasible               b=2.9275709233134872 n=141 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=2.9275709233134872 n=141 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 120.6/123.4 load 3.38
+tspn08                 OFF feasible               b=281.7923358676849 n=113 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=281.03462675958286 n=97 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 120.3/123.0 load 3.43
+tspn10                 OFF feasible               b=165.48633263693753 n=71 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=165.48633263693753 n=71 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 120.2/120.2 load 3.74
+tspn12                 OFF feasible               b=206.02218142808346 n=153 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=205.0594347808771 n=127 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 120.1/120.4 load 3.32
+wallfix                OFF feasible               b=0.0 n=2003 KernelPresolveApplied=0 KernelPresolveEliminated=0 | ON feasible               b=0.0 n=2003 KernelPresolveApplied=0 KernelPresolveEliminated=0 fired=0 undecided None/None wall 77.7/77.3 load 1.49
+
+instances           : 22
+executed checks     : 246
+violations          : 0
+mechanism fired     : 8 on 2 instance(s) ['st_e38', 'tanksize']
+unfired identical   : 14 checked, 5 skipped (wall backstop) ['prolog', 'tls2', 'tspn08', 'tspn10', 'tspn12']
+certified           : OFF 16 -> ON 16  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 2 ['tspn08', 'tspn12']  (where it ran: [])
+nodes (all)         : OFF 3983 -> ON 3871
+wall  (all)         : OFF 795.1s -> ON 798.0s
+wall  (fired)       : OFF 7.0s -> ON 7.2s over 3 instance(s)
+report              : docs/dev/data/2168-kernel-presolve/panel/corpus_b.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.
+PANEL exit 0
