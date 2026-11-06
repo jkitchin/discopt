@@ -316,7 +316,7 @@ def test_find_latest_results_skips_files_with_a_foreign_schema(tmp_path, monkeyp
     assert BenchmarkResults.load(found).suite == "phase3"
 
 
-def test_suite_results_override_maps_a_panel_saved_under_another_name(tmp_path):
+def test_suite_results_override_maps_a_panel_saved_under_another_name(tmp_path, monkeypatch):
     """`reports/cert0_*.json` carries suite="cert0" but IS the global50 panel.
 
     Auto-discovery must not assume that (it is the silent substitution #1420 is
@@ -324,6 +324,11 @@ def test_suite_results_override_maps_a_panel_saved_under_another_name(tmp_path):
     mapping is echoed into the run's output.
     """
     import run_benchmarks as rb
+
+    # Auto-discovery reads ./reports. Run from the repo root, it found the
+    # committed reports/global50_discopt_scip_2026-10-28.json and the
+    # "not_measured" arm below asserted against a real panel.
+    monkeypatch.chdir(tmp_path)
 
     panel = _bench("cert0", [_res("i1", "discopt", wall=1.0, obj=1.0)])
     path = tmp_path / "cert0_2026-01-01.json"
