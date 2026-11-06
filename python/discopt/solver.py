@@ -10525,7 +10525,8 @@ def _convex_minlp_route_enabled() -> bool:
 
 
 def _convex_route_oa_master() -> str:
-    """The MILP engine for the routed OA master: always HiGHS.
+    """The MILP engine for the routed OA master: HiGHS, or the in-house lazy master
+    when ``DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex`` (highs-parity P5.1, opt-in).
 
     HiGHS is discopt's MILP solver. ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` once
     selected between ``highs`` (default since performance-plan §25.13) and
@@ -10555,10 +10556,21 @@ def _convex_route_oa_master() -> str:
     (``milp_highs``), and OA reads only ``master_result.bound``.
     """
     raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
-    if raw is not None and raw.strip().lower() != "highs":
+    val = None if raw is None else raw.strip().lower()
+    if val == "simplex":
+        # highs-parity P5.1: the in-house lazy master (`milp_solver="simplex"`,
+        # `solve_milp_lazy_csc_py`) as an explicit opt-in. Default OFF -- the HiGHS
+        # master stays the default until the P5.1 panel (route panel + syn/rsyn,
+        # kernel ON and OFF) shows certified >= HiGHS and total wall <= 1.25x; see
+        # `docs/dev/highs-parity-plan.md` P5.1 and `flag-retirement-audit.md`. It
+        # needs no highspy, which is what makes it the route's master on an install
+        # without HiGHS.
+        return "simplex"
+    if val is not None and val != "highs":
         raise ValueError(
-            "DISCOPT_CONVEX_ROUTE_OA_MASTER was retired (the routed OA master is "
-            "always HiGHS); unset it. To keep a convex MINLP off this route, set "
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'highs' "
+            "(default) or 'simplex' (the in-house lazy master, highs-parity P5.1); "
+            "'auto' stays retired. To keep a convex MINLP off this route, set "
             "DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy

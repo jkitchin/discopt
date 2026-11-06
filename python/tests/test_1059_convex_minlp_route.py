@@ -92,6 +92,29 @@ class TestRouteGates:
         with pytest.raises(ValueError, match="retired"):
             _convex_minlp_auto_route(_load("gbd"))
 
+    def test_simplex_master_is_an_explicit_opt_in(self, monkeypatch):
+        """highs-parity P5.1: ``=simplex`` selects the in-house lazy master, and the
+        route reason says so (default stays HiGHS)."""
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        monkeypatch.setenv(MASTER_ENV, "simplex")
+        monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
+        method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
+        assert method == "lp_nlp_bb" and opts == {"milp_solver": "simplex"}, reason
+        assert "master=simplex" in reason
+
+    def test_simplex_master_certifies_the_same_optimum(self, monkeypatch):
+        """End to end: the routed solve on the in-house master reaches the HiGHS
+        master's certified optimum."""
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
+        monkeypatch.setenv(MASTER_ENV, "highs")
+        ref = _load("gbd").solve(time_limit=60)
+        monkeypatch.setenv(MASTER_ENV, "simplex")
+        r = _load("gbd").solve(time_limit=60)
+        assert "master=simplex" in (r.algorithm_route or ""), r.algorithm_route
+        assert r.status == ref.status == "optimal" and r.gap_certified
+        assert r.objective == pytest.approx(ref.objective, rel=1e-6, abs=1e-6)
+
     def test_explicit_highs_is_accepted(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
         monkeypatch.setenv(MASTER_ENV, "highs")
