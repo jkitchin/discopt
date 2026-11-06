@@ -1540,7 +1540,7 @@ and is re-written by P4.1.**
   and `fj_search_py` deleted (recoverable from `4aef7331`); no flag was ever added.
   Not tested by this entry: FJ on the 12 *primal-class* rows (incumbent frozen 20 → 60 s),
   which P4.2 (RENS) targets next.
-- [ ] **P4.7 — Conflict analysis.** Scope: `milp_driver.rs` infeasible-node handling
+- [x] **P4.7 — Conflict analysis. RETIRED AT ENTRY 2026-11-06 (owner).** Scope: `milp_driver.rs` infeasible-node handling
   (Farkas ray → conflict constraint over the branching bounds), `pool.rs`. Entry: on
   `gsvm2rl3`/`neos-2624317-amur`-class instances (§2.6: branching-and-conflicts), count
   infeasible nodes whose Farkas ray involves ≤ 10 branching bounds; hypothesis ≥ 30 % of
@@ -1559,6 +1559,10 @@ and is re-written by P4.1.**
   `blend2` (262 of 8,487); elsewhere they are rare (`gt2` 9 of 80,865). Note the LP
   already contains every row the proof aggregates, so a conflict (dual-proof)
   constraint pays only through node propagation / earlier pruning, not through the LP.
+  **Retired (owner, 2026-11-06: "Retire; go to P4.8").** The aggregate bar is met by one
+  instance and the class the task names has no infeasible nodes; the change (conflict
+  pool + propagation + panel) is not justified by this measurement. Nothing was built;
+  the `Conflict*` counters stay (bound-neutral, profile-gated).
 - [ ] **P4.8 — Dimension-reducing MILP presolve with postsolve** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag
