@@ -39598,6 +39598,25 @@ def _milp_reentry_spend_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "1") != "0"
 
 
+def _milp_reentry_cuts_enabled() -> bool:
+    """``DISCOPT_MILP_REENTRY_CUTS`` gate (highs-parity D2): give the #698 re-entry
+    (run 2 of ``_solve_milp_simplex``) the same root cut budget as run 1.
+
+    Run 2 rebuilds the tree from the root, but it was called without ``**_cut_opts``.
+    So it separated with the binding's historical single pass (``root_cuts=16,
+    cut_rounds=1``) while run 1 got the graduated ``_milp_root_cut_budget`` (500 cuts
+    over 50 rounds). Since P4.0 graduated, run 2 is where most of a 20 s solve's wall
+    goes, and it runs on the weaker root. This is the same class of omission as
+    #1323, where run 2 also dropped ``abs_gap_tol``. Found by the D2 HiGHS-expert
+    Phase B review (``docs/dev/highs-parity-d2-phaseB-expert.md``). ON passes
+    ``_milp_root_cut_budget(<run-2 budget>)``.
+
+    Bound-changing (a different root LP, hence a different tree), so gated per
+    CLAUDE.md section 5 and default OFF until its panel passes; read at call time.
+    """
+    return os.environ.get("DISCOPT_MILP_REENTRY_CUTS", "0") == "1"
+
+
 def _milp_engine_full_budget_enabled() -> bool:
     """``DISCOPT_MILP_ENGINE_FULL_BUDGET`` gate (#1874): let the native MILP
     engine use the caller's budget instead of stopping on the 100k-node default.
@@ -40062,6 +40081,11 @@ def _solve_milp_simplex(
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_debug.rust_hook(),
+                **(
+                    (_milp_root_cut_budget(_reentry_remaining) or {})
+                    if _milp_reentry_cuts_enabled()
+                    else {}
+                ),
                 **_frontier_opts,
             )
             # #1874: a node- or frontier-capped run 2 stopped on a node budget.
