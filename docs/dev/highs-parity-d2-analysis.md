@@ -663,3 +663,48 @@ evidence points to is that **run 2 inherits run 1's root cut pool** (rows append
 LP, no re-separation), as the Phase B review suggested. That is a re-scope, not a tuning
 of this flag. Owner decision: retire `DISCOPT_MILP_REENTRY_CUTS` now and build pool
 inheritance under a new flag, or keep it pending that build.
+
+**10. Phase B entry B0 (no code): in-tree separation is the HiGHS lever; the Rust root is
+not the gap.**
+
+*HiGHS* (`d2-ablation/ablation_phase4_b0.jsonl`, the 10 rows `keep_cuts` rescues over
+plain B&B, 20 s, threads=1):
+
+- `keep_cuts` minus node separation (`mip_allow_cut_separation_at_nodes=false`) certifies
+  **3/10**, against 10/10 for `keep_cuts`.
+  - Lost: all four `mik`, `iskar`, `istra`, `b-ball`.
+  - `kaihu` still certifies, but with 21x the nodes.
+  - Root bounds are identical in both arms, so what certifies these rows is cuts found
+    in the tree.
+- `keep_cuts` minus aging (LP/pool age limits at their maximum) certifies 7/10. It loses
+  `b-ball`, `mik-1` and `mik-3`, with dual gaps < 0.8 %.
+- The Phase B review's kill criterion for "node separation first" (no-nodesep certifies
+  >= 8/10) is not met. **B1 goes first.**
+
+*Rust* (`d2-analysis/b0_rust_cuts_entry.{py,jsonl}`, direct driver, A14 options,
+`{cmir_cuts, node_cuts}` 2x2, root-only and 20 s):
+
+- **The Rust root matches or beats HiGHS's root with cuts.**
+
+  | row | Rust root | HiGHS root |
+  |---|---|---|
+  | `istra` | 46.57 | 45.99 |
+  | `iskar` | 34.65 | 34.54 |
+  | `mik-1` | -51,757 | -52,241 |
+  | `sp150x300d` | 55 | 4.89 |
+
+- **The existing node separator (`node_cuts`, knapsack cover) is identical to `base` on
+  all 10 rows.** It finds nothing there.
+- **Root c-MIR (`cmir_cuts`)** moves the root a little (`kaihu` 110.4 -> 112.2,
+  `issue-2446` -339 -> -415), but the 20 s outcome is mixed: `istra` gets worse, `mik-1`
+  gets a better incumbent.
+
+*Lattice check.* On the four `neos-361*` rows the objective is one free continuous column
+defined by a single equality, `z = 24 + sum(binaries)` on `istra`. The default-ON
+`DISCOPT_OBJ_LATTICE_SUBST` resolves it on the route: the panel bounds sit at exactly 48,
+36, 115 and 104. So the route needs the bound to cross to the next integer (`istra` 48 ->
+49), which HiGHS gets in the tree.
+
+The direct probe writes equality rows as inequality pairs (follow-up 4), so the
+substitution declines there (`ObjLatticeSubst` = 0; `istra` bound 48.31 unrounded). This
+is a probe artifact, not a route defect. For lattice rows, panels must use the route.
