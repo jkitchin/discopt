@@ -761,3 +761,39 @@ the causes.
 * Pyomo enumerate on med_term_purchasing was OOM-killed (11.9 GB RSS in a 16 GB container),
   as in #2149 (`killed`); it counts as unsolved.
 * No row was load-gated (`--max-load 16`); the 1-minute load ran 2.4-8.5.
+
+## #2182 close-out: the decision (2026-11-06)
+
+**Decision (owner, 2026-11-06): #2182 closes, and with it the GDP parity effort (#1775 →
+#1917 → #2182), with the §1.2 performance gate recorded as unmet.** The spec is not
+edited; the bar stands as written and is not met. What was reached, and why the rest is
+not GDP parity work:
+
+* **Correctness parity: exceeded.** discopt has 0 incorrect answers in every family in
+  both full gate runs (#2149 and this one). Pyomo has 10 and 8, including false optima
+  from its LOA, GLOA and RIC.
+* **Capability parity: met**, with documented exceptions (the capability matrix above:
+  19 of 23 rows; T2's local-variable half skipped by the owner, T3 and T11 retired on
+  their panels, M5 killed at its entry experiment).
+* **Performance parity: not met.** loa and gloa beat Pyomo at the point estimate (0.94,
+  0.87) and on solved count (13 vs 11), and miss only the CI clause. big-M and hull lose
+  on small instances where Pyomo + SCIP takes 0.1-0.2 s. The cause is measured (task 2,
+  `performance-plan.md` §120): per-solve and per-node overhead, spread across components,
+  in the **Python** tree. The native kernel declines every lowering measured, for five
+  distinct reasons. That is kernel coverage, a general performance question, and it
+  continues in `performance-plan.md`, not as GDP parity work.
+* **Why the gate is not re-run again.** Between #2149 and this run discopt got slightly
+  faster on the same host (new/old 0.95), yet big-M's ratio moved 1.97 -> 3.42 on the
+  environment alone: host, concurrency, Pyomo's SCIP interface and version. The CI clause
+  needs a point estimate of roughly 0.65-0.7 on this 24-instance panel. Re-running it
+  measures the machine more than the solver.
+
+**Carried forward**, outside #2182:
+
+* #2183: the HiGHS ≥ 1.13 fixed-integer-LP certificate decline (med_term_purchasing
+  big-M). A sound refusal of a certificate, with a proposed rigorous fix.
+* `performance-plan.md` §120: kernel coverage of GDP lowerings (`exp` / `log` atoms,
+  lifted perspective columns, box-dependent big-M rows) as the next entry experiment.
+* G4.2's done-when (enumerate / RIC certify every ≤ 10⁴-configuration instance) stays
+  unmet. Its remaining instances are the large GDPlib models, where the per-configuration
+  global subproblem is the cost, the same kernel-coverage question.

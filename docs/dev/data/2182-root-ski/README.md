@@ -14,6 +14,7 @@ was not using.
 | `corpus_60s_2rep.jsonl` | panel B: `flag_onoff_corpus_panel.py --time-limit 60 --reps 2 --jobs 1`, oracle `www.minlplib.org/minlplib.solu` fetched for the run |
 | `verdict.txt` | `python verdict.py .` on the two panels: **GRADUATE** |
 | `medterm_highs_version.txt`, `probes/medterm_highs_version.py` | the side finding: med_term_purchasing big-M certifies with highspy 1.11.0, not with 1.13.0-1.15.1 |
+| `kernel_decline.jsonl`, `probes/kernel_decline_probe.py` | why the native spatial kernel declines each lowering: the `build_spatial_kernel_spec` return site, traced with `sys.setprofile` during the real solve (`performance-plan.md` §120) |
 
 `probes/phase_probe.py` and `probes/children.py` are the cProfile attribution of
 eight_process hull and ex_633 big-M quoted in the write-up. Their `.prof` dumps are not
