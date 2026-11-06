@@ -619,8 +619,12 @@ reps, OFF/ON interleaved in fresh processes on one pinned core, the ON arm patch
 * While the A/B ran, the regression test briefly used its core for ~11 s. The interleaved
   arm order keeps that roughly symmetric.
 
-It ships as `DISCOPT_GDP_CONFIG_ROOT_SKI`, **default OFF**, with its §5 panel
-pre-registered (`prereg.md`, `verdict.py`, committed before the first panel row).
+It ships as `DISCOPT_GDP_CONFIG_ROOT_SKI`. It was added default-OFF with its §5 panel
+pre-registered (`prereg.md` and `verdict.py`, committed before the first panel row).
+**The panel passed, and the flag is graduated (default ON, `=0` opts out).**
+`verdict.txt` has the run: 192 GDP and 296 corpus solves, 0 C violations. GDP SGM
+ON/OFF was 0.799 and 0.818 per rep over the 24 cells both arms certify. Node ratio
+1.004 (GDP) and 1.001 (corpus); corpus SGM 1.002 / 1.010.
 
 This does not close the big-M/hull gap. At best it takes ~1.4 s off a 2-4 s solve that
 Pyomo + SCIP finishes in 0.1-0.2 s. The remainder is distributed across root OBBT, the
@@ -639,3 +643,121 @@ root NS bound. Restoring `lp_milp_highs.py` from `1f16c936`, `aa12eb4~1`, `aa12e
 is sound (it refuses, never mis-certifies) but costs a certificate on the default install
 (`highspy>=1.11` resolves to 1.15.1). It is a lead for the LP/MILP route's certificate,
 outside #2182.
+
+## #2182 task 3: the leftovers, closed or retired (2026-11-06)
+
+Every measurement here is from the #2182 G6.1 re-run's repeat 1 (`docs/dev/data/gdp_g61_2182/rep1.jsonl`,
+main `63910b2`, 300 s, all 24 instances × 14 arms; see the G6.1 section below for the setup).
+
+* **G4.1 part 2 (LOA equality relaxation, slack penalty): retired, not built.** Per spec
+  §5.3 / §5.4 a slack-penalized master gives no valid LB (`bound=None`), so neither option
+  can turn an unsolved instance into a certified one. Both §1.2 bars that LOA could miss
+  count certified solves: bar 2 directly, bar 3 because an unsolved run scores at the 300 s
+  limit. Measured: discopt-LOA leaves 11 of 24 unsolved (batch_processing, biofuel, cstr,
+  gdp_col, hda, kaibel, med_term_purchasing, methanol, mod_hens, spectralog, stranded_gas).
+  6 already have an incumbent. The other 5 are all the options could change, and only by
+  adding an incumbent, which no bar counts. LOA's bar-2 standing is 13 vs Pyomo's 11
+  without them. What would reopen this: a gate that scores primal quality on unsolved
+  instances.
+* **G4.2 (RIC + enumerate): re-measured, done-when still not met.** The done-when (spec
+  §9) is "certify every panel instance that has ≤ 10⁴ configurations within the budget."
+  With `DISCOPT_GDP_ENUMERATE_CUTOFF` graduated, enumerate refuses 6 instances above 10⁴
+  configurations (biofuel, disease_model, med_term_purchasing, positioning, spectralog,
+  stranded_gas). Of the 18 eligible it certifies **9 within 60 s** and 10 within 300 s
+  (clay0203 at 128 s), 0 incorrect. Against the old "7 of 14 eligible within 60 s", that
+  is more instances, and the same half. The 8 eligible instances it does not certify
+  (batch_processing, cstr, gdp_col, hda, kaibel, methanol, mod_hens, syngas) end at the
+  limit with open configuration subproblems. RIC certifies 11 of 24. Both match Pyomo's
+  counts on this run (enumerate 10 / 10, RIC 11 / 11), so G4.2's remaining gap is the
+  global-subproblem cost on the large GDPlib models, the same as big-M's. It is not an
+  enumeration defect.
+* **`stranded_gas` under hull: no longer refuses; no incumbent in 300 s.** discopt hull
+  ends `time_limit` at 304 s with no incumbent and no bound, and so does discopt big-M
+  (306 s). Pyomo hull, which errored in #2149, now reaches its time limit (373 s) with
+  bound -99072.4 and no incumbent. No arm of either tool solves it.
+* **The §1.1 capability matrix:** done, in the section above.
+* **G5.4 (advisor extension): retired.** Already closed in writing on 2026-11-01 (the G5.4
+  section above): both options it would have routed to are gone, `DISCOPT_MBIGM_CONDITIONED`
+  retired by its panel and G2.2 skipped by the owner.
+
+## #2182 task 1: G6.1 re-run on `main` (2026-11-06)
+
+Data: `docs/dev/data/gdp_g61_2182/`. Score: `python discopt_benchmarks/scripts/gdp_g61_score.py
+docs/dev/data/gdp_g61_2182`. Build `63910b2` (main) in a worktree, every row's `discopt` path
+asserted inside it. Same design and scorer as #2149: repeat 1 runs all 24 instances × 14 arms;
+repeats 2-3 re-run the 172 pairs that both sides solved; 300 s limit, 120 s grace. Host: a 4-core
+Linux VM, Python 3.12, Pyomo 6.10.1, SCIP 10.2.0 (`scip_direct` and the executable), Ipopt
+3.11.9, CBC, highspy 1.15.1. Cores 0-2 ran the gate (`--jobs 3`, `taskset`); core 3 ran the
+#2182 task-2 experiments.
+
+### Result: no family passes all three bars
+
+| family | solved d / p | incorrect d / p | SGM d (s) | SGM p (s) | ratio | 95% CI | per-repeat ratios |
+|---|---|---|---|---|---|---|---|
+| big-m | 15 / **17** | 0 / 0 | 38.58 | 10.59 | 3.42 | [2.15, 5.81] | 3.44 3.42 3.39 |
+| hull | 15 / **17** | 0 / 0 | 47.09 | 10.88 | 4.05 | [2.38, 7.17] | 3.97 4.10 4.08 |
+| loa | 13 / 11 | 0 / 2 | 35.21 | 37.44 | **0.94** | [0.51, 1.54] | 0.90 0.97 0.96 |
+| gloa | 13 / 11 | 0 / 3 | 34.57 | 40.00 | **0.87** | [0.47, 1.46] | 0.87 0.85 0.88 |
+| ric | 11 / 11 | 0 / 2 | 59.38 | 35.32 | 1.66 | [1.25, 2.31] | 1.67 1.66 1.66 |
+| enumerate | 10 / 10 | 0 / 1 | 65.37 | 42.92 | 1.51 | [1.10, 2.18] | 1.51 1.51 1.52 |
+| lbb | 13 / **14** | 0 / 0 | 69.41 | 35.55 | 1.93 | [1.40, 2.74] | 1.94 1.93 1.91 |
+
+* **Bar 1 passes everywhere.** discopt has 0 incorrect and 0 unverified claims, in every
+  family and repeat. Pyomo has 8 incorrect answers.
+* **Bar 2 fails for big-m, hull and lbb.**
+  * big-m: discopt gained cstr (#2142) and lost med_term_purchasing. Pyomo gained cstr and
+    eight_process_logical, which it scored `incorrect` in #2149.
+  * hull: discopt gained syngas (#2143). Pyomo now also solves positioning and spectralog.
+  * lbb: discopt lost med_term_purchasing and spectralog; spectralog is near the limit on this host.
+  * The three instances #2182 named (cstr #2142, syngas #2143, batch_processing #2144) did
+    close the hull gap discopt had, but Pyomo's gains here outran them.
+* **Bar 3 fails everywhere.** loa and gloa pass the point estimate and fail the CI clause
+  (upper 1.54, 1.46 > 1.10), as in #2149. The per-repeat ratios differ by ≤ 0.07, so the
+  width of the CI comes from instance heterogeneity, not from noise.
+
+### Why the ratios are worse than #2149's, and what the cause is not
+
+Every ratio is above #2149's (big-m 1.97 → 3.42, loa 0.71 → 0.94). Three controls separate
+the causes.
+
+* **Not a discopt regression.** `old_vs_new_same_host.jsonl` runs `1f16c936` (the #2149
+  build, rebuilt here) and `main` on the same host, interleaved, one run per pinned core,
+  over the 90 (family, instance) cells `main` solved. On the 86 cells both solved, the
+  geometric-mean wall new/old is **0.95** (sd of log 0.27): hull 0.80, lbb 0.83, big-m 0.89,
+  loa 1.05, gloa 1.04, ric 1.08, enumerate 1.07. The three status changes are all gains:
+  cstr under big-M and LBB, syngas under hull.
+* **The concurrency penalty is asymmetric here.** The jobs=1 serial control (`serial.jsonl`,
+  78 runs) puts `--jobs 3` walls at 1.63x serial for discopt and 1.20x for Pyomo. discopt's
+  workers are multithreaded (about 1.1-1.3 cores each), and three of them on three cores
+  oversubscribe; Pyomo's subsolvers are single-threaded. #2149's 14-core host had room, and
+  measured 1.09x / 1.13x. That alone inflates every ratio here by about 1.36x. Big-m's
+  corrected ratio is about 2.5, still above 1.0.
+* **Pyomo's arms are stronger.** The harness default `scip_direct` is available here; #2149
+  ran the SCIP executable because its Pyomo lacked it. `control_pyomo_scipexe.jsonl` re-runs
+  Pyomo big-m and hull on the executable. It solves 16 / 15 (vs 17 / 17 direct). So **bar 2
+  for hull passes like-for-like (15 vs 15)**: the direct interface adds positioning and
+  spectralog. Pyomo's two `incorrect` big-m answers in #2149 (cstr, eight_process_logical)
+  come out correct here on either interface, so they belonged to SCIP 10.0.2, not to the
+  `.nl` route.
+
+### Per family: the measured lead for each miss
+
+* **big-m, hull:** per-solve fixed cost on small instances plus search on hull (task 2
+  above); `DISCOPT_GDP_CONFIG_ROOT_SKI` takes the constructor's share. Bar 2 for big-m also
+  loses med_term_purchasing to the HiGHS ≥ 1.13 certificate decline (task 2's side finding).
+* **lbb:** med_term_purchasing and spectralog, both solved in #2149. spectralog is near the
+  limit on this host. Whether med_term's LBB loss has the same HiGHS cause has not been
+  tested; a highspy 1.11.0 run of `discopt-lbb` would decide it.
+* **ric, enumerate:** the per-configuration global subproblems on the large GDPlib models
+  (task 3, G4.2).
+* **loa, gloa:** bar 3's CI clause only. The point estimates are 0.94 and 0.87.
+
+### Deviations from the spec and from #2149, stated
+
+* `--jobs 3` on 4 cores (#2149: jobs 4 on 14), with the asymmetric inflation above.
+* Pyomo 6.10.1 (#2149: 6.10.0). Pyomo hull no longer errors on gdp_col, hda, kaibel or
+  stranded_gas; it reaches its limit instead.
+* highspy 1.15.1, which costs med_term_purchasing under discopt big-M and LBB.
+* Pyomo enumerate on med_term_purchasing was OOM-killed (11.9 GB RSS in a 16 GB container),
+  as in #2149 (`killed`); it counts as unsolved.
+* No row was load-gated (`--max-load 16`); the 1-minute load ran 2.4-8.5.

@@ -1,0 +1,11 @@
+arm                n  gm new/old (1 s shift)  worst cells
+discopt-big-m      14   0.89   pyomo.eight_process_logical 4.8->5.0; pyomo.nonconvex_hen 2.5->2.6; pyomo.constrained_layout_clay0203 46.7->47.9
+discopt-enumerate  10   1.07   pyomo.eight_process_logical 11.1->20.0; pyomo.eight_process 7.0->10.7; pyomo.constrained_layout_clay0203 86.4->96.9
+discopt-gloa       13   1.04   pyomo.eight_process 3.6->5.1; syngas 57.2->71.5; pyomo.nonconvex_hen 1.9->2.4
+discopt-hull       14   0.80   disease_model 82.9->84.0; pyomo.strip_packing_concrete 0.5->0.5; med_term_purchasing 4.5->4.5
+discopt-lbb        11   0.83   positioning 157.3->166.9; ex1_linan_2023 3.3->3.4; pyomo.ex_633_trespalacios 2.8->2.9
+discopt-loa        13   1.05   pyomo.eight_process 4.4->6.4; pyomo.eight_process_logical 4.2->4.8; pyomo.nonconvex_hen 2.8->3.1
+discopt-ric        11   1.08   pyomo.ex_633_trespalacios 1.4->2.0; pyomo.eight_process 25.6->31.4; pyomo.eight_process_logical 29.8->36.1
+all: n=86 gm=0.95 sd(log)=0.27
+status flips (old vs new): [('cstr', 'discopt-big-m', 'time_limit', 'optimal', 300.235, 122.994), ('cstr', 'discopt-lbb', 'feasible', 'optimal', 300.088, 168.298), ('syngas', 'discopt-hull', 'time_limit', 'optimal', 302.659, 101.33)]
+executed-assertions: 1

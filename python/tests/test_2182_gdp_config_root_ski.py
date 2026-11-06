@@ -4,8 +4,9 @@ Under ``DISCOPT_GDP_CONFIG_DEFER`` (default ON) the GDP-config constructor's roo
 call gets a fixed ``_GDP_CONFIG_DEFER_ROOT_S`` = 1.5 s and the rest of its grant is
 held back. With this flag ON the root share is ``min(1.5 s, time the solve spent
 before the constructor)``; the hold-back is unchanged, so a solve that runs long
-enough still spends the whole grant. Default OFF until its §5 panel (BC: it changes
-which incumbents are found and when, never a bound).
+enough still spends the whole grant. Default ON since its §5 panel
+(``docs/dev/data/2182-root-ski/``); ``=0`` opts out (BC: it changes which
+incumbents are found and when, never a bound).
 """
 
 from __future__ import annotations
@@ -21,15 +22,17 @@ from discopt._relax import primal_heuristics as PH
 pytestmark = pytest.mark.smoke
 
 
-def test_default_off_and_opt_in(monkeypatch):
+def test_default_on_and_opt_out(monkeypatch):
+    """Graduated on its §5 panel: unset is ON, ``=0`` (and its spellings) opt out,
+    empty is not off."""
     monkeypatch.delenv("DISCOPT_GDP_CONFIG_ROOT_SKI", raising=False)
-    assert not SV._gdp_config_root_ski_enabled()
-    for off in ("", "0", "false", "no", "off", "2"):
-        monkeypatch.setenv("DISCOPT_GDP_CONFIG_ROOT_SKI", off)
-        assert not SV._gdp_config_root_ski_enabled(), off
-    for on in ("1", "true", "yes", "on", " ON "):
+    assert SV._gdp_config_root_ski_enabled()
+    for on in ("", "1", "true", "yes", "on"):
         monkeypatch.setenv("DISCOPT_GDP_CONFIG_ROOT_SKI", on)
         assert SV._gdp_config_root_ski_enabled(), on
+    for off in ("0", "false", "no", "off", " OFF "):
+        monkeypatch.setenv("DISCOPT_GDP_CONFIG_ROOT_SKI", off)
+        assert not SV._gdp_config_root_ski_enabled(), off
 
 
 def test_root_share_is_capped_by_the_time_already_spent(monkeypatch):

@@ -1000,8 +1000,9 @@ def _gdp_config_defer_enabled() -> bool:
 
 def _gdp_config_root_ski_enabled() -> bool:
     """Whether the root share itself follows the ski-rental rule
-    (``DISCOPT_GDP_CONFIG_ROOT_SKI``, #2182; default **OFF**, ``=1`` opts in; BC: it
-    changes which incumbents are found and when, never a bound).
+    (``DISCOPT_GDP_CONFIG_ROOT_SKI``, #2182; default **ON** since its §5 panel,
+    ``=0`` opts out and restores the fixed 1.5 s share; BC: it changes which
+    incumbents are found and when, never a bound).
 
     Under ``DISCOPT_GDP_CONFIG_DEFER`` the root call gets a fixed
     ``_GDP_CONFIG_DEFER_ROOT_S`` = 1.5 s and the rest of the grant is held back
@@ -1027,16 +1028,23 @@ def _gdp_config_root_ski_enabled() -> bool:
     final point came at 1.1-1.5 s on eight_process_logical, ex1_linan_2023 hull,
     clay0203 and positioning).
 
-    Off under ``deterministic`` because ``_gdp_config_defer_enabled`` is. Default
-    OFF until its §5 panel; the row in ``docs/dev/flag-retirement-audit.md`` has the
-    entry measurement and the panel's state. Only ``1``/``true``/``yes``/``on``
-    turn it on.
+    Off under ``deterministic`` because ``_gdp_config_defer_enabled`` is.
+
+    **Graduated** on its pre-registered §5 panel (2026-11-06,
+    ``docs/dev/data/2182-root-ski/``: ``gdp_parity`` 24 x {big-m, hull} x 2 reps at
+    120 s plus the 74 in-repo ``.nl`` x 2 reps at 60 s, OFF/ON interleaved;
+    ``verdict.py`` -> GRADUATE): cert-clean (0 incorrect, 0 bound crossings, no
+    certificate or incumbent lost) and net-positive where it acts (SGM wall over the
+    24 cells both arms certify ON/OFF 0.799 and 0.818 per rep; node ratio 1.004),
+    neutral on the corpus (SGM 1.002 / 1.010). The row in
+    ``docs/dev/flag-retirement-audit.md`` has the numbers. Empty is not an
+    off-value; ``0``/``false``/``no``/``off`` opt out.
     """
-    return os.environ.get("DISCOPT_GDP_CONFIG_ROOT_SKI", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_CONFIG_ROOT_SKI", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

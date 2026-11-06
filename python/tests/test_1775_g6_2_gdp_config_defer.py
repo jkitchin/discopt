@@ -34,6 +34,9 @@ def test_default_on_and_opt_out(monkeypatch):
 
 
 def test_opt_out_and_root_until(monkeypatch):
+    # The fixed-share rule this test pins; #2182's DISCOPT_GDP_CONFIG_ROOT_SKI (default
+    # ON) caps the share by the time already spent, and test_2182 covers that rule.
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_ROOT_SKI", "0")
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "0")
     assert not SV._gdp_config_defer_enabled()
     assert SV._gdp_config_root_until(100.0, 50.0, 45.0) == 100.0

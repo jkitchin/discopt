@@ -174,7 +174,8 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     "DISCOPT_HEUR_WALL_COST": ("big-m", "hull"),
     # #2182: the GDP-config constructor's root share under the ski-rental rule acts
     # at solve time (lowering identical): solve ``--all``. Pre-registered rule:
-    # docs/dev/data/2182-root-ski/prereg.md.
+    # docs/dev/data/2182-root-ski/prereg.md. GRADUATED by that panel (default ON; the
+    # OFF arm is now ``=0``).
     "DISCOPT_GDP_CONFIG_ROOT_SKI": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
