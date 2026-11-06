@@ -511,3 +511,17 @@ root vertex. This **falsifies lever L1 (bisect) for `gt2`** and sharpens the dia
 engine's primal side cannot recover from an unlucky trajectory (no improvement heuristic
 runs once an incumbent exists; RINS is off). Lever L3a/L3b (RINS, improvement diving) is
 the one that addresses this class.
+
+**4. RETRACTION of follow-up 1's "the route wrapper costs ~3 certifications".** On
+`khb05250` (65 nodes / 0.44 s direct, open via the route) the route's own arrays, replayed
+through the same driver with the direct options and the full 20 s
+(`d2-analysis/route_spy.py`), still do not certify (2107 nodes, open). The difference is the
+formulation, not the wrapper: the direct path (`_ranged_to_ub_eq` +
+`_marshal_std_form`) writes each of the 77 equality rows as two inequalities (m = 178,
+1528 columns), the route keeps them as equalities (m = 101, 1374 columns). Same problem,
+different LP bases and vertices, opposite outcomes -- the `gt2` 1-ulp effect again, from an
+equivalent reformulation. **Consequence for D2:** the engine's certification count on this
+panel is variance-dominated (trajectory-sensitive); levers have to be judged on several
+equivalent perturbations or reps, and the levers that can move it robustly are primal
+recovery (RINS, improvement heuristics) and per-node bound strength, not reverts or
+re-tuning one path.
