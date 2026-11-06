@@ -190,6 +190,7 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated instance names to run")
     ap.add_argument("--results", default="results.jsonl", help="file (in --out) to write")
     ap.add_argument("--judge-only", action="store_true", help="judge every results*.jsonl")
+    ap.add_argument("--arms", default="new,off,base", help="arms to run (with --only)")
     a = ap.parse_args()
     if a.worker:
         worker()
@@ -217,6 +218,7 @@ def main() -> int:
         "off": (FLAGS_OFF, repo_py, True),
         "base": ({}, a.base_pythonpath, False),
     }
+    arms = {k: v for k, v in arms.items() if k in a.arms.split(",")}
     procs = {}
     for arm, (env_add, pp, want_marker) in arms.items():
         env = {k: v for k, v in os.environ.items() if not k.startswith("DISCOPT_MILP_")}
@@ -240,8 +242,8 @@ def main() -> int:
     for i, ins in enumerate(run):
         for form in FORMS:
             rot = (
-                order[(i + list(FORMS).index(form)) % 3 :]
-                + order[: (i + list(FORMS).index(form)) % 3]
+                order[(i + list(FORMS).index(form)) % len(order) :]
+                + order[: (i + list(FORMS).index(form)) % len(order)]
             )
             for arm in rot:
                 p = procs[arm]
