@@ -484,7 +484,7 @@ discopt install-skills --dev            # symlink, for `pip install -e`
 discopt install-skills --force          # overwrite
 ```
 
-`ls python/discopt/skills/commands/` (8), `skills/agents/` (17) and `skills/skills/` (the
+`ls python/discopt/skills/commands/` (8), `skills/agents/` (18) and `skills/skills/` (the
 `discopt` Agent Skill) for the current set; `skills/__init__.py` exposes `commands_dir()`,
 `agents_dir()`, `skills_dir()` and the matching `iter_*()` for programmatic discovery.
 

@@ -122,6 +122,7 @@
 "python/tests/test_1858_disjunct_rhs.py::test_normalized_twin_solves_to_oracle[either_or-binary_multiplication]": 7.7,
 "python/tests/test_1858_disjunct_rhs.py::test_seed41_normalized_twin[hull]": 19.7,
 "python/tests/test_1873_jax_optional.py::test_a_few_instances_solve_without_ever_reaching_for_jax": 6.24,
+"python/tests/test_2156_relu_negligible_partitions.py::test_tiny_weight_net_certifies_bigm_optimum[relu_extended-kw0-0-32]": 15.29,
 "python/tests/test_832_root_build_deadline.py::test_832_flag_byte_identical_on_normal_instance[casctanks]": 14.98,
 "python/tests/test_844_lp_spatial_deadline.py::test_engine_honours_its_time_limit[6.0]": 6.01,
 "python/tests/test_844_lp_spatial_deadline.py::test_result_is_sound_when_one_is_returned": 6.01,

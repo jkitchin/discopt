@@ -12,7 +12,7 @@ The repository root has `commands/`, `agents/` and `skills/` symlinks into
 [knowhow](https://github.com/jkitchin/knowhow) (v0.3+) discovers:
 
 ```bash
-uvx knowhow add jkitchin/discopt --list          # 8 commands, 17 agents, 1 skill
+uvx knowhow add jkitchin/discopt --list          # 8 commands, 18 agents, 1 skill
 uvx knowhow add jkitchin/discopt --all           # install everything
 uvx knowhow add jkitchin/discopt --skill discopt # just the overview skill (any agent)
 uvx knowhow check / update / remove ...          # lock-file managed
@@ -71,13 +71,21 @@ plugin: `discopt-doe-install-skill`.)
 
 ### Agents (`~/.claude/agents/`)
 
-17 domain-expert subagents covering modeling and the solver stack:
+18 subagents: 17 domain experts covering modeling and the solver stack,
 `amp-expert`, `benchmarking-expert`, `convex-relaxation-expert`,
 `convexity-detection-expert`, `differentiability-expert`, `estimation-expert`, `heuristics-expert`,
 `highs-expert`, `ipopt-expert`,
 `llm-feature-expert`, `minlp-solver-expert`,
 `modeling-expert`, `multiobjective-expert`, `ml-embedding-expert`,
-`presolve-expert`, `robust-opt-expert`, `scip-expert`.
+`presolve-expert`, `robust-opt-expert`, `scip-expert`, and the generalist
+`discopt-expert`.
+
+`discopt-expert` knows the codebase as a whole: where things live, the order
+`solve_model` routes a model, how a result traces back to code, and the rules in
+`CLAUDE.md`. It routes a question to the specialist that owns it. For POUNCE's own
+internals it points to the `pounce-expert` agent, which ships from
+[pounce](https://github.com/jkitchin/pounce) (`uvx knowhow add jkitchin/pounce --subagent
+pounce-expert`).
 
 The source of truth for these files is `python/discopt/skills/commands/`,
 `python/discopt/skills/agents/` and `python/discopt/skills/skills/`. Edit them there; downstream users

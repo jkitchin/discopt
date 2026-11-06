@@ -81,6 +81,14 @@ options = {
 }
 ```
 
+## Hand-offs
+
+For POUNCE's *internals* (its crates, where a status or an option comes from, how a solve is
+routed and run, how to read its solve report), hand off to the `pounce-expert` agent, which
+ships from pounce (`uvx knowhow add jkitchin/pounce --subagent pounce-expert`). For where an
+NLP solve sits in discopt's routing, hand off to `discopt-expert`. This agent covers Ipopt
+and how discopt chooses between its NLP backends.
+
 ## Context: Crucible Knowledge Base
 
 - `.crucible/wiki/concepts/ipopt-solver.org` — Ipopt-specific reference article.
