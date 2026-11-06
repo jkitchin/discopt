@@ -1,0 +1,39 @@
+instance                           method  OFF wall (mean)  ON wall (mean)  ratio  nodes OFF/ON  ON root share
+disease_model                      big-m      64.36           64.02        0.99  3970/3970  []
+disease_model                      hull       80.39           80.74        1.00  3318/3318  []
+ex1_linan_2023                     big-m       3.25            1.83        0.56  9/9  [0.079, 1.195]
+ex1_linan_2023                     hull        3.48            2.06        0.59  9/9  [0.101, 1.192]
+med_term_purchasing                big-m       7.99            7.93        0.99  41/41  []
+med_term_purchasing                hull        4.14            4.13        1.00  1/1  []
+modprodnet                         big-m      10.89           10.90        1.00  5/5  [1.5]
+modprodnet                         hull      244.47          247.79        1.01  249/249  [1.5]
+positioning                        big-m       7.26            6.07        0.84  307/323  [0.205]
+positioning                        hull        7.33            6.16        0.84  307/323  [0.254]
+pyomo.constrained_layout_clay0203  big-m      45.78           45.57        1.00  127/127  [0.103]
+pyomo.constrained_layout_clay0203  hull       10.05            8.91        0.89  109/109  [0.326]
+pyomo.eight_process                big-m       4.11            3.03        0.74  27/27  [0.474]
+pyomo.eight_process                hull       14.68           14.51        0.99  59/59  [1.5]
+pyomo.eight_process_logical        big-m       4.07            4.18        1.03  19/19  [0.64]
+pyomo.eight_process_logical        hull       12.37           12.50        1.01  41/41  [1.5]
+pyomo.ex_633_trespalacios          big-m       1.91            0.84        0.44  13/13  [0.154]
+pyomo.ex_633_trespalacios          hull        7.07            7.00        0.99  45/45  [0.938]
+pyomo.jobshop_small                big-m       0.29            0.31        1.04  1/1  []
+pyomo.jobshop_small                hull        0.22            0.23        1.05  1/1  []
+pyomo.nonconvex_hen                big-m       2.46            1.35        0.55  5/5  [0.361]
+pyomo.nonconvex_hen                hull       12.00           12.29        1.02  13/13  [1.5]
+pyomo.strip_packing_concrete       big-m       0.34            0.35        1.01  1/1  []
+pyomo.strip_packing_concrete       hull        0.34            0.33        0.99  1/1  []
+small_batch                        big-m       2.22            0.81        0.37  3/3  [0.136]
+small_batch                        hull        2.40            1.11        0.46  3/3  [0.213]
+spectralog                         big-m     118.22          115.11        0.97  657/657  [1.5]
+spectralog                         hull      248.63          249.54        1.00  797/797  [1.5]
+syngas                             big-m      96.82           98.99        1.02  3/3  [15.0, 1.989]
+syngas                             hull      101.04          101.74        1.01  3/3  [15.0, 2.009]
+
+pairs scored 90, error pairs 0, cells 30
+certified-objective violations: 0 []
+certification lost: 0 []; gained: 0
+SGM (1 s shift) OFF 10.140 s  ON 8.989 s  gain 11.4 %
+median node ratio ON/OFF 1.000 over 87 both-certified pairs
+VERDICT: PASS (all three bars)
+executed-assertions: 1 (pairs=90)

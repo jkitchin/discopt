@@ -1,0 +1,13 @@
+# med_term_purchasing, gdp_method="big-m", time_limit=300, main @ 63910b2, same build, highspy
+# swapped by PYTHONPATH (each run asserts the highspy it loaded). Route: highs-milp (pure MILP).
+highspy 1.11.0  optimal  cert=True   obj 6797.539701513403  bound 6798.148597893704   75 nodes  6.9-7.1 s
+highspy 1.13.0  feasible cert=False  obj 6797.539701512009  bound 8358.999245053974  197 nodes  8.8 s
+highspy 1.13.1  feasible cert=False  obj 6797.539701512009  bound 8358.999245053974  197 nodes  8.9 s
+highspy 1.14.0  feasible cert=False  obj 6797.539701513318  bound 8358.999245053974   41 nodes  8.3 s
+highspy 1.15.1  feasible cert=False  obj 6797.539701513318  bound 8358.999245053974   41 nodes  7.7-8.0 s
+# 1.12.0 is excluded by pyproject (highspy>=1.11,!=1.12.0); 1.12.1 does not exist on PyPI.
+# Decline reason on >= 1.13: "the fixed-integer LP check was inconclusive (LP feasible: NS safe
+# bound -6797.54123335 is 0.00153 below the objective)"; threshold CERT_ABS + CERT_REL*|obj| =
+# 7.8e-6. Same with lp_milp_highs.py taken from 1f16c936, aa12eb4~1, aa12eb4 and f0de847, and with
+# DISCOPT_MILP_REFUTED_TIGHT_RESOLVE=0: not a discopt code change. DISCOPT_LP_MILP_BACKEND=rust:
+# feasible, 6760.54 / 7841.91 after 39448 nodes at 300 s.
