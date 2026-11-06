@@ -1612,6 +1612,10 @@ and is re-written by P4.1.**
   bound (`sp150x300d`, `beavma`, `gt2`, `neos17`, `p0548`, `issue-2446`, `gesa2`) and no
   incumbent (`enlight_hard`, `neos-2624317-amur`, `neos17`). Per the kill clause the
   decision passes to **D2** (owner).
+  **D2 decided (owner, 2026-11-06): keep HiGHS as the MILP default and stop the MILP
+  track.** `DISCOPT_LP_MILP_BACKEND` stays `highs` (`=rust` remains the opt-in); the
+  narrower "HiGHS optional for R1 by class" end state is not pursued. Phase 6's
+  packaging flip must therefore keep `highspy` for pure MILP (the R1 route).
 
 ### Phase 5 — masters (R2a/R2b)
 
