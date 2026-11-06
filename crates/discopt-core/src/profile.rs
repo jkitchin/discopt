@@ -143,6 +143,8 @@ timed_phases!(
     SepGomory,
     Augment,
     DiveRepair,
+    // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`).
+    SubMip,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
@@ -325,6 +327,16 @@ counters!(
     NodeGmiPoolUsed,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
     SubstFixedSlack,
+    // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`): attempts considered, propagation
+    // refusals, RENS/RINS solves run, sub-solve nodes, improvements, and rejected
+    // points (must stay 0).
+    SubMipConsidered,
+    SubMipPropInfeas,
+    SubMipRensRun,
+    SubMipRinsRun,
+    SubMipSubNodes,
+    SubMipImproved,
+    SubMipRejected,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,

@@ -908,6 +908,247 @@ pub struct MilpOptions {
     pub simplex: SimplexOptions,
 }
 
+// ---------------------------------------------------------------------------
+// highs-parity D2: budgeted sub-MIP neighbourhood heuristic (`DISCOPT_MILP_SUBMIP`).
+//
+// HiGHS's default final incumbent comes from a sub-MIP (source `L`) on 20 of the 25
+// MIPLIB/M rows the Rust engine failed (`highs-parity-d2-highs-ablation.md` §C.5).
+// With bounds now at or near the optimum on several of them (aligned slacks, node
+// GMI), the incumbent is what is missing: on `neos-3610051-istra`, HiGHS with every
+// heuristic off finds 49 only at node 6,194, and on `neos-3118745-obra` not within
+// 30 s. This restores the A12 sub-MIP machinery (retired with `DISCOPT_RINS`) with
+// what the ablation's design (§C.3) says made HiGHS's version work:
+//
+// * a RENS neighbourhood when there is no incumbent (LP-integral columns fixed,
+//   fractional ones clamped to floor/ceil);
+// * a RINS neighbourhood once there is one (LP/incumbent agreement set fixed);
+// * FBBT propagation on the sub-box, so the neighbourhood is consistent and smaller.
+//
+// Soundness is the A12 argument, unchanged. Every sub-box is a contraction of the
+// base box; the sub-solve runs on the BASE problem (snapshot before the root cut
+// loop); a point is injected only after `validate_seed_incumbent` re-verifies every
+// original row, bound and integrality. A heuristic that only proposes incumbents
+// cannot move the dual bound.
+// ---------------------------------------------------------------------------
+
+/// Minimum share of integer columns a neighbourhood must fix (before propagation).
+const SUB_MIP_MIN_FIXING_RATE: f64 = 0.30;
+/// Node budget for one sub-MIP.
+const SUB_MIP_NODE_CAP: usize = 500;
+/// Share of the parent search all sub-solves may spend, plus a flat allowance
+/// (SCIP's `nodesquot` shape).
+const SUB_MIP_NODE_QUOT: f64 = 0.05;
+const SUB_MIP_NODE_OFFSET: usize = 500;
+/// Batches between attempts, and the cap on failure-backoff doublings.
+const SUB_MIP_BATCH_STRIDE: usize = 16;
+const SUB_MIP_BACKOFF_MAX_DOUBLINGS: u32 = 2;
+
+/// Total sub-solve nodes still allowed, given the parent's node count and what has
+/// been spent.
+fn sub_mip_node_budget(parent_nodes: usize, spent: usize) -> usize {
+    let allowance = SUB_MIP_NODE_OFFSET + (parent_nodes as f64 * SUB_MIP_NODE_QUOT) as usize;
+    allowance.saturating_sub(spent).min(SUB_MIP_NODE_CAP)
+}
+
+/// Batches to wait before the next attempt after `fail_streak` failures in a row.
+fn sub_mip_backoff_stride(base_stride: usize, fail_streak: u32) -> usize {
+    base_stride << fail_streak.min(SUB_MIP_BACKOFF_MAX_DOUBLINGS)
+}
+
+/// `DISCOPT_MILP_SUBMIP`, read once. Default OFF; garbage is refused.
+fn sub_mip_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_SUBMIP").unwrap_or_default();
+        parse_sub_mip(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+fn parse_sub_mip(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_SUBMIP={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// The pristine base problem, captured once before the root cut loop.
+struct SubMipBase {
+    csc: SparseCols,
+    m: usize,
+    n: usize,
+    c: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    b: Vec<f64>,
+    is_int_full: Vec<bool>,
+}
+
+/// Which neighbourhood a sub-MIP serves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubMipKind {
+    Rens,
+    Rins,
+}
+
+/// Build a neighbourhood sub-box (a contraction of `base.l`/`base.u`), propagate it,
+/// and solve it. `node_x` is a node relaxation point over the structural columns;
+/// `inc` is the incumbent `(x, objective incl. obj_const)` for RINS. Returns a
+/// re-validated strictly improving point `(x over base columns, obj incl. obj_const)`.
+#[allow(clippy::too_many_arguments)]
+fn try_sub_mip(
+    kind: SubMipKind,
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    inc: Option<(&[f64], f64)>,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    node_budget: usize,
+    spent: &mut usize,
+) -> Option<(Vec<f64>, f64)> {
+    crate::profile::incr(crate::profile::Ctr::SubMipConsidered);
+    if node_x.len() < ns {
+        return None;
+    }
+    let mut sub_l = base.l.clone();
+    let mut sub_u = base.u.clone();
+    let mut n_int = 0usize;
+    let mut fixed = 0usize;
+    for j in 0..ns {
+        if !is_int[j] {
+            continue;
+        }
+        n_int += 1;
+        let x = node_x[j];
+        match kind {
+            SubMipKind::Rens => {
+                let r = x.round();
+                if (x - r).abs() <= 1e-6 {
+                    if r < base.l[j] - 1e-9 || r > base.u[j] + 1e-9 {
+                        return None;
+                    }
+                    sub_l[j] = r;
+                    sub_u[j] = r;
+                    fixed += 1;
+                } else {
+                    // Clamp to the two roundings: a contraction of the base box.
+                    sub_l[j] = sub_l[j].max(x.floor());
+                    sub_u[j] = sub_u[j].min(x.ceil());
+                }
+            }
+            SubMipKind::Rins => {
+                let (ix, _) = inc?;
+                if ix.len() < ns {
+                    return None;
+                }
+                if (x - ix[j]).abs() <= 1e-6 {
+                    let v = ix[j].round();
+                    if v < base.l[j] - 1e-9 || v > base.u[j] + 1e-9 {
+                        return None;
+                    }
+                    sub_l[j] = v;
+                    sub_u[j] = v;
+                    fixed += 1;
+                }
+            }
+        }
+    }
+    if n_int == 0 {
+        return None;
+    }
+    let rate = fixed as f64 / n_int as f64;
+    if rate < SUB_MIP_MIN_FIXING_RATE || fixed == n_int && kind == SubMipKind::Rins {
+        return None;
+    }
+    // Propagate the fixings over the base rows: a consistent, smaller sub-box, or a
+    // proof that this neighbourhood is empty (skip the solve).
+    let pr = tighten_bounds_csc(
+        &base.csc,
+        base.m,
+        base.n,
+        &sub_l,
+        &sub_u,
+        &base.b,
+        &base.is_int_full,
+        opts.simplex.tol,
+    );
+    if pr.infeasible {
+        crate::profile::incr(crate::profile::Ctr::SubMipPropInfeas);
+        return None;
+    }
+    let (sub_l, sub_u) = (pr.l, pr.u);
+    let (seed, cutoff) = match (kind, inc) {
+        (SubMipKind::Rins, Some((ix, v))) => (Some(ix[..ns].to_vec()), Some(v)),
+        _ => (None, inc.map(|(_, v)| v)),
+    };
+    let mut sub = opts.clone();
+    sub.max_nodes = node_budget;
+    // The RINS seed lies in the sub-box by construction (every fixed column is fixed
+    // to its own value). FBBT only removes points violating a row, so it keeps it.
+    sub.initial_incumbent = seed;
+    if let Some(d) = deadline {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let budget = (left.as_secs_f64() * 0.25).min(2.0);
+        sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+    }
+    crate::profile::incr(match kind {
+        SubMipKind::Rens => crate::profile::Ctr::SubMipRensRun,
+        SubMipKind::Rins => crate::profile::Ctr::SubMipRinsRun,
+    });
+    let res = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        solve_milp_node_hooked(
+            base.csc.clone(),
+            base.m,
+            base.n,
+            &base.c,
+            &sub_l,
+            &sub_u,
+            &base.b,
+            obj_const,
+            &sub,
+            None,
+            None,
+            None,
+        )
+    };
+    *spent += res.nodes;
+    crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
+    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
+        return None;
+    }
+    let good = match cutoff {
+        Some(inc_obj) => res.obj < inc_obj - 1e-9 * (1.0 + inc_obj.abs()),
+        None => res.obj.is_finite(),
+    };
+    if !good {
+        return None;
+    }
+    match validate_seed_incumbent(
+        &res.x, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
+    ) {
+        Some((sx, sobj)) => {
+            crate::profile::incr(crate::profile::Ctr::SubMipImproved);
+            Some((sx, sobj + obj_const))
+        }
+        None => {
+            // A point the sub-driver called feasible that this driver cannot verify:
+            // never injected; a nonzero count is a correctness bug to chase.
+            crate::profile::incr(crate::profile::Ctr::SubMipRejected);
+            None
+        }
+    }
+}
+
 thread_local! {
     /// Recursion depth of the MILP driver on this thread. A nested driver call
     /// (the retired A12 RINS sub-solve was one) must not call
@@ -1970,6 +2211,25 @@ fn solve_milp_node_search(
     let n_orig_rows = m_w;
     let n_orig_cols = n_w;
 
+    // --- D2: sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`): snapshot the base problem ---
+    // Before the root cut loop, so every sub-solve and re-validation runs against the
+    // original rows. Not under a lazy separator (a point must be screened there first)
+    // and not inside a sub-solve (no recursion).
+    let mut sub_mip_spent: usize = 0;
+    let mut sub_mip_fail_streak: u32 = 0;
+    let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
+    let sub_mip_base: Option<SubMipBase> =
+        (sub_mip_enabled() && milp_depth == 0 && lazy.is_none() && !opts.integer_cols.is_empty())
+            .then(|| SubMipBase {
+                csc: csc_w.clone(),
+                m: m_w,
+                n: n_w,
+                c: c_w.clone(),
+                l: l_w.clone(),
+                u: u_w.clone(),
+                b: b_w.clone(),
+                is_int_full: is_int_full.clone(),
+            });
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
@@ -3035,6 +3295,59 @@ fn solve_milp_node_search(
                 }
                 gmi_pool = keep_pool;
                 gmi_pool_age = keep_age;
+            }
+        }
+
+        // --- D2 sub-MIP (`DISCOPT_MILP_SUBMIP`): one attempt at the batch boundary ---
+        // In the sequential reduce, so it is deterministic. RENS while the tree holds no
+        // incumbent, RINS once it does; the candidate is the batch's best-bound
+        // fractional node.
+        if let Some(base) = sub_mip_base.as_ref() {
+            let budget = sub_mip_node_budget(tm.stats().total_nodes, sub_mip_spent);
+            sub_mip_since += 1;
+            let due =
+                sub_mip_since >= sub_mip_backoff_stride(SUB_MIP_BATCH_STRIDE, sub_mip_fail_streak);
+            if due && budget > 0 {
+                let inc = tm.incumbent().and_then(|(x, v)| {
+                    (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))
+                });
+                let cand = results
+                    .iter()
+                    .filter(|r| {
+                        !r.is_feasible
+                            && r.lower_bound < INFEAS_SENTINEL - 1.0
+                            && r.solution.len() >= ns
+                    })
+                    .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
+                if let Some(r) = cand {
+                    sub_mip_since = 0;
+                    let kind = if inc.is_some() {
+                        SubMipKind::Rins
+                    } else {
+                        SubMipKind::Rens
+                    };
+                    match try_sub_mip(
+                        kind,
+                        base,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &r.solution,
+                        inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
+                        opts,
+                        deadline,
+                        budget,
+                        &mut sub_mip_spent,
+                    ) {
+                        Some((sx, sobj)) => {
+                            tm.inject_incumbent(sx, sobj);
+                            sub_mip_fail_streak = 0;
+                        }
+                        None => {
+                            sub_mip_fail_streak = sub_mip_fail_streak.saturating_add(1);
+                        }
+                    }
+                }
             }
         }
 
