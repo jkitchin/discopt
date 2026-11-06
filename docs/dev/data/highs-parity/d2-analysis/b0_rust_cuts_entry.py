@@ -87,7 +87,8 @@ def main() -> int:
                 fh.flush()
                 executed += 1
                 print(f"{nm:22s} {arm:9s} root_bnd={root['bound']} full={full['status']} "
-                      f"bnd={full['bound']} obj={full['obj']} n={full['nodes']}", flush=True)  # fmt: skip
+                      f"bnd={full['bound']} obj={full['obj']} n={full['nodes']}",
+                      flush=True)  # fmt: skip
     print(f"b0 rust: executed={executed} wrong={wrong}", flush=True)
     return 0 if executed and not wrong else 1
 
