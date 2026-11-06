@@ -12,6 +12,17 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **A `discopt-expert` subagent**, the generalist beside the domain
+  specialists. It knows the codebase as a whole: the repository map, the order
+  `Model.solve` and `solve_model` route a model, how a `status`,
+  `algorithm_route` or `gap_certified` traces back to code, how incumbents are
+  verified, how to debug a solve, and the rules in `CLAUDE.md` for changing
+  discopt. It routes each question to the specialist that owns it, and for
+  POUNCE internals to pounce's `pounce-expert` (installed from pounce). It reads
+  the source rather than answering from memory. It complements the `discopt`
+  skill, which covers using discopt. Ships with `discopt install-skills` and
+  `uvx knowhow add jkitchin/discopt`.
+
 - **`relu_complementarity` strategy for ReLU networks (#2167, slice 1).**
   `NNFormulation(m, net, strategy="relu_complementarity")` encodes each unstable ReLU
   neuron as `y - s == z` with a declared complementarity relation `0 <= y ⊥ s >= 0`

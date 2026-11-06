@@ -187,7 +187,11 @@ def test_shipped_skills_reference_only_existing_in_tree_paths():
     root = _repo_root()
     # Paths as written in prose: a slash path under python/discopt with an
     # optional file extension. Trailing punctuation is stripped by the charset.
-    pattern = re.compile(r"python/discopt/[A-Za-z0-9_/]+(?:\.[A-Za-z0-9]+)?")
+    # ``-`` is in the charset because shipped file names use it
+    # (``skills/agents/pounce-expert.md``); without it the match stopped at the
+    # hyphen and reported the existing file as the missing path ``.../pounce``.
+    pattern = re.compile(r"python/discopt/[A-Za-z0-9_/-]+(?:\.[A-Za-z0-9]+)?")
+    assert pattern.fullmatch("python/discopt/skills/agents/pounce-expert.md")
     dangling: dict[str, list[str]] = {}
     checked = 0
     for path in _shipped_skill_files():

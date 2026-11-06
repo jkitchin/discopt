@@ -127,6 +127,32 @@ class TestKnowhowLayout:
 
 
 # ──────────────────────────────────────────────────────────
+# discopt-expert: its hand-off table names agents that exist
+# ──────────────────────────────────────────────────────────
+
+# Agents discopt-expert hands off to that ship from another repository.
+_EXTERNAL_AGENTS = {"pounce-expert"}  # jkitchin/pounce, .claude/agents/
+
+
+def test_discopt_expert_hands_off_only_to_agents_that_exist():
+    """The generalist's routing table must not send a reader to a missing agent.
+
+    ``discopt-expert`` routes questions to the bundle's specialists by name. An
+    agent renamed or removed from ``skills/agents/`` would leave that table
+    pointing nowhere, and nothing else checks it."""
+    agents_dir = Path(str(skills.agents_dir()))
+    text = (agents_dir / "discopt-expert.md").read_text()
+    named = set(re.findall(r"`([a-z0-9-]+-expert)`", text))
+    assert len(named) >= 10, f"probe found only {sorted(named)}: the table moved"
+    shipped = {Path(str(p)).stem for p in skills.iter_agents()}
+    missing = named - shipped - _EXTERNAL_AGENTS
+    assert not missing, f"discopt-expert hands off to agents that do not ship: {missing}"
+    # every specialist in the bundle is reachable from the generalist
+    unrouted = shipped - named - {"discopt-expert"}
+    assert not unrouted, f"agents discopt-expert never routes to: {unrouted}"
+
+
+# ──────────────────────────────────────────────────────────
 # install-skills CLI
 # ──────────────────────────────────────────────────────────
 
