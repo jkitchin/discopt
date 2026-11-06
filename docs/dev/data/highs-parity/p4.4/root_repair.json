@@ -1,0 +1,99 @@
+{
+ "header": {
+  "load": [
+   1.62060546875,
+   1.40625,
+   0.8251953125
+  ],
+  "commit": "983a83fa",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python"
+ },
+ "rows": [
+  {
+   "name": "mik-250-20-75-1",
+   "opt": -49716.0,
+   "driver_bound": -51756.664571574525,
+   "root_gap_pct": 4.104560958172306,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -51756.664571574525,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-2",
+   "opt": -50768.00000000001,
+   "driver_bound": -52795.15659977772,
+   "root_gap_pct": 3.9929023612395635,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -52795.15659977772,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-3",
+   "opt": -52242.0,
+   "driver_bound": -54222.410156214624,
+   "root_gap_pct": 3.790766526069759,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -54222.410156214624,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "mik-250-20-75-5",
+   "opt": -51532.0,
+   "driver_bound": -53673.84424646286,
+   "root_gap_pct": 4.156257633871229,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": -53673.84424646286,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "fiber",
+   "opt": 405935.18,
+   "driver_bound": 325720.98278400704,
+   "root_gap_pct": 19.760297595546415,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": 325720.98278400704,
+   "route": "native-milp: discopt monolithic Rust MILP engine (default)",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  },
+  {
+   "name": "sp150x300d",
+   "opt": 69.0,
+   "driver_bound": 48.0,
+   "root_gap_pct": 30.0,
+   "driver_status": "node_limit",
+   "driver_nodes": 3,
+   "reported_bound": 48.0,
+   "route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+   "env": {
+    "DISCOPT_MILP_ROOT_GMI_REPAIR": "1"
+   },
+   "force_kw": {}
+  }
+ ]
+}

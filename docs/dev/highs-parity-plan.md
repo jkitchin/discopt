@@ -1431,6 +1431,32 @@ and is re-written by P4.1.**
      the loop stops on the 500 generated-cut cap; 2000 helps 0.0-0.4 pp and 5000 × 200
      adds nothing more; with c-MIR the best existing-mechanism mik residual is 3.2-3.7 %,
      between the hypothesis (≤ 2.5 %) and the kill line (> 3.5 %).
+  **Re-scoped (owner, 2026-11-05: "Fix route gaps first").** Built
+  `DISCOPT_MILP_ROOT_GMI_REPAIR` (default OFF, `2a0504cf`): (1) a short root basis is
+  completed with unit columns of the rows a partial-pivoting elimination leaves
+  unpivoted (structural matching was tried first and gave a numerically singular basis
+  on `fiber` -- recorded, replaced; the dense elimination is capped at `m·k² <= 5e8`,
+  matching above); (2) the slack rewrite maps a slack column to the row it is a clean
+  singleton slack OF (on `sp150x300d` all 30 completed-basis cuts had been dropped with
+  `SubstDropNoSlack`: slackless rows shift the `ns + r` convention). Root gap with the flag
+  (`p4.4/root_repair*.json`): `fiber` 61.55 → 19.76 %, `sp150x300d` 50.0 → 30.0 %, `mik`
+  bit-identical; c-MIR on top adds little (`fiber` 18.27 %) and makes `mik-2` worse, so it
+  is not part of this flag. Soundness: 400 seeded MILPs with short bases, 319 cuts ×
+  4193 integer-feasible points by exact enumeration, 0 violations.
+  **§5 panel (2026-11-05/06, `p4.4/p44_panel.json`, bars pre-registered in
+  `p44_gmi_repair_panel.py`):** MIPLIB-38 + M, 3 reps, 20 s, 372 solves, fired ON
+  2,517,336 / OFF 0; median load 6.2 on 4 cores, so no wall claim.
+  - BAR 1 cert-clean: **pass** (372 checks, 0 problems).
+  - 2a solved: **96 → 99**. 2b nodes over the 30 always-certified instances:
+    **157,233 → 127,323 (−19 %)**. 2c dual losses: **1** (`neos17` 0.097 → 0.115), cap 2.
+  - Dual gains: `fiber` 0.556 → 0.194, `b-ball` 0.120 → 0.0002, `beavma` 0.396 → 0.161,
+    `khb05250` 0.029 → 0.0015, `nexp-50-20-1-1` 0.400 → 0.267, `nexp-50-20-4-2` 0.292 →
+    0.181, `sp150x300d` 0.429 → 0.300, `neos-3610040-iskar` 0.026 → 0.000.
+  - MINLP corpus (`p4.4/p44_corpus.jsonl`, 20 s): 74 rows, 0 problems, certified 56 = 56,
+    130 incumbent checks.
+  Both bars met → graduation is the owner's call. Tableau c-MIR (the original P4.4
+  scope) is deferred: with the repair, `mik` stays at 3.8-4.2 %; its limiter is the
+  500-cut cap (2000 helps 0-0.4 pp), not a missing family.
 - [ ] **P4.5 — Root restart.** Scope: `milp_driver.rs` root loop. After the root cut loop,
   if reduced-cost fixing + FBBT fixed ≥ 10 % of columns, re-run presolve + root loop on the
   reduced problem once (HiGHS's closer on `beavma`/`dcmulti`, §2.6). Entry: count such
