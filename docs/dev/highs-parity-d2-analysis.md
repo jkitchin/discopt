@@ -759,3 +759,10 @@ node basis with the node's bounds, append the rows to a node-local copy of the L
 re-solve warm, and repeat for 2-3 rounds. The node keeps the stronger (NS-verified) bound,
 the children inherit it as their floor, and the rows are dropped with the node. The shared
 matrix and the other nodes of the batch are untouched. That is the next build (B1').
+
+**12. Owner decisions (2026-11-06, second round).**
+
+- **Next build:** node-local GMI rounds (B1').
+- **`DISCOPT_MILP_REENTRY_CUTS`:** kept default-OFF, re-scoped so that run 2 inherits run
+  1's root cuts instead of re-separating.
+- **`DISCOPT_MILP_NODE_SEP`:** retired, flag and implementation.
