@@ -1,0 +1,4178 @@
+[
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   4,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   8,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   12,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100.0,
+   16,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 10000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   4,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   8,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   12,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   1000.0,
+   16,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 1000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   4,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   8,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   12,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   10000.0,
+   16,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 100000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   4,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   8,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   12,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   30000.0,
+   16,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 900000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   4,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   8,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   12,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   8.67e-08,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   8.67e-08,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   5e-07,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   5e-07,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   2e-06,
+   false
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "direct",
+  "p": [
+   100000.0,
+   16,
+   2e-06,
+   true
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.048828,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.048828,
+   "bound": 10000000000.0,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999189,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999189,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999189,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999189,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.999999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.99999999679,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000.0,
+   "bound": 9999.99999999679,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999068,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999068,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999989998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999989998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999068,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999068,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   1000.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 1000000.0,
+   "bound": 999999.9999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999935,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999935,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   3000.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 9000000.0,
+   "bound": 8999999.999999996,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999999,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   10000.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 100000000.0,
+   "bound": 99999999.99999997,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   30000.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 900000000.0,
+   "bound": 899999999.9999998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "log",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 1,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "log",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "log",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "sqrt",
+   4
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.989979,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.989979,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "sqrt",
+   8
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.99,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ },
+ {
+  "kind": "pwl",
+  "p": [
+   100000.0,
+   "sqrt",
+   16
+  ],
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 10000000000.0,
+   "bound": 9999999999.98998,
+   "nodes": 0,
+   "false_cert": false,
+   "bounded_fired": 0
+  }
+ }
+]
