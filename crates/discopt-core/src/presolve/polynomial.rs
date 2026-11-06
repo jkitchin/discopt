@@ -383,7 +383,8 @@ fn walk_into_polynomial(
             BinOp::Pow => {
                 let exp = not_poly(constant_value(arena, *right))?;
                 let exp_int = exp.round() as i64;
-                if (exp - exp_int as f64).abs() > 1e-12 || exp_int < 0 {
+                // Exact only (#2191 class): a near-integer exponent is not a polynomial.
+                if exp != exp_int as f64 || exp_int < 0 {
                     return Err(PolyStop::NotPolynomial);
                 }
                 if exp_int == 0 {

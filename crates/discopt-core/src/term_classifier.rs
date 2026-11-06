@@ -247,17 +247,16 @@ impl<'a> TermClassifier<'a> {
     fn classify_power(&mut self, left: ExprId, right: ExprId) {
         if let Some(flat) = self.flat_index(left) {
             if let Some(exp_val) = self.constant_value(right) {
-                if exp_val.abs() <= 1e-12 {
+                // Exact comparisons only (#2191 class): an exponent near 0, 1 or
+                // an integer is a different function, not that monomial.
+                if exp_val == 0.0 {
                     return;
                 }
-                if exp_val >= 2.0
-                    && exp_val.is_finite()
-                    && (exp_val - exp_val.round()).abs() <= 1e-12
-                {
+                if exp_val >= 2.0 && exp_val.is_finite() && exp_val == exp_val.round() {
                     self.record_monomial(flat, exp_val.round() as usize);
                     return;
                 }
-                if (exp_val - 1.0).abs() > 1e-12 {
+                if exp_val != 1.0 {
                     self.result.general_nl_count += 1;
                     return;
                 }

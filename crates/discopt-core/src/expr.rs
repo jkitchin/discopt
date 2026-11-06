@@ -1497,7 +1497,10 @@ impl ExprArena {
                             // Try to extract the constant exponent.
                             if let Some(exp) = self.try_constant_value(*right) {
                                 let exp_int = exp as usize;
-                                if (exp - exp_int as f64).abs() < 1e-12 {
+                                // Exact only (#2191 class): `x^(1 + 2^-43)` is not
+                                // linear. A 1e-12 window here classified it LP, and
+                                // the tape rung linearised it into a false certificate.
+                                if exp >= 0.0 && exp == exp_int as f64 {
                                     ld.saturating_mul(exp_int)
                                 } else {
                                     usize::MAX
@@ -2713,6 +2716,41 @@ mod tests {
             ExprNode::Constant(v) => assert!((v - 3.14).abs() < 1e-15),
             _ => panic!("expected Constant"),
         }
+    }
+
+    /// #2191 class: a near-integer exponent is not a monomial. `max_degree`
+    /// read `x^(1 + 2^-43)` as linear within 1e-12, and the LP route then
+    /// linearised it into a certified false optimum.
+    #[test]
+    fn near_integer_exponent_is_not_polynomial() {
+        let mut checked = 0;
+        for (p, expect_lin, expect_quad) in [
+            (1.0, true, true),
+            (2.0, false, true),
+            (0.0, true, true),
+            (1.0 + 2f64.powi(-43), false, false),
+            (1.0 - 2f64.powi(-43), false, false),
+            (2.0 + 2f64.powi(-42), false, false),
+            (2f64.powi(-50), false, false),
+        ] {
+            let mut arena = ExprArena::new();
+            let x0 = arena.add(ExprNode::Variable {
+                name: "x".into(),
+                index: 0,
+                size: 1,
+                shape: vec![],
+            });
+            let c = arena.add(ExprNode::Constant(p));
+            let pw = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: x0,
+                right: c,
+            });
+            assert_eq!(arena.is_linear(pw), expect_lin, "is_linear(x^{p:e})");
+            assert_eq!(arena.is_quadratic(pw), expect_quad, "is_quadratic(x^{p:e})");
+            checked += 1;
+        }
+        assert_eq!(checked, 7);
     }
 
     #[test]
