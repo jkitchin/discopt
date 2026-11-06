@@ -224,12 +224,19 @@ def _improver_within_contingent(
     *,
     budget_on: bool,
     tree,
-    heur_state: dict[str, float],
+    heur_state: dict[str, Any],
     success_gain: float,
     offset: float,
     quot: float,
+    key: Optional[str] = None,
+    node_wall: Optional[float] = None,
 ) -> bool:
     """Whether an improver-role heuristic costing ``cost`` fits the contingent.
+
+    ``key``/``node_wall`` (#2176): under :func:`_heur_wall_cost_enabled` (``heur_state``
+    carries ``walls``), once ``key`` has a measured call and the caller passes the
+    search's node-processing wall, the test runs in seconds; see that function.
+    Otherwise it is the fixed-cost test, unchanged.
 
     The finder role is never gated: with no incumbent yet, securing the first one
     (for pruning) takes priority. Once an incumbent exists the call is an improver
@@ -251,21 +258,115 @@ def _improver_within_contingent(
     _nodes = float(tree.stats().get("total_nodes", 0))
     _weight = success_gain * (heur_state["found"] + 1) / (heur_state["calls"] + 1)
     _contingent = offset + quot * _nodes * _weight
-    return (heur_state["cost"] + cost) <= _contingent
+    _walls = heur_state.get("walls")
+    if key is not None and node_wall is not None and _walls is not None and _walls.get(key):
+        # #2176 (``DISCOPT_HEUR_WALL_COST``): the same contingent with both sides
+        # in seconds. One cost unit is one node's measured processing wall, and the
+        # call is priced at the mean measured wall of this heuristic's own earlier
+        # calls.
+        if _nodes <= 0:
+            return False
+        _expected = sum(_walls[key]) / len(_walls[key])
+        _unit = max(0.0, float(node_wall)) / _nodes
+        return bool(float(heur_state["wall"]) + _expected <= _contingent * _unit)
+    return bool(float(heur_state["cost"]) + cost <= _contingent)
 
 
-def _record_improver_run(heur_state: dict[str, float], cost: float, improved: bool) -> None:
+def _heur_wall_cost_enabled() -> bool:
+    """Whether the improver governor prices heuristics by measured wall (#2176).
+
+    **Default ON** (graduated 2026-11-06, #2176, on its CLAUDE.md §5 panel); ``0`` opts
+    out to the fixed-cost test. Row in ``docs/dev/flag-retirement-audit.md``.
+
+    The #1344 contingent (:func:`_improver_within_contingent`) admits an
+    improver-role call (RINS, local branching, the binary-seed enumeration) while
+    ``spent + cost <= offset + quot * nodes * weight``. ``cost`` is a fixed
+    per-heuristic number (``_HEUR_COST``: RINS 5, local branching 10, enumeration
+    12), meant as node-equivalents. Nothing checks that the call actually costs
+    that. ON keeps the formula and measures both sides:
+
+    * one unit is the search's **node-processing wall** per processed node -- the
+      ``rust_time + jax_time`` each loop already accumulates (batch export, node
+      relaxation / NLP solves, import and processing), which excludes the root
+      heuristics (LOA proposer, pumps, multistart, OBBT) and the improvers;
+    * a heuristic's price is the mean wall of its earlier calls in this solve,
+      timed from :func:`_improver_clock_start` at the call to
+      :func:`_record_improver_run`;
+    * a first call, with nothing measured yet, takes the fixed-cost test as before.
+
+    Why: GDPlib ``batch_processing`` hull, NLP-BB, with the #2144 incumbent, 159
+    nodes, profiled: 6 RINS calls took 54.8 s and improved nothing. The contingent
+    charged them 30 units, about 30 nodes' worth; the tree's 159 nodes took 11 s of
+    node NLPs. At a fixed node count the bound is the same with and without the
+    incumbent (317 nodes: 592238.9435633742 in both arms), so that wall bought
+    nothing (``docs/dev/data/2172-batch-processing-dual-gap/``).
+
+    Panel (``docs/dev/data/2176-heur-wall-cost-panel/``, ON vs OFF): the 74 in-repo
+    ``.nl`` at 60 s x 2 reps, certified 116 -> 116, 260 incumbent checks, 0 errors,
+    total wall 2466 -> 2449 s; gdp_parity x {big-M, hull} at 120 s, 0 incorrect, 0
+    bound crossings, SGM wall 37.42 -> 36.71 s. Where it acts: ``positioning`` 151 ->
+    305 nodes, 9.7-10.1 s -> 6.8-7.1 s, same optimum, both lowerings, 3 reps each;
+    ``batch_processing`` bound big-M 557177 -> 566697 and hull 588573 -> 602199 (885 and
+    541 nodes vs 503 and 255). The one cell the panel reported lost (syngas hull, 119.2
+    s OFF vs a 120 s limit) never reached a wall-priced decision; a 3-rep interleaved
+    re-run certified it in both arms (112.7-113.8 s).
+    """
+    return os.environ.get("DISCOPT_HEUR_WALL_COST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _new_heur_state() -> dict[str, Any]:
+    """A fresh improver-governor state (#1344); with the #2176 timing fields when ON."""
+    st: dict[str, Any] = {"calls": 0, "found": 0, "cost": 0.0}
+    if _heur_wall_cost_enabled():
+        st.update(walls={}, wall=0.0, started={})
+    return st
+
+
+def _improver_clock_start(heur_state: dict[str, Any], key: str) -> None:
+    """Start timing ``key``'s call, at the heuristic call itself (#2176). No-op when OFF."""
+    started = heur_state.get("started")
+    if started is not None:
+        started[key] = time.perf_counter()
+
+
+def _record_improver_run(
+    heur_state: dict[str, Any],
+    cost: float,
+    improved: bool,
+    *,
+    key: Optional[str] = None,
+) -> None:
     """Charge an improver-role run against the contingent and note success.
 
     One definition (#1344): duplicated verbatim in :func:`solve_model` and
     :func:`_solve_nlp_bb`, whose own comment says the governor there is
     "mirrored from solve_model". ``heur_state`` is mutated in place, exactly as
     the closed-over dict was.
+
+    ``key`` (#2176, ``DISCOPT_HEUR_WALL_COST``): the wall since this key's
+    :func:`_improver_clock_start` is kept per heuristic in ``heur_state["walls"]`` and
+    summed in ``heur_state["wall"]``. A record with no running clock for ``key``
+    charges no wall. Ignored when the state
+    carries no ``walls`` (flag OFF).
     """
     heur_state["calls"] += 1
     heur_state["cost"] += cost
     if improved:
         heur_state["found"] += 1
+    walls = heur_state.get("walls")
+    if walls is None or key is None:
+        return
+    t = heur_state["started"].pop(key, None)
+    if t is None:
+        return
+    wall = max(0.0, time.perf_counter() - float(t))
+    walls.setdefault(key, []).append(wall)
+    heur_state["wall"] = float(heur_state["wall"]) + wall
 
 
 def _validate_injected_candidate(x, evaluator, cl, cu, int_offsets, int_sizes):
@@ -3677,6 +3778,10 @@ def _root_pump_skip_enabled() -> bool:
     4669.0235 at about 59 s; the tree reached 7 nodes and bound 4347.80. ON: 29
     nodes, bound 4666.75. At 600 s, both arms certify with the same 27 nodes and
     bound; ON in 178 s, OFF in 224 s.
+
+    #2170: the skip is taken only when the incumbent's gap to the tree's dual bound
+    is already closed (:func:`_root_pump_skip_decision`), not whenever an incumbent
+    exists. See that function for the measurement.
     """
     return os.environ.get("DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT", "1").strip().lower() not in (
         "0",
@@ -3684,6 +3789,50 @@ def _root_pump_skip_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _root_pump_skip_decision(
+    tree: Any, gap_tolerance: float, abs_gap_tol: float, root_lb: float = float("-inf")
+) -> tuple[bool, str]:
+    """Whether the root pumps are skipped, and why, under :func:`_root_pump_skip_enabled`.
+
+    Skip only when the tree holds an incumbent whose gap to the tree's global lower
+    bound already meets the solve's own termination test
+    (:func:`_gap_values_converged` with ``gap_tolerance``/``abs_gap_tol``). The
+    pumps inject only a strict improvement, so once the gap is closed nothing they
+    find can change the certificate, and their time is pure cost. With the gap open,
+    an incumbent says nothing about whether a pump can still improve it.
+
+    #2170: the rule was "any incumbent". Measured on GDPlib ``methanol`` hull,
+    120 s: the LOA proposer's verified point 645.51 reached the tree with the dual
+    bound at -4699.67 (gap about 830 %), the rule skipped both pumps, and the solve
+    ended at 645.51 while the pump the legacy path runs finds -1793.43 (BARON's best
+    known). The #2143 gain this flag was graduated on (``syngas`` hull) is the
+    closed-gap case: LOA's bound 4668.809 against its optimum 4669.0235, a relative
+    gap of 4.6e-5, inside the default ``gap_tolerance`` of 1e-4.
+
+    The bound is ``max(tree global lower bound, root_lb)``. The tree's bound includes
+    a bound installed by :meth:`PyTreeManager.seed_root_bound` (the LOA proposer's).
+    The pump site runs before the root batch is imported into the tree, though, so the
+    caller also passes ``root_lb``: the root batch's own minimum relaxation bound,
+    the ``_batch_relax_lb`` that ``_root_optimum_proven`` already reads at the same
+    point.
+    Panel (CLAUDE.md §5, old rule vs this one, ``gdp_parity`` x {big-M, hull} at 120 s,
+    ``docs/dev/data/2170-pump-skip-gap-gate/``): cert-clean, 24 -> 24 solved, and
+    methanol hull the only objective that moved. On the certified cells where the pumps
+    now run, nodes and objective are unchanged and the wall cost is at most a few
+    seconds.
+    """
+    inc = tree.incumbent()
+    if inc is None or not np.isfinite(float(inc[1])):
+        return False, "no incumbent"
+    ub = float(inc[1])
+    lb = float(tree.stats().get("global_lower_bound", float("-inf")))
+    if np.isfinite(root_lb):
+        lb = max(lb, float(root_lb))
+    if _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol):
+        return True, f"the incumbent {ub:.10g} meets the gap test against the bound {lb:.10g}"
+    return False, f"the incumbent {ub:.10g} is open against the bound {lb:.10g}"
 
 
 def _presolve_bound_propagation_enabled() -> bool:
@@ -20871,9 +21020,10 @@ def solve_model(
     # ``nonlocal`` dance. ``cost`` is sub-NLP-solve-equivalents already spent on
     # the (improver-role) heuristics; ``found`` counts those that strictly
     # improved the incumbent — the success signal in the contingent.
-    _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default ON; ``0`` opts out) adds the timing fields.
+    _heur_state = _new_heur_state()
 
-    def _improver_allowed(cost: float) -> bool:
+    def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
         return _improver_within_contingent(
             cost,
@@ -20883,11 +21033,14 @@ def solve_model(
             success_gain=_HEUR_SUCCESS_GAIN,
             offset=_HEUR_BUDGET_OFFSET,
             quot=_HEUR_BUDGET_QUOT,
+            key=key,
+            # #2176: the node-processing wall this loop accumulates.
+            node_wall=rust_time + jax_time,
         )
 
-    def _record_improver(cost: float, improved: bool) -> None:
+    def _record_improver(cost: float, improved: bool, key: Optional[str] = None) -> None:
         """Bind this solve's heuristic state to the shared recorder (#1344)."""
-        _record_improver_run(_heur_state, cost, improved)
+        _record_improver_run(_heur_state, cost, improved, key=key)
 
     if subnlp_enabled:
         try:
@@ -23256,9 +23409,16 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            _fp_skip = _root_pump_skip_enabled() and tree.incumbent() is not None
-            if _fp_skip:
-                logger.info("Feasibility pump (root): skipped, an incumbent exists")
+            # #2170: skip on a CLOSED gap, not on an incumbent's mere existence.
+            _fp_skip = False
+            if _root_pump_skip_enabled():
+                _fp_skip, _fp_why = _root_pump_skip_decision(
+                    tree, gap_tolerance, abs_gap_tol, root_lb=_batch_relax_lb
+                )
+                if _fp_skip:
+                    logger.info("Feasibility pump (root): skipped, %s", _fp_why)
+                elif tree.incumbent() is not None:
+                    logger.info("Feasibility pump (root): runs, %s", _fp_why)
             if best_root_idx is not None and not _fp_skip and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._relax.primal_heuristics import feasibility_pump
@@ -23683,7 +23843,7 @@ def solve_model(
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
             and not _root_optimum_proven()
-            and _improver_allowed(_HEUR_COST["enumerate"])
+            and _improver_allowed(_HEUR_COST["enumerate"], "enumerate")
             # F4: the binary-seed enumeration issues up to 2**k full sub-NLPs; do
             # not start it when the budget is exhausted (primal heuristic — sound).
             and _root_heur_nlp_entry_ok(evaluator)
@@ -23711,6 +23871,7 @@ def solve_model(
             else:
                 _enum_seed = 0.5 * np.add(*_clip_start_box(lb, ub))
             _enum_stats: dict = {}
+            _improver_clock_start(_heur_state, "enumerate")
             try:
                 _enum_results = enumerate_binary_seeds_subnlp(
                     model,
@@ -23734,7 +23895,7 @@ def solve_model(
             if _enum_had_inc:
                 _enum_inc1 = tree.incumbent()
                 _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
-                _record_improver(_HEUR_COST["enumerate"], _enum_improved)
+                _record_improver(_HEUR_COST["enumerate"], _enum_improved, "enumerate")
 
         if not _gdp_config_first_enabled():
             _root_gdp_config_primal()
@@ -23891,10 +24052,11 @@ def solve_model(
                     and _lns_gap_open
                     and _lns_best_idx is not None
                     and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
-                    and _improver_allowed(_HEUR_COST["rins"])
+                    and _improver_allowed(_HEUR_COST["rins"], "rins")
                 ):
                     _rins_obj0 = float(_lns_inc[1])
                     _rins_improved = False
+                    _improver_clock_start(_heur_state, "rins")
                     try:
                         from discopt._relax.primal_heuristics import rins
 
@@ -23918,7 +24080,7 @@ def solve_model(
                                 logger.info("LNS RINS incumbent: obj=%.6g", _obj_ri)
                     except Exception as _e:
                         logger.debug("LNS RINS failed: %s", _e)
-                    _record_improver(_HEUR_COST["rins"], _rins_improved)
+                    _record_improver(_HEUR_COST["rins"], _rins_improved, "rins")
 
                 # (2b) One-hot swap search (improve). For set-partition /
                 # assignment-structured MIQPs (``sum_k x[i,k] == 1``), a single bit
@@ -23969,7 +24131,7 @@ def solve_model(
                     _lns_have_inc
                     and _lns_gap_open
                     and (_deadline - time.perf_counter()) > 1.0
-                    and _improver_allowed(_HEUR_COST["lbranch"])
+                    and _improver_allowed(_HEUR_COST["lbranch"], "lbranch")
                 ):
                     _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                     _lns_lb_calls += 1
@@ -23982,6 +24144,7 @@ def solve_model(
                     )
                     _lb_obj0 = float(_lns_inc[1])
                     _lb_improved = False
+                    _improver_clock_start(_heur_state, "lbranch")
                     try:
                         from discopt._relax.primal_heuristics import local_branching
 
@@ -24017,7 +24180,7 @@ def solve_model(
                                 )
                     except Exception as _e:
                         logger.debug("LNS local-branching failed: %s", _e)
-                    _record_improver(_HEUR_COST["lbranch"], _lb_improved)
+                    _record_improver(_HEUR_COST["lbranch"], _lb_improved, "lbranch")
 
         # --- User cut callback at EVERY node (#1278 D) ---
         if cut_callback is not None and _cut_pool is not None:
@@ -29004,9 +29167,10 @@ def _solve_nlp_bb(
     _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))
     _HEUR_SUCCESS_GAIN = 3.0
     _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
-    _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
+    # #2176 (``DISCOPT_HEUR_WALL_COST``, default ON; ``0`` opts out) adds the timing fields.
+    _heur_state = _new_heur_state()
 
-    def _improver_allowed(cost: float) -> bool:
+    def _improver_allowed(cost: float, key: Optional[str] = None) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
         return _improver_within_contingent(
             cost,
@@ -29016,11 +29180,14 @@ def _solve_nlp_bb(
             success_gain=_HEUR_SUCCESS_GAIN,
             offset=_HEUR_BUDGET_OFFSET,
             quot=_HEUR_BUDGET_QUOT,
+            key=key,
+            # #2176: the node-processing wall this loop accumulates.
+            node_wall=rust_time + jax_time,
         )
 
-    def _record_improver(cost: float, improved: bool) -> None:
+    def _record_improver(cost: float, improved: bool, key: Optional[str] = None) -> None:
         """Bind this solve's heuristic state to the shared recorder (#1344)."""
-        _record_improver_run(_heur_state, cost, improved)
+        _record_improver_run(_heur_state, cost, improved, key=key)
 
     from discopt import debug as _debug
 
@@ -29941,10 +30108,11 @@ def _solve_nlp_bb(
                     if (
                         _lns_best_idx is not None
                         and (_lns_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
-                        and _improver_allowed(_HEUR_COST["rins"])
+                        and _improver_allowed(_HEUR_COST["rins"], "rins")
                     ):
                         _rins_obj0 = float(_lns_inc[1])
                         _rins_improved = False
+                        _improver_clock_start(_heur_state, "rins")
                         try:
                             from discopt._relax.primal_heuristics import rins
 
@@ -29974,10 +30142,10 @@ def _solve_nlp_bb(
                                     logger.info("NLP-BB LNS RINS incumbent: obj=%.6g", _obj_ri)
                         except Exception as _e:
                             logger.debug("NLP-BB LNS RINS failed: %s", _e)
-                        _record_improver(_HEUR_COST["rins"], _rins_improved)
+                        _record_improver(_HEUR_COST["rins"], _rins_improved, "rins")
                     # (2) Local branching — Hamming-ball sub-MIP, escalating k.
                     if (_lns_deadline - time.perf_counter()) > 1.0 and _improver_allowed(
-                        _HEUR_COST["lbranch"]
+                        _HEUR_COST["lbranch"], "lbranch"
                     ):
                         _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                         _lns_lb_calls += 1
@@ -29992,6 +30160,7 @@ def _solve_nlp_bb(
                         )
                         _lb_obj0 = float(_lns_inc[1])
                         _lb_improved = False
+                        _improver_clock_start(_heur_state, "lbranch")
                         try:
                             from discopt._relax.primal_heuristics import local_branching
 
@@ -30033,7 +30202,7 @@ def _solve_nlp_bb(
                                     )
                         except Exception as _e:
                             logger.debug("NLP-BB LNS local-branching failed: %s", _e)
-                        _record_improver(_HEUR_COST["lbranch"], _lb_improved)
+                        _record_improver(_HEUR_COST["lbranch"], _lb_improved, "lbranch")
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:

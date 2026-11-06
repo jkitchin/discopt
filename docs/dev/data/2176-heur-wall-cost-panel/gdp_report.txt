@@ -1,0 +1,58 @@
+== DISCOPT_HEUR_WALL_COST: /home/user/discopt/docs/dev/data/2176-heur-wall-cost-panel/gdp_parity_120s.jsonl
+fire: 0 lowerings checked; fired on 0; identical on 0; lowering error on 0
+
+instance                           method OFF solved ON solved  OFF wall   ON wall OFF nodes  ON nodes  verdicts
+batch_processing                   big-m       0/1       0/1       120.4     121.8       503       885  unsolved
+batch_processing                   hull        0/1       0/1       121.4     121.8       255       541  unsolved
+biofuel                            big-m       0/1       0/1       124.8     126.4         3         3  unsolved
+biofuel                            hull        0/1       0/1       128.8     127.3         0         0  unsolved
+cstr                               big-m       0/1       0/1       120.1     120.1     23520     23514  unsolved
+cstr                               hull        0/1       0/1       126.2     126.6       109       109  unsolved
+disease_model                      big-m       1/1       1/1        49.2      44.0      3970      3970  solved
+disease_model                      hull        1/1       1/1        58.6      54.3      3318      3318  solved
+ex1_linan_2023                     big-m       1/1       1/1         3.5       3.4         9         9  solved
+ex1_linan_2023                     hull        1/1       1/1         3.7       3.8         9         9  solved
+gdp_col                            big-m       0/1       0/1       124.5     125.7        15        15  unsolved
+gdp_col                            hull        0/1       0/1       123.7     123.7         7         7  unsolved
+hda                                big-m       0/1       0/1       120.1     120.1         3         3  unsolved
+hda                                hull        0/1       0/1       121.7     122.7         3         3  unsolved
+kaibel                             big-m       0/1       0/1       120.7     130.5         1         3  unsolved
+kaibel                             hull        0/1       0/1       120.7     120.7         0         0  unsolved
+med_term_purchasing                big-m       0/1       0/1         6.1       6.0        41        41  unsolved
+med_term_purchasing                hull        1/1       1/1         4.1       4.2         1         1  solved
+methanol                           big-m       0/1       0/1       122.5     122.8       125       125  unsolved
+methanol                           hull        0/1       0/1       120.5     120.4         7         7  unsolved
+mod_hens                           big-m       0/1       0/1       121.7     120.4       367       421  unsolved
+mod_hens                           hull        0/1       0/1       120.2     120.2         3         3  unsolved
+modprodnet                         big-m       1/1       1/1        11.3      11.3         5         5  solved
+modprodnet                         hull        0/1       0/1       120.6     120.8       127       135  unsolved
+positioning                        big-m       1/1       1/1         9.7       6.8       151       305  solved
+positioning                        hull        1/1       1/1         9.8       6.7       151       305  solved
+pyomo.constrained_layout_clay0203  big-m       1/1       1/1        61.5      67.0       127       127  solved
+pyomo.constrained_layout_clay0203  hull        1/1       1/1        13.7      11.2       109       109  solved
+pyomo.eight_process                big-m       1/1       1/1         4.3       4.3        27        27  solved
+pyomo.eight_process                hull        1/1       1/1        15.3      15.6        59        59  solved
+pyomo.eight_process_logical        big-m       1/1       1/1         5.7       5.6        19        19  solved
+pyomo.eight_process_logical        hull        1/1       1/1        12.9      12.7        41        41  solved
+pyomo.ex_633_trespalacios          big-m       1/1       1/1         2.2       2.2        13        13  solved
+pyomo.ex_633_trespalacios          hull        1/1       1/1        17.2      17.1        75        75  solved
+pyomo.jobshop_small                big-m       1/1       1/1         0.2       0.2         1         1  solved
+pyomo.jobshop_small                hull        1/1       1/1         0.2       0.2         1         1  solved
+pyomo.nonconvex_hen                big-m       1/1       1/1         2.4       2.3         5         5  solved
+pyomo.nonconvex_hen                hull        1/1       1/1        13.6      15.2        13        13  solved
+pyomo.strip_packing_concrete       big-m       1/1       1/1         3.3       0.3         1         1  solved
+pyomo.strip_packing_concrete       hull        1/1       1/1         0.4       0.4         1         1  solved
+small_batch                        big-m       1/1       1/1         2.2       2.3         3         3  solved
+small_batch                        hull        1/1       1/1         2.5       2.6         3         3  solved
+spectralog                         big-m       0/1       0/1       120.1     120.2       581       557  unsolved
+spectralog                         hull        0/1       0/1       120.3     120.1       277       265  unsolved
+stranded_gas                       big-m       0/1       0/1       125.1     125.2         0         0  unsolved
+stranded_gas                       hull        0/1       0/1       125.4     125.4         0         0  unsolved
+syngas                             big-m       0/1       0/1       120.1     120.1         3         3  unsolved
+syngas                             hull        1/1       0/1       119.2     120.1         3         3  solved,unsolved
+
+executed solves: 96
+cert-clean: incorrect=0 bound-crossings=0 solved-lost=1
+   lost: syngas hull solved 1 OFF -> 0 ON
+net: solved-gained=0 []
+net: SGM(wall, shift 10 s, capped at 120 s) over 48 cells: OFF 37.42 s -> ON 36.71 s

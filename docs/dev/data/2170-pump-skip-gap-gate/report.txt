@@ -1,0 +1,59 @@
+rows=96 cells=48 marker_mismatch=0
+incumbent checks=76 incorrect=0 bound_crossings=0 solved old=24 new=24
+same cstr                   hull   old: feasible obj=3.0620146393632 bnd=0.09399999998926228 nodes=103 | new: feasible obj=3.0620146393631957 bnd=0.09399999998926228 nodes=103
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 4.0618817 is open against the bound 0']
+same gdp_col                big-m  old: feasible obj=20392.21950385642 bnd=7999.999999997215 nodes=15 | new: feasible obj=20392.21950385642 bnd=7999.999999997203 nodes=7
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 20392.2195 is open against the bound 8000']
+same hda                    hull   old: feasible obj=4559.97354579573 bnd=121140.98250089576 nodes=7 | new: feasible obj=4559.97354579573 bnd=121140.98250089576 nodes=3
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent -4559.973577 is open against the bound -172201.82']
+same methanol               big-m  old: feasible obj=-1793.4292355699822 bnd=-4614.156894155711 nodes=155 | new: feasible obj=-1793.4292355699822 bnd=-4622.431672198387 nodes=95
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent -1793.429234 is open against the bound -18735.52291']
+DIFF methanol               hull   old: feasible obj=645.5092442580465 bnd=-4658.047679820163 nodes=19 | new: feasible obj=-1793.4292319539043 bnd=-4699.665321804744 nodes=7
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 645.5092447 is open against the bound -4699.665322']
+same mod_hens               big-m  old: feasible obj=106766.53159195802 bnd=34146.10063587564 nodes=367 | new: feasible obj=106766.53159195802 bnd=33728.02856623919 nodes=323
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 106766.5316 is open against the bound 18000']
+same mod_hens               hull   old: feasible obj=106766.53159200825 bnd=17999.99999998197 nodes=61 | new: feasible obj=106766.53159200825 bnd=17999.99999998197 nodes=3
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 106766.5316 is open against the bound 18000']
+same modprodnet             big-m  old: optimal obj=3592.9243341676265 bnd=3592.9243576870044 nodes=5 | new: optimal obj=3592.9243341676265 bnd=3592.9243576870044 nodes=5
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent -3592.924335 is open against the bound -1246402.406']
+same modprodnet             hull   old: feasible obj=3592.9243230522857 bnd=3594.5385754393205 nodes=107 | new: feasible obj=3592.9243230522857 bnd=3594.5385754393205 nodes=91
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent -3592.924335 is open against the bound -7084.399763']
+same pyomo.eight_process    big-m  old: optimal obj=68.0097515218955 bnd=68.00971272202321 nodes=27 | new: optimal obj=68.0097515218955 bnd=68.00971272202321 nodes=27
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 68.00974424 is open against the bound -1181.792029']
+same pyomo.eight_process    hull   old: optimal obj=68.00974430089957 bnd=68.00971278380305 nodes=59 | new: optimal obj=68.00974430089957 bnd=68.00971278380305 nodes=59
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 68.00974409 is open against the bound -1331']
+same pyomo.eight_process_logical big-m  old: optimal obj=68.00974405106511 bnd=68.00971271613832 nodes=19 | new: optimal obj=68.00974405106511 bnd=68.00971271613832 nodes=19
+      gate old=['Feasibility pump (root): skipped, an incumbent exists', 'Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 91.19615227 is open against the bound -1181.792029', 'Feasibility pump (root): runs, the incumbent 76.41938401 is open against the bound -456.4105508']
+same pyomo.eight_process_logical hull   old: optimal obj=68.00974409832823 bnd=68.0097127838036 nodes=41 | new: optimal obj=68.00974409832823 bnd=68.0097127838036 nodes=41
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 91.19615229 is open against the bound -1331']
+same pyomo.ex_633_trespalacios big-m  old: optimal obj=4.46036761713799 bnd=4.460364898905878 nodes=13 | new: optimal obj=4.46036761713799 bnd=4.460364898905878 nodes=13
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 4.460367617 is open against the bound 2.291493743']
+same pyomo.ex_633_trespalacios hull   old: optimal obj=4.460367612284862 bnd=4.4603289017149805 nodes=75 | new: optimal obj=4.460367612284862 bnd=4.4603289017149805 nodes=75
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 4.460367617 is open against the bound 2']
+same pyomo.nonconvex_hen    big-m  old: optimal obj=114384.7775876192 bnd=114384.7775866238 nodes=5 | new: optimal obj=114384.7775876192 bnd=114384.7775866238 nodes=5
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 114384.7776 is open against the bound 92932.15123']
+same pyomo.nonconvex_hen    hull   old: optimal obj=114384.77758756472 bnd=114374.91679664506 nodes=13 | new: optimal obj=114384.77758756472 bnd=114374.91679664506 nodes=13
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 114384.7776 is open against the bound 80299.26875']
+same spectralog             big-m  old: feasible obj=12.089262200968358 bnd=12.087353322283896 nodes=509 | new: feasible obj=12.089262200968358 bnd=12.084247333895739 nodes=465
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 15.54061076 is open against the bound 7.438868468']
+same spectralog             hull   old: feasible obj=12.089262200968324 bnd=10.10471860529931 nodes=265 | new: feasible obj=12.089262200968324 bnd=11.735096885829345 nodes=249
+      gate old=['Feasibility pump (root): skipped, an incumbent exists']
+      gate new=['Feasibility pump (root): runs, the incumbent 101.6917514 is open against the bound 7.438868466']

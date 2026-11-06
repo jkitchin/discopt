@@ -1,0 +1,2 @@
+RESULT {"method": "hull", "status": "node_limit", "obj": null, "bound": 635222.164228626, "nodes": 3015, "wall": 1051.481566387, "env": {"DISCOPT_GDP_CONFIG_FEAS_FALLBACK": "0"}}
+STATS {"nlpbb/convex_safe_bound_nodes": 1506.0, "nlpbb/convex_safe_bound_abstained": 0.0, "nlpbb/convex_safe_bound_raised": 1506.0, "nlpbb/convex_safe_bound_exact_suspended": 0.0, "nlpbb/convex_safe_fathom_floor": Infinity}

@@ -1,0 +1,6 @@
+{"flag": "0", "status": "optimal", "obj": 4669.02349872477, "bound": 4668.8089683503995, "nodes": 3, "wall": 112.8, "load": 0.986328125, "governor": 2, "wall_priced": 0, "clock_starts": 1}
+{"flag": "1", "status": "optimal", "obj": 4669.023507663008, "bound": 4668.808968189199, "nodes": 3, "wall": 112.7, "load": 1.392578125, "governor": 2, "wall_priced": 0, "clock_starts": 1}
+{"flag": "1", "status": "optimal", "obj": 4669.023507665756, "bound": 4668.8089683503995, "nodes": 3, "wall": 113.0, "load": 1.44873046875, "governor": 2, "wall_priced": 0, "clock_starts": 1}
+{"flag": "0", "status": "optimal", "obj": 4669.0234987241765, "bound": 4668.808968189199, "nodes": 3, "wall": 113.8, "load": 1.40966796875, "governor": 2, "wall_priced": 0, "clock_starts": 1}
+{"flag": "0", "status": "optimal", "obj": 4669.023507666083, "bound": 4668.8089683503995, "nodes": 3, "wall": 113.5, "load": 1.5, "governor": 2, "wall_priced": 0, "clock_starts": 1}
+{"flag": "1", "status": "optimal", "obj": 4669.023507657243, "bound": 4668.808968189199, "nodes": 3, "wall": 113.3, "load": 1.2744140625, "governor": 2, "wall_priced": 0, "clock_starts": 1}

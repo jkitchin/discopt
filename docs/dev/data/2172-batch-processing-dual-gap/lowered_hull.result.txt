@@ -1,0 +1,1 @@
+RESULT {"meth": "hull", "status": "feasible", "obj": 1620646.5651901143, "bound": 569660.6192506348, "gap_certified": false, "route": "mip-nlp/lp_nlp_bb ... did not certify in 89.41s (status=feasible) -> fell back to the default path"}
