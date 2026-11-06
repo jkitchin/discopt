@@ -289,7 +289,8 @@ def judge(rows: list[dict], insts: list[dict], out: Path) -> int:
         checks += 1
         if abs(f - r["objective"]) > 1e-6 * (1 + abs(f)):
             bad.append(
-                f"{r['instance']} {r['form']} {r['arm']}: f(x)={f!r} != obj {r['objective']!r}"
+                f"OBJECTIVE-AT-POINT {r['instance']} {r['form']} {r['arm']}: "
+                f"f(x)={f!r} != obj {r['objective']!r}"
             )
     gmin = {}
     for fam in sorted(set(fam_of.values())):
@@ -305,7 +306,7 @@ def judge(rows: list[dict], insts: list[dict], out: Path) -> int:
                 checks += 1
                 if r["bound"] > v + 1e-9 * (1 + abs(v)):
                     bad.append(
-                        f"{r['instance']} {r['form']} {r['arm']}: "
+                        f"BOUND {r['instance']} {r['form']} {r['arm']}: "
                         f"bound {r['bound']!r} > exact value {v!r}"
                     )
                     break
@@ -352,7 +353,9 @@ def judge(rows: list[dict], insts: list[dict], out: Path) -> int:
             "# #2187 panel summary",
             *lines,
             f"executed checks: {checks}",
-            f"violations: {len(bad)}",
+            f"violations: {len(bad)} (bound: {sum(b.startswith('BOUND') for b in bad)}, "
+            f"incorrect certificate: {sum(b.startswith('INCORRECT') for b in bad)}, "
+            f"objective-at-point: {sum(b.startswith('OBJECTIVE') for b in bad)})",
             *bad,
             f"instance/form pairs where arms differ: {len(diffs)}",
             *diffs,

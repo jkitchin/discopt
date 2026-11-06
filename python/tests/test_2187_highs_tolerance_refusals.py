@@ -247,6 +247,13 @@ def test_repair_never_certifies_an_incumbent_below_the_root_bound():
     assert stats["milp/incumbent_below_root"] == pytest.approx(5.05315e-5, rel=1e-4)
 
 
+def test_repair_of_an_optimal_without_an_incumbent_is_an_error():
+    out, labels, stats = _tree_out(None, 10.0), {}, {}
+    lp_milp_highs._repair_tree_below_root(out, 12.0, labels, stats, GAP_KW)
+    assert out.status == "error" and not out.gap_certified
+    assert labels["milp/certificate"] == "declined"
+
+
 def test_repair_on_a_limit_exit_only_raises_the_bound():
     out, labels, stats = _tree_out(30.0, 10.0, status="time_limit"), {}, {}
     lp_milp_highs._repair_tree_below_root(out, 12.0, labels, stats, GAP_KW)

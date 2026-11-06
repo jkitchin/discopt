@@ -3346,10 +3346,15 @@ def _repair_tree_below_root(
         if out.status == "optimal":
             out.status = "feasible"
             stats["milp/incumbent_below_root_pending"] = 1.0
+    elif out.status == "optimal" and out.objective is None:
+        # HiGHS reports a point with every kOptimal, so this is not reached today. An
+        # "optimal" with no incumbent has nothing to certify, and "feasible" would claim
+        # a point that does not exist (review of #2189).
+        out.status, out.gap_certified = "error", False
+        out.message = "HiGHS MILP kOptimal without an incumbent"
+        labels["milp/certificate"] = "declined"
     elif out.status == "optimal":
-        closed = out.objective is not None and _gap_closed(
-            float(out.objective), float(out.bound), gap_kw
-        )
+        closed = _gap_closed(float(out.objective), float(out.bound), gap_kw)  # type: ignore[arg-type]
         out.gap_certified = closed
         if not closed:
             out.status = "feasible"
