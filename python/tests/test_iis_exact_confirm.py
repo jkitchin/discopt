@@ -78,6 +78,56 @@ def _presolve_off_status(model):
     return h.getModelStatus()
 
 
+def _verified_certificates(model, res, tol=1e-6) -> set:
+    """Keys of ``res.certificates`` whose point, checked against ``model`` directly,
+    satisfies every other IIS member within ``tol`` and violates its own by more.
+    Raises if any key names something that is not an IIS member."""
+    from discopt.decomposition._linear import extract_linear
+
+    lin = extract_linear(model)
+    assert lin.m == len(model._constraints)  # one row per constraint in this model
+    A = sp.csr_matrix(lin.A)
+    lb = np.concatenate([np.atleast_1d(np.asarray(v.lb, float)) for v in model._variables])
+    ub = np.concatenate([np.atleast_1d(np.asarray(v.ub, float)) for v in model._variables])
+    members = (
+        {("constraint", c) for c in res.constraints}
+        | {("bound", j, s) for j, s in res.bounds}
+        | {("integrality", j) for j in res.integrality}
+    )
+    assert set(res.certificates) <= members, set(res.certificates) - members
+
+    def violation(key, x) -> float:
+        if key[0] == "constraint":
+            r = key[1]
+            act = float(A[r] @ x)
+            s = lin.sense[r]
+            v = 0.0
+            if s in (">=", "=="):
+                v = max(v, lin.b[r] - act)
+            if s in ("<=", "=="):
+                v = max(v, act - lin.b[r])
+            return v
+        if key[0] == "bound":
+            j, side = key[1], key[2]
+            return lb[j] - x[j] if side == "lower" else x[j] - ub[j]
+        j = key[1]
+        return abs(x[j] - round(x[j]))
+
+    held = set(res.integrality)
+    ok = set()
+    n_checked = 0
+    for key, x in res.certificates.items():
+        x = np.asarray(x, float)
+        rest = [violation(k, x) for k in members if k != key]
+        # A held integer column keeps its box even when it is not a bound member.
+        rest += [max(lb[j] - x[j], x[j] - ub[j]) for j in held]
+        n_checked += 1
+        if max(rest, default=0.0) <= tol and violation(key, x) > tol:
+            ok.add(key)
+    assert n_checked == len(res.certificates)
+    return ok
+
+
 @pytest.mark.smoke
 def test_big_m_set_presolve_off_cannot_confirm_is_decided_exactly():
     m = _kedron_like()
@@ -87,7 +137,14 @@ def test_big_m_set_presolve_off_cannot_confirm_is_decided_exactly():
         res = milp_iis(m, total_time_limit=tl)
         assert res.complete and res.proven_irreducible and not res.fallback
         assert (len(res.constraints), len(res.bounds), len(res.integrality)) == (6, 4, 2)
-        assert len(res.certificates) == 12
+        # Every certificate reported is a real witness, re-checked here against the
+        # model. Not ``== 12``: a certificate is the probe's own point, dropped
+        # rather than repaired when it fails the check, and which vertex HiGHS
+        # returns is version-dependent. Measured with highspy 1.13.1 on macOS:
+        # relaxing z1's integrality returns z1 = 1 - 3.1e-11 (fractional by less
+        # than cert_tol) although z1 = 0.5 is feasible, so 11 of 12 are certified.
+        assert _verified_certificates(m, res) == set(res.certificates)
+        assert len(res.certificates) >= len(res.constraints) + len(res.bounds)
         # Decided by an exact second route: the reduction (tried first) or the
         # rational decider (below, with the reduction off).
         assert res.n_exact_confirmed + res.n_reduced_confirmed >= 1
