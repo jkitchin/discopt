@@ -39617,6 +39617,78 @@ def _milp_reentry_cuts_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_REENTRY_CUTS", "0") == "1"
 
 
+def _milp_aligned_slacks_enabled() -> bool:
+    """``DISCOPT_MILP_ALIGNED_SLACKS`` gate (highs-parity D2): hand the native MILP driver
+    an *aligned* standard form, where column ``n_orig + r`` is row ``r``'s slack.
+
+    ``extract_lp_data`` gives slack columns to inequality rows only, in an order unrelated
+    to the rows. The driver's root cut loop assumes column ``ns + r`` is row ``r``'s slack
+    (``BaseRows.slack_coef``). Measured on the MIPLIB rows that plain HiGHS B&B certifies
+    and the route does not:
+
+    * ``fiber``: 363 equality rows, no slack columns, rank 352. The 11 dependent rows keep
+      a basic artificial, the root basis is short, and GMI declines it
+      (``SepGomoryShortBasis``). One root cut round, 0 cuts: route root gap 61.6 %, against
+      8.7 % for the same driver on inequality pairs.
+    * ``nexp-50-20-1-1``: 522 slacks for 540 rows, none at ``ns + r``, so the structural
+      rewrite drops every cut touching a slack (``SubstDropNoSlack``).
+
+    ON permutes each row's existing slack (a singleton column past ``n_orig``) to
+    ``n_orig + r`` and gives every row without one a new slack fixed at ``[0, 0]``; any
+    other auxiliary column follows. The feasible set is unchanged (a column permutation
+    plus zero-fixed columns), the structural columns keep their positions, and every
+    check after the solve still reads the original ``lp_data``. The driver's rewrite
+    moves a fixed slack's term to the rhs exactly (``SubstFixedSlack``). Bound-changing
+    (different root cuts), so default OFF pending its panel; read at call time.
+    """
+    return os.environ.get("DISCOPT_MILP_ALIGNED_SLACKS", "0") == "1"
+
+
+def _milp_aligned_lp(lp_data, n_orig: int):
+    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`."""
+    import scipy.sparse as _sp
+
+    A = _sp.csc_matrix(lp_data.A_eq)
+    m, n = A.shape
+    slack_of_row = [-1] * m
+    for k in range(n_orig, n):
+        lo, hi = A.indptr[k], A.indptr[k + 1]
+        if hi - lo == 1:
+            r = int(A.indices[lo])
+            if slack_of_row[r] < 0:
+                slack_of_row[r] = k
+    used = {k for k in slack_of_row if k >= 0}
+    rest = [k for k in range(n_orig, n) if k not in used]
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    cols = [A[:, :n_orig]]
+    cc, ll, uu = [c[:n_orig]], [xl[:n_orig]], [xu[:n_orig]]
+    for r in range(m):
+        k = slack_of_row[r]
+        if k >= 0:
+            cols.append(A[:, k])
+            cc.append(c[k : k + 1])
+            ll.append(xl[k : k + 1])
+            uu.append(xu[k : k + 1])
+        else:
+            cols.append(_sp.csc_matrix(([1.0], ([r], [0])), shape=(m, 1)))
+            cc.append(np.zeros(1))
+            ll.append(np.zeros(1))
+            uu.append(np.zeros(1))
+    for k in rest:
+        cols.append(A[:, k])
+        cc.append(c[k : k + 1])
+        ll.append(xl[k : k + 1])
+        uu.append(xu[k : k + 1])
+    return lp_data._replace(
+        A_eq=_sp.hstack(cols, format="csc"),
+        c=np.concatenate(cc),
+        x_l=np.concatenate(ll),
+        x_u=np.concatenate(uu),
+    )
+
+
 def _milp_engine_full_budget_enabled() -> bool:
     """``DISCOPT_MILP_ENGINE_FULL_BUDGET`` gate (#1874): let the native MILP
     engine use the caller's budget instead of stopping on the 100k-node default.
@@ -39810,10 +39882,13 @@ def _solve_milp_simplex(
     # is the same driver with the same options and return tuple, entered without the
     # densify. See ``_csc_for_rust_milp`` for the measurement and the bit-for-bit
     # structural equivalence that keeps this bound-neutral.
-    _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(lp_data.A_eq)
+    n_orig = sum(v.size for v in model._variables)
+    # D2 (``DISCOPT_MILP_ALIGNED_SLACKS``): the driver's own copy; every check below
+    # keeps reading the original ``lp_data``.
+    _drv = _milp_aligned_lp(lp_data, n_orig) if _milp_aligned_slacks_enabled() else lp_data
+    _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     if _A_m == 0:
         return None  # no constraints — let the default path handle it
-    n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
@@ -39879,15 +39954,15 @@ def _solve_milp_simplex(
     _stopped_on_nodes = False
 
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
-        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        np.ascontiguousarray(_drv.c, dtype=np.float64),
         _A_m,
         _A_n,
         _A_ptr,
         _A_idx,
         _A_val,
-        np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+        np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+        np.ascontiguousarray(_drv.x_u, dtype=np.float64),
         np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
         n_orig,
         float(lp_data.obj_const),
@@ -39923,7 +39998,7 @@ def _solve_milp_simplex(
         _A_gate,
         np.asarray(lp_data.b_eq),
         n_orig,
-        _A_n - n_orig,
+        lp_data.A_eq.shape[1] - n_orig,
         np.asarray(lp_data.x_u, dtype=np.float64),
         row_sense=_declared_row_senses(lp_data, _A_gate),
     )
@@ -40059,15 +40134,15 @@ def _solve_milp_simplex(
                 _nodes2,
                 _iters2,
             ) = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
                 n_orig,
                 float(lp_data.obj_const),
@@ -40246,15 +40321,15 @@ def _solve_milp_simplex(
         _t_root = time.perf_counter()
         if relu_cuts is None:
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
                 n_orig,
                 float(lp_data.obj_const),
@@ -40271,15 +40346,15 @@ def _solve_milp_simplex(
             # is the frontier minimum after the root's separation rounds, a valid
             # bound over the root box.
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
                 n_orig,
                 float(lp_data.obj_const),

@@ -453,6 +453,45 @@ const NODE_GMI_ROUNDS: usize = 3;
 /// Cuts kept per round after selection.
 const NODE_GMI_MAX_CUTS: usize = 20;
 
+/// Whether the root cut loop's LPs expel zero-valued basic artificials, read once from
+/// `DISCOPT_MILP_ROOT_FULL_BASIS` (highs-parity D2). Default OFF; garbage is refused.
+///
+/// On the shipped pure-MILP route, equality rows reach the driver without slack columns.
+/// The cold root solve then leaves a zero-valued artificial in the basis, so the basis
+/// is SHORT, and GMI separation declines it (`SepGomoryShortBasis`). The root cut loop
+/// separates nothing and stops after one round. Measured with `p44_root_gap.py --profile`:
+/// `fiber` and `beavma` both do 1 round with 1 short-basis refusal and 0 cuts.
+///
+/// | row | route root gap | direct-driver root gap (equalities as inequality pairs, full basis) |
+/// |---|---|---|
+/// | `fiber` | 61.6 % | 8.7 % |
+/// | `beavma` | 58.7 % | 19.7 % |
+///
+/// ON solves the root-loop LPs with [`SimplexOptions::expel_zero_artificials`], which
+/// drives those artificials out by degenerate pivots. The vertex, objective and duals
+/// are unchanged, and the basis is full in real columns. This is the clean form of the
+/// reverted `DISCOPT_MILP_ROOT_GMI_REPAIR`, which completed the basis with unit columns
+/// and produced dense cuts. Bound-changing (different root cuts), so default OFF pending
+/// its panel.
+fn root_full_basis_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        match std::env::var("DISCOPT_MILP_ROOT_FULL_BASIS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            other => panic!(
+                "DISCOPT_MILP_ROOT_FULL_BASIS={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+            ),
+        }
+    })
+}
+
 /// Global GMI pool (`DISCOPT_MILP_NODE_GMI`): most cuts kept, batches a cut may go
 /// unused before it ages out, and pool cuts appended per node.
 const NODE_GMI_POOL_CAP: usize = 2000;
@@ -1983,6 +2022,14 @@ fn solve_milp_node_search(
         sx.deadline = deadline;
         sx
     };
+    // D2: the root cut loop's LP options (`DISCOPT_MILP_ROOT_FULL_BASIS`).
+    let root_simplex = {
+        let mut sx = node_simplex.clone();
+        if root_full_basis_enabled() {
+            sx.expel_zero_artificials = true;
+        }
+        sx
+    };
 
     // --- P5/P8: multi-round root GMI cuts from the native simplex basis ---
     // Each round re-solves the (growing) root LP and separates GMI cuts off its
@@ -2099,7 +2146,7 @@ fn solve_milp_node_search(
                             &lp,
                             &b_w,
                             &b,
-                            &warm_root_opts(&node_simplex, m_w, n_w),
+                            &warm_root_opts(&root_simplex, m_w, n_w),
                             &csc_w,
                         );
                         match warm.status {
@@ -2111,13 +2158,13 @@ fn solve_milp_node_search(
                                 &l_w,
                                 &u_w,
                                 &b_w,
-                                &node_simplex,
+                                &root_simplex,
                             ),
                             _ => warm,
                         }
                     }
                     None => {
-                        solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &node_simplex)
+                        solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &root_simplex)
                     }
                 }
             };
@@ -4769,6 +4816,15 @@ fn substitute_slacks_to_structural(
     for j in ns..cut.coeffs.len() {
         let a = cut.coeffs[j];
         if a == 0.0 {
+            continue;
+        }
+        // A FIXED column (an equality row's slack pinned at [0, 0] by the route's
+        // aligned standard form, D2) takes the value `l[j]` at every feasible point, so
+        // its term is the constant `a * l[j]`: move it to the rhs exactly instead of
+        // expanding it through its row, which only densifies the cut.
+        if j < n_base && j < l.len() && j < u.len() && l[j] == u[j] && l[j].is_finite() {
+            crate::profile::incr(crate::profile::Ctr::SubstFixedSlack);
+            rhs -= a * l[j];
             continue;
         }
         if j < n_base {

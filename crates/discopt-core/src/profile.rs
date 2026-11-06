@@ -323,6 +323,8 @@ counters!(
     NodeGmiPoolAdded,
     NodeGmiPoolDropped,
     NodeGmiPoolUsed,
+    // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
+    SubstFixedSlack,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
