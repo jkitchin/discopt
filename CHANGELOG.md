@@ -12,6 +12,28 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`relu_complementarity` strategy for ReLU networks (#2167, slice 1).**
+  `NNFormulation(m, net, strategy="relu_complementarity")` encodes each unstable ReLU
+  neuron as `y - s == z` with a declared complementarity relation `0 <= y ⊥ s >= 0`
+  (new role `ComplementarityRole.FROM_ACTIVATION`, `parent` = layer, `index` = neuron)
+  instead of an indicator binary and big-M rows; the relations are on `nn.relations`.
+  They are registered but not lowered, so `Model.solve()` refuses until
+  `solve_mpec(m, nn.relations, method=...)` picks `"sos1"`/`"gdp"` (exact; reproduces
+  `relu_bigm`'s certified objective) or `"scholtes"` (local). The strategy needs no
+  `input_bounds`. Checked by `python/tests/test_2167_relu_complementarity.py`.
+- **Multistart local mode for complementarity models (#2167, slice 2).**
+  `discopt.mpec.solve_mpec_multistart(model, pairs, starts)` and
+  `NNFormulation.solve_local(n_starts=...)`, which uses forward-pass warm starts from
+  `NNFormulation.local_starts`. Each start runs a Scholtes continuation and then an
+  active-set polish that leaves the point exactly complementary. A point becomes
+  `result.x` only after `accept_local_incumbent` verifies it. The result is always
+  local (`local_optimal` / `local_infeasible`, no bound), and `result.multistart`
+  logs every start (a new `SolveResult` field).
+- **Native complementarity lowering and branch (#2167, slice 3).**
+  `solve_mpec(method="native")` encodes each pair as `f·g <= 0` over `f, g >= 0`.
+  This is exact, has no binaries, and needs no finite bounds. With
+  `DISCOPT_COMPL_BRANCH=1` (default off) the spatial tree splits a violated pair
+  into `ub(f)=0` / `ub(g)=0` before its other branching rules.
 - **The GAMS link reads a `discopt.opt` option file.** With `optfile = 1`, the link
   reads GAMS's usual solver option file and accepts three keys: `tol` and
   `constr_viol_tol`, forwarded to every POUNCE NLP the solve runs (as

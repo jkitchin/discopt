@@ -1,0 +1,2 @@
+RESULT {"method": "big-m", "status": "node_limit", "obj": null, "bound": 552271.2989113937, "nodes": 311, "wall": 63.37670640399983, "env": {"DISCOPT_GDP_CONFIG_FEAS_FALLBACK": "0"}}
+STATS {"nlpbb/convex_safe_bound_nodes": 155.0, "nlpbb/convex_safe_bound_abstained": 0.0, "nlpbb/convex_safe_bound_raised": 155.0, "nlpbb/convex_safe_bound_exact_suspended": 0.0, "nlpbb/convex_safe_fathom_floor": Infinity}

@@ -5213,6 +5213,11 @@ class SolveResult:
     # interval evaluator, and ``SolveResult`` is constructed on every solve path.
     mpec_report: Optional[object] = None
 
+    # Per-start log of ``discopt.mpec.solve_mpec_multistart`` (#2167): a list of
+    # ``discopt.mpec.MultistartRecord``, one per start that ran. ``None`` on every
+    # other path.
+    multistart: Optional[list] = None
+
     # Set True when the final incumbent-verification guard (Model.solve, default
     # on) found the returned incumbent INFEASIBLE in the ORIGINAL problem — a
     # false primal, which can only arise from an unsound presolve mutation or a

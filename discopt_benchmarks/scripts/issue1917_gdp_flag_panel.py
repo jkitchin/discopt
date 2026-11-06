@@ -169,6 +169,9 @@ FLAG_METHODS: dict[str, tuple[str, ...]] = {
     # time (lowering identical): solve ``--all``. Rows carry ``feas_fallback``, the
     # worker's firing counter.
     "DISCOPT_GDP_CONFIG_FEAS_FALLBACK": ("big-m", "hull"),
+    # #2176: the improver contingent priced by measured wall acts at solve time in
+    # both governors (lowering identical): solve ``--all``.
+    "DISCOPT_HEUR_WALL_COST": ("big-m", "hull"),
 }
 #: Methods with no lowering to fingerprint: the flag acts inside the algorithm,
 #: so the fire phase cannot rule an instance out and every instance is solved.

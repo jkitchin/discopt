@@ -592,8 +592,14 @@ def evaluate_on_point_box(model: "Model", expr: "Expression", box: dict) -> np.n
     return np.atleast_1d(mid)
 
 
-def _scalar(model: "Model", expr: "Expression", point: dict[int, np.ndarray]) -> float:
-    vals = evaluate_at_point(model, expr, point)
+def _scalar(model: "Model", expr: "Expression", box: dict) -> float:
+    """``expr`` at the point whose degenerate box is ``box`` (see :func:`point_box`).
+
+    Takes the box, not the point: building it walks every model variable, and
+    rebuilding it per operand made a residual report quadratic in model size
+    (#2167: 8198 rebuilds, 42 s of a 68 s local solve on a 4-256-256-1 net).
+    """
+    vals = evaluate_on_point_box(model, expr, box)
     if vals.size != 1:
         raise ValueError(
             f"expected a scalar operand, got {vals.size} elements from {expr!r}. "
@@ -762,11 +768,12 @@ def relation_residuals(
         nothing failure of CLAUDE.md §6, caught at the one place it can start.
     """
     rows: list[RelationResidual] = []
+    box = point_box(model, point)  # once per call: the point is fixed for the whole walk
     for parent in pairs:
         for elem in parent.elements(model):
             elem_kind = _resolve_kind(kind, elem)
-            fv = _scalar(model, elem.f, point)
-            gv = _scalar(model, elem.g, point)
+            fv = _scalar(model, elem.f, box)
+            gv = _scalar(model, elem.g, box)
             scale = float(elem.effective_scale)
             rows.append(
                 RelationResidual(
@@ -1043,14 +1050,17 @@ def _row_residual(
     """
     worst = 0.0
     where = None
+    box = point_box(model, point)  # once per call; see _scalar
     for con in rows:
-        v = _one_row_violation(model, con, point)
+        v = _one_row_violation(model, con, point, box=box)
         if v > worst:
             worst, where = v, getattr(con, "name", None)
     return Residual(name=name, value=worst, definition=definition, where=where)
 
 
-def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> float:
+def _one_row_violation(
+    model: "Model", con, point: dict[int, np.ndarray], *, box: Optional[dict] = None
+) -> float:
     """Violation of one row of a model's constraint list, whatever kind it is.
 
     ``Model._constraints`` holds several kinds of object, and a residual walker
@@ -1073,6 +1083,8 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
       complementarity lowering, and guessing its residual would be a silent
       approximation, so it is refused.
     """
+    if box is None:
+        box = point_box(model, point)
     from discopt.modeling.core import (
         Constraint,
         Variable,
@@ -1083,7 +1095,7 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
     )
 
     if isinstance(con, Constraint):
-        vals = evaluate_at_point(model, con.body, point)
+        vals = evaluate_on_point_box(model, con.body, box)
         sense = getattr(con.sense, "value", con.sense)
         rhs = float(getattr(con, "rhs", 0.0) or 0.0)
         shifted = vals - rhs
@@ -1102,7 +1114,7 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
         # other selectors before a fractional value can skip the wrapped row.
         if not isinstance(con.indicator, Variable) or con.indicator.var_type is not VarType.BINARY:
             raise ValueError(f"indicator row {con.name!r} requires a binary variable selector")
-        values = evaluate_at_point(model, con.indicator, point).ravel()
+        values = evaluate_on_point_box(model, con.indicator, box).ravel()
         if values.size != 1 or not np.all(np.isfinite(values)):
             raise ValueError(
                 f"indicator row {con.name!r} requires one finite scalar selector; "
@@ -1125,7 +1137,7 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
         effectively_integral = selector * (1.0 - selector) <= _INTEGRALITY_TOL
         boolean_value = int(selector >= 0.5)
         if in_tolerated_box and effectively_integral and boolean_value == con.active_value:
-            return _one_row_violation(model, con.constraint, point)
+            return _one_row_violation(model, con.constraint, point, box=box)
         # An effectively integral inactive selector contributes zero. At a
         # genuinely fractional selector the Boolean implication has no arithmetic
         # row residual of its own. The dedicated selector-integrality residual
@@ -1137,7 +1149,10 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
             return 0.0
         return float(
             min(
-                max((_one_row_violation(model, row, point) for row in disjunct), default=0.0)
+                max(
+                    (_one_row_violation(model, row, point, box=box) for row in disjunct),
+                    default=0.0,
+                )
                 for disjunct in con.disjuncts
             )
         )
@@ -1151,7 +1166,7 @@ def _one_row_violation(model: "Model", con, point: dict[int, np.ndarray]) -> flo
             )
         mags: list[float] = []
         for var in con.variables:
-            mags.extend(float(abs(a)) for a in evaluate_at_point(model, var, point).ravel())
+            mags.extend(float(abs(a)) for a in evaluate_on_point_box(model, var, box).ravel())
         if len(mags) < 2:
             return 0.0
         mags.sort(reverse=True)

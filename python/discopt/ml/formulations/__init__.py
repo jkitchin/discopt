@@ -4,6 +4,7 @@ from discopt.ml.formulations.base import NNFormulation
 from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml.formulations.relu_complementarity import ReluComplementarityFormulation
 from discopt.ml.formulations.relu_partition import (
     AndersonCutSeparator,
     ReluExtendedFormulation,
@@ -20,4 +21,5 @@ __all__ = [
     "NNFormulation",
     "ReducedSpaceFormulation",
     "ReluBigMFormulation",
+    "ReluComplementarityFormulation",
 ]
