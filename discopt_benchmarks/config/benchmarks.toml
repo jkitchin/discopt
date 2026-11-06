@@ -497,15 +497,16 @@ options = { threads = 1 }
 note = "conda-forge coin-or-bonmin in the discopt-bench env."
 
 [solvers.scip]
-command = "/opt/homebrew/Caskroom/miniforge/base/envs/discopt-bench/bin/scip"
+command = "/opt/homebrew/bin/scip"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
-note = "conda-forge scip 10.0.2 (SoPlex 8.0.2) in the discopt-bench env; has the AMPL/MP .nl reader. Driven via the SCIP batch -c interface."
+note = "Homebrew scip 10.1.0 (SoPlex 8.1.0); has the AMPL/MP .nl reader. Driven via the SCIP batch -c interface. (Was conda-forge 10.0.2 in a discopt-bench env until that env was removed, 2026-11-06.)"
 
 [solvers.highs]
 command = "/Applications/AMPL/highs"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
+preflight_probe = "milp"  # LP/MILP only: cannot solve the MINLP probe
 note = "HiGHS 1.11.0 (AMPL-ASL build) — reads .nl. NOTE: the conda-forge `highs` CLI is mps/lp-only and does NOT read .nl, so the .nl benchmark path must use the ASL build. LP/MILP only."

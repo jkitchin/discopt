@@ -8,6 +8,7 @@ collects results, computes metrics, and generates reports.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -48,10 +49,49 @@ class SolverConfig:
     solver_type: str  # "internal" (discopt) or "external"
     nl_interface: bool = False
     options: dict = None
+    # Key into PREFLIGHT_PROBES: the instance this solver must solve correctly
+    # before a run starts. "minlp" for the MINLP solvers; an LP/MILP-only solver
+    # (HiGHS) declares ``preflight_probe = "milp"`` in its [solvers.*] table.
+    preflight_probe: str = "minlp"
 
     def __post_init__(self):
         if self.options is None:
             self.options = {}
+
+
+class SolverUnavailableError(RuntimeError):
+    """An external solver failed the preflight probe; the run must not start."""
+
+
+@dataclass(frozen=True)
+class PreflightProbe:
+    """An instance every external solver must solve before a run starts."""
+
+    nl_path: Path
+    optimum: float
+    why: str
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Both probes are larger than 10 variables AND 10 constraints, the cap of the
+# AMPL-bundle demo licenses, so a demo-licensed binary refuses the probe rather
+# than passing it and then refusing every real instance. Both optima are checked,
+# so a binary that runs but cannot read the model (the GAMS ``.bar``-only BARON,
+# which prints usage and exits rc=0) fails too.
+PREFLIGHT_PROBES: dict[str, PreflightProbe] = {
+    "minlp": PreflightProbe(
+        nl_path=_REPO_ROOT / "python/tests/data/minlplib_nl/flay03m.nl",
+        optimum=48.98979486,  # MINLPLib .solu
+        why="MINLPLib flay03m: 26 vars, 24 cons, convex MINLP (exact for local Bonmin)",
+    ),
+    "milp": PreflightProbe(
+        nl_path=_REPO_ROOT / "discopt_benchmarks/data/preflight/probe_milp.nl",
+        optimum=16.0,  # brute force over all 120 assignments; see make_probe_milp.py
+        why="5x5 assignment + 1 binding side row: 25 binaries, 11 rows",
+    ),
+}
+PREFLIGHT_TIME_LIMIT = 30
 
 
 @dataclass
@@ -207,11 +247,12 @@ class BenchmarkRunner:
                 else:
                     icon = "✗"
 
-                time_str = (
-                    f"{best_result.wall_time:.2f}s"
-                    if best_result.wall_time < float("inf")
-                    else "TL"
-                )
+                if best_result.status == SolveStatus.ERROR:
+                    time_str = "ERR"  # not "TL": an error is not a time limit
+                elif best_result.wall_time < float("inf"):
+                    time_str = f"{best_result.wall_time:.2f}s"
+                else:
+                    time_str = "TL"
 
                 # Objective and gap info
                 obj_str = ""
@@ -367,9 +408,7 @@ class BenchmarkRunner:
             pounce_frac = time_fraction(getattr(result, "pounce_time", None), wt)
 
             traj = (
-                _downsample_trajectory(
-                    _traj, getattr(self.config, "trajectory_max_points", 500)
-                )
+                _downsample_trajectory(_traj, getattr(self.config, "trajectory_max_points", 500))
                 if _traj
                 else None
             )
@@ -433,6 +472,73 @@ class BenchmarkRunner:
 
         return None
 
+    def preflight_external_solvers(self) -> None:
+        """Refuse to start unless every external solver solves its probe.
+
+        A run used to start with whatever ``command`` the config named. When the
+        binary was gone (the 2026-11 global50 run: the miniforge env holding SCIP
+        had been deleted) every launch raised, every row became ERROR with an
+        infinite time, the log printed ``TL``, and the summary reported
+        ``scip 0/50`` -- a solver column that read as a result. Checking that the
+        file exists is not enough: a wrong binary or a demo license also runs.
+        So each external solver must solve a probe whose optimum is known, and
+        every failure is collected and raised before any instance runs.
+        """
+        failures = []
+        for solver in self.config.solvers:
+            if solver.solver_type != "external":
+                continue
+            problem = self._preflight_one(solver)
+            if problem is None:
+                print(f"  preflight: {solver.name} ({solver.command}) ok")
+            else:
+                failures.append(f"{solver.name} ({solver.command}): {problem}")
+        if failures:
+            raise SolverUnavailableError(
+                "external solver preflight failed -- not running:\n  " + "\n  ".join(failures)
+            )
+
+    def _preflight_one(self, solver: SolverConfig) -> str | None:
+        """Return why ``solver`` cannot be benchmarked, or None if it can."""
+        probe = PREFLIGHT_PROBES.get(solver.preflight_probe)
+        if probe is None:
+            return (
+                f"unknown preflight_probe {solver.preflight_probe!r} "
+                f"(known: {sorted(PREFLIGHT_PROBES)})"
+            )
+        if not probe.nl_path.is_file():
+            return f"probe instance {probe.nl_path} is missing from this checkout"
+        if shutil.which(solver.command) is None:
+            return "binary not found or not executable"
+
+        cmd = self._build_command(solver, str(probe.nl_path), time_limit=PREFLIGHT_TIME_LIMIT)
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=PREFLIGHT_TIME_LIMIT + 30
+            )
+        except subprocess.TimeoutExpired:
+            return f"no answer on the probe within {PREFLIGHT_TIME_LIMIT + 30}s"
+        except OSError as exc:
+            return f"could not be launched: {exc!r}"
+        elapsed = time.monotonic() - start
+
+        name = probe.nl_path.stem
+        result = self._parse_external_output(solver.name, name, proc.stdout, proc.stderr, elapsed)
+        result = self._reject_non_result(solver, name, result, proc.stdout)
+        tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-3:]
+        if result.status != SolveStatus.OPTIMAL or result.objective is None:
+            return (
+                f"probe {name} ({probe.why}) returned status={result.status.value}, "
+                f"objective={result.objective}, rc={proc.returncode}; output tail: {tail}"
+            )
+        if abs(result.objective - probe.optimum) > 1e-6 + 1e-4 * abs(probe.optimum):
+            return (
+                f"probe {name} returned objective {result.objective!r}, "
+                f"known optimum {probe.optimum!r}"
+            )
+        return None
+
     def _run_external(
         self,
         solver: SolverConfig,
@@ -469,7 +575,10 @@ class BenchmarkRunner:
                 status=SolveStatus.TIME_LIMIT,
                 wall_time=self.config.time_limit,
             )
-        except Exception:
+        except Exception as exc:
+            # Recorded as ERROR so one bad instance does not end the panel, but
+            # never silently: this branch is where a missing binary used to vanish.
+            print(f"    !! {solver.name} on {instance}: {exc!r} -- recorded as ERROR")
             return SolveResult(
                 instance=instance,
                 solver=solver.name,
@@ -525,7 +634,9 @@ class BenchmarkRunner:
             wall_time=result.wall_time,
         )
 
-    def _build_command(self, solver: SolverConfig, instance: str) -> list[str]:
+    def _build_command(
+        self, solver: SolverConfig, instance: str, time_limit: float | None = None
+    ) -> list[str]:
         """Build a solver command line for the .nl-interface external solvers.
 
         SCIP is driven through its batch (``-c``) interface so we can set the
@@ -537,7 +648,7 @@ class BenchmarkRunner:
         nl = self._find_nl_file(instance) or instance
         cmd = [solver.command]
         name = solver.name.lower()
-        time_limit = int(self.config.time_limit)
+        time_limit = int(self.config.time_limit if time_limit is None else time_limit)
 
         if name.startswith("scip"):
             cmd += [

@@ -13,7 +13,7 @@ builds cannot, so the binary that matters is not always the obvious one:
 
 | Solver  | Use this binary                                                        | Version  | Reads `.nl`? |
 |---------|-----------------------------------------------------------------------|----------|--------------|
-| SCIP    | `…/miniforge/base/envs/discopt-bench/bin/scip` (conda-forge)          | 10.0.2   | ✅ (AMPL/MP reader) |
+| SCIP    | `/opt/homebrew/bin/scip` (`brew install scip`)                         | 10.1.0   | ✅ (AMPL/MP reader) |
 | Couenne | `/Applications/AMPL/couenne` (COIN-OR ASL build)                       | 0.5.8    | ✅ |
 | HiGHS   | `/Applications/AMPL/highs` (ASL build)                                 | 1.11.0   | ✅ |
 
@@ -25,14 +25,37 @@ highs) need **no AMPL license**.
 
 Paths are configured in `config/benchmarks.toml` under `[solvers]`.
 
-## Conda environment
+## Installing
 
 ```bash
-conda create -n discopt-bench -c conda-forge scip=10.0.2 highs bonmin
+brew install scip   # SCIP 10.1.0 with SoPlex; reads .nl
 ```
 
-(SCIP is the one solver consumed from conda-forge. HiGHS/Couenne are taken from
-`/Applications/AMPL/` per the table above.)
+SCIP came from a conda-forge `discopt-bench` env until 2026-11-06, when that env
+(and miniforge) was found deleted; `[solvers.bonmin]` still names it, so Bonmin
+fails the preflight below until it is reinstalled. HiGHS/Couenne/BARON-demo are
+taken from the AMPL bundle in `/Applications/AMPL/` per the table above.
+
+## Preflight: a run refuses to start on a broken solver
+
+Before any instance runs, `run_benchmarks.py` makes every external solver solve a
+probe with a known optimum (`BenchmarkRunner.preflight_external_solvers`,
+`PREFLIGHT_PROBES` in `benchmarks/runner.py`) and exits 1, naming each failing
+solver and its configured path, if any of them cannot. It catches a missing
+binary, a binary that cannot read `.nl` (it answers with a usage message and
+rc=0), a demo license (both probes are larger than 10 variables and 10
+constraints) and a wrong answer. This replaced a failure mode where a deleted
+binary produced a column of ERROR rows that the summary reported as `0/50 solved`.
+
+- `minlp` (default): MINLPLib `flay03m`, optimum 48.98979486. Convex, so local
+  Bonmin is exact on it.
+- `milp`: `data/preflight/probe_milp.nl`, a 5x5 assignment with one binding side
+  row, optimum 16 by brute force (`data/preflight/make_probe_milp.py`). For an
+  LP/MILP-only solver, set `preflight_probe = "milp"` in its `[solvers.*]` table
+  (HiGHS does).
+
+A `--solvers` name with no `[solvers.*]` entry is also refused. It used to fall
+back to an internal solver, which runs discopt under the unknown name.
 
 ## Invocation details
 
