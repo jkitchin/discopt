@@ -1496,12 +1496,27 @@ and is re-written by P4.1.**
   Tableau c-MIR (the original P4.4
   scope) is deferred: with the repair, `mik` stays at 3.8-4.2 %; its limiter is the
   500-cut cap (2000 helps 0-0.4 pp), not a missing family.
-- [ ] **P4.5 — Root restart.** Scope: `milp_driver.rs` root loop. After the root cut loop,
+- [x] **P4.5 — Root restart. KILLED AT ENTRY 2026-11-06.** Scope: `milp_driver.rs` root loop. After the root cut loop,
   if reduced-cost fixing + FBBT fixed ≥ 10 % of columns, re-run presolve + root loop on the
   reduced problem once (HiGHS's closer on `beavma`/`dcmulti`, §2.6). Entry: count such
   roots on MIPLIB-38; hypothesis ≥ 8 instances qualify and the restarted root bound
   improves ≥ 1 pp on ≥ 4. Flag `DISCOPT_MILP_ROOT_RESTART`. Done: panel bars. Kill: entry
   fails → retire. Regime: bound-changing.
+  **Result (2026-11-06): killed at entry; nothing built.** Data `p4.5/`. New bound-neutral
+  counters `RootIntFree` / `RootIntFixed` (profile-gated) count the free integer columns
+  and those the ROOT node's FBBT + reduced-cost fixing pins.
+  - Unseeded (`root_fixing_unseeded.json`, `p44_root_gap.py --all --profile`): **0** of 57
+    roots fix ≥ 10 % -- without an incumbent at the root, reduced-cost fixing cannot act.
+  - Seeded with the HiGHS optimum (`root_fixing_seeded.json`, `P44_SEED_HIGHS=1`, the
+    best case for fixing): **15** of 57 qualify (`mik` 40 %, `gt2` 46 %, `rgn` 47 %,
+    `app2-2` 91 %, ...) -- part 1 of the hypothesis (≥ 8) holds only with an optimal
+    incumbent in hand at the root.
+  - Restart (`restart_bounds.jsonl`, probe `p45_restart_probe.py`: the root's tightened
+    box dumped by a temporary hook, then the same driver call -- same options, seeded --
+    re-run on that box, i.e. presolve + root cut loop again): **1** of 15 improves ≥ 1 pp
+    (`rgn` 29.13 → 24.03); `mik` 0.02-0.20 pp, `gt2` +0.48 (certified), `lseu` −0.89. The
+    bar was ≥ 4. Since the seeded incumbent is the optimum, this is an upper bound on what
+    a restart gets on the shipped route. The hook was reverted; the counters stay.
 - [x] **P4.6 — Feasibility jump + shifting primal heuristics. KILLED AT ENTRY 2026-11-05.** Scope: new
   `bnb/primal_fj.rs`. Entry: on P4.1's no-incumbent instances, a standalone FJ run (10 %
   of TL) finds a feasible point on ≥ half of them. Flag `DISCOPT_MILP_FJ`. Done: panel bars

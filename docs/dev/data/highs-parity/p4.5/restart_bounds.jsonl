@@ -1,0 +1,16 @@
+{"name": "mik-250-20-75-5", "root_bound": -53673.84424646286, "restart_bound": -53665.04633374401, "restart_status": "node_limit", "gap0": 4.156257633871229, "gap1": 4.139185247790753, "closed_pp": 0.017072386080476676}
+{"name": "mik-250-20-75-3", "root_bound": -54222.410156214624, "restart_bound": -54173.87799821965, "restart_status": "node_limit", "gap0": 3.7907665260697594, "gap1": 3.697869567635186, "closed_pp": 0.09289695843457357}
+{"name": "mik-250-20-75-2", "root_bound": -52795.15659977772, "restart_bound": -52693.399981759954, "restart_status": "node_limit", "gap0": 3.9929023612395635, "gap1": 3.7924717480351133, "closed_pp": 0.20043061320445021}
+{"name": "22433", "root_bound": 21280.04404688461, "restart_bound": 21340.257782455843, "restart_status": "node_limit", "gap0": 0.9170125389486451, "gap1": 0.6366617820288529, "closed_pp": 0.28035075691979217}
+{"name": "gt2", "root_bound": 21064.299303049418, "restart_bound": 21165.99999997882, "restart_status": "optimal", "gap0": 0.48046816719696656, "gap1": 1.000628932531202e-10, "closed_pp": 0.48046816709690365}
+{"name": "mik-250-20-75-1", "root_bound": -51756.664571574525, "restart_bound": -51748.74122750571, "restart_status": "node_limit", "gap0": 4.104560958172306, "gap1": 4.0886240672319465, "closed_pp": 0.01593689094035966}
+{"name": "23588", "root_bound": 7672.73295105267, "restart_bound": 7698.073168939784, "restart_status": "node_limit", "gap0": 5.1571752434473925, "gap1": 4.8439850582154715, "closed_pp": 0.313190185231921}
+{"name": "neos-5192052-neckar", "root_bound": -11980000.000012035, "restart_bound": -11980000.000011982, "restart_status": "node_limit", "gap0": 2.6563836627951836, "gap1": 2.656383662794737, "closed_pp": 4.46753745109163e-13}
+{"name": "app2-2", "root_bound": 212040.35714263498, "restart_bound": 212040.35714264447, "restart_status": "optimal", "gap0": 1.249848066009188e-10, "gap1": 1.2051027915177543e-10, "closed_pp": 4.4745274491433766e-12}
+{"name": "bppc8-02", "root_bound": 486.4999999994209, "restart_bound": 486.49999999943765, "restart_status": "node_limit", "gap0": 4.0354330709800985, "gap1": 4.035433070976797, "closed_pp": 3.3013591860253655e-12}
+{"name": "neos-3118745-obra", "root_bound": 253.9999999999914, "restart_bound": 253.99999999999227, "restart_status": "node_limit", "gap0": 0.390625000003364, "gap1": 0.3906250000030198, "closed_pp": 3.4416913763379853e-13}
+{"name": "2171", "root_bound": -22412.81049947027, "restart_bound": -22412.810499470273, "restart_status": "node_limit", "gap0": 0.16558230862122472, "gap1": 0.165582308621241, "closed_pp": -1.6264767310758543e-14}
+{"name": "issue-2173", "root_bound": -26786.5463732641, "restart_bound": -26786.546373266585, "restart_status": "node_limit", "gap0": 0.058788800056698384, "gap1": 0.058788800065979564, "closed_pp": -9.281179991216248e-12}
+{"name": "lseu", "root_bound": 1023.0, "restart_bound": 1013.0, "restart_status": "node_limit", "gap0": 8.652988403211436, "gap1": 9.545049063336325, "closed_pp": -0.8920606601248888}
+{"name": "rgn", "root_bound": 57.96045630774704, "restart_bound": 62.206401321872185, "restart_status": "node_limit", "gap0": 29.13406629047092, "gap1": 24.030766948030738, "closed_pp": 5.103299342440181}
+p45 restart: executed=15

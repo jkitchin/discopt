@@ -2026,6 +2026,8 @@ fn solve_milp_node_search(
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
+    // highs-parity P4.5 entry: the first node imported is the root; its fixings are counted.
+    let mut root_fix_counted = false;
 
     // Node-cut policy (issue #331 node-count sweep). Separating cover cuts at
     // fractional nodes closes the integrality gap deep in the tree and cuts the
@@ -2810,6 +2812,27 @@ fn solve_milp_node_search(
             // never affects a bound, so determinism and soundness hold.
             if !out.sb_observations.is_empty() {
                 tm.record_sb_observations(&out.sb_observations);
+            }
+            // highs-parity P4.5 entry (counters only): how many free integer columns
+            // the ROOT node's FBBT + reduced-cost fixing pins, against the root box.
+            if !root_fix_counted {
+                root_fix_counted = true;
+                if crate::profile::enabled() {
+                    let mut free = 0u64;
+                    let mut fixed = 0u64;
+                    for j in 0..ns {
+                        if is_int_full[j] && u_w[j] - l_w[j] > 0.5 {
+                            free += 1;
+                            if let Some((tl, tu)) = out.tightened.as_ref() {
+                                if tu[j] - tl[j] < 0.5 {
+                                    fixed += 1;
+                                }
+                            }
+                        }
+                    }
+                    crate::profile::incr_by(crate::profile::Ctr::RootIntFree, free);
+                    crate::profile::incr_by(crate::profile::Ctr::RootIntFixed, fixed);
+                }
             }
             // Store node-propagation tightened bounds so children inherit them.
             if let Some((tl, tu)) = out.tightened {

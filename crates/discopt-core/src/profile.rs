@@ -301,6 +301,10 @@ counters!(
     // audit that the reuse is actually happening (CLAUDE.md §6) — without it a
     // silently-always-refactoring path reads exactly like a working one.
     RcFixDualReuse,
+    // highs-parity P4.5 entry: free integer columns at the root node, and how many
+    // its FBBT + reduced-cost fixing pinned.
+    RootIntFree,
+    RootIntFixed,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,

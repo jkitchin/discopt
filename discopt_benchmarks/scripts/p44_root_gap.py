@@ -49,7 +49,13 @@ from discopt import _rust
 from discopt.modeling.core import from_nl
 inst = L.read_instance(sys.argv[1])
 with tempfile.TemporaryDirectory() as td:
-    nl = os.path.join(td, "m.nl"); L.write_nl(inst, nl); m = from_nl(nl)
+    nl = os.path.join(td, "m.nl"); perm = L.write_nl(inst, nl); m = from_nl(nl)
+init = None
+if os.environ.get("P44_SEED_HIGHS"):
+    import lp_milp_panel as P
+    h0 = P.solve_arrays(inst, 120.0)
+    if h0["x"] is not None:
+        init = {v: float(h0["x"][perm[k]]) for k, v in enumerate(m._variables)}
 calls = []
 real = _rust.solve_milp_csc_py
 FORCE = json.loads(os.environ.get("P44_FORCE_KW", "{}"))
@@ -58,15 +64,17 @@ def spy(*a, **kw):
         kw.update(FORCE)
     out = real(*a, **kw)
     calls.append({"status": out[0], "obj": float(out[2]), "bound": float(out[3]),
-                  "nodes": int(out[4]), "obj_const": float(a[11]), "max_nodes": int(a[12])})
+                  "nodes": int(out[4]), "obj_const": float(a[11]), "max_nodes": int(a[12]),
+                  "seeded": kw.get("initial_incumbent") is not None})
     return out
 _rust.solve_milp_csc_py = spy
-r = m.solve(time_limit=float(sys.argv[3]), gap_tolerance=float(sys.argv[4]), max_nodes=2)
+r = m.solve(time_limit=float(sys.argv[3]), gap_tolerance=float(sys.argv[4]), max_nodes=2,
+            initial_solution=init)
 print("RESULT " + json.dumps({"calls": calls, "reported_bound": r.bound,
                               "route": r.algorithm_route}))
 """
 
-_CTR = re.compile(r"^\s+((?:RootCut|SubstDrop|SepGomory|SepCmir|SepCover)\w*)\s+(\d+)$")
+_CTR = re.compile(r"^\s+((?:RootCut|RootInt|SubstDrop|SepGomory|SepCmir|SepCover)\w*)\s+(\d+)$")
 DEFAULT = "mik-250-20-75-1,mik-250-20-75-2,mik-250-20-75-3,mik-250-20-75-5,fiber,sp150x300d"
 
 
@@ -132,7 +140,8 @@ def main(argv=None) -> int:
             gap = max(0.0, sgn * opt - c0["bound"]) / (1.0 + abs(opt))
             row = {"name": name, "opt": opt, "driver_bound": c0["bound"],
                    "root_gap_pct": 100 * gap, "driver_status": c0["status"],
-                   "driver_nodes": c0["nodes"], "reported_bound": res["reported_bound"],
+                   "driver_nodes": c0["nodes"], "seeded": c0["seeded"],
+                   "reported_bound": res["reported_bound"],
                    "route": res["route"], "env": extra,
                    "force_kw": json.loads(a.force_kw), "counters": ctr}  # fmt: skip
             rows.append(row)
