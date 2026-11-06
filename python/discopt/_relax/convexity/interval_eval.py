@@ -677,7 +677,9 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
         return _unbounded(_broadcast_shape(left.lo.shape, raw.shape))
     n = float(raw)
     n_int = int(n)
-    if np.isclose(n, float(n_int)):
+    # Exact only (#2191): ``x**2.0000001`` is not ``x**2``; a near-integer
+    # exponent takes the fractional enclosure below.
+    if n == float(n_int):
         if n_int < 0:
             # x**-k = 1 / x**k (a denominator holding 0 gives (-inf, inf)).
             return Interval.point(1.0) / left ** (-n_int)
