@@ -1,2 +1,0 @@
-ROUNDS=1000 MAX_NODES=10000 status=node_limit obj=3.062014576618532 bound=0.7580535468028535 nodes=10000 wall=57.7s kernel_calls=2 passed=['default(15)', 'default(15)']
-executed assertions: 2

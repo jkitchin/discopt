@@ -1,0 +1,65 @@
+== DISCOPT_KERNEL_PRESOLVE: /private/tmp/claude-501/-Users-jkitchin-projects-discopt/d73bc55b-2ab7-4d2f-8796-47ef84e408a8/scratchpad/wt2171/docs/dev/data/2168-kernel-presolve/gdp_panel/gdp_merged.jsonl
+fire: 0 lowerings checked; fired on 0; identical on 0; lowering error on 0
+
+instance                           method OFF solved ON solved  OFF wall   ON wall OFF nodes  ON nodes  verdicts
+batch_processing                   big-m       0/1       0/1       120.1     120.5      1929      1959  unsolved
+batch_processing                   hull        0/1       0/1       120.7     120.7      1295      1237  unsolved
+biofuel                            big-m       0/1       0/1       122.3     132.1         3         7  unsolved
+biofuel                            hull        0/1       0/1       121.7     121.7         0         0  unsolved
+cstr                               big-m       0/1       0/1        22.5      21.6      5000      5000  unsolved
+cstr                               hull        0/1       0/1        43.1      28.2      5000      5000  unsolved
+disease_model                      big-m       1/1       1/1        21.9      21.6      3841      3841  solved
+disease_model                      hull        1/1       1/1        31.2      31.1      2769      2769  solved
+ex1_linan_2023                     big-m       1/1       1/1         1.9       1.9         9         9  solved
+ex1_linan_2023                     hull        1/1       1/1         3.6       3.7         9         9  solved
+gdp_col                            big-m       0/1       0/1       120.1     120.1         7         7  unsolved
+gdp_col                            hull        0/1       0/1       120.1     120.1         5         5  unsolved
+hda                                big-m       0/1       0/1       120.2     120.2         3         3  unsolved
+hda                                hull        0/1       0/1       120.3     120.3         3         3  unsolved
+kaibel                             big-m       0/1       0/1       123.3     123.5         3         3  unsolved
+kaibel                             hull        0/1       0/1       125.9     125.9         1         1  unsolved
+med_term_purchasing                big-m       0/1       0/1         3.3       3.2       254       254  unsolved
+med_term_purchasing                hull        1/1       1/1         3.0       3.0         1         1  solved
+methanol                           big-m       0/1       0/1       120.1     121.1       183       183  unsolved
+methanol                           hull        0/1       0/1       120.1     120.1        15        15  unsolved
+mod_hens                           big-m       0/1       0/1       120.1     120.1      1111      1159  unsolved
+mod_hens                           hull        0/1       0/1       120.0     120.0         0         0  unsolved
+modprodnet                         big-m       1/1       1/1        15.7      14.5         5         5  solved
+modprodnet                         hull        1/1       1/1        54.6      53.3         3         3  solved
+positioning                        big-m       1/1       1/1        13.2      12.3       151       151  solved
+positioning                        hull        1/1       1/1        11.4      11.4       151       151  solved
+pyomo.constrained_layout_clay0203  big-m       1/1       1/1        34.4      30.0       135       135  solved
+pyomo.constrained_layout_clay0203  hull        1/1       1/1        21.8      20.8       109       109  solved
+pyomo.eight_process                big-m       1/1       1/1        10.2       9.9        27        27  solved
+pyomo.eight_process                hull        1/1       1/1        10.2       9.1        59        59  solved
+pyomo.eight_process_logical        big-m       1/1       1/1        14.8      13.7        19        19  solved
+pyomo.eight_process_logical        hull        1/1       1/1        22.5      22.4        41        41  solved
+pyomo.ex_633_trespalacios          big-m       1/1       1/1         1.6       1.6        13        13  solved
+pyomo.ex_633_trespalacios          hull        1/1       1/1         4.7       4.9        45        45  solved
+pyomo.jobshop_small                big-m       1/1       1/1         0.1       0.1         1         1  solved
+pyomo.jobshop_small                hull        1/1       1/1         0.1       0.1         1         1  solved
+pyomo.nonconvex_hen                big-m       1/1       1/1         5.0       5.2         5         5  solved
+pyomo.nonconvex_hen                hull        1/1       1/1        21.2      21.2        17        17  solved
+pyomo.strip_packing_concrete       big-m       1/1       1/1         0.1       1.7         1         1  solved
+pyomo.strip_packing_concrete       hull        1/1       1/1         0.3       0.2         1         1  solved
+small_batch                        big-m       1/1       1/1         6.2       6.3         3         3  solved
+small_batch                        hull        1/1       1/1        17.4       8.1         3         3  solved
+spectralog                         big-m       1/1       1/1        75.9      67.8       651       651  solved
+spectralog                         hull        0/1       0/1       120.1     120.1       767       735  unsolved
+stranded_gas                       big-m       0/1       0/1       121.9     121.8         0         0  unsolved
+stranded_gas                       hull        0/1       0/1       121.7     121.7         0         0  unsolved
+syngas                             big-m       1/1       1/1        83.9      79.1         3         3  solved
+syngas                             hull        1/1       1/1        98.5     105.7         3         3  solved
+
+executed solves: 96
+cert-clean: incorrect=0 bound-crossings=0 solved-lost=0
+net: solved-gained=0 []
+net: SGM(wall, shift 10 s, capped at 120 s) over 48 cells: OFF 33.92 s -> ON 32.95 s
+
+KernelPresolveApplied: fired on 4 pair(s)
+   cstr big-m {'DualProofRays': 1518, 'DualProofGlobalLps': 1508, 'DualProofLearned': 39, 'DualProofTightenings': 28977, 'DualProofFathoms': 133, 'KernelPresolveCalls': 1, 'KernelPresolveApplied': 1, 'KernelPresolveEliminated': 20}
+   cstr hull {'DualProofRays': 651, 'DualProofGlobalLps': 640, 'DualProofLearned': 26, 'DualProofTightenings': 33941, 'DualProofFathoms': 64, 'KernelPresolveCalls': 1, 'KernelPresolveApplied': 1, 'KernelPresolveEliminated': 112}
+   syngas big-m {'DualProofRays': 2, 'DualProofGlobalLps': 2, 'DualProofLearned': 0, 'DualProofTightenings': 0, 'DualProofFathoms': 0, 'KernelPresolveCalls': 3, 'KernelPresolveApplied': 3, 'KernelPresolveEliminated': 185}
+   syngas hull {'DualProofRays': 2, 'DualProofGlobalLps': 2, 'DualProofLearned': 0, 'DualProofTightenings': 0, 'DualProofFathoms': 0, 'KernelPresolveCalls': 3, 'KernelPresolveApplied': 3, 'KernelPresolveEliminated': 185}
+unfired bit-identity: 27 pair(s) checked, 17 at the wall ['batch_processing big-m', 'batch_processing hull', 'biofuel big-m', 'biofuel hull', 'gdp_col big-m', 'gdp_col hull', 'hda big-m', 'hda hull', 'kaibel big-m', 'kaibel hull', 'methanol big-m', 'methanol hull', 'mod_hens big-m', 'mod_hens hull', 'spectralog hull', 'stranded_gas big-m', 'stranded_gas hull']
+errored in both arms (no solve to compare): []

@@ -153,6 +153,7 @@ EXPECTED = {
     "binary.multilinear": binary_multilinear_reform.reformulate_binary_multilinear,
     "mpec.gdp": mpec.reformulate_gdp,
     "mpec.sos1": mpec.reformulate_sos1,
+    "mpec.native": mpec.reformulate_native,
     "mpec.scholtes": mpec.reformulate_scholtes,
     "nonsmooth.epigraph": nonsmooth_lift.lift_nonsmooth_atoms,
     "core.relax_integrality": _relax_integrality.relax_integrality,
@@ -165,6 +166,7 @@ def test_every_registered_name_is_the_solvers_own_function():
         assert dt.get(name).function is fn, name
     assert dt.TransformationFactory is dt.get
     assert not dt.get("mpec.scholtes").exact
+    assert dt.get("mpec.native").exact  # #2167: f*g <= 0 over f, g >= 0 is an encoding
     assert not dt.get("core.relax_integrality").exact
 
 

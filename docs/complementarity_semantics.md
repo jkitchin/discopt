@@ -118,7 +118,7 @@ available: `Expression.__eq__` builds a `Constraint`.)
 | field | meaning |
 |---|---|
 | `f`, `g` | the **source** operands, never rewritten by a lowering or a pass |
-| `role` | `ComplementarityRole`: `NCP_PAIR`, `BOX_MCP`, `FROM_KKT`, `FROM_DISJUNCT` |
+| `role` | `ComplementarityRole`: `NCP_PAIR`, `BOX_MCP`, `FROM_KKT`, `FROM_DISJUNCT`, `FROM_ACTIVATION` |
 | `f_bounds`, `g_bounds` | the bounds the *relation* declares — its semantics, not the operand's interval enclosure, which presolve moves |
 | `scale` | characteristic residual magnitude, for a meaningful tolerance when the operands carry unrelated physical magnitudes; `effective_scale` derives one from the declared bounds when it is not given |
 | `parent` | identity of the construct that generated the relation (the lower-level row for a KKT pair, the disjunction for a disjunct pair) |
@@ -136,6 +136,13 @@ semantics.
 
 `FROM_DISJUNCT` is reserved vocabulary with no in-tree producer yet — exactly as
 `DisjunctionSemantics.OR` was defined by #1124 before any lowering emitted it.
+
+`FROM_ACTIVATION` is produced by the `relu_complementarity` strategy of
+`discopt.ml.NNFormulation` (#2167): one pair `0 <= y ⊥ s >= 0`, with
+`y - s = z`, per unstable ReLU neuron; `parent` names the layer and `index` the
+neuron. The strategy registers the pairs on the model without lowering them, so
+`Model.solve()` refuses until `solve_mpec` (or `reformulate_gdp` /
+`reformulate_sos1`) lowers them.
 
 The lowering marks — **and the method** — live on the model
 (`Model._lowered_complementarities`, an identity map from relation to method),
@@ -415,3 +422,35 @@ carries its continuation trace — per-stage `t`, subsolver status, accept/rejec
 reason and the achieved source residual — rather than discarding it, so
 "converged at 1e-8" and "stalled at 1e-2" are distinguishable from the result
 alone.
+
+## 9. The native lowering and the multistart local mode (#2167)
+
+**Native lowering.** `solve_mpec(method="native")` / `mpec.reformulate_native`
+encodes a symmetric pair `0 <= f ⊥ g >= 0` whose operands are single variable
+elements declared `>= 0` as the rows `f >= 0`, `g >= 0`, `f·g <= 0`. With both
+operands nonnegative the product row holds exactly when `f·g = 0`, so this is an
+**encoding** — `"native"` is not in `RELAXING_METHODS` and
+`require_all_relations_lowered` accepts it — with no binary and no big-M constant,
+which makes it exact on an unbounded box where the `sos1`/`gdp` lowerings must
+refuse. The global solver's McCormick relaxation of `f·g <= 0` over a node box
+`[0, u_f] × [0, u_g]` is exactly the #245 triangle `f/u_f + g/u_g <= 1`,
+regenerated per node from that node's bounds. Any other operand shape is refused
+before a row is emitted.
+
+With `DISCOPT_COMPL_BRANCH=1` (default off, bound-changing, tracked in
+`docs/dev/flag-retirement-audit.md`) the spatial tree also registers each natively
+lowered pair and splits one violated at the node's relaxation point into
+`ub(f)=0` / `ub(g)=0`. The children cover `{f=0} ∪ {g=0}` exactly, and a pair
+splits at most once per path. Flag off, the same model is solved by ordinary
+spatial branching on the product rows.
+
+**Multistart local mode.** `solve_mpec_multistart(model, pairs, starts)` lowers
+the relations once with Scholtes rows and runs one continuation per start. With
+`polish=True`, it then solves the smooth NLP of one *piece*: the smaller side of
+every pair is fixed to 0 by a bound, on an evaluator proxy, so the model is never
+changed. That makes the point exactly complementary instead of `sqrt(t)`-close.
+A point becomes `result.x` only after `accept_local_incumbent` verifies it.
+Statuses are `local_optimal` / `local_infeasible`, and §8 applies unchanged:
+no bound, no certificate. The default `t0` is `1e-4`, not `1.0`, because a
+loose first stage erases a start that already satisfies the relations (the
+measurement is in the function's docstring).

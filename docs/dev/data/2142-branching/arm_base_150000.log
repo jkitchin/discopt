@@ -1,2 +1,0 @@
-ARM=base MAX_NODES=150000 status=node_limit obj=3.062014576618532 bound=2.8696841347703983 gap_certified=False nodes=150000 wall=2946.5s calls=[{'spatial_midpull': None, 'spatial_clamp': None, 'spatial_midpull_reldomtrig': None, 'scale_free_branching': None, 'spatial_score': None, 'max_nodes': 1}, {'spatial_midpull': 0.75, 'spatial_clamp': None, 'spatial_midpull_reldomtrig': None, 'scale_free_branching': None, 'spatial_score': True, 'max_nodes': 150000}]
-executed assertions: 4

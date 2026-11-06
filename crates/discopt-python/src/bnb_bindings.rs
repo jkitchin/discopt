@@ -643,6 +643,44 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Register complementarity pairs `0 <= y ⊥ s >= 0` for the dichotomy branch
+    /// (#2167, `DISCOPT_COMPL_BRANCH`): `y_cols[k]`, `s_cols[k]` are the flat
+    /// columns of pair `k`. Empty (the default) keeps the legacy branch path
+    /// byte-identical. Raises on mismatched lengths or negative indices rather
+    /// than silently registering a different set of pairs.
+    fn set_complementarity_pairs(
+        &mut self,
+        y_cols: PyReadonlyArray1<i64>,
+        s_cols: PyReadonlyArray1<i64>,
+    ) -> PyResult<()> {
+        let y = y_cols.as_slice()?;
+        let s = s_cols.as_slice()?;
+        if y.len() != s.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "set_complementarity_pairs: {} y columns but {} s columns",
+                y.len(),
+                s.len()
+            )));
+        }
+        if y.iter().chain(s.iter()).any(|&c| c < 0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "set_complementarity_pairs: negative column index",
+            ));
+        }
+        let pairs: Vec<(usize, usize)> = y
+            .iter()
+            .zip(s.iter())
+            .map(|(&a, &b)| (a as usize, b as usize))
+            .collect();
+        self.inner.set_complementarity_pairs(&pairs);
+        Ok(())
+    }
+
+    /// Complementarity dichotomies taken so far (#2167 probe).
+    fn compl_branches(&self) -> u64 {
+        self.inner.compl_branches()
+    }
+
     /// Score branching candidates for a solution vector.
     ///
     /// Returns (var_indices, frac_parts, obs_counts, scores) as four arrays.

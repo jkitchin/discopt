@@ -479,10 +479,17 @@ Build: `d032897d` (main) plus this branch's harness changes; Pyomo 6.10.0; SCIP 
 * **Solved count: passes in six families.** hull is short by 2: cstr, batch_processing and
   syngas solve under Pyomo hull and not under discopt (tracked in #2142, #2144, #2143);
   discopt hull solves positioning, which Pyomo does not.
-* **SGM ratio.** If the bar is the point estimate ≤ 1.0, **loa and gloa pass the whole gate**.
-  If the bar is the bootstrap CI's upper end ≤ 1.0, no family passes: loa's and gloa's CIs
-  straddle 1. The spec does not say which; the CI is wide because it resamples 24
-  instances, not because the repeats disagree (per-repeat ratios differ by ≤ 0.07).
+* **SGM ratio: passes in no family.** The spec's bar 3 (#1775 §1.2) is a conjunction:
+  ratio ≤ 1.0 **and** the upper end of the bootstrap 95% CI ≤ 1.10. loa (0.71, upper
+  1.15) and gloa (0.76, upper 1.22) meet the first clause and fail the second; every
+  other family fails the first. The CI is wide because it resamples 24 heterogeneous
+  instances, not because the repeats disagree (per-repeat ratios differ by ≤ 0.07), so
+  more repeats would not narrow it. loa and gloa are faster at the point estimate,
+  not demonstrated faster.
+  *Correction (2026-11-05):* this bullet first read "if the bar is the point estimate
+  ≤ 1.0, loa and gloa pass the whole gate … the spec does not say which", testing the
+  CI's upper end against 1.0. That was wrong: the spec states both clauses and the 1.10
+  threshold. The bar is applied as written; it was not re-chosen after the results.
 * **big-m and hull lose on small instances.** Pyomo + SCIP solves most of the pyomo.*
   examples in 0.1–0.2 s; discopt takes 2–11 s (eight_process hull 7.6 s vs 0.18 s).
   That points at per-solve fixed cost, not search, and is the next thing to profile.

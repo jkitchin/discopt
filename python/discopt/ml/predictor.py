@@ -62,7 +62,8 @@ def add_predictor(
     method : str
         Formulation method. ``"auto"`` selects based on the model type.
         For neural networks: ``"relu_bigm"``, ``"relu_partition"``,
-        ``"relu_extended"``, ``"full_space"``, or ``"reduced_space"``.
+        ``"relu_extended"``, ``"relu_complementarity"``, ``"full_space"``, or
+        ``"reduced_space"``.
         Tree ensembles always use MILP encoding.
         Linear model decision trees: ``"hull"`` (default) or ``"bigm"``.
     prefix : str

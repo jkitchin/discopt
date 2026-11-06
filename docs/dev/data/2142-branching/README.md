@@ -28,3 +28,7 @@ Panel files (`panel/`):
 Load: 1-8 one-minute average on 4 cores (at most 3 solver processes, one Rust build
 overlapping the first arms). The bounds and node counts of work-terminated rows do not
 depend on load; walls and wall-terminated rows do.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-branching/<name>.log.gz | gunzip` (or `.log`, no gunzip).

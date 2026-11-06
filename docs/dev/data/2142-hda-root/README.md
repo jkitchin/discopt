@@ -42,3 +42,7 @@ raised `IndexError: index 801 is out of bounds for axis 0 with size 801` and mar
 hda model convexity-unknown. The memo is now invalidated when the variable count changes:
 3173/3493 rows are proven convex, against 0 before because of the raise. The fix did not move
 hda's bound (`fix_f*.log`: 121140.98 / 118678.93, unchanged).
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-hda-root/<name>.log.gz | gunzip` (or `.log`, no gunzip).

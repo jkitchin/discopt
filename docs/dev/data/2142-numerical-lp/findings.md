@@ -84,3 +84,7 @@ Consequence for #2142: the remaining gap to SCIP on this spec is not in LP robus
 cost of the numerical attempts is a wall-time matter only (<= 7.5 % of pivots sit in windows
 with a failed attempt; the dense retry rescued 0 of 561 here) and is out of scope for the bound
 question; recorded, not pursued.
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-numerical-lp/<name>.log.gz | gunzip` (or `.log`, no gunzip).

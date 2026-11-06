@@ -1,0 +1,4 @@
+options: {'max_nodes': 10000, 'gap_tol': 1e+300, 'rel_gap_tol': 0.0001, 'abs_gap_tol': 1e-06, 'obj_offset': 0.0, 'time_limit_s': None, 'cold_dual_start': False, 'pseudocost_branching': True, 'pseudocost_reliability': 1, 'spatial_score': True, 'spatial_pscost_weight': 1.0, 'spatial_midpull': 0.75, 'warm_start_children': True, 'warm_flip_boxed': True, 'cut_rounds_root': 30, 'cut_rounds_node': 3, 'int_fix_probe': True, 'undecided_unpropagated_retry': True, 'dual_proof_propagation': True}
+counters: {'DualProofLearned': 0, 'DualProofFathoms': 0, 'LpVerdictNumerical': 0, 'LpInfeasUncertified': 0}
+RESULT arm=orig max_nodes=10000 status=node_limit bound=1.188807281445566 incumbent=None nodes=10000 wall=171.0s
+executed assertions: 3

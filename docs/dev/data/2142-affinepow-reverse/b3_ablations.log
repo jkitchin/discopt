@@ -1,9 +1,0 @@
-== constraints/nonlinear/propfreq=-1
-boxes 94 SCIP-empty 93
-executed propagations: 94
-== constraints/linear/propfreq=-1
-boxes 94 SCIP-empty 94
-executed propagations: 94
-== propagating/pseudoobj/freq=-1
-boxes 94 SCIP-empty 94
-executed propagations: 94

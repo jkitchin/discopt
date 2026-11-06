@@ -20,3 +20,7 @@ Environment: the extension was built from `57743608`. Its Rust is source-equival
 `d963f813`, apart from one added test. `PYTHONHASHSEED=0`, deterministic,
 `time_limit=7200` as a backstop. Up to 4 concurrent arms ran on 4 cores.
 The big-M 10k arm matches §108's baseline bit for bit (0.5568486578).
+
+> **Raw logs removed (#2142 follow-up).** The `.log` / `.log.gz` run traces cited in this directory were
+> removed to keep checkouts small; the results they support are recorded in these notes. The originals
+> remain in git history: `git show e39975e1:docs/dev/data/2142-hull-mixed/<name>.log.gz | gunzip` (or `.log`, no gunzip).

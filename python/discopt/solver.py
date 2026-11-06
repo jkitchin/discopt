@@ -92,7 +92,6 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
-from discopt.solvers._nlp_ladder_scope import apply_ladder_scope, ladder_off
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
@@ -1740,6 +1739,40 @@ def _native_spatial_kernel_enabled() -> bool:
         "false",
         "no",
         "off",
+    )
+
+
+def _compl_branch_enabled() -> bool:
+    """``DISCOPT_COMPL_BRANCH``: the native complementarity branch (#2167). Default OFF.
+
+    ON, every pair a model lowered with :func:`discopt.mpec.reformulate_native`
+    (``solve_mpec(method="native")``) is registered with the spatial tree, which
+    splits a pair violated at the node's relaxation point into ``ub(f)=0`` /
+    ``ub(g)=0`` before its ordinary branching rules, and the native spatial kernel
+    is bypassed (it has no such branch). Both children cover the pair's feasible
+    set ``{f=0} ∪ {g=0}`` exactly, and each pair splits at most once per path.
+
+    **Kept as a documented opt-in, not the default (#2167 panels).** Cert-clean
+    everywhere it was measured (H2: 216 checks; non-ReLU MPEC panel: 255; route
+    isolation: 38 paired certificates, 0 disagreements). On the SAME tree (both
+    arms on the Python tree) it is node-positive but modest: equal nodes on 34
+    of 45 instances, fewer on 10 (often 2-7x on the deeper trees, e.g. 93 -> 13),
+    more on 1. It is not the default because turning it on also moves the solve
+    off the native Rust spatial kernel, which has no such branch: on ReLU nets
+    that costs +27-34% median wall (H2), although the Python tree then needs
+    30-45x fewer nodes than the kernel; on the non-ReLU panel it is 0.70x wall.
+    What would change that: the dichotomy implemented in
+    ``bnb/spatial_tree.rs``, so the flag no longer changes the route; then
+    re-run ``discopt_benchmarks/scripts/compl_branch_isolation.py`` and the H2
+    panel and graduate on the usual two bars. OFF, a natively lowered model is
+    still solved exactly by ordinary spatial branching on its ``f·g <= 0`` rows.
+    Measurements: ``docs/dev/issue-2167-relu-complementarity-results.md``.
+    """
+    return os.environ.get("DISCOPT_COMPL_BRANCH", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
@@ -19562,6 +19595,13 @@ def solve_model(
         debug_attached=_debug_instruments_this_solve(),
     )
 
+    # #2167: the native kernel has no complementarity branch; a model whose pairs
+    # the caller asked to branch on natively goes to the Python-orchestrated tree.
+    if _compl_branch_enabled() and any(
+        p.lowering_in(model) == "native" for p in getattr(model, "_complementarities", ())
+    ):
+        _native_bypass.append("complementarity_branch")
+
     def _bypass_coverage() -> Optional[bool]:
         return _native_kernel_covers(model, lb, ub, n_vars)
 
@@ -20034,6 +20074,7 @@ def solve_model(
     _lp_downgraded = False
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
     _spatial_score_registered = False  # #1978: score terms handed to the tree
+    _compl_pairs_registered = False  # #2167: complementarity pairs handed to the tree
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
@@ -20350,6 +20391,29 @@ def solve_model(
                     # multi-line box's bound off 0. Order-only metadata (soundness
                     # unaffected); empty list when the flag is off or the structure
                     # is absent, leaving the branch path byte-identical.
+                    # Native complementarity branch (#2167, ``DISCOPT_COMPL_BRANCH``,
+                    # default off). Register every pair the model lowered with
+                    # ``mpec.reformulate_native`` so the tree splits a violated
+                    # pair into ``ub(f)=0`` / ``ub(g)=0``. The split covers the
+                    # pair's feasible set exactly; no pairs (flag off, or none
+                    # lowered natively) leaves the branch path byte-identical.
+                    if _compl_branch_enabled():
+                        from discopt.mpec import native_pair_columns
+
+                        _cpairs = native_pair_columns(model)
+                        if _cpairs:
+                            _ca = np.asarray(_cpairs, dtype=np.int64)
+                            if int(_ca.max()) >= n_vars:
+                                raise RuntimeError(
+                                    "complementarity branch: a pair column is outside the "
+                                    f"tree's {n_vars} columns; refusing to register pairs "
+                                    "against a different layout (#2167)"
+                                )
+                            tree.set_complementarity_pairs(
+                                np.ascontiguousarray(_ca[:, 0]), np.ascontiguousarray(_ca[:, 1])
+                            )
+                            _compl_pairs_registered = True
+                            logger.info("complementarity branch: %d pair(s)", len(_cpairs))
                     if _tuning().sos1_selector_branch:
                         # #1514: no ``except``. Structural detection with no external call.
                         _sos1_cols = sorted(_sos1_selector_vars(model))
@@ -21995,24 +22059,21 @@ def solve_model(
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
         # #1978: each node's relaxation LP point, for the tree's spatial score.
         _score_pts: dict[int, np.ndarray] = {}
-        _score_on = _py_tree_spatial_score_enabled()
+        _score_on = _py_tree_spatial_score_enabled() or _compl_pairs_registered
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        _active_evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        _active_cb,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=_exclusion_mask,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                _active_evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                _active_cb,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=_exclusion_mask,
+            )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
@@ -22432,17 +22493,16 @@ def solve_model(
                     else:
                         lb_clipped, ub_clipped = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        _active_evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -23428,7 +23488,7 @@ def solve_model(
                         # its starts ran from 86 s to 160 s of a 120 s solve.
                         from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
 
-                        with stop_at_solve_deadline(), ladder_off():
+                        with stop_at_solve_deadline():
                             _root_relax = _solve_root_node_multistart(
                                 _active_evaluator,
                                 np.array(batch_lb[best_root_idx]),
@@ -24453,7 +24513,7 @@ def solve_model(
             _spatial_score_registered = _register_spatial_score_terms(
                 tree, _mc_lp_relaxer if _mc_mode == "lp" else None
             )
-        if _spatial_score_registered and _score_pts:
+        if (_spatial_score_registered or _compl_pairs_registered) and _score_pts:
             _sp_idx = sorted(_score_pts)
             tree.set_spatial_score_points(
                 np.asarray([int(batch_ids[k]) for k in _sp_idx], dtype=np.int64),
@@ -25751,6 +25811,10 @@ def solve_model(
         )
     if _spatial_score_registered:
         _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
+    if _compl_pairs_registered:
+        # #2167 probe: dichotomies taken. Present only when pairs were registered,
+        # so a missing key means "the branch was never armed", not "it fired 0x".
+        _solver_stats["tree/compl_branches"] = float(tree.compl_branches())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:
@@ -29392,22 +29456,19 @@ def _solve_nlp_bb(
         t_jax_start = time.perf_counter()
 
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        constraint_bounds,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=result_excl,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=result_excl,
+            )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
             # not a valid lower bound, so decertify the gap rather than trust
@@ -29500,17 +29561,16 @@ def _solve_nlp_bb(
                     else:
                         lb_c, ub_c = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_c + ub_c)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            constraint_bounds,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -31377,9 +31437,6 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
-    # The wave runs in POUNCE's Rust pool, outside any Python contextvar read, so
-    # a caller's ladder scope (``solvers._nlp_ladder_scope``) is applied here.
-    apply_ladder_scope(batch_opts)
     # The caller's ``max_wall_time`` is what is left of its budget; the whole
     # wave, not each instance, must end by then.
     _batch_deadline = time.perf_counter() + caller_limit

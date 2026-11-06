@@ -691,6 +691,7 @@ _TRANSFORM_ROUND_TRIPS = {
     "transform:gdp.bilinear": _transform("gdp.bilinear", _bilinear_source)[0],
     "transform:mpec.gdp": _mpcc_transform("mpec.gdp"),
     "transform:mpec.sos1": _mpcc_transform("mpec.sos1"),
+    "transform:mpec.native": _mpcc_transform("mpec.native"),
     "transform:mpec.scholtes": _mpcc_transform("mpec.scholtes", scholtes=True),
     "transform:core.relax_integrality": _transform(
         "core.relax_integrality", _binary_multilinear_source

@@ -1,3 +1,0 @@
-BIG 1e+29 numerics/infinity 9.999999999999999e+29
-{"arm": "nocuts", "tl": 900.0, "node_limit": 10000, "status": "nodelimit", "primal_internal": 3.0620144515552457, "dual_internal": 0.0, "primal_model": 3.0620144515552457, "dual_model": 0.0, "nodes": 10000, "total_nodes": 10000, "nruns": 1, "conflicts": null, "wall": 15.0, "ncuts_applied": 13561, "vars": 320, "fixed_rows": 725, "terms": 25, "blf": 54, "branchings_by_class": {"binary_orig": 141, "cont_orig": 2253, "aux": 7661}, "top_branch_cols": [[300, 1846, "aux"], [272, 678, "aux"], [314, 570, "aux"], [21, 404, "cont"], [20, 326, "cont"], [295, 260, "aux"], [311, 252, "aux"], [289, 250, "aux"], [302, 230, "aux"], [296, 230, "aux"], [270, 222, "aux"], [297, 221, "aux"]]}
-executed assertions: 1

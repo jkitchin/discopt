@@ -183,6 +183,12 @@ was believed.
 - **Re-derive any order-of-magnitude figure before stating it.** A dense `A_eq` was
   reported as 91.5 **TB**; it is 91.5 **GB**. Numbers in a PR or issue are read as
   measurements.
+- **`docs/dev/data` holds evidence, not raw traces.** Commit the `.jsonl` rows,
+  summaries, the scripts that regenerate them, and at most a tail of the lines a
+  document cites (`*_tail.log`, `*.summary.log`). Full per-run solver logs stay in the
+  scratchpad. #2169 landed 174 MB of them (single files of ~255k lines, 18x the rest of
+  the directory); they were removed afterwards, but stay in history for good.
+  `test_docs_dev_data_size.py` fails on a tracked log over 100 kB or any file over 2 MB.
 
 ### Working on an issue
 

@@ -1,4 +1,0 @@
-infeasible nodes in census: 7406
-  0/7406 global-infeasible 1 verified 1
-LPs solved 7406; global-row infeasible 844/7406; verified proofs 844; unique 95; nnz median 8.0 max 21; <=15 nnz 84
-executed assertions: 8250

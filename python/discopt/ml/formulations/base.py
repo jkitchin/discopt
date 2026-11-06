@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Union
 
+import numpy as np
+
 from discopt.ml.formulations.full_space import FullSpaceFormulation
 from discopt.ml.formulations.reduced_space import ReducedSpaceFormulation
 from discopt.ml.formulations.relu_bigm import ReluBigMFormulation
+from discopt.ml.formulations.relu_complementarity import ReluComplementarityFormulation
 from discopt.ml.formulations.relu_partition import (
     AndersonCutSeparator,
     PartitionFn,
@@ -31,6 +34,7 @@ _StrategyCls = Union[
     type[ReducedSpaceFormulation],
     type[ReluPartitionFormulation],
     type[ReluExtendedFormulation],
+    type[ReluComplementarityFormulation],
 ]
 
 _STRATEGIES: dict[str, _StrategyCls] = {
@@ -39,6 +43,7 @@ _STRATEGIES: dict[str, _StrategyCls] = {
     "reduced_space": ReducedSpaceFormulation,
     "relu_partition": ReluPartitionFormulation,
     "relu_extended": ReluExtendedFormulation,
+    "relu_complementarity": ReluComplementarityFormulation,
 }
 
 #: Strategies that encode ReLU neurons with indicator binaries, and so can carry
@@ -67,6 +72,13 @@ class NNFormulation:
         2020), or ``"reduced_space"`` (nested expressions, no intermediate
         variables). The three ``relu_*`` MILPs have the same integer-feasible
         set; their LP relaxations are ordered big-M <= partition <= extended.
+        ``"relu_complementarity"`` (#2167) encodes each unstable ReLU neuron as a
+        complementarity relation ``0 <= y ⊥ s >= 0`` with ``y - s = z``, with no
+        binary and no big-M; it needs no ``input_bounds``. The relations are
+        declared, not lowered: pass :attr:`relations` to
+        :func:`discopt.mpec.solve_mpec` with ``method="sos1"``/``"gdp"`` (exact)
+        or ``"scholtes"`` (local, no certificate). ``Model.solve()`` refuses the
+        model until then.
     prefix : str
         Name prefix for created variables and constraints.
     scaling : OffsetScaling or None
@@ -115,6 +127,11 @@ class NNFormulation:
                 "n_partitions / partition_strategy apply only to strategy='relu_partition'"
             )
         if ideal_cuts and strategy not in _RELU_MILP:
+            # relu_complementarity is deliberately absent: its continuous-q
+            # Anderson cuts were RETIRED by #2167's H3 panel -- at equal node
+            # budgets they closed a median 0.0% of the remaining gap (16
+            # instances, 1 of 16 >= 10%) for +25% median wall
+            # (docs/dev/issue-2167-relu-complementarity-results.md).
             raise ValueError(f"ideal_cuts=True needs a ReLU MILP strategy, one of {_RELU_MILP}")
         if n_partitions is not None and int(n_partitions) < 1:
             raise ValueError(f"n_partitions must be >= 1, got {n_partitions}")
@@ -135,7 +152,72 @@ class NNFormulation:
         self._strategy_cls: _StrategyCls = _STRATEGIES[strategy]
         self._inputs: Variable | None = None
         self._outputs: Variable | None = None
+        self._relations: list = []
+        self._strategy: object = None
         self._formulated = False
+
+    @property
+    def relations(self) -> list:
+        """The complementarity relations the strategy declared (#2167).
+
+        One :class:`~discopt.mpec.Complementarity` per unstable ReLU neuron for
+        ``strategy="relu_complementarity"``, in layer-then-neuron order; empty for
+        every other strategy. Hand them to :func:`discopt.mpec.solve_mpec`.
+        """
+        if not self._formulated:
+            raise RuntimeError("Call formulate() before accessing relations")
+        return list(self._relations)
+
+    def local_starts(self, n_starts: int, *, seed: int | None = 0) -> list[dict]:
+        """``n_starts`` forward-pass warm starts from sampled inputs (#2167).
+
+        ``relu_complementarity`` only. Inputs are drawn uniformly from the input
+        box, or from a standard normal per coordinate where a side is unbounded;
+        each start is the network's exact point at that input (see
+        :meth:`ReluComplementarityFormulation.start_point`), so every relation
+        holds with zero residual at the start. Variables outside the network are
+        left to the solver's default.
+        """
+        strategy = self._require_complementarity("local_starts")
+        net = self._network
+        rng = np.random.default_rng(seed)
+        n = net.input_size
+        if net.input_bounds is None:
+            lo, hi = np.full(n, -np.inf), np.full(n, np.inf)
+        else:
+            lo = np.asarray(net.input_bounds[0], dtype=np.float64)
+            hi = np.asarray(net.input_bounds[1], dtype=np.float64)
+        finite = np.isfinite(lo) & np.isfinite(hi)
+        starts = []
+        for _ in range(int(n_starts)):
+            x = rng.standard_normal(n)
+            u = rng.uniform(size=n)
+            x = np.where(finite, lo + u * (hi - lo), x)
+            x = np.where(~finite & np.isfinite(lo), np.maximum(x, lo), x)
+            x = np.where(~finite & np.isfinite(hi), np.minimum(x, hi), x)
+            starts.append(strategy.start_point(x))
+        return starts
+
+    def solve_local(self, n_starts: int = 20, *, seed: int | None = 0, **kwargs):
+        """Multistart local solve of the embedded network's model (#2167).
+
+        Runs :func:`discopt.mpec.solve_mpec_multistart` over :attr:`relations`
+        from :meth:`local_starts`. A **local** result: ``local_optimal`` /
+        ``local_infeasible``, never a bound or certificate; ``x`` is only ever a
+        point verified against the source relations and every model row.
+        ``kwargs`` are forwarded (``polish``, ``t_min``, ``time_limit``, ...).
+        """
+        from discopt.mpec import solve_mpec_multistart
+
+        starts = self.local_starts(n_starts, seed=seed)
+        return solve_mpec_multistart(self._model, self.relations, starts, **kwargs)
+
+    def _require_complementarity(self, what: str) -> ReluComplementarityFormulation:
+        if not self._formulated:
+            raise RuntimeError(f"Call formulate() before {what}()")
+        if not isinstance(self._strategy, ReluComplementarityFormulation):
+            raise RuntimeError(f"{what}() needs strategy='relu_complementarity'")
+        return self._strategy
 
     @property
     def inputs(self) -> Variable:
@@ -163,6 +245,8 @@ class NNFormulation:
             self._model, self._network, self._prefix, self._scaling, **self._strategy_kwargs
         )
         self._inputs, self._outputs = strategy.build()
+        self._strategy = strategy
+        self._relations = list(getattr(strategy, "relations", []))
         if self._ideal_cuts:
             self._cut_callback = AndersonCutSeparator(getattr(strategy, "relu_layers", []))
         self._formulated = True
