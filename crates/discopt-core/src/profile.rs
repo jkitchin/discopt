@@ -314,6 +314,8 @@ counters!(
     NodeGmiLpFail,
     NodeGmiNsAbstain,
     NodeGmiLifted,
+    // Nodes that re-solved with rows inherited from an ancestor.
+    NodeGmiInheritSolves,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
