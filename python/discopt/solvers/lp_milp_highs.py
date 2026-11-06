@@ -210,8 +210,9 @@ class HighsOutcome:
     stats: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
     #: #2151: which candidate refuted THIS solve's own bound in the #1509 check
-    #: (``root-lp``, ``own-integers``, ``rounded-root``), or ``""``. A field rather than
-    #: a label, so a merge of another solve's labels cannot set it.
+    #: (``root-lp``, ``own-integers``, ``own-integers-bounded`` (#2183: the same LP when
+    #: only its NS bound settled the check), ``rounded-root``), or ``""``. A field rather
+    #: than a label, so a merge of another solve's labels cannot set it.
     refuted_by: str = ""
 
 
@@ -2008,6 +2009,37 @@ def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float])
     xl[sf.int_idx] = xi
     xu[sf.int_idx] = xi
     return solve_lp_std(dataclasses.replace(sf, xl=xl, xu=xu), time_limit=time_limit)
+
+
+def _fixed_integer_lp_cannot_refute(sf: "StdForm", fx: HighsOutcome, bound: float) -> bool:
+    """#2183: does the fixed-integer LP ``fx`` prove that no point on its integer
+    assignment refutes the MILP ``bound``, without being known optimal?
+
+    The #1509 check asks whether some verified point lies below the reported bound by
+    more than the yardstick ``CERT_ABS + CERT_REL*|bound|``. It solves the LP over the
+    incumbent's integers to find that assignment's best point. When the LP's NS gap does
+    not close, ``solve_lp_std`` returns ``feasible``. The LP optimum is then only known
+    to lie in ``[fx.bound, fx.objective]``. ``fx.bound`` is the NS-safe bound, rigorous
+    whatever the dual's quality. If ``fx.bound`` already sits within the yardstick of
+    ``bound``, every point on this assignment does too, and the question has its answer
+    ("none refutes"). That holds whether or not the LP is optimal. This accepts nothing
+    the optimal-LP arm would refuse, since its optimum ``v >= fx.bound`` passes the same
+    margin test whenever ``fx.bound`` does.
+
+    Measured on GDPlib med_term_purchasing (big-M) with highspy >= 1.13: NS bound
+    -6797.541 against the MILP bound -6798.149 (minimisation terms). The old arm
+    called that "inconclusive" and declined a sound certificate.
+
+    Requires the LP point to pass the incumbent verifier as well. The caller adds that
+    point as a candidate, so a ``True`` here always carries a verified point.
+    """
+    if fx.status != "feasible" or fx.bound is None or fx.x is None:
+        return False
+    if not np.isfinite(fx.bound) or not np.isfinite(bound):
+        return False
+    if bound - float(fx.bound) > CERT_ABS + CERT_REL * abs(bound):
+        return False
+    return _verified_mip_point(sf, fx.x) is not None
 
 
 #: #1920: wall-clock cap of the :func:`fix_and_propagate_point` start heuristic, and
@@ -4105,7 +4137,26 @@ def _solve_milp_std(
             fx = _fixed_integer_lp(sf, out.x, rem_fx)
             stats["milp/fixed_int_check_ran"] = 1.0
             pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
-            if pt is None:
+            assert out.bound is not None  # the caller runs this check only with a bound
+            if pt is None and _fixed_integer_lp_cannot_refute(sf, fx, float(out.bound)):
+                # #2183: the LP did not close its own NS gap, so it is not known to be
+                # optimal, but its NS-safe bound already lies within the refutation
+                # yardstick of the reported MILP bound. Every point on this integer
+                # assignment has an objective >= that bound, so none of them can
+                # refute the reported bound. That is a rigorous verdict. The
+                # optimal-LP arm accepts exactly these cases too: its optimum v >= ns
+                # passes the margin test whenever ns does. The LP point is verified,
+                # so it may still improve the incumbent (#2151). It is NOT the
+                # LP optimum, so it stays out of #1612 (``milp/fixed_int_objective``),
+                # #1733 (rederivation) and the own-integers tight re-solve, all of
+                # which assume one.
+                fpt = _verified_mip_point(sf, fx.x)
+                assert fpt is not None  # checked by _fixed_integer_lp_cannot_refute
+                stats["milp/fixed_int_check_bounded"] = 1.0
+                stats["milp/fixed_int_ns_bound"] = float(fx.bound)  # type: ignore[arg-type]
+                cands.append(fpt)
+                kinds.append("own-integers-bounded")
+            elif pt is None:
                 # The LP over a verified incumbent's own integers is feasible (the
                 # incumbent is a point of it), so a non-verdict here is numerical
                 # trouble on this matrix -- the #1320 rule: an unsettled check is not
@@ -4115,28 +4166,29 @@ def _solve_milp_std(
                     f"the fixed-integer LP check was inconclusive (LP {fx.status}: {fx.message})"
                 )
                 return False
-            cands.append(pt)
-            kinds.append("own-integers")
-            # #1612: the incumbent's own integers, re-optimised by a separate LP; the
-            # distance from HiGHS's objective is what its feasibility tolerance bought
-            # (read by :func:`_tighten_feasibility_artefact`).
-            stats["milp/fixed_int_objective"] = float(pt[1])
-            # #1733: when HiGHS's objective beats the LP over its own integers by no more
-            # than the equality yardstick, the difference is row tolerance HiGHS spent
-            # on the objective, not a better point; publish the LP's point. Only where
-            # #1612 would leave the pair alone (the gap still closes with that
-            # difference charged twice), so its tight re-solve is untouched. Measured
-            # on test_piecewise's incremental graph (HiGHS random_seed 16): y published
-            # 1.0e-6 above f(x) on the row form; the LP point is exact.
-            delta = float(pt[1]) - float(out.objective) if out.objective is not None else 0.0
-            gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
-            if (
-                0.0 < delta <= CERT_ABS + CERT_REL * abs(float(pt[1]))
-                and out.bound is not None
-                and _gap_closed(float(pt[1]) + delta, float(out.bound), gap_kw)
-            ):
-                out.x, out.objective = pt
-                stats["milp/incumbent_rederived"] = float(delta)
+            else:
+                cands.append(pt)
+                kinds.append("own-integers")
+                # #1612: the incumbent's own integers, re-optimised by a separate LP; the
+                # distance from HiGHS's objective is what its feasibility tolerance bought
+                # (read by :func:`_tighten_feasibility_artefact`).
+                stats["milp/fixed_int_objective"] = float(pt[1])
+                # #1733: when HiGHS's objective beats the LP over its own integers by no more
+                # than the equality yardstick, the difference is row tolerance HiGHS spent
+                # on the objective, not a better point; publish the LP's point. Only where
+                # #1612 would leave the pair alone (the gap still closes with that
+                # difference charged twice), so its tight re-solve is untouched. Measured
+                # on test_piecewise's incremental graph (HiGHS random_seed 16): y published
+                # 1.0e-6 above f(x) on the row form; the LP point is exact.
+                delta = float(pt[1]) - float(out.objective) if out.objective is not None else 0.0
+                gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
+                if (
+                    0.0 < delta <= CERT_ABS + CERT_REL * abs(float(pt[1]))
+                    and out.bound is not None
+                    and _gap_closed(float(pt[1]) + delta, float(out.bound), gap_kw)
+                ):
+                    out.x, out.objective = pt
+                    stats["milp/incumbent_rederived"] = float(delta)
         if root_pt is None and lp.status == "optimal" and lp.x is not None and sf.int_idx.size:
             # The root LP point is not itself integer-feasible: its rounding, with the
             # continuous part re-optimised, is the other point an LP buys. Measured on

@@ -1530,3 +1530,36 @@ with its 8 logicals folded into ranged rows, HiGHS default options plus `random_
 - What a user can do today: `highs_options={"output_flag": True}` shows the HiGHS log
   of the route's solves; `m.to_mps()` + `highspy` solves the ranged-row form, without
   discopt's certificate checks.
+
+**2026-11-06 — #2183: the #1509 fixed-integer LP check declined a sound certificate when
+its LP was merely feasible; it now accepts the NS-bound verdict.** GDPlib
+`med_term_purchasing` (big-M) lost its certificate with highspy >= 1.13. The LP over the
+HiGHS incumbent's own integers returned a verified point, but its NS gap did not close
+(0.00153 against 7.8e-6). So `solve_lp_std` said `feasible`, and the check called that
+"inconclusive" (#1320) and declined. But the check is a falsifier: it asks whether a point
+on that integer assignment lies more than `CERT_ABS + CERT_REL*|bound|` below the reported
+bound. The LP optimum lies in `[ns, obj_fx]`. If `ns` already meets the yardstick, no
+point on the assignment can refute the bound. That is a rigorous answer.
+`_fixed_integer_lp_cannot_refute` now issues it. It requires a `feasible` LP, a finite NS
+bound inside the yardstick of the reported bound, and a point that passes the incumbent
+verifier. It accepts nothing the optimal-LP arm would refuse, since `v >= ns` passes the
+margin test whenever `ns` does. The not-known-optimal point is a candidate (it can still
+improve the incumbent, #2151). It is kept out of #1612 (`milp/fixed_int_objective`), #1733
+(rederivation) and the own-integers tight re-solve, all of which assume the LP optimum.
+This is not a wider `CERT_REL`: no tolerance changed.
+
+Measured (highspy 1.15.1, `docs/dev/data/2183-fixed-int-bounded/`):
+- med_term big-M: NS bound -6797.541 vs MILP bound -6798.199 (min terms).
+  `feasible` / bound 8359.0 becomes `optimal`, certified, obj 6797.5397015 (oracle
+  6797.539701513444), bound 6798.1986. Regression test:
+  `test_2183_fixed_integer_lp_bounded_verdict.py` on the captured standard form
+  (`data/highs_2183_medterm_bigm_milp.npz`). It fails before the change.
+- M-HiGHS + i1183 (`lp_milp_panel.py --arms H`, 60 s): 24/24 certified before and after.
+  Status, objective, bound and `gap_certified` identical, `incorrect_count=0`.
+- #1509 family: its script was never committed. A 156-instance rebuild from the
+  description above (`family_1509.py`) gives 0 false certificates and 156/156 certified on
+  both arms, with 0 differences. The new arm was never reached (every own-integer LP was
+  `optimal`). So on this HiGHS build the family shows neutrality only. That the falsifier
+  still catches rests on `test_1509`'s injected false answer.
+- gdp_parity big-M/hull, 14 of 24 instances buildable here: med_term big-M is the only
+  cell that changes.
