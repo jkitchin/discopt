@@ -1,0 +1,15 @@
+
+instances           : 74
+executed checks     : 800
+violations          : 0
+mechanism fired     : 20 on 4 instance(s) ['nvs06', 'nvs21', 'st_e38', 'tanksize']
+unfired identical   : 53 checked, 16 skipped (wall backstop) ['4stufen', 'bchoco06', 'bchoco07', 'bchoco08', 'beuster', 'casctanks', 'contvar', 'hda', 'heatexch_gen1', 'heatexch_gen2', 'heatexch_gen3', 'prolog', 'tls2', 'tspn08', 'tspn10', 'tspn12']
+certified           : OFF 57 -> ON 57  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 2 ['tspn08', 'tspn12']  (where it ran: [])
+nodes (all)         : OFF 6339 -> ON 6227
+wall  (all)         : OFF 2519.0s -> ON 2522.2s
+wall  (fired)       : OFF 8.6s -> ON 8.8s over 5 instance(s)
+report              : docs/dev/data/2168-kernel-presolve/panel/corpus_all.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

@@ -32,11 +32,14 @@
 //! `lp/simplex` no code builds a [`Scaling`] or scales a matrix; the structural test
 //! below fails if one does, so a new caller cannot reopen the bypass silently.
 
-use super::primal::{downgrade_false_optimal, point_fails_original_audit, retry_decided};
+use super::primal::{
+    downgrade_false_optimal, farkas_ray_certifies_cols, point_fails_original_audit,
+    point_passes_original_audit, retry_decided,
+};
 use super::scaling::Scaling;
 use super::sparse::SparseCols;
 use super::{solve_lp_cols, solve_lp_warm_scaled_csc, LpSolve, LpStatus, SimplexOptions};
-use crate::lp::basis::Basis;
+use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::crossover::LpView;
 
 /// An LP matrix with its objective and rhs, equilibrated once when ill-conditioned.
@@ -135,6 +138,7 @@ impl ScaledProblem {
         let (sl, su) = self.solve_bounds(l, u);
         let view = self.view(self.solve_c(), &sl, &su);
         let sol = solve_lp_warm_scaled_csc(&view, self.solve_b(), start, opts, self.solve_matrix());
+        let sol = self.recover_numerical(sol, l, u, Some(start), opts);
         self.verify(sol, l, u, Some(start), opts)
     }
 
@@ -152,7 +156,240 @@ impl ScaledProblem {
             self.solve_b(),
             opts,
         );
+        let sol = self.recover_numerical(sol, l, u, None, opts);
         self.verify(sol, l, u, None, opts)
+    }
+
+    /// #2163: the #649 recovery the other auto-scaling entry points already apply
+    /// ([`super::solve_lp_warm_csc`] and friends), which this type did not. Pow2
+    /// geometric-mean equilibration is a heuristic, and on some LPs it is
+    /// counterproductive: on trained ReLU big-M MILPs (hidden weights from ~1e-8 to
+    /// ~10) it sets column factors up to 2^16. That squeezes the scaled box widths to a
+    /// median of ~4e-3 and a minimum of ~8e-6, and the scaled solve ends `Numerical`:
+    /// a phase-1 residual whose Farkas ray does not verify, or a basic column outside
+    /// its box at the audit. The UNSCALED solve of the same LP decides it, matching
+    /// HiGHS. On network A of #2163 that held for 203 of the 207 node LPs the driver
+    /// handed back undecided (197 optimal, 6 infeasible, as HiGHS says), and those
+    /// undecided nodes are what drained the tree into `unresolved_floor`.
+    ///
+    /// So when a scaled solve returns `Numerical`, re-solve on the original data
+    /// (warm from the same start when there is one, else cold) and, if that decides
+    /// the LP, return it mapped into solve coordinates exactly as
+    /// [`Self::verify`]'s retry is. Sound: the unscaled solve carries its own
+    /// feasibility audit in original units, so a returned `Optimal` / `Infeasible` /
+    /// `Unbounded` is genuine (and a returned `Optimal` still goes through
+    /// [`Self::verify`], a no-op on an unscaled-space point that passed it); a retry
+    /// that decides nothing leaves the original `Numerical` untouched. It can only
+    /// recover a verdict scaling lost, never change one scaling reached.
+    ///
+    /// `IterLimit` is deliberately NOT retried: it is a budget verdict (strong
+    /// branching and the driver's pivot-bounded warm root solve impose it on
+    /// purpose), so re-running the same budget on the other matrix would double a
+    /// cost the caller chose to cap.
+    fn retry_numerical_unscaled(
+        &self,
+        sol: LpSolve,
+        l: &[f64],
+        u: &[f64],
+        start: Option<&Basis>,
+        opts: &SimplexOptions,
+    ) -> LpSolve {
+        let Some(s) = &self.scaling else {
+            return sol;
+        };
+        if sol.status != LpStatus::Numerical {
+            return sol;
+        }
+        crate::profile::incr(crate::profile::Ctr::ScaledNumericalUnscaledRetry);
+        let view = self.view(&self.c, l, u);
+        let mut alt = match start {
+            Some(basis) => solve_lp_warm_scaled_csc(&view, &self.b, basis, opts, &self.original),
+            None => solve_lp_cols(
+                self.original.clone(),
+                self.m,
+                self.n,
+                &self.c,
+                l,
+                u,
+                &self.b,
+                opts,
+            ),
+        };
+        if !self.decided_on_original(&alt, l, u) {
+            return sol;
+        }
+        crate::profile::incr(crate::profile::Ctr::ScaledNumericalUnscaledRetryDecided);
+        // Into solve coordinates, as every other result of this problem is. Exact:
+        // power-of-two factors.
+        s.scale_x(&mut alt.x);
+        s.scale_dual(&mut alt.dual);
+        s.scale_ray(&mut alt.ray);
+        alt
+    }
+
+    /// Whether a re-solve `alt` on the ORIGINAL data (original coordinates) decided
+    /// the LP: `Infeasible` / `Unbounded` (their certificates are checked by the
+    /// caller, as for any solve), or an `Optimal` whose point passes the original-LP
+    /// audit. The audit is needed because a warm re-solve runs the dual
+    /// re-optimize, which audits nothing (the #1287 retraction in `dual.rs`); a
+    /// cold re-solve's own audit already passed, so for it this is a re-check.
+    fn decided_on_original(&self, alt: &LpSolve, l: &[f64], u: &[f64]) -> bool {
+        match alt.status {
+            LpStatus::Optimal => {
+                point_passes_original_audit(&alt.x, &self.original, self.m, self.n, &self.b, l, u)
+            }
+            LpStatus::Infeasible | LpStatus::Unbounded => true,
+            LpStatus::Numerical | LpStatus::IterLimit => false,
+        }
+    }
+
+    /// #2163: everything this problem does with a `Numerical` solve, in order. The
+    /// #649 unscaled retry first ([`Self::retry_numerical_unscaled`]); if the LP is
+    /// still undecided, the logical-basis dual solve ([`Self::logical_basis_dual`]).
+    /// Each stage runs only when every stage before it failed to decide, so an LP
+    /// the solver already decides takes exactly the path it took before.
+    fn recover_numerical(
+        &self,
+        sol: LpSolve,
+        l: &[f64],
+        u: &[f64],
+        start: Option<&Basis>,
+        opts: &SimplexOptions,
+    ) -> LpSolve {
+        let sol = self.retry_numerical_unscaled(sol, l, u, start, opts);
+        if sol.status != LpStatus::Numerical {
+            return sol;
+        }
+        match self.logical_basis_dual(l, u, opts) {
+            Some(mut alt) => {
+                if let Some(s) = &self.scaling {
+                    s.scale_x(&mut alt.x);
+                    s.scale_dual(&mut alt.dual);
+                    s.scale_ray(&mut alt.ray);
+                }
+                alt
+            }
+            None => sol,
+        }
+    }
+
+    /// #2163: solve the ORIGINAL LP with the dual simplex from an all-logical basis,
+    /// the way HiGHS starts: every row gets a logical column, `A x - s = 0` with
+    /// `s` fixed at `[b, b]`, so a basis of logicals always exists, and it is dual
+    /// feasible once each structural column sits at the bound its cost sign wants.
+    ///
+    /// Why a third stage: on trained ReLU big-M MILPs with Anderson cut rows
+    /// (entries ~6e-8..1.4e3, equality rows with no logical of their own), the
+    /// primal cold solve -- scaled or not -- stops at a basis the final audit
+    /// refuses (28 of 43 captured node LPs with a basic column off its box, 16 with
+    /// a row residual), with phase-1 artificials still basic, so no full basis is
+    /// left to warm-start from. From the logical basis the dual simplex decided all
+    /// 43, each audit-clean in original units (worst 5e-10) and matching HiGHS;
+    /// on the 207 plain big-M node LPs of #2163's network A it decided all 207
+    /// (201 optimal matching HiGHS, 6 infeasible as HiGHS says), including the 4
+    /// the unscaled retry could not.
+    ///
+    /// Accepted only with a certificate checked HERE, because the warm dual path
+    /// runs no feasibility audit of its own (the #1287 retraction in `dual.rs`):
+    /// an `Optimal` whose point passes the original-LP audit, or an `Infeasible`
+    /// whose ray verifies as a Farkas certificate of the original LP. The rows of
+    /// the augmented LP are the original rows, and the logical columns contribute
+    /// exactly `bᵀy` to the Farkas bound, so the ray is a ray of the original LP
+    /// unchanged. Anything else is `None` and the caller keeps its `Numerical`.
+    ///
+    /// Returns ORIGINAL coordinates: `x` and the basis restricted to the
+    /// structural columns (a basic logical has no structural counterpart, so the
+    /// basis can come back short; warm starts already refuse a short basis and
+    /// solve cold), row duals and ray over the original rows.
+    fn logical_basis_dual(&self, l: &[f64], u: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
+        const INF: f64 = 1e20;
+        let (m, n) = (self.m, self.n);
+        let mut col_status = Vec::with_capacity(n + m);
+        for j in 0..n {
+            let lo = l[j] > -INF;
+            let hi = u[j] < INF;
+            let c = self.c[j];
+            col_status.push(if c >= 0.0 && lo {
+                AT_LOWER
+            } else if c <= 0.0 && hi {
+                AT_UPPER
+            } else {
+                // No bound on the side the cost needs: the logical basis is not dual
+                // feasible and this stage does not apply.
+                return None;
+            });
+        }
+        col_status.extend(std::iter::repeat_n(BASIC, m));
+        crate::profile::incr(crate::profile::Ctr::LogicalBasisDualAttempts);
+        let (cp, ri, vals) = self.original.raw();
+        let mut col_ptr = cp.to_vec();
+        let mut row_idx = ri.to_vec();
+        let mut vv = vals.to_vec();
+        for i in 0..m {
+            row_idx.push(i);
+            vv.push(-1.0);
+            col_ptr.push(row_idx.len());
+        }
+        let aug = SparseCols::from_csc(col_ptr, row_idx, vv);
+        let mut c_a = self.c.clone();
+        c_a.resize(n + m, 0.0);
+        let mut l_a = l.to_vec();
+        l_a.extend_from_slice(&self.b);
+        let mut u_a = u.to_vec();
+        u_a.extend_from_slice(&self.b);
+        let b_a = vec![0.0; m];
+        let start = Basis {
+            col_status,
+            basic_vars: (n..n + m).collect(),
+        };
+        let view = LpView {
+            a: &[],
+            m,
+            n: n + m,
+            c: &c_a,
+            l: &l_a,
+            u: &u_a,
+        };
+        let w = solve_lp_warm_scaled_csc(&view, &b_a, &start, opts, &aug);
+        let x: Vec<f64> = w.x.iter().take(n).copied().collect();
+        let accepted = match w.status {
+            LpStatus::Optimal => {
+                w.dual.len() == m
+                    && point_passes_original_audit(&x, &self.original, m, n, &self.b, l, u)
+            }
+            LpStatus::Infeasible => {
+                farkas_ray_certifies_cols(&w.dual, &self.original, n, m, &self.b, l, u)
+            }
+            _ => false,
+        };
+        if !accepted {
+            return None;
+        }
+        crate::profile::incr(crate::profile::Ctr::LogicalBasisDualDecided);
+        let basis = Basis {
+            col_status: w.basis.col_status.iter().take(n).copied().collect(),
+            basic_vars: w
+                .basis
+                .basic_vars
+                .iter()
+                .copied()
+                .filter(|&j| j < n)
+                .collect(),
+        };
+        let obj = if w.status == LpStatus::Optimal {
+            x.iter().zip(&self.c).map(|(xj, cj)| xj * cj).sum()
+        } else {
+            w.obj
+        };
+        Some(LpSolve {
+            status: w.status,
+            x,
+            obj,
+            basis,
+            iters: w.iters,
+            dual: w.dual,
+            ray: w.ray,
+        })
     }
 
     /// The choke point: check a solve-space result `sol` of this problem over
@@ -199,8 +436,20 @@ impl ScaledProblem {
                 opts,
             ),
         };
-        if !retry_decided(&alt) {
-            return downgrade_false_optimal(sol);
+        if !(self.decided_on_original(&alt, l, u) && retry_decided(&alt)) {
+            // #2163: before refusing, the logical-basis dual solve. Measured: on 4 of
+            // the 43 cut-augmented node LPs of #2163 the scaled solve returned a false
+            // `Optimal`, this re-solve decided nothing, and the LP came back
+            // `Numerical`; the logical-basis dual decides all 4 (matching HiGHS).
+            return match self.logical_basis_dual(l, u, opts) {
+                Some(mut alt) => {
+                    s.scale_x(&mut alt.x);
+                    s.scale_dual(&mut alt.dual);
+                    s.scale_ray(&mut alt.ray);
+                    alt
+                }
+                None => downgrade_false_optimal(sol),
+            };
         }
         // The retry ran on the original data; express it in solve coordinates, as
         // every other result of this problem is. Exact: power-of-two factors.
@@ -246,6 +495,11 @@ mod tests {
     /// The fixture's LP and its captured basis (the flat-JSON format of
     /// `dual.rs`'s `parse_stall_fixture`).
     fn fixture() -> (Lp, Basis) {
+        fixture_from(FIXTURE)
+    }
+
+    /// [`fixture`] for any captured LP in the same flat-JSON format.
+    fn fixture_from(json: &str) -> (Lp, Basis) {
         fn field<'a>(json: &'a str, key: &str) -> &'a str {
             let k = format!("\"{key}\":");
             &json[json.find(&k).expect("key present") + k.len()..]
@@ -265,22 +519,22 @@ mod tests {
                 .collect()
         }
         let us = |k: &str| {
-            arr(FIXTURE, k)
+            arr(json, k)
                 .into_iter()
                 .map(|v| v as usize)
                 .collect::<Vec<_>>()
         };
         let lp = Lp {
-            m: scalar(FIXTURE, "m"),
-            n: scalar(FIXTURE, "n"),
-            sp: SparseCols::from_csc(us("col_ptr"), us("row_idx"), arr(FIXTURE, "vals")),
-            c: arr(FIXTURE, "c"),
-            l: arr(FIXTURE, "l"),
-            u: arr(FIXTURE, "u"),
-            b: arr(FIXTURE, "b"),
+            m: scalar(json, "m"),
+            n: scalar(json, "n"),
+            sp: SparseCols::from_csc(us("col_ptr"), us("row_idx"), arr(json, "vals")),
+            c: arr(json, "c"),
+            l: arr(json, "l"),
+            u: arr(json, "u"),
+            b: arr(json, "b"),
         };
         let basis = Basis {
-            col_status: arr(FIXTURE, "col_status")
+            col_status: arr(json, "col_status")
                 .into_iter()
                 .map(|v| v as i8)
                 .collect(),
@@ -310,6 +564,187 @@ mod tests {
         (0..lp.m).fold(worst, |w, i| {
             w.max((ax[i] - lp.b[i]).abs() / (1.0 + lp.b[i].abs()))
         })
+    }
+
+    /// #2163 regression: two node LPs the Rust MILP engine handed back undecided on
+    /// a trained 2-32-32-1 ReLU big-M MILP (network A of the issue), captured with
+    /// the node's warm-start basis. Equilibration sets column factors up to 2^16 on
+    /// this matrix (entries ~1.5e-8 .. ~12), and the solve on the scaled data ends
+    /// `Numerical`, warm and cold (asserted first, so the fixtures provably still
+    /// exercise the failure). HiGHS decides both: one optimal at
+    /// -6.806923340932464, one infeasible. `ScaledProblem` must decide them too,
+    /// through the unscaled retry, and with certificates that hold where the
+    /// driver checks them (the point in original units; the Farkas ray in solve
+    /// coordinates, where the driver verifies it).
+    #[test]
+    fn scaled_numerical_is_recovered_by_the_unscaled_retry_2163() {
+        let opts = SimplexOptions::default();
+        for (json, want_optimal) in [
+            (
+                include_str!("testdata/relu_bigm_scaled_numerical_optimal_lp.json"),
+                true,
+            ),
+            (
+                include_str!("testdata/relu_bigm_scaled_numerical_infeasible_lp.json"),
+                false,
+            ),
+        ] {
+            let (lp, basis) = fixture_from(json);
+            let p = ScaledProblem::new(lp.sp.clone(), lp.m, lp.n, &lp.c, &lp.b);
+            assert!(p.scaling().is_some(), "fixture must be equilibrated");
+            let (sl, su) = p.solve_bounds(&lp.l, &lp.u);
+
+            // Precondition: the scaled solves fail, warm and cold.
+            let view = p.view(p.solve_c(), &sl, &su);
+            let warm_scaled =
+                solve_lp_warm_scaled_csc(&view, p.solve_b(), &basis, &opts, p.solve_matrix());
+            let cold_scaled = solve_lp_cols(
+                p.solve_matrix().clone(),
+                lp.m,
+                lp.n,
+                p.solve_c(),
+                &sl,
+                &su,
+                p.solve_b(),
+                &opts,
+            );
+            assert_eq!(
+                warm_scaled.status,
+                LpStatus::Numerical,
+                "precondition (warm)"
+            );
+            assert_eq!(
+                cold_scaled.status,
+                LpStatus::Numerical,
+                "precondition (cold)"
+            );
+
+            let warm = p.solve_warm(&lp.l, &lp.u, &basis, &opts);
+            let cold = p.solve_cold(&lp.l, &lp.u, &opts);
+            for (label, sol) in [("warm", warm), ("cold", cold)] {
+                if want_optimal {
+                    assert_eq!(sol.status, LpStatus::Optimal, "{label}");
+                    let hi = -6.806923340932464f64;
+                    assert!(
+                        (sol.obj - hi).abs() <= 1e-7 * (1.0 + hi.abs()),
+                        "{label}: obj {} vs HiGHS {hi}",
+                        sol.obj
+                    );
+                    let mut x = sol.x.clone();
+                    p.scaling().unwrap().unscale_x(&mut x);
+                    let viol = original_violation(&lp, &x);
+                    assert!(viol <= 1e-6, "{label}: original violation {viol:e}");
+                } else {
+                    assert_eq!(sol.status, LpStatus::Infeasible, "{label}");
+                    assert!(
+                        super::super::primal::farkas_ray_certifies_cols(
+                            &sol.dual,
+                            p.solve_matrix(),
+                            lp.n,
+                            lp.m,
+                            p.solve_b(),
+                            &sl,
+                            &su,
+                        ),
+                        "{label}: the ray must verify in solve coordinates"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #2163 regression, cut-augmented class: two node LPs captured from the Rust
+    /// MILP engine on #2163's network B with native Anderson cuts (#2164). Both end
+    /// undecided on every pre-existing stage: the cold primal on the ORIGINAL data
+    /// is `Numerical` (asserted first, so the fixtures still exercise the failure),
+    /// and through `ScaledProblem` one reaches the logical stage from a scaled
+    /// `Numerical`, the other from a scaled false `Optimal` that `verify` refuses.
+    /// HiGHS solves both. The logical-basis dual stage must decide them, with a point
+    /// that is feasible in original units and HiGHS's objective, and the counter
+    /// proves that stage (not some other path) is what decided them.
+    #[test]
+    fn cut_augmented_numerical_is_decided_by_the_logical_basis_dual_2163() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let opts = SimplexOptions::default();
+        let mut checks = 0usize;
+        for (json, highs) in [
+            (
+                include_str!("testdata/relu_anderson_cuts_numerical_lp.json"),
+                -254.27360315225872f64,
+            ),
+            (
+                include_str!("testdata/relu_anderson_cuts_false_optimal_lp.json"),
+                22.36816528521379f64,
+            ),
+        ] {
+            let (lp, basis) = fixture_from(json);
+            let raw = solve_lp_cols(lp.sp.clone(), lp.m, lp.n, &lp.c, &lp.l, &lp.u, &lp.b, &opts);
+            assert_eq!(raw.status, LpStatus::Numerical, "precondition: cold primal");
+
+            let p = ScaledProblem::new(lp.sp.clone(), lp.m, lp.n, &lp.c, &lp.b);
+            let warm = p.solve_warm(&lp.l, &lp.u, &basis, &opts);
+            let cold = p.solve_cold(&lp.l, &lp.u, &opts);
+            for (label, sol) in [("warm", warm), ("cold", cold)] {
+                assert_eq!(sol.status, LpStatus::Optimal, "{label}");
+                assert!(
+                    (sol.obj - highs).abs() <= 1e-7 * (1.0 + highs.abs()),
+                    "{label}: obj {} vs HiGHS {highs}",
+                    sol.obj
+                );
+                let mut x = sol.x.clone();
+                if let Some(s) = p.scaling() {
+                    s.unscale_x(&mut x);
+                }
+                let viol = original_violation(&lp, &x);
+                assert!(viol <= 1e-6, "{label}: original violation {viol:e}");
+                checks += 1;
+            }
+        }
+        let decided = crate::profile::counter(crate::profile::Ctr::LogicalBasisDualDecided);
+        crate::profile::set_enabled(false);
+        assert_eq!(checks, 4);
+        assert!(
+            decided >= 4,
+            "the logical-basis dual decided {decided} solves, want >= 4"
+        );
+    }
+
+    /// #2163: the logical-basis dual on an infeasible LP returns `Infeasible` only
+    /// with a ray that certifies the ORIGINAL LP empty (the augmented rows are the
+    /// original rows), and on a feasible one an audited optimum matching HiGHS.
+    #[test]
+    fn logical_basis_dual_certificates_hold_on_the_original_lp_2163() {
+        let opts = SimplexOptions::default();
+        let (lp, _) = fixture_from(include_str!(
+            "testdata/relu_bigm_scaled_numerical_infeasible_lp.json"
+        ));
+        let p = ScaledProblem::new(lp.sp.clone(), lp.m, lp.n, &lp.c, &lp.b);
+        let inf = p
+            .logical_basis_dual(&lp.l, &lp.u, &opts)
+            .expect("decides the infeasible fixture");
+        assert_eq!(inf.status, LpStatus::Infeasible);
+        assert!(super::super::primal::farkas_ray_certifies_cols(
+            &inf.dual, &lp.sp, lp.n, lp.m, &lp.b, &lp.l, &lp.u
+        ));
+
+        let (lp, _) = fixture_from(include_str!(
+            "testdata/relu_bigm_scaled_numerical_optimal_lp.json"
+        ));
+        let p = ScaledProblem::new(lp.sp.clone(), lp.m, lp.n, &lp.c, &lp.b);
+        let opt = p
+            .logical_basis_dual(&lp.l, &lp.u, &opts)
+            .expect("decides the optimal fixture");
+        assert_eq!(opt.status, LpStatus::Optimal);
+        let hi = -6.806923340932464f64;
+        assert!(
+            (opt.obj - hi).abs() <= 1e-7 * (1.0 + hi.abs()),
+            "obj {}",
+            opt.obj
+        );
+        assert!(original_violation(&lp, &opt.x) <= 1e-6);
+        assert_eq!(opt.dual.len(), lp.m);
     }
 
     /// #1945 regression. The MILP driver's old recipe -- equilibrate once, solve the

@@ -1,0 +1,8 @@
+ARM=homog METHOD=hull DET=True MAX_NODES=2000 TL=7200.0 status=node_limit obj=3.0620145766187727 bound=0.38595045554133645 nodes=2000 gap_certified=False wall=62.0s
+proto stats: {'rows': 5, 'auxes': 0, 'hull_mc_rows': 0, 'arm': 'homog'}
+spec max |global bound|: 1.000e+03
+  kernel: {'max_nodes': 2000, 'status': 'node_limit', 'bound': 0.38595045554133645, 'nodes': 2000, 'undecided': 0, 'n_cols': 285, 'wall': 33.3}
+node status histogram: {'optimal': 1204, 'infeasible': 427}
+counters: {'DualProofLearned': 41, 'DualProofTightenings': 9340, 'DualProofFathoms': 29, 'LpVerdictOptimal': 1506, 'LpVerdictInfeasible': 79, 'LpVerdictNumerical': 202, 'LpInfeasUncertified': 26, 'FarkasRejectMargin': 967}
+RESULT arm=homog nodes=2000 bound=0.38595045554133645 status=node_limit wall=62.0 spec_mag=1.000e+03 numerical=202
+executed assertions: 7

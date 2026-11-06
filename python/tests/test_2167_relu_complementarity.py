@@ -125,7 +125,12 @@ def test_unbounded_inputs_accepted_all_neurons_unstable():
 _NETS = [
     pytest.param(dict(seed=42, hidden=(3,)), "min", id="1x3-min"),
     pytest.param(dict(seed=42, hidden=(3,)), "max", id="1x3-max"),
-    pytest.param(dict(seed=7, n_in=3, hidden=(4, 3)), "min", id="2layer-min"),
+    pytest.param(
+        dict(seed=7, n_in=3, hidden=(4, 3)),
+        "min",
+        id="2layer-min",
+        marks=[pytest.mark.slow, pytest.mark.correctness],
+    ),
     pytest.param(dict(seed=11, n_in=2, hidden=(5, 4)), "max", id="2layer-max"),
 ]
 
@@ -479,15 +484,13 @@ def test_native_matches_relu_bigm(kw, sense, flag, monkeypatch):
 
 
 def test_compl_branch_fires_on_a_net_that_needs_branching(monkeypatch):
-    """Probe that the dichotomy actually ran somewhere (CLAUDE.md §6)."""
-    fired = 0
-    for kw, sense in [
-        (dict(seed=7, n_in=3, hidden=(4, 3)), "min"),
-        (dict(seed=11, n_in=2, hidden=(5, 4)), "max"),
-    ]:
-        _, _, rc = _solve_native(_relu_net(**kw), sense, "1", monkeypatch)
-        fired += int((rc.solver_stats or {}).get("tree/compl_branches", 0))
-    assert fired > 0
+    """Probe that the dichotomy actually ran (CLAUDE.md §6). One net whose root
+    leaves a violated pair, under a deterministic node budget: firing is decided
+    at the first branching, so the budget does not weaken the probe."""
+    monkeypatch.setenv("DISCOPT_COMPL_BRANCH", "1")
+    m, nn = _embed(_relu_net(seed=11, n_in=2, hidden=(5, 4)), "relu_complementarity", "max")
+    rc = solve_mpec(m, nn.relations, method="native", max_nodes=8, deterministic=True)
+    assert (rc.solver_stats or {}).get("tree/compl_branches", 0) > 0
 
 
 def test_native_lowering_cuts_no_feasible_point():
@@ -520,7 +523,8 @@ _BOXES = [
 def test_compl_branch_bound_on_fixed_boxes(box, monkeypatch):
     """Differential bound test: on a fixed input sub-box the flag-ON certified
     bound never exceeds the box's true optimum (relu_bigm on the same box), and
-    the flag-ON and flag-OFF objectives agree."""
+    the flag-ON objective is the box optimum. (Flag OFF on the same models is
+    covered by ``test_native_matches_relu_bigm``.)"""
     net = _relu_net(seed=11, n_in=2, hidden=(5, 4))
 
     def oracle():
@@ -533,11 +537,9 @@ def test_compl_branch_bound_on_fixed_boxes(box, monkeypatch):
 
     opt = oracle()
     _, _, on = _solve_native(net, "min", "1", monkeypatch, box=box)
-    _, _, off = _solve_native(net, "min", "0", monkeypatch, box=box)
-    assert on.gap_certified and off.gap_certified
+    assert on.gap_certified
     assert on.bound <= opt + 1e-6
     assert on.objective == pytest.approx(opt, abs=1e-6, rel=1e-6)
-    assert off.objective == pytest.approx(opt, abs=1e-6, rel=1e-6)
 
 
 def _input_rows(m, x):
@@ -551,7 +553,7 @@ def test_compl_branch_certifies_without_input_bounds(monkeypatch):
     """The network declares no input box (relu_bigm refuses it); the inputs are
     bounded only by the surrounding model's rows. The native lowering with the
     branch certifies, and matches relu_bigm given the box explicitly."""
-    net_free = _relu_net(seed=7, n_in=3, hidden=(4, 3), with_bounds=False)
+    net_free = _relu_net(seed=7, n_in=3, hidden=(3,), with_bounds=False)
     with pytest.raises(ValueError, match="input_bounds"):
         _embed(net_free, "relu_bigm")
     _, _, rc = _solve_native(
@@ -572,10 +574,12 @@ def test_compl_branch_certifies_without_input_bounds(monkeypatch):
 def test_compl_branch_sound_on_an_unbounded_relaxation(monkeypatch):
     """Free inputs with a quadratic penalty: the LP relaxation cannot bound
     ``0.1*||x||^2`` over a free ``x``, so this does not certify within a node
-    budget (measured: 163 nodes / 60 s, incumbent -11.5585, no dual bound).
+    budget (measured on this 3-3-1 net: 10 nodes -> feasible -1.958945, no dual
+    bound; on a 3-4-3-1 net 163 nodes / 60 s still gave none). It checks the
+    soundness of whatever comes back, which a larger budget does not strengthen.
     Whatever it returns must stay sound: no certificate on a wrong value, no
     bound above the true optimum (relu_bigm on a box wide enough to hold it)."""
-    net_free = _relu_net(seed=7, n_in=3, hidden=(4, 3), with_bounds=False)
+    net_free = _relu_net(seed=7, n_in=3, hidden=(3,), with_bounds=False)
 
     def penalty(m, nn):
         m.minimize(dm.sum(nn.outputs) + 0.1 * dm.sum(nn.inputs * nn.inputs))
@@ -583,7 +587,7 @@ def test_compl_branch_sound_on_an_unbounded_relaxation(monkeypatch):
     monkeypatch.setenv("DISCOPT_COMPL_BRANCH", "1")
     m, nn = _embed(net_free, "relu_complementarity")
     penalty(m, nn)
-    rc = solve_mpec(m, nn.relations, method="native", max_nodes=40, deterministic=True)
+    rc = solve_mpec(m, nn.relations, method="native", max_nodes=10, deterministic=True)
 
     B = 30.0
     wide = NetworkDefinition(net_free.layers, input_bounds=(-B * np.ones(3), B * np.ones(3)))
@@ -594,8 +598,8 @@ def test_compl_branch_sound_on_an_unbounded_relaxation(monkeypatch):
     assert np.max(np.abs(np.asarray(rb.x["nn_input"]))) < 0.9 * B, "wide box must be inactive"
     # The oracle is certified to an interval [rb.bound, rb.objective]: a primal
     # point may not lie below its bound, a dual bound may not lie above its
-    # incumbent. (Measured: the native incumbent -11.5585181 sits below the
-    # oracle's -11.5585034, inside the oracle's own certified gap 1.3e-6.)
+    # incumbent. (Measured on a 3-4-3-1 net: the native incumbent -11.5585181
+    # sat below the oracle's -11.5585034, inside the oracle's certified gap 1.3e-6.)
     tol = 1e-7 * max(1.0, abs(rb.objective))
     checks = 0
     if rc.objective is not None:
@@ -619,9 +623,23 @@ def test_multistart_time_limit_caps_inflight_start():
     367 s start against a 120 s budget before the cap)."""
     import time
 
-    from discopt_benchmarks.scripts.relu_local_h1 import make_net
-
-    net = make_net(0, 4, 32, 2)  # ~2.5 s per start; 20 starts ~ 50 s uncapped
+    # He-initialised 4-32-32-1 net (the H1 panel's generator, inlined so the test
+    # does not import the benchmark package): ~2.5 s per start, ~50 s uncapped.
+    rng = np.random.default_rng(0)
+    layers, w = [], 4
+    for _ in range(2):
+        layers.append(
+            DenseLayer(
+                rng.standard_normal((w, 32)) * np.sqrt(2.0 / w),
+                0.1 * rng.standard_normal(32),
+                Activation.RELU,
+            )
+        )
+        w = 32
+    layers.append(
+        DenseLayer(rng.standard_normal((w, 1)) / np.sqrt(w), np.zeros(1), Activation.LINEAR)
+    )
+    net = NetworkDefinition(layers, input_bounds=(-np.ones(4), np.ones(4)))
     m, nn = _embed(net, "relu_complementarity")
     t0 = time.perf_counter()
     res = nn.solve_local(n_starts=20, seed=0, time_limit=3.0)

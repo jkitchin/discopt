@@ -326,6 +326,14 @@ counters!(
     // healthy majority — so the guard's action is auditable and its
     // bound-neutrality (same optimum, cold path) is measurable.
     DualStallTrips,
+    // #2142 learned dual-proof rows (`SpatialTreeConfig::dual_proof_propagation`):
+    // certified-empty node LPs examined, global-rows fallback LPs solved, rows
+    // stored, and proof-row bound changes / fathoms during node propagation.
+    DualProofRays,
+    DualProofGlobalLps,
+    DualProofLearned,
+    DualProofTightenings,
+    DualProofFathoms,
     // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
     // above fires only when the F2 *cap* is reached, so an LP that grinds below
     // the cap reads 0 there while 43% of its pivots take a zero-length step —
@@ -480,6 +488,39 @@ counters!(
     // control flow.
     DualUnstablePivotRecoveries,
     DualUnstablePivotBails,
+    // #2142 B0: every remaining `None` exit of `run_dual` (each one becomes a
+    // `DualColdFallbacks` on the `reoptimize` route). Before these, 493 of 534
+    // cold fallbacks on GDPlib cstr big-M left the warm dual through an exit with
+    // no counter, so "which breakdown fires" could only be guessed. Split by site:
+    // the wall-clock deadline without banking; the exact x_B / reduced-cost
+    // recompute's solve failing (`?` exits); the optimality confirmation finding
+    // the exact reduced costs dual-INfeasible (a drifted pivot); the pivot-row
+    // btran; an uncertified Farkas ray on an empty ratio test; the entering
+    // column's ftran; the bound-flip RHS ftran; the refactorization after an FT
+    // failure or the interval cap; and the pivot-budget (stall/iteration) cap.
+    DualExitDeadline,
+    DualExitXbSolveFail,
+    DualExitRcSolveFail,
+    DualExitDualInfeasAtOptimum,
+    DualExitRhoBtranFail,
+    DualExitFarkasUncertified,
+    DualExitAlphaFtranFail,
+    DualExitFlipFtranFail,
+    DualExitRefacFail,
+    DualExitPivotCap,
+    // #2142 B0: the cold primal's `Err(Numerical)` exits that had no counter.
+    // `assemble`'s audit refusals are already split (`LpAudit*`), as is the
+    // subtol budget (`SubtolCapNumerical`); these are the linear-algebra and
+    // ratio-test failures that end the loop before `assemble` is reached.
+    PrimalExitSubtolFtranFail,
+    PrimalExitConfirmBtranFail,
+    PrimalExitXbInitFail,
+    PrimalExitPriceBtranFail,
+    PrimalExitAlphaFtranFail,
+    PrimalExitRayNoRescue,
+    PrimalExitRefacFail,
+    PrimalExitXbAfterRefacFail,
+    PrimalExitXbRefreshFail,
     // The WARM path's own terminal histogram. `solve_lp_warm_csc` is the entry the
     // Python spatial engine's per-node LPs come through, and it can return without
     // ever reaching the cold primal's `assemble`, so the `LpVerdict*` counters above
@@ -630,10 +671,28 @@ counters!(
     // #2125: `Rows` audit residuals forgiven because a singleton column (a row
     // slack) absorbs them within its own representability (`singleton_absorbs`).
     AuditRowsSingletonAbsorbed,
+    // #2163: `ScaledProblem` solves that ended `Numerical` on the equilibrated
+    // matrix and were re-solved on the original one (the #649 recovery), and how
+    // many of those retries decided the LP. Zero retries on a run means the path
+    // never fired (CLAUDE.md §6).
+    ScaledNumericalUnscaledRetry,
+    ScaledNumericalUnscaledRetryDecided,
+    // #2163: `ScaledProblem` solves still `Numerical` after the unscaled retry that
+    // were re-solved by the dual simplex from an all-logical basis, and how many of
+    // those it decided with a certificate checked on the original LP (CLAUDE.md §6).
+    LogicalBasisDualAttempts,
+    LogicalBasisDualDecided,
     // #1945: integral MILP-driver vertices (node LP or dive) whose original rows
     // verify but whose original columns miss their bounds, refused as incumbents
     // by `incumbent_verified` (defense in depth behind `ScaledProblem::verify`).
     DriverIncumbentBoundsRefused,
+    // #2163: integral vertices whose rows/bounds hold as computed but not at their
+    // integral realisation (integers rounded), refused by `incumbent_verified`;
+    // the fixed-integer polish re-solves those, and how many it turned into a
+    // verified incumbent (CLAUDE.md §6: Attempts > 0 shows the path fired).
+    DriverIncumbentSnapRefused,
+    DriverPolishAttempts,
+    DriverPolishVerified,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,

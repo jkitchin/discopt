@@ -1,0 +1,34 @@
+solve: 16 (instance, method) pairs x 2 arms x 1 reps
+solve rep0 med_term_purchasing                big-m  off unsolved           status=feasible obj=6797.539701395788 bound=8358.999245053974 nodes=254 wall=3.337 load=2.97
+solve rep0 med_term_purchasing                big-m  on  unsolved           status=feasible obj=6797.539701395788 bound=8358.999245053974 nodes=254 wall=3.241 load=3.85
+solve rep0 med_term_purchasing                hull   on  solved             status=optimal obj=6797.539701513404 bound=6798.151525323333 nodes=1 wall=2.999 load=12.11
+solve rep0 med_term_purchasing                hull   off solved             status=optimal obj=6797.539701513404 bound=6798.151525323333 nodes=1 wall=3.019 load=14.9
+solve rep0 methanol                           big-m  off unsolved           status=feasible obj=-1793.4292355916928 bound=-4610.614408300997 nodes=183 wall=120.124 load=14.67
+solve rep0 methanol                           big-m  on  unsolved           status=feasible obj=-1793.4292355916928 bound=-4610.614408300997 nodes=183 wall=121.11 load=13.73
+solve rep0 methanol                           hull   on  unsolved           status=feasible obj=-1793.4292371578927 bound=-4658.047744737831 nodes=15 wall=120.109 load=9.82
+solve rep0 methanol                           hull   off unsolved           status=feasible obj=-1793.4292371578927 bound=-4658.047744737831 nodes=15 wall=120.14 load=13.67
+solve rep0 mod_hens                           big-m  off unsolved           status=feasible obj=106766.53159200575 bound=45578.92391410778 nodes=1111 wall=120.138 load=10.62
+solve rep0 mod_hens                           big-m  on  unsolved           status=feasible obj=106766.53159200563 bound=45991.24835155374 nodes=1159 wall=120.143 load=11.79
+solve rep0 mod_hens                           hull   on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=120.046 load=12.83
+solve rep0 mod_hens                           hull   off unsolved           status=time_limit obj=None bound=None nodes=0 wall=120.042 load=10.7
+solve rep0 modprodnet                         big-m  off solved             status=optimal obj=3592.9243341676265 bound=3592.9243576870035 nodes=5 wall=15.662 load=6.54
+solve rep0 modprodnet                         big-m  on  solved             status=optimal obj=3592.9243341676265 bound=3592.9243576870035 nodes=5 wall=14.451 load=9.28
+solve rep0 modprodnet                         hull   on  solved             status=optimal obj=3592.924334167593 bound=3592.92582274022 nodes=3 wall=53.328 load=9.45
+solve rep0 modprodnet                         hull   off solved             status=optimal obj=3592.924334167593 bound=3592.92582274022 nodes=3 wall=54.576 load=7.32
+solve rep0 positioning                        big-m  off solved             status=optimal obj=-8.064136108923353 bound=-8.06413640863095 nodes=151 wall=13.205 load=7.78
+solve rep0 positioning                        big-m  on  solved             status=optimal obj=-8.064136108923353 bound=-8.06413640863095 nodes=151 wall=12.337 load=9.2
+solve rep0 positioning                        hull   on  solved             status=optimal obj=-8.064136108923353 bound=-8.06413640863095 nodes=151 wall=11.416 load=8.33
+solve rep0 positioning                        hull   off solved             status=optimal obj=-8.064136108923353 bound=-8.06413640863095 nodes=151 wall=11.364 load=8.1
+solve rep0 small_batch                        big-m  off solved             status=optimal obj=167427.65711470306 bound=167427.65191854542 nodes=3 wall=6.211 load=8.24
+solve rep0 small_batch                        big-m  on  solved             status=optimal obj=167427.65711470306 bound=167427.65191854542 nodes=3 wall=6.303 load=7.36
+solve rep0 small_batch                        hull   on  solved             status=optimal obj=167427.65711470298 bound=167427.650428608 nodes=3 wall=8.104 load=7.01
+solve rep0 small_batch                        hull   off solved             status=optimal obj=167427.65711470298 bound=167427.650428608 nodes=3 wall=17.427 load=6.78
+   load gate: load1 20.5 > 16, waiting
+solve rep0 spectralog                         big-m  off solved             status=optimal obj=12.089262200968358 bound=12.089059684237926 nodes=651 wall=75.947 load=14.11
+solve rep0 spectralog                         big-m  on  solved             status=optimal obj=12.089262200968358 bound=12.089059684237926 nodes=651 wall=67.756 load=12.03
+solve rep0 spectralog                         hull   on  unsolved           status=feasible obj=12.089262200968323 bound=12.087709130872346 nodes=735 wall=120.076 load=7.57
+solve rep0 spectralog                         hull   off unsolved           status=feasible obj=12.089262200968323 bound=12.087709130872346 nodes=767 wall=120.081 load=7.93
+solve rep0 stranded_gas                       big-m  off unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.947 load=5.64
+solve rep0 stranded_gas                       big-m  on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.79 load=8.56
+solve rep0 stranded_gas                       hull   on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.675 load=9.15
+solve rep0 stranded_gas                       hull   off unsolved           status=time_limit obj=None bound=None nodes=0 wall=121.666 load=6.34

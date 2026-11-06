@@ -1640,7 +1640,10 @@ impl<'a> PreparedDual<'a> {
         // recompute for free).
         macro_rules! refresh_rc {
             () => {{
-                let (d_new, y_new) = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                let (d_new, y_new) = tagged(
+                    recompute_reduced_costs(&mut lu, sp, c, n, &basis),
+                    crate::profile::Ctr::DualExitRcSolveFail,
+                )?;
                 if opts.bank_deadline_duals {
                     *banked_out = y_new;
                 }
@@ -1664,7 +1667,10 @@ impl<'a> PreparedDual<'a> {
         let mut dvec;
         {
             let _t_rc = crate::profile::Timer::new(crate::profile::Phase::DualRecompute);
-            xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+            xb = tagged(
+                recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                crate::profile::Ctr::DualExitXbSolveFail,
+            )?;
             dvec = refresh_rc!();
         }
         // Iterations since the last exact refresh; bound roundoff in the rank-1
@@ -1751,11 +1757,15 @@ impl<'a> PreparedDual<'a> {
                         &mut lu, &basis, &slot_of, &stat, &xb, c, l, u, n, m, pivots,
                     ));
                 }
+                crate::profile::incr(crate::profile::Ctr::DualExitDeadline);
                 return None;
             }
             // Periodic exact refresh to bound increment roundoff.
             if since_refresh >= REFRESH {
-                xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                xb = tagged(
+                    recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                    crate::profile::Ctr::DualExitXbSolveFail,
+                )?;
                 dvec = refresh_rc!();
                 since_refresh = 0;
             }
@@ -1768,7 +1778,10 @@ impl<'a> PreparedDual<'a> {
                 match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
                     Some(sel) => sel,
                     None => {
-                        xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                        xb = tagged(
+                            recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                            crate::profile::Ctr::DualExitXbSolveFail,
+                        )?;
                         since_refresh = 0;
                         match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
                             Some(sel) => sel,
@@ -1850,6 +1863,9 @@ impl<'a> PreparedDual<'a> {
                                 }
                                 // Exact reduced costs reveal dual infeasibility (a drifted
                                 // pivot): hand off to the robust cold solve.
+                                crate::profile::incr(
+                                    crate::profile::Ctr::DualExitDualInfeasAtOptimum,
+                                );
                                 return None;
                             }
                         }
@@ -1880,6 +1896,7 @@ impl<'a> PreparedDual<'a> {
             let mut rho = vec![0.0; m];
             rho[r] = 1.0;
             if lu.btran(&mut rho).is_err() {
+                crate::profile::incr(crate::profile::Ctr::DualExitRhoBtranFail);
                 return None;
             }
             let mut alpha_r = vec![0.0; n];
@@ -1901,7 +1918,10 @@ impl<'a> PreparedDual<'a> {
                 dvec = refresh_rc!();
                 cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
-                    xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                    xb = tagged(
+                        recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                        crate::profile::Ctr::DualExitXbSolveFail,
+                    )?;
                     // Farkas dual ray: the leaving row's `ρ = eᵣᵀ B⁻¹`. With the ratio
                     // test finding no entering column, `ρ` (or `−ρ`) is a candidate
                     // direction along which `bᵀy` beats the box-max of `(Aᵀy)ᵀz`. But a
@@ -1931,6 +1951,7 @@ impl<'a> PreparedDual<'a> {
                             Vec::new(),
                         ));
                     }
+                    crate::profile::incr(crate::profile::Ctr::DualExitFarkasUncertified);
                     return None;
                 }
             }
@@ -1992,6 +2013,7 @@ impl<'a> PreparedDual<'a> {
             sp.scatter(q, &mut raw_q);
             let mut alpha = raw_q.clone();
             if lu.ftran(&mut alpha).is_err() {
+                crate::profile::incr(crate::profile::Ctr::DualExitAlphaFtranFail);
                 return None;
             }
             let piv = alpha[r];
@@ -2034,7 +2056,10 @@ impl<'a> PreparedDual<'a> {
                         })
                         .collect();
                     if lu.factorize_sparse(m, &cols).is_ok() {
-                        xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                        xb = tagged(
+                            recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                            crate::profile::Ctr::DualExitXbSolveFail,
+                        )?;
                         dvec = refresh_rc!();
                         updates = 0;
                         since_refresh = 0;
@@ -2102,6 +2127,7 @@ impl<'a> PreparedDual<'a> {
                     }
                 }
                 if lu.ftran(&mut rd).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitFlipFtranFail);
                     return None;
                 }
                 for (xi, ri) in xb.iter_mut().zip(rd.iter()) {
@@ -2140,11 +2166,15 @@ impl<'a> PreparedDual<'a> {
                     })
                     .collect();
                 if lu.factorize_sparse(m, &cols).is_err() {
+                    crate::profile::incr(crate::profile::Ctr::DualExitRefacFail);
                     return None;
                 }
                 updates = 0;
                 // Fresh factorization → reseed exact values, reset the drift clock.
-                xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                xb = tagged(
+                    recompute_basic_values(&mut lu, sp, b, n, l, u, &stat),
+                    crate::profile::Ctr::DualExitXbSolveFail,
+                )?;
                 dvec = refresh_rc!();
                 since_refresh = 0;
             } else {
@@ -2196,8 +2226,20 @@ impl<'a> PreparedDual<'a> {
         if opts.warm_stall_guard && stall_cap < opts.max_iter {
             crate::profile::incr(crate::profile::Ctr::DualStallTrips);
         }
+        crate::profile::incr(crate::profile::Ctr::DualExitPivotCap);
         None // stall cap / iteration cap → cold fallback
     }
+}
+
+/// #2142 B0: count a `None` before `?` propagates it, so every silent exit of
+/// [`PreparedDual::run_dual`] names itself in the profile. Pure bookkeeping —
+/// the `Option` is returned unchanged.
+#[inline(always)]
+fn tagged<T>(o: Option<T>, ctr: crate::profile::Ctr) -> Option<T> {
+    if o.is_none() {
+        crate::profile::incr(ctr);
+    }
+    o
 }
 
 /// Exact basic values `x_B = B⁻¹(b − Σ_nonbasic A_j x_j)` for the current basis.
@@ -3688,6 +3730,44 @@ mod tests {
                 cold.obj
             );
         }
+    }
+
+    /// #2142: a GDPlib cstr big-M node LP the warm dual cannot decide. From the
+    /// capture's start basis (the kernel's: `warm_flip_boxed`) the dual reaches the
+    /// empty-ratio-test exit with the leaving row off its bound by ~1e-8, a fresh
+    /// factorization reproduces that residual, the Farkas ray does not certify, and
+    /// the cold primal does not return `Optimal`; HiGHS (presolve off, entries
+    /// kept) solves it to `highs_obj`. `DISCOPT_LP_DUAL_REBUILD` (tolerate such a
+    /// row within `1e-7(1+|bound|)`) decided it and was RETIRED by its section 5
+    /// panel (not net-positive; `docs/dev/flag-retirement-audit.md`). This pins the
+    /// defect: a future fix that decides the LP must also match `highs_obj`, and
+    /// then updates this test.
+    #[test]
+    fn captured_cstr_bigm_node_lp_stays_undecided_2142() {
+        let json = include_str!("testdata/cstr_bigm_dual_rebuild_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let o = SimplexOptions {
+            warm_flip_boxed: true,
+            ..opts()
+        };
+        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &o);
+        assert_ne!(
+            sol.status,
+            LpStatus::Optimal,
+            "#2142: this captured LP is now decided; check its objective against the \
+             fixture's highs_obj and update this pin"
+        );
+        assert_ne!(
+            sol.status,
+            LpStatus::Infeasible,
+            "HiGHS solves it: never infeasible"
+        );
     }
 
     // #1013: the degeneracy-stall DETECTOR fires where `DualStallTrips` is blind.

@@ -92,7 +92,6 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
-from discopt.solvers._nlp_ladder_scope import apply_ladder_scope, ladder_off
 from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
@@ -934,6 +933,29 @@ def _gdp_config_hold_back(
         "remaining": rest,
         "ready_at": now + rest,
     }
+
+
+def _gdp_feas_fallback_due(
+    seed: Optional[np.ndarray], deferred: Optional[dict], iteration: int, tree
+) -> bool:
+    """Whether the #2144 feasibility-first fallback runs now (once per solve).
+
+    Only after every other root constructor has had its turn: the root
+    configuration constructor ran (``seed`` is its seed), its deferred call is not
+    still pending, the root batch is done (``iteration > 0``, so the pumps and the
+    LOA proposer have run), and still no incumbent exists. See
+    ``primal_heuristics.one_hot_config_feasibility_fallback`` for why it must not
+    run earlier. Gated by ``DISCOPT_GDP_CONFIG_FEAS_FALLBACK`` (default ON; ``0`` opts out).
+    """
+    from discopt._relax.primal_heuristics import _gdp_config_feas_fallback_enabled
+
+    return (
+        seed is not None
+        and deferred is None
+        and iteration > 0
+        and tree.incumbent() is None
+        and _gdp_config_feas_fallback_enabled()
+    )
 
 
 def _gdp_config_deferred_due(held: Optional[dict], iteration: int, now: float) -> bool:
@@ -3106,6 +3128,10 @@ def _try_native_spatial_kernel(
     # ``=0`` opts out; see the helper).
     if _kernel_undecided_retry_enabled():
         solve_kwargs["undecided_unpropagated_retry"] = True
+    # #2142: learned dual-proof rows (default ON since its section 5 panel; ``=0``
+    # opts out; see the helper).
+    if _kernel_dual_proof_enabled():
+        solve_kwargs["dual_proof_propagation"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
@@ -12578,6 +12604,41 @@ def _kernel_undecided_retry_enabled() -> bool:
     )
 
 
+def _kernel_dual_proof_enabled() -> bool:
+    """#2142: ``DISCOPT_DUAL_PROOF_PROPAGATION`` for the native spatial kernel
+    (``SpatialTreeConfig::dual_proof_propagation``).
+
+    **Graduated (default ON, 2026-11-05, #2142); ``=0`` opts out** and restores the
+    tree before it bit for bit.
+
+    On every certified-infeasible node LP the kernel aggregates the verified
+    Farkas ray over the GLOBAL rows only (the spec's fixed rows and the global cut
+    block; the node-local envelope rows are dropped) -- or, when that ray does not
+    cut the node, the ray of the global-rows feasibility LP on the same box --
+    cleans the row up as SCIP's ``tightenDualproof`` does, and keeps it in a
+    tree-global pool if it cuts the node. The pool is propagated (never added to
+    the LP) at every later node. Each row is a nonnegative combination of valid
+    rows with a rigorously rounded rhs, so it is valid everywhere. Counters:
+    ``res["dual_proof"]`` from the kernel, ``DualProof*`` under ``DISCOPT_PROFILE``.
+
+    Section 5 panels (deterministic, ``max_nodes=2000`` / 5000 for GDP, 120 s
+    backstop): in-repo corpus (74), section 107's 12 extras, a 59-instance fire
+    screen, GDP parity 24 x {big-m, hull}: cert-clean (the one flagged row, tls2,
+    is unfired and identical at low load). cstr big-M certifies (29,551 nodes,
+    88 s; OFF ends at the 300 s parity budget with bound 1.861); tanksize 519 ->
+    461 nodes (wall neutral); nous1 15,233 -> 12,359 nodes (+4.6 % wall). Known
+    cost: carton7's 120 s bound is looser (3/3 reps; same bound at equal nodes).
+    ``performance-plan.md`` section 112. Read at call time.
+    """
+    return os.environ.get("DISCOPT_DUAL_PROOF_PROPAGATION", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
 def _kernel_spatial_branching_kwargs() -> dict:
     """#1970: ``DISCOPT_KERNEL_SPATIAL_BRANCHING`` for the native spatial kernel.
 
@@ -18625,7 +18686,12 @@ def solve_model(
                     node_engine="simplex",
                     lagrangian_bound=lagrangian_bound,
                     lagrangian_frequency=lagrangian_frequency,
-                    initial_point=initial_point,
+                    # #2163: an engine that deferred an uncertified ``feasible``
+                    # leaves its verified point here; it seeds the tree (re-checked
+                    # there before injection) when the caller gave no start.
+                    initial_point=(
+                        initial_point if initial_point is not None else _deferred.get("incumbent")
+                    ),
                     incumbent_time_extension=incumbent_time_extension,
                     abs_gap_tol=abs_gap_tol,
                     node_callback=node_callback,
@@ -20726,6 +20792,9 @@ def solve_model(
     # #1775 G6.2: the held-back rest of that constructor's grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` -- {"seed", "remaining", "ready_at"} -- else None.
     _gdp_cfg_deferred: Optional[dict] = None
+    # #2144: the root constructor's seed, kept for the one-shot feasibility-first
+    # fallback (``_gdp_feas_fallback_due``); None once it has run.
+    _gdp_fb_seed: Optional[np.ndarray] = None
 
     # Re-attach the captured modeler start (by name) to the post-reform working
     # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
@@ -21482,6 +21551,45 @@ def solve_model(
                     time.perf_counter() - _gdd_t0,
                 )
 
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default ON): every root
+        # constructor has run and none found a point; sample valid configurations
+        # on an attempt budget of its own. Primal only, points verified by subnlp.
+        if _subnlp_backend_fn is not None and _gdp_feas_fallback_due(
+            _gdp_fb_seed, _gdp_cfg_deferred, iteration, tree
+        ):
+            _gfb_seed, _gdp_fb_seed = _gdp_fb_seed, None
+            assert _gfb_seed is not None  # _gdp_feas_fallback_due checked it
+            from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
+
+            _gfb_stats: dict = {}
+            _gfb_t0 = time.perf_counter()
+            try:
+                _gfb_results = one_hot_config_feasibility_fallback(
+                    model,
+                    _gfb_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    stats=_gfb_stats,
+                )
+            except Exception:
+                _warn_gdp_config_raised("spatial feasibility fallback")
+                _gfb_results = []
+            _subnlp_calls += int(_gfb_stats.get("attempted", 0))
+            for _x_gf, _obj_gf in _gfb_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_gf) and _obj_gf < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(np.asarray(_x_gf).copy(), float(_obj_gf)):
+                        _subnlp_incumbent_updates += 1
+            logger.info(
+                "GDP config feasibility fallback (iteration %d): %d sub-NLP solve(s), "
+                "%d feasible point(s), %.2f s",
+                iteration,
+                int(_gfb_stats.get("attempted", 0)),
+                len(_gfb_results),
+                time.perf_counter() - _gfb_t0,
+            )
+
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
         batch_lb, batch_ub, batch_ids, batch_psols = tree.export_batch(batch_size)
@@ -21800,22 +21908,19 @@ def solve_model(
         _score_pts: dict[int, np.ndarray] = {}
         _score_on = _py_tree_spatial_score_enabled() or _compl_pairs_registered
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        _active_evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        _active_cb,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=_exclusion_mask,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                _active_evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                _active_cb,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=_exclusion_mask,
+            )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
@@ -22235,17 +22340,16 @@ def solve_model(
                     else:
                         lb_clipped, ub_clipped = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        _active_evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -22951,7 +23055,7 @@ def solve_model(
         # most once per solve. Where it runs is ``_gdp_config_first_enabled()``.
         def _root_gdp_config_primal() -> None:
             nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
-            nonlocal _gdp_cfg_deferred
+            nonlocal _gdp_cfg_deferred, _gdp_fb_seed
             _loa_bound_pending = None
             if not (
                 iteration == 0
@@ -23002,6 +23106,7 @@ def solve_model(
             _gdp_cfg_deferred = _gdp_config_hold_back(
                 _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
             )
+            _gdp_fb_seed = np.asarray(_cfg_seed, dtype=np.float64).copy()
             if _gdp_cfg_deferred is not None:
                 logger.info(
                     "GDP config subNLP (root, deferred schedule): %.2f s held back",
@@ -23223,7 +23328,7 @@ def solve_model(
                         # its starts ran from 86 s to 160 s of a 120 s solve.
                         from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
 
-                        with stop_at_solve_deadline(), ladder_off():
+                        with stop_at_solve_deadline():
                             _root_relax = _solve_root_node_multistart(
                                 _active_evaluator,
                                 np.array(batch_lb[best_root_idx]),
@@ -28813,6 +28918,8 @@ def _solve_nlp_bb(
     # #1775 G6.2: the held-back rest of the root disjunct-configuration grant under
     # ``DISCOPT_GDP_CONFIG_DEFER`` (see ``_gdp_config_hold_back``), else None.
     _gdp_cfg_deferred_nb: Optional[dict] = None
+    # #2144: the root constructor's seed for the one-shot feasibility fallback.
+    _gdp_fb_seed_nb: Optional[np.ndarray] = None
 
     # --- Soundness: distinguish a PROVEN-infeasible fathom from a merely
     # UNCONVERGED one. A node whose NLP returns SolveStatus.INFEASIBLE (or whose
@@ -29027,6 +29134,47 @@ def _solve_nlp_bb(
                     time.perf_counter() - _gdd_t0,
                 )
 
+        # #2144 (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``, default ON): the last-resort
+        # constructor, as in ``solve_model``'s loop; re-verified like the deferred call.
+        if _gdp_feas_fallback_due(_gdp_fb_seed_nb, _gdp_cfg_deferred_nb, iteration, tree):
+            _gfb_seed_nb, _gdp_fb_seed_nb = _gdp_fb_seed_nb, None
+            assert _gfb_seed_nb is not None  # _gdp_feas_fallback_due checked it
+            from discopt._relax.primal_heuristics import one_hot_config_feasibility_fallback
+
+            _gfb_found: list = []
+            _gfb_stats_nb: dict = {}
+            _gfb_t0 = time.perf_counter()
+            try:
+                _gfb_found = one_hot_config_feasibility_fallback(
+                    model, _gfb_seed_nb, evaluator=evaluator, stats=_gfb_stats_nb
+                )
+            except Exception:
+                _warn_gdp_config_raised("nlp-bb feasibility fallback")
+            _subnlp_calls += int(_gfb_stats_nb.get("attempted", 0))
+            for _gfb_x, _ in _gfb_found:
+                _subnlp_feasible += 1
+                _gfb_sol = np.asarray(_gfb_x, dtype=np.float64).copy()
+                _gfb_obj = float(evaluator.evaluate_objective(_gfb_sol))
+                _gfb_feas = not cl_list or _check_constraint_feasibility(
+                    evaluator, _gfb_sol, cl_list, cu_list
+                )
+                if (
+                    np.isfinite(_gfb_obj)
+                    and _gfb_obj < _SENTINEL_THRESHOLD
+                    and _gfb_feas
+                    and _is_integer_feasible_solution(_gfb_sol, int_offsets, int_sizes)
+                ):
+                    if tree.inject_incumbent(_gfb_sol, _gfb_obj):
+                        _subnlp_incumbent_updates += 1
+            logger.info(
+                "GDP config feasibility fallback (nlp-bb, iteration %d): %d sub-NLP "
+                "solve(s), %d feasible point(s), %.2f s",
+                iteration,
+                int(_gfb_stats_nb.get("attempted", 0)),
+                len(_gfb_found),
+                time.perf_counter() - _gfb_t0,
+            )
+
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
         batch_lb, batch_ub, batch_ids, batch_psols = tree.export_batch(batch_size)
@@ -29141,22 +29289,19 @@ def _solve_nlp_bb(
         t_jax_start = time.perf_counter()
 
         if _use_pounce_batch and n_batch > 1:
-            with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        constraint_bounds,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                        excl_out=result_excl,
-                    )
-                )
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+                excl_out=result_excl,
+            )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
             # not a valid lower bound, so decertify the gap rather than trust
@@ -29249,17 +29394,16 @@ def _solve_nlp_bb(
                     else:
                         lb_c, ub_c = _clip_start_box(node_lb, node_ub)
                         x0 = 0.5 * (lb_c + ub_c)
-                    with ladder_off(not _model_is_convex):  # see solvers._nlp_ladder_scope
-                        nlp_result = _solve_node_nlp(
-                            evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            constraint_bounds,
-                            opts,
-                            nlp_solver=nlp_solver,
-                            convex=_model_is_convex,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -29421,6 +29565,9 @@ def _solve_nlp_bb(
                     _gdp_cfg_deferred_nb = _gdp_config_hold_back(
                         result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
                     )
+                    _gdp_fb_seed_nb = np.asarray(
+                        result_sols[best_root_idx], dtype=np.float64
+                    ).copy()
                     logger.info(
                         "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
                         int(_cfg_stats.get("attempted", 0)),
@@ -31121,9 +31268,6 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
-    # The wave runs in POUNCE's Rust pool, outside any Python contextvar read, so
-    # a caller's ladder scope (``solvers._nlp_ladder_scope``) is applied here.
-    apply_ladder_scope(batch_opts)
     # The caller's ``max_wall_time`` is what is left of its budget; the whole
     # wave, not each instance, must end by then.
     _batch_deadline = time.perf_counter() + caller_limit
@@ -39661,6 +39805,37 @@ def _solve_milp_simplex(
             gap_certified=False,
         )
 
+    # #2163: an engine search that ended ``feasible`` with NO finite bound, before
+    # the clock or a node cap stopped it, finished without any certificate --
+    # the driver withdrew it (an entry the LP cannot resolve, #1296's
+    # ``MilpTinyEntryDecert``) or the bound was left unresolved. Its answer is
+    # uncertified by the engine's own account, so defer to the Python tree, which
+    # resolves the class differently (#1414) and can certify it; this is the same
+    # deferral an infeasible engine point already takes. Measured on #1380's
+    # witness ``min -x + 3z, x <= M z``, ``M = 1e12``: the driver's root vertex
+    # (``z = 1e-11``) is refused at its integral realisation, the ``z >= 1`` child's
+    # exact optimum (-7) cannot be row-verified against a 1e12-magnitude row, and
+    # the engine's honest answer is ``feasible 0.0`` with bound ``-inf``; the Python
+    # tree certifies -7. Decided by the engine's result alone, never by the clock
+    # (#912). The engine's point, when it passes the model's own rows, is handed to
+    # the tree as a warm start (re-verified there before injection), so deferring
+    # never loses the incumbent in hand.
+    if (
+        status == "feasible"
+        and not np.isfinite(bound)
+        and not _stopped_on_nodes
+        and not _debug_stop_pending
+    ):
+        logger.info(
+            "Rust simplex MILP finished feasible with no certificate (bound "
+            "withdrawn or unresolved); deferring to the Python MILP tree (#2163)"
+        )
+        if deferred is not None:
+            _xo_def = np.asarray(x_struct, dtype=np.float64)[:n_orig]
+            if _point_feasible(_xo_def):
+                deferred["incumbent"] = _xo_def.copy()
+        return None
+
     if status in ("optimal", "feasible"):
         x_arr = np.asarray(x_struct, dtype=np.float64)
         xo = x_arr[:n_orig]
@@ -39679,6 +39854,16 @@ def _solve_milp_simplex(
                 status,
             )
             return _debug_stopped_result()
+        # #2163: report the point the gate just verified -- its integral
+        # realisation (#1380) -- not the engine's raw vertex, whose binaries can sit
+        # inside the integrality tolerance (``z = 1 - 1.9e-15`` from a basic column
+        # on a fixed box). A reported integer variable is exactly an integer.
+        if int_idx:
+            from discopt.validation.feasibility import snap_integer_columns
+
+            x_arr = x_arr.copy()
+            x_arr[:n_orig] = snap_integer_columns(xo, int_idx)
+            xo = x_arr[:n_orig]
         x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None

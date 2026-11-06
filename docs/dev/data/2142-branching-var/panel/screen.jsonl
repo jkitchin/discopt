@@ -1,0 +1,60 @@
+{"instance": "carton7", "status": "time_limit", "nodes": 180, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1223a", "status": "optimal", "nodes": 3, "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1233", "status": "feasible", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1252", "status": "time_limit", "nodes": 0, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1252a", "status": "time_limit", "nodes": 1489, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 388, "SpatialViolScipChanged": 228}
+{"instance": "ex1263", "status": "optimal", "nodes": 1629, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1264", "status": "feasible", "nodes": 2075, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1265", "status": "optimal", "nodes": 1903, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex1266", "status": "optimal", "nodes": 1449, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex8_1_1", "status": "optimal", "nodes": 5, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "ex8_5_4", "status": "feasible", "nodes": 133, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "fuel", "status": "optimal", "nodes": 17, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 8, "SpatialViolScipChanged": 3}
+{"instance": "gear", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "gear2", "status": "optimal", "nodes": 159, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "gear3", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "gear4", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "kall_circles_c8a", "status": "feasible", "nodes": 91, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "mathopt3", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "mathopt5_2", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "mathopt5_8", "status": "optimal", "nodes": 39, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 19, "SpatialViolScipChanged": 0}
+{"instance": "meanvar", "status": "optimal", "nodes": 0, "route": "convex-qp: discopt convex QP solve", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "meanvarx", "status": "optimal", "nodes": 9, "route": "miqp-bb: discopt convex MIQP branch and bound", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs16", "status": "optimal", "nodes": 303, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs17", "status": "optimal", "nodes": 61, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs18", "status": "optimal", "nodes": 49, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs19", "status": "optimal", "nodes": 163, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs20", "status": "optimal", "nodes": 151, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 57, "SpatialViolScipChanged": 36}
+{"instance": "nvs22", "status": "optimal", "nodes": 35, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs23", "status": "optimal", "nodes": 328, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nvs24", "status": "optimal", "nodes": 549, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "pooling_bental5tp", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "portfol_roundlot", "status": "optimal", "nodes": 3, "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "prob02", "status": "optimal", "nodes": 37, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "prob03", "status": "optimal", "nodes": 7, "route": "native-milp: discopt monolithic Rust MILP engine (nlp_solver=simplex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "prob06", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "prob10", "status": "optimal", "nodes": 17, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 1, "SpatialViolScipChanged": 0}
+{"instance": "rbrock", "status": "node_limit", "nodes": 2000, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 1098, "SpatialViolScipChanged": 44}
+{"instance": "st_e01", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e02", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e03", "status": "optimal", "nodes": 241, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 120, "SpatialViolScipChanged": 74}
+{"instance": "st_e04", "status": "optimal", "nodes": 9, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e05", "status": "optimal", "nodes": 125, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 62, "SpatialViolScipChanged": 12}
+{"instance": "st_e06", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e07", "status": "optimal", "nodes": 29, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 14, "SpatialViolScipChanged": 1}
+{"instance": "st_e08", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e09", "status": "optimal", "nodes": 7, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e15", "status": "optimal", "nodes": 3, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e17", "status": "optimal", "nodes": 0, "route": "convex-nlp: single pounce NLP solve (continuous model proved convex)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e18", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e27", "status": "optimal", "nodes": 3, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e31", "status": "node_limit", "nodes": 2000, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 714, "SpatialViolScipChanged": 104}
+{"instance": "st_e35", "status": "time_limit", "nodes": 7, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_e40", "status": "optimal", "nodes": 9, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_ph10", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "st_z", "status": "optimal", "nodes": 23, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 11, "SpatialViolScipChanged": 1}
+{"instance": "syn05m", "status": "optimal", "nodes": 3, "route": "convex-kernel: discopt Rust convex LP-OA branch-and-cut kernel (big-M)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "trig", "status": "optimal", "nodes": 63, "route": "spatial-bb: discopt spatial branch and bound (Python tree)", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "util", "status": "optimal", "nodes": 211, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}
+{"instance": "nous1", "status": "node_limit", "nodes": 2000, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 1651, "SpatialViolScipChanged": 1495}
+{"instance": "st_m2", "status": "optimal", "nodes": 1, "route": "native-spatial: discopt Rust spatial branch-and-bound kernel", "SpatialViolScipPicks": 0, "SpatialViolScipChanged": 0}

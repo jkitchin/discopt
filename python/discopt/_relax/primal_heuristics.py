@@ -38,7 +38,6 @@ from discopt.modeling.core import Model, VarType
 from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
 from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
 from discopt.solvers._nlp_hard_stop import stop_at_solve_deadline
-from discopt.solvers._nlp_ladder_scope import ladder_off
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR,
     evaluator_box,
@@ -66,7 +65,7 @@ def _stops_at_solve_deadline(fn: _F) -> _F:
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with stop_at_solve_deadline(), ladder_off():
+        with stop_at_solve_deadline():
             return fn(*args, **kwargs)
 
     return cast(_F, wrapper)
@@ -947,7 +946,20 @@ def _reduce_subnlp(
             return _REDUCED_REFUTED
         vals = np.asarray(evaluator.evaluate_jacobian_values(x0), dtype=np.float64)
         scale = np.zeros(m, dtype=np.float64)
-        np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        with np.errstate(invalid="ignore"):
+            np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        # #2144: a row's derivative can be non-finite at a point where the row
+        # itself holds exactly -- under hull, an off disjunct's eps-perspective row
+        # at ``v = 0, y = 0`` has a 0/0 partial. Its ``scale`` was then NaN, so was
+        # its threshold, and ``~(viol <= NaN)`` refused the fixing. Measured on
+        # GDPlib mod_hens (hull): a configuration feasible to 1.5e-12 (objective
+        # 360045.09, the lifted big-M point) was refused on 14 such rows, and so was
+        # every sampled configuration. Such a row is judged without its scale, i.e.
+        # against ``10 * max(SMALL_ROW_ABS_FLOOR, feas_tol)``: the row is constant in
+        # the reduced NLP, and the final check rejects any violation above
+        # ``SMALL_ROW_ABS_FLOOR`` whose Jacobian it cannot form, so nothing the
+        # legacy pose could return is refused, and a clearly violated row still is.
+        scale = np.where(np.isfinite(scale), scale, 0.0)
         viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
         threshold = 10.0 * np.maximum(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale)
         if np.any(constant & ~(viol <= threshold)):
@@ -2955,6 +2967,255 @@ def _residual_assignments(
 #: on batch_processing (48 / 7.3) instead of the 35 s an uncapped wave wants — which
 #: is what leaves the dive a share to work in.
 _WAVE_SOLVE_CAP = 48
+
+#: Sub-NLP solves the #2144 feasibility-first fallback may spend. A **count**, for
+#: the same #912 reason as ``_WAVE_SOLVE_CAP``: how many samples run is a function
+#: of the model, never of machine speed. The clock only stops it at the solve's own
+#: deadline (role 1), which is the stopping contract, not a work budget.
+#:
+#: Sized from #2144's measurement on batch_processing (big-M, the 29-group GDP whose
+#: relaxation argmax is infeasible): 54 of 60 uniformly sampled valid configurations
+#: gave a feasible sub-NLP, so the chance that 16 samples all fail at that rate is
+#: about 1e-16; and from the per-solve cost there (0.14-0.53 s), which puts the
+#: worst case -- every sample infeasible, on a model where the fallback cannot help
+#: -- at a few seconds, paid once per solve.
+_FEAS_SAMPLE_ATTEMPTS = 16
+
+#: Draws the fallback may make per attempt before giving up. A draw that is refuted
+#: by the integer-only rows, or repeats an earlier one, costs no NLP.
+_FEAS_SAMPLE_DRAWS_PER_ATTEMPT = 64
+
+#: Process-wide firing record of the #2144 fallback (CLAUDE.md §6: a panel must be
+#: able to show where the flag fired). Read by ``gdp_baseline``'s worker.
+FEAS_FALLBACK_COUNTS = {"calls": 0, "attempted": 0, "feasible": 0}
+
+
+def _gdp_config_feas_fallback_enabled() -> bool:
+    """Whether the #2144 feasibility-first fallback runs (``DISCOPT_GDP_CONFIG_FEAS_FALLBACK``).
+
+    **Default ON** (graduated 2026-11-05, #2144, on its CLAUDE.md §5 panel); ``0``
+    opts out and restores the legacy path. Row in ``docs/dev/flag-retirement-audit.md``;
+    data in ``docs/dev/data/2144-feas-fallback-panel/``. See
+    :func:`one_hot_config_feasibility_fallback`.
+
+    Panel: ``gdp_parity`` 24 x {big-M, hull} at 120 s, three arms interleaved per
+    cell (``main``, this branch OFF, this branch ON), 144 rows (kaibel's 6 errored
+    identically in every arm, before solving: its builder needs an ipopt
+    executable the panel host lacked); plus the 74-instance in-repo ``.nl`` corpus at
+    30 s with the flag ON.
+
+    * cert-clean: 0 incorrect, 0 dual bounds past an oracle, 0 solved instances
+      lost (27 -> 27); every ON incumbent re-checked in the Pyomo model.
+    * net-positive where it can act: it fired on 2 cells, both batch_processing,
+      and both gained their first incumbent (big-M 1034233.32, hull 1019222.46; OFF
+      none). On every other cell it does not run -- it is a last resort, gated on
+      no incumbent after every root constructor -- and those cells were unchanged
+      OFF -> ON, including mod_hens big-M (106766.53, 445 nodes in both). It fired
+      on 0 of the 74 corpus instances.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_FEAS_FALLBACK", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _one_hot_feasibility_samples(
+    model: Model,
+    groups: list[list[int]],
+    residual: list[int],
+    residual_assigns: list[tuple[float, ...]],
+    zero_start: np.ndarray,
+    *,
+    backend: Optional[Callable],
+    nlp_options: Optional[dict],
+    evaluator: Optional[NLPEvaluator],
+    integer_tol: float,
+    max_attempts: int = _FEAS_SAMPLE_ATTEMPTS,
+    seed: int = 0,
+    stats: Optional[dict] = None,
+) -> list[tuple[np.ndarray, float]]:
+    """#2144: sample valid disjunct configurations until one is feasible.
+
+    The fallback for the case the wave and the dive both miss: the relaxation's
+    preference is *anti-correlated* with feasibility, so a search that ranks by it
+    stays in an infeasible neighbourhood. Measured on GDPlib batch_processing
+    (big-M): the root relaxation puts its weight on the first disjunct of every
+    group, that argmax configuration is infeasible, LOA's feasible configuration
+    differs from it in 17 of 29 groups -- and 54 of 60 *uniformly* sampled valid
+    configurations are feasible. Ranking by the relaxation is worse there than not
+    ranking at all, so this stops ranking.
+
+    Each sample picks one disjunct per group uniformly (a valid configuration by
+    construction, as in the wave), fixes the residual binaries to the relaxation's
+    own rounding on even samples and to a uniformly drawn residual assignment on odd
+    ones, and solves the fixed sub-NLP from the wave's zero start. It stops at the
+    **first** feasible point: the goal is an incumbent, and improving it is the
+    tree's job (and the deferred constructor call's).
+
+    Its budget is its own, ``max_attempts`` sub-NLP solves, *not* a share of the
+    wave's deadline. That is the lesson of #2150, which interleaved samples into
+    the wave and lost either way: samples placed early took the time ``mod_hens``
+    (big-M) needs to reach its ranked plan, and samples placed late got no time at
+    all. Here the samples run only after every other root constructor has found
+    nothing (see :func:`one_hot_config_feasibility_fallback`), so they cannot
+    displace one, and they are bounded by a count, so they cannot be starved by a
+    clock either. The solve's own deadline still stops them.
+
+    Soundness: every point comes from :func:`subnlp`, which re-verifies integer-
+    and constraint-feasibility. Primal only; the dual bound is never touched.
+    """
+    from discopt.solver import _role1_deadline
+
+    rng = np.random.default_rng(seed)
+    int_mask = _get_integer_mask(model)
+    lb, ub = _get_variable_bounds(model)
+    results: list[tuple[np.ndarray, float]] = []
+    seen: set[tuple[int, ...]] = set()
+    attempted = 0
+    draws = 0
+    refuted = 0
+    stop = "draw cap"
+    # Draws are cheap (no NLP) and only sub-NLP solves count as attempts, so the
+    # draw cap is generous; it only stops a model whose integer rows admit too few
+    # configurations for uniform draws to keep finding new ones.
+    while attempted < max_attempts and draws < _FEAS_SAMPLE_DRAWS_PER_ATTEMPT * max_attempts:
+        draws += 1
+        picks = [int(rng.integers(len(g))) for g in groups]
+        ri = 0 if attempted % 2 == 0 else int(rng.integers(len(residual_assigns)))
+        key = tuple(picks) + (ri,)
+        if key in seen:
+            continue
+        seen.add(key)
+        x0 = zero_start.copy()
+        for g, k in zip(groups, picks):
+            for j in g:
+                x0[j] = 0.0
+            x0[g[k]] = 1.0
+        for j, v in zip(residual, residual_assigns[ri]):
+            x0[j] = v
+        # The integer-only rows (logic between disjunctions, say) are checked here,
+        # with no NLP -- the same check ``subnlp`` applies first -- so a draw they
+        # refute is redrawn and not counted as an attempt.
+        x_int = x0.copy()
+        x_int[int_mask] = np.clip(np.round(x_int[int_mask]), lb[int_mask], ub[int_mask])
+        if _refuted_by_integer_rows(model, int_mask, x_int, 1e-6):
+            refuted += 1
+            continue
+        stop_at = _role1_deadline()
+        if stop_at is not None and _now() >= stop_at:
+            stop = "deadline"
+            break
+        attempted += 1
+        found = subnlp(
+            model,
+            x0,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            integer_tol=integer_tol,
+            time_budget=None if stop_at is None else max(0.0, stop_at - _now()),
+        )
+        if found is not None:
+            results.append(found)
+            stop = "feasible"
+            break
+    else:
+        if attempted >= max_attempts:
+            stop = "attempt cap"
+    logger.debug(
+        "one_hot_config feasibility fallback: %d sample(s) attempted (%s), %d draw(s), "
+        "%d refuted by integer rows, %d feasible",
+        attempted,
+        stop,
+        draws,
+        refuted,
+        len(results),
+    )
+    FEAS_FALLBACK_COUNTS["calls"] += 1
+    FEAS_FALLBACK_COUNTS["attempted"] += attempted
+    FEAS_FALLBACK_COUNTS["feasible"] += len(results)
+    if stats is not None:
+        stats["attempted"] = attempted
+        stats["draws"] = draws
+        stats["refuted"] = refuted
+        stats["first_feasible_at"] = attempted if results else None
+    return results
+
+
+@_stops_at_solve_deadline
+def one_hot_config_feasibility_fallback(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    integer_tol: float = 1e-5,
+    max_attempts: int = _FEAS_SAMPLE_ATTEMPTS,
+    stats: Optional[dict] = None,
+) -> list[tuple[np.ndarray, float]]:
+    """#2144: the last-resort GDP constructor -- sample valid configurations.
+
+    Detects the one-hot groups and residual binaries exactly as
+    :func:`one_hot_config_subnlp` does and hands them to
+    :func:`_one_hot_feasibility_samples`. The *caller* decides when this runs; the
+    B&B loops run it once, after every other root constructor (the configuration
+    wave and dive, their deferred call, the pumps, the LOA proposer) has had its
+    turn and no incumbent exists. Run any earlier and its first, usually poor,
+    point displaces the constructors that are gated on "no incumbent yet": measured
+    on GDPlib mod_hens (big-M, 120 s), firing it inside the root constructor gave
+    110441.39 where the feasibility pump finds 106766.53 a few seconds later.
+    """
+    if stats is not None:
+        stats["attempted"] = 0
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask):
+        return []
+    lb, ub = _get_variable_bounds(model)
+    n_vars = int(int_mask.size)
+    x_relax = np.asarray(x_relax, dtype=np.float64)
+    plb, pub = _pinned_bounds(model, lb, ub)
+    all_groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    groups, decided = _prune_decided_groups(all_groups, plb, pub)
+    if not groups:
+        return []
+    covered = {j for g in groups for j in g} | decided
+    residual = [
+        j
+        for j in np.nonzero(int_mask)[0].tolist()
+        if j not in covered and lb[j] >= -1e-9 and ub[j] <= 1.0 + 1e-9
+    ]
+    residual_assigns = _residual_assignments(residual, x_relax, 256)
+    zero_start = x_relax.copy()
+    cont = ~int_mask
+    zero_start[cont] = np.clip(0.0, lb, ub)[cont]
+    # A column pinned by a ROW (``_pinned_bounds``), not by its own box, starts at
+    # its pinned value. Left at the relaxation point's rounding, it is refused by
+    # the very integer row that pins it. Measured on GDPlib mod_hens (hull and
+    # big-M, bound-midpoint start): 0 of 1024 draws survived the integer-row check
+    # before this, because 40 such columns rounded to the wrong value.
+    pinned = int_mask & (plb == pub)
+    zero_start[pinned] = plb[pinned]
+    # ... and a decided group's other members are 0, as its one-hot row says.
+    for g in all_groups:
+        ones = [j for j in g if plb[j] > 0.5]
+        if ones:
+            zero_start[g] = 0.0
+            zero_start[ones[0]] = 1.0
+    return _one_hot_feasibility_samples(
+        model,
+        groups,
+        residual,
+        residual_assigns,
+        zero_start,
+        backend=backend,
+        nlp_options=nlp_options,
+        evaluator=evaluator,
+        integer_tol=integer_tol,
+        max_attempts=max_attempts,
+        stats=stats,
+    )
 
 
 @_stops_at_solve_deadline

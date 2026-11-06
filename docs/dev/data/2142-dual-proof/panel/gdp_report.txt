@@ -1,0 +1,62 @@
+== DISCOPT_DUAL_PROOF_PROPAGATION: ../docs/dev/data/2142-dual-proof/panel/gdp_merged.jsonl
+fire: 0 lowerings checked; fired on 0; identical on 0; lowering error on 0
+
+instance                           method OFF solved ON solved  OFF wall   ON wall OFF nodes  ON nodes  verdicts
+batch_processing                   big-m       0/1       0/1       121.5     120.5       215       183  unsolved
+batch_processing                   hull        0/1       0/1       121.7     120.5         3         3  unsolved
+biofuel                            big-m       0/1       0/1       124.5     125.8         3         3  unsolved
+biofuel                            hull        0/1       0/1       127.4     123.8         0         0  unsolved
+cstr                               big-m       0/1       0/1        35.6      38.2      5000      5000  unsolved
+cstr                               hull        0/1       0/1       120.2     120.1       350       309  unsolved
+disease_model                      big-m       1/1       1/1        54.3      76.8      3970      3970  solved
+disease_model                      hull        1/1       1/1        81.5      79.2      3318      3318  solved
+ex1_linan_2023                     big-m       1/1       1/1         6.2       6.9         9         9  solved
+ex1_linan_2023                     hull        1/1       1/1         8.8       8.5         9         9  solved
+gdp_col                            big-m       0/1       0/1       120.2     120.1         0         0  unsolved
+gdp_col                            hull        0/1       0/1       128.8     127.2         3         3  unsolved
+hda                                big-m       0/1       0/1       120.1     120.1         3         3  unsolved
+hda                                hull        0/1       0/1       120.2     120.2         3         3  unsolved
+kaibel                             big-m       0/1       0/1           -         -         -         -  error
+kaibel                             hull        0/1       0/1           -         -         -         -  error
+med_term_purchasing                big-m       0/1       0/1        12.5      10.4        41        41  unsolved
+med_term_purchasing                hull        1/1       1/1         4.5       4.4         1         1  solved
+methanol                           big-m       0/1       0/1       121.3     120.8         7        15  unsolved
+methanol                           hull        0/1       0/1       120.4     133.3         3         3  unsolved
+mod_hens                           big-m       0/1       0/1           -         -         -         -  error
+mod_hens                           hull        0/1       0/1           -         -         -         -  error
+modprodnet                         big-m       1/1       1/1        40.4      45.5         5         5  solved
+modprodnet                         hull        1/1       1/1       120.5     120.5         5         5  solved
+positioning                        big-m       1/1       1/1        30.0      32.2       151       151  solved
+positioning                        hull        1/1       1/1        29.3      30.1       151       151  solved
+pyomo.constrained_layout_clay0203  big-m       1/1       1/1       117.9     107.2       133       131  solved
+pyomo.constrained_layout_clay0203  hull        1/1       1/1        40.3      35.0       109       109  solved
+pyomo.eight_process                big-m       1/1       1/1        20.4      20.4        27        27  solved
+pyomo.eight_process                hull        1/1       1/1        22.2      23.4        59        59  solved
+pyomo.eight_process_logical        big-m       1/1       1/1        20.3      20.4        19        19  solved
+pyomo.eight_process_logical        hull        1/1       1/1        32.2      30.2        41        41  solved
+pyomo.ex_633_trespalacios          big-m       1/1       1/1         3.8       4.1        13        13  solved
+pyomo.ex_633_trespalacios          hull        1/1       1/1        26.0      25.1        75        75  solved
+pyomo.jobshop_small                big-m       1/1       1/1         0.4       0.3         1         1  solved
+pyomo.jobshop_small                hull        1/1       1/1         0.2       0.2         1         1  solved
+pyomo.nonconvex_hen                big-m       1/1       1/1        14.7      15.6         5         5  solved
+pyomo.nonconvex_hen                hull        1/1       1/1        41.1      42.3        13        13  solved
+pyomo.strip_packing_concrete       big-m       1/1       1/1         0.3       0.3         1         1  solved
+pyomo.strip_packing_concrete       hull        1/1       1/1         0.3       0.3         1         1  solved
+small_batch                        big-m       1/1       1/1        15.8      15.9         3         3  solved
+small_batch                        hull        1/1       1/1        16.1      16.3         3         3  solved
+spectralog                         big-m       0/1       0/1       120.1     120.1       409       405  unsolved
+spectralog                         hull        0/1       0/1       120.1     120.4       207       191  unsolved
+stranded_gas                       big-m       0/1       0/1       126.3     125.3         0         0  unsolved
+stranded_gas                       hull        0/1       0/1       126.0     126.6         0         0  unsolved
+syngas                             big-m       0/1       0/1       120.2     120.5         3         3  unsolved
+syngas                             hull        0/1       0/1       123.9     122.0         3         3  unsolved
+
+executed solves: 96
+cert-clean: incorrect=0 bound-crossings=0 solved-lost=0
+net: solved-gained=0 []
+net: SGM(wall, shift 10 s, capped at 120 s) over 44 cells: OFF 43.26 s -> ON 43.58 s
+
+DualProofLearned: fired on 1 pair(s)
+   cstr big-m {'DualProofRays': 1497, 'DualProofGlobalLps': 1488, 'DualProofLearned': 42, 'DualProofTightenings': 26379, 'DualProofFathoms': 68}
+unfired bit-identity: 24 pair(s) checked, 19 at the wall ['batch_processing big-m', 'batch_processing hull', 'biofuel big-m', 'biofuel hull', 'cstr hull', 'gdp_col big-m', 'gdp_col hull', 'hda big-m', 'hda hull', 'methanol big-m', 'methanol hull', 'modprodnet hull', 'pyomo.constrained_layout_clay0203 big-m', 'spectralog big-m', 'spectralog hull', 'stranded_gas big-m', 'stranded_gas hull', 'syngas big-m', 'syngas hull']
+errored in both arms (no solve to compare): ['kaibel big-m', 'kaibel hull', 'mod_hens big-m', 'mod_hens hull']

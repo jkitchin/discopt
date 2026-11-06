@@ -198,8 +198,9 @@ def test_no_call_site_discards_the_injection_result():
     sites = [i for i, ln in enumerate(lines) if "_subnlp_incumbent_updates += 1" in ln]
     # 7 -> 9: the two ``DISCOPT_GDP_CONFIG_DEFER`` held-back calls (#1775 G6.2),
     # spatial loop and NLP-B&B, both guarded on the injection result.
-    assert len(sites) == 9, (
-        f"expected the 9 known injection sites, found {len(sites)}; a new one "
+    # 9 -> 11: the #2144 feasibility-first fallback, the same two loops, guarded.
+    assert len(sites) == 11, (
+        f"expected the 11 known injection sites, found {len(sites)}; a new one "
         "must be guarded on the injection result too"
     )
 

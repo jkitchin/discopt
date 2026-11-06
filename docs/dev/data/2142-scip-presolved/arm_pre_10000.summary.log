@@ -1,0 +1,5 @@
+ARM=pre MAX_NODES=10000 TL=7200.0 DET=True status=node_limit obj=3.0620145766187727 bound=2.8834441591939504 nodes=10000 gap_certified=False wall=62.7s
+stats: {'spec_matched': 1, 'rewritten': 1}
+counters: {'DualProofLearned': 58, 'DualProofFathoms': 87, 'LpVerdictNumerical': 809, 'LpInfeasUncertified': 254}
+RESULT arm=pre nodes=10000 bound=2.8834441591939504 status=node_limit wall=62.7
+executed assertions: 5

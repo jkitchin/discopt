@@ -1,0 +1,12 @@
+nopresolve nopresolve
+noprop noprop
+nonlin_prop_off default --param constraints/nonlinear/propfreq=-1
+lin_prop_off default --param constraints/linear/propfreq=-1
+genvbounds_off default --param propagating/genvbounds/freq=-1
+pseudoobj_off default --param propagating/pseudoobj/freq=-1
+noheur noheur
+noobbt noobbt
+persp_off default --param nlhdlr/perspective/enabled=false
+reformbinprods_off default --param constraints/nonlinear/reformbinprods=false
+donotaggr default --param presolving/donotaggr=true
+donotmultaggr default --param presolving/donotmultaggr=true

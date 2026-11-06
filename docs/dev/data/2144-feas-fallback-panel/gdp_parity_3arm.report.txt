@@ -1,0 +1,68 @@
+rows 144; rows whose loaded discopt != arm's head: 6
+   WRONG HEAD kaibel hull on None
+   WRONG HEAD kaibel hull main None
+   WRONG HEAD kaibel hull off None
+   WRONG HEAD kaibel big-m main None
+   WRONG HEAD kaibel big-m off None
+
+instance                     meth                        main                        off                         on
+batch_processing             big-m          unsolv None n1163          unsolv None n1163     unsolv 1034233.32 n693
+batch_processing             hull            unsolv None n699           unsolv None n699     unsolv 1019222.46 n349
+biofuel                      big-m             unsolv None n3             unsolv None n3             unsolv None n3
+biofuel                      hull              unsolv None n0             unsolv None n0             unsolv None n0
+cstr                         big-m         unsolv 3.06 n23668         unsolv 3.06 n23665         unsolv 3.06 n23685
+cstr                         hull            unsolv 3.06 n163           unsolv 3.06 n145           unsolv 3.06 n145
+disease_model                big-m        solved 304.42 n3970        solved 304.42 n3970        solved 304.42 n3970
+disease_model                hull         solved 304.42 n3318        solved 304.42 n3318        solved 304.42 n3318
+ex1_linan_2023               big-m             solved -1.0 n9             solved -1.0 n9             solved -1.0 n9
+ex1_linan_2023               hull              solved -1.0 n9             solved -1.0 n9             solved -1.0 n9
+gdp_col                      big-m        unsolv 20392.22 n29        unsolv 20392.22 n31        unsolv 20392.22 n31
+gdp_col                      hull              unsolv None n7        unsolv 21360.46 n15            unsolv None n15
+hda                          big-m             unsolv None n3             unsolv None n3             unsolv None n3
+hda                          hull           unsolv 4559.97 n7          unsolv 4559.97 n7          unsolv 4559.97 n7
+kaibel                       big-m           error None nNone           error None nNone           error None nNone
+kaibel                       hull            error None nNone           error None nNone           error None nNone
+med_term_purchasing          big-m         unsolv 6797.54 n41         unsolv 6797.54 n41         unsolv 6797.54 n41
+med_term_purchasing          hull           solved 6797.54 n1          solved 6797.54 n1          solved 6797.54 n1
+methanol                     big-m       unsolv -1793.43 n183       unsolv -1793.43 n183       unsolv -1793.43 n183
+methanol                     hull         unsolv -1793.43 n11          unsolv 645.51 n19          unsolv 645.51 n19
+mod_hens                     big-m      unsolv 106766.53 n445      unsolv 106766.53 n445      unsolv 106766.53 n445
+mod_hens                     hull              unsolv None n7       unsolv 106766.53 n61       unsolv 106766.53 n61
+modprodnet                   big-m          solved 3592.92 n5          solved 3592.92 n5          solved 3592.92 n5
+modprodnet                   hull         unsolv 3592.92 n151        unsolv 3592.92 n143        unsolv 3592.92 n149
+positioning                  big-m          solved -8.06 n159          solved -8.06 n151          solved -8.06 n159
+positioning                  hull           solved -8.06 n109          solved -8.06 n161          solved -8.06 n151
+pyomo.constrained_layout_clay0203 big-m       solved 41573.26 n127       solved 41573.26 n127       solved 41573.26 n127
+pyomo.constrained_layout_clay0203 hull        solved 41573.26 n109       solved 41573.26 n109       solved 41573.26 n109
+pyomo.eight_process          big-m           solved 68.01 n27           solved 68.01 n27           solved 68.01 n27
+pyomo.eight_process          hull            solved 68.01 n59           solved 68.01 n59           solved 68.01 n59
+pyomo.eight_process_logical  big-m           solved 68.01 n19           solved 68.01 n19           solved 68.01 n19
+pyomo.eight_process_logical  hull            solved 68.01 n41           solved 68.01 n41           solved 68.01 n41
+pyomo.ex_633_trespalacios    big-m            solved 4.46 n13            solved 4.46 n13            solved 4.46 n13
+pyomo.ex_633_trespalacios    hull             solved 4.46 n75            solved 4.46 n75            solved 4.46 n75
+pyomo.jobshop_small          big-m             solved 11.0 n1             solved 11.0 n1             solved 11.0 n1
+pyomo.jobshop_small          hull              solved 11.0 n1             solved 11.0 n1             solved 11.0 n1
+pyomo.nonconvex_hen          big-m        solved 114384.78 n5        solved 114384.78 n5        solved 114384.78 n5
+pyomo.nonconvex_hen          hull        solved 114384.78 n17       solved 114384.78 n13       solved 114384.78 n13
+pyomo.strip_packing_concrete big-m             solved 11.0 n1             solved 11.0 n1             solved 11.0 n1
+pyomo.strip_packing_concrete hull              solved 11.0 n1             solved 11.0 n1             solved 11.0 n1
+small_batch                  big-m        solved 167427.66 n3        solved 167427.66 n3        solved 167427.66 n3
+small_batch                  hull         solved 167427.65 n3        solved 167427.65 n3        solved 167427.65 n3
+spectralog                   big-m          solved 12.09 n657          solved 12.09 n657          solved 12.09 n657
+spectralog                   hull           unsolv 12.09 n353          unsolv 12.09 n351          unsolv 12.09 n365
+stranded_gas                 big-m             unsolv None n0             unsolv None n0             unsolv None n0
+stranded_gas                 hull              unsolv None n0             unsolv None n0             unsolv None n0
+syngas                       big-m          solved 4669.02 n3          solved 4669.02 n3          solved 4669.02 n3
+syngas                       hull           solved 4669.02 n3          solved 4669.02 n3          solved 4669.02 n3
+
+executed rows: 144
+cert-clean: incorrect=0 bound-crossings=0
+fallback fired (ON arm) on 2 cells: [('batch_processing', 'big-m', {'calls': 1, 'attempted': 1, 'feasible': 1}), ('batch_processing', 'hull', {'calls': 1, 'attempted': 1, 'feasible': 1})]
+
+main -> off over 48 cells: solved 27 -> 27; solved lost 0 []; incumbent lost 0 []; incumbent gained 2 [('gdp_col', 'hull'), ('mod_hens', 'hull')]; objective better 0 / worse 1 / same 36
+     methanol hull: -1793.43 -> 645.509 (nodes 11 -> 19)
+
+off -> on over 48 cells: solved 27 -> 27; solved lost 0 []; incumbent lost 1 [('gdp_col', 'hull')]; incumbent gained 2 [('batch_processing', 'big-m'), ('batch_processing', 'hull')]; objective better 0 / worse 0 / same 38
+
+main -> on over 48 cells: solved 27 -> 27; solved lost 0 []; incumbent lost 0 []; incumbent gained 3 [('batch_processing', 'big-m'), ('batch_processing', 'hull'), ('mod_hens', 'hull')]; objective better 0 / worse 1 / same 36
+     methanol hull: -1793.43 -> 645.509 (nodes 11 -> 19)
