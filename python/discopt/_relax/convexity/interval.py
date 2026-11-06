@@ -28,7 +28,7 @@ Cambridge University Press.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Callable, Union
 
 import numpy as np
 
@@ -561,56 +561,84 @@ def centropy(x: Interval, y: Interval) -> Interval:
 def sin(x: Interval) -> Interval:
     """Sound enclosure of ``sin([lo, hi])``.
 
-    Reduces the interval modulo ``2π`` and reasons about the location
-    of ``±π/2`` critical points within it. Falls back to the safe
-    enclosure ``[-1, 1]`` when the interval is wider than ``2π``.
+    Endpoint values come from ``np.sin`` of the *unreduced* endpoints; the
+    reduced arguments are used only to locate the ``±π/2`` critical points,
+    with a margin that covers the reduction error (#2190). Falls back to the
+    safe enclosure ``[-1, 1]`` when the interval spans a full period, or an
+    endpoint is not finite.
     """
-    return _sinusoid(x, offset=0.0)
+    return _sinusoid(x, np.sin, crit0=np.pi / 2)
 
 
 def cos(x: Interval) -> Interval:
-    """Sound enclosure of ``cos([lo, hi]) = sin([lo + π/2, hi + π/2])``."""
-    return _sinusoid(x, offset=np.pi / 2)
+    """Sound enclosure of ``cos([lo, hi])``; critical points at ``kπ`` (#2190)."""
+    return _sinusoid(x, np.cos, crit0=0.0)
 
 
-def _sinusoid(x: Interval, *, offset: float) -> Interval:
-    """Enclosure of ``sin(x + offset)``; used by ``sin`` and ``cos``."""
-    two_pi = 2.0 * np.pi
-    lo = np.asarray(x.lo + offset, dtype=np.float64)
-    hi = np.asarray(x.hi + offset, dtype=np.float64)
-    width = hi - lo
+def _sinusoid(x: Interval, fn: Callable[[np.ndarray], np.ndarray], *, crit0: float) -> Interval:
+    """Enclosure of ``fn`` = ``sin`` or ``cos``, whose extrema are ``crit0 + mπ``.
 
-    # Wide intervals contain a full period → safe enclosure [-1, 1].
-    wide = width >= two_pi
+    ``m`` even is a maximum (``+1``), ``m`` odd a minimum (``-1``).
 
-    # Reduce lo modulo 2π into [0, 2π); shift hi by the same amount.
-    k = np.floor(lo / two_pi)
-    lo_r = lo - k * two_pi
-    hi_r = hi - k * two_pi
+    Soundness (#2190). The pre-fix code reduced ``lo`` modulo the double
+    ``2π`` (below the real one by ~2.4e-16) and evaluated ``np.sin`` on the
+    *reduced* arguments, and ``cos`` added the rounded ``π/2``. Neither shift
+    was enclosed: the error is ~``|x| * 1e-16`` radians, so ``sin(1e15)``
+    was returned as the point ``0.850`` (true ``0.858``) and a solve certified
+    a wrong optimum. Now:
 
-    sin_lo = np.sin(lo_r)
-    sin_hi = np.sin(hi_r)
+    * the endpoint values are ``fn(lo)``, ``fn(hi)`` on the exact endpoints --
+      libm reduces the argument accurately, and the final one-ulp outward
+      rounding covers its result error;
+    * a critical point counts as inside whenever it lies within ``margin`` of
+      the box. ``t = (x - crit0) / π`` carries an absolute error of a few
+      ``eps * (|x| + |crit0|) / π`` (one rounding for the subtraction, one for
+      the division, ~1 relative ulp from the double ``π``); ``margin`` is
+      ``8 eps (max(|lo|, |hi|) + 4π) / π`` in ``t`` units, several times that.
+      Over-counting a critical point only widens the image to ``±1``, which
+      is sound;
+    * two or more candidate critical points (one of each kind) give
+      ``[-1, 1]``, which also covers the full-period case, and so does any
+      non-finite endpoint. At ``|x| >~ 1e15`` the margin itself spans an
+      integer, so huge arguments degrade to ``[-1, 1]`` instead of trusting
+      a parity the double cannot resolve.
+    """
+    lo = np.asarray(x.lo, dtype=np.float64)
+    hi = np.asarray(x.hi, dtype=np.float64)
+    finite = np.isfinite(lo) & np.isfinite(hi)
+    # Non-finite ends are replaced by 0 for the arithmetic only; ``finite``
+    # sends them to ``[-1, 1]`` below.
+    lo_f = np.where(finite, lo, 0.0)
+    hi_f = np.where(finite, hi, 0.0)
 
-    # Critical points π/2 + 2πk (maxima = +1) and 3π/2 + 2πk (minima = -1).
-    # After reduction, the next maximum after lo_r is at:
-    max_pt_1 = np.pi / 2
-    max_pt_2 = np.pi / 2 + two_pi
-    min_pt_1 = 3 * np.pi / 2
-    min_pt_2 = 3 * np.pi / 2 + two_pi
+    eps = np.finfo(np.float64).eps
+    pi = np.pi
+    mag = np.maximum(np.abs(lo_f), np.abs(hi_f))
+    margin = 8.0 * eps * (mag + 4.0 * pi) / pi
+    t_lo = (lo_f - crit0) / pi
+    t_hi = (hi_f - crit0) / pi
+    m_first = np.ceil(t_lo - margin)
+    m_last = np.floor(t_hi + margin)
+    n_crit = m_last - m_first + 1.0  # candidate critical points in the box
 
-    hits_max = ((lo_r <= max_pt_1) & (max_pt_1 <= hi_r)) | ((lo_r <= max_pt_2) & (max_pt_2 <= hi_r))
-    hits_min = ((lo_r <= min_pt_1) & (min_pt_1 <= hi_r)) | ((lo_r <= min_pt_2) & (min_pt_2 <= hi_r))
+    one_crit = n_crit == 1.0
+    first_is_max = np.mod(m_first, 2.0) == 0.0
+    hits_max = (n_crit >= 2.0) | (one_crit & first_is_max)
+    hits_min = (n_crit >= 2.0) | (one_crit & ~first_is_max)
 
-    lo_candidate = np.minimum(sin_lo, sin_hi)
-    hi_candidate = np.maximum(sin_lo, sin_hi)
-    lo_out = np.where(hits_min, -1.0, lo_candidate)
-    hi_out = np.where(hits_max, 1.0, hi_candidate)
+    f_lo = fn(lo_f)
+    f_hi = fn(hi_f)
+    lo_out = np.where(hits_min, -1.0, np.minimum(f_lo, f_hi))
+    hi_out = np.where(hits_max, 1.0, np.maximum(f_lo, f_hi))
+    lo_out = np.where(finite, lo_out, -1.0)
+    hi_out = np.where(finite, hi_out, 1.0)
 
-    # Apply the wide-interval fallback everywhere it holds.
-    lo_out = np.where(wide, -1.0, lo_out)
-    hi_out = np.where(wide, 1.0, hi_out)
-
-    return Interval(_round_down(lo_out), _round_up(hi_out))
+    # The real image lies in [-1, 1]; clipping after the outward step keeps
+    # the enclosure sound and drops the ``1 + ulp`` artefact.
+    return Interval(
+        np.maximum(_round_down(lo_out), -1.0),
+        np.minimum(_round_up(hi_out), 1.0),
+    )
 
 
 def tan(x: Interval) -> Interval:

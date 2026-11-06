@@ -138,8 +138,13 @@ def _tan_pole_possible(arg: Expression) -> bool:
     lo, hi = _enclosure(arg)
     if not (np.isfinite(lo) and np.isfinite(hi)):
         return True
-    k = math.ceil((lo - math.pi / 2) / math.pi)
-    return math.pi / 2 + k * math.pi <= hi
+    # The sound enclosure is finite only when the box provably avoids every pole
+    # (#1908); an exact comparison with the rounded ``pi/2 + k*pi`` can miss a
+    # pole a few ulps inside the box, erring towards "no pole" (#2190).
+    from discopt._relax.convexity import interval as iv
+
+    t = iv.tan(iv.Interval(np.asarray(lo), np.asarray(hi)))
+    return not (np.isfinite(float(t.lo)) and np.isfinite(float(t.hi)))
 
 
 class _ScipBuilder:

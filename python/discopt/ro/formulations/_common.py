@@ -1114,7 +1114,7 @@ def _function_directions(expr, ctx: _Ctx):
             return f"the argument of {name!r} has no interval rule"
         if name == "cos":
             # d/du cos u = -sin u.
-            slo, shi = _cos_interval(lo - np.pi / 2, hi - np.pi / 2)
+            slo, shi = _sin_interval(lo, hi)
             d = -1 if np.all(slo >= 0) else (1 if np.all(shi <= 0) else 0)
         else:
             clo, chi = _cos_interval(lo, hi)
@@ -1159,18 +1159,26 @@ def _abs_worst_case(u, ctx: _Ctx):
 
 
 def _cos_interval(lo, hi):
-    """Exact range of ``cos`` over ``[lo, hi]``, element-wise."""
-    two_pi = 2.0 * np.pi
-    with np.errstate(invalid="ignore", over="ignore"):
-        clo = np.minimum(np.cos(lo), np.cos(hi))
-        chi = np.maximum(np.cos(lo), np.cos(hi))
-        # cos reaches 1 at 2k*pi and -1 at (2k+1)*pi inside the interval.
-        has_max = np.floor(hi / two_pi) >= np.ceil(lo / two_pi)
-        has_min = np.floor((hi - np.pi) / two_pi) >= np.ceil((lo - np.pi) / two_pi)
-        wide = ~np.isfinite(lo) | ~np.isfinite(hi) | (hi - lo >= two_pi)
-    chi = np.where(has_max | wide, 1.0, chi)
-    clo = np.where(has_min | wide, -1.0, clo)
-    return clo, chi
+    """Sound enclosure of ``cos`` over ``[lo, hi]``, element-wise.
+
+    Delegates to :func:`discopt._relax.convexity.interval.cos` (#2190). The
+    local version this replaced located the extrema with exact comparisons on
+    the rounded ``2π`` and had no outward rounding, and ``sin`` was computed as
+    ``cos(x - π/2)`` with the rounded ``π/2`` -- the same unenclosed shifts that
+    made the interval module miss the true value at large ``|x|``.
+    """
+    from discopt._relax.convexity import interval as iv
+
+    out = iv.cos(iv.Interval(np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)))
+    return out.lo, out.hi
+
+
+def _sin_interval(lo, hi):
+    """Sound enclosure of ``sin`` over ``[lo, hi]``, element-wise (#2190)."""
+    from discopt._relax.convexity import interval as iv
+
+    out = iv.sin(iv.Interval(np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)))
+    return out.lo, out.hi
 
 
 def _mul_interval(alo, ahi, blo, bhi):
@@ -1345,7 +1353,7 @@ def _interval_raw(expr, ctx: _Ctx):
         if name == "cos":
             return _cos_interval(lo, hi)
         if name == "sin":
-            return _cos_interval(lo - np.pi / 2, hi - np.pi / 2)
+            return _sin_interval(lo, hi)
         if name == "prod":
             plo, phi = np.asarray(1.0), np.asarray(1.0)
             for el, eh in zip(np.ravel(lo), np.ravel(hi)):
