@@ -581,7 +581,12 @@ def _emit_reports(args, results: BenchmarkResults, known_optima: dict[str, float
 
 def _run_benchmark(args):
     """Run a benchmark suite."""
-    from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig
+    from benchmarks.runner import (
+        BenchmarkConfig,
+        BenchmarkRunner,
+        SolverConfig,
+        SolverUnavailableError,
+    )
 
     # Fetch MINLPLib first if requested
     if args.fetch:
@@ -602,21 +607,28 @@ def _run_benchmark(args):
 
     # Build solver configs
     solver_names = [s.strip() for s in args.solvers.split(",")]
+    # A name with no [solvers.*] table used to fall back to solver_type="internal",
+    # and every internal solver dispatches to discopt -- so a typo such as
+    # `--solvers discopt,scpi` ran discopt twice and labelled one column "scpi".
+    unknown = [n for n in solver_names if _load_solver_config(n) is None]
+    if unknown:
+        print(
+            f"ERROR: no [solvers.*] entry in config/benchmarks.toml for {unknown}. "
+            f"Known solvers: {sorted(_load_toml_config().get('solvers', {}))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     solver_configs = []
     for name in solver_names:
         solver_toml = _load_solver_config(name)
-        if solver_toml:
-            solver_configs.append(SolverConfig(
-                name=name,
-                command=solver_toml.get("command", name),
-                solver_type=solver_toml.get("type", "internal"),
-                nl_interface=solver_toml.get("nl_interface", False),
-                options=solver_toml.get("options", {}),
-            ))
-        else:
-            solver_configs.append(SolverConfig(
-                name=name, command=name, solver_type="internal",
-            ))
+        solver_configs.append(SolverConfig(
+            name=name,
+            command=solver_toml.get("command", name),
+            solver_type=solver_toml.get("type", "internal"),
+            nl_interface=solver_toml.get("nl_interface", False),
+            options=solver_toml.get("options", {}),
+            preflight_probe=solver_toml.get("preflight_probe", "minlp"),
+        ))
 
     # Load instances either from the MINLPLib cache or the vendored test data.
     # ``data_dir`` must follow the instances: selecting names from the cache while
@@ -648,6 +660,16 @@ def _run_benchmark(args):
             "gate metrics that passed by not being evaluated.",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    # Every external solver must solve a probe with a known optimum before any
+    # instance runs, on both the in-process and the --subprocess path. A missing
+    # binary, a wrong binary or a demo license otherwise surfaces as a column of
+    # ERROR rows that the summary reports as "0/50 solved".
+    try:
+        BenchmarkRunner(config).preflight_external_solvers()
+    except SolverUnavailableError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
     # Subprocess-isolated, resumable path (recommended for full MINLPLib).
