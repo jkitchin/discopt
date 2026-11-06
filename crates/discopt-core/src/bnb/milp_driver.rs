@@ -390,28 +390,42 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
     })
 }
 
-/// Whether node-local Gomory separation is on (highs-parity D2 Phase B, step B1'), read
-/// once from `DISCOPT_MILP_NODE_GMI`. Default OFF; an unrecognized value is refused.
+/// Whether in-tree Gomory separation with a global pool is on (highs-parity D2 Phase B,
+/// step B1'), read once from `DISCOPT_MILP_NODE_GMI`. **Default ON** (graduated
+/// 2026-11-06); `=0` restores the search without it. An unrecognized value is refused.
 ///
-/// ON gives the [`NODE_GMI_PER_BATCH`] best-bound fractional nodes of every batch up to
-/// [`NODE_GMI_ROUNDS`] rounds of **local** Gomory separation:
+/// **Graduation (CLAUDE.md §5).** Two panels, both cert-clean:
 ///
-/// 1. separate GMI cuts from the node's optimal basis, with the node's own bounds;
-/// 2. append the selected ones to a node-local copy of the working LP;
-/// 3. warm re-solve the copy and NS-verify the bound over the augmented matrix.
+/// * MIPLIB-38 + M (`d2_flag_panel.py`, 3 reps, 20 s, 372 solves,
+///   `docs/dev/data/highs-parity/d2-analysis/node_gmi_panel.json.gz`):
+///   * certified 96 -> 107;
+///   * nodes on the always-certified set -33 %;
+///   * 0 dual losses, no incumbent lost;
+///   * median primal gap on the open rows 0.214 -> 0.125.
+/// * The in-repo MINLP corpus (`flag_onoff_corpus_panel.py`, 2 reps, 20 s, 148 solves,
+///   `.../node_gmi_corpus.jsonl`): 0 problem instances, 263 incumbent checks,
+///   certified 112 = 112.
 ///
-/// The node keeps the larger of its own bound and that verified bound, and its children
-/// inherit it as a floor (`process_evaluated` takes the max). The cut rows are dropped
-/// with the node: the shared matrix, the pool and every other node are untouched. The
-/// cuts are valid only for the node's box, which is all a node bound claims.
+/// What ON does, per batch:
 ///
-/// Why: on `neos-3610040-iskar` / `neos-3610051-istra`, SCIP certifies both with
-/// in-tree Gomory and cannot with Gomory at the root only (`iskar` stuck at 36); with
-/// every other separator dropped one at a time, only dropping `gomory` stops
-/// certification. HiGHS without node separation loses both rows. Original-row c-MIR at
-/// nodes (the retired `DISCOPT_MILP_NODE_SEP`) moved neither
-/// (`highs-parity-d2-analysis.md` follow-ups 10-11). Bound-changing: default OFF
-/// pending its §5 panel.
+/// * **Pool use (every fractional node).** The node appends the pool cuts its LP point
+///   violates (top [`NODE_GMI_POOL_PER_NODE`] by efficacy) to a node-local copy of the
+///   working LP, warm re-solves it, and NS-verifies the bound over the augmented matrix.
+/// * **Separation (the [`NODE_GMI_PER_BATCH`] best-bound nodes).** These also run up to
+///   [`NODE_GMI_ROUNDS`] rounds of **globally valid** GMI
+///   ([`crate::lp::gomory::separate_gomory_cols_global`]: the node's tableau,
+///   complemented at the global bounds). The new cuts join a global, deduplicated,
+///   aging pool (cap [`NODE_GMI_POOL_CAP`], age [`NODE_GMI_POOL_AGE`] batches). The pool
+///   is updated between batches in batch order, so the search stays deterministic.
+///
+/// The node keeps the larger of its own bound and the verified one; its children
+/// inherit it as a floor. The shared matrix is never touched.
+///
+/// Why. On `neos-3610040-iskar` / `neos-3610051-istra`, SCIP certifies only with in-tree
+/// Gomory. Our own GMI formula run inside SCIP certifies once cuts are shared globally
+/// (pool or conflict dual proofs) and stalls at 48.31 on `istra` (discopt: 48.32) when
+/// they stay in the subtree that made them (`highs-parity-d2-analysis.md` follow-ups
+/// 10-17, `highs-parity-d2-node-gmi-expert.md`).
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -423,8 +437,8 @@ fn node_gmi_enabled() -> bool {
 /// The parse table behind [`node_gmi_enabled`]; garbage is refused, not defaulted.
 fn parse_node_gmi(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
         other => Err(format!(
             "DISCOPT_MILP_NODE_GMI={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -6652,10 +6666,11 @@ mod tests {
 
     #[test]
     fn node_gmi_parse_refuses_garbage() {
-        for off in ["", " ", "0", "false", "NO"] {
+        // Graduated default ON: unset/empty reads as on; `0` is the opt-out.
+        for off in ["0", "false", "NO"] {
             assert!(!parse_node_gmi(off).unwrap(), "{off:?} must read as off");
         }
-        for on in ["1", "true", " yes "] {
+        for on in ["", " ", "1", "true", " yes "] {
             assert!(parse_node_gmi(on).unwrap(), "{on:?} must read as on");
         }
         for bad in ["2", "on", "y"] {
@@ -7931,7 +7946,11 @@ pub(crate) mod sparse_milp_diff {
         assert_eq!(r.status, MilpStatus::Optimal, "status");
         assert!((r.obj - (-16.0)).abs() < 1e-9, "obj {}", r.obj);
         assert_eq!(r.nodes, 13, "node-count drift (per-node engine)");
-        assert_eq!(r.lp_iters, 39, "lp_iters drift (per-node engine)");
+        // highs-parity D2 (`DISCOPT_MILP_NODE_GMI`, graduated default ON): the node-local
+        // pool/GMI re-solves add pivots (39 -> 48); the tree (13 nodes) and the
+        // objective are unchanged, and `=0` restores exactly 39.
+        let expect_iters = if node_gmi_enabled() { 48 } else { 39 };
+        assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
     }
 
     /// Determinism: re-solving is bit-identical. This is exactly the property the

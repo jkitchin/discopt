@@ -916,3 +916,15 @@ Results:
 (`flag_onoff_corpus_panel.py`, 20 s, 2 reps) runs next, because the Rust MILP driver also
 serves the MINLP routes (decomposition masters). The default flips only if that panel is
 cert-clean too.
+
+**18. `DISCOPT_MILP_NODE_GMI` graduated (default ON).**
+
+The in-repo MINLP corpus differential (`d2-analysis/node_gmi_corpus.{jsonl,summary.log}`,
+`flag_onoff_corpus_panel.py`, 2 reps, 20 s, 148 solves) is cert-clean: 0 problem
+instances, 263 incumbent feasibility checks, certified 112 = 112, no gains and no losses.
+It is neutral there, as expected, since most MINLP routes do not reach the native MILP
+driver.
+
+Together with follow-up 17 (net-positive on MIPLIB-38 + M), both §5 bars are met, so the
+default flips to ON and `=0` is the opt-out. `branching_golden` pins both arms: ON is 13
+nodes and 48 pivots; `=0` is the legacy 13 nodes and 39 pivots, bit-identical.
