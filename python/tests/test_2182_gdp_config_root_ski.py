@@ -85,32 +85,56 @@ def _small_gdp():
     return m
 
 
-def _root_grants(monkeypatch, on: bool) -> tuple[list[float], object]:
+def _root_grants(monkeypatch, on: bool) -> tuple[list[tuple[float, ...]], list[float], object]:
+    """Solve the small GDP, recording each root-share decision the solve makes
+    (``_gdp_config_root_until``'s arguments and result) and each grant the
+    constructor received. The decision is checked against the rule exactly, so the
+    test does not depend on how fast the machine runs the pre-constructor phase."""
     monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
     monkeypatch.setenv("DISCOPT_GDP_LOA_PROPOSER", "0")
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_ROOT_SKI", "1" if on else "0")
+    decisions: list[tuple[float, ...]] = []
     grants: list[float] = []
-    real = PH.one_hot_config_subnlp
+    real_until = SV._gdp_config_root_until
+    real_cfg = PH.one_hot_config_subnlp
 
-    def spy(*a, **k):
+    def until_spy(full_deadline, now, solve_start):
+        out = real_until(full_deadline, now, solve_start)
+        decisions.append((full_deadline, now, solve_start, out))
+        return out
+
+    def cfg_spy(*a, **k):
         grants.append(k["deadline"] - time.perf_counter())
-        return real(*a, **k)
+        return real_cfg(*a, **k)
 
-    monkeypatch.setattr(PH, "one_hot_config_subnlp", spy)
+    monkeypatch.setattr(SV, "_gdp_config_root_until", until_spy)
+    monkeypatch.setattr(PH, "one_hot_config_subnlp", cfg_spy)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _small_gdp().solve(time_limit=40)
-    return grants, r
+    return decisions, grants, r
 
 
 def test_end_to_end_the_root_call_gets_the_shorter_share(monkeypatch):
     """Fails before #2182: the root call's grant was the fixed 1.5 s."""
-    off, r_off = _root_grants(monkeypatch, on=False)
-    on, r_on = _root_grants(monkeypatch, on=True)
-    assert off and on, (off, on)
-    assert off[0] == pytest.approx(SV._GDP_CONFIG_DEFER_ROOT_S, abs=0.05)
-    assert on[0] < off[0] - 0.2, (on, off)
+    share = SV._GDP_CONFIG_DEFER_ROOT_S
+    d_off, g_off, r_off = _root_grants(monkeypatch, on=False)
+    d_on, g_on, r_on = _root_grants(monkeypatch, on=True)
+    assert d_off and d_on and g_off and g_on, (d_off, d_on, g_off, g_on)
+    for decisions, on in ((d_off, False), (d_on, True)):
+        full, now, start, out = decisions[0]
+        elapsed = now - start
+        assert 0.0 <= elapsed < full - now, decisions  # the deferring branch, not "buy now"
+        want = min(full, now + (min(share, elapsed) if on else share))
+        assert out == pytest.approx(want, abs=1e-12), (on, decisions)
+    # ON shortens the share exactly when the pre-constructor phase was shorter than
+    # it; on a machine slow enough to spend >= 1.5 s there, ON and OFF coincide.
+    _, now, start, out = d_on[0]
+    if now - start < share:
+        assert out < now + share
+    # The constructor really ran on the decided deadline.
+    assert g_on[0] <= (d_on[0][3] - d_on[0][1]) + 1e-6
     # Same certified answer: the schedule moves incumbents, never the bound.
     assert r_off.status == r_on.status == "optimal"
     assert r_on.objective == pytest.approx(r_off.objective, rel=1e-4, abs=1e-6)

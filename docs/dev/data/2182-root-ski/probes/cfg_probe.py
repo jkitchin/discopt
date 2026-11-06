@@ -22,7 +22,12 @@ from benchmarks import pyomo_gdp_examples as px  # noqa: E402
 
 from discopt.pyomo.gdp import convert_pyomo_gdp  # noqa: E402
 
-assert discopt.__file__.startswith("/home/user/discopt/python/discopt")
+import os as _os  # noqa: E402
+
+# §8: the tree under test; PROBE_TREE names it when it is not the main checkout.
+assert discopt.__file__.startswith(
+    _os.environ.get("PROBE_TREE", "/home/user/discopt/python")
+), discopt.__file__
 name, method = sys.argv[1], sys.argv[2]
 
 calls = []  # one dict per one_hot_config_subnlp call
