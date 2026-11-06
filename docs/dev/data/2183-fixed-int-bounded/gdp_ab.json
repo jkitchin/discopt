@@ -1,0 +1,522 @@
+[
+ {
+  "instance": "pyomo.constrained_layout_clay0203",
+  "method": "big-m",
+  "old": {
+   "status": "feasible",
+   "cert": false,
+   "obj": 41573.26252221325,
+   "bound": 40377.46031199393,
+   "nodes": 127,
+   "wall": 63.87,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 41573.26252221325,
+   "bound": 41573.26250278102,
+   "nodes": 127,
+   "wall": 52.31,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)"
+  }
+ },
+ {
+  "instance": "pyomo.constrained_layout_clay0203",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 41573.26252221325,
+   "bound": 41573.26249177844,
+   "nodes": 109,
+   "wall": 6.92,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 41573.26252221325,
+   "bound": 41573.26249177844,
+   "nodes": 109,
+   "wall": 6.91,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "nlp-bb: discopt nonlinear branch and bound (convex MINLP, auto-selected)"
+  }
+ },
+ {
+  "instance": "pyomo.eight_process",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.0097515218955,
+   "bound": 68.00971272202321,
+   "nodes": 27,
+   "wall": 2.39,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.0097515218955,
+   "bound": 68.00971272202321,
+   "nodes": 27,
+   "wall": 2.21,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.eight_process",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974430089957,
+   "bound": 68.00971278380305,
+   "nodes": 59,
+   "wall": 10.51,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974430089957,
+   "bound": 68.00971278380305,
+   "nodes": 59,
+   "wall": 11.47,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.eight_process_logical",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974405106511,
+   "bound": 68.00971271613832,
+   "nodes": 19,
+   "wall": 3.47,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974405106511,
+   "bound": 68.00971271613832,
+   "nodes": 19,
+   "wall": 3.33,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.eight_process_logical",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974409832823,
+   "bound": 68.0097127838036,
+   "nodes": 41,
+   "wall": 9.96,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 68.00974409832823,
+   "bound": 68.0097127838036,
+   "nodes": 41,
+   "wall": 9.98,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.ex_633_trespalacios",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 4.46036761713799,
+   "bound": 4.460364898905878,
+   "nodes": 13,
+   "wall": 0.62,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 4.46036761713799,
+   "bound": 4.460364898905878,
+   "nodes": 13,
+   "wall": 0.66,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.ex_633_trespalacios",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 4.460367612284862,
+   "bound": 4.46024437898649,
+   "nodes": 45,
+   "wall": 6.45,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 4.460367612284862,
+   "bound": 4.46024437898649,
+   "nodes": 45,
+   "wall": 6.37,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.jobshop_small",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 10.999999999999972,
+   "nodes": 1,
+   "wall": 0.08,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 10.999999999999972,
+   "nodes": 1,
+   "wall": 0.07,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  }
+ },
+ {
+  "instance": "pyomo.jobshop_small",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 10.999999999999995,
+   "nodes": 1,
+   "wall": 0.06,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 10.999999999999995,
+   "nodes": 1,
+   "wall": 0.06,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  }
+ },
+ {
+  "instance": "pyomo.nonconvex_hen",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 114384.7775876192,
+   "bound": 114384.7775866238,
+   "nodes": 5,
+   "wall": 0.8,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 114384.7775876192,
+   "bound": 114384.7775866238,
+   "nodes": 5,
+   "wall": 0.82,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.nonconvex_hen",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 114384.77758756472,
+   "bound": 114374.91679664506,
+   "nodes": 13,
+   "wall": 18.39,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 114384.77758756472,
+   "bound": 114374.91679664506,
+   "nodes": 13,
+   "wall": 18.97,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "spatial-bb: discopt spatial branch and bound (Python tree)"
+  }
+ },
+ {
+  "instance": "pyomo.strip_packing_concrete",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 11.0,
+   "nodes": 1,
+   "wall": 0.12,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 11.0,
+   "nodes": 1,
+   "wall": 0.11,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  }
+ },
+ {
+  "instance": "pyomo.strip_packing_concrete",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 11.0,
+   "nodes": 1,
+   "wall": 0.17,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 11.0,
+   "bound": 11.0,
+   "nodes": 1,
+   "wall": 0.16,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  }
+ },
+ {
+  "instance": "pyomo.batch_processing",
+  "method": "big-m",
+  "old": {
+   "status": "refused",
+   "cert": false,
+   "obj": null,
+   "bound": null,
+   "nodes": 0,
+   "wall": 0.0,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "GDP big-M reformulation cannot bound the body of constraint 'storage_tank_selection_disjunct[0,1]_then_0' from above: its interval enclosure is unbounded, so no"
+  },
+  "new": {
+   "status": "refused",
+   "cert": false,
+   "obj": null,
+   "bound": null,
+   "nodes": 0,
+   "wall": 0.0,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "GDP big-M reformulation cannot bound the body of constraint 'storage_tank_selection_disjunct[0,1]_then_0' from above: its interval enclosure is unbounded, so no"
+  }
+ },
+ {
+  "instance": "pyomo.batch_processing",
+  "method": "hull",
+  "old": {
+   "status": "refused",
+   "cert": false,
+   "obj": null,
+   "bound": null,
+   "nodes": 0,
+   "wall": 0.0,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "GDP hull reformulation of disjunction 'add_disjunction_select_storage_tanks[1]_0': variable 'batchSize_log[A,1]' has no finite upper bound within disjunct 0 (bo"
+  },
+  "new": {
+   "status": "refused",
+   "cert": false,
+   "obj": null,
+   "bound": null,
+   "nodes": 0,
+   "wall": 0.0,
+   "milp_route_calls": 0,
+   "bounded_fired": 0,
+   "route": "GDP hull reformulation of disjunction 'add_disjunction_select_storage_tanks[1]_0': variable 'batchSize_log[A,1]' has no finite upper bound within disjunct 0 (bo"
+  }
+ },
+ {
+  "instance": "pyomo.disease_model",
+  "method": "big-m",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 304.41621071983536,
+   "bound": 304.38604636874993,
+   "nodes": 3970,
+   "wall": 31.51,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=min(presolved, presolve-free)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 304.41621071983536,
+   "bound": 304.38604636874993,
+   "nodes": 3970,
+   "wall": 31.84,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=min(presolved, presolve-free)"
+  }
+ },
+ {
+  "instance": "pyomo.disease_model",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 304.4162107198372,
+   "bound": 304.38763094846934,
+   "nodes": 3318,
+   "wall": 40.11,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 304.4162107198372,
+   "bound": 304.38763094846934,
+   "nodes": 3318,
+   "wall": 40.8,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=highs-fp"
+  }
+ },
+ {
+  "instance": "pyomo.med_term_purchasing",
+  "method": "big-m",
+  "old": {
+   "status": "feasible",
+   "cert": false,
+   "obj": 6797.539701513318,
+   "bound": 8358.999245053974,
+   "nodes": 41,
+   "wall": 4.62,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: unverified HiGHS route (HiGHS kOptimal); milp/bound_provenance=root-ns; milp/certificate=declined; milp/coef"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 6797.539701513318,
+   "bound": 6798.198610641284,
+   "nodes": 41,
+   "wall": 6.84,
+   "milp_route_calls": 1,
+   "bounded_fired": 1,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=min(presolved, presolve-free)"
+  }
+ },
+ {
+  "instance": "pyomo.med_term_purchasing",
+  "method": "hull",
+  "old": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 6797.539701513403,
+   "bound": 6798.1420816387645,
+   "nodes": 1,
+   "wall": 3.45,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=min(presolved, presolve-free)"
+  },
+  "new": {
+   "status": "optimal",
+   "cert": true,
+   "obj": 6797.539701513403,
+   "bound": 6798.1420816387645,
+   "nodes": 1,
+   "wall": 3.48,
+   "milp_route_calls": 1,
+   "bounded_fired": 0,
+   "route": "highs-milp: verified HiGHS route (HiGHS kOptimal); milp/bound_provenance=min(presolved, presolve-free)"
+  }
+ }
+]

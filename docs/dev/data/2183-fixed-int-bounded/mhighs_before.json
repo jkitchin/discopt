@@ -1,0 +1,517 @@
+{
+ "header": {
+  "load": [
+   0.51806640625,
+   0.4619140625,
+   0.25390625
+  ],
+  "commit": "5975672",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python",
+  "load_end": [
+   1.26708984375,
+   0.64404296875,
+   0.3212890625
+  ]
+ },
+ "args": {
+  "cmd": "run",
+  "manifest": "discopt_benchmarks/data/lp_milp/manifest.json",
+  "panel": [
+   "M-HiGHS",
+   "Probe-1183"
+  ],
+  "instances": "",
+  "arms": "H",
+  "rounds": 1,
+  "time_limit": 60.0,
+  "gap": 0.0001,
+  "max_nodes": 100000000,
+  "out": "/tmp/claude-0/-home-user-discopt/ec92095b-9853-5afc-b279-40ae185c93d9/scratchpad/mhighs_before.json"
+ },
+ "rows": [
+  {
+   "name": "i1183",
+   "panel": "Probe-1183",
+   "oracle": 223.99999999999986,
+   "H": {
+    "status": "optimal",
+    "objective": 224.0,
+    "bound": 223.99999999999955,
+    "gap_certified": true,
+    "nodes": 56,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.9305791830000771,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     56
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "1451",
+   "panel": "M-HiGHS",
+   "oracle": 2.0,
+   "H": {
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.06552227699989999,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2122",
+   "panel": "M-HiGHS",
+   "oracle": -187616.1126029831,
+   "H": {
+    "status": "optimal",
+    "objective": -187612.9441943997,
+    "bound": -187606.59879688933,
+    "gap_certified": true,
+    "nodes": 2,
+    "route": 1.0,
+    "max_viol": 3.3817286748671904e-09,
+    "wall_med": 1.7922119820000262,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     2
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "2171",
+   "panel": "M-HiGHS",
+   "oracle": -22375.758546075078,
+   "H": {
+    "status": "optimal",
+    "objective": -22375.758546075085,
+    "bound": -22375.758546075085,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.28009636499996304,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "bell5",
+   "panel": "M-HiGHS",
+   "oracle": 8966413.70538,
+   "H": {
+    "status": "optimal",
+    "objective": 8966413.70538,
+    "bound": 8965754.935459498,
+    "gap_certified": true,
+    "nodes": 416,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.6297852479999619,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     416
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "dcmulti",
+   "panel": "M-HiGHS",
+   "oracle": 188181.99999999997,
+   "H": {
+    "status": "optimal",
+    "objective": 188182.0,
+    "bound": 188164.75860281635,
+    "gap_certified": true,
+    "nodes": 3,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 2.7006893799999716,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     3
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "egout",
+   "panel": "M-HiGHS",
+   "oracle": 568.1007000000001,
+   "H": {
+    "status": "optimal",
+    "objective": 568.1007,
+    "bound": 568.1007,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 7.105427357601002e-15,
+    "wall_med": 0.28728797799999484,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "fixed-binary",
+   "panel": "M-HiGHS",
+   "oracle": 0.0,
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.07454929000004995,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "flugpl",
+   "panel": "M-HiGHS",
+   "oracle": 1201500.0,
+   "H": {
+    "status": "optimal",
+    "objective": 1201500.0,
+    "bound": 1201500.0,
+    "gap_certified": true,
+    "nodes": 51,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.18142756899999313,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     51
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gesa2",
+   "panel": "M-HiGHS",
+   "oracle": 25779856.371697918,
+   "H": {
+    "status": "optimal",
+    "objective": 25779856.371697903,
+    "bound": 25777297.834232416,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 6.394884621840902e-14,
+    "wall_med": 3.3116425059999983,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "gt2",
+   "panel": "M-HiGHS",
+   "oracle": 21166.0,
+   "H": {
+    "status": "optimal",
+    "objective": 21166.0,
+    "bound": 21166.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.3208637060000683,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2095",
+   "panel": "M-HiGHS",
+   "oracle": 3.0,
+   "H": {
+    "status": "optimal",
+    "objective": 3.0,
+    "bound": 3.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.17246800400005213,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2173",
+   "panel": "M-HiGHS",
+   "oracle": -26770.80754885256,
+   "H": {
+    "status": "optimal",
+    "objective": -26770.807548852565,
+    "bound": -26771.673420988773,
+    "gap_certified": true,
+    "nodes": 29,
+    "route": 1.0,
+    "max_viol": 8.100187187665142e-13,
+    "wall_med": 0.9295703539999067,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     29
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2204",
+   "panel": "M-HiGHS",
+   "oracle": 6.0,
+   "H": {
+    "status": "optimal",
+    "objective": 6.0,
+    "bound": 6.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.10347088799994708,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2290",
+   "panel": "M-HiGHS",
+   "oracle": -1.6666666666000012,
+   "H": {
+    "status": "optimal",
+    "objective": -1.6666666666,
+    "bound": -1.6666666666000012,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 8.326672684688674e-17,
+    "wall_med": 0.10776170199994795,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2388",
+   "panel": "M-HiGHS",
+   "oracle": 0.0,
+   "H": {
+    "status": "optimal",
+    "objective": 0.0,
+    "bound": 0.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 6.617711111747014e-17,
+    "wall_med": 0.11138750199995684,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2446",
+   "panel": "M-HiGHS",
+   "oracle": -785.3552363097108,
+   "H": {
+    "status": "optimal",
+    "objective": -785.3552363096959,
+    "bound": -785.3178115287958,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 3.9108272176235914e-11,
+    "wall_med": 5.414884303000008,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "issue-2585",
+   "panel": "M-HiGHS",
+   "oracle": -175.90999999999997,
+   "H": {
+    "status": "optimal",
+    "objective": -175.91000000000003,
+    "bound": -175.9100000000001,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 5.684341886080802e-14,
+    "wall_med": 0.09712519799995789,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "lseu",
+   "panel": "M-HiGHS",
+   "oracle": 1120.0,
+   "H": {
+    "status": "optimal",
+    "objective": 1120.0,
+    "bound": 1119.9999999999955,
+    "gap_certified": true,
+    "nodes": 5,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.5117214870000453,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     5
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p01",
+   "panel": "M-HiGHS",
+   "oracle": 263.0,
+   "H": {
+    "status": "optimal",
+    "objective": 263.0,
+    "bound": 263.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.2668634369999836,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "p0548",
+   "panel": "M-HiGHS",
+   "oracle": 8691.0,
+   "H": {
+    "status": "optimal",
+    "objective": 8691.0,
+    "bound": 8691.0,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.8130872269999827,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "rgn",
+   "panel": "M-HiGHS",
+   "oracle": 82.19999923999372,
+   "H": {
+    "status": "optimal",
+    "objective": 82.19999923999998,
+    "bound": 82.19999923999282,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.5313979200000176,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "small_mip",
+   "panel": "M-HiGHS",
+   "oracle": 3.2368421052631575,
+   "H": {
+    "status": "optimal",
+    "objective": 3.236842105263158,
+    "bound": 3.236842105263158,
+    "gap_certified": true,
+    "nodes": 0,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 0.10574784499999623,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     0
+    ],
+    "incorrect": []
+   }
+  },
+  {
+   "name": "sp150x300d",
+   "panel": "M-HiGHS",
+   "oracle": 69.0,
+   "H": {
+    "status": "optimal",
+    "objective": 69.0,
+    "bound": 69.0,
+    "gap_certified": true,
+    "nodes": 1,
+    "route": 1.0,
+    "max_viol": 0.0,
+    "wall_med": 1.2879265090000445,
+    "wall_sd": 0.0,
+    "nodes_all": [
+     1
+    ],
+    "incorrect": []
+   }
+  }
+ ],
+ "executed": 24,
+ "incorrect_count": 0
+}

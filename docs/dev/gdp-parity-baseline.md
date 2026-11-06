@@ -644,6 +644,12 @@ is sound (it refuses, never mis-certifies) but costs a certificate on the defaul
 (`highspy>=1.11` resolves to 1.15.1). It is a lead for the LP/MILP route's certificate,
 outside #2182.
 
+**Fixed by #2183 (2026-11-06).** The decline was the check treating a merely-feasible LP
+as having no verdict. Its NS bound (-6797.541) already sat on the safe side of the MILP
+bound (-6798.199), so no point on that integer assignment could refute it. The route now
+accepts that verdict. With highspy 1.15.1, med_term big-M certifies again: obj 6797.5397,
+bound 6798.1986. See the 2026-11-06 entry in `lp-milp-highs-routing-plan.md`.
+
 ## #2182 task 3: the leftovers, closed or retired (2026-11-06)
 
 Every measurement here is from the #2182 G6.1 re-run's repeat 1 (`docs/dev/data/gdp_g61_2182/rep1.jsonl`,

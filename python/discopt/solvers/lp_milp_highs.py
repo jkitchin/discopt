@@ -210,8 +210,9 @@ class HighsOutcome:
     stats: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
     #: #2151: which candidate refuted THIS solve's own bound in the #1509 check
-    #: (``root-lp``, ``own-integers``, ``rounded-root``), or ``""``. A field rather than
-    #: a label, so a merge of another solve's labels cannot set it.
+    #: (``root-lp``, ``own-integers``, ``own-integers-bounded`` (#2183: the same LP when
+    #: only its NS bound settled the check), ``rounded-root``), or ``""``. A field rather
+    #: than a label, so a merge of another solve's labels cannot set it.
     refuted_by: str = ""
 
 
@@ -2008,6 +2009,40 @@ def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float])
     xl[sf.int_idx] = xi
     xu[sf.int_idx] = xi
     return solve_lp_std(dataclasses.replace(sf, xl=xl, xu=xu), time_limit=time_limit)
+
+
+def _fixed_integer_lp_cannot_refute(
+    sf: "StdForm", fx: HighsOutcome, bound: float
+) -> Optional[tuple[np.ndarray, float]]:
+    """#2183: does the fixed-integer LP ``fx`` prove that no point on its integer
+    assignment refutes the MILP ``bound``, without being known optimal?
+
+    The #1509 check asks whether some verified point lies below the reported bound by
+    more than the yardstick ``CERT_ABS + CERT_REL*|bound|``. It solves the LP over the
+    incumbent's integers to find that assignment's best point. When the LP's NS gap does
+    not close, ``solve_lp_std`` returns ``feasible``. The LP optimum is then only known
+    to lie in ``[fx.bound, fx.objective]``. ``fx.bound`` is the NS-safe bound, rigorous
+    whatever the dual's quality. If ``fx.bound`` already sits within the yardstick of
+    ``bound``, every point on this assignment does too, and the question has its answer
+    ("none refutes"). That holds whether or not the LP is optimal. This accepts nothing
+    the optimal-LP arm would refuse, since its optimum ``v >= fx.bound`` passes the same
+    margin test whenever ``fx.bound`` does.
+
+    Measured on GDPlib med_term_purchasing (big-M) with highspy >= 1.13 on Linux: NS
+    bound -6797.541 against the MILP bound -6798.199 (minimisation terms). The old arm
+    called that "inconclusive" and declined a sound certificate.
+
+    Returns the verified ``(point, objective)`` of ``fx`` when the verdict holds, else
+    ``None``: the LP point must also pass the incumbent verifier, and the caller adds
+    it as a candidate.
+    """
+    if fx.status != "feasible" or fx.bound is None or fx.x is None:
+        return None
+    if not np.isfinite(fx.bound) or not np.isfinite(bound):
+        return None
+    if bound - float(fx.bound) > CERT_ABS + CERT_REL * abs(bound):
+        return None
+    return _verified_mip_point(sf, fx.x)
 
 
 #: #1920: wall-clock cap of the :func:`fix_and_propagate_point` start heuristic, and
@@ -4088,6 +4123,8 @@ def _solve_milp_std(
         Returns ``False`` when ``out`` was decertified for want of a verdict and the
         caller should stop; ``True`` otherwise (refuted results are repaired in place).
         """
+        if out.bound is None:  # the only call site runs this check with a bound
+            raise RuntimeError("#1509 refutation check called without a reported bound")
         cands: list[tuple[np.ndarray, float]] = []
         # #2151: where each candidate came from; "own-integers" is the LP over the
         # incumbent's own integer assignment (read by :func:`_reseed_refuted`).
@@ -4105,7 +4142,39 @@ def _solve_milp_std(
             fx = _fixed_integer_lp(sf, out.x, rem_fx)
             stats["milp/fixed_int_check_ran"] = 1.0
             pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
-            if pt is None:
+            fpt = _fixed_integer_lp_cannot_refute(sf, fx, float(out.bound)) if pt is None else None
+            if fpt is not None:
+                # #2183: the LP did not close its own NS gap, so it is not known to be
+                # optimal, but its NS-safe bound already lies within the refutation
+                # yardstick of the reported MILP bound. Every point on this integer
+                # assignment has an objective >= that bound, so none of them can
+                # refute the reported bound. That is a rigorous verdict. The
+                # optimal-LP arm accepts exactly these cases too: its optimum v >= ns
+                # passes the margin test whenever ns does. The LP point is verified,
+                # so it may still improve the incumbent (#2151). It is NOT the
+                # LP optimum, so it stays out of #1612 (``milp/fixed_int_objective``),
+                # #1733 (rederivation) and the own-integers tight re-solve, all of
+                # which assume one.
+                #
+                # Why the unclosed NS gap no longer counts against HiGHS's MILP bound
+                # (#1320's "numerical trouble on this matrix"): that rule exists because
+                # an unsettled check is not a passed one, and this check is settled. Its
+                # only question is whether a point on this assignment refutes the bound,
+                # and the NS bound answers it rigorously whatever its own gap. Whether
+                # HiGHS's arithmetic on this matrix certifies the LPs it solves is the
+                # #1410 root-dual check's question. That check has already run and passed
+                # before this point; otherwise ``done`` would have returned. Measured on
+                # med_term (Linux, highspy 1.15.1): root dual violation 7.5e-17. The
+                # fixed LP's 0.00139 gap is NS round-off: reduced costs of 1e-14..1e-15
+                # charged against 1e20 sentinel upper bounds give 5.0e6 over the declared
+                # box, and the exact dual correction leaves 0.00139. The same LP
+                # re-solved later in that solve (the cross-checks) returns ``optimal``,
+                # with an FBBT-box gap of 4.3e-7 at the identical objective.
+                stats["milp/fixed_int_check_bounded"] = 1.0
+                stats["milp/fixed_int_ns_bound"] = float(fx.bound)  # type: ignore[arg-type]
+                cands.append(fpt)
+                kinds.append("own-integers-bounded")
+            elif pt is None:
                 # The LP over a verified incumbent's own integers is feasible (the
                 # incumbent is a point of it), so a non-verdict here is numerical
                 # trouble on this matrix -- the #1320 rule: an unsettled check is not
@@ -4115,28 +4184,29 @@ def _solve_milp_std(
                     f"the fixed-integer LP check was inconclusive (LP {fx.status}: {fx.message})"
                 )
                 return False
-            cands.append(pt)
-            kinds.append("own-integers")
-            # #1612: the incumbent's own integers, re-optimised by a separate LP; the
-            # distance from HiGHS's objective is what its feasibility tolerance bought
-            # (read by :func:`_tighten_feasibility_artefact`).
-            stats["milp/fixed_int_objective"] = float(pt[1])
-            # #1733: when HiGHS's objective beats the LP over its own integers by no more
-            # than the equality yardstick, the difference is row tolerance HiGHS spent
-            # on the objective, not a better point; publish the LP's point. Only where
-            # #1612 would leave the pair alone (the gap still closes with that
-            # difference charged twice), so its tight re-solve is untouched. Measured
-            # on test_piecewise's incremental graph (HiGHS random_seed 16): y published
-            # 1.0e-6 above f(x) on the row form; the LP point is exact.
-            delta = float(pt[1]) - float(out.objective) if out.objective is not None else 0.0
-            gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
-            if (
-                0.0 < delta <= CERT_ABS + CERT_REL * abs(float(pt[1]))
-                and out.bound is not None
-                and _gap_closed(float(pt[1]) + delta, float(out.bound), gap_kw)
-            ):
-                out.x, out.objective = pt
-                stats["milp/incumbent_rederived"] = float(delta)
+            else:
+                cands.append(pt)
+                kinds.append("own-integers")
+                # #1612: the incumbent's own integers, re-optimised by a separate LP; the
+                # distance from HiGHS's objective is what its feasibility tolerance bought
+                # (read by :func:`_tighten_feasibility_artefact`).
+                stats["milp/fixed_int_objective"] = float(pt[1])
+                # #1733: when HiGHS's objective beats the LP over its own integers by no more
+                # than the equality yardstick, the difference is row tolerance HiGHS spent
+                # on the objective, not a better point; publish the LP's point. Only where
+                # #1612 would leave the pair alone (the gap still closes with that
+                # difference charged twice), so its tight re-solve is untouched. Measured
+                # on test_piecewise's incremental graph (HiGHS random_seed 16): y published
+                # 1.0e-6 above f(x) on the row form; the LP point is exact.
+                delta = float(pt[1]) - float(out.objective) if out.objective is not None else 0.0
+                gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
+                if (
+                    0.0 < delta <= CERT_ABS + CERT_REL * abs(float(pt[1]))
+                    and out.bound is not None
+                    and _gap_closed(float(pt[1]) + delta, float(out.bound), gap_kw)
+                ):
+                    out.x, out.objective = pt
+                    stats["milp/incumbent_rederived"] = float(delta)
         if root_pt is None and lp.status == "optimal" and lp.x is not None and sf.int_idx.size:
             # The root LP point is not itself integer-feasible: its rounding, with the
             # continuous part re-optimised, is the other point an LP buys. Measured on
