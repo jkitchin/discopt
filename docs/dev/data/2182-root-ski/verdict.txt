@@ -1,0 +1,14 @@
+panel A: 192 solve rows, 48 cells, 24 certified by both arms in both reps
+  N1 rep0: SGM wall (shift 1 s) OFF 5.889 s ON 4.708 s ratio 0.799
+  N1 rep1: SGM wall (shift 1 s) OFF 5.881 s ON 4.812 s ratio 0.818
+  N4 A: node ratio geomean 1.004
+  N3 A: ON better in 0 cells, worse in 0
+panel B rep0: 74 instances, SGM wall OFF 4.243 ON 4.250 ratio 1.002
+panel B rep1: 74 instances, SGM wall OFF 4.278 ON 4.321 ratio 1.010
+  N4 B: node ratio geomean 1.001 over 58 certified-by-both
+VOID: 0
+C violations: 0
+N failures: 0
+notes: 0
+executed-assertions: 340
+VERDICT: GRADUATE (V, C and N hold)

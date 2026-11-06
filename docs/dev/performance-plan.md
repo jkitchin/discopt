@@ -15987,3 +15987,60 @@ default) and keeping it as a documented opt-out (its gain is one instance, §2, 
 *Superseded:* **Decision (owner, 2026-11-05): kept as a documented opt-out.** Default OFF, `=1` opts in; the
 docstring (`SolverTuning.kernel_presolve`) and the audit row state why it is not the default and
 what would change that.
+
+## 120. #2182: the small-GDP per-solve cost against Pyomo + SCIP; the root-share fix graduates; the native kernel declines every lowering (2026-11-06)
+
+Data: `docs/dev/data/2182-root-ski/` (task 2) and `docs/dev/data/gdp_g61_2182/` (the G6.1
+re-run). Write-up: `docs/dev/gdp-parity-baseline.md`, "#2182 task 1/2". Host: a 4-core Linux
+VM, main `63910b2`.
+
+**The gap.** On the small `pyomo.*` and GDPlib instances Pyomo + SCIP finishes in 0.1-0.2 s
+and discopt in 1-15 s. With the §1.2 gate's 1 s SGM shift, those instances dominate the
+big-M (3.42) and hull (4.05) ratios; instances both sides leave unsolved at 300 s contribute
+nothing. Under big-M the root is 79-90 % of the solve on the smallest instances (3-13 nodes).
+Under hull, 30-65 % on the `pyomo.*` models, where the trees run 2-4x the big-M node counts.
+
+**Where it goes (cProfile, eight_process hull).** No single owner: primal heuristics 23 %,
+Python node FBBT 19 % (mostly `tighten_nonlinear_bounds`, 269 calls over 59 nodes), node
+LPs 17.5 %, root OBBT 15 % (1246 LP probes on 44 variables), the GDP-config constructor 6 %.
+On ex_633 big-M (6 variables) the constructor alone was 58 %.
+
+**H1, killed.** "The constructor spends its grant after its last improvement." On ex_633 it
+re-solved its 4 configurations 14 times (57 sub-NLPs). But an all-configurations-seen stop
+fires on 1 of 15 instances, and a stagnation stop loses late finds (1.1-1.5 s on 4).
+
+**H2, graduated.** The ski-rental rule for the constructor's root share
+(`DISCOPT_GDP_CONFIG_ROOT_SKI`, default ON). Entry: SGM -11.4 % over 90 pairs. Pre-registered
+§5 panel: GDP SGM 0.799 / 0.818 per rep, corpus neutral, cert-clean. It takes about 1.4 s
+off the smallest solves; it does not close the gap.
+
+**The lead: none of these lowerings reaches the native spatial kernel.** All six (ex_633,
+eight_process, nonconvex_hen × {big-M, hull}) report `spatial-bb ... (Python tree)`. A
+`sys.setprofile` trace of `build_spatial_kernel_spec` during the real solve
+(`probes/kernel_decline_probe.py`, `kernel_decline.jsonl`) names the decline site in each:
+
+| cell | `spatial_producer.py` | why |
+|---|---|---|
+| ex_633, eight_process (big-M) | :311 | a univariate atom other than `sqrt` (the disjuncts' `exp` / `log`) |
+| ex_633 (hull) | :304 | an infinite bound on a lifted column (the perspective auxiliaries) |
+| eight_process (hull) | :283 | the probe-box build dropped a row (`shape_placeholder_rows`) |
+| nonconvex_hen (big-M) | :565 | a pass-through row's coefficients differ between the probe and real boxes (box-dependent) |
+| nonconvex_hen (hull) | :531 | the probe- and real-box builds differ in shape |
+
+So the per-node work profiled above is the Python tree's, which the kernel exists to
+replace. That makes kernel coverage of GDP lowerings the obvious next lever, ahead of
+further Python-path tuning. Covering `exp` / `log` atoms and box-dependent big-M rows would
+reach the first and fourth rows. **Not measured:** what the kernel would cost on these
+models once admitted. The next entry experiment should admit one class (e.g. `exp` / `log`
+atoms) behind a flag and compare per-node wall and certified objectives on the 15
+both-solved instances, before any build-out.
+
+**Controls on the gate itself** (recorded so the G6.1 numbers are not misread):
+- main vs the #2149 build `1f16c936` on the same host: new/old 0.95 over 86 cells;
+- the `--jobs 3` inflation is asymmetric here (discopt 1.63x serial, Pyomo 1.20x);
+- Pyomo's `scip_direct` / SCIP 10.2 solves two hull instances its SCIP-executable route does
+  not.
+
+The gate's ratios moved 1.97 -> 3.42 (big-M) on environment alone, and its CI clause sits
+about 1.6x above the point estimate on this 24-instance panel. #2182 closes on that basis
+(the decision is in `gdp-parity-baseline.md`).
