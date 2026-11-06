@@ -1479,6 +1479,20 @@ and is re-written by P4.1.**
   - MINLP corpus (`p4.4/p44_corpus.jsonl`, 20 s): 74 rows, 0 problems, certified 56 = 56,
     130 incumbent checks.
   **Graduated 2026-11-06 (owner: "Graduate, then P4.3")**: default ON, `=0` opt-out.
+  **RETRACTION (2026-11-06, later): the graduation report omitted real harm the bars did not
+  score.** The D2 analysis (`docs/dev/highs-parity-d2-analysis.md`) found, and the P4.4
+  panel's own data confirms (`p4.4/p44_panel.json`, re-read): with the repair ON,
+  `nexp-50-20-4-2` (3/3 -> 0/3), `sp150x300d` (6/6 -> 0/6) and `neos17` (3/3 -> 0/3)
+  **lost their incumbent in every rep**, and node throughput collapsed on the open
+  population (`fiber` median 2058 -> 13 nodes, `beavma` 5455 -> 35, `neos17` 12265 ->
+  199, `egout` 2439 -> 17 while still certifying). Cause measured by the analysis: the
+  completed-basis GMI cuts are dense after the slack rewrite (`fiber` ~297 nnz per cut on
+  a matrix with ~8 per row), so every node LP carries them. The pre-registered bars --
+  certified count, nodes on the ALWAYS-certified set, dual losses -- passed (96 -> 99,
+  -19 %, 1 loss), but incumbent loss and per-node cost on the OPEN population were not
+  bars. "Dual gains on fiber/beavma/..." above is true and is not the whole result.
+  The flag stays default ON pending the owner's call; the analysis's lever L2 (a density
+  gate on these cuts) is the proposed fix.
   Gates after the flip: `cargo test` 1005/0, clippy clean, smoke 4532 + 2 failures, adversarial
   19, MILP/IIS/cut tests 1872 + 1 failure. All three failures trace to the flip:
   `test_1236[prob03]` (its lifted model now certifies at the root, 1 node vs 5 -- removed
