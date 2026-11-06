@@ -1,0 +1,16 @@
+nous1                  OFF node_limit             b=1.2849430916422184 n=2000 SpatialSplits=1461 SpatialSplitMoved=0 | ON node_limit             b=1.2744240437550372 n=2000 SpatialSplits=1588 SpatialSplitMoved=777 fired=777 undecided 0.0/0.0 wall 16.5/17.2 load 3.06
+
+instances           : 1
+executed checks     : 11
+violations          : 0
+mechanism fired     : 777 on 1 instance(s) ['nous1']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 0 -> ON 0  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 1 ['nous1']  (where it ran: ['nous1'])
+nodes (all)         : OFF 2000 -> ON 2000
+wall  (all)         : OFF 16.5s -> ON 17.2s
+wall  (fired)       : OFF 16.5s -> ON 17.2s over 1 instance(s)
+report              : /tmp/claude-0/-home-user-discopt/6049eedc-02c0-5eef-98d9-e15d698b84ad/scratchpad/bp/panel/extra_nous1.json
+
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.

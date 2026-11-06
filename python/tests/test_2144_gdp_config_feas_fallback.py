@@ -179,3 +179,33 @@ def test_reduced_pose_does_not_refuse_a_row_with_a_nonfinite_derivative():
     found = subnlp(m, np.array([0.0, 0.0]), outcome=out)
     assert out.get("refuted") is None, out
     assert found is not None and found[1] == pytest.approx(0.0, abs=1e-9)
+
+
+def _nan_jacobian_rows(rhs):
+    """``sqrt(v) >= rhs`` (and ``<= 2``) with ``y`` fixed at 0 and ``v`` pinned at 0:
+    both rows constant, both with a non-finite partial at ``v = 0``."""
+    m = dm.Model("nan_jacobian_constant_rows")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0.0, ub=10.0)
+    m.subject_to(v <= 10.0 * y, name="link")
+    m.subject_to(dm.sqrt(v) <= 2.0, name="holds")
+    m.subject_to(dm.sqrt(v) >= rhs, name="maybe_violated")
+    m.minimize(v - y)
+    y.lb = np.zeros_like(y.lb)
+    y.ub = np.zeros_like(y.ub)
+    ev = ph.cached_evaluator(m)
+    lb, ub = (np.asarray(b, dtype=np.float64) for b in ev.variable_bounds)
+    t_lb, t_ub = lb.copy(), ub.copy()
+    t_ub[1] = 0.0  # what FBBT pins through ``link`` (supplied by hand, so FBBT
+    # cannot refute the violated row first and the reduced check is what decides)
+    return ev, (lb, ub, t_lb, t_ub, False)
+
+
+@pytest.mark.smoke
+def test_reduced_check_judges_nonfinite_scale_rows_without_their_scale():
+    """Review of #2173: a non-finite-scale row is judged against the scale-free
+    threshold -- accepted when it holds, still refused when clearly violated."""
+    ev, implied = _nan_jacobian_rows(rhs=0.0)  # sqrt(0) >= 0 holds exactly
+    assert not isinstance(ph._reduce_subnlp(ev, implied, np.zeros(2), 1e-6), str)
+    ev, implied = _nan_jacobian_rows(rhs=1.0)  # sqrt(0) >= 1 violated by 1
+    assert ph._reduce_subnlp(ev, implied, np.zeros(2), 1e-6) == ph._REDUCED_REFUTED

@@ -1,0 +1,9 @@
+root FBBT fixed: 51
+  round 1: +83 aggregations
+  round 2: +28 aggregations
+derived aggregations: 111 (plus 51 fixed); representatives 54
+SCIP: 124 aggregated/negated (116 single-column). overlap 67, only derived 44, only SCIP 57
+  only derived: [75, 77, 79, 80, 100, 102, 120, 122, 140, 142, 160, 162, 177, 179, 181, 189, 191, 193, 201, 203, 205, 213, 215, 217, 225, 227, 229, 251, 252, 253]
+  only SCIP: [(20, '+1<t_x76>'), (21, '+1<t_x77>'), (22, '+1<t_x275>'), (23, '+1<t_x79>'), (25, '+1<t_x81>'), (27, '+1<t_x176>'), (28, '+1<t_x178>'), (29, '+1<t_x180>'), (30, '+1<t_x96>'), (35, '+1<t_x101>'), (37, '+1<t_x103>'), (38, '+1<t_x104>'), (39, '+1<t_x105>'), (40, '-1<t_x120>'), (45, '+1<t_x121>'), (47, '+1<t_x200>'), (48, '+1<t_x203>'), (49, '+1<t_x205>'), (50, '-1<t_x140>'), (55, '+1<t_x141>'), (57, '+1<t_x212>'), (58, '+1<t_x214>'), (59, '+1<t_x216>'), (60, '-1<t_x160>'), (61, '1 +1<t_x69>'), (65, '+1<t_x161>'), (67, '+1<t_x163>'), (68, '+1<t_x226>'), (74, '+0.95<t_x75>'), (107, '1 -1<t_x2>')]
+derived vs SCIP representative mismatches (chains may differ): 53
+executed assertions: 3

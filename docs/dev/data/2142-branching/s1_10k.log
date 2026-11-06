@@ -1,0 +1,125 @@
+solve status=node_limit obj=3.062014576618532 bound=0.5568486578344218 nodes=10000 wall=54.0s kernel_calls=2
+kernel cfg (scalars): {'max_nodes': 10000, 'pseudocost_branching': True, 'spatial_score': True, 'spatial_pscost_weight': 1.0, 'spatial_midpull': 0.75}
+observed nodes 9142; children 9141; zero-diff children 0; splits recovered 4996
+splits: spatial 4982, integer 14
+{
+ "max_nodes": 10000,
+ "bound": 0.5568486578344218,
+ "nodes": 10000,
+ "n_spatial_splits": 4982,
+ "n_integer_splits": 14,
+ "children_observed": 9141,
+ "frac_edge_1pct": 0.0,
+ "frac_edge_5pct": 0.0,
+ "frac_edge_10pct": 0.0,
+ "frac_edge_20pct": 0.0,
+ "frac_edge_lt_0375": 0.0,
+ "pos_hist_20bins": [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  1213,
+  1329,
+  1035,
+  893,
+  416,
+  96,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0
+ ],
+ "relw_quantiles": {
+  "0.05": 0.05654771602315872,
+  "0.25": 0.146937189021511,
+  "0.5": 0.3395529630875689,
+  "0.75": 0.5154984451109381,
+  "0.95": 1.0
+ },
+ "relw_hist_decades": [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  10,
+  571,
+  3890,
+  511
+ ],
+ "cols_split_top": [
+  [
+   46,
+   1429
+  ],
+  [
+   22,
+   633
+  ],
+  [
+   20,
+   585
+  ],
+  [
+   91,
+   579
+  ],
+  [
+   43,
+   384
+  ],
+  [
+   23,
+   348
+  ],
+  [
+   36,
+   281
+  ],
+  [
+   33,
+   249
+  ],
+  [
+   30,
+   157
+  ],
+  [
+   21,
+   73
+  ],
+  [
+   75,
+   71
+  ],
+  [
+   40,
+   44
+  ],
+  [
+   53,
+   26
+  ],
+  [
+   26,
+   23
+  ],
+  [
+   62,
+   17
+  ]
+ ],
+ "orig_share": 0.8805700521878763
+}
+executed assertions: 5

@@ -1,0 +1,10 @@
+boxes 200 SCIP branched 195 SCIP status {'nodelimit': 195, 'infeasible': 5}
+variable agreement: 27/195 = 0.138
+SCIP picks integer: 1  ours integer: 1
+SCIP picks original col: 191  ours original: 170
+top SCIP cols: [(75, 44), (22, 30), (36, 19), (32, 12), (26, 11), (23, 10), (34, 8), (56, 7)]
+top our cols : [(46, 44), (22, 33), (20, 30), (91, 17), (43, 12), (23, 12), (33, 10), (30, 10)]
+same column (27 continuous): |rel point diff| quantiles [0.     0.     0.     0.0004 0.0303 0.0654]
+SCIP point vs 0.75*mid+0.25*lp (rel): [0. 0. 0. 0.] 194
+same column: (SCIP LP value - our LP value)/width quantiles of |.| [0.000e+00 0.000e+00 1.000e-04 1.500e-03 2.615e-01]
+executed assertions: 195

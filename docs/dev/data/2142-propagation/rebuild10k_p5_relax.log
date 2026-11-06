@@ -1,0 +1,12 @@
+boxes with a finite node bound: 125  SCIP infeasible: 2
+SCIP tighter by >1e-4 abs: 29  ours tighter by >1e-4: 7
+SCIP - ours over finite: median -0.0000 mean 0.0223 max 0.4951
+  node 2650 ours 0.3675 scip 0.8626 nodelimit
+  node 6650 ours 1.0009 scip 1.3218 nodelimit
+  node 9850 ours 1.0522 scip 1.3505 nodelimit
+  node 8200 ours 0.9979 scip 1.2599 nodelimit
+  node 8650 ours 1.0465 scip 1.2551 nodelimit
+  node 8250 ours 0.8954 scip 1.0688 nodelimit
+  node 9300 ours 1.1751 scip 1.3441 nodelimit
+  node 8150 ours 0.9852 scip 1.1138 nodelimit
+executed comparisons: 125

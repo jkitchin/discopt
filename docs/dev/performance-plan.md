@@ -14387,7 +14387,1120 @@ net-positive bar, recorded in the flag audit. The rationale: OFF discards a corr
 `Optimal` for a `Numerical` built on a pivot whose reduced cost is rounding residue.
 ON settles that column through the existing verification instead.
 
-## 105. #2143 stage 2: root heuristic budget hygiene; the in-root LOA proposer is falsified at 120 s (2026-11-04)
+## 105. #2142 item 3: cstr big-M's per-node propagation is exonerated (2026-11-04)
+
+**Hypothesis (killed).** cstr big-M's dual bound gets less from per-node propagation than
+SCIP's does: at the same node budget, ours is 35-40 % lower. With node propagation off,
+both solvers collapse (ours 0.070, SCIP 0.110). The guess was that the kernel's
+`propagate_spec_fixpoint` stops looser than a full FBBT, or looser than SCIP's
+propagation, on the same box.
+
+**Instrument (bound-neutral).** Two additions:
+
+- `_rust.propagate_spec_py(spec..., lo, hi, cutoff, rounds)` runs the kernel's fixpoint
+  on one box.
+- The `node_observer` record now also carries:
+  - `pre_lo` / `pre_hi`: the box as it was popped;
+  - `lo` / `hi`: the box the LP was assembled over;
+  - `cutoff`: the cutoff propagation ran under.
+
+Pinned by `test_2142_propagate_spec_binding.py`. The observer copies the box only while
+it is attached. cstr big-M at a deterministic 10k nodes gives bound
+`0.970778897578354` with the observer and without it, the same as the pre-change baseline.
+
+**Experiment.** The scripts and logs are in `docs/dev/data/2142-propagation/`.
+
+1. Capture 187 node boxes from cstr big-M (`p1_capture.py`, every 100th node of a
+   deterministic 20k-node run). The capture was taken with `DISCOPT_LP_DUAL_REBUILD`
+   OFF, because that flag is retired; the run reproduces the OFF baseline bound of
+   1.3432. The `rebuild10k_*` logs repeat the experiment on a flag-ON 10k capture, with
+   the same conclusions.
+2. On each pre-propagation box, under its cutoff, compute three boxes (`p2_compare.py`):
+   - **K:** the kernel;
+   - **R:** a numpy reference FBBT (`fbbt_ref.py`). It has the full textbook
+     contractors, including extended division for a factor that straddles zero and the
+     two-piece even-power reverse step. It runs to convergence with a 1e-12 margin.
+   - **S:** SCIP 6.3 root propagation on the same spec (`scip_prop.py`). Presolve,
+     separation, LP, heuristics, symmetry, conflict analysis, OBBT and redcost are all
+     off; `numerics/boundstreps=1e-9`; `limits/nodes=1`.
+
+| comparison (flag OFF, 187 boxes, 17,325 column comparisons) | result |
+|---|---|
+| `propagate_spec_py(pre, cutoff, 15)` == the tree's own post-propagation box | **187/187 bit-identical** (proves the probe fired) |
+| boxes proven empty: K / R / S | 22 / 22 / 22 |
+| K looser than S (>1e-6 rel.) | **0 columns** |
+| S looser than K | 1,148 columns on 76 boxes |
+| K looser than R | 184 columns on 26 boxes; width ratio R/K: median 0.999996, min 0.9973 |
+| R run with the kernel's own `EPS` (1e-9 margin and change threshold) vs K (`p4_eps.py`) | **0 differences either way, 165/165 boxes** |
+
+Two arms were also run:
+
+- **SCIP's default `boundstreps=0.05`:** looser still. 6 of 11 empty boxes found on the
+  flag-ON capture, and never tighter than K.
+- **K at 100,000 rounds instead of 15:** it does not change the K-vs-R residual. The
+  residual is entirely the `EPS = 1e-9` outward margin and change threshold acting on
+  geometric-convergence tails.
+
+**Verdict.** On every box, the kernel's propagation is at least as tight as SCIP's
+propagation. It equals the reference FBBT up to the `EPS` tail, which is under 0.3 %
+of a width. So propagation strength per box is not the gap.
+
+- **Do not build:** lowering `EPS`, more rounds, a straddling-zero extended division,
+  or the even-power union reverse step. None of them changes a box here.
+- SCIP's in-tree propagation edge (§3 of the #2142 attribution) is therefore not
+  stronger propagation. It must come from what propagation is fed: a tighter LP bound
+  per node, which turns into more cutoff fathoming.
+
+**Next candidate (entry measurement only, `p5_relax.py`).** This compares the node
+relaxation at fixed boxes. For each of the 95 captured nodes with a finite bound, take
+our node bound on its post-propagation box. Compare it with SCIP's root dual bound on
+the same box, with separators off but LP and constraint enforcement on.
+
+- SCIP is tighter by more than 1e-4 on **31 of 94** boxes: mean +0.014, max +0.31
+  (0.27 -> 0.59). We are tighter on 7 boxes.
+- SCIP proves 1 box infeasible that our LP bounds finitely.
+- The flag-ON capture shows the same: 29 of 123 boxes, max +0.50.
+
+The kernel relaxes each lifted `Q²` monomial with three fixed tangents, at `li`, the
+midpoint and `ui` (`mccormick_patch::monomial_rows`). `detect_convex_quad_forms` finds no
+cut form, so `tree/cut_forms = 0`. SCIP's nonlinear handler adds a tangent at the LP
+point whenever enforcement finds it violated. The next entry experiment is therefore
+**LP-point tangent (OA) cuts for convex lifted monomials** in the kernel's node
+separation loop, measured at these fixed boxes before any tree run. That is still a
+hypothesis; this section only measures the relaxation gap.
+
+**Retraction (2026-11-04, CLAUDE.md §11; measured in §106).** The verdict above, "on every
+box the kernel's propagation is at least as tight as SCIP's … so propagation strength per
+box is not the gap", is wrong for the box the tree actually uses. The K-vs-S and K-vs-R
+rows compared boxes started from the *pre*-propagation box. The tree stops at 15 rounds,
+and its own `p2` log already shows that 15 rounds is looser than the converged kernel
+fixpoint on 90 of 187 boxes (`k15_vs_kinf_looser_boxes: 90`); the "K at 100,000 rounds"
+arm was read only against R. On the 95 finite-bound boxes, re-running the kernel's own
+propagator to convergence closes **97.5 %** of the fixed-box SCIP-vs-ours LP gap (§106).
+The kernel's contractors are exonerated. The 15-round cap on the per-node box is not.
+"Do not build more rounds" also falls: in the tree, 1000 rounds is worth +36 % at 10k nodes
+and +7.6 % at 20k (§106).
+
+## 106. #2142 item 3: LP-point tangents falsified; the fixed-box gap is the propagation round cap (2026-11-04)
+
+**Hypothesis (killed).** §105 found SCIP's fixed-box bound tighter than ours on 31 of 94
+boxes. The guess was that SCIP's nonlinear handler gets this by enforcing an LP-point
+tangent for each violated convex term. The kernel has no cut family here
+(`tree/cut_forms = 0`). The 5 lifted `Q²` monomials get three fixed tangents each.
+
+**Kill criterion:** tangent refinement closes less than 50 % of the summed SCIP-vs-ours gap
+on the 31 boxes.
+
+**Instrument.** `_rust.solve_spatial_node_py` runs `solve_spatial_node_with_cuts` on one box.
+That is the tree's node solve, with no warm start, OBBT off, and an optional cut block.
+It returns the NS safe bound. It is pinned by `test_2142_solve_spatial_node_binding.py`.
+
+The scripts and logs are in `docs/dev/data/2142-tangent/`:
+
+- `t1_capture_lp.py` re-captures the 20k-node `DISCOPT_LP_DUAL_REBUILD`-absent run. It
+  reproduces the bound 1.3431805 and the 187 boxes of the §105 capture bit for bit.
+- `t2_tangent.py` adds the tangent `s >= 2x0·x - x0²` at the LP point for every violated
+  square, re-solves, and stops after 20 rounds or when nothing is violated.
+- On these boxes the cold kernel re-solve reproduces the tree's node objective on 94/95.
+  The 95th box is uncertified cold, and SCIP proves it infeasible.
+
+There is nothing else to refine. Every other term is a single-column product `x_i·x_j`
+(24 BLFs), and McCormick is already its exact envelope on the box. The secant of `x²` is
+already its concave envelope.
+
+| fixed-box arm (95 boxes, the §105 capture, 15-round tree boxes) | SCIP tighter > 1e-4 / ours tighter | Σ(SCIP − ours) over SCIP-tighter boxes |
+|---|---|---|
+| ours vs SCIP (p5 arm: LP + enforcement, separators off, `boundstreps=1e-9`) | 31 / 7 | 1.340 |
+| **ours + LP-point tangents (≤ 20 rounds)** | tangents fire on 72 boxes (344 cuts), raise the bound > 1e-4 on 13 | closes **0.023 = 1.7 %** |
+| SCIP with each `nlhdlr/*/enabled=False` (bilinear, convex, concave, quadratic, perspective, soc, quotient, signomial) | 31 / 7, every arm identical | 1.340 |
+| SCIP `propagating/maxroundsroot=0` | 10 / 13 | 0.023 |
+| SCIP `constraints/linear/propfreq=-1` | 9 / 14 | 0.023 |
+| SCIP `constraints/nonlinear/propfreq=-1` | 18 / 16 | 0.046 |
+| SCIP default `boundstreps=0.05` | 25 / 8 | 0.551 |
+
+**Verdict: killed** (1.7 % against the 50 % criterion). No tangent separator was built. No
+SCIP nonlinear handler contributes; the advantage disappears when SCIP's root
+propagation is off. The kernel's own propagator explains why (`t3`–`t5`):
+
+- Re-running `propagate_spec_py` on the tree's post-propagation box tightens it on 44/95
+  boxes. SCIP's propagation of that same box tightens the same 44.
+- Our node LP on SCIP's re-propagated box closes 97.5 % of the gap.
+- From the pre-propagation box under the node's cutoff, the round cap sweeps as follows:
+
+| rounds | 15 | 30 | 50 | 100 | 200 | 500 – 100,000 |
+|---|---|---|---|---|---|---|
+| gap closed | 0 % | 14.4 % | 38.6 % | 77.9 % | 96.5 % | **97.5 %** |
+| propagation, ms/box | 0.38 | 0.49 | 0.68 | 0.99 | 1.64 | 3.1 |
+
+Only 49/95 boxes reach their fixpoint within 15 rounds; 28 need 500–1000. The contraction
+is geometric, with up to a 97.5 % width shrink beyond round 15.
+
+Applied to the tree, the round cap is worth far less than at fixed boxes (`t6_tree.py`, deterministic, `propagation_rounds` injected):
+
+| cstr big-M | 10k nodes | 20k nodes |
+|---|---|---|
+| 15 rounds (default) | 0.5568 (50.5 s) | 1.3432 (79.3 s) |
+| 200 rounds | 0.7391 (54.3 s) | |
+| 1000 rounds | 0.7581 (57.7 s) | 1.4448 (123.0 s) |
+| SCIP default | 1.534 | 2.393 |
+
+Inside the tree a child inherits its parent's propagated box, so the tail keeps contracting
+with depth. That is why the fixed-box 97.5 % turns into +36 % / +7.6 %.
+
+**Per-node relaxation is at parity once the box is converged.** On the 110 finite-bound
+boxes of the 1000-round tree (`t1` with `PROP_ROUNDS=1000`, `t2_r1000.log`):
+
+- SCIP is tighter on 14 boxes and we are tighter on 10.
+- The summed SCIP edge is **0.037**.
+- Tangents close 91.6 % of that residual.
+
+Yet that tree's bound is 1.44 against SCIP's 2.39 at 20k nodes. **The remaining in-tree gap
+is not the node relaxation on a given box. It is which boxes the search creates.**
+
+That reopens branching *variable and point* selection. Integer-first, originals-only, and
+node selection were falsified in the #2142 attribution, but SCIP's violation-based
+candidate scoring and its branching point were not tested. `DISCOPT_SCALE_FREE_BRANCHING=1`
+is still the only existing knob that moves this bound.
+
+**Do not build:**
+
+- LP-point tangent cuts for this class;
+- any SCIP nonlinear-handler port.
+
+**Candidate, not built.** Raise the per-node round cap, or replace it with a
+progress-based stop. The measured price is +55 % wall at 20k nodes for +7.6 % bound. It
+needs its own §5 panel, and on this evidence it is a small lever.
+
+## 107. #2142 item 3: the branching point — slivers falsified, SCIP's point rule wins on cstr only (2026-11-04)
+
+**Hypothesis (killed).** The kernel splits at the raw LP value with only a `1e-9·width`
+interior margin, while SCIP keeps the point at least `branching/clamp = 0.2` of the width
+from either bound. The guess was that we often split slivers near a bound, so one child
+barely changes and the bound crawls.
+
+**Kill criterion:** fewer than 10 % of spatial splits within 5 % of an edge.
+
+**The premise was wrong for the default path.** The kernel's own default is
+`spatial_midpull = 0`, but `Model.solve` passes `spatial_midpull = 0.75` (with
+`spatial_score` and `spatial_pscost_weight = 1`) since #1970 graduated. A 0.75 midpull
+puts every split at least 37.5 % of the width inside, so a sliver is impossible.
+
+**Instrument (bound-neutral).** `s1_splits.py` reads the `node_observer` stream. A child's
+pre-propagation box is its parent's post-propagation box with one coordinate overridden
+(`QNode::into_box`), so each branching decision (column and value) is recovered exactly
+whenever at least one child was solved. The run asserts that no child differs from its
+parent in more than one coordinate. The observer leaves the bound unchanged: 0.5568486578
+at 10k nodes and 1.3431805086 at 20k, both equal to the baseline.
+
+| cstr big-M, default path | 10k nodes | 20k nodes |
+|---|---|---|
+| spatial / integer splits recovered | 4,982 / 14 | 9,980 / 14 |
+| splits within 1 % / 5 % / 20 % / 35 % of an edge | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| relative position, min – max | 0.3754 – 0.6246 | 0.3752 – 0.6246 |
+| position histogram, 0.35–0.65 in 0.05 bins | 1213 1329 1035 893 416 96 | 1410 2818 2613 2048 952 139 |
+| split-domain width / root width: median (q25, q75) | 0.34 (0.15, 0.52) | 0.23 (0.11, 0.39) |
+| share of splits on a domain narrower than half its root width | 73 % | 82 % |
+
+**Verdict: killed** (0 % against the 10 % criterion).
+
+**The converse.** SCIP's `branching/midpullreldomtrig = 0.5` means that `pyscipopt`'s
+`libscip` describes the parameter as "multiply midpull by relative domain width if the
+latter is below this value". That is a scaling, not an on/off switch. On a domain narrower
+than half its global width, SCIP therefore splits nearer the LP value: at the median width
+here (0.23), its effective midpull is about 0.17, against our fixed 0.75. Ours is the
+over-centred rule.
+
+**Step 2: SCIP's rule as kernel options** (commit `feat(kernel): #2142 item 3`):
+
+- `SpatialTreeConfig::spatial_clamp` and `spatial_midpull_reldomtrig` both default to 0.
+  At 0 they are bit-identical to the #1970 rule (Rust test over 30,000 points).
+- The trigger uses the column's global width and is skipped when a global bound is the
+  `1e20` sentinel. The clamp acts only on finite domains.
+- The flag is `DISCOPT_SPATIAL_BRANCH_CLAMP` (clamp 0.2, trigger 0.5).
+- Profile counters `SpatialSplits` and `SpatialSplitMoved` record each spatial split and
+  each split whose point the rule moved.
+
+Arms were injected into `solve_spatial_tree_py` (`s2_arms.py`, deterministic, at most 3
+concurrent).
+
+| cstr big-M arm | 10k nodes | 20k nodes |
+|---|---|---|
+| base (#1970: midpull 0.75) | 0.5568 (51.1 s) | 1.3432 (85.6 s) |
+| clamp 0.2 | 0.5568 (50.3 s), bit-identical | 1.3432 (80.5 s), bit-identical |
+| midpull 0.75 + trigger 0.5 | 1.1078 (52.5 s) | 1.6985 (82.5 s) |
+| **clamp 0.2 + midpull 0.75 + trigger 0.5 (= SCIP)** | **1.1636 (47.5 s)** | **1.6787 (62.7 s)** |
+| SCIP + `scale_free_branching` | 1.2697 (43.3 s) | 1.7740 (65.5 s) |
+| midpull 0 + clamp 0.2 (LP value, clamped) | 1.0685 (43.3 s) | 1.4798 (58.4 s) |
+| `scale_free_branching` alone | | 1.8436 (203.4 s) |
+| SCIP 10 (PySCIPOpt 6.3) on the same spec (§105) | 1.534 | 2.393 |
+
+The clamp alone is a no-op under a 0.75 midpull. The whole effect comes from splitting
+narrowed domains nearer the LP value.
+
+Nodes to certify, with a 150k cap:
+
+| arm | result at the cap or at certification |
+|---|---|
+| base | **not certified**, bound 2.8697 at 150k nodes (2,946 s) |
+| trigger alone | not certified, bound 3.0539 at 150k nodes (463 s) |
+| **SCIP rule** | **certified at 119,015 nodes**, bound 3.06171 (368 s) |
+| SCIP itself | ~38k nodes |
+
+**Step 3: decision replay.** The 200 sampled nodes are spread evenly over the 9,994
+branched parents of the default 20k tree (`s3_capture.py`). For each one, SCIP is run on
+discopt's spec with:
+
+- every column bounded to the node's post-propagation box;
+- `setObjlimit` set to the node's cutoff;
+- presolve, heuristics and root separation off;
+- `limits/nodes = 1`.
+
+SCIP's decision is read from the root's children with `getParentBranchings`, and its LP
+value from an `LPSOLVED` event handler (`s3_scip.py`, `s3_analyse.py`).
+
+- **On SCIP defaults, SCIP branches on only 82 of the 200 boxes.** It closes the other 118.
+  Without the objective limit, 116 of those 118 are still infeasible: the box holds no
+  feasible point. With `propagating/obbt/freq = -1`, 113 of the 118 stop being infeasible.
+  With `propagating/maxroundsroot = 0`, all 118 do. So **SCIP's root OBBT proves 57 % of the
+  boxes our 20k tree branches on empty.** SCIP runs OBBT at the root only (`freq = 0`), so
+  this is an artefact of replaying a node as a fresh root, not something SCIP does at that
+  node in its own tree. The kernel's OBBT was falsified as an in-tree lever in the #2142
+  attribution. It is recorded here because the replay must switch it off to emulate an
+  in-tree node.
+- **With OBBT off (the in-tree emulation),** SCIP branches on 195 of the 200 boxes:
+  - **Variable agreement is 27/195 = 13.8 %.**
+  - SCIP picks a spec-original column 191 times; we do 170 times.
+  - Where the column agrees, the point agrees too: median |Δ relative position| 0, 90th
+    percentile 0.03. The LP value also agrees: median |Δ|/width 1e-4.
+  - SCIP's point equals `0.75·mid + 0.25·lp` on 194 of 194 continuous picks. At a replay
+    root, SCIP's global domain is the box, so its trigger never fires there.
+- **Not run:** driving the kernel with SCIP's variable rule (violation-based, with violation
+  split by midness, pseudocost, `highscorefactor`). The replay says that rule is the
+  remaining difference: the point now matches, and the variable choice agrees on one
+  decision in seven.
+
+**Step 4: §5 panel.** `DISCOPT_SPATIAL_BRANCH_CLAMP` ON vs OFF. Each solve ran in its own
+process under `DISCOPT_PROFILE=1` and `PYTHONHASHSEED=0`, deterministic, with arms
+interleaved.
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74 instances, `max_nodes=2000`, 120 s backstop, 2 jobs | 858 / 0; unfired bit-identical 57 checked, 16 at the wall backstop | **1 (tanksize)** | tanksize certified in both arms, **519 → 705 nodes** (+36 %) |
+| `python/tests/data/minlplib` instances not in the corpus, plus nous1 and st_m2 (60 total), ON-only fire screen at 2000 nodes / 30 s (`s4_screen.py`) | — | 12 | — |
+| those 12, same panel settings | 129 + 11 / 0 | 12 | certified 8 → 8, nodes on the 8 certified 700 → 720. Better: fuel 17 → 15, st_e07 29 → 25, st_z 23 → 17. Worse: nvs20 181 → 187, st_e03 263 → 267, st_e05 131 → 153. Node-limited bounds: st_e31 tighter, rbrock and ex1252a looser, **nous1 1.2849 → 1.2744** |
+| nous1 to certification (`gap_tolerance=1e-4`) | certified in both arms | | **15,233 → 17,187 nodes** (+13 %), 36.1 → 38.2 s |
+| GDP parity, 24 instances × {big-m, hull}, `max_nodes=5000`, 120 s backstop, 1 rep (96 solves, split over 3 processes by `--include`) | 0 incorrect, 0 crossings, 0 solved lost; unfired bit-identical 24 pairs checked (18 at the wall, 0 differ); kaibel and mod_hens error in both arms | **cstr only** (big-m, hull) | cstr big-M bound **0.2152 → 0.7584** at 5000 nodes; cstr hull wall-terminated in both arms, 437 → 658 nodes, bound 0.0940 in both. The one "solved-gained" row, `constrained_layout_clay0203` big-M (OFF 120.8 s at the wall, ON 119.1 s), is unfired (`SpatialSplits = 0`, 133 nodes in both arms), so it is wall noise and not the flag |
+
+**Verdict: cert-clean, not net-positive. Retired.** The rule wins big only on the
+motivating instance. On cstr it takes the tree from uncertified at 150k nodes to certified
+at 119k. Beyond cstr it is mixed to harmful:
+
+- tanksize +36 % nodes;
+- nous1 +13 % nodes to certify (nous1 is #1970's probe);
+- three of eight small certifiers worse and three better.
+
+CLAUDE.md §2 rejects a change whose benefit is confined to one instance. The flag, the two
+kernel options and the `SpatialSplit*` counters are removed (commit `revert(kernel): #2142
+item 3`). The measured state is the commit before it.
+
+**What this changes in the #2142 picture.**
+
+- The branching **point** is not where SCIP's edge comes from in general. It does matter for
+  cstr, whose splits fall 82 % on narrowed domains. That is a property of the instance,
+  not a rule to ship.
+- The replay localises the remaining difference to the branching **variable**: 13.8 %
+  agreement at identical boxes, LP points and split points.
+- The next entry experiment is a kernel scoring arm that follows SCIP's
+  `constraints/nonlinear/branching/*`: violation split by midness, `highscorefactor = 0.9`,
+  pseudocost weight 1 under SCIP's reliability rule. It must first replay at these 195
+  boxes and show agreement well above 13.8 %, and only then be run as a tree arm.
+
+**Do not build:**
+
+- a clamp alone (a no-op under the 0.75 midpull);
+- any further split-point tweak aimed at cstr.
+
+Data: `docs/dev/data/2142-branching/` (see its README).
+
+## 108. #2142: the branching variable — SCIP's violation measure reproduces its picks, wins on cstr, and is retired (2026-11-05)
+
+**Hypothesis.** §107's replay found that SCIP and the kernel choose the same branching
+variable on 27 of 195 identical boxes (13.8 %). The guess was that the difference is the
+violation measure in #1970's spatial score, not the pseudocost. SCIP's `cons_nonlinear.c`
+(v10.0.0 source, read for this entry) does three things differently:
+
+- it scores a term by its *relative* violation, `|gap| / max(1, |f(x)|)`
+  (`SCIPgetExprRelAuxViolationNonlinear`);
+- it splits that score over the term's variables by midness, `max(0.05, min(x - lo,
+  hi - x) / (hi - lo))` (`branching/violsplit = 'm'`), not evenly;
+- it picks uniformly at random among candidates scoring `>= 0.9 x` the best
+  (`branching/highscorefactor`). At a replay root there are no pseudocosts, so SCIP's
+  replayed pick is violation-only.
+
+**Kill criterion:** no offline rule reaches well above 13.8 % agreement (target >= 50 %)
+on the replayed boxes.
+
+**Entry experiment (offline, no tree runs).** `v1_rules.py` re-solves the kernel's node
+LP on each of the 192 boxes that re-solve `optimal` (190 reproduce the tree's bound) and
+scores candidate rules at that point. `v2_scip_lp.py` re-runs §107's replay (all 195
+decisions reproduced) and also records SCIP's own LP point, so the rule can be separated
+from LP-point differences. "In set" is SCIP's pick inside the rule's 0.9 set.
+
+| rule (192 boxes) | top-1, our LP | in set, our LP | top-1, SCIP's LP | in set, SCIP's LP |
+|---|---|---|---|---|
+| #1970: absolute gap, even split | 17.2 % | 23.4 % | 26.6 % | 41.1 % |
+| absolute gap, midness split | 19.8 % | 25.0 % | 31.8 % | 44.8 % |
+| relative gap, even split (convex-square side skipped) | 44.3 % | 57.8 % | 54.2 % | 79.2 % |
+| **relative gap, midness split (SCIP)** | **44.3 %** | **65.6 %** | **62.0 %** | **99.0 %** |
+| relative gap, width split | 25.5 % | 30.7 % | 31.8 % | 38.0 % |
+
+At SCIP's LP point the SCIP rule contains SCIP's pick on 99.0 % of boxes. The remaining
+top-1 misses come from SCIP's random tie-break (mean set size 1.53). At our LP point,
+LP-point degeneracy costs another 18 points. Leaving out convex squares whose aux lies
+below `x²` (SCIP separates those) changes nothing. The relative scaling is the lever.
+**Verdict on entry:** the rule is identified. The kill criterion is met on the in-set
+measure (65.6 %, and 99.0 % at SCIP's LP point). Top-1 is 44.3 %, short of 50 % only by
+SCIP's random pick and LP-point differences. Proceeded.
+
+**Kernel option (commit `feat(kernel): #2142 — SCIP's violation measure`).**
+`SpatialTreeConfig::spatial_viol_scip` changes only the violation component. The
+pseudocost and the split point are unchanged. The flag is `DISCOPT_SPATIAL_VIOL_SCIP`.
+The profile counters `SpatialViolScipPicks` / `SpatialViolScipChanged` record picks made
+under the rule and those whose column differs from #1970's at the same point.
+
+**cstr big-M arms** (`v3_arms.py`, deterministic, 3 concurrent processes):
+
+| arm | 10k nodes | 20k nodes |
+|---|---|---|
+| base (flag OFF; bit-identical to §107's baseline) | 0.5568486578 (49.5 s) | 1.3431805086 (80.7 s) |
+| **SCIP violation measure** | **1.3943 (81.8 s)**, 2,232 of 5,600 picks changed | **1.8051 (162.3 s)** |
+| SCIP violation measure, pseudocost weight 0 | 0.4676 (63.7 s) | 0.8292 (102.6 s) |
+| §107's SCIP point rule (retired) | 1.1636 | 1.6787 |
+| SCIP 10 on the same spec | 1.534 | 2.393 |
+
+The rule needs the pseudocost; without it the bound is below base. Per-node wall is
+about 1.65-2x base in both runs. The walls are not load-gated, but the two arms ran side
+by side. Nodes to certify: the ON tree stops at **117,675 nodes, bound 3.06171**
+(incumbent 3.06201, `gap_certified=False`, 1,061 s). Base has bound 2.8697 at 150k nodes.
+
+**§5 panel** (scripts as §107; deterministic, `max_nodes=2000`, 120 s backstop,
+`PYTHONHASHSEED=0`, `DISCOPT_PROFILE=1`, arms interleaved; `--jobs 3`, load 6-10):
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74 instances | 855 / 1 (see below); unfired bit-identical 57 checked, 16 at the wall | **tanksize only** | certified in both arms, **519 -> 771 nodes (+49 %)** |
+| the one violation, cvxnonsep_psig30 "certification lost", and heatexch_gen1 looser | | **unfired** (0 picks in both arms) | both at the wall backstop under load 8-10. Re-run at load 2-3: identical status/bound/nodes in both arms (89 / 413 nodes). Load, not the flag |
+| ON-only fire screen, §107's 60 extra instances | | 10 | |
+| those 10 (9 + nous1), same settings | 105 + 11 / 0 | 10 | certified 6 -> 6. Better: nvs20 181 -> 151, st_e03 263 -> 241, st_e05 131 -> 125. Neutral: fuel, st_e07, st_z, rbrock. Looser node-limited bounds: **ex1252a** (128893 -> 128861; undecided node LPs 11 -> 68) and **nous1 1.2849 -> 0.8074** |
+| nous1 to certification (`gap_tolerance=1e-4`) | certified in both arms | | **15,233 -> 34,581 nodes (+127 %)**, 39.8 -> 79.1 s |
+
+The GDP parity panel was not run. The net-positive bar already fails by large margins on two of #1970's own probes
+(nous1, its entry instance: +127 %; tanksize, its headline win: +49 %), and a GDP win cannot outweigh them under CLAUDE.md §2.
+
+**Verdict: cert-clean, not net-positive. Retired.** SCIP's violation measure reproduces
+SCIP's variable choice (99 % in-set at SCIP's LP point). It is worth more on cstr than
+§107's point rule: 1.81 vs 1.68 at 20k nodes, and the tree reaches 3.0617 at 118k nodes.
+Beyond cstr it is harmful on exactly the instances #1970 was tuned on.
+
+The likely reason, not tested: the measure is calibrated for SCIP's pseudocost
+normalisation. SCIP drops an unreliable pseudocost from a candidate's weighted score and
+divides by the weights actually used. The kernel adds a mean-imputed pseudocost to every
+candidate. Mixing the relative violation into the kernel's sum changes the balance of
+the two components on instances whose gaps are large in absolute terms (nous1).
+
+What a next attempt needs:
+
+- SCIP's per-candidate weight normalisation with a reliability threshold
+  (`branching/pscostreliable = 2`), measured as a pair with this measure, never alone;
+- a check of the in-tree pick agreement against a SCIP *in-tree* trace. The replay
+  roots have no pseudocosts, so they validate only the violation half.
+
+The flag, the kernel option, the counters, the binding kwarg and the Rust test are
+removed (commit `revert(kernel): #2142`). The measured state is the commit before it.
+
+**Do not build:**
+
+- the relative/midness violation measure alone on top of #1970's pseudocost sum;
+- a pseudocost-free violation rule (0.83 at 20k nodes, below base).
+
+Data: `docs/dev/data/2142-branching-var/` (see its README).
+
+## 109. #2142: SCIP pseudocost normalisation — killed at the entry test
+
+**Hypothesis (from §108):** the SCIP violation measure hurt nous1/tanksize because our
+kernel adds a mean-imputed pseudocost to every candidate, whereas SCIP drops
+unreliable pseudocosts and normalises each score by the weights it actually uses.
+Pairing the measure with that normalisation should remove the harm.
+
+**Kill criterion (stated before running):** stop if either arm is worse than base by
+more than ~10% on nous1 nodes-to-certify (15,233) or tanksize nodes (519).
+
+| arm (deterministic, to certification) | nous1 nodes | tanksize nodes |
+|---|---|---|
+| base | 15,233 (30.9 s) | 519 |
+| measure + normalisation | 14,763 (32.5 s, −3%) | 589 (**+13.5%**) |
+| normalisation alone | 13,609 (100.0 s, −11%) | 743 (**+43%**) |
+
+All six runs certified with `executed assertions: 2`. Both arms fail the tanksize
+criterion, so neither was taken to cstr or a panel, and no flag was committed. The
+combination does remove most of §108's nous1 harm (34,581 → 14,763), which supports
+the hypothesis's mechanism, but not enough of tanksize's. The criterion is not
+relaxed after the fact (§4).
+
+**Status of item 3 (branching):** three SCIP components have now been measured one at
+a time — the point rule (§107), the violation measure (§108), the pseudocost
+normalisation (this section). Each moves cstr toward certification and each costs a
+reference instance of #1970. Data: `docs/dev/data/2142-pscost-norm/`.
+
+
+## 110. #2142: the three SCIP branching components combined — killed at the entry test
+
+**Hypothesis:** §107-§109 each measured one SCIP branching component and each helped
+cstr while hurting a #1970 reference instance. SCIP uses them together; the harm of
+each might come from pairing it with the other two components' #1970 counterparts, so
+the combination (point rule + violation measure + pseudocost normalisation, one flag
+`DISCOPT_SPATIAL_BRANCH_SCIP`) might keep the cstr gain without the reference cost.
+This was the one final bounded test approved for the branching item.
+
+**Kill criterion (fixed before running, not to be relaxed):** worse than base by more
+than 10% in nodes to certification on either tanksize (519) or nous1 (15,233) → stop,
+retire, no flag committed beyond a revert.
+
+| arm (deterministic, to certification) | tanksize nodes | nous1 nodes |
+|---|---|---|
+| base (flag OFF; reproduces §109's base bit for bit) | 519 | 15,233 |
+| all three SCIP components | 1,087 (**+109%**) | 11,603 (−24%) |
+
+All four runs certified (`executed assertions` 1 OFF / 2 ON). With the flag on the
+scored rule made 540 / 5,799 picks (475 / 5,223 differing from #1970's) and the point
+rule moved 518 / 3,460 splits, so the arm was live. The combination is the best nous1
+arm of the series, but tanksize is worse than any single component (§109's worst was
++43%): the components' tanksize costs compound rather than cancel. The criterion
+fails, so cstr and the §5 panels were not run, and the flag was retired in the commit
+after the one that introduced it (§5, *Retired*).
+
+**Status of item 3 (branching):** closed as a direction. The point rule, the violation
+measure, the pseudocost normalisation, and all three together have each been measured;
+every arm that helps cstr costs a #1970 reference instance beyond the fixed bound.
+Do not rebuild any of them, singly or combined, without a new mechanism that explains
+the tanksize cost. Data: `docs/dev/data/2142-scip-branching/`.
+
+## 111. #2142: mixed hull — big-M for rows the detector cannot prove convex — killed at the entry test (2026-11-05)
+
+**Hypothesis.** Under hull, the eps-perspective of cstr's nonconvex disjunct rows has
+`1/yhat` factors near 1e27, which makes the relaxation vacuous while any selector is
+free. The proposed fix keeps the perspective only for rows that the convexity detector
+proves convex. Every other nonlinear row would get big-M rows on its own columns,
+with the shipped `_compute_big_m` and the same loud refusal. The disjunct's linear rows
+would still be hulled on the disaggregated copies. The intended result was a bound above
+both today's hull and big-M.
+
+**Caveat, stated before running.** If the detector proves none of cstr's rows convex,
+then the mixed form is "hull on the linear rows, big-M on the nonlinear rows". That form
+can beat big-M only through the linear rows' hull.
+
+**Kill criterion (fixed before running).** The mixed form's deterministic 20k-node bound
+must be better than big-M's 1.3432.
+
+**Convex fraction.** cstr has 75 disjunct rows in 10 hulled blocks. 70 are linear. The
+other 5 are bilinear mole-balance equalities (`rate * V`). The detector proves **0 of
+the 5** convex. A nonlinear equality cannot be convex in any case. The lowering moved all
+5 to big-M and none to the perspective (`e0_classify.log`).
+
+| arm (cstr, deterministic, `PYTHONHASHSEED=0`) | 1 node | 10k nodes | 20k nodes |
+|---|---|---|---|
+| hull (flag OFF) | 0.0 | 0.0940 (855.5 s) | not run (killed first) |
+| big-M (reproduces §108 bit for bit) | -1e-12 | 0.5568486578 (46.8 s) | 1.3431805086 (§108) |
+| **mixed hull** | -2e-11 | **0.5027153230** (90.1 s) | **1.1272313697** (142.7 s) |
+
+All arms ran with `executed assertions: 4`. The mixed arm fired on 5 rows. It beats today's hull, 0.503 against 0.094 at 10k, and is about 9x faster per node, but it is below big-M.
+
+**Verdict: killed.** At 20k nodes the mixed bound is 1.1272, below big-M's 1.3432, and
+it is below big-M at 10k as well. Hulling cstr's 70 linear rows on disaggregated copies
+does not make up for the larger model. The mixed form has the copies and their link
+rows, and it does not get big-M's `gdp.bound_pretransformation` bound rows. On a model
+whose nonlinear rows are all nonconvex equalities, the design cannot certify where
+big-M cannot. As required, it was not taken to step 2, the soundness tests or the
+panels. The flag and its implementation were removed in the commit after the one that
+added them (§5, *Retired*). They never reached `main`. Commits: `8292ded9` / `d3d59a0f`
+(flag), `bcdf1e61` (retirement).
+
+**Do not build:** any hull variant that sends cstr's bilinear equalities to big-M while
+keeping the rest of the hull. A cstr-hull fix has to change how the *nonconvex* rows are
+relaxed at fractional selectors. Changing which lowering they get does not help: the
+big-M one is already measured above. Data: `docs/dev/data/2142-hull-mixed/` (see its
+README).
+
+
+## 112. #2142 Part A: learned dual-proof (Farkas) rows — graduated (2026-11-05)
+
+**Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`). SCIP's advantage on cstr
+big-M comes entirely from the dual-proof constraints of its conflict analysis
+(`conflict/useinflp=d` reproduces default bit for bit; conflict off costs 2.393 -> 1.854
+at 20k nodes). Offline, appending 40 such rows, learned from discopt's own first 5k
+nodes, certifies cstr big-M at 53,051 nodes. Base is uncertified at 150k.
+
+**Implementation** (`DISCOPT_DUAL_PROOF_PROPAGATION`; Rust `bnb/dual_proof.rs`,
+`SpatialTreeConfig::dual_proof_propagation`). It is general: nothing is keyed to cstr.
+
+- **Source of the ray.** On a certified-empty node LP, take the verified Farkas ray the
+  simplex returns. Use only its **global** rows: the fixed rows and the global cut block.
+  The node-local envelope rows are dropped (SCIP `uselocalrows=false`).
+- **Multipliers.** `λ_r = max(0, -σ y_r)` for both signs `σ`.
+- **Rigour.** The rhs is rounded up and widened by each coefficient's aggregation error
+  times the column's global magnitude. A column with an infinite global bound and
+  nonzero error refuses the row.
+- **Cleanup** (as `tightenDualproof`). A continuous column whose node bound equals its
+  global bound is cancelled, and so are tiny coefficients.
+- **Keep rule.** The row must cut the node by `1e-6 (1 + |rhs|)`, have
+  nnz <= max(10, 15 % of columns), and not be a duplicate.
+- **Fallback.** When the node ray, restricted to the global rows, does not cut the node,
+  solve the feasibility LP over the global rows only on the same box and use its ray.
+  This is the offline construction of `d2_proofs.py`.
+- **Use.** A tree-global pool (LRU eviction at 2,000 rows) is propagated after the fixed
+  rows at every node. It is never an LP row.
+- **Counters.** `res["dual_proof"]` and `DualProof{Rays,GlobalLps,Learned,Tightenings,Fathoms}`.
+
+**Soundness.**
+
+- Every row is a nonnegative combination of valid rows, whatever the ray is.
+- Rust tests (`bnb::dual_proof::tests`):
+  - 190 learned rows on 400 random LPs, checked against 11,753 sampled feasible points
+    of the global box;
+  - outward rhs rounding;
+  - refusal at an unbounded error;
+  - envelope rows excluded;
+  - pool dedupe and LRU.
+- Python test `test_2142_dual_proof.py`: OFF is bit-identical to no kwarg; ON learns,
+  tightens and lifts cstr's bound, staying below the optimum.
+
+**Design pilot** (seed 0, 20k nodes, run before the entry test and disclosed as such):
+the ray restricted to global rows alone gives 1.889 (12 rows); with the fallback it gives
+2.788 (52 rows). The fallback was fixed as the design; the pilot switch was removed.
+
+**Entry experiment** (pre-registered; cstr big-M, deterministic, 20k nodes, row-permutation
+seeds as in the findings; kill: ON mean < 2.0 or any seed ON <= OFF). `entry_*.log`.
+
+| seed | 0 | 1 | 2 | 3 | mean |
+|---|---|---|---|---|---|
+| OFF (reproduces the findings' seeds) | 1.3432 | 1.7656 | 1.0210 | 1.6908 | 1.455 |
+| **ON** | **2.7875** | **2.8067** | **2.5952** | **2.6824** | **2.718** |
+| rows learned / fallback LPs | 52 / 6,975 | 49 / 7,315 | 48 / 6,673 | 44 / 6,721 | |
+
+**Passed.** ON is above the offline 40-proof arm (2.341) and SCIP default (2.393).
+
+**cstr big-M to certification.**
+
+| path | result |
+|---|---|
+| deterministic, cap 150k | **certified, 29,551 nodes, 80 s**, bound 3.06173, 54 rows |
+| default path, `time_limit=300` (GDP parity budget) | **certified, 88 s**; after graduation, with no env set: 84.7 s, 29,551 nodes |
+| default path, OFF | time limit at 300 s, bound 1.861 |
+
+**cstr hull: no effect.** At 1,000 nodes there are 20 certified-empty LPs (167
+undecided), 1 row learned and 0 tightenings, and the bound stays 0.094. See §113.
+
+**§5 panels** (`panel/`; deterministic, 120 s backstop, `--assert-unfired-identical`,
+`--jobs 2`, load 5-14 during the first three).
+
+| panel | checks / violations | fired | outcome where it fired |
+|---|---|---|---|
+| in-repo corpus, 74, `max_nodes=2000` | 858 / 1 (below) | tanksize | certified both, **519 -> 461 nodes** |
+| the violation, tls2 "certification lost" | | **unfired (0 rays)** | at the backstop under load 14 (OFF 103.7 s / ON 120.2 s); at load 1.5 both arms optimal, 143 nodes, identical (`rerun_tls2.log`) |
+| §107's 12 extras (11 + nous1) | 150 / 0 | st_e31, nous1 | st_e31 identical bound; **nous1 1.2849 -> 1.2900** @2000 |
+| fire screen, 59 non-corpus instances, ON only (`v4_screen.py`) | 59 runs, 0 errors | rows learned on carton7, nvs23, nvs24, st_e31 | rays without a row (tree unchanged) on ex1252a, nvs19, rbrock, st_e03, st_e07 |
+| panel over the screen's new ones (carton7, nvs19, nvs23, nvs24) | 43 / 0 | carton7, nvs24 | nvs24 411 -> 409; **carton7 looser at the wall** (below) |
+| GDP parity 24 x {big-m, hull}, `max_nodes=5000` | 96 solves, incorrect 0, crossings 0, solved-lost 0 | cstr big-m only | 0.215 -> 1.414 @5000; 19 unfired pairs at the wall, the rest bit-identical |
+
+The remaining checks:
+
+- **nous1 to certification:** 15,233 -> **12,359 nodes**. It takes 3,261 rays and 3,259
+  fallback LPs for 21 rows, which make 44,845 tightenings and 16 fathoms.
+- **carton7, three repetitions at 120 s:** OFF reaches 1317/753/1013 nodes with bounds
+  50/32.5/50; ON reaches 410/430/349 nodes with bounds 26/26/40. Neither arm certifies,
+  and ON has an incumbent where OFF has none. At an equal 1,300 nodes (`time_limit=3600`)
+  the bound is identical (26.0) and ON's wall is +12 % (one sequential pair). ON's tree on
+  this numerically pathological instance (~4.6 numerical node LPs per node) visits costlier
+  nodes. Recorded as the known cost.
+- **Timing (§9; interleaved, load-gated <= 1.5, 3 reps, all certified):**
+  - tanksize 3.31 ± 0.12 -> 3.34 ± 0.06 s;
+  - nous1 32.35 ± 0.29 -> 33.85 ± 0.52 s (+4.6 %, the fallback LPs).
+
+**Verdict: graduated** (default ON, `=0` opts out to a bit-identical tree).
+
+- *Cert-clean:* no false bound, no incumbent past an optimum, and no certification lost
+  once the load artifact is re-run.
+- *Net-positive:*
+  - +1 certification at the GDP parity budget: cstr big-M, one of the three big-M
+    instances Pyomo solves and discopt did not;
+  - −11 % nodes on tanksize at neutral wall;
+  - −19 % nodes on nous1 at +4.6 % wall;
+  - a tighter node-limited bound on nous1.
+- *Cost:* carton7's 120 s bound.
+- Unlike §107-§110, it does not cost #1970's reference instances; it improves both.
+
+Where it does not fire, the tree is OFF's bit for bit. That holds on 58 corpus and 24 GDP
+pairs checked; the others hit the wall.
+
+**Follow-ups, not built.**
+
+- The fallback LP is solved on every certified-empty node whose own ray fails (~26 % extra
+  LPs on nous1, ~36 % on cstr: 10,741 in 29,551 nodes) for a few dozen rows. A cheaper trigger is the obvious lever
+  on nous1's +4.6 % wall. Measure it against this section's arms.
+- carton7's throughput loss is unexplained beyond "a different, costlier tree".
+
+Data: `docs/dev/data/2142-dual-proof/` (README).
+
+## 113. #2142 Part B: the AffinePow reverse step — killed at the entry check (2026-11-05)
+
+> **Retracted 2026-11-05 (§114):** the SCIP hull reference below is an artifact of
+> SCIP's `numerics/infinity` = 1e20. With a perspective binary at 0 the spec needs
+> a value of 1e24, so SCIP solved only the all-binaries-at-1 restriction. At
+> infinity 1e30, SCIP reports a false optimum (3.1302 > oracle 3.0620). The
+> "94/94 empty" record at the end of this section is explained in §114.
+
+**Hypothesis** (`docs/dev/data/2142-scip-expert/findings.md`, "Hull"). SCIP certifies
+discopt's captured cstr-hull spec in 1,772 nodes. With SCIP's nonlinear propagation off,
+its emulation reproduces discopt's 0.0940 at 10k nodes exactly. The kernel propagates the
+20 eps-perspective terms `w = ((1-1e-8) y + 1e-8)^-1` (`EnvTerm::AffinePow`, `p = -1`)
+**forward only**. The guess was that the missing reverse step (w-bounds -> `y`) is the gap.
+
+**Kill criterion (pre-registered in `PREREG.md` before any run).** On captured hull node
+boxes, the reverse step must close at least 50 % of the kernel-vs-SCIP box gap. The
+primary measure is at converged rounds:
+
+- per box and arm, the excess is the summed root-normalised width over SCIP's box;
+- a box SCIP proves empty counts every column, unless the arm also empties it.
+
+**Implementation measured.** Flag `DISCOPT_AFFINE_POW_REVERSE` (Rust, read once, default
+OFF), committed at `2d7d9c54`:
+
+- on a sign-definite base interval, `t ∈ [w_hi^(-1/q), w_lo^(-1/q)]` (and the `t < 0`
+  odd/even cases), with directed roots;
+- it declines at the pole;
+- a Rust test checks 20,000 sampled feasible points.
+
+| cstr hull, 94 boxes (every 10th of the first 1,000 deterministic nodes) | 15 rounds | 100,000 rounds |
+|---|---|---|
+| boxes / columns the reverse step tightens (KR vs K) | 0 / 0 | 0 / 0 |
+| closure of the gap to SCIP | **0.000** | **0.000** |
+| boxes proven empty: kernel / kernel + reverse / SCIP | 0 / 0 / 94 | 0 / 0 / 94 |
+
+**Verdict: killed.** The step has nothing to act on. On all 1,880 (term, box) pairs, any
+nontrivial upper bound on a perspective `w` came from the forward step on the same `y`,
+and `1/w_hi` never exceeds the base's lower bound (`b5_probe.log`). Nothing else in the
+spec bounds `w` from above. The flag, the implementation and the Rust test were removed
+in the commit after `8b552939` (§5, *Retired*); they never reached `main`.
+
+**Recorded, unexplained.**
+
+- SCIP 6.3 root propagation (`2142-propagation/scip_prop.py`) calls all 94 captured
+  boxes empty. It does so with its nonlinear (93/94), linear or pseudo-objective
+  propagator switched off.
+- It also calls the first 10 boxes empty with **no cutoff at all**, while the global box
+  stays open (`b6_scip_sanity.log`).
+- So either the hull tree spends its first 1,000 nodes on regions with no point
+  feasible for the exact lifted system, which the kernel cannot prove empty, or the
+  instrument has an artifact on this spec. Settle that before any further hull-propagation
+  work.
+- Dual-proof learning (§112) does not reach hull: 20 certified-empty node LPs in 1,000
+  nodes, 1 row learned, 0 tightenings, bound unchanged at 0.094 (`2142-dual-proof/hull_on_1k.log`).
+
+**Do not build:** a reverse step for the AffinePow perspective terms as a cstr-hull fix.
+Data: `docs/dev/data/2142-affinepow-reverse/`.
+
+## 114. #2142: the 94 "SCIP-empty" cstr-hull boxes — SCIP's 1e20 infinity, a real kernel rounding gap, and a fix killed at entry (2026-11-05)
+
+**Question (§113, recorded unexplained).** SCIP 6.3's root propagation called all 94 captured
+cstr-hull node boxes empty, ten of them with no cutoff, while the global box stayed open. Are the
+boxes truly empty, or is this an artifact of the SCIP instrument? Data:
+`docs/dev/data/2142-hull-empty/` (README). Every script verifies points with an evaluator of the
+spec that does not use SCIP (`specio.py`).
+
+**Verdict: both, for different reasons.**
+
+1. **SCIP's verdict was an instrument artifact.** SCIP's default `numerics/infinity` is 1e20. The
+   instruments also passed every spec bound >= 1e19 as infinite. When a perspective binary is 0,
+   its eps-perspective is `w = 1e8`, and the spec's lifted product of three such terms is
+   `1e8^3 = 1e24` (col 313; global bound 1.0000000000000012e24). SCIP cannot represent that
+   value, so it calls every configuration with a perspective binary at 0 infeasible:
+   - With binary 8 fixed to 0, SCIP returns "infeasible" in presolve at 1e20 (`c5`). At
+     infinity 1e30 it returns a point that passes the independent check (residual 8.5e-7,
+     objective 3.1336).
+   - Minimal empty set: one column, col 318 = w316·w317 in [~1e16, 1e16] (`c4`).
+   - The emptiness is not a thin-box effect. Widening every box by up to 1e-4 leaves 94/94 empty
+     (`c3`).
+   - Boxes 0 and 2 contain points that pass the independent check (`c6`), yet §113's
+     instrument called both empty.
+2. **91 of the 94 boxes are nevertheless truly empty**, for an exact and checkable reason
+   unrelated to SCIP (`c10`). The method:
+   - round the binaries to the box's integral range;
+   - forward-evaluate every lifted column whose operands are fixed;
+   - compare the result with the box.
+
+   In 91/94 boxes a forced value lies outside the box. For example, in box 4 binary 6 = 0 forces
+   `w296 = 1e8`, but the box has `w296 ∈ [9.517e7, 9.585e7]`.
+
+   The other three boxes: box 2 has a verified witness, and boxes 0 and 1 have free binaries
+   (box 0 has c6's witness).
+
+   SCIP at infinity 1e30 also calls exactly 91 empty. That agreement is consistent but not
+   independent.
+3. **Why discopt misses them: a rounding boundary case in the kernel.** In step 5 of
+   `propagate_spec_fixpoint`, the integer-rounding test is `floor(hi + 1e-6) < hi - EPS`, with
+   `EPS = 1e-9`. `cap_hi(.., 0)` pads a tightened upper bound of 0 to exactly
+   `EPS·(1 + 0) = 1e-9`. The test therefore compares `0 < 1e-9 - 1e-9`, which is false, so the
+   binary stays at `[0, 1e-9]`. Across the 94 boxes, 560 integer columns have a non-integral
+   bound.
+
+   The perspective `1/((1-1e-8) y + 1e-8)` turns that 1e-9 into `w ∈ [9.09e7, 1e8]`, a 10 %
+   range instead of the point 1e8. The tree then branches on it.
+
+   With the integer bounds rounded before the call, the unchanged kernel propagation empties
+   **91/94** (`c11`).
+
+**Retraction (§11).** The following statements are retracted:
+
+- `2142-scip-expert/findings.md` ("SCIP on the HULL spec", "Hull" table);
+- §113 ("SCIP certifies discopt's captured cstr-hull spec in 1,772 nodes"; "SCIP with its
+  nonlinear propagation off reproduces discopt's 0.0940");
+- §112 ("See §113").
+
+They no longer hold as comparisons. At infinity 1e20, SCIP's 1,772-node "certification"
+certified a **restricted** problem in which every perspective binary is 1. The true optimum lies
+in that restriction (x* has all four perspective binaries = 1, `c1`), so the objective matched
+by coincidence. At 1e30, SCIP default reports **"optimal 3.1302" after 0 nodes**. That is wrong:
+the oracle is 3.0620073, and `c1`'s x* passes the independent check with residual 8.9e-7
+(`c7_default_big1e29.log`). At 1e30 the emulation reaches dual **0.0** at 10k nodes, with SCIP's
+nonlinear propagation on or off (`c7_emu10k_*`). **There is no valid SCIP reference on this
+hull spec.** One SCIP setting excludes half the problem, and the other returns a false optimum.
+
+**Fix tried: `DISCOPT_INT_ROUND_EXACT`** (Rust, read once, default OFF). Step 5 snaps an integer
+bound on any strict improvement. Rounding to the integral range is exact. Rust tests:
+
+- the rule itself;
+- 200,000 sampled intervals, none of whose integer points was cut.
+
+Counter: `IntRoundExactSnaps`. Registered in both §5 panels.
+
+**Entry (pre-registered in `PREREG.md` before any run):**
+
+| check | kill | OFF | ON |
+|---|---|---|---|
+| E1: the 94 boxes, 15 rounds, no cutoff, no pre-rounding | ON < 85 empty | 0/94 | **91/94** (passed) |
+| E2: cstr hull, deterministic, 10k nodes | ON bound < 1.0 | 0.0940000 (479 undecided, 1022 s) | **0.0940000** (3,539 undecided, 839 s) |
+
+**Killed at E2.** The flag fires: 77 snaps in 1,000 nodes, and the tree differs. The bound does
+not move, because these boxes are not what pins it. At 1,000 nodes (`d1_pin_f{0,1}.log`, run
+concurrently, so node counts only):
+
+- **every node's LP bound is <= 0.0941**:
+  - OFF: 752 of 753 LP-optimal nodes, plus all 167 numerical and all 20 infeasible nodes;
+  - ON: 647 of 670 LP-optimal nodes, plus all 248 numerical nodes and the 1 infeasible node;
+- OFF has 6,089 `LpVerdictNumerical` against 2,827 optimal LP verdicts, and 21,836 Farkas rays
+  rejected on margin.
+
+The hull relaxation of this spec is near-uninformative on every box the tree reaches. Its
+eps-perspective products carry `w` up to 1e8 and lifted columns up to 1e24 (global bounds up to
+1e27, above the LP's 1e20 sentinel). Refuting the empty boxes earlier only moves the tree onto
+other boxes with the same LP floor.
+
+**Retired** in the commit after the E2 data (§5): the flag, `snap_integer_bounds`, the counter
+and the Rust tests. Kept: the panel entries, marked retired, and all scripts and logs. No §5
+panel was run; none is owed after a pre-registered entry kill.
+
+**What this implies for the hull gap.**
+
+- The question §113 left open is settled. Neither a missing propagation step nor a SCIP-only
+  deduction is the lever: corrected, SCIP is no better (0.0 at 10k) or is wrong.
+- The gap is the formulation. The eps-perspective `1/yhat` enters every product of the rate law
+  (#2142 Problem A).
+- Direction 2 of the issue is the measured next step. Replace the eps-approximation by the exact
+  perspective / conic hull of the rate law, which takes `1/yhat` out of the products.
+- The integer-rounding boundary case is real. It is recorded here; nothing ships for it, because
+  its one measured consumer showed no gain.
+- **Do not build:** more kernel propagation for cstr hull, or any comparison against SCIP on this
+  spec without a representable-magnitude check (`c5`).
+
+**#2142 status.** Big-M certifies (§112). Hull does not, and nothing in §113 or §114 changes that.
+The issue's "done means" (both formulations certify) is unmet, so the issue stays open on hull's
+Problem A.
+
+## 115. #2142: the division-free hull (`DISCOPT_HULL_EXACT_PERSPECTIVE`) — built, bound-neutral to its prototype, cert-clean, not net-positive, kept OFF (2026-11-05)
+
+**What was built.** `_relax/gdp_reformulate.py` `_homogenized_hull_row` (with
+`_polynomial_monomials`), gated by `SolverTuning.hull_exact_perspective`
+(`DISCOPT_HULL_EXACT_PERSPECTIVE`, default OFF). Under `gdp_method="hull"`, a disjunct row
+that is a polynomial and that `classify_constraint` does not prove convex is emitted as
+
+    sum_m c_m prod_{i in m} v_i * y^(d-|m|)  <sense>  rhs * y^d     (d >= 1)
+
+instead of the eps-perspective. A polynomial here means `+ - *`, `neg`, `Σ`, or an integer
+`**` <= 8, with no Parameter. The emitted row has no division, no eps and no aux column. It is
+exact at `y ∈ {0,1}` (proof: `2142-exact-hull/proposal.md` §3), and an off disjunct's rows are
+exactly `0.0`. Convex rows keep the eps-perspective or cone, and so do non-polynomial rows.
+`_HULL_EXACT_STATS` counts rows homogenized, left convex, and declined. Tests:
+`python/tests/test_2142_exact_hull.py`:
+
+- flag OFF: sha256 fingerprints taken on the parent commit, byte-identical;
+- monomial unit test;
+- routing of each row class;
+- fixed-selector exactness, including off-disjunct rows exactly 0;
+- the differential battery on three new bilinear/cubic shapes;
+- certified optima equal to big-M under 4 objectives;
+- cstr (slow): spec max |bound| <= 1e4, and the 2,000-node bound equal to the prototype's.
+
+**Bound-neutral against the prototype** (`arm.py flag` against `arm.py homog`, cstr,
+deterministic, `PYTHONHASHSEED=0`):
+
+| run | prototype `homog` | shipped flag |
+|---|---|---|
+| 2,000 nodes | 0.38595045554133645 | **0.38595045554133645** (also under `PYTHONHASHSEED=1`) |
+| 10,000 nodes | 1.6107840610272945 | **1.6107840610272945** |
+| `LpVerdictNumerical` @10k | 1,122 | 1,122 |
+| spec max \|bound\| | 1e3 | 1e3 |
+
+The kernel records, node-status histograms and counters are identical line for line. The
+convexity gate changes nothing on cstr, because none of its 5 rows is proven convex.
+
+**§5 panel** (data `docs/dev/data/2142-exact-hull/panel/`). Load was 5-10 on 4 cores: a
+concurrent agent's SCIP and arm runs were on the machine. The deterministic node-limited cells
+do not depend on that load; the wall-limited ones are compared only as reported.
+
+- **Corpus** (`issue2115_graduation_panel.py --deterministic --max-nodes 2000 --time-limit 120
+  --assert-unfired-identical`, 74 instances). A `.nl` instance carries no disjunction, so the
+  flag cannot run there:
+  - 861 checks, **0 violations**;
+  - 60 instances bit-identical; 14 at the wall backstop;
+  - certified 59 -> 59;
+  - the one bound difference (4stufen, tighter) is at the backstop.
+
+  Verdict: INCONCLUSIVE (never fired), by construction.
+- **GDP parity** (`issue1917_gdp_flag_panel.py`, hull). Fire phase:
+  - fires on 6 of 22 lowerable instances. Homogenized rows per instance: cstr 5, gdp_col 126,
+    hda 49 (1 convex kept), methanol 18, syngas 21, ex_633 4;
+  - identical on 16;
+  - 2 lowering errors, in both arms (kaibel, mod_hens: no ipopt).
+
+  The fired 6 were solved deterministic, 5,000 nodes / 120 s, 1 rep:
+
+| instance | OFF | ON |
+|---|---|---|
+| cstr | bound 0.0940, 496 nodes | **0.6641**, 4,130 nodes |
+| gdp_col | no incumbent, bound 1000.0 | **incumbent 22959.8**, bound **8736.8** (3 nodes) |
+| pyomo.ex_633_trespalacios | optimal, 75 nodes, 22.6 s | optimal, **47 nodes, 11.4 s** |
+| hda | root bound **121140.98** | 118678.93 (looser, 3 nodes each) |
+| methanol | -4699.665 | -4699.665 |
+| syngas | 4347.803 | 4347.803 |
+
+**Cert-clean: passes.** The ON arm has 0 incorrect, 0 bound crossings and 0 solved lost.
+Every incumbent is verified in the Pyomo model (max relative violation <= 2.8e-14).
+
+**Net-positive: fails.**
+
+- 3 instances gain, 1 loses and 2 are neutral. No certification is gained. SGM wall goes
+  93.2 -> 86.2 s.
+- The loss is hda's root bound. It is deterministic, and it is exactly the pair (118678.9 vs
+  121141.0) that killed the retired `DISCOPT_HULL_LIFTED_PERSPECTIVE` (audit). Both
+  division-free forms lose the same amount there.
+- The cause is the one the proposal predicted in §3.4. The homogenized row is relaxed by
+  McCormick on the copies' *global* boxes. On hda's rows that is weaker than the
+  eps-perspective, which these rows tolerate.
+
+**cstr at the parity budget** (default path, `time_limit=300`, flag ON, load 5-9): 11,854
+nodes, bound **0.939**, incumbent 3.0620146, **not certified**. Hull OFF reaches 0.094 at
+120 s. The prototype at load 3 reached 30,246 nodes and 1.58 (`proposal.md` §5). The
+difference in node count is the machine load, not the code: the two are bit-identical at
+equal nodes. SCIP certifies the same lowered model in 7,470 nodes (`proposal.md` §0a).
+
+**Decision.** Not graduated, because §5 requires both bars. The flag is **kept as a documented
+opt-out**, default OFF, not retired. It is the only hull lowering of cstr with bounded
+magnitudes (1e3 against 1e27), and the formulation that SCIP certifies. That makes it the base
+the next hull lever builds on. What would graduate it: a perspective-aware kernel envelope of
+the homogenized products (on the box of `t = v/y`, `proposal.md` §3.5) that removes the hda
+loss, followed by a re-run of this panel. Audit row: `docs/dev/flag-retirement-audit.md`.
+
+**#2142 status.** Unchanged in kind. Big-M certifies (§112). Hull ON is far better than hull
+OFF on cstr (bound 0.094 -> 0.94 at 300 s under load), but it does not certify. Per §0a, the
+remaining gap is in discopt's tree on this model, not in the formulation.
+
+**Verification run.**
+
+- `pytest -m smoke python/tests`: 4,578 passed, 17 skipped.
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: 19 passed.
+- `test_2142_exact_hull.py`: 33 fast tests and 2 slow tests passed (the cstr fixture takes 55 s).
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
+- `ruff format --check`: clean except a pre-existing `skills/.../SKILL.md` that this branch did
+  not touch.
+- With the flag forced ON, the hull and nesting suites pass, except for 3 tests that assert the
+  eps-perspective shape (`/` in the row). The soundness batteries on those same shapes pass.
+
+## 116. #2142: discopt certifies cstr on SCIP's presolved hull model; the homogenized hull graduates; hda's "loss" was a tighter bound (2026-11-05)
+
+### 116.1 Entry: discopt's tree on SCIP's presolved model — passes
+
+Data: `docs/dev/data/2142-scip-presolved/` (`PREREG.md`, `findings.md`).
+
+SCIP's transformed problem of the homog-hull kernel spec has 110 vars and 174 conss
+(`presolved_homog.cip`). `translate.py` translates it back into a kernel spec over the same
+column indices. Eliminated columns are recovered by SCIP's affine maps. The translation is
+checked against two fidelity gates:
+
+- SCIP solves the translation to the oracle (9,367 nodes);
+- both directions of the point maps verify to within SCIP's feastol. The PREREG gate was
+  1e-6 and is amended to 1e-5, because SCIP's own optimum of the original has residual
+  9.7e-7.
+
+`arm_pre.py` swaps the translation into a real cstr hull solve through a spy. It expands
+every point back and verifies the incumbent on the original spec. Deterministic results:
+
+| arm | 10k nodes | 20k node cap |
+|---|---|---|
+| base (control) | 1.6107840610272945 (bit-identical to §115) | 2.1886 (§115) |
+| **SCIP-presolved model** | **2.8834** | **certified, 12,931 nodes, 43 s kernel** |
+| + all original rows mapped back | | certified, 18,943 |
+| + discopt's own root-FBBT box | | certified, 12,087 |
+
+The pre-registered kill was a 20k bound <= 2.7875 with no certificate in 300 s. It **does not
+fire**. The gap to SCIP is in the model handed to the kernel, not in discopt's tree.
+
+**Retraction (§11).** This partly retracts §0a of `2142-exact-hull/proposal.md` and the
+§115 status line, both of which said "the gap is in discopt's tree".
+
+What carries the effect:
+
+- **Not** the deleted rows, and **not** SCIP's bound tightening; the two ablations above
+  show it.
+- It **is** the column eliminations beyond the 106 doubleton identities that `arm_aggr`
+  emulated (2.43 @20k):
+  - products with a fixed factor are linearised;
+  - non-identity aggregations into term and BLF outputs;
+  - 8 multi-aggregations;
+  - negated binaries;
+  - a product with two definitions is merged.
+
+SCIP ablations on the original spec: `cons_linear` presolve off takes 60,371 nodes (against
+7,470); varbound presolve off 12,617; probing presolve off 11,274.
+
+Scope decision (owner, via coordinator): the presolve is **not** built on #2142. The design
+for it is `2142-scip-presolved/followup_issue.md` (drafted, not filed).
+
+### 116.2 hda MAXIMIZES: §115's net-positive verdict is retracted
+
+§115 kept `DISCOPT_HULL_EXACT_PERSPECTIVE` OFF for one reason: hda's root bound went from
+121140.98 to 118678.93 and was recorded as "looser". hda's objective sense is `maximize`. Its
+dual bound is an upper bound, so **118678.93 is 2.0 % tighter**.
+
+The pure McCormick LP of each lowering at the declared box, with no tree, reproduces the
+pair exactly (`docs/dev/data/2142-hda-root/lp.py`). The 37 degree-2 rows carry the change.
+
+**Retracted (§11):**
+
+- §115's "not net-positive" and its "what would graduate it" (a perspective-aware envelope
+  to remove the hda loss): there was no loss.
+- The same misreading is in the retirement record of `DISCOPT_HULL_LIFTED_PERSPECTIVE`
+  (audit), whose "hda loss" is the identical pair. That flag stays retired (its code is
+  gone), but its record is corrected here: on hda it tightened the bound. Re-opening it
+  would need its own entry experiment.
+
+Tried and not shipped (`2142-hda-root/README.md`):
+
+- **Keep the eps row alongside the homogenized row.** On cstr this brings the 1e27
+  magnitudes back: 7 nodes in 120 s, bound 0.
+- **Linear perspective-McCormick rows.**
+  - hda: tighter again, 117453.
+  - gdp_col: neutral.
+  - cstr: worse at 5,000 deterministic nodes, 0.455 against 0.728.
+
+**Defect fixed on the way.** `_relax/convexity/patterns.py`'s declared-box memo kept the
+model size from before the hull lowering appended variables, because the homogenized row
+calls `classify_constraint` mid-lowering. hda's whole-model classification then raised
+`IndexError` and the solver marked the model convexity-unknown. The memo is now invalidated
+when the variable count changes. Regression test:
+`test_patterns_declared_box_cache.py::test_cache_invalidated_when_the_model_grows`.
+hda's bound is unchanged by the fix.
+
+### 116.3 §5 panel re-run and graduation
+
+Data: `docs/dev/data/2142-exact-hull/panel2/`; arm OFF is `=0`, arm ON is `=1`; load 2-3 on
+4 cores.
+
+**GDP parity, hull** (`issue1917_gdp_flag_panel.py`, deterministic, 5,000 nodes / 120 s,
+1 rep):
+
+- Fire phase: fires on 6 of 22 lowerable instances. kaibel and mod_hens fail to lower in both
+  arms (no ipopt).
+- **Cert-clean:**
+  - 0 incorrect, 0 bound crossings, 0 solved lost;
+  - every incumbent verified in Pyomo (max relative violation 2.8e-14).
+
+| instance | sense | OFF | ON |
+|---|---|---|---|
+| cstr | min | 0.0940, 591 nodes | **0.7226**, 4,568 nodes |
+| gdp_col | min | no incumbent, bound 1000.0 | **incumbent 22959.8**, bound **8736.8** |
+| hda | **max** | UB 121140.98 | **UB 118678.93** |
+| pyomo.ex_633_trespalacios | min | optimal, 75 nodes, 21.9 s | optimal, **47 nodes, 10.8 s** |
+| methanol | min | -4699.665321805 | -4699.665321838 (neutral) |
+| syngas | min | 4347.8025834920 | 4347.8025834920 (neutral) |
+
+**Net-positive:** 4 gains, 0 losses. SGM wall goes from 92.88 to 85.81 s.
+
+Big-M is unaffected by construction: the flag acts only inside the hull lowering. cstr big-M
+is re-checked below.
+
+**Corpus** (`issue2115_graduation_panel.py --deterministic --max-nodes 2000 --time-limit 120
+--assert-unfired-identical`, 74 instances): no `.nl` instance reaches a hull lowering. 813 checks, **0 violations**; 60 bit-identical OFF vs ON, 14 at the wall backstop; certified 59 -> 59; no bound tighter or looser. Verdict INCONCLUSIVE (never fired), by construction, as in §115. The same run checks the convexity-memo fix: this run's OFF arm against §115's OFF arm (before the fix) is bit-identical (status, objective, bound, nodes, `gap_certified`) on all 59 instances where neither hit the backstop (`panel2/off_vs_section115.py`).
+
+**Decision: graduated, default ON.** `=0` restores the eps-perspective lowering byte for byte;
+`test_2142_exact_hull.py::test_flag_off_is_byte_identical_to_before` checks this against the
+pre-flag fingerprints.
+
+Tests that assert the eps-perspective shape are pinned to `=0`:
+
+- `test_1917_hull_plain_equality.py::test_nonlinear_equalities_keep_the_perspective`
+- `test_1917_hull_plain_equality.py::test_retired_flag_is_inert`
+- `test_2142_hull_lifted_perspective_retired.py::test_rows_keep_the_eps_perspective`
+
+`test_cstr_hull_reaches_the_native_kernel` (slow) now pins the default route:
+
+- the spec is accepted;
+- it has no `AffinePow` terms;
+- every finite global bound is <= 1e4.
+
+`test_cstr_eps_hull_reaches_the_native_kernel` keeps the `=0` route (20 `AffinePow` terms).
+The audit row is updated, and the live-gate count goes from 49 to 48.
+
+### 116.4 cstr at the gdp_parity budget, default path (no `DISCOPT_*` env), 300 s
+
+Data: `docs/dev/data/2142-exact-hull/final/`.
+
+| method | status | incumbent | bound | nodes | wall |
+|---|---|---|---|---|---|
+| big-m | **optimal** | 3.0620146 | 3.0617346 | 29,551 | 89.6 s |
+| hull | time_limit | 3.1301981 | 1.6671 | 33,735 | 300 s |
+
+Hull reaches the native kernel with bounded magnitudes: the spec max is 1e3, against 1e27
+for the eps-perspective. It does not certify. Full hull certification moves to the follow-up
+(`2142-scip-presolved/followup_issue.md`).
+
+**#2142 status against the owner's revised target:**
+
+- big-M certifies cstr on default: done.
+- hull reaches the native kernel with bounded magnitudes on the default path: done.
+
+**Verification run:**
+
+- `pytest -m smoke python/tests`: 4,578 passed, 17 skipped.
+- `pytest -m slow` on `test_adversarial_recent_fixes.py`, `test_2142_exact_hull.py` and
+  `test_1917_hull_plain_equality.py`: 23 passed.
+- The non-slow hull / GDP / nesting / convexity / patterns suites: 2,229 passed and 1 failed.
+  The failure is `test_ipopt_backend_active_constraint_gradient`, a `ModuleNotFoundError:
+  cyipopt` in this environment, unrelated.
+- `test_1345_flag_retirement_audit.py`: 11 passed.
+- `mypy python/discopt/`: clean. `ruff check python/`: clean.
+- No Rust was touched.
+
+## 117. #2143 stage 2: root heuristic budget hygiene; the in-root LOA proposer is falsified at 120 s (2026-11-04)
 
 **Context.** GDPlib `syngas` under `gdp_method="hull"` ends its 120 s with no incumbent.
 The #2143 diagnosis showed the `DISCOPT_SUBNLP_REDUCED` sub-NLP is not the gap: no root
@@ -14473,12 +15586,12 @@ an alternative.
   at 128-145 s of 120. This is pre-existing (the stage was simply not reached before)
   and wants a cost-aware entry gate for the repair.
 
-## 106. #2143 stage 3: deadline adherence, the root presolve stop, the in-root LOA proposer (2026-11-04)
+## 118. #2143 stage 3: deadline adherence, the root presolve stop, the in-root LOA proposer (2026-11-04)
 
 Probes and data: `scratchpad/stage3/` of the session. Box: 4 cores, nothing else of
 ours running unless stated; load is recorded beside every timing.
 
-### 106.1 A root heuristic's sub-solve stops at the solve's deadline (default ON)
+### 118.1 A root heuristic's sub-solve stops at the solve's deadline (default ON)
 
 **Reproduced first.** GDPlib `syngas`, `gdp_method="hull"`, 120 s, the three stage-2
 flags ON, every heuristic, NLP and QP entry point wrapped and timed
@@ -14493,7 +15606,7 @@ flags ON, every heuristic, NLP and QP entry point wrapped and timed
   iterating past the cap.
 - **One QP of the pump's repair.** It ran from 105.95 s to 123.48 s. pounce 0.15.0's
   `project_to_feasible` takes no time limit and calls back into Python only between
-  QPs, so `_DeadlineCallbacks` could not stop it. The stage-2 write-up (§105) had
+  QPs, so `_DeadlineCallbacks` could not stop it. The stage-2 write-up (§117) had
   attributed the overrun to this QP. That is confirmed for that run shape. Offline,
   an earlier pump's repair on the same model took 10 QPs of 1.1-1.9 s each
   (`probe_repair_qp.py`, 12.4 s in all), so the cost of one QP varies by an order of
@@ -14556,9 +15669,9 @@ Honouring either changes which incumbents are found where the deadline does not
 bind, so it is §5 bound-changing work. It is not part of a deadline fix, and is
 recorded as a lead.
 
-### 106.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, RETIRED)
+### 118.2 The root presolve stops at its marginal fixed point (`DISCOPT_PRESOLVE_MARGINAL_STOP`, RETIRED)
 
-> **Retired 2026-11-04 in #2155, before merge.** Its §5 panels were cert-clean but met its pre-registered kill criterion (not net-positive in wall: gdp_parity SGM 35.33 -> 35.57 s, corpus certified 114 -> 113). The flag and its Rust implementation were deleted; the measurements below stand as the record. §106.3's all-flags-ON run included this flag and has not been repeated without it.
+> **Retired 2026-11-04 in #2155, before merge.** Its §5 panels were cert-clean but met its pre-registered kill criterion (not net-positive in wall: gdp_parity SGM 35.33 -> 35.57 s, corpus certified 114 -> 113). The flag and its Rust implementation were deleted; the measurements below stand as the record. §118.3's all-flags-ON run included this flag and has not been repeated without it.
 
 **What the 30 s on `syngas` hull bought.** Per pass and per sweep
 (`probe_presolve_passes.py`, `probe_presolve_sweeps.py`), the run hit `TimeBudget`
@@ -14610,12 +15723,12 @@ instances. The default path never adopts that box.
 
 On the default path, then, the flag changes no model the search sees. What it
 changes is time: the solve starts its root ~19 s earlier on `syngas` hull. Its
-§5 panels therefore measure what that time does downstream (results in 106.4).
+§5 panels therefore measure what that time does downstream (results in 118.4).
 
-### 106.3 Tier B rerun: the root LOA proposer reaches an incumbent on `syngas` hull (`DISCOPT_GDP_LOA_PROPOSER`, default OFF)
+### 118.3 Tier B rerun: the root LOA proposer reaches an incumbent on `syngas` hull (`DISCOPT_GDP_LOA_PROPOSER`, default OFF)
 
 **Entry experiment redone.** This is stage 2's prototype (`probe_tierb_entry.py`,
-probe-level), now on top of 106.1 and 106.2. All flags were ON:
+probe-level), now on top of 118.1 and 118.2. All flags were ON:
 
 - `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXING_SCREEN`,
   `DISCOPT_ROOT_WARMSTART_FIRST`;
@@ -14676,9 +15789,9 @@ Under hull the proposer's sub-NLP needs `DISCOPT_SUBNLP_REDUCED`. On the toy, th
 legacy pose fails on the right configuration (status ERROR) and the reduced pose
 returns 2.0.
 
-### 106.4 `syngas` hull certifies: the LOA proposer's bound reaches the search (`DISCOPT_GDP_LOA_PROPOSER_BOUND`, `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`)
+### 118.4 `syngas` hull certifies: the LOA proposer's bound reaches the search (`DISCOPT_GDP_LOA_PROPOSER_BOUND`, `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`)
 
-**Where the 120 s went after 106.3.** The panels of 106.3 (all #2143 flags ON, 120 s)
+**Where the 120 s went after 118.3.** The panels of 118.3 (all #2143 flags ON, 120 s)
 left `syngas` hull `feasible`: the incumbent 4669.0235 at about 67 s, bound 4347.80,
 3-7 nodes. Wall attribution without cProfile (`time_probe`, outermost inclusive calls):
 
@@ -14700,7 +15813,7 @@ Two levers were measured and dropped:
   recursive interval walk, and is retracted.
 - **Root presolve: not reopened.** Its 30 s yields no reduction the solve keeps (the box
   is dropped by default, `DISCOPT_PRESOLVE_BOUND_PROPAGATION` OFF), but the stop rule
-  that would end it, `DISCOPT_PRESOLVE_MARGINAL_STOP`, was retired on its panel (106.2).
+  that would end it, `DISCOPT_PRESOLVE_MARGINAL_STOP`, was retired on its panel (118.2).
 
 **The missing piece was a bound already proved.** The proposer's LOA on the source GDP
 reports `optimal after 2 iteration(s)` at about 66 s: master bound 4668.809 against
@@ -14708,7 +15821,7 @@ reports `optimal after 2 iteration(s)` at about 66 s: master bound 4668.809 agai
 `optimal` only with a valid LB, nothing unresolved, gap within tolerance; LOA cuts only
 certified-convex rows and solves subproblems globally). The hull tree, at 600 s, ends at
 bound 4668.80896982951 after 27 nodes -- the same number, re-derived for 2-3 minutes after
-the proposer had it. 106.3 left it out ("needs its own soundness argument"); the argument:
+the proposer had it. 118.3 left it out ("needs its own soundness argument"); the argument:
 the lowering is exact at integer selectors, so the lowered model's optimum is no better
 than the GDP's, and LOA's GDP bound floors it. Checked against `_relax/gdp_reformulate.py`:
 big-M takes M from finite variable bounds and refuses an infinite one rather than clamp it;

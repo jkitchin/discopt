@@ -1,0 +1,5 @@
+ARM=pre MAX_NODES=20000 TL=7200.0 DET=True status=optimal obj=3.0620145766187727 bound=3.0617110307647915 nodes=12931 gap_certified=True wall=70.1s
+stats: {'spec_matched': 1, 'rewritten': 1}
+counters: {'DualProofLearned': 59, 'DualProofFathoms': 103, 'LpVerdictNumerical': 917, 'LpInfeasUncertified': 302}
+RESULT arm=pre nodes=20000 bound=3.0617110307647915 status=optimal wall=70.1
+executed assertions: 5

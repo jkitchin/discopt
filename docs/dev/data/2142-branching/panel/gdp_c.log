@@ -1,0 +1,25 @@
+solve: 12 (instance, method) pairs x 2 arms x 1 reps
+solve rep0 spectralog                         big-m  off unsolved           status=feasible obj=12.08926220096832 bound=12.084247333895739 nodes=415 wall=120.114 load=1.58
+solve rep0 spectralog                         big-m  on  unsolved           status=feasible obj=12.08926220096832 bound=12.084247333895739 nodes=417 wall=120.101 load=5.4
+solve rep0 spectralog                         hull   on  unsolved           status=feasible obj=12.089262200968324 bound=10.10471860596715 nodes=223 wall=120.694 load=7.11
+solve rep0 spectralog                         hull   off unsolved           status=feasible obj=12.089262200968324 bound=10.10471860596715 nodes=223 wall=120.775 load=5.04
+solve rep0 stranded_gas                       big-m  off unsolved           status=time_limit obj=None bound=None nodes=0 wall=126.193 load=5.1
+solve rep0 stranded_gas                       big-m  on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=125.76 load=4.45
+solve rep0 stranded_gas                       hull   on  unsolved           status=time_limit obj=None bound=None nodes=0 wall=125.238 load=3.93
+solve rep0 stranded_gas                       hull   off unsolved           status=time_limit obj=None bound=None nodes=0 wall=125.729 load=2.38
+solve rep0 syngas                             big-m  off unsolved           status=time_limit obj=None bound=2.059437978070299 nodes=3 wall=120.175 load=2.15
+solve rep0 syngas                             big-m  on  unsolved           status=time_limit obj=None bound=2.059437978070299 nodes=3 wall=120.606 load=2.56
+solve rep0 syngas                             hull   on  unsolved           status=time_limit obj=None bound=4347.802583492291 nodes=3 wall=126.52 load=2.44
+solve rep0 syngas                             hull   off unsolved           status=time_limit obj=None bound=4347.802583492291 nodes=3 wall=125.754 load=2.21
+solve rep0 pyomo.eight_process                big-m  off solved             status=optimal obj=68.0097515218955 bound=68.00971272202321 nodes=27 wall=19.348 load=1.08
+solve rep0 pyomo.eight_process                big-m  on  solved             status=optimal obj=68.0097515218955 bound=68.00971272202321 nodes=27 wall=19.42 load=1.33
+solve rep0 pyomo.eight_process                hull   on  solved             status=optimal obj=68.00974430089958 bound=68.00971278380305 nodes=59 wall=20.384 load=1.23
+solve rep0 pyomo.eight_process                hull   off solved             status=optimal obj=68.00974430089958 bound=68.00971278380305 nodes=59 wall=20.223 load=1.23
+solve rep0 pyomo.eight_process_logical        big-m  off solved             status=optimal obj=68.00974418763874 bound=68.00971271613832 nodes=19 wall=18.827 load=1.37
+solve rep0 pyomo.eight_process_logical        big-m  on  solved             status=optimal obj=68.00974418763874 bound=68.00971271613832 nodes=19 wall=18.859 load=1.57
+solve rep0 pyomo.eight_process_logical        hull   on  solved             status=optimal obj=68.00974409832823 bound=68.0097127838036 nodes=41 wall=30.445 load=1.41
+solve rep0 pyomo.eight_process_logical        hull   off solved             status=optimal obj=68.00974409832823 bound=68.0097127838036 nodes=41 wall=30.502 load=1.22
+solve rep0 pyomo.strip_packing_concrete       big-m  off solved             status=optimal obj=11.0 bound=11.0 nodes=1 wall=0.268 load=1.12
+solve rep0 pyomo.strip_packing_concrete       big-m  on  solved             status=optimal obj=11.0 bound=11.0 nodes=1 wall=0.276 load=1.35
+solve rep0 pyomo.strip_packing_concrete       hull   on  solved             status=optimal obj=11.000000000000002 bound=11.000000000000002 nodes=1 wall=0.371 load=1.35
+solve rep0 pyomo.strip_packing_concrete       hull   off solved             status=optimal obj=11.000000000000002 bound=11.000000000000002 nodes=1 wall=0.388 load=1.57

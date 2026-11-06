@@ -1,0 +1,9 @@
+ARM=flag METHOD=hull DET=True MAX_NODES=10000 TL=7200.0 status=node_limit obj=3.0620145766187727 bound=1.6107840610272945 nodes=10000 gap_certified=False wall=197.7s
+proto stats: {'rows': 0, 'auxes': 0, 'hull_mc_rows': 0, 'arm': None}
+spec max |global bound|: 1.000e+03
+  kernel: {'max_nodes': 10000, 'status': 'node_limit', 'bound': 1.6107840610272945, 'nodes': 10000, 'undecided': 0, 'n_cols': 285, 'wall': 164.0}
+node status histogram: {'optimal': 5640, 'infeasible': 3395}
+counters: {'DualProofLearned': 65, 'DualProofTightenings': 93264, 'DualProofFathoms': 109, 'LpVerdictOptimal': 4533, 'LpVerdictInfeasible': 201, 'LpVerdictNumerical': 1122, 'LpInfeasUncertified': 214, 'FarkasRejectMargin': 5943}
+exact-hull stats: {'homogenized': 5, 'convex': 0, 'not_polynomial': 0}
+RESULT arm=flag nodes=10000 bound=1.6107840610272945 status=node_limit wall=197.7 spec_mag=1.000e+03 numerical=1122
+executed assertions: 6

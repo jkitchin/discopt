@@ -949,21 +949,21 @@ def _reduce_subnlp(
         scale = np.zeros(m, dtype=np.float64)
         with np.errstate(invalid="ignore"):
             np.add.at(scale, rows, np.abs(vals) * np.abs(x0[cols]))
+        # #2144: a row's derivative can be non-finite at a point where the row
+        # itself holds exactly -- under hull, an off disjunct's eps-perspective row
+        # at ``v = 0, y = 0`` has a 0/0 partial. Its ``scale`` was then NaN, so was
+        # its threshold, and ``~(viol <= NaN)`` refused the fixing. Measured on
+        # GDPlib mod_hens (hull): a configuration feasible to 1.5e-12 (objective
+        # 360045.09, the lifted big-M point) was refused on 14 such rows, and so was
+        # every sampled configuration. Such a row is judged without its scale, i.e.
+        # against ``10 * max(SMALL_ROW_ABS_FLOOR, feas_tol)``: the row is constant in
+        # the reduced NLP, and the final check rejects any violation above
+        # ``SMALL_ROW_ABS_FLOOR`` whose Jacobian it cannot form, so nothing the
+        # legacy pose could return is refused, and a clearly violated row still is.
+        scale = np.where(np.isfinite(scale), scale, 0.0)
         viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
         threshold = 10.0 * np.maximum(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale)
-        # #2144: refuse only on a row this test can judge. A row's derivative can
-        # be non-finite at a point where the row itself holds exactly -- under hull,
-        # an off disjunct's eps-perspective row at ``v = 0, y = 0`` has a 0/0
-        # partial -- and then ``scale`` and ``threshold`` are NaN and
-        # ``~(viol <= NaN)`` refused the fixing. The final check accepts such a row
-        # (a violation within ``SMALL_ROW_ABS_FLOOR`` needs no Jacobian there), so
-        # the refusal broke this function's own contract. Measured on GDPlib
-        # mod_hens (hull): a configuration feasible to 1.5e-12 (objective
-        # 360045.09, the lifted big-M point) was refused on 14 such rows, and so
-        # was every sampled configuration. A row left unjudged is still dropped
-        # from the reduced NLP and checked by the full-evaluator verification.
-        judged = np.isfinite(threshold)
-        if np.any(constant & judged & ~(viol <= threshold)):
+        if np.any(constant & ~(viol <= threshold)):
             return _REDUCED_REFUTED
     keep = np.flatnonzero(touches_free)
     ev_solve = _RowSubsetEvaluator(evaluator, keep, lb_red, ub_red)
