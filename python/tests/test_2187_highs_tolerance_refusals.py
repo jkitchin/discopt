@@ -46,6 +46,8 @@ BIGM_OPT = {
     "rosenbrock_Bh_lam1.0_s413_p1": -54.5248663510,
     "rosenbrock_Bh_lam1.0_s406_p0": -38.1894278908,
     "rosenbrock_Bm_lam3.0_s404_p0": 20.5561384254,
+    # A hidden-neuron permutation of s406_p0 (the same function), from the #2187 panel.
+    "rosenbrock_Bh_lam1.0_s406_p0_perm4": -38.1894278908,
 }
 
 
@@ -440,3 +442,79 @@ def test_rederive_below_root_refuses_an_lp_point_also_below_the_bound():
     out, labels, stats = _pending(15.0, 20.0)
     lp_milp_highs._rederive_below_root(out, (np.ones(1), 19.0), labels, stats, GAP_KW)
     assert out.objective == 15.0 and out.status == "feasible" and not out.gap_certified
+
+
+# ── #1678 adoption takes the RE-DERIVED cross point, never the raw one ───────
+
+
+def test_s406_perm4_extended_publishes_the_value_of_its_point():
+    """Before: ``optimal`` at -38.1894713, the raw presolve-free incumbent, while the
+    network's exact value at the published inputs is -38.1894279 (4.3e-5 apart), on
+    the merge base as well. The raw point was adopted as 4.34e-5 "better" than the
+    primary's; the LP over its own integers gives the exact value."""
+    name = "rosenbrock_Bh_lam1.0_s406_p0_perm4"
+    r, f = _solve(name, strategy="relu_extended")
+    _assert_certified_optimum(name, r, f)
+    assert abs(r.objective - f) <= 1e-9 * (1 + abs(f))
+    assert "milp/presolve_cross_incumbent_adopted" not in r.solver_stats
+
+
+def _two_point_sf() -> StdForm:
+    # min -x - 2y  s.t.  x + y + s = 10, x, y integer >= 0: optimum -20 at (0, 10).
+    return StdForm.from_arrays(
+        c=np.array([-1.0, -2.0, 0.0]),
+        A=np.array([[1.0, 1.0, 1.0]]),
+        b=np.array([10.0]),
+        xl=np.zeros(3),
+        xu=np.array([1e20, 1e20, 1e20]),
+        int_idx=np.array([0, 1]),
+    )
+
+
+def _verifier_accepting(monkeypatch, raw_obj: float):
+    """The route's verifier, except that the cross point ``(0, 10)`` is reported at
+    ``raw_obj``: a raw HiGHS point whose objective the row tolerance flattered."""
+    real = lp_milp_highs._verified_mip_point
+    flagged = {"raw": 0}
+
+    def fake(sf, x):
+        if x is not None and np.asarray(x).size == 3 and np.isnan(np.asarray(x)[2]):
+            flagged["raw"] += 1
+            return (np.array([0.0, 10.0, 0.0]), raw_obj)
+        return real(sf, x)
+
+    monkeypatch.setattr(lp_milp_highs, "_verified_mip_point", fake)
+    return flagged
+
+
+def test_adopt_uses_the_lp_point_not_the_raw_cross_point(monkeypatch):
+    sf = _two_point_sf()
+    flagged = _verifier_accepting(monkeypatch, -20.5)  # raw: 0.5 "better" than truth
+    out = HighsOutcome("optimal", x=np.array([1.0, 9.0, 0.0]), objective=-19.0, gap_certified=True)
+    cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 10.0)
+    assert flagged["raw"] == 1, "the raw cross point was never offered"
+    assert out.stats["milp/presolve_cross_incumbent_adopted"] == 1.0
+    assert out.objective == pytest.approx(-20.0, abs=1e-9)  # the LP point, not -20.5
+    assert out.stats["milp/presolve_cross_incumbent_rederive_shift"] == pytest.approx(0.5)
+
+
+def test_adopt_declines_when_the_lp_point_is_no_better(monkeypatch):
+    sf = _two_point_sf()
+    flagged = _verifier_accepting(monkeypatch, -20.5)
+    out = HighsOutcome("optimal", x=np.array([0.0, 10.0, 0.0]), objective=-20.0, gap_certified=True)
+    cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 10.0)
+    assert flagged["raw"] == 1, "the raw cross point was never offered"
+    assert out.objective == -20.0
+    assert "milp/presolve_cross_incumbent_adopted" not in out.stats
+
+
+def test_adopt_without_budget_adopts_nothing(monkeypatch):
+    sf = _two_point_sf()
+    _verifier_accepting(monkeypatch, -20.5)
+    out = HighsOutcome("optimal", x=np.array([1.0, 9.0, 0.0]), objective=-19.0, gap_certified=True)
+    cross = HighsOutcome("optimal", x=np.array([0.0, 10.0, np.nan]))
+    lp_milp_highs._adopt_better_cross_incumbent(sf, out, cross, 0.0)
+    assert out.objective == -19.0
+    assert out.stats["milp/presolve_cross_incumbent_not_rederived"] == 1.0

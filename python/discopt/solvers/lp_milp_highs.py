@@ -3727,7 +3727,9 @@ def _gap_closed(obj: float, bound: float, kw: dict[str, Any]) -> bool:
     )
 
 
-def _adopt_better_cross_incumbent(sf: StdForm, out: HighsOutcome, cross: HighsOutcome) -> None:
+def _adopt_better_cross_incumbent(
+    sf: StdForm, out: HighsOutcome, cross: HighsOutcome, time_limit: Optional[float]
+) -> None:
     """#1678 II.19: publish the cross-solve's incumbent when it is verified and better.
 
     The presolve-free solve is a full HiGHS solve; its incumbent often beats the
@@ -3748,14 +3750,40 @@ def _adopt_better_cross_incumbent(sf: StdForm, out: HighsOutcome, cross: HighsOu
     cross point verified at -7.3e-7 against an exact optimum of 0 (the primary's), and
     adopting it published a super-optimal incumbent that the solve-level verifier then
     refused and re-solved.
+
+    #2187: a gain larger than the yardstick can be tolerance too, so the point adopted is
+    the cross incumbent RE-DERIVED by the LP over its own integers
+    (:func:`_fixed_integer_lp`), never the raw HiGHS point -- the #1920 rule of
+    :func:`_merge_uncertified_cross`. The verifier's row tolerance is relative, and a
+    network row chain amplifies it. Measured on a 2-32-32-1 ``relu_extended`` net
+    (a hidden-neuron permutation of #2187's ``s406_p0``): the raw cross point verified at
+    -38.1894713, 4.34e-5 "better" than the primary's, while the network's exact value at
+    its inputs is -38.1894279, and so is the LP over its integers. The route certified
+    -38.1894713 with that as its bound. With no budget left for the LP, or no verified
+    LP point, nothing is adopted.
     """
     if out.objective is None:
         return
-    pt = _verified_mip_point(sf, cross.x)
-    if pt is None:
+    raw = _verified_mip_point(sf, cross.x)
+    if raw is None:
         return
-    if out.objective - pt[1] <= CERT_ABS + CERT_REL * abs(out.objective):
+    thr = CERT_ABS + CERT_REL * abs(out.objective)
+    if out.objective - raw[1] <= thr:
         return
+    pt = raw
+    if sf.int_idx.size:
+        if time_limit is not None and time_limit <= 0.0:
+            out.stats["milp/presolve_cross_incumbent_not_rederived"] = 1.0
+            return
+        fx = _fixed_integer_lp(sf, raw[0], time_limit)
+        lp_pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+        if lp_pt is None:
+            out.stats["milp/presolve_cross_incumbent_not_rederived"] = 1.0
+            return
+        out.stats["milp/presolve_cross_incumbent_rederive_shift"] = float(lp_pt[1] - raw[1])
+        pt = lp_pt
+        if out.objective - pt[1] <= thr:
+            return
     out.stats["milp/presolve_cross_incumbent_adopted"] = 1.0
     out.stats["milp/presolve_cross_incumbent_gain"] = float(out.objective - pt[1])
     out.x, out.objective = pt
@@ -3819,7 +3847,7 @@ def _weaker_bound(
     if out.status != "optimal" or out.bound is None or cross.bound is None:
         return out
     out.stats["milp/presolve_cross_bound"] = float(cross.bound)
-    _adopt_better_cross_incumbent(sf, out, cross)
+    _adopt_better_cross_incumbent(sf, out, cross, kw.get("time_limit"))
     if cross.bound >= out.bound:
         if out.objective is not None and out.bound > out.objective:
             out.bound = out.objective
