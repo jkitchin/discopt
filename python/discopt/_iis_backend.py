@@ -66,8 +66,9 @@ class HighsBackend:
     name = "highs"
 
     def __init__(self, A, row_lo, row_hi, col_lb, col_ub, is_int) -> None:
-        import highspy
+        from discopt._optional_highs import require_highspy
 
+        highspy = require_highspy("the HiGHS IIS backend (iis_engine='highs')")
         self.hs = highspy
         n, m = col_lb.size, row_lo.size
         inf = highspy.kHighsInf

@@ -574,8 +574,9 @@ def _rust_reduced(Ar, rl, rh, lo, hi, hd, left) -> bool | None:
 
 def _highs_reduced(Ar, rl, rh, lo, hi, hd, left, stop_at, guard) -> bool | None:
     """The reduced model, presolve-free, on HiGHS (the pre-P3.2 code)."""
-    import highspy
+    from discopt._optional_highs import require_highspy
 
+    highspy = require_highspy("the HiGHS IIS reduction (iis_engine='highs')")
     h = highspy.Highs()
     h.silent()
     h.setOptionValue("presolve", "off")

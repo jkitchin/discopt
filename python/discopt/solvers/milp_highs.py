@@ -88,18 +88,13 @@ def _drop_negligible_enabled() -> bool:
     return _env_flag(DROP_NEGLIGIBLE_ENV, default=True)
 
 
-class HighsBackendUnavailable(ImportError):
-    """``highspy`` is not installed, so the HiGHS master backend cannot be used."""
+from discopt._optional_highs import MissingHighsError as HighsBackendUnavailable  # noqa: E402, F401
 
 
 def _require_highspy():
-    try:
-        import highspy
-    except ImportError as err:  # pragma: no cover - exercised via the selector
-        raise HighsBackendUnavailable(
-            "milp_solver='highs' needs the optional HiGHS backend: pip install highspy"
-        ) from err
-    return highspy
+    from discopt._optional_highs import require_highspy
+
+    return require_highspy("milp_solver='highs' (the HiGHS MILP master)")
 
 
 def _hand_highs_col_bounds(bounds: Optional[BoundList], n: int) -> tuple[np.ndarray, np.ndarray]:

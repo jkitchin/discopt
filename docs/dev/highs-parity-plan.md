@@ -1720,7 +1720,7 @@ and is re-written by P4.1.**
 
 ### Phase 6 — HiGHS optional, then removable
 
-- [ ] **P6.1 — `discopt/_optional_highs.py` and the inventory.** Scope: move
+- [x] **P6.1 — `discopt/_optional_highs.py` and the inventory. DONE 2026-11-06.** Scope: move
   `HighsUnavailable`/`require_highspy` (`lp_milp_highs.py:122-135`) and
   `milp_highs.HighsBackendUnavailable` (`:91`) to one module with `MissingHighsError`
   (`ModuleNotFoundError`, `name="highspy"`, message names `pip install 'discopt[highs]'`);
@@ -1728,6 +1728,17 @@ and is re-written by P4.1.**
   listing every remaining `highspy` reach with its feature. Done: `grep -rn "import
   highspy" python/discopt` lists only sites behind `require_highspy`; smoke green. Kill:
   none. Regime: bound-neutral.
+  **Result (2026-11-06): done.** `python/discopt/_optional_highs.py` (`MissingHighsError`,
+  `highs_available`, `require_highspy(feature)`); `lp_milp_highs.HighsUnavailable` and
+  `milp_highs.HighsBackendUnavailable` are aliases of `MissingHighsError`, and their
+  `require_highspy` wrappers delegate. All 11 former `import highspy` sites (`mipcc` x2,
+  `_root_cuts` x3, `_iis_backend`, `_iis_reduce`, `solver`, `milp_highs`,
+  `lp_milp_highs`) go through it; `grep -rn "import highspy" python/discopt` lists only
+  `_optional_highs.py` (guarded by `test_highs_parity_p61_optional_highs.py`, smoke).
+  Inventory `docs/dev/highs-optional-inventory.md`: 12 reaches, 4 already HiGHS-free by
+  default (pure LP D1, decomposition masters P5.2, convex node bound, WASM fallbacks), 1
+  automatic (NLP-BB root cuts), the rest gated on D2 (pure MILP), D3 (route master), the
+  `solve_lp_std` seam default and the IIS default. Gates: ruff/mypy clean, smoke 4560.
 - [ ] **P6.2 — CI lane "Python without highspy" + corpus guard.** Scope:
   `.github/workflows/ci.yml` (clone of the `:780` lane), new
   `python/tests/test_highs_optional.py` mirroring `test_1873_jax_optional.py` (import

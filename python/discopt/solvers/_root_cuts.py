@@ -422,11 +422,9 @@ def root_cuts_engine() -> str:
     """
     raw = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_ENGINE")
     if raw is None:
-        try:
-            import highspy  # noqa: F401
-        except ImportError:
-            return "rust"
-        return "highs"
+        from discopt._optional_highs import highs_available
+
+        return "highs" if highs_available() else "rust"
     val = raw.strip().lower()
     if val not in ("highs", "rust"):
         raise ValueError(f"DISCOPT_NLPBB_ROOT_CUTS_ENGINE={val!r}: expected 'highs' or 'rust'")
@@ -492,8 +490,9 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
             return None, None, None, None
         x, duals, h = got
         return _finish_root_lp(root, x, duals, h)
-    import highspy
+    from discopt._optional_highs import require_highspy
 
+    highspy = require_highspy("the HiGHS NLP-BB root-cut LP")
     inf = highspy.kHighsInf
     n_le = a_ub.shape[0]
     n_eq = root.A_eq.shape[0]
@@ -614,8 +613,9 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
     """
     if isinstance(h, _RustRootBasis):
         return _separate_gmi_rust(h, x, a_all, b_all, max_cuts)
-    import highspy
+    from discopt._optional_highs import require_highspy
 
+    highspy = require_highspy("the HiGHS NLP-BB root-cut LP")
     # ``h``'s rows are [<= rows..., == rows...] and the row loop below pairs
     # ``binv[r]`` / ``row_st[r]`` with ``a_all[r]`` POSITIONALLY. A caller whose
     # row system is wider than the LP this basis was factorized from would

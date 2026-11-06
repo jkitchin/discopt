@@ -35732,11 +35732,9 @@ def _highs_lp_verifier_available() -> bool:
     corroborates it, and the multiplier-free node bound falls back to the
     box-only bound (#1537).
     """
-    try:
-        import highspy  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    from discopt._optional_highs import highs_available
+
+    return highs_available()
 
 
 def _convex_qp_node_lower_bound(

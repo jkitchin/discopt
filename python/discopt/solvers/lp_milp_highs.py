@@ -119,18 +119,15 @@ MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_
 _LIMIT_STATUSES = ("kTimeLimit", "kIterationLimit", "kSolutionLimit", "kInterrupt")
 
 
-class HighsUnavailable(ImportError):
-    """``highspy`` is missing, which for this route means a broken install."""
+from discopt._optional_highs import MissingHighsError as HighsUnavailable  # noqa: E402, F401
 
 
 def require_highspy():
-    try:
-        import highspy
-    except ImportError as err:
-        raise HighsUnavailable(
-            "the LP/MILP HiGHS route needs highspy: pip install 'highspy>=1.11,!=1.12.0'"
-        ) from err
-    return highspy
+    """``highspy`` for the LP/MILP HiGHS route, or :class:`HighsUnavailable`
+    (``discopt._optional_highs.MissingHighsError``)."""
+    from discopt._optional_highs import require_highspy as _require
+
+    return _require("the LP/MILP HiGHS route")
 
 
 @dataclass(frozen=True)
