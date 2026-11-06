@@ -41,7 +41,10 @@ CORPORA = (
 
 #: Instances the un-lifted path closes quickly, with the node count it closes in.
 #: The lift costs each of them nodes, so the gate must decline it.
-LIFT_DECLINED = {"nvs02": 3, "nvs14": 3, "prob03": 5}
+#: `prob03` left the list on 2026-11-06: with `DISCOPT_MILP_ROOT_GMI_REPAIR` default ON
+#: (highs-parity P4.4) its LIFTED model certifies at the root (1 node vs the gate's 5),
+#: so the lift no longer costs it nodes -- the premise of this list no longer holds.
+LIFT_DECLINED = {"nvs02": 3, "nvs14": 3}
 
 #: Instances that certify ONLY with the lift. The gate must keep it, and the
 #: probe it spends first must not cost them their certificate.

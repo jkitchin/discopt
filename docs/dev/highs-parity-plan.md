@@ -1395,7 +1395,7 @@ and is re-written by P4.1.**
   closed on ≥ 5 instances. Flag `DISCOPT_MILP_CUT_REPAIR`. Done: panel bars; feasible-point
   sampling (≥ 1e5 integer-feasible points over the panel) 0 violations. Kill: entry < 5
   instances → retire. Regime: bound-changing.
-- [ ] **P4.4 — Tableau-row c-MIR / lifted cover (HiGHS's family).** Scope: `cmir.rs`
+- [x] **P4.4 — Tableau-row c-MIR / lifted cover (HiGHS's family). RE-SCOPED; ROOT GMI REPAIR GRADUATED 2026-11-06.** Scope: `cmir.rs`
   (aggregation from tableau rows, not only original rows), `cover.rs` (lifting with
   bound substitution), driver wiring. Entry: on the four `mik-250-20-75-*` + `fiber` +
   `sp150x300d` roots (where §2.5 measured 4.5 % residual vs HiGHS 1.7 %), root gap with
@@ -1454,7 +1454,16 @@ and is re-written by P4.1.**
     0.181, `sp150x300d` 0.429 → 0.300, `neos-3610040-iskar` 0.026 → 0.000.
   - MINLP corpus (`p4.4/p44_corpus.jsonl`, 20 s): 74 rows, 0 problems, certified 56 = 56,
     130 incumbent checks.
-  Both bars met → graduation is the owner's call. Tableau c-MIR (the original P4.4
+  **Graduated 2026-11-06 (owner: "Graduate, then P4.3")**: default ON, `=0` opt-out.
+  Gates after the flip: `cargo test` 1005/0, clippy clean, smoke 4532 + 2 failures, adversarial
+  19, MILP/IIS/cut tests 1872 + 1 failure. All three failures trace to the flip:
+  `test_1236[prob03]` (its lifted model now certifies at the root, 1 node vs 5 -- removed
+  from the list, per the test's own message), `test_2157` (the root now closes the ReLU
+  net, so the node separator is never called -- that test pins `=0` to keep exercising the
+  node path), and `test_1940[ex1264]` (passes 3/3 at low load with and without the flag;
+  the flag makes the file 6.6 s vs 3.5 s, so under load the lift can miss its slice --
+  watch it in CI).
+  Tableau c-MIR (the original P4.4
   scope) is deferred: with the repair, `mik` stays at 3.8-4.2 %; its limiter is the
   500-cut cap (2000 helps 0-0.4 pp), not a missing family.
 - [ ] **P4.5 — Root restart.** Scope: `milp_driver.rs` root loop. After the root cut loop,

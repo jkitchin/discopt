@@ -66,14 +66,22 @@ const FRAC_MIN: f64 = 1e-3;
 /// valid.
 const MAX_ABS_COEFF: f64 = 1e7;
 
-/// `DISCOPT_MILP_ROOT_GMI_REPAIR=1` (highs-parity P4.4): separate GMI cuts off a SHORT
+/// `DISCOPT_MILP_ROOT_GMI_REPAIR` (highs-parity P4.4): separate GMI cuts off a SHORT
 /// basis by completing it with unit columns ([`separate_on_completed_basis`]); the
-/// MILP driver's slack rewrite reads the same flag (`milp_driver::gmi_repair_enabled`).
-/// Default OFF: bound-changing (it adds cuts where none were separated).
+/// MILP driver's slack rewrite reads the same flag (`substitute_slacks_to_structural`'s
+/// `slack_by_column`).
+///
+/// **Graduated (default ON, 2026-11-06, owner).** §5 panel, bars pre-registered in
+/// `discopt_benchmarks/scripts/p44_gmi_repair_panel.py` (data
+/// `docs/dev/data/highs-parity/p4.4/`): MIPLIB-38 + M panel, 3 reps, 20 s, 372 solves --
+/// cert-clean; certified 96 -> 99; nodes over the always-certified instances -19 %;
+/// 1 dual-bound loss (`neos17`) against a cap of 2. MINLP corpus: 0 problems,
+/// certified 56 = 56. Exact enumeration: 0 violations over 319 cuts x 4193 points.
+/// `DISCOPT_MILP_ROOT_GMI_REPAIR=0` restores the legacy refusal and `ns + r` rewrite.
 pub(crate) fn gmi_repair_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var("DISCOPT_MILP_ROOT_GMI_REPAIR").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+        Ok("0") | Ok("false") | Ok("no")
     )
 }
 
@@ -695,17 +703,27 @@ mod tests {
         let calls = |()| crate::profile::counter(crate::profile::Ctr::SepGomoryCalls);
         let short = |()| crate::profile::counter(crate::profile::Ctr::SepGomoryShortBasis);
 
-        // Arm 1: a basis one column short of `m`. It must refuse AND say so.
+        let completed = |()| crate::profile::counter(crate::profile::Ctr::SepGomoryBasisCompleted);
+
+        // Arm 1: a basis one column short of `m`. Whatever happens to it -- refused
+        // (`DISCOPT_MILP_ROOT_GMI_REPAIR=0`) or completed with a unit column (the
+        // default since P4.4) -- exactly one of the two counters must say so. Its only
+        // basic slot is then the appended unit column, which is continuous: no cut.
         let c0 = calls(());
         let s0 = short(());
+        let k0 = completed(());
         let stub = Basis {
             col_status: vec![AT_LOWER, AT_LOWER, AT_LOWER],
             basic_vars: vec![], // 0 != m = 1
         };
         let cuts = separate_gomory_cols(&sp, 1, 3, &l, &u, &b, &stub, &integrality, 1e-7, 1e9);
-        assert!(cuts.is_empty(), "a short basis cannot yield cuts");
-        assert_eq!(calls(()) - c0, 1, "the call counter is the denominator");
-        assert_eq!(short(()) - s0, 1, "the short-basis refusal must be counted");
+        assert!(cuts.is_empty(), "no integer basic variable: no cut");
+        assert!(calls(()) - c0 >= 1, "the call counter is the denominator");
+        assert_eq!(
+            (short(()) - s0) + (completed(()) - k0),
+            1,
+            "a short basis must be counted as refused or as completed"
+        );
 
         // Arm 2: the complete basis. The refusal counter must NOT move — without
         // this arm the test would pass on a counter that fires unconditionally.
