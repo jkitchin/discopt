@@ -795,3 +795,22 @@ keeps local cuts in the LP for the whole subtree, so branching compounds on the 
 relaxation. The next increment is **subtree inheritance of the local rows**. On the route
 the shared matrix is constant during the search (no node, lazy or hook cuts are folded;
 `node_cuts` off), so the local-row column positions are stable.
+
+**14. B1' with subtree inheritance (`c61b3b76`): the mechanism fires heavily, and the
+`neos-361*` frontier still does not move.**
+
+Data: `b1p_node_gmi_inherit_direct.log`, direct driver, 20 s, unrounded bounds.
+
+| row | bound OFF | bound ON | lifted | inherit-solves | nodes OFF -> ON |
+|---|---|---|---|---|---|
+| `istra` | 48.32 | 48.18 | 7,381 | 10,673 | 43.6k -> 21.3k |
+| `iskar` | 36.19 | 36.08 | 15,320 | 21,171 | 91.8k -> 42.4k |
+| `kaihu` | 117.46 | 117.11 | 10,228 | 17,053 | 67.0k -> 34.1k |
+
+`kaihu` also shows 897 LP failures. Fewer nodes per second account for the lower ON
+bounds.
+
+SCIP certifies `istra` with tree-only Gomory in ~1,600 nodes. So either our node GMI cuts
+are much weaker than SCIP's in-tree Gomory cuts, or the bound that matters is not
+reaching the frontier minimum. This goes to the HiGHS/SCIP-expert consult (standing
+instruction) before more building.
