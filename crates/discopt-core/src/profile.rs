@@ -302,6 +302,11 @@ counters!(
     ImproveDiveHits,
     ImproveDiveCutoff,
     ImproveDivePropInfeas,
+    // D2 B1 (`DISCOPT_MILP_NODE_SEP`): in-tree c-MIR calls, raw candidates, and cuts
+    // kept after the structural rewrite and selection.
+    NodeSepCalls,
+    NodeSepRaw,
+    NodeSepCuts,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,

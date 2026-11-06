@@ -390,6 +390,47 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
     })
 }
 
+/// Whether in-tree c-MIR separation is on (highs-parity D2 Phase B, step B1), read once
+/// from `DISCOPT_MILP_NODE_SEP`. Default OFF; an unrecognized value is refused.
+///
+/// ON runs the aggregated c-MIR separator (#2107, the root's `cmir_cuts` family) at the
+/// [`NODE_SEP_PER_BATCH`] best-bound fractional nodes of every batch. It runs on the node
+/// LP point with the **global** bounds over the original rows, so every cut is globally
+/// valid. Each cut is rewritten over structural columns exactly as the root rewrites
+/// its cuts, the strongest [`NODE_SEP_MAX_CUTS`] are kept, and they join the shared
+/// node-cut pool (`node_cut_cap`), which later batches solve against.
+///
+/// Why: on the 10 rows HiGHS's cuts certify and its plain B&B does not, HiGHS without
+/// in-tree separation certifies 3/10 against 10/10 with it, at identical root bounds.
+/// The Rust root already matches HiGHS's root there, and the Rust node separator
+/// (knapsack cover) finds nothing (`highs-parity-d2-analysis.md` follow-up 10).
+/// Bound-changing (cuts change every later node LP), so it ships default-OFF pending
+/// its §5 panel.
+fn node_sep_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_NODE_SEP").unwrap_or_default();
+        parse_node_sep(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`node_sep_enabled`]; garbage is refused, not defaulted.
+fn parse_node_sep(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_NODE_SEP={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// Nodes per batch (the best-bound ones) that run in-tree c-MIR separation.
+const NODE_SEP_PER_BATCH: usize = 8;
+/// Cuts kept per separating node, after selection.
+const NODE_SEP_MAX_CUTS: usize = 10;
+
 /// Share of the search's LP pivots (node LPs + strong branching) the improving dive may
 /// spend: a batch is granted a dive only while the dives' pivots so far are at most this
 /// fraction of the tree's. HiGHS budgets its heuristics the same way, as a share of LP
@@ -1717,6 +1758,9 @@ fn solve_milp_node_search(
     const NODE_CUT_MAX_DENSITY: f64 = 0.5;
     let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
     let node_cut_cap = (2 * n_orig_rows).min(opts.max_pool_cuts);
+    // D2 B1: in-tree c-MIR separation. Shares the node-cut pool and its cap, not the
+    // cover separator's density gate (c-MIR cuts are rewritten and length-capped).
+    let node_sep_on = node_sep_enabled() && lazy.is_none();
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
@@ -2353,6 +2397,11 @@ fn solve_milp_node_search(
                 improve_dive: improve_batch,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
+                node_sep: node_sep_on && pool_sigs.len() < node_cut_cap,
+                base_rows: &base_rows,
+                structural_cuts: &structural_cuts,
+                n_base0,
+                cut_max_len,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
                 tm: &tm,
@@ -2376,6 +2425,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
+                                k < NODE_SEP_PER_BATCH,
                             )
                         })
                         .collect()
@@ -2388,6 +2438,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
+                                k < NODE_SEP_PER_BATCH,
                             )
                         })
                         .collect()
@@ -2403,6 +2454,7 @@ fn solve_milp_node_search(
                             &batch.ub[k],
                             &ctx,
                             dive_batch && k == 0,
+                            k < NODE_SEP_PER_BATCH,
                         )
                     })
                     .collect()
@@ -2901,6 +2953,14 @@ struct NodeCtx<'a> {
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
+    /// `DISCOPT_MILP_NODE_SEP`: in-tree c-MIR separation is on for this batch (and the
+    /// pool has room). The per-node slot is `solve_node`'s `sep_slot`.
+    node_sep: bool,
+    /// The root's base-row view and cut list, for the structural rewrite of node cuts.
+    base_rows: &'a BaseRows,
+    structural_cuts: &'a [GomoryCut],
+    n_base0: usize,
+    cut_max_len: usize,
     /// Optimal basis of the (final) root-cut LP, extended to the current matrix
     /// size. The root B&B node — the only node solved cold — warm-starts from it
     /// instead of the slack basis, so it pivots in just the few cut rows added
@@ -2982,6 +3042,7 @@ fn solve_node(
     ub_k: &[f64],
     ctx: &NodeCtx<'_>,
     dive_slot: bool,
+    sep_slot: bool,
 ) -> NodeOutput {
     // Deadline guard BEFORE the expensive LP solve. The loop-top check only stops
     // *dispatching* new batches; a single batch of N nodes whose per-node LP costs
@@ -3442,6 +3503,59 @@ fn solve_node(
                     ctx.n_orig_rows,
                     ctx.opts.simplex.tol,
                 );
+            }
+            // D2 B1 (`DISCOPT_MILP_NODE_SEP`): in-tree c-MIR at the batch's best-bound
+            // nodes. Global bounds (`ctx.l_w`/`ctx.u_w`) and original rows only, so each
+            // cut is valid for the whole tree; rewritten over structural columns with
+            // the root's own rewrite, then selected like the root's cuts.
+            if ctx.node_sep && sep_slot && !feasible && !time_up {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                let tol = ctx.opts.simplex.tol;
+                let found = separate_cmir_csc(
+                    ctx.csc_rc,
+                    ctx.n_w,
+                    ctx.m_w,
+                    ctx.l_w,
+                    ctx.u_w,
+                    ctx.b_w,
+                    &sol.x,
+                    ctx.is_int_full,
+                    ctx.n_orig_rows,
+                    CMIR_MAX_AGGR,
+                    CMIR_MAX_CUTS,
+                    tol,
+                );
+                crate::profile::incr(crate::profile::Ctr::NodeSepCalls);
+                crate::profile::incr_by(crate::profile::Ctr::NodeSepRaw, found.len() as u64);
+                let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
+                let rewritten: Vec<GomoryCut> = found
+                    .iter()
+                    .filter_map(|c| {
+                        substitute_slacks_to_structural(
+                            c,
+                            ctx.base_rows,
+                            ctx.structural_cuts,
+                            ctx.ns,
+                            ctx.n_base0,
+                            &sol.x,
+                            ctx.l_w,
+                            ctx.u_w,
+                            ctx.cut_max_len,
+                            tol,
+                            1e7,
+                            gmi_repair,
+                        )
+                    })
+                    .collect();
+                let sel = select_cuts(
+                    rewritten,
+                    &sol.x,
+                    NODE_SEP_MAX_CUTS,
+                    CUT_MIN_EFFICACY,
+                    CUT_MAX_PARALLEL,
+                );
+                crate::profile::incr_by(crate::profile::Ctr::NodeSepCuts, sel.len() as u64);
+                out.found_cuts.extend(sel);
             }
             // Strong branching: for a fractional node that won't be pruned, probe
             // the unreliable candidates and hint the best branching variable.
@@ -6269,6 +6383,19 @@ mod tests {
         assert_eq!(parse_dive_stride(" 12 ").unwrap(), 12);
         for bad in ["-1", "eight", "1.5", "8x"] {
             assert!(parse_dive_stride(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn node_sep_parse_refuses_garbage() {
+        for off in ["", " ", "0", "false", "NO"] {
+            assert!(!parse_node_sep(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " yes "] {
+            assert!(parse_node_sep(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["2", "on", "y"] {
+            assert!(parse_node_sep(bad).is_err(), "{bad:?} must be refused");
         }
     }
 
