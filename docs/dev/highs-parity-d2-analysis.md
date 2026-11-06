@@ -881,3 +881,38 @@ gains < +0.3 (to 36.49) over OFF, and neither certifies, kill it.
 
 Open levers: NS abstains on 3-8k node solves (`NodeGmiNsAbstain`), and the per-node pool
 scan and local solve cost throughput. Next is the full §5 panel (MIPLIB-38 + M, 3 reps).
+
+**17. `DISCOPT_MILP_NODE_GMI` §5 panel (MIPLIB-38 + M): passes every pre-registered
+bar.**
+
+Setup: `d2_flag_panel.py --flag DISCOPT_MILP_NODE_GMI --fired 'NodeGmiPoolUsed|NodeGmiLifted'`,
+3 reps, 20 s, 372 solves, load ~6-7, arms interleaved. Data:
+`d2-analysis/node_gmi_panel.json.gz`.
+
+Results:
+
+- **BAR 1:** cert-clean, 372 checks, 0 problems.
+- **2a:** certified **96 -> 107**:
+  - `gt2` 0/6 -> 6/6, `kaihu` 0/3 -> 3/3, `neos-1425699` 0/3 -> 3/3;
+  - `dcmulti` 6/6 -> 5/6, at the 20 s edge.
+- **2b:** nodes on the 29 always-certified instances **116,694 -> 78,006 (-33 %)**.
+- **2c:** **0 dual losses**. Dual gap reduced on:
+
+  | row | dual gap OFF -> ON |
+  |---|---|
+  | `jijia` | 2.8 % -> 0 |
+  | `kaihu` | 3.3 % -> 0 |
+  | `iskar` | 2.6 % -> 0 |
+  | `p0548` | 8.0 % -> 2.3 % |
+  | `neos17` | 9.9 % -> 6.1 % |
+  | `nexp-50-20-1-1` | 40 % -> 33 % |
+  | `b-ball` | 12 % -> 7.8 % |
+
+  The only rise is `gsvm2rl3`, 12.3 % -> 12.8 %, within its spread.
+- **2d:** no incumbent lost.
+- **2e:** median primal gap 0.214 -> 0.125.
+
+**Graduation candidate.** The in-repo MINLP corpus differential
+(`flag_onoff_corpus_panel.py`, 20 s, 2 reps) runs next, because the Rust MILP driver also
+serves the MINLP routes (decomposition masters). The default flips only if that panel is
+cert-clean too.
