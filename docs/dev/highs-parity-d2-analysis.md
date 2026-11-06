@@ -525,3 +525,15 @@ panel is variance-dominated (trajectory-sensitive); levers have to be judged on 
 equivalent perturbations or reps, and the levers that can move it robustly are primal
 recovery (RINS, improvement heuristics) and per-node bound strength, not reverts or
 re-tuning one path.
+
+**5. Lever L3a (`DISCOPT_RINS=1`) panel: bars missed, decision deferred to the HiGHS-expert
+review.** `d2_flag_panel.py --flag DISCOPT_RINS --fired RinsRun`, MIPLIB-38 + M, 3 reps,
+20 s, 372 solves, fired ON 632 / OFF 0 (`d2-analysis/rins_panel.json`). Cert-clean (372
+checks); **no incumbent lost**; median primal gap over the open population 0.214 -> 0.187
+(`gt2`, `iskar` to the optimum; `jijia`, `neos-911970`, `nexp-50-20-1-1`, `fiber`, `bppc8-02`
+better); certified **96 = 96** -- `gt2` 0/6 -> 6/6 but `dcmulti` 6/6 -> 0/6 (ON ends with a
+WORSE incumbent, primal gap 0 -> 0.12, the RENS P4.2 pattern again); bar 2b (nodes -15 %
+or +2 certified) fails. Median 1-min load 7.2 on 4 cores (two analysis agents ran
+alongside): arms were interleaved under the same load, but `dcmulti` certifies near the
+20 s line, so the loss may be partly budget. Not retired yet: the RINS scheduling/budget
+question goes to the HiGHS-expert review first.
