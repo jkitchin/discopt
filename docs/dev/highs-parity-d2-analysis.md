@@ -637,3 +637,29 @@ same pre-registered bars. The bars are not changed after the fact.
   bars.
 - **`DISCOPT_RINS` is retired** (flag and implementation; see the audit row).
 - Next build is Phase B, with a HiGHS-expert design consult first.
+
+**9. `DISCOPT_MILP_REENTRY_CUTS=1` §5 panel: does not graduate (bar 2e).**
+
+Setup: `d2_flag_panel.py --flag DISCOPT_MILP_REENTRY_CUTS --fired RootCutRounds`,
+MIPLIB-38 + M, 3 reps, 20 s, 372 solves, load ~6.5. Data:
+`d2-analysis/reentry_cuts_panel.json.gz`. The fired counter runs in both arms, because
+run 1 cuts in both, so firing reads as ON > OFF: 1389 vs 1143. The script's exit check
+(OFF must be 0) does not apply to this flag.
+
+Results:
+
+- **BAR 1:** cert-clean, 372 checks.
+- **2a, 2b:** certified **96 -> 100**: `gt2` 0/6 -> 6/6, `enlight8` 3/3 -> 1/3.
+- **2c:** one dual loss, `enlight8`, within the cap of 2.
+- **2d:** no incumbent lost.
+- **2e fails:** median primal gap 0.214 -> 0.248. The four `mik-250-20-75-*` rows go from
+  a primal gap of 0.0000-0.0026 to 0.25-0.89.
+
+**Reading.** P4.0 measured that the `mik` incumbents come from run 2's search. ON spends up
+to half of run 2's time (`root_cut_time_s = 0.5 * remaining`) re-deriving the root cuts run
+1 already found, and that displaces the search. The `gt2` gain says a strong root matters
+in run 2. The `mik` loss says re-separating is the wrong way to get it. The fix the
+evidence points to is that **run 2 inherits run 1's root cut pool** (rows appended to its
+LP, no re-separation), as the Phase B review suggested. That is a re-scope, not a tuning
+of this flag. Owner decision: retire `DISCOPT_MILP_REENTRY_CUTS` now and build pool
+inheritance under a new flag, or keep it pending that build.
