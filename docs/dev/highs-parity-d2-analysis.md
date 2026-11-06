@@ -973,3 +973,22 @@ Quick check (`aligned_slacks_quick.json`; the 26 failing rows plus duplicates, 1
 
 On `istra` and `b-ball` the bound now equals or nearly equals the optimum, so what remains
 there is the incumbent.
+
+**20. Presolve entry (no code): the Rust route on HiGHS's presolved model fixes 1-2 rows.**
+
+`d2-analysis/presolved_route_entry.py` writes HiGHS 1.15.1's presolved model
+(`writePresolvedModel`) and solves original and presolved through the Rust route, 20 s
+each. Run alongside the aligned-slacks panel, so load was ~8.
+
+| row | original | presolved |
+|---|---|---|
+| `p0548` | no incumbent, time limit | **optimal 8691 in 323 nodes** |
+| `issue-2446` | 1 node | 169 nodes, bound -9,284 (from 18,930; optimum -785) |
+| `gesa2` | incumbent 27.28M | incumbent 26.17M, still open |
+| `mik-1`, `mik-5`, `istra`, `sp150x300d`, `b-ball` | — | essentially unchanged |
+
+On `mik`, HiGHS's presolve removes exactly the 120 singleton bound rows, which Rust's
+FBBT already turns into bounds. So the HiGHS ablation's "presolve_off costs `mik` 15x"
+describes HiGHS's own search, not something the Rust route lacks. **Full presolve is not
+the next lever; it is deferred.** The remaining `mik` gap is in-tree cuts: in HiGHS,
+`node_cuts_off` costs `mik` 10-14x.
