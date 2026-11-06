@@ -10559,12 +10559,13 @@ def _convex_route_oa_master() -> str:
     val = None if raw is None else raw.strip().lower()
     if val == "simplex":
         # highs-parity P5.1: the in-house lazy master (`milp_solver="simplex"`,
-        # `solve_milp_lazy_csc_py`) as an explicit opt-in. Default OFF -- the HiGHS
-        # master stays the default until the P5.1 panel (route panel + syn/rsyn,
-        # kernel ON and OFF) shows certified >= HiGHS and total wall <= 1.25x; see
-        # `docs/dev/highs-parity-plan.md` P5.1 and `flag-retirement-audit.md`. It
-        # needs no highspy, which is what makes it the route's master on an install
-        # without HiGHS.
+        # `solve_milp_lazy_csc_py`) as an explicit opt-in -- a DOCUMENTED OPT-OUT of
+        # the HiGHS master, not a pending graduation. Its panel (2026-11-06, data
+        # `docs/dev/data/highs-parity/p5.1/`) was cert-clean but lost: route panel
+        # 92 -> 87 certified at 1.82x wall, syn/rsyn 29 -> 19 at 1.32x. It is kept
+        # because it needs no highspy (the route's master on an install without
+        # HiGHS). What would make it the default: certified >= HiGHS with 0 lost and
+        # wall <= 1.25x on the same panel (plan D3).
         return "simplex"
     if val is not None and val != "highs":
         raise ValueError(

@@ -1619,7 +1619,7 @@ and is re-written by P4.1.**
 
 ### Phase 5 — masters (R2a/R2b)
 
-- [ ] **P5.1 — Re-enable the Rust lazy master on the convex route behind a flag.** Scope:
+- [x] **P5.1 — Re-enable the Rust lazy master on the convex route behind a flag. BARS MISSED 2026-11-06 → state 3 / D3.** Scope:
   `solver.py:9916` (`_convex_route_oa_master` accepts `DISCOPT_CONVEX_ROUTE_OA_MASTER=
   simplex` again, default `highs`; `auto` stays refused), `oa.py` lazy-callback selection
   (`:6578`). Done: the §76.4 panel (94) + syn/rsyn (51, kernel ON and OFF) ON vs OFF
@@ -1627,6 +1627,24 @@ and is re-written by P4.1.**
   count or wall > 1.25× after P4's graduated levers → flag kept OFF as state 3 (the
   documented opt-out for HiGHS-less installs), recorded in §7; D3 asks whether to continue.
   Regime: bound-changing (route-level panel).
+  **Result (2026-11-06): the bars are missed on both populations measured; the opt-in
+  stays as state 3 and the continuation question passes to D3.** `bd49011e` re-admits
+  `DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex` (default `highs`, `auto` still refused).
+  `p51_route_master_panel.py`, bars pre-registered in its docstring, in-process, arms
+  alternating, 30 s; data `p5.1/`. Populations: the §76.4 route panel (94) and every
+  `syn`/`rsyn` in `minlplib.solu` the router diverts on this build (**47**, fetched from
+  minlplib.org; the retired `auto` panel's 51-name list was never recorded).
+
+  | population | certified HiGHS → simplex | lost | wall ON/OFF | cert-clean |
+  |---|---|---|---|---|
+  | route (94) | 92 → **87** | `clay0303hfsg@3/@6`, `flay03m@6`, `m3@6`, `tls2@6` | **1.82x** (543.1 / 298.6 s) | yes (332 checks) |
+  | syn/rsyn, kernel ON (47) | 29 → **19** | `rsyn0820m/0830m/0840m`, `syn15m03m/04m`, `syn20m03m/04m`, `syn30m03m`, `syn40m`, `syn40m02m` | **1.32x** (950.9 / 721.6 s) | yes (188 checks) |
+
+  Every bar must hold on every population, so the kernel-OFF syn/rsyn run was stopped at
+  3/47 (`p51_syn_off_partial.json`) once the verdict could no longer change. Both arms
+  fired on every row (`master=highs` / `master=simplex`). Per the kill clause the flag is
+  **kept as a documented opt-out** for installs without HiGHS (it needs no highspy), not
+  graduated; whether to continue the master track is **D3**.
 - [ ] **P5.2 — Decomposition masters default to Rust.** Scope: `lp_backend.py:249-262`
   (`get_decomposition_master_solver` → Rust first; HiGHS when `DISCOPT_DECOMP_MASTER=
   highs`), `names_decomposition_route`. Done: P0.4's R2b table re-run: identical certified
