@@ -928,3 +928,48 @@ driver.
 Together with follow-up 17 (net-positive on MIPLIB-38 + M), both §5 bars are met, so the
 default flips to ON and `=0` is the opt-out. `branching_golden` pins both arms: ON is 13
 nodes and 48 pivots; `=0` is the legacy 13 nodes and 39 pivots, bit-identical.
+
+**19. The route starved its own root cut loop: `DISCOPT_MILP_ALIGNED_SLACKS`.**
+
+Of the 21 rows still failing after node GMI, plain HiGHS B&B certifies 11, and presolve
+alone rescues 7 more (`d2-ablation` phase 2). On the four tried, Rust's per-node speed is
+comparable (`fiber` 258 nodes/s vs HiGHS 580). The route's root, however, was far weaker
+than the same driver called directly:
+
+| row | route root gap | direct-driver root gap |
+|---|---|---|
+| `fiber` | 61.6 % | 8.7 % |
+| `beavma` | 58.7 % | 19.7 % |
+
+Cause: `extract_lp_data` gives slacks to inequality rows only, in arbitrary order.
+
+- `fiber` has 363 equality rows, no slacks, rank 352. The root basis is short, GMI
+  declines it, and the loop runs 1 round with 0 cuts.
+- `nexp` has no slack at `ns + r`, so every slack-touching cut is dropped.
+
+The fix gives each row its slack at `n_orig + r`, [0, 0]-fixed for equality rows, a pure
+reformulation. Route root gap with it: `fiber` 4.3 %, `beavma` 17.9 %, `nexp-1-1` 20 %,
+`nexp-4-2` 9.7 %; 0 short-basis refusals and 0 dropped cuts.
+
+Quick check (`aligned_slacks_quick.json`; the 26 failing rows plus duplicates, 1 rep,
+20 s). Cert-clean, 56 checks, no incumbent lost.
+
+- **Certified 1 -> 4:** `khb05250`, `dcmulti` (both copies) and `jijia` gained; `iskar`
+  lost.
+- **Bounds now at or near the optimum:**
+
+  | row | OFF | ON | optimum |
+  |---|---|---|---|
+  | `fiber` | 169,682 | 396,936 | 405,935 |
+  | `beavma` | 229,625 | 346,463 | 383,285 |
+  | `b-ball` | -1.696 | -1.5007 | -1.5 |
+  | `istra` | 48 | 49 | 49 |
+  | `sp150x300d` | 40 | 62 | 69 |
+  | `nexp-50-20-4-2` | 50 | 64 | — |
+  | `nexp-50-20-1-1` | 19 | 23 | — |
+
+- **Two dual losses:** `neos17` 0.082 -> 0.054, and `mik` at noise level.
+- Median primal gap 0.200 -> 0.124.
+
+On `istra` and `b-ball` the bound now equals or nearly equals the optimum, so what remains
+there is the incumbent.

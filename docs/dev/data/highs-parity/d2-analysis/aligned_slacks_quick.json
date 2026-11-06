@@ -1,0 +1,1640 @@
+{
+ "header": {
+  "load": [
+   1.005859375,
+   2.03271484375,
+   3.31298828125
+  ],
+  "commit": "863b1664",
+  "highspy": "1.15.1",
+  "highs_version": "1.15.1",
+  "python": "/usr/local/bin/python"
+ },
+ "args": {
+  "flag": "DISCOPT_MILP_ALIGNED_SLACKS",
+  "on_value": "1",
+  "fired": "RootCutRounds",
+  "time_limit": 20.0,
+  "gap": 0.0001,
+  "max_nodes": 100000000,
+  "reps": 1,
+  "jobs": 2,
+  "instances": "beavma,bppc8-02,dcmulti,fiber,gsvm2rl3,khb05250,nexp-50-20-1-1,sp150x300d,b-ball,mik-250-20-75-1,mik-250-20-75-2,mik-250-20-75-3,mik-250-20-75-5,nexp-50-20-4-2,2122,enlight_hard,issue-2446,neos-2624317-amur,p0548,gesa2,neos-3118745-obra,neos-3610040-iskar,neos-3610051-istra,neos-3611447-jijia,neos-911970,neos17",
+  "out": "/tmp/claude-0/-home-user-discopt/38303ad9-c9f4-5a5b-9f75-f33b92707a61/scratchpad/r1/q_aligned.json"
+ },
+ "rows": [
+  {
+   "name": "mik-250-20-75-5",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": -51532.0,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": -51506.0,
+    "bound": -53082.845263143776,
+    "gap_certified": false,
+    "nodes": 26082,
+    "wall": 20.131716621999885,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.552713678800501e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 17
+    },
+    "load": 1.005859375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": -51506.0,
+    "bound": -53082.845263143776,
+    "gap_certified": false,
+    "nodes": 23008,
+    "wall": 20.139228244999913,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.552713678800501e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 17
+    },
+    "load": 2.140625
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "neos-911970",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 54.76,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 130.16000000000003,
+    "bound": 23.259999999974596,
+    "gap_certified": false,
+    "nodes": 7,
+    "wall": 20.103642762999925,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 4
+    },
+    "load": 1.005859375
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 226.5099999999999,
+    "bound": 23.259999999975143,
+    "gap_certified": false,
+    "nodes": 7,
+    "wall": 20.126157105000175,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 2.140625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "mik-250-20-75-3",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": -52242.0,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": -52106.0,
+    "bound": -53835.70426904607,
+    "gap_certified": false,
+    "nodes": 12482,
+    "wall": 20.177779544000032,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.6645352591003757e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 13
+    },
+    "load": 3.03271484375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": -52106.0,
+    "bound": -53830.05953541786,
+    "gap_certified": false,
+    "nodes": 13366,
+    "wall": 20.24500748599985,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.6645352591003757e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 13
+    },
+    "load": 4.7275390625
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "fiber",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 405935.18,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 408053.35,
+    "bound": 396936.0978144121,
+    "gap_certified": false,
+    "nodes": 2341,
+    "wall": 20.285107881000158,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.552713678800501e-15,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 25
+    },
+    "load": 3.03271484375
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 628445.84,
+    "bound": 169682.14993037126,
+    "gap_certified": false,
+    "nodes": 1346,
+    "wall": 20.3629654450001,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 4.7275390625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "khb05250",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 106940225.9999999,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": 111632934.0000011,
+    "bound": 102295503.99985287,
+    "gap_certified": false,
+    "nodes": 495,
+    "wall": 22.87010576900002,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 9.094947017729282e-13,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 5.533203125
+   },
+   "on": {
+    "status": "optimal",
+    "objective": 106940225.99999936,
+    "bound": 106940225.99986501,
+    "gap_certified": true,
+    "nodes": 61,
+    "wall": 7.145165832999737,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "gap",
+    "max_viol": 2.4841991883321704e-10,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 13
+    },
+    "load": 6.31005859375
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "nexp-50-20-1-1",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 28.99999999999999,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 41.0,
+    "bound": 23.0,
+    "gap_certified": false,
+    "nodes": 2774,
+    "wall": 20.13957381099999,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 23
+    },
+    "load": 5.533203125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 48.0,
+    "bound": 19.0,
+    "gap_certified": false,
+    "nodes": 1247,
+    "wall": 20.260208810000222,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.16259765625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "mik-250-20-75-2",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": -50768.00000000001,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": -50768.0,
+    "bound": -52568.334673299454,
+    "gap_certified": false,
+    "nodes": 9740,
+    "wall": 20.132176040000104,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.4868995751603507e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 15
+    },
+    "load": 6.72412109375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": -50768.0,
+    "bound": -52477.563676503196,
+    "gap_certified": false,
+    "nodes": 16614,
+    "wall": 20.335541809999995,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.4868995751603507e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 15
+    },
+    "load": 7.767578125
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "nexp-50-20-4-2",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 70.99999999999999,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 79.0,
+    "bound": 64.0,
+    "gap_certified": false,
+    "nodes": 3364,
+    "wall": 20.37525406299983,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 21
+    },
+    "load": 7.53564453125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 80.0,
+    "bound": 50.0,
+    "gap_certified": false,
+    "nodes": 185,
+    "wall": 20.358414610999716,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 7.95751953125
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "mik-250-20-75-1",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": -49716.0,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": -49716.0,
+    "bound": -51303.15426088173,
+    "gap_certified": false,
+    "nodes": 21140,
+    "wall": 20.131526638000196,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.552713678800501e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 15
+    },
+    "load": 7.82275390625
+   },
+   "on": {
+    "status": "feasible",
+    "objective": -49716.0,
+    "bound": -51305.944290337,
+    "gap_certified": false,
+    "nodes": 20324,
+    "wall": 20.15552125999966,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.552713678800501e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 15
+    },
+    "load": 7.8740234375
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "dcmulti",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 188182.0,
+   "maximize": false,
+   "on": {
+    "status": "optimal",
+    "objective": 188182.00000000006,
+    "bound": 188181.213630538,
+    "gap_certified": true,
+    "nodes": 2609,
+    "wall": 9.526955446999636,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "gap",
+    "max_viol": 1.9667822925839573e-11,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 17
+    },
+    "load": 7.8505859375
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 210291.19999999998,
+    "bound": 188090.69530717068,
+    "gap_certified": false,
+    "nodes": 26588,
+    "wall": 20.20959470700018,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 4.263256414560601e-13,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 7.8740234375
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "enlight_hard",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 37.0,
+   "maximize": false,
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 26.0,
+    "gap_certified": false,
+    "nodes": 2105,
+    "wall": 20.012493491999976,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 7.91064453125
+   },
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 25.0,
+    "gap_certified": false,
+    "nodes": 2193,
+    "wall": 20.010917898000116,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 11
+    },
+    "load": 7.1396484375
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "sp150x300d",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 69.0,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 89.0,
+    "bound": 62.0,
+    "gap_certified": false,
+    "nodes": 6185,
+    "wall": 20.24661441199987,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.4210854715202004e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 9
+    },
+    "load": 7.91064453125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 93.0,
+    "bound": 40.0,
+    "gap_certified": false,
+    "nodes": 11972,
+    "wall": 20.266950867000105,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.1827872842550278e-11,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 7.1396484375
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "neos17",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 0.1500025774,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": 0.3960852875695731,
+    "bound": 0.08162309690201204,
+    "gap_certified": false,
+    "nodes": 3219,
+    "wall": 20.197337487000368,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 6.080205783298709e-16,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.220703125
+   },
+   "on": {
+    "status": "feasible",
+    "objective": 0.3632342457542458,
+    "bound": 0.05438698813384434,
+    "gap_certified": false,
+    "nodes": 2713,
+    "wall": 20.179843323000114,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.220446049250313e-16,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 8
+    },
+    "load": 6.43017578125
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "beavma",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 383285.0,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 512277.6000000001,
+    "bound": 346463.31520199834,
+    "gap_certified": false,
+    "nodes": 1983,
+    "wall": 20.222647129000052,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.4791141972893971e-31,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 32
+    },
+    "load": 6.220703125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 541302.2,
+    "bound": 229624.8457487116,
+    "gap_certified": false,
+    "nodes": 7228,
+    "wall": 20.17241771299996,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.43017578125
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "neos-3611447-jijia",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 107.0,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": 133.0,
+    "bound": 106.99999999999984,
+    "gap_certified": false,
+    "nodes": 12393,
+    "wall": 20.098718659000042,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.1094237467877974e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.87646484375
+   },
+   "on": {
+    "status": "optimal",
+    "objective": 106.99999999999999,
+    "bound": 106.99999999999963,
+    "gap_certified": true,
+    "nodes": 19378,
+    "wall": 19.843479993000074,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "gap",
+    "max_viol": 7.17290810081644e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 50
+    },
+    "load": 7.1962890625
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "neos-3610051-istra",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 49.0,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 56.0,
+    "bound": 48.999999999999936,
+    "gap_certified": false,
+    "nodes": 5759,
+    "wall": 20.190708339999674,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 4.6629367034256575e-15,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 27
+    },
+    "load": 6.87646484375
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 55.0,
+    "bound": 47.99999999999994,
+    "gap_certified": false,
+    "nodes": 5017,
+    "wall": 20.19430520900005,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.7763568394002505e-15,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 7.1962890625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "neos-3610040-iskar",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 37.0,
+   "maximize": false,
+   "off": {
+    "status": "optimal",
+    "objective": 37.0,
+    "bound": 36.9999999999999,
+    "gap_certified": true,
+    "nodes": 18189,
+    "wall": 9.066912714999944,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "gap",
+    "max_viol": 3.219646771412954e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 2
+    },
+    "load": 7.03662109375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": 41.0,
+    "bound": 36.99999999999994,
+    "gap_certified": false,
+    "nodes": 34610,
+    "wall": 20.104454889999943,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.7763568394002505e-15,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 52
+    },
+    "load": 6.96337890625
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "neos-2624317-amur",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 3.5223968,
+   "maximize": false,
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "gap_certified": false,
+    "nodes": 414,
+    "wall": 20.01759145899996,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 2
+    },
+    "load": 7.03662109375
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.0,
+    "gap_certified": false,
+    "nodes": 440,
+    "wall": 20.026064498999858,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 1
+    },
+    "load": 6.7412109375
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "b-ball",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": -1.50000000000001,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": -1.500000000000002,
+    "bound": -1.6956521739160006,
+    "gap_certified": false,
+    "nodes": 134751,
+    "wall": 20.097777056000268,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 2.1316282072803006e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.7138671875
+   },
+   "on": {
+    "status": "feasible",
+    "objective": -1.5000000000000038,
+    "bound": -1.5006980023277579,
+    "gap_certified": false,
+    "nodes": 46315,
+    "wall": 20.13599855199982,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 3.774758283725532e-15,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 52
+    },
+    "load": 6.73876953125
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "bppc8-02",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 506.9999999999998,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 521.0,
+    "bound": 486.4999999995125,
+    "gap_certified": false,
+    "nodes": 14571,
+    "wall": 20.180207773999882,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 4
+    },
+    "load": 6.68408203125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 528.0,
+    "bound": 486.49999999951245,
+    "gap_certified": false,
+    "nodes": 8610,
+    "wall": 20.191527862000385,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.78515625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "gsvm2rl3",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 0.33652753,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": 0.5863548183028108,
+    "bound": 0.1671857618723036,
+    "gap_certified": false,
+    "nodes": 27308,
+    "wall": 20.198052066999935,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 6.661338147750939e-16,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.5302734375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": 0.5863548183028108,
+    "bound": 0.16718576190218717,
+    "gap_certified": false,
+    "nodes": 15891,
+    "wall": 20.213490253000145,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 6.661338147750939e-16,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.73046875
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "neos-3118745-obra",
+   "panel": "MIPLIB",
+   "rep": 0,
+   "opt": 255.0,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 290.0,
+    "bound": 254.99999999999068,
+    "gap_certified": false,
+    "nodes": 3770,
+    "wall": 20.168355583999983,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 4
+    },
+    "load": 6.88134765625
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 310.0,
+    "bound": 253.9999999999914,
+    "gap_certified": false,
+    "nodes": 5919,
+    "wall": 20.12678797799981,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 0.0,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 4
+    },
+    "load": 6.66064453125
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "2122",
+   "panel": "M",
+   "rep": 0,
+   "opt": -187612.94419439966,
+   "maximize": true,
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -187604.19071986031,
+    "gap_certified": false,
+    "nodes": 153,
+    "wall": 20.044227624000087,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 1
+    },
+    "load": 6.46630859375
+   },
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": -187604.19498326778,
+    "gap_certified": false,
+    "nodes": 157,
+    "wall": 20.06570062799983,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.63525390625
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "dcmulti",
+   "panel": "M",
+   "rep": 0,
+   "opt": 188182.0,
+   "maximize": false,
+   "on": {
+    "status": "optimal",
+    "objective": 188182.00000000006,
+    "bound": 188181.213630538,
+    "gap_certified": true,
+    "nodes": 2609,
+    "wall": 9.952166847000171,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "gap",
+    "max_viol": 1.9667822925839573e-11,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 17
+    },
+    "load": 6.48095703125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 210291.19999999998,
+    "bound": 188169.57896089647,
+    "gap_certified": false,
+    "nodes": 14721,
+    "wall": 20.191130108999914,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 4.263256414560601e-13,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.63525390625
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "gesa2",
+   "panel": "M",
+   "rep": 0,
+   "opt": 25779856.371697918,
+   "maximize": false,
+   "off": {
+    "status": "feasible",
+    "objective": 27279827.359579917,
+    "bound": 25634085.408569373,
+    "gap_certified": false,
+    "nodes": 11032,
+    "wall": 21.31711438299999,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 4.547473508864641e-13,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 6.8359375
+   },
+   "on": {
+    "status": "feasible",
+    "objective": 26093421.065075967,
+    "bound": 25766307.352193385,
+    "gap_certified": false,
+    "nodes": 4285,
+    "wall": 20.40097585400008,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 4.547473508864641e-13,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 19
+    },
+    "load": 6.73876953125
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "issue-2446",
+   "panel": "M",
+   "rep": 0,
+   "opt": -785.3552363097108,
+   "maximize": true,
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 18930.002285397146,
+    "gap_certified": false,
+    "nodes": 1,
+    "wall": 20.12224560300001,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 5
+    },
+    "load": 6.8359375
+   },
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 18930.002285397146,
+    "gap_certified": false,
+    "nodes": 1,
+    "wall": 20.116858514999876,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 1
+    },
+    "load": 6.73876953125
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  },
+  {
+   "name": "p0548",
+   "panel": "M",
+   "rep": 0,
+   "opt": 8691.0,
+   "maximize": false,
+   "off": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 8156.420118521628,
+    "gap_certified": false,
+    "nodes": 697,
+    "wall": 13.096450813000047,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 29
+    },
+    "load": 5.83642578125
+   },
+   "on": {
+    "status": "time_limit",
+    "objective": null,
+    "bound": 8156.420118521628,
+    "gap_certified": false,
+    "nodes": 737,
+    "wall": 13.114068621000115,
+    "route": "rust",
+    "algorithm_route": "milp-tree: discopt MILP branch and bound (milp_backend='rust')",
+    "termination": "time_limit",
+    "max_viol": null,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 29
+    },
+    "load": 5.66845703125
+   },
+   "problems": {
+    "off": [],
+    "on": []
+   }
+  },
+  {
+   "name": "sp150x300d",
+   "panel": "M",
+   "rep": 0,
+   "opt": 69.0,
+   "maximize": false,
+   "on": {
+    "status": "feasible",
+    "objective": 89.0,
+    "bound": 62.0,
+    "gap_certified": false,
+    "nodes": 5929,
+    "wall": 20.313277263000145,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.4210854715202004e-14,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 9
+    },
+    "load": 5.83642578125
+   },
+   "off": {
+    "status": "feasible",
+    "objective": 93.0,
+    "bound": 40.0,
+    "gap_certified": false,
+    "nodes": 7835,
+    "wall": 20.24928489900003,
+    "route": "rust",
+    "algorithm_route": "native-milp: discopt monolithic Rust MILP engine (default)",
+    "termination": "time_limit",
+    "max_viol": 1.0913936421275139e-11,
+    "env_backend": "rust",
+    "env_std_engine": null,
+    "fired": {
+     "RootCutRounds": 3
+    },
+    "load": 5.88623046875
+   },
+   "problems": {
+    "on": [],
+    "off": []
+   }
+  }
+ ],
+ "verdict": {
+  "bar1_problems": [],
+  "bar1_pass": true,
+  "bar1_checks": 56,
+  "solved": {
+   "off": 1,
+   "on": 4
+  },
+  "both_certified": 0,
+  "nodes_both_certified": {
+   "off": 0,
+   "on": 0
+  },
+  "population_open": 26,
+  "dual_losses": 2,
+  "dual_loss_cap": 2,
+  "incumbent_lost_on": [],
+  "median_primal_gap": {
+   "off": 0.200453575595059,
+   "on": 0.12391493055555566
+  },
+  "bar2": {
+   "2a_solved_on_ge_off": true,
+   "2b_nodes_minus15_or_solved_plus2": true,
+   "2c_dual_losses_le_10pct": true,
+   "2d_no_incumbent_lost": true,
+   "2e_median_primal_not_higher": true
+  },
+  "bar2_pass": true,
+  "graduate": true,
+  "fired": {
+   "off": 152,
+   "on": 499
+  },
+  "per_instance": {
+   "mik-250-20-75-5": {
+    "dual_off": 0.030094216582457374,
+    "dual_on": 0.030094216582457374,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.0005045310771738498,
+    "primal_on": 0.0005045310771738498,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-911970": {
+    "dual_off": 0.5649210903878202,
+    "dual_on": 0.56492109038783,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 3.0801649928263974,
+    "primal_on": 1.3522238163558113,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "mik-250-20-75-3": {
+    "dual_off": 0.030505603986104798,
+    "dual_on": 0.03039755633133355,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.0026032195700859445,
+    "primal_on": 0.0026032195700859445,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "fiber": {
+    "dual_off": 0.5819955000552766,
+    "dual_on": 0.022168711804865248,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.548141976406242,
+    "primal_on": 0.0052179877142263685,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "khb05250": {
+    "dual_off": 0.04343287956689146,
+    "dual_on": 1.2613149879203932e-12,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.043881597520839484,
+    "primal_on": 0.0,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "nexp-50-20-1-1": {
+    "dual_off": 0.3333333333333331,
+    "dual_on": 0.1999999999999997,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.6333333333333339,
+    "primal_on": 0.4000000000000005,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "mik-250-20-75-2": {
+    "dual_off": 0.03546129869210437,
+    "dual_on": 0.03367337699192791,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 1.4331496807467992e-16,
+    "primal_on": 1.4331496807467992e-16,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "nexp-50-20-4-2": {
+    "dual_off": 0.2916666666666665,
+    "dual_on": 0.09722222222222204,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.12500000000000022,
+    "primal_on": 0.11111111111111133,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "mik-250-20-75-1": {
+    "dual_off": 0.031923773777213685,
+    "dual_on": 0.031979891995434155,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.0,
+    "primal_on": 0.0,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "dcmulti": {
+    "dual_off": 0.0002755980400271256,
+    "dual_on": 4.178748675506115e-06,
+    "off_spread": 0.0004191858654915081,
+    "dual_loss": false,
+    "primal_off": 0.1174877645695944,
+    "primal_on": 3.09314129934518e-16,
+    "incumbents_off": 2,
+    "incumbents_on": 2
+   },
+   "enlight_hard": {
+    "dual_off": 0.2894736842105263,
+    "dual_on": 0.3157894736842105,
+    "off_spread": 0.0,
+    "dual_loss": true,
+    "primal_off": Infinity,
+    "primal_on": Infinity,
+    "incumbents_off": 0,
+    "incumbents_on": 0
+   },
+   "sp150x300d": {
+    "dual_off": 0.4142857142857143,
+    "dual_on": 0.1,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.34285714285714286,
+    "primal_on": 0.2857142857142857,
+    "incumbents_off": 2,
+    "incumbents_on": 2
+   },
+   "neos17": {
+    "dual_off": 0.05946028456091351,
+    "dual_on": 0.08314380432288208,
+    "off_spread": 0.0,
+    "dual_loss": true,
+    "primal_off": 0.21398448577909518,
+    "primal_on": 0.18541842648416815,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "beavma": {
+    "dual_off": 0.40090207899920266,
+    "dual_on": 0.09606843140109908,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.4122696889528967,
+    "primal_on": 0.3365439906492804,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-3611447-jijia": {
+    "dual_off": 1.4474018691409447e-15,
+    "dual_on": 3.4211316906967785e-15,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.24074074074074073,
+    "primal_on": 0.0,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-3610051-istra": {
+    "dual_off": 0.02000000000000114,
+    "dual_on": 1.2789769243681803e-15,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.12,
+    "primal_on": 0.14,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-3610040-iskar": {
+    "dual_off": 2.6177890264845795e-15,
+    "dual_on": 1.495879443705474e-15,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.0,
+    "primal_on": 0.10526315789473684,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-2624317-amur": {
+    "dual_off": 0.778878315144748,
+    "dual_on": 0.778878315144748,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": Infinity,
+    "primal_on": Infinity,
+    "incumbents_off": 0,
+    "incumbents_on": 0
+   },
+   "b-ball": {
+    "dual_off": 0.07826086956639595,
+    "dual_on": 0.0002792009310991428,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 3.1974423109204383e-15,
+    "primal_on": 2.486899575160341e-15,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "bppc8-02": {
+    "dual_off": 0.040354330709620724,
+    "dual_on": 0.04035433070962061,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.04133858267716582,
+    "primal_on": 0.027559055118110697,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "gsvm2rl3": {
+    "dual_off": 0.1267027908715778,
+    "dual_on": 0.12670279084921868,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.1869226654110228,
+    "primal_on": 0.1869226654110228,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "neos-3118745-obra": {
+    "dual_off": 0.00390625000003364,
+    "dual_on": 3.6415315207705135e-14,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.21484375,
+    "primal_on": 0.13671875,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "2122": {
+    "dual_off": 4.665684406847435e-05,
+    "dual_on": 4.6634119704985556e-05,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": Infinity,
+    "primal_on": Infinity,
+    "incumbents_off": 0,
+    "incumbents_on": 0
+   },
+   "gesa2": {
+    "dual_off": 0.005654451885702717,
+    "dual_on": 0.0005255661157926667,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": 0.058183835785248494,
+    "primal_on": 0.012163166337851536,
+    "incumbents_off": 1,
+    "incumbents_on": 1
+   },
+   "issue-2446": {
+    "dual_off": 25.071820738714894,
+    "dual_on": 25.071820738714894,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": Infinity,
+    "primal_on": Infinity,
+    "incumbents_off": 0,
+    "incumbents_on": 0
+   },
+   "p0548": {
+    "dual_off": 0.061502517427332266,
+    "dual_on": 0.061502517427332266,
+    "off_spread": 0.0,
+    "dual_loss": false,
+    "primal_off": Infinity,
+    "primal_on": Infinity,
+    "incumbents_off": 0,
+    "incumbents_on": 0
+   }
+  }
+ }
+}
