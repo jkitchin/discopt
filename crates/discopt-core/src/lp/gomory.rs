@@ -652,13 +652,21 @@ pub fn separate_gomory_cols(
         // kernel's `substitute_slacks` drops only exact zeros and would pass it
         // straight to the node LP. Refusing a cut is always sound.
         let all_kept_coefficients_are_tiny = !min_c.is_finite();
-        if !ok
-            || max_c == 0.0
-            || all_kept_coefficients_are_tiny
-            || max_c > MAX_ABS_COEFF
-            || rhs.abs() > MAX_ABS_COEFF
-            || (min_c > 0.0 && max_c / min_c > max_dynamism)
-        {
+        // highs-parity P4.3 entry: which numerical gate refused the cut (counters
+        // only; the decision is unchanged).
+        let reject = if !ok {
+            Some(crate::profile::Ctr::SepGomoryRejectNonFinite)
+        } else if max_c == 0.0 || all_kept_coefficients_are_tiny {
+            Some(crate::profile::Ctr::SepGomoryRejectTiny)
+        } else if max_c > MAX_ABS_COEFF || rhs.abs() > MAX_ABS_COEFF {
+            Some(crate::profile::Ctr::SepGomoryRejectMagnitude)
+        } else if min_c > 0.0 && max_c / min_c > max_dynamism {
+            Some(crate::profile::Ctr::SepGomoryRejectDynamism)
+        } else {
+            None
+        };
+        if let Some(ctr) = reject {
+            crate::profile::incr(ctr);
             continue;
         }
         // #1236 review finding 4: record what was emitted, not just that it was.

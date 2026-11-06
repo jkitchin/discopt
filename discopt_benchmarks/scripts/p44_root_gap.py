@@ -13,7 +13,11 @@ instead (measured: ``sp150x300d`` read 91.6 %, worse than its own LP). The resid
 ``max(0, sgn*(opt - bound)) / (1 + |opt|)`` against the published optimum, the
 milp-competitiveness-plan section 2.5 metric. Extra environment for an arm is passed with
 ``--env KEY=VALUE`` (repeatable), so a candidate separator's flag can be A/B'd on the
-same probe; ``--force-kw '{"cmir_cuts": true}'`` overrides keywords on the route's first
+same probe; ``--all`` takes the MIPLIB-38 + M population of ``p42_rens_panel``;
+``--profile`` sets ``DISCOPT_PROFILE=1`` and records the FIRST driver call's cut counters
+(``RootCuts*``, ``SubstDrop*``, ``SepGomory*``; the first dump of each name is that call's,
+since the profile prints after every driver call); ``--force-kw '{"cmir_cuts": true}'``
+overrides keywords on the route's first
 driver call only (an experiment knob for options the route does not expose). Prints
 executed count; exits non-zero when nothing ran (CLAUDE.md section 6).
 """
@@ -23,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -61,6 +66,7 @@ print("RESULT " + json.dumps({"calls": calls, "reported_bound": r.bound,
                               "route": r.algorithm_route}))
 """
 
+_CTR = re.compile(r"^\s+((?:RootCut|SubstDrop|SepGomory|SepCmir|SepCover)\w*)\s+(\d+)$")
 DEFAULT = "mik-250-20-75-1,mik-250-20-75-2,mik-250-20-75-3,mik-250-20-75-5,fiber,sp150x300d"
 
 
@@ -71,11 +77,19 @@ def main(argv=None) -> int:
     ap.add_argument("--gap", type=float, default=P.GAP)
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--force-kw", default="{}")
+    ap.add_argument("--all", action="store_true")
+    ap.add_argument("--profile", action="store_true")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     extra = dict(kv.split("=", 1) for kv in a.env)
     P._assert_discopt_under_test()
     man = {m["name"]: m for m in M._load_panel(M.PANEL_JSON)["members"]}
+    if a.all:
+        import p42_rens_panel as R  # noqa: N812
+
+        pop = R.population()
+        man = {m["name"]: m for m in pop}
+        a.instances = ",".join(dict.fromkeys(m["name"] for m in pop))
     rows, executed = [], 0
     saved = {k: os.environ.get(k) for k in extra}
     os.environ.update(extra)
@@ -91,6 +105,8 @@ def main(argv=None) -> int:
                 PYTHONUNBUFFERED="1",
                 P44_FORCE_KW=a.force_kw,
             )
+            if a.profile:
+                env["DISCOPT_PROFILE"] = "1"
             p = subprocess.run([sys.executable, "-c", CHILD, path, str(HERE.parent),
                                 str(a.time_limit), str(a.gap)], env=env, capture_output=True,
                                text=True, timeout=4 * a.time_limit + 120)  # fmt: skip
@@ -99,9 +115,18 @@ def main(argv=None) -> int:
                 raise RuntimeError(f"{name}: rc={p.returncode} {p.stderr[-1500:]}")
             res = json.loads(lines[0][len("RESULT ") :])
             if not res["calls"]:
-                raise RuntimeError(f"{name}: the Rust driver was never called ({res['route']})")
+                # Another route served it (e.g. the Python MILP tree): recorded and
+                # counted, never silently dropped -- and it measures nothing here.
+                rows.append({"name": name, "off_route": res["route"]})
+                print(json.dumps(rows[-1]), flush=True)
+                continue
             executed += 1
             c0 = res["calls"][0]
+            ctr: dict[str, int] = {}
+            for ln in p.stderr.splitlines():
+                mm = _CTR.match(ln)
+                if mm and mm.group(1) not in ctr:
+                    ctr[mm.group(1)] = int(mm.group(2))
             # The driver minimises sgn * f; its bound includes obj_const.
             sgn = -1.0 if inst.maximize else 1.0
             gap = max(0.0, sgn * opt - c0["bound"]) / (1.0 + abs(opt))
@@ -109,7 +134,7 @@ def main(argv=None) -> int:
                    "root_gap_pct": 100 * gap, "driver_status": c0["status"],
                    "driver_nodes": c0["nodes"], "reported_bound": res["reported_bound"],
                    "route": res["route"], "env": extra,
-                   "force_kw": json.loads(a.force_kw)}  # fmt: skip
+                   "force_kw": json.loads(a.force_kw), "counters": ctr}  # fmt: skip
             rows.append(row)
             print(json.dumps(row), flush=True)
     finally:
@@ -119,7 +144,8 @@ def main(argv=None) -> int:
             else:
                 os.environ[k] = v
     Path(a.out).write_text(json.dumps({"header": P._header(), "rows": rows}, indent=1) + "\n")
-    print(f"p44 root gap: executed={executed}", flush=True)
+    off = sum(1 for r in rows if "off_route" in r)
+    print(f"p44 root gap: executed={executed} off_route={off}", flush=True)
     return 0 if executed else 1
 
 

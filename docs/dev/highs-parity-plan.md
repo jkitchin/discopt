@@ -1387,7 +1387,7 @@ and is re-written by P4.1.**
   `primal_heuristics.py`) is a different mechanism and is untouched. Recorded: RENS was a
   large primal win that cost a certification on one instance; a future attempt should
   start from why its incumbent derails `dcmulti`'s search.
-- [ ] **P4.3 — Cut repair instead of rejection.** Scope: `milp_driver.rs` cut cleanup
+- [x] **P4.3 — Cut repair instead of rejection. KILLED AT ENTRY 2026-11-06.** Scope: `milp_driver.rs` cut cleanup
   (the numerical gates), `cut_select.rs`. Entry: count cuts rejected by range/dynamism
   gates at the MIPLIB roots and the root bound with those cuts *repaired*
   (SCIP-style: drop |a| < feastol by charging the box, tighten coefficients, re-check
@@ -1395,6 +1395,30 @@ and is re-written by P4.1.**
   closed on ≥ 5 instances. Flag `DISCOPT_MILP_CUT_REPAIR`. Done: panel bars; feasible-point
   sampling (≥ 1e5 integer-feasible points over the panel) 0 violations. Kill: entry < 5
   instances → retire. Regime: bound-changing.
+  **Result (2026-11-06): killed at entry; repair code retired, counters kept.** Instrument:
+  `p44_root_gap.py --all --profile` (root bound of the route's first driver call at
+  `max_nodes=2`, plus that call's cut counters), MIPLIB-38 + M, 57 roots on the Rust route
+  (`fixed-binary` is served by the Python MILP tree and recorded as off-route), HEAD with
+  `DISCOPT_MILP_ROOT_GMI_REPAIR` default ON. New bound-neutral counters
+  `SepGomoryReject{NonFinite,Tiny,Magnitude,Dynamism}` (`lp/gomory.rs`) name the gate
+  that refused each GMI cut. Data `docs/dev/data/highs-parity/p4.3/`.
+  - **Where cuts are lost (`entry_head.json`):** 28 of 57 roots. Separator dynamism gate
+    (`max/min > 1e7`): 3,427 cuts on 21 instances (`sp150x300d` 839, `gesa2` 495,
+    `nexp-50-20-1-1` 464, `p0548` 451, `beavma` 306); rewrite length cap
+    (`SubstDropTooLong`): 918 on 12 (`dcmulti` 244, `fiber` 204, `22433` 117); unbounded
+    weakening 34; tiny / magnitude / non-finite 0.
+  - **Dynamism repair** (`entry_dynamism_repair.json`; tried behind
+    `DISCOPT_MILP_CUT_REPAIR`: drop every term below `max/1e7`, charging its box maximum
+    to the rhs -- a valid relaxation, refused on an infinite bound): **0** instances gain
+    ≥ 5 pp. `sp150x300d` −1.43 pp, `beavma` −0.80, `egout` −0.61, and `nexp-50-20-4-2`'s
+    root bound became non-finite; the best is +0.02.
+  - **Length ceiling** (`entry_uncapped_length.json`; temporary build with the cap lifted,
+    i.e. every too-long cut KEPT unshortened -- an upper bound on any repair): **1**
+    instance ≥ 5 pp (`fiber` 19.76 → 14.03); next `nexp-50-20-1-1` +3.33, `p0201` +2.62,
+    `supportcase16` +1.38, the rest < 1.
+  Kill bar (entry < 5 instances) fires on both gates. `DISCOPT_MILP_CUT_REPAIR` and its
+  `repair_dynamism` were deleted before any commit (never on a default path); the
+  rejection counters stay.
 - [x] **P4.4 — Tableau-row c-MIR / lifted cover (HiGHS's family). RE-SCOPED; ROOT GMI REPAIR GRADUATED 2026-11-06.** Scope: `cmir.rs`
   (aggregation from tableau rows, not only original rows), `cover.rs` (lifting with
   bound substitution), driver wiring. Entry: on the four `mik-250-20-75-*` + `fiber` +

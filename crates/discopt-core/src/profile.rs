@@ -714,6 +714,11 @@ counters!(
     // highs-parity P4.4: a short basis completed with unit columns of its
     // structurally unmatched rows (`DISCOPT_MILP_ROOT_GMI_REPAIR`), then separated.
     SepGomoryBasisCompleted,
+    // highs-parity P4.3 entry: GMI cuts refused by the separator's numerical gates.
+    SepGomoryRejectNonFinite,
+    SepGomoryRejectTiny,
+    SepGomoryRejectMagnitude,
+    SepGomoryRejectDynamism,
     // highs-parity P4.4: a cut's slack coefficient rewritten through the row its
     // slack column actually sits in, where `ns + r` is not row `r`'s own slack.
     SubstSlackByColumn,
