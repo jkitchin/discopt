@@ -1791,6 +1791,17 @@ and is re-written by P4.1.**
   documented on the opt-in `DISCOPT_LP_MILP_BACKEND=highs` route; re-measure upstream on a
   release ≥ <version> and drop the bit there." Plus the #1634 disposition per §4. Done:
   the five checks pass in CI. Kill: none.
+  **Status (2026-11-06): P6.3, P6.4 and P6.5 are BLOCKED, not done.**
+  - P6.3 (packaging flip): its precondition "D2 resolved to a Rust default" is unmet (P4.9
+    missed; D2 reopened) and P5.1 did not land as a default (D3 open); the kill clause
+    says this task cannot be partially done -> stopped. The P6.2 guard names what still
+    needs `highspy` on the default path.
+  - P6.4 (retire HiGHS-only flags/paths): runs only after D4 chooses removal.
+  - P6.5 (M-1671 closure): D0 chose route (a), "Rust default for the pure-MILP class",
+    which is D2 itself; the closing comment cannot claim "no default path runs HiGHS
+    presolve" while the MILP default is HiGHS.
+  The owner's direction (2026-11-06): carry the plan to its end, then return to D2/D3.
+  A D2 path analysis was commissioned the same day.
 - [ ] **P6.6 — Final gate → D4.** Re-run every §1.3 panel at the final commit, fill §6,
   and stop for D4.
 
