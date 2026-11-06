@@ -3862,6 +3862,31 @@ fn solve_node(
             // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
             if verify_farkas_infeasible_csc(&sol.dual, ctx.csc, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w)
             {
+                // highs-parity P4.7 entry (counters only): how many LOCAL bound
+                // changes (node bound tighter than the root's, on the side the ray
+                // uses) this infeasibility proof rests on. Scaling is positive, so
+                // the sign and support of (A^T y)_j are the same in both spaces.
+                // The smaller count over the two ray orientations is taken.
+                if crate::profile::enabled() {
+                    let rcs: Vec<f64> = (0..ctx.ns).map(|j| ctx.csc.dot(j, &sol.dual)).collect();
+                    let big = rcs.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+                    let count = |sgn: f64| {
+                        rcs.iter()
+                            .enumerate()
+                            .filter(|&(j, &r)| {
+                                let r = sgn * r;
+                                (r > 1e-9 * big && full_u[j] < ctx.u_w[j] - 1e-9)
+                                    || (r < -1e-9 * big && full_l[j] > ctx.l_w[j] + 1e-9)
+                            })
+                            .count() as u64
+                    };
+                    let k = count(1.0).min(count(-1.0));
+                    crate::profile::incr(crate::profile::Ctr::ConflictInfeasNodes);
+                    crate::profile::incr_by(crate::profile::Ctr::ConflictLocalBoundsSum, k);
+                    if k <= 10 {
+                        crate::profile::incr(crate::profile::Ctr::ConflictSmall);
+                    }
+                }
                 out.result = NodeResult {
                     node_id: id,
                     lower_bound: INFEAS_SENTINEL, // pruned

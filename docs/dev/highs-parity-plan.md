@@ -1547,6 +1547,18 @@ and is re-written by P4.1.**
   infeasible nodes. Flag `DISCOPT_MILP_CONFLICT`. Done: panel bars; each conflict
   constraint validated by feasible-point sampling. Kill: entry < 30 % → retire. Regime:
   bound-changing.
+  **Entry (2026-11-06, decision point).** `p47_conflict_entry.py` (data `p4.7/entry.json`):
+  MIPLIB-38 on the Rust route, 20 s, `DISCOPT_PROFILE=1`; new bound-neutral counters in the
+  verified-Farkas arm count, per verified-infeasible node, the local bound changes (node
+  bound tighter than the root's on the side the ray uses) its proof rests on (smaller of
+  the two ray orientations -- optimistic). **Aggregate: 13,076 of 25,388 (51 %) need
+  <= 10** -- the bar (30 %) is met -- but `enlight8` is 24,503 of them; without it 773 of
+  885 (87 %). The named class does NOT have the problem: `gsvm2rl3` has 0 infeasible
+  nodes, `neos-2624317-amur` 10 (40 % small). Infeasible nodes are a large share of the
+  search only on `beavma` (311 of 351), `enlight8` (24,503 of 123,436), `gen` (88 of 987),
+  `blend2` (262 of 8,487); elsewhere they are rare (`gt2` 9 of 80,865). Note the LP
+  already contains every row the proof aggregates, so a conflict (dual-proof)
+  constraint pays only through node propagation / earlier pruning, not through the LP.
 - [ ] **P4.8 — Dimension-reducing MILP presolve with postsolve** *(≤ 3 iterations, last:
   worth ≤ 2 instances / 1.7× in HiGHS's own ablation, §1c)*. Scope: reuse P2.4's LP
   reductions + integer-aware rounding, `presolve/substitute.rs` where it applies. Flag

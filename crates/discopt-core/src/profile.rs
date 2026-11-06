@@ -305,6 +305,11 @@ counters!(
     // its FBBT + reduced-cost fixing pinned.
     RootIntFree,
     RootIntFixed,
+    // highs-parity P4.7 entry: verified-infeasible nodes, the local bound changes
+    // their Farkas proofs use (sum), and how many use <= 10.
+    ConflictInfeasNodes,
+    ConflictLocalBoundsSum,
+    ConflictSmall,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
