@@ -426,6 +426,19 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 /// (pool or conflict dual proofs) and stalls at 48.31 on `istra` (discopt: 48.32) when
 /// they stay in the subtree that made them (`highs-parity-d2-analysis.md` follow-ups
 /// 10-17, `highs-parity-d2-node-gmi-expert.md`).
+/// W1 entry (scratch): fold pool cuts used at >= `uses` nodes into the shared matrix,
+/// up to `cap` rows in total. `DISCOPT_MILP_NODE_GMI_FOLD=cap[:uses]`; unset/0 = off.
+fn node_gmi_fold() -> (usize, u32) {
+    static V: std::sync::OnceLock<(usize, u32)> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_NODE_GMI_FOLD").unwrap_or_default();
+        let mut it = raw.split(':');
+        let cap = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        let uses = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(3);
+        (cap, uses)
+    })
+}
+
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -2307,6 +2320,9 @@ fn solve_milp_node_search(
     // node appends the ones its point violates to a node-local copy.
     let mut gmi_pool: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_age: Vec<u32> = Vec::new();
+    let mut gmi_pool_uses: Vec<u32> = Vec::new();
+    let mut gmi_folded: usize = 0;
+    let mut gmi_fold_pending: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
@@ -3306,11 +3322,15 @@ fn solve_milp_node_search(
                 if let Some(a) = gmi_pool_age.get_mut(k) {
                     *a = 0;
                 }
+                if let Some(u) = gmi_pool_uses.get_mut(k) {
+                    *u = u.saturating_add(1);
+                }
             }
             for cut in batch_new_gmi {
                 if gmi_pool_sigs.insert(cut_signature(&cut)) {
                     gmi_pool.push(cut);
                     gmi_pool_age.push(0);
+                    gmi_pool_uses.push(0);
                     crate::profile::incr(crate::profile::Ctr::NodeGmiPoolAdded);
                 }
             }
@@ -3323,20 +3343,44 @@ fn solve_milp_node_search(
                     drop[k] = true;
                 }
             }
+            // W1 entry: hot cuts move into the shared matrix (signature kept, so a
+            // re-separated copy is not re-admitted to the pool).
+            let (fold_cap, fold_uses) = node_gmi_fold();
+            let mut fold = vec![false; gmi_pool.len()];
+            if fold_cap > 0 {
+                let mut hot: Vec<usize> = (0..gmi_pool.len())
+                    .filter(|&k| !drop[k] && gmi_pool_uses[k] >= fold_uses)
+                    .collect();
+                hot.sort_by_key(|&k| (std::cmp::Reverse(gmi_pool_uses[k]), k));
+                for k in hot {
+                    if gmi_folded >= fold_cap {
+                        break;
+                    }
+                    fold[k] = true;
+                    drop[k] = true;
+                    gmi_folded += 1;
+                }
+            }
             if drop.iter().any(|&d| d) {
                 let mut keep_pool = Vec::with_capacity(gmi_pool.len());
                 let mut keep_age = Vec::with_capacity(gmi_pool.len());
-                for (k, cut) in gmi_pool.drain(..).enumerate() {
-                    if drop[k] {
+                let mut keep_uses = Vec::with_capacity(gmi_pool.len());
+                for (k, mut cut) in gmi_pool.drain(..).enumerate() {
+                    if fold[k] {
+                        cut.coeffs.resize(n_w, 0.0);
+                        gmi_fold_pending.push(cut);
+                    } else if drop[k] {
                         gmi_pool_sigs.remove(&cut_signature(&cut));
                         crate::profile::incr(crate::profile::Ctr::NodeGmiPoolDropped);
                     } else {
                         keep_pool.push(cut);
                         keep_age.push(gmi_pool_age[k]);
+                        keep_uses.push(gmi_pool_uses[k]);
                     }
                 }
                 gmi_pool = keep_pool;
                 gmi_pool_age = keep_age;
+                gmi_pool_uses = keep_uses;
             }
         }
 
@@ -3435,6 +3479,13 @@ fn solve_milp_node_search(
         // node-cut pool budget a second time.
         if !node_pending.is_empty() {
             pending_cuts.append(&mut node_pending);
+        }
+        if !gmi_fold_pending.is_empty() {
+            crate::profile::incr_by(
+                crate::profile::Ctr::NodeCutsFolded,
+                gmi_fold_pending.len() as u64,
+            );
+            pending_cuts.append(&mut gmi_fold_pending);
         }
 
         // Fold this batch's newly-found global cuts into the shared matrix.
