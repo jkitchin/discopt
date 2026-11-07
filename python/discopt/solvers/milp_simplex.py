@@ -96,7 +96,12 @@ def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
             mx[nz] = np.maximum.reduceat(np.abs(A.data), A.indptr[:-1][nz])
         f = np.ones(A.shape[0])
         ok = mx > 0
-        f[ok] = np.exp2(-np.round(np.log2(mx[ok])))
+        # Scale UP only (f >= 1). Scaling a large row DOWN loosens its feasibility
+        # tolerance in original units: measured on ``portfol_roundlot`` (span 0), a
+        # down-scaled master returned a point violating an original row by 9e-6, and
+        # the NLP-BB feasibility guard refused it. Up-scaling small rows, where the
+        # pivoting trouble is, only tightens.
+        f[ok] = np.maximum(1.0, np.exp2(-np.round(np.log2(mx[ok]))))
         return sp.csr_matrix(sp.diags(f) @ A), np.asarray(b, dtype=np.float64) * f
 
     A_ub, b_ub = scale(A_ub, b_ub)
