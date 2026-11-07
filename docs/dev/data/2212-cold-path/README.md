@@ -1,93 +1,122 @@
-# #2212 entry experiments: the engine's cold path on the captured LP fixtures
+# #2212: the engine's cold path, entry experiments and throughput panel
 
-`entry_experiment.py` replays every captured LP fixture in the tree
-(`crates/discopt-core/src/{bnb,lp/simplex}/testdata/*_lp.json`, 18 LPs) through the
-engine (`solve_lp_warm_csc` via the Python binding, default `SimplexOptions`) under
-four starts, and checks each answer against HiGHS and independently of it.
-`fixtures.jsonl` is its output on `798c370` (release build, this checkout asserted).
-60 executed comparisons.
+Scripts (each asserts it loaded this checkout's `discopt`, prints an executed count, §6/§8):
+
+| file | what |
+|---|---|
+| `entry_experiment.py` → `fixtures.jsonl` | every captured LP fixture in the tree (`crates/discopt-core/src/{bnb,lp/simplex}/testdata/*_lp.json`, 19 LPs) under four starts, checked against HiGHS and independently of it |
+| `throughput_panel.py` → `throughput_nl.jsonl`, `throughput_nl.summary.log` | the #1008 question: cold dual from the logical start vs today's cold primal, on root relaxations (`build_uniform_relaxation`, `rlt_lineq` off/on), 3 interleaved reps per LP. `--corpus nl` is the in-repo corpus; `--corpus qplib` is #1008's own QPLIB selection (needs the corpus) |
+| `prepare_check_probe.py` → `prepare_check_probe.log` | the corpus solved through `Model.solve`, counting how often the new `PreparedDual::prepare` consistency check fires (it must not) |
 
 ```
 DISCOPT_PROFILE=1 python -u docs/dev/data/2212-cold-path/entry_experiment.py
+python -u docs/dev/data/2212-cold-path/throughput_panel.py --corpus nl --out nl.jsonl
+python -u docs/dev/data/2212-cold-path/throughput_panel.py --corpus qplib \
+    --qplib-dir ~/Dropbox/projects/discopt-minlp-benchmark/qplib --out qplib.jsonl
 ```
 
-| arm | what it is |
-|---|---|
-| `warm` | the fixture's captured start basis (the caller's inherited basis); the entry falls back to the cold primal on difficulty, and the counters say which happened |
-| `cold` | no start: today's cold path, the two-phase primal |
-| `logical` | dual simplex from the fixture's own unit columns as a basis, structurals at their cost-sign bound (the #2202 kernel retry's start) |
-| `augmented` | #2163's general form (`ScaledProblem::logical_basis_dual`): append `-e_i` per row fixed at `[b_i, b_i]`, so an all-logical basis always exists |
+## Retraction (§11): the first version of this README was measured with the wrong basis constants
 
-## The oracle needed fixing first (three instrument findings)
+`1865672` published the entry experiment with `BASIC = 2, AT_UPPER = 1` typed into the script.
+The engine's values (`crate::lp::basis`) are `BASIC = 1, AT_UPPER = 2`. Every
+logical start it built marked the logicals at-upper and the at-upper structurals basic. The
+binding then forced the listed basics to BASIC without clearing the extras, so the engine
+received starts with more "basic" columns than rows. Its `logical` and `augmented` columns,
+and the "16 of 18" built on them, measured corrupted starts and are withdrawn. The scripts now
+read the constants from `basis.rs` and assert them. The verdict checks were unaffected (no
+wrong answer was published either way), and the corrected numbers below are better than the
+withdrawn ones.
 
-Read before trusting any HiGHS comparison of these fixtures:
+The same mistake found a real engine defect, fixed in this change. `PreparedDual::prepare`
+accepted a start whose `col_status` and `basic_vars` disagree. A column marked basic but
+unlisted had no slot, and `assemble` indexed `xb` with `-1`: a **panic out of
+`solve_lp_warm_csc_py`**, a public binding, on `ex1221`'s root relaxation. `prepare` now
+refuses such a start (cold fallback, counter `DualPrepRejectInconsistent`). The regression test
+is `inconsistent_start_basis_is_refused_not_run_2212`, on the captured start
+(`testdata/ex1221_inconsistent_start_lp.json`). It fails before the fix with the panic and
+passes after.
 
-1. **HiGHS drops matrix entries below `small_matrix_value` (default 1e-9).** Six fixtures have
-   such entries. On `ex1252a` HiGHS stored 582 of 593 nonzeros and called the LP
-   **infeasible** (minimum L1 row violation 0.3447). The engine's point satisfies the
-   full matrix to an L1 residual of 3.6e-7, and HiGHS with the entries kept agrees with
-   the engine. The oracle runs at `small_matrix_value=1e-12`, HiGHS's floor. Three
-   fixtures (`adhya1stp`, `c39_surplus_slack`, `tspn12`) still have entries below that,
-   down to 5.6e-17, and are marked `oracle_exact: false`.
-2. **HiGHS presolve moves `nvs01`'s optimum**: 9.1004 with presolve, 9.0833 without and at
-   1e-10 tolerances, which is the engine's value (point residual 4.7e-10). The oracle runs
-   presolve off at 1e-10.
-3. **`cstr_bigm_dual_rebuild` is infeasible to HiGHS at 1e-10 tolerances and optimal at its
-   defaults** (the fixture's recorded `highs_obj` was taken at the defaults). Even the
-   oracle cannot say which it is, so that LP is on the feasibility edge.
+## The oracle (three instrument findings; read before trusting a HiGHS comparison here)
 
-Every `optimal` answer is also checked without HiGHS: activity-scaled row residual
-(≤ 2e-10 on every one), bound violation, and the Neumaier–Shcherbina safe bound from
-the returned duals (never above the objective). `|b|`-scaled residuals are misleading
-on `qplib2170`: a column parked at 9.999e19, on the 1e20 sentinel, makes a 5e-21 relative
-residual read as 0.5. The bound is right there and the point is unusable. That is the
-#2125 huge-bound class, not this issue.
+1. **HiGHS drops matrix entries below `small_matrix_value` (default 1e-9).** On `ex1252a` it
+   stored 582 of 593 nonzeros and called the LP infeasible. With the entries kept it agrees
+   with the engine, whose point satisfies the full matrix to an L1 residual of 3.6e-7. The
+   oracle runs at 1e-12, HiGHS's floor. Three fixtures still have smaller entries (down to
+   5.6e-17) and are marked `oracle_exact: false`.
+2. **HiGHS presolve moves `nvs01`'s optimum** (9.1004 with, 9.0833 without, = the engine's).
+   The oracle runs presolve off, at 1e-10 feasibility tolerances.
+3. **HiGHS rejects a model with a coefficient above `large_matrix_value` (1e15)** instead of
+   solving it (`nvs05`'s relaxation has 1.4e15); the panel raises it to 1e20.
 
-**No arm produced a wrong verdict on any fixture.**
+`cstr_bigm_dual_rebuild` is infeasible to HiGHS at 1e-10 and optimal at its defaults, so its
+answer depends on the tolerance. `nvs05`'s relaxation has right-hand sides up to 2.9e17. Both
+the engine's point (objective 0.99146) and HiGHS's (0.99097) are feasible to double precision:
+HiGHS misses a row by 32 absolute, 1e-16 relative. The 5e-4 objective gap is inside that
+rounding, and the engine's own Neumaier–Shcherbina evaluation declines to certify, as it should.
+The panel's two "WRONG" flags are this LP. No false verdict was established anywhere.
 
-## Results
+## Entry experiment (19 fixtures, 64 comparisons, no wrong verdict)
 
-| fixture | HiGHS | warm | cold (today) | logical | augmented |
+| fixture | HiGHS | warm (inherited) | cold (today) | logical | augmented |
 |---|---|---|---|---|---|
 | nous1 (#2202, optimal) | optimal | numerical | numerical | **optimal** | **optimal** |
 | nous1 (#2202, infeasible) | infeasible | numerical | numerical | **infeasible** | **infeasible** |
 | relu_anderson_cuts_numerical (#2163) | optimal | numerical | numerical | refused | **optimal** |
 | relu_anderson_cuts_false_optimal (#2163) | optimal | numerical | numerical | refused | **optimal** |
 | qplib2170_cold_fail | optimal | optimal | numerical | **optimal** | refused |
-| ex1252a_drive_out_cycle | optimal | numerical | optimal | optimal | optimal |
-| bchoco06_unstable_pivot | optimal | **optimal** | numerical | numerical | numerical |
-| cstr_bigm_dual_rebuild (#2142) | infeasible (optimal at default tol) | numerical | numerical | numerical | numerical |
-| 10 others | — | decided where run | decided | decided where run | decided where run, except `adhya1stp` (numerical; cold decides) |
+| bchoco06_unstable_pivot | optimal | optimal | numerical | **optimal** | numerical |
+| cstr_bigm_dual_rebuild (#2142) | tolerance-dependent | numerical | numerical | numerical | numerical |
+| 12 others | — | decided where run | decided | decided where run | decided where run |
 
-"refused": no full logical basis from the fixture's own columns (`logical`), or a costed
-column whose selected bound is open (`augmented`).
+`logical` uses the fixture's own unit columns (the #2202 kernel retry's start); `augmented`
+appends `-e_i` per row fixed at `[b_i, b_i]` (#2163's `ScaledProblem::logical_basis_dual`).
+"refused": no full logical basis from the fixture's columns, or a costed column whose selected
+bound is open.
 
-## What it answers
+**Q1, inherited start vs cold fallback.** On both nous1 LPs the inherited basis is bad: singular
+(κ₁ 1.5e21, refused at prepare), or accepted at κ₁ 1.3e13 and handed to the cold primal four
+times. Either way the cold primal then fails with `Phase1EndBoxViolated` +
+`Phase1DriftDominates` + `LpAuditBoundsFail` (#956 T2′). The `cold` arm alone fails the same
+way. The fallback is what needs fixing.
 
-**Q1, inherited start vs cold fallback: both are broken on nous1, and only the fallback matters.**
-The infeasible LP's inherited basis is singular (κ₁ 1.5e21, `DualPrepRejectSingular`), so the
-warm dual never starts. The optimal LP's inherited basis is accepted (κ₁ 1.3e13), and the dual
-hands off to the cold primal four times (`DualColdFallbacks 4`). In both cases the cold primal
-then ends `Numerical` with `Phase1EndBoxViolated` + `Phase1DriftDominates` + `LpAuditBoundsFail`:
-the #956 T2′ phase-1 drift. The `cold` arm alone fails identically. Fixing the start would
-not help; fixing the fallback does.
+**Q2, a logical-basis dual as the cold path.** Augmented, then the fixture's own logical basis,
+then the primal decides **18 of 19, everything except `cstr`**. Today's cold path decides 12.
+Neither logical form covers the other: `qplib2170` needs the fixture's columns because a costed
+column's bound is open, and the ReLU LPs need the augmentation.
 
-**Q2, a logical-basis dual as the cold path: decides 16 of 18, today's decides 11.**
-The proposed cold path is the augmented logical dual, then the fixture's own logical
-basis when that is refused, then the primal as last resort. It decides everything except
-`cstr` and `bchoco06_unstable_pivot`, with no wrong verdict. The second is decided by its
-warm start, so as a whole entry the engine would leave only `cstr` undecided. The order
-matters: neither start dominates the primal alone (`adhya1stp`: augmented `Numerical`,
-primal decides), and neither logical form covers the other (`qplib2170` needs the
-fixture's columns because a costed column's bound is open; the ReLU LPs need the
-augmentation).
+## Throughput panel, in-repo corpus (148 root relaxations, 3 reps, load ~1)
 
-**What it does not settle:**
-- `cstr`. Nothing decides it, HiGHS's verdict depends on its tolerance, and the augmented
-  dual falls back to the primal as well (`DualColdFallbacks 4`). #2212's "done" list asks
-  for it. It needs its own look (phase-1 repair, or accepting that its correct answer
-  depends on the tolerance).
-- Cost. Pivots per solve are here (`iters`); the #1008 throughput panel and the
-  equality-rich `max_iter` grind that kept `cold_dual_start` OFF are not measured yet.
-- The 40-LP nous1 capture (performance-plan §121) was not regenerated; the two nous1
-  fixtures are from it.
+`throughput_nl.summary.log`, recomputed from the rows with the corrected cascade accounting
+(the dual arm already contains the cold-primal fallback inside `solve_lp_warm_csc`, so it is
+the cascade; the first summary counted `hda` twice):
+
+| | cold primal (today) | cold dual from logical start (cascade) |
+|---|---|---|
+| decided, agreeing with HiGHS | 124 / 148 | **126 / 148** (gains `nvs09` ×2, loses none) |
+| wall on the 92 LPs both decide | 0.489 s | **0.339 s (−31 %)** |
+| per-LP wall ratio, both decide | — | geomean 0.765, median 0.755, max 6.64 (0.2 → 1.1 ms on `st_testgr3`) |
+| LPs over 10 ms (8) | — | faster on all 8, ratio 0.55–0.92 |
+| pivots, both decide | — | geomean 0.79× |
+
+Rep-to-rep relative sd: median 2 %, so the direction is not noise (§9). `rlt0`/`rlt1` pairs are
+near-identical on this corpus, so these are effectively ~74 distinct LPs.
+
+**No max_iter grind here, and no regression.** The history that kept `cold_dual_start` OFF was
+the opposite (primal ground on QPLIB_1157's equality-rich RLT relaxation; dual ~25× faster). This
+corpus's LPs are small (largest `hda`, m ≈ 3000; neither arm decides it). #1008's class
+(m 3000–8000, QPLIB RLT) needs `--corpus qplib`, which this container cannot run.
+
+**The coverage gap is the logical start, not the dual.** The start is refused on **52 of 148**
+LPs, those where a costed column has no bound on the side its cost wants (or is a free
+zero-cost column). That is where 18 of the primal's 22 undecided LPs sit (`bchoco06-08`,
+`contvar`, `tanksize`, `wallfix`, ...), and where the cascade adds nothing. Both existing
+implementations (the kernel's `cold_dual_start_basis`, #2163's stage) refuse the same way.
+Reaching them needs a start for open costed columns: a big-M box, or HiGHS's free-column
+handling.
+
+## What is still open for #2212
+
+- `cstr` (tolerance-dependent; nothing decides it).
+- The QPLIB throughput run (#1008's class), on a machine with the corpus.
+- A start for the 52 refused LPs.
+- The 40-LP nous1 capture (§121) was not regenerated.

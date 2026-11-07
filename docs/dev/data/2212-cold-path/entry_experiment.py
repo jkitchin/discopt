@@ -62,7 +62,24 @@ FIXTURE_DIRS = [
     REPO / "crates/discopt-core/src/lp/simplex/testdata",
 ]
 INF = 1e20
-AT_LOWER, AT_UPPER, BASIC = 0, 1, 2  # crate::lp::basis constants
+
+
+def _basis_consts() -> tuple[int, int, int]:
+    """AT_LOWER, AT_UPPER, BASIC read from `crate::lp::basis`, never typed in.
+
+    The first version of this script hard-coded BASIC=2, AT_UPPER=1; the engine's
+    values are BASIC=1, AT_UPPER=2. Every start it built marked the wrong columns
+    basic (#2212 README, retraction).
+    """
+    import re
+
+    src = (REPO / "crates/discopt-core/src/lp/basis.rs").read_text()
+    val = {k: int(v) for k, v in re.findall(r"pub const (\w+): i8 = (-?\d+);", src)}
+    return val["AT_LOWER"], val["AT_UPPER"], val["BASIC"]
+
+
+AT_LOWER, AT_UPPER, BASIC = _basis_consts()
+assert (AT_LOWER, BASIC, AT_UPPER) == (0, 1, 2), (AT_LOWER, BASIC, AT_UPPER)
 REL = 1e-6
 
 sys.path.insert(0, str(REPO / "python"))

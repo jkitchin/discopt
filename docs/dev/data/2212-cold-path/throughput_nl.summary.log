@@ -1,0 +1,17 @@
+
+# summary
+LPs built 148 / 148 (build errors 0)
+dual start refused (open costed bound): 52
+primal decided  124  undecided  22  WRONG 2
+dual   decided   94  undecided   2  WRONG 0
+cascade (dual, else primal) decided 126 / 148
+both decided: 92 LPs; wall dual/primal geomean 0.765, median 0.755, min 0.261, max 6.640
+  pivots dual/primal geomean 0.793
+  slowest-for-dual nvs08_rlt0                   m=   45 primal      0.2 ms/23 piv  dual      0.4 ms/18 piv
+  slowest-for-dual nvs08_rlt1                   m=   45 primal      0.2 ms/23 piv  dual      0.4 ms/18 piv
+  slowest-for-dual nvs21_rlt0                   m=   38 primal      0.1 ms/11 piv  dual      0.2 ms/13 piv
+  slowest-for-dual st_testgr3_rlt0              m=  103 primal      0.2 ms/12 piv  dual      1.1 ms/47 piv
+  slowest-for-dual st_testgr3_rlt1              m=  103 primal      0.2 ms/12 piv  dual      1.1 ms/47 piv
+total wall: primal 32.13 s, cascade 17.16 s (median of 3 reps per LP)
+# load at end: (0.951171875, 0.7880859375, 0.5)
+EXECUTED CHECKS: 244  WRONG: 2
