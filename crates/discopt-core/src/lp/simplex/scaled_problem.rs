@@ -32,6 +32,8 @@
 //! `lp/simplex` no code builds a [`Scaling`] or scales a matrix; the structural test
 //! below fails if one does, so a new caller cannot reopen the bypass silently.
 
+use super::dual::PreparedDual;
+use super::linsolve::{node_feral_lu, LinearSolver};
 use super::primal::{
     downgrade_false_optimal, farkas_ray_certifies_cols, point_fails_original_audit,
     point_passes_original_audit, retry_decided,
@@ -41,6 +43,143 @@ use super::sparse::SparseCols;
 use super::{solve_lp_cols, solve_lp_warm_scaled_csc, LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::crossover::LpView;
+
+/// `DISCOPT_LP_DUAL_COLD` (D2 engine item W5(a), default OFF): solve a cold LP
+/// with the dual simplex from the all-logical basis (HiGHS's cold start, with its
+/// auxiliary-LP dual phase 1 when the logical basis is not dual feasible) before
+/// the two-phase primal, and export a FULL basis (basic logicals exchanged out), so
+/// the next warm start is not refused for its shape. Read once.
+fn dual_cold_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_DUAL_COLD").unwrap_or_default();
+        parse_dual_cold(&raw)
+    })
+}
+
+/// The parse table behind [`dual_cold_enabled`]; garbage is refused.
+fn parse_dual_cold(raw: &str) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => false,
+        "1" | "true" | "yes" => true,
+        other => panic!(
+            "DISCOPT_LP_DUAL_COLD={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        ),
+    }
+}
+
+/// HiGHS's dual phase-1 box for a column with bounds `[l, u]` (`HEkk.cpp` 2665):
+/// free -> [-1000, 1000], lower-only -> [0, 1], upper-only -> [-1, 0], boxed or
+/// fixed -> [0, 0]. Every box holds 0, so with a zero rhs the phase-1 LP is
+/// feasible at `x = 0` and bounded.
+fn phase1_box(l: f64, u: f64) -> (f64, f64) {
+    const INF: f64 = 1e20;
+    match (l > -INF, u < INF) {
+        (false, false) => (-1000.0, 1000.0),
+        (true, false) => (0.0, 1.0),
+        (false, true) => (-1.0, 0.0),
+        (true, true) => (0.0, 0.0),
+    }
+}
+
+/// Exchange every basic logical of an optimal basis of the logical-augmented LP
+/// (`n` structural columns, then the `m` logicals `-e_i`) for a nonbasic
+/// structural column, so the exported basis is a full basis of the original LP.
+///
+/// A logical is fixed (`[b_i, b_i]`), and the entering structural keeps the value
+/// of its nonbasic bound, so the point is unchanged: only the labels move. A
+/// logical whose row holds its own nonbasic structural singleton is relabelled to
+/// it directly (the two columns are parallel); the rest take the largest-|alpha|
+/// nonbasic structural of their row of `B^-1 A`, one LU update each. Returns `None`
+/// when a row admits no entering column (a redundant row) or the LU fails; the
+/// caller then exports no full basis.
+fn exchange_out_logicals(aug: &SparseCols, m: usize, n: usize, basis: &Basis) -> Option<Basis> {
+    const PIVOT_MIN: f64 = 1e-7;
+    let mut basic: Vec<usize> = basis.basic_vars.clone();
+    if basic.len() != m {
+        return None;
+    }
+    let mut stat: Vec<i8> = basis.col_status.clone();
+    if !basic.iter().any(|&j| j >= n) {
+        return Some(Basis {
+            col_status: stat[..n].to_vec(),
+            basic_vars: basic,
+        });
+    }
+    // Relabel: row i's logical -> a nonbasic structural singleton of row i.
+    let mut single: Vec<Option<(usize, f64)>> = vec![None; m];
+    for j in 0..n {
+        if stat[j] == BASIC {
+            continue;
+        }
+        let (rows, vals) = aug.col(j);
+        if rows.len() == 1 {
+            let i = rows[0];
+            if single[i].is_none_or(|(_, v)| vals[0].abs() > v.abs()) {
+                single[i] = Some((j, vals[0]));
+            }
+        }
+    }
+    for slot in 0..m {
+        let jl = basic[slot];
+        if jl >= n {
+            if let Some((j, _)) = single[jl - n] {
+                if stat[j] != BASIC {
+                    basic[slot] = j;
+                    stat[j] = BASIC;
+                    stat[jl] = AT_LOWER;
+                    crate::profile::incr(crate::profile::Ctr::DualColdRelabels);
+                }
+            }
+        }
+    }
+    if !basic.iter().any(|&j| j >= n) {
+        return Some(Basis {
+            col_status: stat[..n].to_vec(),
+            basic_vars: basic,
+        });
+    }
+    let col_of = |j: usize| -> Vec<(usize, f64)> {
+        let (rows, vals) = aug.col(j);
+        rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+    };
+    let mut lu = node_feral_lu();
+    let cols: Vec<Vec<(usize, f64)>> = basic.iter().map(|&j| col_of(j)).collect();
+    lu.factorize_sparse(m, &cols).ok()?;
+    for slot in 0..m {
+        if basic[slot] < n {
+            continue;
+        }
+        let mut rho = vec![0.0; m];
+        rho[slot] = 1.0;
+        lu.btran(&mut rho).ok()?;
+        let mut best: Option<(usize, f64)> = None;
+        for j in 0..n {
+            if stat[j] == BASIC {
+                continue;
+            }
+            let a = aug.dot(j, &rho);
+            if a.abs() > PIVOT_MIN && best.is_none_or(|(_, v)| a.abs() > v.abs()) {
+                best = Some((j, a));
+            }
+        }
+        let (q, _) = best?;
+        let mut dense = vec![0.0; m];
+        for (r, v) in col_of(q) {
+            dense[r] = v;
+        }
+        lu.update(slot, &dense).ok()?;
+        stat[basic[slot]] = AT_LOWER;
+        basic[slot] = q;
+        stat[q] = BASIC;
+        crate::profile::incr(crate::profile::Ctr::DualColdExchanges);
+    }
+    Some(Basis {
+        col_status: stat[..n].to_vec(),
+        basic_vars: basic,
+    })
+}
 
 /// An LP matrix with its objective and rhs, equilibrated once when ill-conditioned.
 /// See the module documentation.
@@ -135,6 +274,13 @@ impl ScaledProblem {
         start: &Basis,
         opts: &SimplexOptions,
     ) -> LpSolve {
+        // A short basis (a cold primal solve's, with zero artificials dropped) is
+        // refused by the warm dual for its shape and would cold-solve through the
+        // primal; under W5(a) it cold-solves through the dual instead.
+        if dual_cold_enabled() && start.basic_vars.len() != self.m {
+            crate::profile::incr(crate::profile::Ctr::DualColdShortStart);
+            return self.solve_cold(l, u, opts);
+        }
         let (sl, su) = self.solve_bounds(l, u);
         let view = self.view(self.solve_c(), &sl, &su);
         let sol = solve_lp_warm_scaled_csc(&view, self.solve_b(), start, opts, self.solve_matrix());
@@ -145,6 +291,11 @@ impl ScaledProblem {
     /// Cold solve over ORIGINAL bounds `l`, `u`. The result is in solve coordinates
     /// and verified ([`Self::verify`]).
     pub fn solve_cold(&self, l: &[f64], u: &[f64], opts: &SimplexOptions) -> LpSolve {
+        if dual_cold_enabled() {
+            if let Some(sol) = self.dual_cold(l, u, opts) {
+                return self.verify(sol, l, u, None, opts);
+            }
+        }
         let (sl, su) = self.solve_bounds(l, u);
         let sol = solve_lp_cols(
             self.solve_matrix().clone(),
@@ -241,6 +392,182 @@ impl ScaledProblem {
             LpStatus::Infeasible | LpStatus::Unbounded => true,
             LpStatus::Numerical | LpStatus::IterLimit => false,
         }
+    }
+
+    /// W5(a) (`DISCOPT_LP_DUAL_COLD`): the cold solve through the dual simplex, in
+    /// SOLVE coordinates, from the all-logical basis of `A x - s = 0`, `s` fixed at
+    /// `b` (the #2163 augmentation, [`Self::logical_basis_dual`]).
+    ///
+    /// - Structural columns sit at the bound their cost sign wants. When one cannot
+    ///   (a one-sided or free column with the wrong cost sign), HiGHS's dual phase 1
+    ///   runs first: the same LP over [`phase1_box`] boxes with `s` fixed at 0, which
+    ///   is feasible at 0 and bounded; its optimal basis is the phase-2 start.
+    /// - Phase 2 goes through [`PreparedDual`], which re-verifies dual feasibility
+    ///   on the true bounds (flipping boxed columns); a start it refuses means the
+    ///   LP may be dual infeasible, and this returns `None` (the primal decides).
+    /// - Accepted only with a certificate checked HERE (the warm dual audits
+    ///   nothing, #1287): an `Optimal` whose unscaled point passes the original-LP
+    ///   audit, or an `Infeasible` whose ray verifies as a Farkas certificate.
+    ///   Anything else is `None`.
+    /// - Basic logicals are exchanged out ([`exchange_out_logicals`]) so the
+    ///   exported basis is full; when that fails the basis is the structural part
+    ///   (short), as [`Self::logical_basis_dual`] exports.
+    fn dual_cold(&self, l: &[f64], u: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
+        const INF: f64 = 1e20;
+        let (m, n) = (self.m, self.n);
+        let (sl, su) = self.solve_bounds(l, u);
+        let (sc, sb) = (self.solve_c(), self.solve_b());
+        crate::profile::incr(crate::profile::Ctr::DualColdAttempts);
+        let _t = crate::profile::Timer::new(crate::profile::Phase::DualCold);
+        let (cp, ri, vals) = self.solve_matrix().raw();
+        let mut col_ptr = cp.to_vec();
+        let mut row_idx = ri.to_vec();
+        let mut vv = vals.to_vec();
+        for i in 0..m {
+            row_idx.push(i);
+            vv.push(-1.0);
+            col_ptr.push(row_idx.len());
+        }
+        let aug = SparseCols::from_csc(col_ptr, row_idx, vv);
+        let mut c_a = sc.to_vec();
+        c_a.resize(n + m, 0.0);
+        let mut l_a = sl.clone();
+        l_a.extend_from_slice(sb);
+        let mut u_a = su.clone();
+        u_a.extend_from_slice(sb);
+        let b_a = vec![0.0; m];
+        let mut wopts = opts.clone();
+        wopts.warm_flip_boxed = true;
+        // #350: a dual solve that stalls on an ill-conditioned LP must hand over to
+        // the cold primal, not grind to the deadline. Same cap as the driver's
+        // slack-basis dual start (`warm_root_opts`); an `IterLimit` is `None` below.
+        wopts.max_iter = wopts.max_iter.min((8 * (m + n)).max(512));
+        let mut iters = 0usize;
+        // Logical basis, structurals at their cost-preferred bound.
+        let mut need_phase1 = false;
+        let mut col_status: Vec<_> = (0..n)
+            .map(|j| {
+                let (lo, hi, c) = (sl[j] > -INF, su[j] < INF, sc[j]);
+                if c >= 0.0 && lo {
+                    AT_LOWER
+                } else if c <= 0.0 && hi {
+                    AT_UPPER
+                } else {
+                    need_phase1 = true;
+                    if lo {
+                        AT_LOWER
+                    } else if hi {
+                        AT_UPPER
+                    } else {
+                        AT_LOWER
+                    }
+                }
+            })
+            .collect();
+        col_status.extend(std::iter::repeat_n(BASIC, m));
+        let mut start = Basis {
+            col_status,
+            basic_vars: (n..n + m).collect(),
+        };
+        if need_phase1 {
+            crate::profile::incr(crate::profile::Ctr::DualColdPhase1);
+            let mut l1 = Vec::with_capacity(n + m);
+            let mut u1 = Vec::with_capacity(n + m);
+            for j in 0..n {
+                let (a, b) = phase1_box(sl[j], su[j]);
+                l1.push(a);
+                u1.push(b);
+            }
+            l1.resize(n + m, 0.0);
+            u1.resize(n + m, 0.0);
+            let mut st1 = start.clone();
+            for j in 0..n {
+                st1.col_status[j] = if sc[j] >= 0.0 { AT_LOWER } else { AT_UPPER };
+            }
+            let p1 = PreparedDual::prepare_cols(&aug, m, n + m, &c_a, &l1, &u1, &st1, &wopts)?;
+            let w1 = p1.reoptimize(&l1, &u1, &b_a, &wopts);
+            iters += w1.iters;
+            if w1.status != LpStatus::Optimal || w1.basis.basic_vars.len() != m {
+                return None;
+            }
+            // Phase-1 statuses on the true bounds: boxed keep theirs (prepare flips
+            // a dual-infeasible one), one-sided take their finite bound, free sit at 0.
+            let mut st2 = w1.basis.clone();
+            for j in 0..n {
+                if st2.col_status[j] == BASIC {
+                    continue;
+                }
+                let (lo, hi) = (sl[j] > -INF, su[j] < INF);
+                st2.col_status[j] = match (lo, hi) {
+                    (true, true) => st2.col_status[j],
+                    (false, true) => AT_UPPER,
+                    _ => AT_LOWER,
+                };
+            }
+            for j in n..n + m {
+                if st2.col_status[j] != BASIC {
+                    st2.col_status[j] = AT_LOWER;
+                }
+            }
+            start = st2;
+        }
+        let Some(p2) = PreparedDual::prepare_cols(&aug, m, n + m, &c_a, &l_a, &u_a, &start, &wopts)
+        else {
+            crate::profile::incr(crate::profile::Ctr::DualColdPrepRefused);
+            return None;
+        };
+        let w = p2.reoptimize(&l_a, &u_a, &b_a, &wopts);
+        iters += w.iters;
+        let x: Vec<f64> = w.x.iter().take(n).copied().collect();
+        let accepted = match w.status {
+            LpStatus::Optimal => {
+                let mut xo = x.clone();
+                if let Some(s) = &self.scaling {
+                    s.unscale_x(&mut xo);
+                }
+                w.dual.len() == m
+                    && point_passes_original_audit(&xo, &self.original, m, n, &self.b, l, u)
+            }
+            LpStatus::Infeasible => {
+                farkas_ray_certifies_cols(&w.dual, self.solve_matrix(), n, m, sb, &sl, &su)
+            }
+            _ => false,
+        };
+        if !accepted {
+            crate::profile::incr(crate::profile::Ctr::DualColdUndecided);
+            return None;
+        }
+        crate::profile::incr(crate::profile::Ctr::DualColdDecided);
+        let basis = match exchange_out_logicals(&aug, m, n, &w.basis) {
+            Some(b) => b,
+            None => {
+                crate::profile::incr(crate::profile::Ctr::DualColdShortBasis);
+                Basis {
+                    col_status: w.basis.col_status.iter().take(n).copied().collect(),
+                    basic_vars: w
+                        .basis
+                        .basic_vars
+                        .iter()
+                        .copied()
+                        .filter(|&j| j < n)
+                        .collect(),
+                }
+            }
+        };
+        let obj = if w.status == LpStatus::Optimal {
+            x.iter().zip(sc).map(|(xj, cj)| xj * cj).sum()
+        } else {
+            w.obj
+        };
+        Some(LpSolve {
+            status: w.status,
+            x,
+            obj,
+            basis,
+            iters,
+            dual: w.dual,
+            ray: w.ray,
+        })
     }
 
     /// #2163: everything this problem does with a `Numerical` solve, in order. The
@@ -482,6 +809,112 @@ mod tests {
     const INF: f64 = 1e20;
     const FIXTURE: &str = include_str!("testdata/adhya1stp_tiny_coef_false_optimal_lp.json");
 
+    /// W5(a): the dual cold solve reaches the primal cold solve's optimum and exports
+    /// a FULL basis, on LPs that need each of its parts. Each case is
+    /// `(dense A, m, n, c, l, u, b)`:
+    /// 1. equality rows with no slack (logicals must be exchanged out by LU pivots);
+    /// 2. a free column with a nonzero cost (the auxiliary dual phase 1);
+    /// 3. a lower-only column whose cost has the wrong sign (phase 1 again);
+    /// 4. an inequality row with its own slack singleton (the relabel).
+    /// An infeasible LP must come back `Infeasible` with a verified Farkas ray.
+    /// Executed comparisons are counted (CLAUDE.md §6).
+    #[test]
+    fn dual_cold_matches_primal_cold_and_exports_full_basis() {
+        type Case = (
+            Vec<f64>,
+            usize,
+            usize,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        );
+        let cases: Vec<Case> = vec![
+            // x0 + x1 + x2 = 2, x0 - x1 = 0.5; min x0 + 2x1 + 3x2, x in [0, 5]
+            (
+                vec![1.0, 1.0, 1.0, 1.0, -1.0, 0.0],
+                2,
+                3,
+                vec![1.0, 2.0, 3.0],
+                vec![0.0; 3],
+                vec![5.0; 3],
+                vec![2.0, 0.5],
+            ),
+            // free x0 with c = 1: x0 - x1 = 0, x1 in [1, 3]  -> x0 = 1
+            (
+                vec![1.0, -1.0],
+                1,
+                2,
+                vec![1.0, 0.0],
+                vec![-INF, 1.0],
+                vec![INF, 3.0],
+                vec![0.0],
+            ),
+            // lower-only x0 with c = -1: x0 + x1 = 4, x1 in [0, 4] -> x0 = 4, obj -4
+            (
+                vec![1.0, 1.0],
+                1,
+                2,
+                vec![-1.0, 0.0],
+                vec![0.0, 0.0],
+                vec![INF, 4.0],
+                vec![4.0],
+            ),
+            // 2x0 + x1 - s = 3, s in [0, inf) (slack singleton); min x0 + x1
+            (
+                vec![2.0, 1.0, -1.0],
+                1,
+                3,
+                vec![1.0, 1.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![10.0, 10.0, INF],
+                vec![3.0],
+            ),
+        ];
+        let opts = SimplexOptions::default();
+        let mut checked = 0usize;
+        for (k, (a, m, n, c, l, u, b)) in cases.iter().enumerate() {
+            let sp = SparseCols::from_dense(a, *m, *n);
+            let p = ScaledProblem::new(sp.clone(), *m, *n, c, b);
+            let primal = solve_lp_cols(sp.clone(), *m, *n, c, l, u, b, &opts);
+            assert_eq!(primal.status, LpStatus::Optimal, "case {k}: premise");
+            let dual = p
+                .dual_cold(l, u, &opts)
+                .unwrap_or_else(|| panic!("case {k}: undecided"));
+            assert_eq!(dual.status, LpStatus::Optimal, "case {k}");
+            assert!(
+                (dual.obj - primal.obj).abs() <= 1e-9 * (1.0 + primal.obj.abs()),
+                "case {k}: dual {} vs primal {}",
+                dual.obj,
+                primal.obj
+            );
+            assert_eq!(dual.basis.basic_vars.len(), *m, "case {k}: short basis");
+            assert_eq!(dual.basis.col_status.len(), *n, "case {k}");
+            assert!(dual.basis.basic_vars.iter().all(|&j| j < *n), "case {k}");
+            checked += 1;
+        }
+        // x0 + x1 = 5 with x in [0, 1]: infeasible.
+        let sp = SparseCols::from_dense(&[1.0, 1.0], 1, 2);
+        let (c, l, u, b) = (vec![1.0, 1.0], vec![0.0; 2], vec![1.0; 2], vec![5.0]);
+        let p = ScaledProblem::new(sp.clone(), 1, 2, &c, &b);
+        let inf = p
+            .dual_cold(&l, &u, &opts)
+            .expect("decides the infeasible LP");
+        assert_eq!(inf.status, LpStatus::Infeasible);
+        assert!(farkas_ray_certifies_cols(&inf.dual, &sp, 2, 1, &b, &l, &u));
+        checked += 1;
+        assert_eq!(checked, cases.len() + 1);
+    }
+
+    #[test]
+    fn parse_dual_cold_table() {
+        assert!(!parse_dual_cold(""));
+        assert!(!parse_dual_cold("0"));
+        assert!(parse_dual_cold("1"));
+        assert!(parse_dual_cold(" Yes "));
+        assert!(std::panic::catch_unwind(|| parse_dual_cold("maybe")).is_err());
+    }
+
     struct Lp {
         m: usize,
         n: usize,
@@ -702,7 +1135,10 @@ mod tests {
                 checks += 1;
             }
         }
-        let decided = crate::profile::counter(crate::profile::Ctr::LogicalBasisDualDecided);
+        // Under `DISCOPT_LP_DUAL_COLD=1` the cold solve is the W5(a) dual cold solve,
+        // the same logical-basis dual with its own audit; count either stage.
+        let decided = crate::profile::counter(crate::profile::Ctr::LogicalBasisDualDecided)
+            + crate::profile::counter(crate::profile::Ctr::DualColdDecided);
         crate::profile::set_enabled(false);
         assert_eq!(checks, 4);
         assert!(
@@ -803,13 +1239,16 @@ mod tests {
             } else {
                 problem.solve_cold(&lp.l, &lp.u, &opts)
             };
-            let refused = crate::profile::counter_snapshot()
-                .into_iter()
-                .find(|(k, _)| *k == "ScaledOptimalOriginalAuditFail")
-                .map_or(0, |(_, v)| v);
+            let snap = crate::profile::counter_snapshot();
+            let ctr = |name: &str| snap.iter().find(|(k, _)| *k == name).map_or(0, |(_, v)| *v);
+            let refused = ctr("ScaledOptimalOriginalAuditFail");
+            // `DISCOPT_LP_DUAL_COLD=1`: the cold solve is decided by the dual cold
+            // solve, which audits its Optimal on the original data itself (and the
+            // checks below re-audit it), so the scaled solve's audit never runs.
+            let dual_cold = if warm { 0 } else { ctr("DualColdDecided") };
             crate::profile::set_enabled(false);
             assert!(
-                refused >= 1,
+                refused >= 1 || dual_cold >= 1,
                 "warm={warm}: the original-space audit never fired"
             );
             checked += 1;

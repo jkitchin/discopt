@@ -286,6 +286,23 @@ impl NodePool {
         }
     }
 
+    /// D2 W5(d): rewrite the stored basis of every FRONTIER (pending or evaluated)
+    /// node with `f` (`None` drops it) and drop every other node's. A branched or
+    /// fathomed node's basis is never read again (children copy the parent's at
+    /// branch time, `branching.rs`), so mapping it would only cost work.
+    pub fn map_frontier_bases(
+        &mut self,
+        mut f: impl FnMut(&crate::lp::basis::Basis) -> Option<crate::lp::basis::Basis>,
+    ) {
+        for n in self.nodes.iter_mut() {
+            if !matches!(n.status, NodeStatus::Pending | NodeStatus::Evaluated) {
+                n.basis = None;
+            } else if let Some(b) = n.basis.as_deref() {
+                n.basis = f(b).map(std::sync::Arc::new);
+            }
+        }
+    }
+
     /// Whether [`Self::release_storage`] freed this node's vectors.
     pub fn is_released(&self, id: NodeId) -> bool {
         self.released[id.0]

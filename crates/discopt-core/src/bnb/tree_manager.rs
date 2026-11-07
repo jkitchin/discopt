@@ -1798,6 +1798,15 @@ impl TreeManager {
         self.pool.map_bases(f);
     }
 
+    /// D2 W5(d): rewrite every frontier node's stored basis, drop the rest
+    /// ([`super::pool::NodePool::map_frontier_bases`]).
+    pub fn map_frontier_bases(
+        &mut self,
+        f: impl FnMut(&crate::lp::basis::Basis) -> Option<crate::lp::basis::Basis>,
+    ) {
+        self.pool.map_frontier_bases(f);
+    }
+
     /// Store a node's optimal basis before it is branched, so its children
     /// inherit it as their dual-simplex warm-start state.
     pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {

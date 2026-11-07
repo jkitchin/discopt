@@ -164,6 +164,8 @@ timed_phases!(
     PriceSweep,
     // Pivot-row reduced-cost update of the primal incremental pricing (engine step 2).
     PivotRowPrice,
+    // W5(a) `DISCOPT_LP_DUAL_COLD`: the cold solve through the dual simplex.
+    DualCold,
     AlphaFtran,
     FtUpdate,
     Refactorize,
@@ -354,6 +356,25 @@ counters!(
     PrimalRowPriceSparse,
     PrimalRowPriceDense,
     PrimalRowPriceVerifyFail,
+    // W5(a) `DISCOPT_LP_DUAL_COLD`: dual cold solves attempted / decided (audited
+    // Optimal or verified Farkas) / undecided / refused by the phase-2 prepare; how
+    // many needed the auxiliary phase 1; short starts routed here from `solve_warm`;
+    // basic logicals relabelled to their row's singleton / exchanged by an LU pivot;
+    // decided solves that could only export a short basis.
+    DualColdAttempts,
+    DualColdDecided,
+    DualColdUndecided,
+    DualColdPrepRefused,
+    DualColdPhase1,
+    DualColdShortStart,
+    DualColdRelabels,
+    DualColdExchanges,
+    DualColdShortBasis,
+    // D2 W5(d) `DISCOPT_MILP_CUT_LP_EXCHANGE`: stored bases factorized to take deleted
+    // cut slacks in, the exchange pivots made, and bases that could not be (dropped).
+    CutLpExchangeFactor,
+    CutLpExchangePivots,
+    CutLpExchangeFail,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
