@@ -66,10 +66,9 @@ def solve_one(lab, inst, build, on, a, solu):
     from discopt.modeling.core import ObjectiveSense
     from discopt.validation.feasibility import verify_point
 
-    if on:
-        os.environ[FLAG] = "simplex"
-    else:
-        os.environ.pop(FLAG, None)
+    # Both arms are pinned explicitly: since highs-parity D3 (2026-11-07) the default
+    # master is the in-house one, so an unset variable no longer means HiGHS.
+    os.environ[FLAG] = "simplex" if on else "highs"
     try:
         m = build()
         sense = 1.0 if m._objective.sense == ObjectiveSense.MINIMIZE else -1.0

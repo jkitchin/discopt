@@ -1953,6 +1953,15 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    and is the D3 to-do list. Gates at the flip: smoke 4578 passed / 0 failed,
    adversarial 19/19, `cargo test` clean.
 
+   *Root-cut variant probe (2026-11-07, the 6 syn rows plus `portfol_roundlot@0`, Rust
+   master):*
+   - shipped default (500 x 50 + c-MIR): 5 of 6 syn certify; `portfol_roundlot` is lost.
+   - no c-MIR: 3 of 6 syn, but newly certifies `rsyn0820m` and `portfol_roundlot` (2.5 s).
+   - c-MIR at the legacy 16 x 1 budget: 1 of 6.
+
+   The default is kept. A per-instance choice (for example c-MIR only where the root gap
+   stays large) is the next lever for this residual.
+
    **Owner decision.** The bars (0 lost, wall <= 1.25x) are still missed, 6 instances across
    both panels. Choose one:
 
