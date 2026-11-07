@@ -1,0 +1,6 @@
+rows 148 | instances with a problem: 0
+certified OFF 112 -> ON 113 | gained ['ex8_5_3'] | lost []
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 260
+wall 981 s

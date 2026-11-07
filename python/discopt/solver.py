@@ -39638,10 +39638,17 @@ def _milp_aligned_slacks_enabled() -> bool:
     other auxiliary column follows. The feasible set is unchanged (a column permutation
     plus zero-fixed columns), the structural columns keep their positions, and every
     check after the solve still reads the original ``lp_data``. The driver's rewrite
-    moves a fixed slack's term to the rhs exactly (``SubstFixedSlack``). Bound-changing
-    (different root cuts), so default OFF pending its panel; read at call time.
+    moves a fixed slack's term to the rhs exactly (``SubstFixedSlack``). Read at call time.
+
+    **Graduated (default ON, 2026-11-07, highs-parity D2), bundled with the driver's
+    ``DISCOPT_MILP_SUBMIP``.** MIPLIB-38 + M (3 reps, 20 s, 372 solves,
+    ``docs/dev/data/highs-parity/d2-analysis/bundle_aligned_submip_panel.json.gz``):
+    cert-clean; certified 107 -> 114; nodes on the always-certified set -16 %; 2 dual
+    losses (cap 2); no incumbent lost; median primal gap 0.187 -> 0.012. In-repo MINLP
+    corpus (2 reps, 20 s, ``bundle_corpus.jsonl``): 0 problem instances, 260 incumbent
+    checks, certified 112 -> 113. ``=0`` restores the extraction order.
     """
-    return os.environ.get("DISCOPT_MILP_ALIGNED_SLACKS", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_ALIGNED_SLACKS", "1") != "0"
 
 
 def _milp_aligned_lp(lp_data, n_orig: int):

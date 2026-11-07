@@ -955,7 +955,10 @@ fn sub_mip_backoff_stride(base_stride: usize, fail_streak: u32) -> usize {
     base_stride << fail_streak.min(SUB_MIP_BACKOFF_MAX_DOUBLINGS)
 }
 
-/// `DISCOPT_MILP_SUBMIP`, read once. Default OFF; garbage is refused.
+/// `DISCOPT_MILP_SUBMIP`, read once. **Default ON** (graduated 2026-11-07 with
+/// `DISCOPT_MILP_ALIGNED_SLACKS`; panel: certified 107 -> 114, nodes -16 %, median
+/// primal gap 0.187 -> 0.012, no incumbent lost); `=0` is the opt-out. Garbage is
+/// refused.
 fn sub_mip_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -966,8 +969,8 @@ fn sub_mip_enabled() -> bool {
 
 fn parse_sub_mip(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
         other => Err(format!(
             "DISCOPT_MILP_SUBMIP={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -2218,18 +2221,21 @@ fn solve_milp_node_search(
     let mut sub_mip_spent: usize = 0;
     let mut sub_mip_fail_streak: u32 = 0;
     let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
-    let sub_mip_base: Option<SubMipBase> =
-        (sub_mip_enabled() && milp_depth == 0 && lazy.is_none() && !opts.integer_cols.is_empty())
-            .then(|| SubMipBase {
-                csc: csc_w.clone(),
-                m: m_w,
-                n: n_w,
-                c: c_w.clone(),
-                l: l_w.clone(),
-                u: u_w.clone(),
-                b: b_w.clone(),
-                is_int_full: is_int_full.clone(),
-            });
+    let sub_mip_base: Option<SubMipBase> = (sub_mip_enabled()
+        && opts.heuristics
+        && milp_depth == 0
+        && lazy.is_none()
+        && !opts.integer_cols.is_empty())
+    .then(|| SubMipBase {
+        csc: csc_w.clone(),
+        m: m_w,
+        n: n_w,
+        c: c_w.clone(),
+        l: l_w.clone(),
+        u: u_w.clone(),
+        b: b_w.clone(),
+        is_int_full: is_int_full.clone(),
+    });
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
@@ -7639,6 +7645,9 @@ mod tests {
         };
         let b = [15.0, 17.0, 16.0];
         let mut o = opts(8, (0..8).collect());
+        // The sub-MIP heuristic's nested driver call runs its own root cut loop
+        // (first round cold), which this outer-loop counter invariant cannot see past.
+        o.heuristics = false;
         o.root_cuts = 200;
         o.cut_rounds = 12;
         o.cut_select = true;
