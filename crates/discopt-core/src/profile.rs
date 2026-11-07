@@ -338,6 +338,7 @@ counters!(
     CutLpFolded,
     CutLpDeleted,
     CutLpDeleteBlocked,
+    CutLpDeleteBlockedRow,
     CutLpLenRejected,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
     SubstFixedSlack,

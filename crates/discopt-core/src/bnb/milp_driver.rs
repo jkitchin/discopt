@@ -3920,7 +3920,7 @@ fn solve_milp_node_search(
                 }
                 let (rows, _) = csc_w.col(r.col);
                 if rows.iter().any(|q| !managed.contains(q)) {
-                    crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
+                    crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlockedRow);
                     continue;
                 }
                 let basic_everywhere = tm
