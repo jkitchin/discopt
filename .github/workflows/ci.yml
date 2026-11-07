@@ -303,7 +303,7 @@ jobs:
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pyscipopt \
-            pytest pytest-timeout pytest-xdist hypothesis
+            pytest pytest-timeout pytest-xdist hypothesis mcp
           maturin develop --release
       - name: Run pytest (PR-fast, parallel)
         run: |
@@ -883,7 +883,7 @@ jobs:
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             sympy pyomo litellm onnx onnxruntime xgboost lightgbm pyscipopt \
-            pytest pytest-timeout pytest-xdist pytest-cov hypothesis
+            pytest pytest-timeout pytest-xdist pytest-cov hypothesis mcp
           maturin develop --release
       # --cov-fail-under restored to 85 (#87) after the post-AMP-merge
       # 85 -> 70 -> 65 lowering: the optional-dep unlock plus the
