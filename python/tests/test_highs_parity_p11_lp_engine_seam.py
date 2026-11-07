@@ -39,11 +39,12 @@ def _instance(name):
     return H.StdForm.from_arrays(g("c"), a, g("b"), g("xl"), g("xu"), float(g("obj_const")))
 
 
-def test_default_engine_is_highs_and_env_selects(monkeypatch):
+def test_default_engine_is_rust_and_env_selects(monkeypatch):
+    # highs-parity P6.4 (2026-11-07): the seam defaults to the in-house engine.
     monkeypatch.delenv("DISCOPT_LP_STD_ENGINE", raising=False)
-    assert H._lp_engine(None).name == "highs"
-    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "rust")
     assert H._lp_engine(None).name == "rust"
+    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
+    assert H._lp_engine(None).name == "highs"
     assert H._lp_engine("highs").name == "highs"
     monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "rsut")
     with pytest.raises(ValueError, match="LP engine"):

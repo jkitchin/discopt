@@ -65,6 +65,10 @@ OUT_OF_SCOPE = {
 #: stops the blind spot from reopening somewhere new.
 NOT_A_GATE = {
     "DISCOPT_DECOMP_STORE": "a filesystem path for the decomposition record store",
+    "DISCOPT_LP_STD_ENGINE": (
+        "an engine selector for `solve_lp_std` (`rust` default since highs-parity P6.4, "
+        "`highs` opt-out); unset defers to HiGHS only when the user passed highs_options"
+    ),
     "DISCOPT_LLM_MODEL": "a litellm model identifier",
     "DISCOPT_LLM_TIMEOUT": "a request timeout in seconds; 0 would be a duration, not an off-switch",
     "DISCOPT_PROVENANCE_AUTHOR": "an author name stamped into a provenance block",

@@ -1161,14 +1161,23 @@ def solve_lp_std_rust_first(sf: StdForm, *, time_limit: Optional[float] = None) 
 def _lp_engine(engine: Optional[str]):
     """The raw-LP engine for ``solve_lp_std`` and its helpers (highs-parity P1.1).
 
-    ``None`` reads ``DISCOPT_LP_STD_ENGINE`` (``highs`` unless set). It is a measurement
-    lever for the P1/P2 Rust-engine work, kept OFF as the default until the R1-LP parity
-    gate (P2.6, decision D1) passes; a value other than ``highs``/``rust`` raises.
+    ``None`` reads ``DISCOPT_LP_STD_ENGINE`` (``rust`` unless set). **Default ``rust``
+    since 2026-11-07** (highs-parity P6.4, owner: eliminate HiGHS): the R1-LP parity
+    gate this waited on passed (P2.6, decision D1). ``=highs`` is the opt-out; any other
+    value raises.
     """
     from discopt.solvers.lp_std_engine import get_engine
 
     if engine is None:
-        engine = os.environ.get("DISCOPT_LP_STD_ENGINE", "highs").strip().lower()
+        env = os.environ.get("DISCOPT_LP_STD_ENGINE")
+        if env is not None:
+            engine = env.strip().lower()
+        elif _USER_OPTIONS.get():
+            # ``Model.solve(highs_options=...)`` is an explicit request for HiGHS behaviour;
+            # running the in-house engine would leave those options silently inert.
+            engine = "highs"
+        else:
+            engine = "rust"
     return get_engine(engine)
 
 

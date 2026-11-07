@@ -38961,7 +38961,9 @@ def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = Non
 
     _, n_orig, sf = _highs_std_form(model)
     rem = None if time_limit is None else float(time_limit) - (time.perf_counter() - t_start)
-    out = solve_lp_std(sf, time_limit=rem)
+    # The explicit HiGHS LP route (``DISCOPT_LP_BACKEND=highs``) runs HiGHS: the seam's
+    # default is the in-house engine since highs-parity P6.4.
+    out = solve_lp_std(sf, time_limit=rem, engine="highs")
     wall = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
     route = _highs_route_label("lp", out)

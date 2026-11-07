@@ -23,9 +23,10 @@ solve was conclusive (always the case for LP/MILP/convex models). See
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import numpy as np
 
@@ -162,6 +163,16 @@ class IISResult:
         return self.summary()
 
 
+def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
+    """The IIS matrix engine: an explicit argument, else ``DISCOPT_IIS_ENGINE``, else
+    ``"rust"``, discopt's own MILP driver. That default dates from 2026-11-07
+    (highs-parity P6.4; P3.2 measured 53/53 parity with HiGHS on the fixtures).
+    ``"highs"`` is the opt-out."""
+    if iis_engine is None:
+        iis_engine = os.environ.get("DISCOPT_IIS_ENGINE", "rust").strip().lower()
+    return iis_engine
+
+
 def _bound_candidates(model: "Model") -> list[tuple[int, str]]:
     """Finite lower/upper bounds of non-binary variables, as (var_index, side).
 
@@ -260,7 +271,7 @@ def compute_iis(
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
-    iis_engine: str = "highs",
+    iis_engine: Optional[str] = None,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -326,9 +337,10 @@ def compute_iis(
         the slow instances, with one set 4% larger (jjliu_clique 277 vs 266).
     iis_engine : {"rust", "highs"}
         Only with ``include_integrality=True``. The MILP solver behind every
-        probe of the matrix engine: HiGHS (``"highs"``, the default) or
-        discopt's own MILP driver (``"rust"``, an opt-in; see
-        :func:`discopt._iis_milp.milp_iis`). The filter, cross-checks and
+        probe of the matrix engine: discopt's own MILP driver (``"rust"``, the
+        default since 2026-11-07, highs-parity P6.4; see
+        :func:`discopt._iis_milp.milp_iis`) or HiGHS (``"highs"``, opt-out); ``None``
+        reads ``DISCOPT_IIS_ENGINE``. The filter, cross-checks and
         confirmations are the same either way.
 
     Returns
@@ -347,6 +359,7 @@ def compute_iis(
     TimeoutError
         ``total_time_limit`` ran out before any subsystem was proven infeasible.
     """
+    iis_engine = _resolve_iis_engine(iis_engine)
     if include_integrality:
         return _compute_iis_with_integrality(
             model,
@@ -500,9 +513,10 @@ def _compute_iis_with_integrality(
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
-    iis_engine: str = "highs",
+    iis_engine: Optional[str] = None,
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
+    iis_engine = _resolve_iis_engine(iis_engine)
     from discopt._iis_milp import milp_iis
 
     res = milp_iis(

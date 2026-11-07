@@ -35,14 +35,14 @@ HiGHS-less install gets today.
 |---|---|---|---|---|
 | 1 | Pure-**MILP** route (`solver` dispatch → `lp_milp_highs.solve_milp*`) | HiGHS (`DISCOPT_LP_MILP_BACKEND=highs`) | `=rust` is the opt-in; the dispatch default would raise `MissingHighsError` | **D2** (P4.9 gate missed: Rust 16/38 MIPLIB vs 36/38) |
 | 2 | Pure-**LP** route | Rust (`DISCOPT_LP_BACKEND`, D1) | unaffected | done (D1) |
-| 3 | `solve_lp_std` engine seam (`lp_std_engine.HighsEngine`; `DISCOPT_LP_STD_ENGINE`, default `highs`) — the verified LP solve under the MILP/LP routes and `mccormick_lp`'s exact LP certification | HiGHS | `DISCOPT_LP_STD_ENGINE=rust` | flip the seam default (P1.x measured parity on L/M/INF) — P6.4 |
+| 3 | `solve_lp_std` engine seam (`lp_std_engine`; `DISCOPT_LP_STD_ENGINE`) — the verified LP solve under the MILP/LP routes and `mccormick_lp`'s exact LP certification | **Rust** (default since P6.4, 2026-11-07); HiGHS only when the user passes `highs_options` or selects the HiGHS LP route | unaffected | done (P6.4) |
 | 4 | Convex-MINLP route OA / LP-NLP-BB **master** (`solver._convex_route_oa_master`) | **Rust** (`simplex`, default since D3, 2026-11-07) | unaffected; `DISCOPT_CONVEX_ROUTE_OA_MASTER=highs` opt-in raises | done (D3, owner-accepted residual of 6 instances: plan D3 status) |
 | 5 | #2069 independent **confirmation** of a HiGHS master (`milp_highs._confirm_lazy_master_independently`); Lagrangian `lazy_confirm` | only when the master is HiGHS | n/a (no HiGHS master) | follows #4; P5.3 memo |
 | 6 | **Decomposition** masters (`lp_backend.get_decomposition_master_solver`) | Rust (P5.2) | unaffected; `DISCOPT_DECOMP_MASTER=highs` opt-in raises | done (P5.2) |
 | 7 | NLP-BB **root cuts** LP (`_root_cuts._root_cuts_engine`; `DISCOPT_NLPBB_ROOT_CUTS_ENGINE`) | HiGHS when available, else Rust | Rust, automatically | P6.4 (Rust root LP measured 1.35x on `tls2`) |
 | 8 | Convex **node bound** LP (`convex_node_bound`, #2067) | HiGHS, then the Rust simplex | Rust simplex, automatically (catches the error, records why) | none needed |
 | 9 | `solver._highs_available()` WASM fallbacks (POUNCE `primal_infeasible` corroboration, multiplier-free node bound) | HiGHS path | in-house simplex / box-only bound (#1537) | none needed |
-| 10 | **IIS** engine (`compute_iis(iis_engine=...)`, `_iis_backend.HighsBackend`, `_iis_reduce._highs_reduced`) | `iis_engine="highs"` | `iis_engine="rust"` (P3.2: 53/53 vs P0.6) | flip the default — big-M INT_TOL and pigeonhole gaps (P3.2) |
+| 10 | **IIS** engine (`compute_iis(iis_engine=...)`, `DISCOPT_IIS_ENGINE`) | **Rust** (default since P6.4, 2026-11-07) | unaffected; `iis_engine="highs"` opt-in raises | done (P6.4). The P3.2 residual (big-M `INT_TOL`, pigeonhole) is accepted; tests whose budgets were tuned on HiGHS pin `=highs` |
 | 11 | `discopt.mipcc` (`read_mps`, the HiGHS checker) | HiGHS | `MissingHighsError` naming the feature | an in-house MPS reader; the checker is a HiGHS-specific tool by design |
 | 12 | Opt-in `milp_solver="highs"` for MIP-NLP / OA (`lp_backend.get_milp_solver(backend="highs")`) | opt-in only | raises when asked | stays an opt-in |
 

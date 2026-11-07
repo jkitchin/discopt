@@ -1976,6 +1976,19 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    remaining removal (a flip + the P1.x identity checks).
 4. **IIS default** (`iis_engine="highs"`): parity on the fixtures is met (53/53); the
    default stays HiGHS for the big-M INT_TOL and pigeonhole gaps recorded in P3.2.
+   **P6.4 (2026-11-07, owner: eliminate HiGHS):**
+
+   - **`solve_lp_std` defaults to `rust`.** It resolves an explicit argument, then
+     `DISCOPT_LP_STD_ENGINE`, then HiGHS if the user passed `highs_options` (otherwise
+     those options would be silently inert), then `rust`. The explicit HiGHS LP route
+     passes `engine="highs"`.
+   - **The IIS engine defaults to `rust`.** `iis_engine=None` reads `DISCOPT_IIS_ENGINE`,
+     default `rust`. Ten test modules whose budgets, probe counts or HiGHS-specific checks
+     were tuned on HiGHS now pin `=highs`. On two fixtures with tight budgets
+     (`base_checkpoint`, `sat_candidate`) the Rust engine cannot prove infeasibility in
+     time: an accepted speed residual.
+   - **Gates:** smoke 4578 passed / 0 failed; adversarial 19/19; mypy and ruff clean.
+
 5. **`discopt.mipcc`**: a HiGHS-specific tool (MPS reader + checker) with no substitute.
 
 **D4 (owner):** whether the HiGHS-only flags and paths are removed or kept as documented

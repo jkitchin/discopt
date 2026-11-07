@@ -566,6 +566,16 @@ class _Engine:
         return bool(bits) and bool(_gf2_certificates(bits))
 
 
+def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
+    """The IIS matrix engine: an explicit argument, else ``DISCOPT_IIS_ENGINE``, else
+    ``"rust"``, discopt's own MILP driver. That default dates from 2026-11-07
+    (highs-parity P6.4; P3.2 measured 53/53 parity with HiGHS on the fixtures).
+    ``"highs"`` is the opt-out."""
+    if iis_engine is None:
+        iis_engine = os.environ.get("DISCOPT_IIS_ENGINE", "rust").strip().lower()
+    return iis_engine
+
+
 def _check_certificates(pending: dict, eng: _Engine, cons, bounds, ints, tol) -> dict:
     """The points in ``pending`` that certify their element: ``x`` satisfies the
     final subsystem minus ``key`` (every other row, applied bound and integrality
@@ -953,7 +963,7 @@ def milp_iis(
     portfolio: Optional[Sequence[str]] = None,
     workers: Optional[int] = None,
     portfolio_wait: str = "fast",
-    iis_engine: str = "highs",
+    iis_engine: Optional[str] = None,
 ) -> MilpIIS:
     """IIS of a linear (LP/MILP) ``model`` with integrality as an element.
 
@@ -963,7 +973,9 @@ def milp_iis(
     P0.6's fixtures the two agree (``DISCOPT_FARKAS_EXACT_OPEN``, default ON); the Rust
     driver still leaves some probes undecided where HiGHS decides them -- integrality
     slack on big-M rows (``INT_TOL`` 1e-5) and hard combinatorial MILPs (pigeonhole)
-    -- so it is not the default (``docs/dev/highs-parity-plan.md`` P3.2). The deletion
+    -- recorded in ``docs/dev/highs-parity-plan.md`` P3.2. It is the default since
+    2026-11-07 (P6.4, owner: eliminate HiGHS); ``iis_engine="highs"`` /
+    ``DISCOPT_IIS_ENGINE=highs`` is the opt-out. The deletion
     filter, the #1634 presolve-on / presolve-off cross-checks, the witness repair and the
     confirmations are the same code either way (``discopt._iis_backend``).
 
@@ -1030,6 +1042,7 @@ def milp_iis(
     nonlinear or non-algebraic constraint, ``ValueError`` when the full model is
     not proven infeasible, and ``TimeoutError`` as above.
     """
+    iis_engine = _resolve_iis_engine(iis_engine)
     t_start = time.perf_counter()
     import scipy.sparse as sp
 
@@ -1103,7 +1116,7 @@ def milp_iis_arrays(
     t_start: Optional[float] = None,
     grace: float = math.inf,
     grace_window: Optional[tuple[float, float]] = None,
-    iis_engine: str = "highs",
+    iis_engine: Optional[str] = None,
 ) -> MilpIIS:
     """:func:`milp_iis` on a model already in matrix form, for callers that have
     no :class:`Model` (``discopt.mipcc`` reads an MPS file straight into arrays).
@@ -1118,6 +1131,7 @@ def milp_iis_arrays(
     ``grace`` / ``grace_window`` (portfolio only): see :func:`_portfolio_iis`;
     the default waits for every member.
     """
+    iis_engine = _resolve_iis_engine(iis_engine)
     if t_start is None:
         t_start = time.perf_counter()
     kwargs: dict[str, Any] = dict(
