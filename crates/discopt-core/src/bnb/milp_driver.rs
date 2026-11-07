@@ -433,8 +433,8 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 ///   with its adaptive threshold and 0.1 parallelism filter ([`cut_lp_select`],
 ///   `HighsCutPool.cpp:315-418`) and **folded into the shared working LP** at the
 ///   batch boundary, instead of every node re-solving a local copy with them.
-/// * A folded row ages each batch its slack is basic at every node optimum of the
-///   batch and resets when any node has it nonbasic; every
+/// * A folded row ages by one on each node LP solve (in batch order) whose optimum has
+///   its slack basic and resets on one that has it nonbasic; every
 ///   [`CUT_LP_DELETE_EVERY`] batches rows older than [`CUT_LP_AGE_LIMIT`] are deleted
 ///   and returned to the pool (`HighsLpRelaxation.cpp:629-676`, `HighsCutPool.cpp:150-160`).
 ///   discopt keeps a basis on every open node, where HiGHS keeps one only along the
@@ -777,10 +777,8 @@ struct CutLpRow {
     /// Its row in the working matrix, and its surplus slack column (`a·x - s = rhs`).
     row: usize,
     col: usize,
-    /// Batches since a node optimum last had the slack nonbasic.
+    /// Node LP solves (in batch order) since one last had the slack nonbasic.
     age: u32,
-    /// Nonbasic at some node optimum of the current batch.
-    active: bool,
     /// The cut over the working columns below `col`.
     cut: GomoryCut,
 }
@@ -3342,11 +3340,14 @@ fn solve_milp_node_search(
             // so a closed gap is a rigorous certificate even after node-LP
             // failures; withholding `Optimal` here was pure over-conservatism.
             if let Some(basis) = out.basis {
-                // D2 W1: a folded row is active at this node when its slack is nonbasic
-                // (HiGHS resets the age of a nonbasic row, `HighsLpRelaxation.cpp:660`).
+                // D2 W1: age every folded row on this node's LP solve, in batch order:
+                // reset when its slack is nonbasic, +1 when basic. HiGHS ages per LP
+                // solve the same way (`HighsLpRelaxation.cpp:660-673`).
                 for r in cut_lp_rows.iter_mut() {
                     if basis.col_status.get(r.col).is_some_and(|&st| st != BASIC) {
-                        r.active = true;
+                        r.age = 0;
+                    } else {
+                        r.age = r.age.saturating_add(1);
                     }
                 }
                 if !cut_lp_rows.is_empty() {
@@ -3773,16 +3774,8 @@ fn solve_milp_node_search(
         if !node_pending.is_empty() {
             pending_cuts.append(&mut node_pending);
         }
-        // D2 W1: age the folded rows on this batch's node optima, then append the
-        // newly selected pool cuts (tracked so they can be aged and deleted).
-        for r in cut_lp_rows.iter_mut() {
-            if r.active {
-                r.age = 0;
-            } else {
-                r.age = r.age.saturating_add(1);
-            }
-            r.active = false;
-        }
+        // D2 W1: append the newly selected pool cuts (tracked so they can be aged and
+        // deleted).
         if !cut_lp_fold.is_empty() {
             let base = pending_cuts.len();
             for (i, cut) in cut_lp_fold.iter().enumerate() {
@@ -3790,7 +3783,6 @@ fn solve_milp_node_search(
                     row: m_w + base + i,
                     col: n_w + base + i,
                     age: 0,
-                    active: false,
                     cut: cut.clone(),
                 });
             }
