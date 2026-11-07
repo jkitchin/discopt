@@ -71,6 +71,29 @@ _LEGACY_CUT_PROFILE: dict[str, object] = {
     "cut_select": False,
 }
 
+
+def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
+    """Root cut options for the lazy (OA / LP-NLP-BB) master (highs-parity D3).
+
+    ``DISCOPT_MILP_LAZY_ROOT_CUTS=1`` gives the lazy master the root budget the pure-MILP
+    route graduated in September (500 cuts over 50 rounds, efficacy selection) plus the
+    #2107 aggregated c-MIR. That separator was built on exactly these masters: on the
+    ``syn20m03m`` / ``rsyn0820m`` OA masters, one aggregation step closes most of the root
+    gap. The master otherwise runs at :data:`_LEGACY_CUT_PROFILE` (16 cuts, 1 round).
+    Profile of ``syn20m03m`` on the Rust master: 22.8 s of a 30 s solve is in the master
+    tree (14,382 nodes, 35 lazy callbacks), while HiGHS's master certifies it in 9 s. The
+    root-cut phase is capped at a quarter of the master's time. Bound-changing (different
+    master cuts), so default OFF pending its panel; read at call time.
+    """
+    if os.environ.get("DISCOPT_MILP_LAZY_ROOT_CUTS", "0") != "1" or base.get("root_cuts") == 0:
+        return base
+    out = dict(base)
+    out.update(root_cuts=500, cut_rounds=50, cut_select=True, cmir_cuts=True)
+    if time_limit is not None:
+        out["root_cut_time_s"] = max(0.5, 0.25 * float(time_limit))
+    return out
+
+
 #: The budget the loop is worth now that a round is warm (#1066) — reached ONLY
 #: through :func:`solve_milp`'s escalation, never as a blanket default. Applying
 #: it unconditionally was measured and rejected: it costs the ``tls2`` masters
@@ -1728,7 +1751,7 @@ def solve_milp_with_lazy_cuts(
         node_callback=_node_hook,
         node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
-        **std.lp_kwargs,
+        **_lazy_root_cut_kwargs(std.lp_kwargs, time_limit),
     )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it
