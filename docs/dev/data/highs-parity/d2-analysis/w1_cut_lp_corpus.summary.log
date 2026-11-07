@@ -1,0 +1,14 @@
+
+rows 132 | instances with a problem: 1
+certified OFF 105 -> ON 104 | gained [] | lost ['ex1266']
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 244
+wall 1016 s
+
+ex1266 follow-up (direct, 20 s, 3 reps per arm, interleaved): OFF certifies 3/3 (native-spatial 5.8-6.0 s);
+ON certifies 1/3 -- the 2 failures fall back to milp-tree and end with no incumbent. Cause: the route's first
+native-milp attempt (2.45 s slice) explores 419 nodes OFF but 15 nodes ON; with 13 folded cut rows the
+strong-branching probe LPs turn degenerate (DualBlandActivations 21,856 over 171 warm solves ON vs 9,495 over
+1,404 OFF; 7 refactorizations per solve vs 1.5), so 7 SB calls take 2.25 s. A real certification regression:
+the flag stays default OFF.
