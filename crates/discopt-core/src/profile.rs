@@ -344,6 +344,8 @@ counters!(
     CutLpLenRejected,
     CutLpRelaxed,
     LazyNearIntegralBranch,
+    // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
+    P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
     SubstFixedSlack,
     // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`): attempts considered, propagation

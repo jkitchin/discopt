@@ -3589,6 +3589,7 @@ impl<'a> Simplex<'a> {
         if status == LpStatus::Optimal
             && (self.expel_zero_artificials || p1_expel_forced_for_test())
         {
+            crate::profile::incr(crate::profile::Ctr::P1ExpelPasses);
             let _ = self.expel_zero_basic_artificials(art_sign);
         }
 
