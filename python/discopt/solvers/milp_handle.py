@@ -34,7 +34,7 @@ def _rust_side(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=np.float64)
     if np.isnan(v).any():
         raise ValueError("MilpHandle: NaN bound")
-    return np.clip(v, -RUST_INF, RUST_INF)
+    return np.asarray(np.clip(v, -RUST_INF, RUST_INF), dtype=np.float64)
 
 
 @dataclass

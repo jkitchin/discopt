@@ -299,7 +299,7 @@ class _Engine:
         return status
 
     def _point(self) -> np.ndarray:
-        return self.backend.point()
+        return np.asarray(self.backend.point(), dtype=np.float64)
 
     def _witness(self, stop_at: Optional[float] = None) -> Optional[np.ndarray]:
         """An exact-integer feasible point behind the ``Optimal`` status just

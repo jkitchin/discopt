@@ -60,4 +60,5 @@ def require_highspy(feature: str = "this HiGHS-backed feature") -> ModuleType:
         import highspy
     except ImportError as err:
         raise missing_highs_error(feature) from err
-    return highspy
+    mod: ModuleType = highspy
+    return mod
