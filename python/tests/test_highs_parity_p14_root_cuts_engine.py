@@ -10,6 +10,7 @@ and the stage deadline reaching the Rust simplex.
 from __future__ import annotations
 
 import builtins
+import sys
 
 import discopt.solvers._root_cuts as rc
 import numpy as np
@@ -38,6 +39,9 @@ def _block_highspy(monkeypatch):
         return real(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", imp)
+    # `_optional_highs.highs_available` probes with `find_spec`, which the import hook
+    # does not see; `sys.modules["highspy"] = None` is the block it documents.
+    monkeypatch.setitem(sys.modules, "highspy", None)
 
 
 def _root(seed=7):

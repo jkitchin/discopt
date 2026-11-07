@@ -343,6 +343,7 @@ counters!(
     CutLpDeleteBlockedRow,
     CutLpLenRejected,
     CutLpRelaxed,
+    LazyNearIntegralBranch,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
     SubstFixedSlack,
     // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`): attempts considered, propagation

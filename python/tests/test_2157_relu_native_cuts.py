@@ -220,6 +220,11 @@ def test_rust_engine_route_separates_at_nodes(monkeypatch):
     # GMI cuts close this small network at the root, so no node -- and no separator
     # call -- exists. Pin the legacy root so the node path is still exercised.
     monkeypatch.setenv("DISCOPT_MILP_ROOT_GMI_REPAIR", "0")
+    # Likewise `DISCOPT_MILP_ALIGNED_SLACKS` (highs-parity D2, default ON 2026-11-07):
+    # with the slacks aligned the root cut loop closes this network before any
+    # fractional point reaches the separator (0 calls vs 3; both certify the same
+    # optimum in 1 node). Pin the legacy layout so the separator path is exercised.
+    monkeypatch.setenv("DISCOPT_MILP_ALIGNED_SLACKS", "0")
     net = _net([2, 6, 1], 0)
     ref, _ = _build(net, False)
     r0 = ref.solve(time_limit=60)

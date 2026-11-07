@@ -110,6 +110,10 @@ def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
     return A_ub, b_ub, A_eq, b_eq
 
 
+#: Ceiling on the lazy master's root cut-loop wall budget (#1153 saturation).
+LAZY_ROOT_CUT_TIME_CAP_S = 15.0
+
+
 def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
     """Root cut options for the lazy (OA / LP-NLP-BB) master (highs-parity D3).
 
@@ -129,7 +133,10 @@ def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
     out = dict(base)
     out.update(root_cuts=500, cut_rounds=50, cut_select=True, cmir_cuts=True)
     if time_limit is not None:
-        out["root_cut_time_s"] = max(0.5, 0.25 * float(time_limit))
+        # Saturated (#1153): a carve that kept growing with the caller's budget would
+        # buy root separation instead of search. 15 s = the carve at the 60 s limit
+        # the D3 panels measured, so every measured run is unchanged.
+        out["root_cut_time_s"] = min(max(0.5, 0.25 * float(time_limit)), LAZY_ROOT_CUT_TIME_CAP_S)
     return out
 
 

@@ -3871,8 +3871,60 @@ fn solve_milp_node_search(
             if let Some(h) = lazy {
                 if integral {
                     lazy_calls += 1;
-                    match h.separate(&out.result.solution) {
+                    // #1561: the separator judges the vertex's INTEGRAL REALISATION
+                    // (integers rounded), as every exit gate does. A raw vertex
+                    // within `INT_TOL` of integral can satisfy a nonlinear row its
+                    // realisation violates (`v0^2+v1^2+s <= 32-8e-6` at
+                    // v = (3.9999995, 4)).
+                    let realised: Vec<f64> = out
+                        .result
+                        .solution
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &v)| {
+                            if is_int.get(j).copied().unwrap_or(false) {
+                                v.round()
+                            } else {
+                                v
+                            }
+                        })
+                        .collect();
+                    // The integer column furthest from its rounding, if the vertex
+                    // is not exactly integral.
+                    let off = (0..out.result.solution.len().min(is_int.len()))
+                        .filter(|&j| is_int[j])
+                        .map(|j| {
+                            (
+                                j,
+                                (out.result.solution[j] - out.result.solution[j].round()).abs(),
+                            )
+                        })
+                        .filter(|&(_, d)| d > 0.0)
+                        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)));
+                    match h.separate(&realised) {
                         MilpLazyVerdict::Accept => {}
+                        MilpLazyVerdict::Reject(cuts)
+                            if off.is_some() && lazy_requeues.get(&id).is_some_and(|&k| k >= 1) =>
+                        {
+                            // The realisation is vetoed AGAIN after a re-solve against
+                            // the previous veto's rows, and only the integrality
+                            // tolerance admits this vertex: the new rows cut it off by
+                            // less than the LP tolerance, so re-solving would loop to
+                            // `LAZY_REQUEUE_CAP`. Branch on the column whose rounding
+                            // was assumed (`x <= floor(v)` / `x >= floor(v)+1`, a valid
+                            // cover of an integer column). The first veto still
+                            // re-solves (below): on most models the rows move the
+                            // vertex and the re-solve's bound is the sharper one
+                            // (`test_1658` perspective portfolio: branching on the
+                            // first veto left the master at a 0.7 % gap). The node keeps
+                            // its own LP bound, valid over its box; the cuts are staged.
+                            let _ = stage_lazy_cuts!(cuts);
+                            let (j, _) = off.expect("guarded");
+                            crate::profile::incr(crate::profile::Ctr::LazyNearIntegralBranch);
+                            out.result.is_feasible = false;
+                            out.point_value = f64::NAN;
+                            tm.set_branch_hint(id, j);
+                        }
                         MilpLazyVerdict::Reject(cuts) => {
                             let _ = stage_lazy_cuts!(cuts);
                             let seen = lazy_requeues.entry(id).or_insert(0);
