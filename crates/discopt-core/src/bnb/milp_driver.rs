@@ -426,8 +426,16 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 /// (pool or conflict dual proofs) and stalls at 48.31 on `istra` (discopt: 48.32) when
 /// they stay in the subtree that made them (`highs-parity-d2-analysis.md` follow-ups
 /// 10-17, `highs-parity-d2-node-gmi-expert.md`).
-/// D2 W1 (`DISCOPT_MILP_CUT_LP`, default OFF): HiGHS's persistent-LP cut policy for
-/// the node-GMI pool (`docs/dev/highs-parity-d2-w1-cut-lp-expert.md`).
+/// D2 W1 (`DISCOPT_MILP_CUT_LP`, graduated default ON 2026-11-07; `=0` opts out to the
+/// node-local pool re-solve): HiGHS's persistent-LP cut policy for the node-GMI pool
+/// (`docs/dev/highs-parity-d2-w1-cut-lp-expert.md`). Graduated as a bundle with
+/// `DISCOPT_MILP_SB_ARMED` (alone it lost `ex1266` in the corpus differential: its
+/// folded rows made the unarmed strong-branch probes degenerate). Bundle §5 panel
+/// (`d2-analysis/w1_cut_lp_sb_armed_panel_r3.json.gz`, MIPLIB-38 + M, 3 reps, 20 s):
+/// cert-clean, certified 117 -> 125, nodes over the both-certified set -48 %, 2 dual
+/// losses (cap 2), no incumbent lost, median primal gap 0.105 -> 0.041; corpus
+/// differential cert-clean (`nvs24`, the one row it flagged, certifies 5/5 in both
+/// arms at 17-19 s against the 20 s limit: a timing edge).
 ///
 /// * Pool cuts the batch's node LP points violate are selected by HiGHS's pool score
 ///   with its adaptive threshold and 0.1 parallelism filter ([`cut_lp_select`],
@@ -439,7 +447,11 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 ///   and returned to the pool (`HighsLpRelaxation.cpp:629-676`, `HighsCutPool.cpp:150-160`).
 ///   discopt keeps a basis on every open node, where HiGHS keeps one only along the
 ///   active dive, so a row is deleted only when its slack is basic in every stored
-///   frontier basis; each basis then stays valid with the column removed.
+///   frontier basis (each basis then stays valid with the column removed); an aged row
+///   some stored basis still blocks is deleted lazily: its slack is freed, so it stops
+///   binding while every stored basis stays a basis. Falling back to the root basis or
+///   to a recent basis instead was measured and rejected (thousands of foreign warm
+///   starts; `highs-parity-d2-plan.md` W1 record).
 /// * New pool cuts start [`CUT_LP_POOL_NEW_AGE_HEADROOM`] batches short of the pool age
 ///   limit (`HighsCutPool.cpp:609`) and cuts longer than `100 + 0.15·ns` nonzeros are
 ///   not admitted (`HighsCutGeneration.cpp:974`).
@@ -457,8 +469,8 @@ fn cut_lp_enabled() -> bool {
 /// The parse table behind [`cut_lp_enabled`]; garbage is refused, not defaulted.
 fn parse_cut_lp(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
         other => Err(format!(
             "DISCOPT_MILP_CUT_LP={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -763,7 +775,8 @@ fn delete_cut_rows(
     }
 }
 
-/// D2 W1 (`DISCOPT_MILP_SB_ARMED`, default OFF): run strong-branch probes through
+/// D2 W1 (`DISCOPT_MILP_SB_ARMED`, graduated default ON 2026-11-07 bundled with
+/// `DISCOPT_MILP_CUT_LP`; `=0` opts out): run strong-branch probes through
 /// [`PreparedDual::reoptimize_armed`] (the degeneracy-armed warm path every other warm
 /// LP takes) instead of the bare [`PreparedDual::reoptimize`]. Only the pivot path
 /// changes; every probe is still verified on the original data. Evidence: on `ex1266`
@@ -781,8 +794,8 @@ fn sb_armed_enabled() -> bool {
 /// The parse table behind [`sb_armed_enabled`]; garbage is refused, not defaulted.
 fn parse_sb_armed(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
         other => Err(format!(
             "DISCOPT_MILP_SB_ARMED={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -7719,10 +7732,11 @@ mod tests {
 
     #[test]
     fn sb_armed_parse_refuses_garbage() {
-        for off in ["", " ", "0", "false", "NO"] {
+        // Graduated default ON: unset/empty reads as on; `0` is the opt-out.
+        for off in ["0", "false", "NO"] {
             assert!(!parse_sb_armed(off).unwrap(), "{off:?} must read as off");
         }
-        for on in ["1", "true", " yes "] {
+        for on in ["", " ", "1", "true", " yes "] {
             assert!(parse_sb_armed(on).unwrap(), "{on:?} must read as on");
         }
         for bad in ["2", "on", "y"] {
@@ -7732,11 +7746,11 @@ mod tests {
 
     #[test]
     fn cut_lp_parse_refuses_garbage() {
-        // Default OFF: unset/empty reads as off.
-        for off in ["", " ", "0", "false", "NO"] {
+        // Graduated default ON: unset/empty reads as on; `0` is the opt-out.
+        for off in ["0", "false", "NO"] {
             assert!(!parse_cut_lp(off).unwrap(), "{off:?} must read as off");
         }
-        for on in ["1", "true", " yes "] {
+        for on in ["", " ", "1", "true", " yes "] {
             assert!(parse_cut_lp(on).unwrap(), "{on:?} must read as on");
         }
         for bad in ["2", "on", "y"] {
@@ -9245,17 +9259,26 @@ pub(crate) mod sparse_milp_diff {
         let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);
         assert_eq!(r.status, MilpStatus::Optimal, "status");
         assert!((r.obj - (-16.0)).abs() < 1e-9, "obj {}", r.obj);
-        assert_eq!(r.nodes, 13, "node-count drift (per-node engine)");
         // highs-parity D2 (`DISCOPT_MILP_NODE_GMI`, graduated default ON): the node-local
         // pool/GMI re-solves add pivots (39 -> 48); the tree (13 nodes) and the
-        // objective are unchanged, and `=0` restores exactly 39.
-        let expect_iters = if node_gmi_enabled() { 48 } else { 39 };
+        // objective are unchanged, and `=0` restores exactly 39. D2 W1
+        // (`DISCOPT_MILP_CUT_LP`, default ON with node GMI): pool cuts folded into the
+        // shared LP prune the tree to 11 nodes; `DISCOPT_MILP_CUT_LP=0` restores 13/48.
+        let (expect_nodes, expect_iters) = match (node_gmi_enabled(), cut_lp_enabled()) {
+            (false, _) => (13, 39),
+            (true, false) => (13, 48),
+            (true, true) => (11, GOLDEN_CUT_LP_ITERS),
+        };
+        assert_eq!(r.nodes, expect_nodes, "node-count drift (per-node engine)");
         assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
     }
 
     /// Determinism: re-solving is bit-identical. This is exactly the property the
     /// CSC path must satisfy against the dense path at T1, so the harness proves the
     /// gate is meaningful (the dense driver itself is reproducible).
+    /// `branching_golden` pivots with `DISCOPT_MILP_CUT_LP` (11 nodes).
+    const GOLDEN_CUT_LP_ITERS: usize = 45;
+
     #[test]
     fn dense_panel_is_deterministic() {
         for case in panel() {

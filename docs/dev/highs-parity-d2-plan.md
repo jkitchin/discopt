@@ -14,7 +14,8 @@ Panel: MIPLIB-38 + M (62 instances), 20 s, `gap 1e-4`.
 |---|---|
 | HiGHS 1.15.1 | ~59 / 62 |
 | Rust at the start of 2026-11-06 | ~32 / 62 |
-| Rust now (node GMI + aligned slacks + sub-MIP, all default ON) | **~38 / 62** |
+| Rust before W1 (node GMI + aligned slacks + sub-MIP, all default ON) | ~38 / 62 |
+| Rust after W1 (+ cut LP + armed SB, default ON) | **~41-42 / 62** (bundle panel: 125 / 186 solves) |
 
 Rust certified 114 of 186 solves on the bundle panel. 24 instances never certify; by
 cause:
@@ -88,6 +89,44 @@ The cost is structural. Every node that uses the pool:
 
 **Size:** 1-2 days. This is bound-neutral per node (same cuts, same verified bound),
 so verify it as bound-neutral on fixed seeds first.
+
+**Status 2026-11-07: done. `DISCOPT_MILP_CUT_LP` + `DISCOPT_MILP_SB_ARMED` graduated default ON.**
+
+The entry profile overturned this section's premise. The cost was not the scan, the
+CSC clone or NS abstention, which together took < 10 % of node-GMI time. It was the
+second, node-local LP re-solve with pool rows: on `istra`, `NodeGmiLp` took 14.2 s
+against 7.1 s for `NodeLpSolve`. Changes (a)-(d) above were therefore not built.
+
+Following three HiGHS-expert consults (`highs-parity-d2-w1-cut-lp-expert.md`), the pool
+moved into the shared LP with HiGHS's rules:
+- pool score, adaptive threshold and parallelism filter;
+- per-solve aging on |dual| > tol;
+- deletion past age 10;
+- the length cap.
+
+Measured record:
+
+| step | result | verdict |
+|---|---|---|
+| fold hot cuts, append-only (`FOLD=200:3`) | `b-ball` certified in 2.8 s, `istra` 2.2x; lost `bppc8-02`, `fiber` 2x slower, `gsvm2rl3`/`beavma`/`obra` ~10x fewer nodes | not HiGHS: no removal |
+| + global nnz cap (`:0.1`, `:0.3`) | erased the gains; `bppc8-02` still lost with 39 rows | killed (not a HiGHS mechanism) |
+| instrumentation | 82-96 % of folded rows basic at node optima, on winners and losers alike | removal is the missing mechanism |
+| HiGHS policy, batch-level aging | ages never grew: `bppc8-02` 197 folded, 0 deleted | fixed: per-node-solve aging |
+| per-node aging | **false certificate**: `p0548` 9154 > optimum 8691. Deleting a row dropped a slack column other folded rows used. | fixed: `delete_cut_rows` rewrites them by substitution; regression test fails on the old behaviour |
+| aging on nonbasic only | degenerate zero-dual rows never aged | fixed: also require \|dual\| > 1e-7 (HiGHS) |
+| root-basis fallback for invalidated stored bases | 3,644 fallbacks on `bppc8-02`, worse everywhere | reverted |
+| recent-basis fallback (HiGHS's actual queue-node start) | churn (2,443 folded / 2,205 deleted on `enlight8`), 116k foreign starts, lost `kaihu`/`fiber` | reverted: HiGHS pays one foreign start per dive, here it lands per node |
+| lazy deletion (free the slack when a stored basis blocks) | neutral to positive; `enlight8` keeps its incumbent | kept |
+| §5 panel, CUT_LP alone | certified 118 -> 124, nodes -48 %, cert-clean | passed |
+| corpus differential, CUT_LP alone | lost `ex1266` (OFF 3/3, ON 1/3): folded rows made strong-branch probes degenerate, and probes never reached the cost perturbation (21,856 Bland pivots vs 21 attempts) | fixed: `DISCOPT_MILP_SB_ARMED` |
+| `ex1266` entry, + SB_ARMED | 5/5 in 2.1 s (both off: 11.6 s), Bland ~23k -> 812 | passed |
+| **§5 panel, bundle** | **certified 117 -> 125, nodes -48 %, median primal gap 0.105 -> 0.041, 2 dual losses (cap 2), no incumbent lost** | **passed** |
+| corpus differential, bundle | cert-clean; flagged `nvs24` certifies 5/5 in both arms at 17-19 s (20 s limit) | timing edge |
+
+Still open from W1:
+- `enlight8` and `bppc8-02` want node-local lifts that a shared LP does not reproduce.
+- HiGHS's start-of-solve perturbation and cost-shifting anti-cycling (third consult,
+  items 2-6) belong to W5.
 
 ### W2 — First incumbents (G2)  *expected +2-3*
 
