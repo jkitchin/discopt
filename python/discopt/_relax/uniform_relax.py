@@ -3090,37 +3090,63 @@ def _pow_deriv(p: float) -> Callable[[float], float]:
 def _odd_power_tangent_point(p: int, endpoint: float, lo: float, hi: float) -> Optional[float]:
     """Tangent point of the line through ``(endpoint, endpoint**p)`` touching ``t**p``.
 
-    Root of ``h(t) = (p-1) t^p - p·endpoint·t^(p-1) + endpoint**p`` on the OPEN side
+    Root of ``h(t) = (p-1) t^p - p·endpoint·t^(p-1) + endpoint**p`` on the side
     opposite the endpoint's sign (for the convex-envelope lower facet the endpoint is
     ``lo<0`` and the tangency is in ``(0, hi]``; the concave upper facet mirrors it in
-    ``[lo, 0)``). Returns the root by bisection, or ``None`` if the tangency lies
-    outside the box (=> the secant is the exact facet instead).
+    ``[lo, 0)``).
+
+    Returns ``None`` ONLY when the tangency is certified to lie outside the box (=> the
+    secant is the exact facet). ``h`` is strictly increasing on the search side
+    (``h'(t) = p(p-1) t^(p-2) (t - endpoint)``) and ``h(0) = endpoint**p`` carries the
+    sign of ``endpoint``, so the root is in the box exactly when ``h`` changes sign
+    between ``0`` and the far endpoint. The bracket starts AT ``0``: it used to start at
+    ``±1e-12·max(|far|, 1)``, which missed a root ``c_p·|endpoint|`` lying left of it,
+    and the caller then emitted the secant -- which lies on the wrong side of the
+    graph and cut feasible points (#2198, ``(1-x)**3`` with the enclosure
+    ``[-2.2e-16, 1]``).
+
+    The returned point is the bracket end on the ``h(0)`` side of the root, i.e. the
+    one nearer ``0``. Both facet slopes ``p·t^(p-1)`` grow with ``|t|``, and a smaller
+    slope keeps either line on its valid side, so the rounding error of the bisection
+    only ever loosens the facet. When the sign test is inconclusive (``endpoint**p``
+    underflows to 0) the result is ``0.0``: the slope-0 line ``w >= lo**p`` /
+    ``w <= hi**p`` is valid on the whole box because ``t**p`` is monotone.
     """
 
     def h(t: float) -> float:
         return (p - 1) * t**p - p * endpoint * t ** (p - 1) + endpoint**p
 
-    if endpoint < 0.0:  # lower facet: search (0, hi]
-        a, b = 1e-12 * max(hi, 1.0), hi
-    else:  # upper facet: search [lo, 0)
-        a, b = lo, -1e-12 * max(-lo, 1.0)
-    ha, hb = h(a), h(b)
-    if ha == 0.0:
-        return a
-    if hb == 0.0:
-        return b
-    if (ha > 0.0) == (hb > 0.0):
-        return None  # no sign change -> tangency outside box, secant is the facet
-    for _ in range(80):
-        m = 0.5 * (a + b)
+    h0 = endpoint**p
+    if h0 == 0.0:
+        return 0.0  # inconclusive (underflow): the monotone bound row is the safe facet
+    far = hi if endpoint < 0.0 else lo
+    h_far = h(far)
+    if h_far == 0.0:
+        return far
+    if (h_far > 0.0) == (h0 > 0.0):
+        return None  # certified: no sign change on [0, far] -> tangency beyond the box
+    # The root is c_p·|endpoint| with c_p in (0, 1), and h(-endpoint) = (2p-2)·|endpoint|^p
+    # has the far-side sign, so narrow the bracket to the root's own scale when that
+    # holds in floating point; bisection then resolves it to full relative precision.
+    if abs(endpoint) < abs(far):
+        h_mid = h(-endpoint)
+        if h_mid == 0.0:
+            return -endpoint
+        if (h_mid > 0.0) != (h0 > 0.0):
+            far = -endpoint
+    near = 0.0  # h(near) has the sign of h0
+    for _ in range(200):
+        m = 0.5 * (near + far)
+        if m == near or m == far:
+            break
         hm = h(m)
         if hm == 0.0:
             return m
-        if (hm > 0.0) == (ha > 0.0):
-            a, ha = m, hm
+        if (hm > 0.0) == (h0 > 0.0):
+            near = m
         else:
-            b = m
-    return 0.5 * (a + b)
+            far = m
+    return near
 
 
 def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float, p: int) -> bool:
@@ -3161,7 +3187,9 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
     flo, fhi = lo**p, hi**p
     # Underestimator from lo.
     t_u = _odd_power_tangent_point(p, lo, lo, hi)
-    if t_u is not None and 0.0 < t_u <= hi:
+    # ``None`` means the tangency is CERTIFIED beyond ``hi`` (#2198): only then is the
+    # secant a valid underestimator. Any other result is a tangency in ``[0, hi]``.
+    if t_u is not None:
         m_u = p * t_u ** (p - 1)
         _line(m_u, lo, flo, under=True)
     else:
@@ -3169,7 +3197,7 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
         _line(m_u, lo, flo, under=True)
     # Overestimator from hi (mirror).
     t_o = _odd_power_tangent_point(p, hi, lo, hi)
-    if t_o is not None and lo <= t_o < 0.0:
+    if t_o is not None:
         m_o = p * t_o ** (p - 1)
         _line(m_o, hi, fhi, under=False)
     else:
