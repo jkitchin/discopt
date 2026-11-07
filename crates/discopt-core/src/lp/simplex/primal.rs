@@ -1419,6 +1419,12 @@ fn p1_expel_forced_for_test() -> bool {
 /// `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine work, default OFF): maintain the primal
 /// simplex's reduced costs incrementally from the pivot row instead of re-pricing
 /// every column every pivot. Read once.
+///
+/// **Kept as a documented opt-out, not the default** (2026-11-07). Its §5 panel with
+/// the row-wise pivot row (`d2-analysis/eng_incr_rowprice_panel_r3.json.gz`) is
+/// cert-clean with nodes -16 %, but certified 125 -> 123, every loss on `p0548`,
+/// whose incumbent arrives later on this trajectory. What would make it the default:
+/// a primal lever that makes `p0548` robust, then a passing re-panel.
 pub(crate) fn incr_pricing_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {

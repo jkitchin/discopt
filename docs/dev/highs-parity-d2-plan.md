@@ -389,7 +389,17 @@ Entry (`d2-analysis/eng_rowprice_entry.jsonl.gz`):
 - The verify fired 1-2 times, on `2122` only, in both arms.
 - Statuses were unchanged and node counts within run noise; the rows are wall-limited
   elsewhere (node LP total time is level).
-- Re-panelled together with step 1 below.
+- §5 panel, steps 1+2 together (`d2-analysis/eng_incr_rowprice_panel_r3.json.gz`, 3 reps,
+  20 s, 62 instances; fired 7.8M row-price updates ON, 0 OFF):
+  - BAR 1 passes (372 checks); 2b (nodes over the 38 certified both ways 47,695 -> 40,050,
+    -16 %) and 2c (0 dual losses) pass.
+  - 2a (certified 125 -> 123), 2d and 2e fail, and every loss is `p0548`: 0/3 ON vs 2/3
+    OFF, no incumbent within the 13 s engine share in each failing rep.
+  - Run alone, both arms certify it (OFF 6.1 s, 3,309 nodes; ON 10.1 s, 7,796 nodes),
+    so ON is faster per node and finds the incumbent later. OFF's own third rep ends
+    the same way (775 nodes, no incumbent).
+  - Verdict: does not graduate. Kept as a documented opt-out pending the owner (audit
+    row). A `p0548`-robust primal lever is the precondition for a third panel.
 
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
