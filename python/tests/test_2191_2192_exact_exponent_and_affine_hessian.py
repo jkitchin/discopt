@@ -21,9 +21,13 @@ import numpy as np
 import pytest
 from discopt._relax.convexity import interval_ad
 from discopt._relax.convexity.certificate import certify_convex
+from discopt._relax.convexity.interval import Interval
 from discopt._relax.convexity.interval_ad import interval_hessian
+from discopt._relax.convexity.interval_ad_reverse import tighten_box
 from discopt._relax.convexity.interval_eval import evaluate_interval
 from discopt._relax.convexity.rules import Curvature, classify_expr
+from discopt._relax.cutting_planes import _quadratic_polynomial
+from discopt.solvers.amp import _flatten_objective_power_terms
 
 
 def _hess00(expr, model):
@@ -81,6 +85,44 @@ def test_interval_eval_near_integer_exponent_encloses_true_value():
     enc = evaluate_interval(x**p, m)
     assert float(enc.hi) >= 3.0**p > 9.0 + 1e-6
     assert float(enc.lo) <= 2.0**p
+
+
+@pytest.mark.smoke
+def test_reverse_propagation_near_integer_exponent_keeps_feasible_points():
+    """``x**(2 + 1e-7) >= 100`` holds for ``x >= 100**(1/p) ~ 10 - 1.15e-6``.
+
+    The old ``isclose`` rule inverted the integer square, giving ``x >= 10`` and
+    cutting off feasible points just below 10.
+    """
+    p = 2.0 + 1e-7
+    assert np.isclose(p, round(p))  # the old rule took this as exactly 2
+    m = dm.Model("reverse_near_int")
+    x = m.continuous("x", lb=1.0, ub=20.0)
+    box = tighten_box([(x**p, Interval(np.float64(100.0), np.float64(np.inf)))], m)
+    true_root = 100.0 ** (1.0 / p)
+    assert true_root < 10.0 - 1e-6
+    assert float(np.asarray(box[x].lo)) <= true_root, box[x]
+    assert float(np.asarray(box[x].hi)) >= 20.0
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("p", [2.0 + 1e-13, 2.0 - 1e-13, 1.0 + 1e-13])
+def test_cutting_plane_quadratic_extractor_rejects_near_integer_exponent(p):
+    m = dm.Model("cp_near_int")
+    x = m.continuous("x", lb=1.0, ub=8.0)
+    assert _quadratic_polynomial(x**p, m) is None
+    assert _quadratic_polynomial(x**2.0, m) is not None  # exact control
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("p", [2.0 + 1e-13, 2.0 - 1e-13, 1.0 + 1e-13])
+def test_amp_power_term_flattening_rejects_near_integer_exponent(p):
+    m = dm.Model("amp_near_int")
+    x = m.continuous("x", lb=1.0, ub=8.0)
+    assert _flatten_objective_power_terms(x**p, m, 1.0, {}) is None
+    groups: dict[int, dict[int, float]] = {}
+    assert _flatten_objective_power_terms(x**2.0, m, 1.0, groups) == 0.0  # exact control
+    assert groups[0] == {2: 1.0}
 
 
 @pytest.mark.smoke
@@ -152,6 +194,8 @@ def test_rank1_perspective_still_certifies():
     assert certify_convex(f, m) == Curvature.CONVEX
 
 
+@pytest.mark.smoke
+@pytest.mark.correctness
 def test_tiny_denominator_model_solves_to_true_optimum():
     """End-to-end reproducer from #2192: optimum 0.1 at x = -3, not 0.41 at x = 0.68."""
     k = 2.0**-1000

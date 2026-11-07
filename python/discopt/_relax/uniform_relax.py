@@ -680,17 +680,25 @@ def _curv_tan(lo: float, hi: float) -> Optional[str]:
 
     This is why ``tan`` was absent from the table rather than merely overlooked:
     the guard is two-sided and ``domain_ok`` only sees ``lo``.
+
+    Both tests go through the sound enclosure ``interval.tan`` (#2190): it is
+    finite only when the box provably lies in one branch (#1908), and its sign
+    then gives the verdict. The previous inline version compared ``lo`` and
+    ``hi`` with the rounded ``k*pi``, which lies off the true inflection by up
+    to ``|k| * 1.2e-16`` -- so a box ending a few ulps past ``k*pi`` was called
+    ``concave`` while ``tan`` is positive (hence convex) on that sliver.
     """
     if not (math.isfinite(lo) and math.isfinite(hi)) or hi < lo:
         return None
-    k = math.floor(lo / math.pi + 0.5)  # index of the branch containing lo
-    if math.floor(hi / math.pi + 0.5) != k:
-        return None  # crosses a pole
-    if not ((k - 0.5) * math.pi < lo and hi < (k + 0.5) * math.pi):
-        return None  # touches a pole (or the float-rounded branch test is unsafe)
-    if lo - k * math.pi >= 0.0:
+    from discopt._relax.convexity import interval as iv
+
+    t = iv.tan(Interval(np.asarray(float(lo)), np.asarray(float(hi))))
+    t_lo, t_hi = float(t.lo), float(t.hi)
+    if not (math.isfinite(t_lo) and math.isfinite(t_hi)):
+        return None  # touches or crosses a pole
+    if t_lo >= 0.0:
         return "convex"
-    if hi - k * math.pi <= 0.0:
+    if t_hi <= 0.0:
         return "concave"
     return None  # straddles the inflection at k*pi
 
