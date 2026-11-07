@@ -194,6 +194,21 @@ _FLAGS = {
         "leak": lambda off: off["NodeLpSlackRetry"],
         "show": ("NodeLpSlackRetry", "NodeLpSlackRetryDecided"),
     },
+    # #2211: the #956 T2' EXPAND-free re-solve of an undecided cold primal
+    # (``DISCOPT_PRIMAL_EXPAND_RESET``, `lp/simplex/primal.rs`). RETIRED by this panel
+    # (docs/dev/data/2211-expand-reset/); the build no longer has the ExpandReset*
+    # counters. Kept so ``--rows`` re-derives the verdict. The retry ran only
+    # after a cold `solve_lp_cols` ended ``Numerical``/``IterLimit``, so
+    # ``ExpandResetRetries`` ON is where it ran and ``ExpandResetRescues`` ON (a
+    # terminal certificate the first solve lacked) is what it changed. OFF the
+    # re-solve's copy is never taken, so ``ExpandResetRetries`` OFF must be 0.
+    # (``ExpandResetArmed`` is not used: no code path increments it.)
+    "DISCOPT_PRIMAL_EXPAND_RESET": {
+        "fired": lambda off, on: on["ExpandResetRescues"],
+        "ran": lambda off, on: on["ExpandResetRescues"] > 0,
+        "leak": lambda off: off["ExpandResetRetries"],
+        "show": ("ExpandResetRetries", "ExpandResetRescues"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -225,6 +240,9 @@ _CTRS = (
     "KernelPresolveEliminated",
     "NodeLpSlackRetry",
     "NodeLpSlackRetryDecided",
+    "ExpandResetArmed",
+    "ExpandResetRetries",
+    "ExpandResetRescues",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 

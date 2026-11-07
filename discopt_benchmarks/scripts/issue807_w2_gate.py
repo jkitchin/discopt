@@ -84,6 +84,13 @@ def parse(out):
 
 
 def main() -> bool:
+    # #2211 retired DISCOPT_CVX_NATIVELP (docs/dev/flag-retirement-audit.md). Against a
+    # tree without it, both arms below run the same code and would read as "no effect"
+    # (CLAUDE.md §6), so refuse instead of measuring nothing.
+    raise SystemExit(
+        "DISCOPT_CVX_NATIVELP was retired by #2211; this A/B now compares the default "
+        "path with itself. Re-run from a commit before #2211 to reproduce #807."
+    )
     if os.environ.get("_W2_CHILD") == "1":
         run_child()
         return True

@@ -164,34 +164,6 @@ fn parse_refac_interval(raw: &str) -> Result<usize, String> {
     }
 }
 
-/// Whether the near-zero-pivot recovery is enabled for callers that did **not**
-/// supply a deadline, read once from `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY` (#1008
-/// R1). Default **off**: re-selecting after a refactorize can land on a different
-/// degenerate vertex, so graduating it needs the §5 corpus panel. The deadline
-/// path is not routed through here — it keeps the recovery it already had.
-pub fn unstable_pivot_recovery_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY").unwrap_or_default();
-        parse_unstable_pivot_recovery(&raw).unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
-/// The parse table behind [`unstable_pivot_recovery_default`]. Unrecognized input
-/// is refused rather than defaulted, for the reason spelled out on
-/// [`parse_stall_patience`]: a typo in an A/B harness's arm that silently reads as
-/// a valid setting makes the harness measure one arm twice.
-fn parse_unstable_pivot_recovery(raw: &str) -> Result<bool, String> {
-    match raw.trim() {
-        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(false),
-        "1" | "true" | "True" | "on" | "ON" => Ok(true),
-        other => Err(format!(
-            "DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY={other:?} is not a recognized \
-             value. Use 1/true/on, or 0/false/off (the default)."
-        )),
-    }
-}
-
 /// Default for [`SimplexOptions::dual_cost_perturb`], read once from
 /// `DISCOPT_LP_DUAL_COST_PERTURB`: unset → [`COST_PERTURB_EPS`] (**on**),
 /// `1`/`true`/`on` → the same, `0`/`false`/`off` → off, any finite float > 0 →
@@ -372,7 +344,7 @@ pub fn solve_lp_warm_csc(
             return sol;
         }
     }
-    solve_lp_warm_csc_hardened(sp, m, n, c, l, u, b, start, opts)
+    solve_lp_warm_csc_counted(sp, m, n, c, l, u, b, start, opts)
 }
 
 /// A finite bound at or past this magnitude is a **huge** bound (#2125).
@@ -850,12 +822,12 @@ fn cold_with_dual_cleanup(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    let sol = solve_lp_warm_csc_hardened(sp.clone(), m, n, c, l, u, b, None, opts);
+    let sol = solve_lp_warm_csc_counted(sp.clone(), m, n, c, l, u, b, None, opts);
     if sol.status != LpStatus::Numerical || sol.basis.basic_vars.len() != m {
         return sol;
     }
     crate::profile::incr(crate::profile::Ctr::HugeBoxDualCleanupAttempts);
-    let warm = solve_lp_warm_csc_hardened(sp.clone(), m, n, c, l, u, b, Some(&sol.basis), opts);
+    let warm = solve_lp_warm_csc_counted(sp.clone(), m, n, c, l, u, b, Some(&sol.basis), opts);
     if warm.status == LpStatus::Optimal
         && super::primal::point_passes_original_audit(&warm.x, sp, m, n, b, l, u)
     {
@@ -865,10 +837,18 @@ fn cold_with_dual_cleanup(
     sol
 }
 
-/// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the #671
-/// hardened retry around [`solve_lp_warm_csc_inner`].
+/// [`solve_lp_warm_csc`] without the #2125 huge-box relaxation: the solve plus
+/// its terminal-verdict count.
+///
+/// This was the #671 hardened retry (`DISCOPT_LP_FACTORIZATION_HARDENING`, default
+/// OFF): on a `Numerical`/`IterLimit` verdict, re-solve once under
+/// `PerturbToEps` + double-double refinement. Retired by #2211 with its
+/// measurements recorded in `docs/dev/flag-retirement-audit.md`: it did not rescue
+/// hda (#671, the class it was built for), and #2212 reports it deciding 0 of 10
+/// captured nous1 node LPs. The primitive, [`super::linsolve::FeralLU::with_singular_perturb`],
+/// stays, with its tests in `regularized_lu.rs`.
 #[allow(clippy::too_many_arguments)]
-fn solve_lp_warm_csc_hardened(
+fn solve_lp_warm_csc_counted(
     sp: SparseCols,
     m: usize,
     n: usize,
@@ -879,52 +859,7 @@ fn solve_lp_warm_csc_hardened(
     start: Option<&Basis>,
     opts: &SimplexOptions,
 ) -> LpSolve {
-    // #671 factorization hardening (default OFF): if the solve breaks down
-    // numerically — a near-singular basis feral's strict LU cannot factorize (the
-    // hda-class ill-conditioned relaxations) — retry once with `PerturbToEps` +
-    // double-double refined solves so the basis completes and the node yields a
-    // usable dual. Failure-triggered; the cloned CSC is paid only when the flag is
-    // on. A retry that also fails falls through to the original verdict.
-    let retry_sp = super::linsolve::hardening_retry_available().then(|| sp.clone());
     let sol = solve_lp_warm_csc_inner(sp, m, n, c, l, u, b, start, opts);
-    if let Some(sp2) = retry_sp {
-        if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
-            // Bound the hardened re-solve: a completed factorization lets the simplex
-            // *proceed* on the near-singular basis, but the ill-conditioned LP can
-            // still pivot-grind (this is the intrinsic hardness #671 tracks). Cap the
-            // pivots (size-derived, ≤ the caller's `max_iter`) so a node that would
-            // grind bails with `IterLimit` and falls through to the original verdict
-            // (candidate A) instead of hanging — the flag can only *rescue*, never
-            // stall the solve. A clean hardened solve finishes far inside the cap.
-            // Bound BOTH pivots and wall time: the root's OBBT/FBBT fixpoint issues
-            // many LP solves, so an unbounded (or only iteration-bounded) hardened
-            // re-solve on the m~3000 refactor-heavy basis compounds. A short wall
-            // deadline guarantees each retry terminates regardless of per-pivot cost.
-            let deadline = {
-                let cap = std::time::Instant::now()
-                    + std::time::Duration::from_millis(HARDENING_RETRY_DEADLINE_MS);
-                Some(match opts.deadline {
-                    Some(d) => d.min(cap),
-                    None => cap,
-                })
-            };
-            let opts_h = SimplexOptions {
-                max_iter: hardening_retry_iter_cap(m, n).min(opts.max_iter),
-                deadline,
-                ..opts.clone()
-            };
-            let hardened = super::linsolve::with_hardening_active(|| {
-                solve_lp_warm_csc_inner(sp2, m, n, c, l, u, b, start, &opts_h)
-            });
-            if matches!(
-                hardened.status,
-                LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
-            ) {
-                warm_verdict(hardened.status);
-                return hardened;
-            }
-        }
-    }
     warm_verdict(sol.status);
     sol
 }
@@ -941,23 +876,8 @@ fn warm_verdict(status: LpStatus) {
     });
 }
 
-/// Pivot cap for the #671 hardened re-solve: `8·(m+n) + 2000`, so a healthy solve
-/// (a few multiples of `m+n` pivots) always finishes inside it while a degenerate
-/// near-singular grind is bounded well below the `100 000`-pivot default.
-fn hardening_retry_iter_cap(m: usize, n: usize) -> usize {
-    8usize
-        .saturating_mul(m.saturating_add(n))
-        .saturating_add(2000)
-}
-
-/// Wall-clock budget (ms) per #671 hardened re-solve. A clean hardened solve of an
-/// unblocked basis returns well inside it; a degenerate grind is cut here so the
-/// flag can never stall the enclosing solve even when many node LPs fail.
-const HARDENING_RETRY_DEADLINE_MS: u64 = 3000;
-
 /// The body of [`solve_lp_warm_csc`] (scaling + warm/cold solve + the #649 unscaled
-/// retry). Split out so the #671 hardened retry can re-run it under
-/// [`super::linsolve::with_hardening_active`] without recursing.
+/// retry), split from the verdict count in [`solve_lp_warm_csc_counted`].
 #[allow(clippy::too_many_arguments)]
 fn solve_lp_warm_csc_inner(
     mut sp: SparseCols,

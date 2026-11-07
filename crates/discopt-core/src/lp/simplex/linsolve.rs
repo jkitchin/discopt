@@ -222,63 +222,20 @@ fn route_suppressed() -> bool {
     DENSITY_ROUTE_SUPPRESSED.with(|s| s.get())
 }
 
-std::thread_local! {
-    /// #671 factorization hardening: while `true`, a solve on this thread builds its
-    /// basis factor with [`FeralLU::with_singular_perturb`] so a near-singular basis
-    /// completes (`PerturbToEps`) instead of aborting, and the refined solves recover
-    /// accuracy in double-double. Set only for the duration of a *failure-triggered*
-    /// hardened retry (see `hardening_retry` in `primal.rs`/`dual.rs`); thread-local
-    /// for the rayon-parallel B&B. Default off — no solve is affected unless a prior
-    /// solve numerically failed AND the flag is enabled.
-    static FACTORIZATION_HARDENING_ACTIVE: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-/// The `PerturbToEps` floor used by the hardened retry: below `zero_pivot_tol`
-/// (1e-13) so genuine small pivots are preserved, above 0 so exactly-singular /
-/// sub-tolerance pivots are floored and the factorization completes (the balance
-/// mapped by the `regularized_lu.rs` boundary experiment).
+/// The `PerturbToEps` floor the #671 hardened factorization used: below
+/// `zero_pivot_tol` (1e-13) so genuine small pivots are preserved, above 0 so
+/// exactly-singular / sub-tolerance pivots are floored and the factorization
+/// completes (the balance mapped by the `regularized_lu.rs` boundary experiment).
+/// Test-only since #2211 retired the failure-triggered retry that used it.
+#[cfg(test)]
 pub(crate) const HARDENING_ABS_FLOOR: f64 = 1e-14;
 
-/// Whether the `DISCOPT_LP_FACTORIZATION_HARDENING` flag (default OFF) is enabled
-/// *and* no hardened retry is already in progress on this thread (a retry that
-/// fails again must fall through to the existing fallback chain, never recurse).
-pub(crate) fn hardening_retry_available() -> bool {
-    !FACTORIZATION_HARDENING_ACTIVE.with(|s| s.get())
-        && std::env::var("DISCOPT_LP_FACTORIZATION_HARDENING")
-            .map(|v| v != "0")
-            .unwrap_or(false)
-}
-
-/// Whether the hardened factorization mode is active on this thread (a hardened
-/// retry is in progress). Read at [`FeralLU`] construction in the simplex.
-pub(crate) fn hardening_active() -> bool {
-    FACTORIZATION_HARDENING_ACTIVE.with(|s| s.get())
-}
-
-/// A basis solver for a node solve, hardened iff a hardened retry is in progress:
-/// [`FeralLU::with_singular_perturb`] under [`hardening_active`], else the plain
-/// `FeralLU::new()` (byte-identical to today). The single construction helper the
-/// simplex uses so the mode is honored uniformly.
+/// A basis solver for a node solve: the plain `FeralLU::new()`. The single
+/// construction helper the simplex uses, so a future factorization mode is
+/// honored uniformly. (It built a hardened factor during the #671 retry, retired
+/// by #2211.)
 pub(crate) fn node_feral_lu() -> FeralLU {
-    if hardening_active() {
-        FeralLU::new().with_singular_perturb(HARDENING_ABS_FLOOR)
-    } else {
-        FeralLU::new()
-    }
-}
-
-/// Run `f` with factorization hardening active on this thread (a hardened retry).
-/// Restores the previous state on exit, including on unwind.
-pub(crate) fn with_hardening_active<T>(f: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FACTORIZATION_HARDENING_ACTIVE.with(|s| s.set(self.0));
-        }
-    }
-    let _guard = Restore(FACTORIZATION_HARDENING_ACTIVE.with(|s| s.replace(true)));
-    f()
+    FeralLU::new()
 }
 
 /// #85: whether a *failed* LP solve may be retried on the dense route — true iff
