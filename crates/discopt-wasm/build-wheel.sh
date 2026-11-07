@@ -263,7 +263,15 @@ rm -rf "$root/dist"
 #
 # so the page is served the emscripten-tagged one. Revisit when the Pyodide pin
 # moves — a newer micropip prefers the repacked tag.
-built=$(ls "$root/target/wheels/discopt-"*"-emscripten_${EMSCRIPTEN_VERSION//./_}_wasm32.whl")
+# Select this build's version explicitly: target/wheels keeps the wheels of earlier
+# builds, so a bare `discopt-*` glob matched the previous release's wheel too and
+# handed both paths to the slimmer as one filename (v0.12.0 release run).
+built="$root/target/wheels/discopt-$(project_version)-cp312-abi3-emscripten_${EMSCRIPTEN_VERSION//./_}_wasm32.whl"
+if [[ ! -f "$built" ]]; then
+  echo "expected built wheel not found: $built" >&2
+  ls "$root/target/wheels/" >&2
+  exit 1
+fi
 name=$(basename "$built")
 
 mkdir -p "$wheels"
