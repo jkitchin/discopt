@@ -338,6 +338,19 @@ bound; each has a regression test that fails before its fix.
   0 lost, LOA iterations 93 -> 48. Default ON; `DISCOPT_OA_CONVEXITY_TAYLOR=0` restores the
   previous behaviour.
 
+### Known issues
+
+- **On macOS/arm64, MINLPLib `nous1` no longer certifies within 150 s (#2202).**
+  With `DISCOPT_DUAL_PROOF_PROPAGATION` on (the new default) the tree stalls at a
+  valid bound of 1.3457 (optimum 1.5671); with `DISCOPT_DUAL_PROOF_PROPAGATION=0` it
+  certifies in about 11 s. Linux is not affected (25.5 s with the flag on). No bound
+  or answer is wrong. Bisected to #2169.
+- **On macOS, importing `cyipopt` and then `torch` in one process aborts it**
+  (`OMP: Error #15`: two copies of `libomp`). This is an interaction between those two
+  packages' bundled OpenMP runtimes, not discopt code, but it affects a process that
+  uses `nlp_solver="ipopt"` and the torch reader together, in either import order.
+  Run the two in separate processes until the runtimes are reconciled.
+
 ## [0.11.1] - 2026-10-29
 
 A debugger follow-up to 0.11.0: the built-in frontends now show the node
