@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
+## [Unreleased]
+
 ## [0.12.0] - 2026-11-07
 
 ### Added
