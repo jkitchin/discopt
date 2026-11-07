@@ -72,6 +72,38 @@ _LEGACY_CUT_PROFILE: dict[str, object] = {
 }
 
 
+def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
+    """Scale each row of the lazy master by a power of two near ``1 / max|a_ij|``
+    (highs-parity D3, ``DISCOPT_MILP_LAZY_ROW_EQUILIBRATE``).
+
+    A positive row scaling changes neither the feasible set nor ``x``, the objective or
+    the bound, and powers of two are exact in floating point. It exists because the
+    P5.1 route panel loses its row-scaled variants (``m3@6``, ``flay03m@6``,
+    ``tls2@6``, ``clay0303hfsg@3/@6``: rows multiplied by 10^U(-span, span)). On
+    ``m3@6`` the Rust lazy master stops after 47 nodes / 0.16 s with status
+    ``feasible`` and bound ``-inf``: a node fathomed without a proof (the unresolved
+    path), where HiGHS's own scaling certifies it. Bound-changing in the §5 sense
+    (different pivot paths), so default OFF pending its panel.
+    """
+
+    def scale(A, b):
+        if A is None:
+            return A, b
+        A = sp.csr_matrix(A, dtype=np.float64)
+        mx = np.zeros(A.shape[0])
+        nz = np.diff(A.indptr) > 0
+        if nz.any():
+            mx[nz] = np.maximum.reduceat(np.abs(A.data), A.indptr[:-1][nz])
+        f = np.ones(A.shape[0])
+        ok = mx > 0
+        f[ok] = np.exp2(-np.round(np.log2(mx[ok])))
+        return sp.csr_matrix(sp.diags(f) @ A), np.asarray(b, dtype=np.float64) * f
+
+    A_ub, b_ub = scale(A_ub, b_ub)
+    A_eq, b_eq = scale(A_eq, b_eq)
+    return A_ub, b_ub, A_eq, b_eq
+
+
 def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
     """Root cut options for the lazy (OA / LP-NLP-BB) master (highs-parity D3).
 
@@ -1592,6 +1624,8 @@ def solve_milp_with_lazy_cuts(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
+    if os.environ.get("DISCOPT_MILP_LAZY_ROW_EQUILIBRATE", "0") == "1":
+        A_ub, b_ub, A_eq, b_eq = _equilibrate_rows(A_ub, b_ub, A_eq, b_eq)
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m
 
