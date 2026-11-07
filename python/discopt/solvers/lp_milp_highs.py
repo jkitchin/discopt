@@ -1176,6 +1176,15 @@ def _lp_engine(engine: Optional[str]):
             # ``Model.solve(highs_options=...)`` is an explicit request for HiGHS behaviour;
             # running the in-house engine would leave those options silently inert.
             engine = "highs"
+        elif _IN_HIGHS_MILP_ROUTE.get():
+            # The HiGHS MILP route's own LP checks (the NS-safe root cross-check, the
+            # #1509 fixed-integer LP, the #1733 refutations) were calibrated against
+            # HiGHS's LP, and the route already requires highspy. With the in-house
+            # LP engine they disagreed with HiGHS's MILP and declined certificates the
+            # HiGHS LP grants (#2156 tiny-weight ReLU nets: ``feasible`` instead of
+            # ``optimal``; #1447's threshold point assigned instead of refused). The
+            # P6.4 default applies to the LP seam outside this route.
+            engine = "highs"
         else:
             engine = "rust"
     return get_engine(engine)
@@ -1677,6 +1686,11 @@ RESERVED_USER_OPTIONS: dict[str, str] = {
 
 _USER_OPTIONS: contextvars.ContextVar[tuple[tuple[str, Any], ...]] = contextvars.ContextVar(
     "discopt_highs_user_options", default=()
+)
+
+#: Set while :func:`solve_milp_std` (the HiGHS MILP route) runs; see :func:`_lp_engine`.
+_IN_HIGHS_MILP_ROUTE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "discopt_in_highs_milp_route", default=False
 )
 
 
@@ -2733,6 +2747,34 @@ def _coefficient_tightening_rescue(
 
 
 def solve_milp_std(
+    sf: StdForm,
+    *,
+    time_limit: Optional[float],
+    gap_tolerance: float,
+    abs_gap_tolerance: Optional[float] = None,
+    max_nodes: int,
+    initial_point: Optional[np.ndarray] = None,
+    n_struct: Optional[int] = None,
+    root_check: bool = True,
+) -> HighsOutcome:
+    """The HiGHS MILP route; its LP checks run on HiGHS's LP (:func:`_lp_engine`)."""
+    token = _IN_HIGHS_MILP_ROUTE.set(True)
+    try:
+        return _solve_milp_std_route(
+            sf,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            abs_gap_tolerance=abs_gap_tolerance,
+            max_nodes=max_nodes,
+            initial_point=initial_point,
+            n_struct=n_struct,
+            root_check=root_check,
+        )
+    finally:
+        _IN_HIGHS_MILP_ROUTE.reset(token)
+
+
+def _solve_milp_std_route(
     sf: StdForm,
     *,
     time_limit: Optional[float],

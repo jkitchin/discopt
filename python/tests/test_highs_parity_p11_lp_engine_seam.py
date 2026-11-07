@@ -51,6 +51,24 @@ def test_default_engine_is_rust_and_env_selects(monkeypatch):
         H._lp_engine(None)
 
 
+def test_highs_milp_route_checks_run_on_the_highs_lp(monkeypatch):
+    """Inside the HiGHS MILP route the unset default is HiGHS's LP: the route's own
+    cross-checks were calibrated against it, and with the in-house LP they declined
+    certificates HiGHS grants (#2156 tiny-weight nets, #1447's threshold point).
+    Outside the route the P6.4 default stands; an explicit setting still wins."""
+    monkeypatch.delenv("DISCOPT_LP_STD_ENGINE", raising=False)
+    token = H._IN_HIGHS_MILP_ROUTE.set(True)
+    try:
+        assert H._lp_engine(None).name == "highs"
+        assert H._lp_engine("rust").name == "rust"
+        monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "rust")
+        assert H._lp_engine(None).name == "rust"
+    finally:
+        H._IN_HIGHS_MILP_ROUTE.reset(token)
+    monkeypatch.delenv("DISCOPT_LP_STD_ENGINE", raising=False)
+    assert H._lp_engine(None).name == "rust"
+
+
 @pytest.mark.parametrize("name", ["e226", "klein1", "forest6"])
 def test_rust_engine_reaches_the_highs_verdict(name):
     sf = _instance(name)
