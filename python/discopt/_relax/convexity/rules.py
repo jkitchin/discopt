@@ -1334,7 +1334,9 @@ def _classify_power(
 
     n = _scalar_value(expr.right)
     n_int = int(n)
-    is_int = np.isclose(n, float(n_int))
+    # Exact comparisons only (#2191): ``x**(1 - 1e-7)`` is strictly concave, not
+    # the affine ``x``; a near-integer exponent takes the fractional rules.
+    is_int = n == float(n_int)
 
     # Tighten base sign when it's needed for a conclusive verdict:
     # fractional exponents and negative exponents both require the
@@ -1345,9 +1347,9 @@ def _classify_power(
         base = ExprInfo(base.curvature, _refine_sign(expr.left, model, cache, base.sign))
 
     # Trivial exponents.
-    if np.isclose(n, 0.0):
+    if n == 0.0:
         return ExprInfo(Curvature.AFFINE, Sign.POS)  # x^0 = 1
-    if np.isclose(n, 1.0):
+    if n == 1.0:
         return base
 
     # ``base ** 0.5`` IS ``sqrt(base)`` (#1616 B-20b): give the power spelling the

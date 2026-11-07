@@ -412,10 +412,14 @@ pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
 /// `[a,b]^[c,d]` for general power.
 pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
     // If exponent is a point and integer, use int version.
-    if (exp.hi - exp.lo).abs() < 1e-12 {
+    // Exact only (#2191 class): an exponent interval `[2, 2 + 1e-13]` is not the
+    // point 2, and `x^(3 + 1e-13)` is not `x^3` -- the integer enclosure can
+    // exclude the true value (by ~1e7 at x = 1e8), and the integer rule also
+    // drops the nonnegative-base domain a non-integer power has.
+    if exp.hi == exp.lo {
         let e = exp.lo;
         let e_int = e.round() as i64;
-        if (e - e_int as f64).abs() < 1e-12 {
+        if e == e_int as f64 {
             return interval_pow_int(base, e_int);
         }
     }
@@ -1441,8 +1445,7 @@ fn node_domain(arena: &ExprArena, node: &ExprNode) -> Option<(ExprId, Interval)>
             right,
         } => {
             let p = arena.try_constant_value_pub(*right)?;
-            (p.is_finite() && (p - p.round()).abs() >= 1e-12)
-                .then(|| (*left, Interval::new(0.0, f64::INFINITY)))
+            (p.is_finite() && p != p.round()).then(|| (*left, Interval::new(0.0, f64::INFINITY)))
         }
         _ => None,
     }
@@ -1653,7 +1656,7 @@ fn backward_propagate_with(
                         // #1982: a non-integer power is real-valued only on a
                         // nonnegative base -- the domain `interval_pow` assumes.
                         // The same integrality test as the forward pass.
-                        if (exp_val - exp_int as f64).abs() >= 1e-12
+                        if exp_val != exp_int as f64
                             && exp_val.is_finite()
                             && SIGN_DOMAIN.with(|c| c.get())
                         {
@@ -1679,7 +1682,7 @@ fn backward_propagate_with(
                                 reduce_counts,
                             );
                         }
-                        if (exp_val - exp_int as f64).abs() < 1e-12 && exp_int > 0 {
+                        if exp_val == exp_int as f64 && exp_int > 0 {
                             // Roots are VERIFIED outward (#1504): `powf(1/n)`
                             // rounds to nearest, so the lower root could land
                             // above the true root and cut it. `root_down` /
@@ -6101,5 +6104,44 @@ mod tests_1982 {
             "not pinned: {:?}",
             on[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_near_integer_pow {
+    //! #2191 class: `interval_pow` collapsed an exponent within 1e-12 of an
+    //! integer (and an exponent interval narrower than 1e-12) to that integer.
+    use super::*;
+
+    #[test]
+    fn near_integer_point_exponent_encloses_true_value() {
+        let p = 3.0 + 2f64.powi(-40);
+        let base = Interval::new(1.0, 1e8);
+        let enc = interval_pow(&base, &Interval::new(p, p));
+        let truth = 1e8f64.powf(p); // ~1e24 * (1 + 1.7e-11): above 1e24 by ~1.7e13
+        assert!(truth > 1e24 + 1e12);
+        assert!(enc.hi >= truth, "hi {} excludes x^p = {}", enc.hi, truth);
+        // ... and a non-integer power keeps its nonnegative-base domain.
+        let neg = interval_pow(&Interval::new(-2.0, 2.0), &Interval::new(p, p));
+        assert!(
+            neg.lo >= 0.0,
+            "x^{p} over [-2, 2] took the odd-power rule: {:?}",
+            neg
+        );
+    }
+
+    #[test]
+    fn narrow_exponent_interval_is_not_a_point() {
+        let e = Interval::new(2.0, 2.0 + 2f64.powi(-44));
+        let enc = interval_pow(&Interval::new(1.0, 1e8), &e);
+        let truth = 1e8f64.powf(e.hi);
+        assert!(enc.hi >= truth, "hi {} excludes x^e.hi = {}", enc.hi, truth);
+    }
+
+    #[test]
+    fn exact_integer_exponent_keeps_integer_rule() {
+        // x^3 over a sign-straddling base still uses the odd-power rule.
+        let enc = interval_pow(&Interval::new(-2.0, 2.0), &Interval::new(3.0, 3.0));
+        assert!(enc.lo <= -8.0 && enc.hi >= 8.0, "{:?}", enc);
     }
 }

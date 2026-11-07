@@ -374,7 +374,9 @@ def _propagate_power(node: BinaryOp, parent: Interval, tight: dict, forward: dic
     if raw.ndim != 0:
         return
     p = float(raw)
-    if not np.isclose(p, round(p)):
+    # Exact only (#2191): a near-integer exponent is a different function, and
+    # inverting it as the integer power would tighten the base unsoundly.
+    if p != float(round(p)):
         return  # fractional handled separately if ever needed
     p_int = int(round(p))
     if p_int == 1:
