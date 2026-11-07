@@ -1330,7 +1330,7 @@ def _atanh(E: Any, a: Any) -> Any:
     ``a = -1 + 1e-13`` it returns ``-15.312667`` against the true ``-15.313221``
     (3.6e-5 relative; 3.0e-3 at ``a = -1 + 1e-15``), and ``min atanh(x)``
     certified that wrong objective. Workaround until the opcode is fixed
-    upstream in POUNCE (tracking issue pending in jkitchin/pounce).
+    upstream in POUNCE (https://github.com/jkitchin/pounce/issues/1151).
 
     For ``|a| >= 0.5`` the form ``0.5 * log((1 + a) / (1 - a))`` is accurate:
     the factor that approaches zero (``1 + a`` near ``-1``, ``1 - a`` near
