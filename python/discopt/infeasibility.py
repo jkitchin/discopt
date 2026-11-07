@@ -268,7 +268,7 @@ def compute_iis(
     include_integrality: bool = False,
     time_limit: float = 30.0,
     total_time_limit: float | None = None,
-    portfolio: Sequence[str] | None = None,
+    portfolio: Sequence[str] | bool | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
     iis_engine: Optional[str] = None,
@@ -324,7 +324,9 @@ def compute_iis(
         portfolio buys size (and, when orders differ in speed, time) with cores.
         Each member's result is sound on its own; ``IISResult.portfolio_members``
         reports all of them. ``None`` (default) runs the single ``"ICB"`` order
-        in-process.
+        in-process. ``True`` means ``DEFAULT_PORTFOLIO`` and ``False`` means
+        ``None``; a bare string (``"ICB"``) or a non-iterable raises
+        :class:`TypeError` -- wrap a single order in a list (``["ICB"]``).
     workers : int, optional
         Processes for ``portfolio`` (default: one per order, at most the CPU
         count). Orders beyond ``workers`` start as earlier members finish.
@@ -360,6 +362,9 @@ def compute_iis(
         ``total_time_limit`` ran out before any subsystem was proven infeasible.
     """
     iis_engine = _resolve_iis_engine(iis_engine)
+    from discopt._iis_milp import _normalize_portfolio
+
+    portfolio = _normalize_portfolio(portfolio)
     if include_integrality:
         return _compute_iis_with_integrality(
             model,

@@ -10,7 +10,67 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: cyipopt and torch in one process now raise instead of aborting it
+  (#2205).** Each brings its own `libomp` (torch's wheel ships one; cyipopt's Ipopt
+  often links Homebrew's), and the second to load called
+  `abort()` (`OMP: Error #15`) with no traceback. Every discopt import of either
+  package (`nlp_solver="ipopt"`, the cyipopt NLP backend, `load_torch_sequential`)
+  now first compares the OpenMP runtimes already mapped into the process with the
+  ones the package would load, and raises
+  `discopt._openmp_guard.OpenMPRuntimeConflictError` (a `RuntimeError`, so
+  `except ImportError` fallbacks do not route around it) naming both files. "Would
+  load" covers both a runtime the wheel ships (torch) and one its binaries link
+  through their Mach-O load commands, followed through `@rpath`/`@loader_path`
+  dependencies (cyipopt's Ipopt linking Homebrew's `libomp`, which cyipopt does not
+  ship). An explicit `nlp_solver="ipopt"` is checked once at solve entry and
+  refuses the solve; it is never silently replaced by another backend. Every broad
+  handler around an NLP-backend call re-raises the refusal instead of absorbing it,
+  and an auto-chosen heuristic backend that steps past it logs one WARNING. Builds
+  that share one `libomp` pass. `KMP_DUPLICATE_LIB_OK` is never set by
+  discopt; if the user sets it the check only warns. On macOS the test suite skips,
+  with a #2205 reason, a test that would load the second runtime into a worker,
+  instead of losing the worker. Not covered: a bare `import torch` / `import
+  cyipopt` in the caller's own code, and a runtime loaded with `dlopen` at run
+  time. Linux is unaffected.
+
+## [0.12.0] - 2026-11-07
+
 ### Added
+
+- **Faster, smaller irreducible infeasible subsystems for MILPs (#2093, #2108,
+  #2110–#2114, #2118, #2122).** `compute_iis(include_integrality=True)` treats an
+  integrality restriction as an IIS member and gains several candidate generators
+  and confirmation routes, all decided exactly: an in-house CDCL SAT solver
+  (`discopt._rust.PySatSolver`) for clause, cardinality and pseudo-Boolean rows; a
+  GF(2) parity certificate for integer equality rows; a staged-oracle ladder for
+  big-M models; and an exact decider that projects continuous columns out first
+  (about 2000x faster on MIPcc27 `otra`). `portfolio=` / `workers=` run several
+  deletion orders in parallel against one `total_time_limit` and return the
+  smallest result; under a deadline the base set is confirmed up front, so a run
+  that times out still returns a valid (if large) subsystem.
+- **The browser page shows and explains an IIS (#2109)**: member table, a
+  constraint–variable graph, and links back to the declaring line.
+- **Smooth ReLU-like activations with a sharpness parameter (#2135, #2139).**
+  `DenseLayer.beta` for `SOFTPLUS`, `SQUAREPLUS`, `SWISH` (alias `"silu"`) and
+  `GELU`; the torch reader keeps `Softplus(beta)`. Each activation is defined once
+  (value, exact interval image, symbolic form) in `discopt/ml/activations.py`.
+- **Stronger MILP encodings for trained ReLU networks (#2134, #2140):**
+  `strategy="relu_partition"` (Tsay et al. 2021) and `strategy="relu_extended"`
+  (Anderson et al. 2020), plus the `AndersonCutSeparator` ideal-cut callback.
+- **GDP primal heuristics.** A feasibility-first fallback for the disjunct
+  configuration search, default ON (`DISCOPT_GDP_CONFIG_FEAS_FALLBACK`; #2144,
+  #2173); the root LOA proposer's proved bound now reaches the tree, so GDPlib
+  `syngas` certifies under hull and big-M at 120 s (#2143, #2166).
+- **Relaxation soundness fuzzers (#2200)**: `scripts/fuzz/fuzz_relax_atoms.py` and
+  `scripts/fuzz/fuzz_relax_trees.py` search for a point that violates a relaxation
+  bound and confirm it in mpmath. The developer `/adversary` command
+  (`discopt-dev adversary`) is tracked in the repository again and documents the
+  method as its soundness-fuzzing mode.
+- **The benchmark harness refuses to run on a broken external solver (#2186).** Each
+  configured solver must solve a probe with a known optimum first; a missing or
+  demo-licensed binary no longer shows up as a solver column of timeouts.
 
 - **A `discopt-expert` subagent**, the generalist beside the domain
   specialists. It knows the codebase as a whole: the repository map, the order
@@ -83,6 +143,69 @@ The release procedure that produces these entries is documented in
   `Model.mcp(..., method="gdp"|"sos1")` lowers on the spot.
 
 ### Fixed
+
+Correctness first. Every item below is a case where a solve could report
+`optimal` (or `infeasible`) with `gap_certified=True` and a wrong objective or
+bound; each has a regression test that fails before its fix.
+
+- **Nested powers inside a product keep their sign (#2200).** The canonicalizer
+  folded `(b^q)^e` to `b^(q*e)` and `(x*y)^e` to `x^e*y^e` with no sign check, so
+  `x*(x**2)**0.5` became `x**2` (true value `-x**2` for `x < 0`) and
+  `1/(x**2)**0.5` became `1/x`. Such a factor now folds as `|b|`, the exact identity
+  wherever the expression is real. Found by the new relaxation soundness fuzzers.
+- **The odd-power hull no longer uses the secant when the tangency is near 0
+  (#2198, #2199).** For `t**p` with odd `p` over a box whose lower end is a tiny
+  negative number, the tangent search started at `1e-12` and missed a root near
+  `1e-16`; the secant it fell back to lies above the graph. The trigger is
+  ordinary: `(1 - x)**3` with `x` in `[0, 1]` has the rounded enclosure
+  `[-2.2e-16, 1]`.
+- **Sound `sin`/`cos`/`tan` enclosures after argument reduction (#2190, #2193).**
+  Reducing by the rounded `2*pi` was not enclosed, so `sin(1e15)` came back as the
+  point 0.850 (true 0.858). Endpoint values now come from the unreduced
+  arguments, and extrema near a reduction boundary are counted conservatively. The
+  same rounding was fixed at four other trig sites.
+- **Exponents and Hessians that are nearly special are no longer treated as
+  exactly special (#2191, #2192, #2195; #2194, #2197).** `np.isclose` decided
+  whether an exponent was 0, 1 or an integer, and `|H| <= 1e-300` counted as a zero
+  Hessian, so `x**(1 - 2**-17)` could be certified affine or a nonconvex model
+  convex. Exact tests replace both, in the convexity layer and on the LP/QP routing
+  path.
+- **Like terms are collected exactly (#2090, #2097, #2098, #2099, #2100; #2094,
+  #2106).** `(2**53*x + x) - 2**53*x` is exactly `x`, but every float consumer read
+  it as `0*x`. A row whose coefficients cancel catastrophically is now rewritten
+  from an exact `Fraction` collection, including array rows, sums that are exactly
+  zero beside a large term, and `verify_point` called before `solve`. Collecting
+  terms of a shared sub-expression no longer walks it as a tree (exponential time
+  on deep sharing).
+- **`.nl` complementarity rows use AMPL's flag semantics (#2056, #2057).** The
+  bound bits were swapped and the relation was taken against `x` instead of its
+  bound.
+- **Binary bounds are rounded after tightening (#2081, #2087)**, so a round-off of
+  `1.6e-13` can no longer invert a selector's box; **LOA no longer stops on an
+  unresolved re-proposal (#2082).**
+- **The default GDP hull path takes the Neumaier–Shcherbina safe bound on every
+  ill-conditioned OBBT probe (#2088, in #2086)**, which removes a false certificate on
+  `clay0303`; spatial OBBT edges are safe bounds, and a box whose bounds cross by
+  round-off is widened instead of panicking.
+- **`compute_iis` no longer returns a feasible subsystem (#2093).** Finite bounds
+  of a partly free vector were applied in every probe but never reported; size-1
+  variables also kept their shape on the POUNCE tape again.
+- **Fewer sound certificates declined.** The HiGHS MILP route accepts the
+  fixed-integer LP's Neumaier–Shcherbina verdict (#2183, #2188) and certifies its
+  round-off refusals on ReLU networks (#2187, #2189); the in-house Rust MILP engine
+  certifies trained ReLU big-M MILPs that it used to leave undecided (#2163, #2165).
+- **Deadlines.** The per-node interval objective bound stops at the deadline
+  (#2071, #2073); every step of a native GDP solve, including lowering, is charged
+  to `time_limit` (#2079, #2080: `stranded_gas` overran 120 s by 97 s, now by 2 s);
+  under `deterministic=True`, per-NLP wall caps are role-2 budgets, so the answer
+  reproduces (#2120, #2124).
+- **GDP robustness (#1917).** LOA/RIC sub-NLPs keep a sparse Jacobian and Hessian
+  and refuse an `i32` KKT overflow instead of panicking (#2078); the hull splits an
+  unboundable `log(sum)` operand instead of refusing the model (#2076); a raising
+  disjunct-configuration constructor is logged at WARNING with its traceback, not
+  DEBUG (#2138).
+- **A failed pickle closes its children-first scope (#2180, #2181)**, which had
+  left later deep expressions pickling recursively until `RecursionError`.
 
 - **The HiGHS MILP route no longer certifies a feasible model infeasible (#2156).**
   HiGHS's MIP answered `kInfeasible` on feasible models with continuous columns of width
@@ -182,16 +305,43 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
-- **The `pounce-solver` floor is now 0.15 (was 0.14)**, for both the core
-  dependency and the `pounce` extra. POUNCE 0.15.0 adds a declared-complementarity
-  driver, caps the slack-row inertia perturbation (`perturb_slack_max_rows`,
-  default 1000; models with at most 1000 inequality rows solve exactly as before),
-  and fixes a convex infeasibility test that could report a feasible LP infeasible
-  off an approximate Farkas ray. It still has no in-memory solve report, so
-  `_pounce_report.py` keeps its temporary-file route. CI already installs POUNCE
-  from git `main`, so the CI lanes do not change. The Pyodide wheel in
+- **The `pounce-solver` floor is now 0.16 (was 0.14 in v0.11.1; #2132 raised it to
+  0.15 during this cycle)**, for both the core dependency and the `pounce` extra.
+  POUNCE 0.16.0 fixes a false infeasibility verdict at a point that satisfies the
+  model (most visible under L-BFGS), makes declared complementarity much faster on
+  large models (wide paired rows are lifted into a variable) and complementary to
+  `tol` rather than `sqrt(tol)`, and classifies two more convex infeasibility cases
+  correctly. 0.15.0 added the declared-complementarity driver and capped the
+  slack-row inertia perturbation. Neither has an in-memory solve report, so
+  `_pounce_report.py` keeps its temporary-file route. The Pyodide wheel in
   `crates/discopt-wasm/web/wheels/` is still 0.14.0; it is built in the POUNCE
   repository and is updated separately.
+- **Flags graduated to default ON this cycle** (the measurement behind each is in
+  its PR and in `docs/dev/flag-retirement-audit.md`; `=0` opts out):`DISCOPT_ROUTE_ABANDON_CROSS_CHECK` and `DISCOPT_OA_SOC_OUTER`
+  (`portfol_classical050_1` now certifies, #2059, #2064);
+  `DISCOPT_SUBNLP_REDUCED`, `DISCOPT_HEUR_FIXING_SCREEN`,
+  `DISCOPT_ROOT_WARMSTART_FIRST`, `DISCOPT_GDP_LOA_PROPOSER`,
+  `DISCOPT_GDP_LOA_PROPOSER_BOUND` and `DISCOPT_ROOT_PUMP_SKIP_WITH_INCUMBENT`
+  (#2143, #2166); `DISCOPT_DUAL_PROOF_PROPAGATION` and
+  `DISCOPT_HULL_EXACT_PERSPECTIVE` (GDPlib `cstr` certifies under big-M, #2142,
+  #2169); `DISCOPT_HEUR_WALL_COST` (#2176, #2175);
+  `DISCOPT_GDP_CONFIG_ROOT_SKI` (#2182, #2184).
+- **The root-pump skip requires a closed gap (#2170, #2175).** It skipped both root
+  feasibility pumps whenever any incumbent existed; it now requires that incumbent
+  to meet the solve's own gap test.
+- **`DISCOPT_OBBT_NS_STRICT` (#2077)**, a documented opt-out (default OFF):
+  tighten OBBT/DBBT only to the Neumaier–Shcherbina safe bound.
+- **Bound-neutral speedups.** The nonlinear FBBT scan skips rows a rule
+  structurally cannot match (#2159); curvature proofs that must abstain are skipped
+  when the Hessian at a point of the box is provably indefinite (#2160); the
+  multiple-big-M GDP LP relaxation is sparse and memoized (#2075).
+- Measured and not adopted, so absent from this release: per-LP caps on
+  persistent OBBT probes (#2065, #2068), `DISCOPT_HULL_PLAIN_EQUALITY` (#2137),
+  `DISCOPT_SUBNLP_FBBT_BOX` (#2141), `DISCOPT_ROOT_FIXPOINT_EVEN_SPLIT` (#2162),
+  `DISCOPT_NLP_LADDER_SCOPED` (#2161, retired in #2177) and
+  `DISCOPT_KERNEL_PRESOLVE` (#2168, #2171). Their measurements are in
+  `docs/dev/flag-retirement-audit.md`.
+
 - **The open branch-and-bound frontier has a memory budget, on by default (#2092).**
   `DISCOPT_FRONTIER_MEMORY_MB` (default 2048 MiB; `0` = no budget) becomes an open-node
   cap for the native spatial kernel and the Python-tree loops. A search whose gap never
@@ -214,6 +364,20 @@ The release procedure that produces these entries is documented in
   cuts. On a 40-model reactor-choice panel under `gdp_method="loa"`: certified 20 -> 25,
   0 lost, LOA iterations 93 -> 48. Default ON; `DISCOPT_OA_CONVEXITY_TAYLOR=0` restores the
   previous behaviour.
+
+### Known issues
+
+- **On macOS/arm64, MINLPLib `nous1` no longer certifies within 150 s (#2202).**
+  With `DISCOPT_DUAL_PROOF_PROPAGATION` on (the new default) the tree stalls at a
+  valid bound of 1.3457 (optimum 1.5671); with `DISCOPT_DUAL_PROOF_PROPAGATION=0` it
+  certifies in about 11 s. Linux is not affected (25.5 s with the flag on). No bound
+  or answer is wrong. Bisected to #2169.
+- **On macOS, importing `cyipopt` and then `torch` in one process aborts it**
+  (`OMP: Error #15`: two copies of `libomp`). This is an interaction between those two
+  packages' bundled OpenMP runtimes, not discopt code, but it affects a process that
+  uses `nlp_solver="ipopt"` and the torch reader together, in either import order.
+  Run the two in separate processes until the runtimes are reconciled. Since the next release discopt raises
+  `OpenMPRuntimeConflictError` instead of letting the process abort.
 
 ## [0.11.1] - 2026-10-29
 
@@ -6520,6 +6684,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
+[0.12.0]: https://github.com/jkitchin/discopt/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/jkitchin/discopt/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/jkitchin/discopt/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/jkitchin/discopt/compare/v0.9.0...v0.10.0

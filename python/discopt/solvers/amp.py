@@ -31,6 +31,7 @@ from typing import Any, Callable, Optional, Sequence, TypedDict, cast
 
 import numpy as np
 
+from discopt._openmp_guard import OpenMPRuntimeConflictError
 from discopt._relax.milp_relaxation import _normalize_convhull_formulation
 from discopt._relax.model_utils import flat_variable_bounds
 from discopt._relax.nonlinear_bound_tightening import (
@@ -568,6 +569,10 @@ def _solve_nlp_subproblem(
                         x0_clipped,
                         options=options,
                     )
+            except OpenMPRuntimeConflictError:
+                # #2205: an NLP backend that cannot load here refuses the solve; it is
+                # not a heuristic failure to log and step past.
+                raise
             except Exception as e:
                 logger.debug("AMP NLP subproblem backend %s failed: %s", solver_name, e)
                 continue
@@ -586,6 +591,10 @@ def _solve_nlp_subproblem(
                 logger.debug("AMP NLP subproblem returned a non-finite objective; rejecting it")
                 return None, None
             return x_opt, obj
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
+        raise
     except Exception as e:
         logger.debug("AMP NLP subproblem failed: %s", e)
     return None, None

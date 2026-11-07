@@ -300,10 +300,22 @@ def test_zero_cost_recession_lp_certifies_by_exact_dual_correction():
 @pytest.mark.parametrize(
     "name, provenance", [("klein1", "phase1-exact-dual-correction"), ("forest6", "farkas-fbbt-box")]
 )
-def test_infeasible_lp_without_a_declared_box_farkas_ray_is_proved(name, provenance):
+def test_infeasible_lp_without_a_declared_box_farkas_ray_is_proved(name, provenance, monkeypatch):
+    # The provenance labels are HiGHS's proof routes; since highs-parity P6.4 the
+    # `solve_lp_std` default engine is Rust, so pin HiGHS here (the Rust engine's
+    # verdict on the same instances is checked below).
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
     out = H.solve_lp_std(_certificate_instance(name))
     assert out.status == "infeasible" and out.gap_certified
     assert out.labels["lp/infeasible_provenance"] == provenance
+
+
+@pytest.mark.parametrize("name", ["klein1", "forest6"])
+def test_default_engine_also_certifies_these_lps_infeasible(name, monkeypatch):
+    monkeypatch.delenv("DISCOPT_LP_STD_ENGINE", raising=False)
+    out = H.solve_lp_std(_certificate_instance(name))
+    assert out.status == "infeasible" and out.gap_certified
 
 
 # ── LP route through Model.solve ────────────────────────────────────────

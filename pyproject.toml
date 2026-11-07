@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.11.2.dev0"
+version = "0.12.1.dev0"
 description = "MINLP solver with a Rust core: spatial branch and bound over convex relaxations"
 requires-python = ">=3.12"
 authors = [{name = "John Kitchin"}]
@@ -33,7 +33,7 @@ dependencies = [
     # JAX is NOT here: it is the `jax` extra below (issue #1873).
     "numpy>=1.24",
     "scipy>=1.10",
-    "pounce-solver>=0.15",
+    "pounce-solver>=0.16",
     # Pure LP/MILP is routed to HiGHS (issue #1229, docs/dev/lp-milp-highs-routing-plan.md).
     # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
     # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
@@ -63,7 +63,9 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
-pounce = ["pounce-solver>=0.15"]
+pounce = ["pounce-solver>=0.16"]
+# macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
+# both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
 # highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
 # extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
@@ -90,6 +92,7 @@ ml = ["scikit-learn>=1.0"]
 # the small ONNX toolchain, and torch is a multi-hundred-MB wheel nobody who
 # only reads ONNX should pay for. Declared 2026-09-20 (v0.9.0 audit) so the
 # reader's ImportError can name a real extra.
+# On macOS torch cannot share a process with the `ipopt` extra's cyipopt (#2205).
 torch = ["torch>=2.0"]
 # `ParetoFront.plot()` is the only matplotlib consumer in the package.
 plot = ["matplotlib>=3.5"]

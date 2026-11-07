@@ -44,6 +44,7 @@ import logging
 
 import numpy as np
 
+from discopt._openmp_guard import OpenMPRuntimeConflictError
 from discopt.solvers import SolveStatus
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,10 @@ def certify_recourse_feasibility(
             constraint_bounds=ev.constraint_bounds(),
             options={"print_level": 0, "max_iter": 300},
         )
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
+        raise
     except Exception as exc:  # noqa: BLE001 - a failed phase-1 yields no verdict
         logger.debug("feasibility phase-1 NLP raised: %s", exc)
         return "unknown", {"t": None, "mu": None, "evaluator": ev}
