@@ -1,0 +1,2594 @@
+{
+ "header": {
+  "commit": "488c3902",
+  "load": [
+   1.98193359375,
+   1.94091796875,
+   1.580078125
+  ],
+  "highs": "1.15.1"
+ },
+ "args": {
+  "population": "route",
+  "kernel": "on",
+  "spans": "0,3,6",
+  "time_limit": 30.0,
+  "only": "",
+  "out": "/tmp/claude-0/-home-user-discopt/38303ad9-c9f4-5a5b-9f75-f33b92707a61/scratchpad/r1/d3_full_route.json"
+ },
+ "rows": [
+  {
+   "model": "clay0303hfsg@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 26669.109572583595,
+    "bound": 26669.109572485642,
+    "wall": 4.25493952800025,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 26669.109572486115,
+    "bound": 26669.10955160326,
+    "wall": 24.22363386400002,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 2.20s (status=feasible) -> fell back to the default path with 27.74s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "clay0303hfsg@3",
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 26669.109572486057,
+    "bound": 19513.271996671625,
+    "wall": 30.212372149000203,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 5.75s (status=feasible) -> fell back to the default path with 24.17s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 26669.10957253795,
+    "bound": 26669.10907565207,
+    "wall": 7.552104091999809,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "clay0303hfsg@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 26669.109572500114,
+    "bound": 26669.10957248589,
+    "wall": 11.303438590000042,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "time_limit",
+    "cert": false,
+    "obj": null,
+    "bound": null,
+    "wall": 44.33730309800012,
+    "feas_ok": null,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 1.93s (status=iteration_limit) -> fell back to the default path with 27.97s",
+    "fired": true,
+    "checks": 0,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_nsig30@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.6287126437295,
+    "bound": 130.61841392487696,
+    "wall": 22.659135379999952,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.63s (status=feasible) -> fell back to the default path with 14.37s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.6287126437295,
+    "bound": 130.61841392487696,
+    "wall": 22.86709164499962,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.38s (status=feasible) -> fell back to the default path with 14.62s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_nsig30@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.62871264373192,
+    "bound": 130.61841520499814,
+    "wall": 22.432595958000093,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.87s (status=feasible) -> fell back to the default path with 14.13s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.62871264373192,
+    "bound": 130.61841520499814,
+    "wall": 21.921135696999954,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.40s (status=feasible) -> fell back to the default path with 14.60s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_nsig30@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.6287126437294,
+    "bound": 130.61841471560888,
+    "wall": 22.22883903999991,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.33s (status=feasible) -> fell back to the default path with 14.66s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 130.6287126437294,
+    "bound": 130.61841471560888,
+    "wall": 21.9732827250009,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.32s (status=feasible) -> fell back to the default path with 14.68s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig30@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 79.00237823939578,
+    "bound": 78.99701685046514,
+    "wall": 20.730380928999693,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.62s (status=feasible) -> fell back to the default path with 14.38s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 78.99885434060918,
+    "bound": 78.99179856949351,
+    "wall": 20.891668909000146,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 16.17s (status=feasible) -> fell back to the default path with 13.83s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig30@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 78.99885434060918,
+    "bound": 78.99179856949351,
+    "wall": 20.738550276999376,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.90s (status=feasible) -> fell back to the default path with 14.10s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 79.00237823939578,
+    "bound": 78.99701685046514,
+    "wall": 20.551038315999904,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.49s (status=feasible) -> fell back to the default path with 14.50s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig30@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 79.00237823939578,
+    "bound": 78.99701685046514,
+    "wall": 20.449861724000584,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 15.74s (status=feasible) -> fell back to the default path with 14.26s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 78.99885434060918,
+    "bound": 78.99179856949351,
+    "wall": 20.738194624999778,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.81s (status=feasible) -> fell back to the default path with 14.19s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig40r@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 86.54515412414284,
+    "bound": 86.53912379936298,
+    "wall": 16.642229647000022,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.53s (status=feasible) -> fell back to the default path with 14.46s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 86.54515381631941,
+    "bound": 86.53657911270008,
+    "wall": 1.2028813970000556,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig40r@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 86.54515381641804,
+    "bound": 86.53819936597505,
+    "wall": 1.811719825000182,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 86.54515381641804,
+    "bound": 86.54331961919098,
+    "wall": 2.000079915000242,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "cvxnonsep_psig40r@6",
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 86.54515381641801,
+    "bound": 84.98247960024837,
+    "wall": 30.0657493409999,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.04s (status=feasible) -> fell back to the default path with 14.94s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 86.54515381641801,
+    "bound": 86.5333748508114,
+    "wall": 30.12288438199994,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 0.75s (status=feasible) -> fell back to the default path with 29.23s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "fac2@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.1768791,
+    "bound": 331837498.17643344,
+    "wall": 0.4386911149995285,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.1768791,
+    "bound": 331837498.17628086,
+    "wall": 0.8248787470001844,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "fac2@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.1768791,
+    "bound": 331837498.17612076,
+    "wall": 1.2821844990003228,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.17687905,
+    "bound": 331837498.1764322,
+    "wall": 0.7518126289996871,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "fac2@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.1768791,
+    "bound": 331837498.1762971,
+    "wall": 1.1099387300000672,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 331837498.1769342,
+    "bound": 331837498.1680512,
+    "wall": 4.018293994000487,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 1.46s (status=feasible) -> fell back to the default path with 28.53s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay02m@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.94733194457007,
+    "bound": 37.9473319194657,
+    "wall": 0.10636102999978903,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.947331944570074,
+    "bound": 37.947331916928526,
+    "wall": 0.191124605999903,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay02m@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.947331944570074,
+    "bound": 37.94733191675903,
+    "wall": 0.21732502699978795,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.94733194457007,
+    "bound": 37.94733191675487,
+    "wall": 0.06996426599926053,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay02m@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.94733194456998,
+    "bound": 37.94733191433845,
+    "wall": 0.12989950700011832,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.94733194456998,
+    "bound": 37.947331916946716,
+    "wall": 0.23112637600024755,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay03m@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 48.989794888232055,
+    "bound": 48.98844775290874,
+    "wall": 0.7161569669997334,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 48.989794888231785,
+    "bound": 48.98979396160844,
+    "wall": 0.6997027549996346,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay03m@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 48.989794888230826,
+    "bound": 48.98979485484883,
+    "wall": 0.7176973940004245,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 48.989794888231586,
+    "bound": 48.988447753288966,
+    "wall": 0.6463077570006135,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "flay03m@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 48.989794888230094,
+    "bound": 48.98979484371362,
+    "wall": 0.9553272030007065,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 48.989808712686994,
+    "bound": null,
+    "wall": 59.634038699000484,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.92s (status=feasible) -> fell back to the default path with 29.07s",
+    "fired": true,
+    "checks": 0,
+    "violations": []
+   }
+  },
+  {
+   "model": "gbd@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090948,
+    "bound": 2.1999999999968,
+    "wall": 0.021134093999535253,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090948,
+    "bound": 2.1999999999968,
+    "wall": 0.034065882000504644,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "gbd@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090948,
+    "bound": 2.1999999999968,
+    "wall": 0.03296774099999311,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090948,
+    "bound": 2.1999999999968,
+    "wall": 0.021821205999913218,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "gbd@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090908,
+    "bound": 2.1999999999968,
+    "wall": 0.02242752200072573,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.2000000009090908,
+    "bound": 2.1999999999968,
+    "wall": 0.03419357600068906,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "m3@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.80000007286183,
+    "bound": 37.7999999998928,
+    "wall": 0.15073637899968162,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.80000007286182,
+    "bound": 37.79999999989748,
+    "wall": 0.15057054499993683,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "m3@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.80000007276869,
+    "bound": 37.799999999858144,
+    "wall": 0.22710676299993793,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.80000007276868,
+    "bound": 37.79999999987602,
+    "wall": 0.14160619799986307,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "m3@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 37.80000002636364,
+    "bound": 37.79999999987603,
+    "wall": 0.13322604400036653,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 37.80000002636364,
+    "bound": null,
+    "wall": 30.086028439000074,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.16s (status=feasible) -> fell back to the default path with 29.83s",
+    "fired": true,
+    "checks": 0,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs03@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982995,
+    "wall": 0.021178961000259733,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982915,
+    "wall": 0.10477641099987522,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs03@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982915,
+    "wall": 0.11888278600054036,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982998,
+    "wall": 0.0196815939998487,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs03@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982997,
+    "wall": 0.02004786400084413,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 16.0,
+    "bound": 15.999999999982915,
+    "wall": 0.11177720600062457,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs10@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.8000000003177,
+    "wall": 0.10521374400013883,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.8000000003141,
+    "wall": 0.04437194499951147,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs10@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.80000000031185,
+    "wall": 0.030581447999793454,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.8000000003125,
+    "wall": 0.14471700100057205,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs10@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.80000000031765,
+    "wall": 0.10496818799947505,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -310.80000000000007,
+    "bound": -310.80000000031424,
+    "wall": 0.036775822999516095,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs11@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.0,
+    "bound": -431.0000000004328,
+    "wall": 0.4079725849996976,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.0,
+    "bound": -431.0092378508183,
+    "wall": 0.30326637899997877,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs11@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.0,
+    "bound": -431.0000000004688,
+    "wall": 0.23688315399977,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.00000000054865,
+    "bound": -431.0000000111474,
+    "wall": 1.5115359270002955,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.33s (status=feasible) -> fell back to the default path with 19.16s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs11@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.00000000054797,
+    "bound": -431.0000000010524,
+    "wall": 1.6269806399996014,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.32s (status=feasible) -> fell back to the default path with 19.17s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -431.0,
+    "bound": -431.0000000004688,
+    "wall": 0.20136736199947336,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs12@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.20000000000005,
+    "bound": -481.2000000004844,
+    "wall": 0.5520757140002388,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.20000000000005,
+    "bound": -481.20000000048316,
+    "wall": 0.41903932400055055,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs12@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.2000000005521,
+    "bound": -481.20000000133354,
+    "wall": 3.46471293400009,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.38s (status=feasible) -> fell back to the default path with 19.12s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.20000000000005,
+    "bound": -481.2000000005281,
+    "wall": 0.5495062160007365,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs12@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.20000000000005,
+    "bound": -481.20000000055023,
+    "wall": 0.33369793699966976,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -481.2000000005538,
+    "bound": -481.20000001302645,
+    "wall": 3.2498740040000484,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.51s (status=feasible) -> fell back to the default path with 18.99s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs15@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999949178,
+    "wall": 0.064149142000133,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999961277,
+    "wall": 0.10220556700005545,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs15@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999961278,
+    "wall": 0.07511286599947198,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999949178,
+    "wall": 0.06447129000025598,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "nvs15@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999949178,
+    "wall": 0.06375110699991637,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1.0,
+    "bound": 0.9999999999961277,
+    "wall": 0.07281386300019221,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp1@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.057326752000335546,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.04149596399929578,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp1@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.040906147999521636,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.05683172199951514,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp1@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.05338702600056422,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 281.0,
+    "bound": 280.9999999997175,
+    "wall": 0.04165309900054126,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp2@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.9999999999469644,
+    "wall": 0.03347712300001149,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.9999999999469644,
+    "wall": 0.06426032499985013,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp2@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.9999999999469404,
+    "wall": 0.06643260700002429,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.9999999999469635,
+    "wall": 0.03571188100067957,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp2@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.999999999946958,
+    "wall": 0.03577645899986237,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 2.0,
+    "bound": 1.999999999946955,
+    "wall": 0.06945647900010954,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp3@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -6.0,
+    "bound": -6.000000000008493,
+    "wall": 0.031075591000444547,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -5.999999997493812,
+    "bound": -6.000000001887192,
+    "wall": 0.01654340100049012,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp3@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -5.999999997493812,
+    "bound": -6.00000000188719,
+    "wall": 0.01648864299932029,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -6.0,
+    "bound": -6.000000000008491,
+    "wall": 0.04110924900032842,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp3@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -6.0,
+    "bound": -6.000000000008498,
+    "wall": 0.03111135400013154,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -5.999999997493812,
+    "bound": -6.000000001887193,
+    "wall": 0.01646788200014271,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp4@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.000000004578,
+    "wall": 0.033912859999873035,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.0000000045775,
+    "wall": 0.04201815299984446,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp4@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.000000004578,
+    "wall": 0.05193417899954511,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.000000004579,
+    "wall": 0.03502979800032335,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp4@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.000000004626,
+    "wall": 0.03580665299978136,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -4573.999999984964,
+    "bound": -4574.000000004578,
+    "wall": 0.0458457320000889,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp5@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.88888888727627,
+    "bound": -333.88888890070234,
+    "wall": 0.13659148099941376,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.88888888031863,
+    "bound": -333.8888889815548,
+    "wall": 0.04792958599955455,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp5@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.88888886028565,
+    "bound": -333.88889155011105,
+    "wall": 0.04982473099971685,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.8888888739614,
+    "bound": -333.8888888918351,
+    "wall": 0.08272583300004044,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_miqp5@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.88888888123716,
+    "bound": -333.88888888997695,
+    "wall": 0.08082568499958143,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -333.88888888060035,
+    "bound": -333.8888889445934,
+    "wall": 0.10153926400016644,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.05s (status=feasible) -> fell back to the default path with 29.95s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_test1@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -1.0799360577730912e-12,
+    "wall": 0.09903126900007919,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -3.4689037408334897e-11,
+    "wall": 0.13844784400043864,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_test1@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -3.468903740832778e-11,
+    "wall": 0.15494547900016187,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -1.0799360577730912e-12,
+    "wall": 0.09407899799953157,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_test1@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -1.0799360577730912e-12,
+    "wall": 0.09412058099951537,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0,
+    "bound": -3.468903740832826e-11,
+    "wall": 0.10288170599960722,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_testgr3@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.59000000002205,
+    "wall": 0.18081240199990134,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.590000000021814,
+    "wall": 1.4220383730007597,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_testgr3@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.590000008412616,
+    "wall": 0.1800339189994702,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.59000000002205,
+    "wall": 0.19940528799997992,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "st_testgr3@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.590000000022048,
+    "wall": 0.20145096899977943,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": -20.59,
+    "bound": -20.59070709895718,
+    "wall": 0.6608777949995783,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.14s (status=feasible) -> fell back to the default path with 19.36s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "tls2@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 5.3,
+    "bound": 5.2999999999999226,
+    "wall": 0.6227749090003272,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 5.3,
+    "bound": 5.299999999999999,
+    "wall": 1.0069242149993443,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "tls2@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 5.3,
+    "bound": 5.299999999999988,
+    "wall": 1.0993399290000525,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 5.3,
+    "bound": 5.299999999999962,
+    "wall": 0.7873819730002651,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "tls2@6",
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 5.3,
+    "bound": 0.9597542061036561,
+    "wall": 40.07619947800049,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 1.04s (status=feasible) -> fell back to the default path with 28.96s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 5.3,
+    "bound": 5.3,
+    "wall": 1.0295031149998977,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "ex1223a@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.579582414838561,
+    "bound": 4.579582402429315,
+    "wall": 0.05783455700020568,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.579582414865666,
+    "bound": 4.579582402429314,
+    "wall": 0.027607388999967952,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "ex1223a@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.57958241487231,
+    "bound": 4.579582402231785,
+    "wall": 0.02583991099982086,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.579582414834248,
+    "bound": 4.5795824024305105,
+    "wall": 0.07095122400005494,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "ex1223a@6",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.579582414847269,
+    "bound": 4.579582402429335,
+    "wall": 0.06160888599970349,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 4.579582414879426,
+    "bound": 4.579582402231969,
+    "wall": 0.028892868000184535,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqcqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "meanvarx@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.369232119289872,
+    "bound": 14.368213982850937,
+    "wall": 0.12020485199991526,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.369232119289872,
+    "bound": 14.368213982893662,
+    "wall": 0.12952400800077157,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "meanvarx@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.369232119289876,
+    "bound": 14.368213982911582,
+    "wall": 0.19850245800080302,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.369232119289876,
+    "bound": 14.368213982849564,
+    "wall": 0.18882236999979796,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "meanvarx@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.36923211928989,
+    "bound": 14.36821398195512,
+    "wall": 0.1956854400004886,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 14.369232114918084,
+    "bound": 14.36923211292873,
+    "wall": 0.576804841000012,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 0.31s (status=feasible) -> fell back to the default path with 29.69s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfol_roundlot@0",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.0282914310698744,
+    "bound": 0.028290211931876332,
+    "wall": 15.816659857000559,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 0.02833452845159641,
+    "bound": 0.028290213085141753,
+    "wall": 30.395700195000245,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.16s (status=feasible) -> fell back to the default path with 29.82s",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfol_roundlot@3",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.028290400083635522,
+    "bound": 0.028289427862438533,
+    "wall": 0.6730064519997541,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.19s (status=feasible) -> fell back to the default path with 29.78s",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.028291780763744705,
+    "bound": 0.028290193120098787,
+    "wall": 7.52980170400042,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfol_roundlot@6",
+   "off": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 0.028288942335676238,
+    "bound": 0.028208874081598306,
+    "wall": 31.604728061999595,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 1.22s (status=no_feasible_point) -> fell back to the default path with 28.75s",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 0.028288942335676238,
+    "bound": 0.028208874081598306,
+    "wall": 30.570555417999458,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 2.66s (status=feasible) -> fell back to the default path with 27.30s",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "syn05m@0",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008528419,
+    "bound": 837.7324008988239,
+    "wall": 0.10309044800033007,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008528419,
+    "bound": 837.7324008991633,
+    "wall": 0.14345007999963855,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "syn05m@3",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008815399,
+    "bound": 837.7324008991634,
+    "wall": 0.14941078599986213,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008815399,
+    "bound": 837.73240089882,
+    "wall": 0.1267722929997035,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "syn05m@6",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008979801,
+    "bound": 837.7325620853707,
+    "wall": 0.7004416949994265,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.08s (status=feasible) -> fell back to the default path with 29.91s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 837.7324008815391,
+    "bound": 837.7324008991629,
+    "wall": 0.21695663399987097,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n12_s21_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01061031076360843,
+    "bound": 0.010610310459302098,
+    "wall": 0.3868607140002496,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010610310711534326,
+    "bound": 0.010610127088043573,
+    "wall": 0.8885921730006885,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n12_s21_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01061031077783941,
+    "bound": 0.010610310441758586,
+    "wall": 1.1308732319994306,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010610311413226067,
+    "bound": 0.01061031045887419,
+    "wall": 1.059424802000649,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n12_s22_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016663294719339146,
+    "bound": 0.016663294677068185,
+    "wall": 0.5430197059995407,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01666329471919669,
+    "bound": 0.016663294687449016,
+    "wall": 0.45185992200003966,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n12_s22_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016663294719302158,
+    "bound": 0.016663294665075885,
+    "wall": 0.48476795200076594,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016663294719939138,
+    "bound": 0.016663294664608277,
+    "wall": 1.1263134939999873,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n16_s21_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.008560782228732593,
+    "bound": 0.00856078220831284,
+    "wall": 0.23181587500039313,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.008560782228732593,
+    "bound": 0.00856078222030997,
+    "wall": 0.21359326600031636,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n16_s21_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.008560782228732593,
+    "bound": 0.008560781087925474,
+    "wall": 2.032779969999865,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.008560782228784813,
+    "bound": 0.00856078042788629,
+    "wall": 0.7467853279995325,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n16_s22_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016388579578155184,
+    "bound": 0.01638857951286256,
+    "wall": 0.4917244890002621,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016388579578155184,
+    "bound": 0.016388579507588714,
+    "wall": 0.6695602360005068,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n16_s22_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01638857957841683,
+    "bound": 0.016388579512858492,
+    "wall": 0.5567419399994833,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.016388579515490817,
+    "bound": 0.01638857951285861,
+    "wall": 1.0937804660006805,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n20_s21_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010442024937118514,
+    "bound": 0.010441963030928147,
+    "wall": 0.4472432270003992,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01044202493711852,
+    "bound": 0.010442024935896443,
+    "wall": 0.434523105000153,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n20_s21_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010442024937121286,
+    "bound": 0.010442024511824863,
+    "wall": 2.224776959999872,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010442024937118516,
+    "bound": 0.010442024934184524,
+    "wall": 3.5314073540002937,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n20_s22_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.014933032024054587,
+    "bound": 0.01493303201646803,
+    "wall": 0.9340445309999268,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.014933032024054582,
+    "bound": 0.01493303202276578,
+    "wall": 0.8211499629996979,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n20_s22_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.014933032024054584,
+    "bound": 0.014933032014102562,
+    "wall": 2.558908063999297,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.014933032024054585,
+    "bound": 0.014933032015623172,
+    "wall": 3.2117462239993984,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n24_s21_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010994536013966435,
+    "bound": 0.010994061950478471,
+    "wall": 0.592853740999999,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010994536013966433,
+    "bound": 0.01099453278951057,
+    "wall": 1.5380669500000295,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n24_s21_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01099453601608617,
+    "bound": 0.010994503985493157,
+    "wall": 2.179725629999666,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.010994535889900563,
+    "bound": 0.010994379938734042,
+    "wall": 3.405263204000221,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n24_s22_bigm",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.012347713064671785,
+    "bound": 0.012347127856370422,
+    "wall": 0.3756799829998272,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.012347713064672366,
+    "bound": 0.012347044225332221,
+    "wall": 1.2043322930003342,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: miqp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  },
+  {
+   "model": "portfolio_n24_s22_persp",
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.012347713063834998,
+    "bound": 0.012347706014440896,
+    "wall": 2.1642665449999186,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 0.54s (status=feasible) -> fell back to the default path with 29.45s",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   },
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 0.01234771306423609,
+    "bound": 0.012347713043894424,
+    "wall": 2.09525480100001,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 1,
+    "violations": []
+   }
+  }
+ ],
+ "skipped": [],
+ "verdict": {
+  "certified": {
+   "off": 92,
+   "on": 86
+  },
+  "lost": [
+   "clay0303hfsg@3",
+   "clay0303hfsg@6",
+   "flay03m@6",
+   "m3@6",
+   "tls2@6",
+   "portfol_roundlot@0"
+  ],
+  "gained": [],
+  "wall": {
+   "off": 276.0081838860051,
+   "on": 513.0463643089993
+  },
+  "wall_ratio": 1.8588085218548953,
+  "fired": {
+   "off": 94,
+   "on": 94
+  },
+  "checks": 332,
+  "violations": [],
+  "errors": [],
+  "bars": {
+   "cert_clean": true,
+   "certified_on_ge_off": false,
+   "zero_lost": false,
+   "wall_on_le_1.25x": false
+  },
+  "pass": false
+ }
+}
