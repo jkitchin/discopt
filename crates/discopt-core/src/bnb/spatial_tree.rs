@@ -446,6 +446,31 @@ pub struct SpatialTreeConfig {
     /// `run_propagation = false` would solve it. Changes nothing at a node whose
     /// first LP decides. Off (the default) is the tree before it.
     pub undecided_unpropagated_retry: bool,
+    /// #2202: when a node LP ends `Numerical` / `IterLimit`, re-solve it once from
+    /// the sign-matched slack basis (`spatial_kernel::cold_dual_start_basis`) and
+    /// keep that answer if it is `Optimal` or `Infeasible`.
+    ///
+    /// **The defect.** A child's LP starts from the basis its nearest solved
+    /// ancestor ended on (#1935). On MINLPLib `nous1` that inherited start sends the
+    /// warm dual into a breakdown, and the cold fallback (the two-phase primal) ends
+    /// `Numerical` too, its phase-1 handoff box-infeasible from `x_B` drift (#956
+    /// T2'). The node is then undecided and branches with its parent's bound, so its
+    /// subtree learns nothing. On 40 captured nous1 node LPs that ended this way
+    /// (`m = 368`, `|a_ij| <= 300`, bounds `<= 300`) HiGHS decides every one (36
+    /// optimal, 4 infeasible), and so does the warm dual started from the slack
+    /// basis, with the same split and objectives equal to HiGHS's to 6 digits; from
+    /// the inherited start, 0 of 40. Under fixed-row permutations of nous1 the
+    /// cascade stalls the tree at the time limit with ~1,400 undecided nodes, with
+    /// `dual_proof_propagation` on or off: which arm falls into it depends on the
+    /// order of floating-point work, which is why #2202 looked like a macOS-only
+    /// regression of #2169.
+    ///
+    /// **Sound.** The re-solve is another START for the same LP, through the same
+    /// entry (`solve_lp_warm_csc`): the same equilibration, final feasibility audit
+    /// and Farkas-ray verification as every node LP. Only a terminal verdict replaces
+    /// the first one, so it can turn "undecided" into a certificate, never one
+    /// certificate into another. Off (the default) is the tree before it, bit for bit.
+    pub node_lp_slack_retry: bool,
     /// #2142: learn a dual-proof row from the Farkas ray of every certified-empty
     /// node LP (global rows only, [`crate::bnb::dual_proof`]) and propagate the
     /// tree-global pool of them at every node after the fixed rows. Never added to
@@ -484,6 +509,7 @@ impl Default for SpatialTreeConfig {
             spatial_pscost_weight: 0.0,
             spatial_midpull: 0.0,
             undecided_unpropagated_retry: false,
+            node_lp_slack_retry: false,
             dual_proof_propagation: false,
         }
     }
@@ -651,6 +677,12 @@ pub struct SpatialTreeResult {
     pub n_prop_retries: usize,
     /// #1995: pre-propagation re-solves that decided (see above).
     pub n_prop_retry_decided: usize,
+    /// #2202: node LPs (the node's own and its #1995 re-solve) re-solved from the
+    /// slack basis ([`SpatialTreeConfig::node_lp_slack_retry`]), and how many of
+    /// those re-solves decided. Both 0 with the flag off.
+    pub n_slack_retries: usize,
+    /// #2202: slack-basis re-solves that decided (see above).
+    pub n_slack_retry_decided: usize,
     /// #2092: the search stopped because the open frontier reached
     /// [`SpatialTreeConfig::max_open_nodes`] (status [`TreeStatus::NodeLimit`]).
     pub frontier_capped: bool,
@@ -951,6 +983,8 @@ pub fn solve_spatial_tree_observed(
     // #1995: pre-propagation re-solves of undecided node LPs (probe counters).
     let mut n_prop_retries = 0usize;
     let mut n_prop_retry_decided = 0usize;
+    let mut n_slack_retries = 0usize;
+    let mut n_slack_retry_decided = 0usize;
     // #2092: set only on the frontier-budget exit below.
     let mut frontier_capped = false;
     // #2142: the tree-global pool of learned dual-proof rows (empty, and never
@@ -1113,6 +1147,8 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                n_slack_retries,
+                n_slack_retry_decided,
                 frontier_capped,
                 dual_proof: dp_stats(&dp_pool, &dp_counts),
             };
@@ -1167,6 +1203,8 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                n_slack_retries,
+                n_slack_retry_decided,
                 frontier_capped,
                 dual_proof: dp_stats(&dp_pool, &dp_counts),
             };
@@ -1249,7 +1287,12 @@ pub fn solve_spatial_tree_observed(
             &node_opts,
             parent_basis.as_ref(),
             &inherited_cuts,
+            config.node_lp_slack_retry,
         );
+        if let Some(decided) = node.slack_retry {
+            n_slack_retries += 1;
+            n_slack_retry_decided += usize::from(decided);
+        }
         // #1962: the separation loop. Every LP solved here is a relaxation of the
         // node region (each cut holds at every feasible point), so each one's safe
         // bound is valid and the node keeps the best of them; a round whose LP
@@ -1295,7 +1338,12 @@ pub fn solve_spatial_tree_observed(
                     &node_opts,
                     parent_basis.as_ref(),
                     &inherited_cuts,
+                    config.node_lp_slack_retry,
                 );
+                if let Some(decided) = retry.slack_retry {
+                    n_slack_retries += 1;
+                    n_slack_retry_decided += usize::from(decided);
+                }
                 if verdict_for(retry.status) != NodeVerdict::Undecided {
                     n_prop_retry_decided += 1;
                     node = retry;
@@ -1647,6 +1695,8 @@ pub fn solve_spatial_tree_observed(
                                     n_int_probe_improvements,
                                     n_prop_retries,
                                     n_prop_retry_decided,
+                                    n_slack_retries,
+                                    n_slack_retry_decided,
                                     frontier_capped,
                                     dual_proof: dp_stats(&dp_pool, &dp_counts),
                                 };
@@ -1703,7 +1753,14 @@ pub fn solve_spatial_tree_observed(
                     );
                 if live {
                     let probe = solve_spatial_node_with_cuts(
-                        spec, &l2, &h2, false, &node_opts, None, &node_cuts,
+                        spec,
+                        &l2,
+                        &h2,
+                        false,
+                        &node_opts,
+                        None,
+                        &node_cuts,
+                        config.node_lp_slack_retry,
                     );
                     n_lp_solves += probe.n_lp_solves;
                     let px = &probe.x;
@@ -1917,6 +1974,8 @@ pub fn solve_spatial_tree_observed(
                 n_int_probe_improvements,
                 n_prop_retries,
                 n_prop_retry_decided,
+                n_slack_retries,
+                n_slack_retry_decided,
                 frontier_capped,
                 dual_proof: dp_stats(&dp_pool, &dp_counts),
             }
@@ -1952,6 +2011,8 @@ pub fn solve_spatial_tree_observed(
             n_int_probe_improvements,
             n_prop_retries,
             n_prop_retry_decided,
+            n_slack_retries,
+            n_slack_retry_decided,
             frontier_capped,
             dual_proof: dp_stats(&dp_pool, &dp_counts),
         },
@@ -2345,7 +2406,16 @@ fn strong_branch_init(
             let gain = if empty {
                 Some(pruned_gain)
             } else {
-                let child = solve_spatial_node_with_cuts(spec, &l2, &h2, false, opts, None, cuts);
+                let child = solve_spatial_node_with_cuts(
+                    spec,
+                    &l2,
+                    &h2,
+                    false,
+                    opts,
+                    None,
+                    cuts,
+                    config.node_lp_slack_retry,
+                );
                 n_lp += child.n_lp_solves;
                 match verdict_for(child.status) {
                     NodeVerdict::EmptyRegion => Some(pruned_gain),
@@ -2411,7 +2481,16 @@ fn separation_loop(
         warm.basic_vars.extend(n_total..n_total + k);
         let base_len = cuts.len();
         cuts.extend(new);
-        let next = solve_spatial_node_with_cuts(spec, lo, hi, false, opts, Some(&warm), &cuts);
+        let next = solve_spatial_node_with_cuts(
+            spec,
+            lo,
+            hi,
+            false,
+            opts,
+            Some(&warm),
+            &cuts,
+            config.node_lp_slack_retry,
+        );
         *n_lp_solves += next.n_lp_solves;
         *n_node_pivots += next.n_pivots;
         match next.status {

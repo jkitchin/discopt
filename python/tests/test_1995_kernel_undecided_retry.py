@@ -36,6 +36,10 @@ import serialize_builder_cases as cases  # noqa: E402
 pytestmark = pytest.mark.smoke
 
 FLAG = "DISCOPT_KERNEL_UNDECIDED_RETRY"
+# #2202's slack-basis re-solve also decides this sliver LP (at the first solve, before
+# this retry is reached), so the solve-level tests below turn it off to pin THIS
+# mechanism; ``test_2202_node_lp_slack_retry.py`` covers the two together.
+SLACK_FLAG = "DISCOPT_NODE_LP_SLACK_RETRY"
 
 
 def _lowered():
@@ -83,6 +87,7 @@ def _root(model, box, incumbent, retry):
 
 def test_the_lowered_either_or_certifies_with_the_retry(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)  # the default
+    monkeypatch.setenv(SLACK_FLAG, "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _lowered().solve(time_limit=30)
@@ -105,6 +110,7 @@ def test_the_retry_is_on_by_default_and_zero_opts_out(monkeypatch):
 def test_the_opt_out_is_the_tree_before_the_retry(monkeypatch):
     """``=0`` reproduces the stall (the legacy path stays intact) and reports 0."""
     monkeypatch.setenv(FLAG, "0")
+    monkeypatch.setenv(SLACK_FLAG, "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _lowered().solve(time_limit=3)

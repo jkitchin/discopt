@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **MINLPLib `nous1` no longer stalls on undecided node LPs (#2202).** The 0.12.0
+  known issue ("on macOS/arm64 `nous1` no longer certifies with
+  `DISCOPT_DUAL_PROOF_PROPAGATION` on") was not a dual-proof defect. A child's node LP
+  starts from the basis its parent ended on; on `nous1` that start sends the warm dual
+  simplex into a breakdown, and the cold fallback ends `Numerical` too, so the node is
+  undecided and branches with its parent's bound. Whether a run falls into this
+  depends only on the order of floating-point work: with the kernel's rows permuted,
+  Linux stalls the same way (bound 1.485 at 120 s, ~1,400 undecided nodes) with the
+  flag on **or** off. The native kernel now re-solves an undecided node LP once from
+  the slack basis, through the same audits and Farkas verification as every node LP;
+  that decides all 40 captured failing LPs, agreeing with HiGHS, and all 24 permuted
+  runs certify. `DISCOPT_NODE_LP_SLACK_RETRY=0` restores the previous behaviour.
+  `solver_stats` gains `tree/slack_retries` and `tree/slack_retry_decided`.
+
 ## [0.12.0] - 2026-11-07
 
 ### Added

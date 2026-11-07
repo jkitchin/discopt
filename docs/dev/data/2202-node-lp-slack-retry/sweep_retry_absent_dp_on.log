@@ -1,0 +1,9 @@
+seed=6 flag=1 optimal cert=True bound=1.566916 nodes=15121 wall=33.5 lp=18272 undec=3 rays=3773 learned=19 tight=56467 fath=34 pool=19
+seed=4 flag=1 optimal cert=True bound=1.566916 nodes=24455 wall=72.3 lp=30691 undec=305 rays=6554 learned=50 tight=185998 fath=37 pool=50
+seed=5 flag=1 time_limit cert=False bound=1.485249 nodes=12758 wall=120.0 lp=17919 undec=1336 rays=3177 learned=35 tight=76028 fath=102 pool=35
+jit=None seed=8 flag=1 optimal cert=True bound=1.566930 nodes=12765 wall=30.1 lp=15460 undec=5 rays=3146 learned=21 tight=71253 fath=55 pool=21
+jit=None seed=7 flag=1 optimal cert=True bound=1.566927 nodes=15605 wall=46.0 lp=19421 undec=113 rays=3994 learned=28 tight=98776 fath=24 pool=28
+jit=None seed=9 flag=1 optimal cert=True bound=1.566921 nodes=19793 wall=53.8 lp=24247 undec=203 rays=4994 learned=45 tight=232280 fath=54 pool=45
+jit=None seed=10 flag=1 optimal cert=True bound=1.566916 nodes=13193 wall=30.3 lp=15851 undec=1 rays=3314 learned=30 tight=121668 fath=30 pool=30
+jit=None seed=11 flag=1 optimal cert=True bound=1.566917 nodes=16479 wall=34.6 lp=19417 undec=0 rays=3842 learned=39 tight=125089 fath=21 pool=39
+jit=None seed=12 flag=1 optimal cert=True bound=1.566919 nodes=17703 wall=62.9 lp=21889 undec=323 rays=4307 learned=35 tight=95445 fath=66 pool=35

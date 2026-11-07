@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
     node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
     int_fix_probe=false, spatial_score=false, spatial_pscost_weight=0.0,
     spatial_midpull=0.0, undecided_unpropagated_retry=false, max_open_nodes=None,
-    dual_proof_propagation=false,
+    dual_proof_propagation=false, node_lp_slack_retry=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -131,6 +131,9 @@ pub fn solve_spatial_tree_py<'py>(
     max_open_nodes: Option<usize>,
     // #2142: learned dual-proof rows (`SpatialTreeConfig::dual_proof_propagation`).
     dual_proof_propagation: bool,
+    // #2202: re-solve an undecided node LP from the slack basis
+    // (`SpatialTreeConfig::node_lp_slack_retry`).
+    node_lp_slack_retry: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let spec = build_spec(
         n_cols,
@@ -265,6 +268,7 @@ pub fn solve_spatial_tree_py<'py>(
         undecided_unpropagated_retry,
         max_open_nodes: max_open_nodes.unwrap_or(usize::MAX),
         dual_proof_propagation,
+        node_lp_slack_retry,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -502,6 +506,8 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_int_probe_improvements", res.n_int_probe_improvements)?;
     out.set_item("n_prop_retries", res.n_prop_retries)?;
     out.set_item("n_prop_retry_decided", res.n_prop_retry_decided)?;
+    out.set_item("n_slack_retries", res.n_slack_retries)?;
+    out.set_item("n_slack_retry_decided", res.n_slack_retry_decided)?;
     // #2092: the search stopped on the frontier memory budget.
     out.set_item("frontier_capped", res.frontier_capped)?;
     // #2142: learned dual-proof counters (all zero with the flag off).
@@ -738,7 +744,7 @@ pub fn solve_spatial_node_py<'py>(
         cold_dual_start,
         ..SimplexOptions::default()
     };
-    let r = solve_spatial_node_with_cuts(&spec, lo, hi, false, &opts, None, &cuts);
+    let r = solve_spatial_node_with_cuts(&spec, lo, hi, false, &opts, None, &cuts, false);
     let status = match r.status {
         LpStatus::Optimal => "optimal",
         LpStatus::Infeasible => "infeasible",
