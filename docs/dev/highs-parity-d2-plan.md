@@ -331,6 +331,25 @@ The engine work, in order, each with an R1-LP-panel entry (P2.6) and a kill crit
 - (d) physical removal of lazily deleted cut rows via one exchange pivot per stored
   basis (the expert's option b).
 
+**Engine record 2026-11-07 (evening).**
+- The primal work in the tree is mostly the #1595 sub-`tol` repair. Every repair
+  measured was triggered only by infinite-room columns (open slacks, unbounded
+  continuous columns), and every one pivoted: `bppc8-02` made 1,959 repairs and 312k
+  primal pivots in 20 s.
+- `DISCOPT_MILP_SUBTOL_INF_SKIP` skipped those repairs on node LPs, relying on the NS
+  ladder for the bound. It was retired on its entry
+  (`d2-analysis/eng_subtol_skip_entry.jsonl.gz`).
+  - Node throughput rose (`bppc8-02` 2.4k -> 7.0k, `obra` +60 %).
+  - Bounds and incumbents got worse (`beavma` 356,127 -> 353,010, `gsvm2rl3` 0.253 ->
+    0.235, `bppc8-02` incumbent 513 -> 523), and `istra`/`kaihu` slowed 1.7-1.9x.
+  - The repairs find the true LP optimum; HiGHS can accept the sub-`tol` vertex only
+    because it takes the LP objective as its node bound, where discopt needs a
+    rigorous NS bound.
+- So the lever is a cheaper repair, not skipping it: the primal simplex's
+  full-column re-pricing per pivot (`primal.rs` `PriceSweep`) must become an
+  incremental, row-wise, hyper-sparse reduced-cost update. That is engine item (b),
+  applied to the primal.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first

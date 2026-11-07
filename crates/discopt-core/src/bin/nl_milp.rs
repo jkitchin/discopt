@@ -365,7 +365,6 @@ fn run() -> Result<(), String> {
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
             cold_dual_start: false,
             warm_flip_boxed: false,
-            subtol_skip_inf_room: false,
         },
     };
 

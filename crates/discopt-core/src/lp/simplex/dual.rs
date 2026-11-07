@@ -1104,15 +1104,6 @@ fn repair_subtol_dual_optimum(
     // #1953: a suspect (set aside only by the noise test) also hands off when the
     // NS bound from these duals leaves the vertex uncertified; the primal then
     // settles it with refined duals.
-    if opts.subtol_skip_inf_room
-        && cands
-            .iter()
-            .chain(suspects.iter())
-            .all(|c| c.2.is_infinite())
-    {
-        crate::profile::incr(crate::profile::Ctr::WarmSubtolRepairSkippedInf);
-        return sol;
-    }
     if cands.is_empty()
         && (suspects.is_empty()
             || !super::primal::subtol_suspects_matter(

@@ -121,16 +121,6 @@ pub struct SimplexOptions {
     /// OFF and is opted into only by the branch-and-cut kernel path (which needs
     /// warm-start to succeed), pending the CLAUDE.md §5 graduation panel.
     pub expel_zero_artificials: bool,
-    /// D2 engine work (`DISCOPT_MILP_SUBTOL_INF_SKIP`, set only by the MILP driver's
-    /// node LPs): skip the #1595 sub-`tol` primal repair of a warm dual optimum when
-    /// every candidate column has infinite room. Such a column is an open slack or
-    /// unbounded continuous column whose wrong-signed reduced cost is below `tol`;
-    /// the repair then runs a full primal re-solve (measured: 100 % of the repairs on
-    /// `bppc8-02`, `sp150x300d`, `beavma`, `2122`; 1,959 repairs / 312k primal pivots
-    /// on `bppc8-02` in 20 s). A caller that sets it must not trust the returned
-    /// objective as a bound: the driver's node bound is `min(NS(y), obj)` with the NS
-    /// ladder (open-column repair, projection, FBBT box), valid for any `y`.
-    pub subtol_skip_inf_room: bool,
     /// Bank the warm dual loop's progress when [`deadline`](Self::deadline) cuts
     /// it short (#928). When `true`, a deadline exit from the dual pivot loop
     /// returns [`LpStatus::IterLimit`] carrying the current (dual-feasible)
@@ -328,7 +318,6 @@ impl Default for SimplexOptions {
             dual_cost_perturb: dual::cost_perturb_default(),
             cold_dual_start: false,
             warm_flip_boxed: false,
-            subtol_skip_inf_room: false,
         }
     }
 }
