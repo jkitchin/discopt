@@ -446,6 +446,29 @@ fn parse_node_gmi(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// `DISCOPT_MILP_NODE_GMI_LAZY` (highs-parity D3), read once. Default OFF; garbage is
+/// refused. ON extends [`node_gmi_enabled`] to drivers with a lazy separator: the
+/// convex-route OA / LP-NLP-BB master, which P5.1 measured losing 5/94 route and 10/47
+/// syn/rsyn certifications against HiGHS. Bound-changing: default OFF pending its panel.
+fn node_gmi_lazy_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        match std::env::var("DISCOPT_MILP_NODE_GMI_LAZY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            other => panic!(
+                "DISCOPT_MILP_NODE_GMI_LAZY={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+            ),
+        }
+    })
+}
+
 /// Best-bound nodes per batch that run node-local Gomory rounds.
 const NODE_GMI_PER_BATCH: usize = 8;
 /// Separation rounds per node (SCIP's in-tree `gomory/maxrounds` is 5).
@@ -2263,9 +2286,12 @@ fn solve_milp_node_search(
     const NODE_CUT_MAX_DENSITY: f64 = 0.5;
     let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
     let node_cut_cap = (2 * n_orig_rows).min(opts.max_pool_cuts);
-    // D2 B1': node-local Gomory rounds (no lazy separator: a lazy callback screens
-    // points against the shared LP, and the local rows are invisible to it).
-    let node_gmi_on = node_gmi_enabled() && lazy.is_none();
+    // D2 B1': node GMI with the global pool. Under a lazy separator (the OA / LP-NLP-BB
+    // master, D3) only with `DISCOPT_MILP_NODE_GMI_LAZY`: the pool rows only lift node
+    // BOUNDS (incumbents still come from the shared LP and are screened by the lazy
+    // callback), and a Gomory cut valid for the current master's integer hull stays
+    // valid as lazy cuts tighten the master (the true feasible set is always inside it).
+    let node_gmi_on = node_gmi_enabled() && (lazy.is_none() || node_gmi_lazy_enabled());
     // Global GMI pool (`DISCOPT_MILP_NODE_GMI`): globally valid cuts separated at nodes,
     // with the batches since each was last used. Not folded into the shared matrix; each
     // node appends the ones its point violates to a node-local copy.
