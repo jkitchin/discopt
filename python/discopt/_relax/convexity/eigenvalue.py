@@ -583,7 +583,7 @@ def gershgorin_row_upper_bounds(H: Interval) -> np.ndarray:
     return np.asarray(_round_up_exact0(raw), dtype=np.float64)  # ``_exact0``: see λ_min
 
 
-def _row_decision_slack(H: Interval, floor: float | None) -> np.ndarray:
+def _row_decision_slack(H: Interval, floor: float | None, *, side: str) -> np.ndarray:
     """Per-row acceptance slack for a Gershgorin sign test (#1673 B4).
 
     Row ``i``'s Gershgorin bound is computed from row ``i``'s entries only, so
@@ -596,10 +596,28 @@ def _row_decision_slack(H: Interval, floor: float | None) -> np.ndarray:
     approximation, whose invalid cuts then emptied the master (a false
     ``infeasible``). ``floor``, when given, is an absolute lower limit on every
     row's slack (``g_convexity``'s explicit ``tol``).
+
+    ``side`` names the bound under test, and the magnitude is taken from the
+    terms *that bound reads*: ``"lower"`` (the PSD test) reads ``inf(H_ii)``,
+    ``"upper"`` (the NSD test) reads ``sup(H_ii)``, and both read the
+    off-diagonal ``max(|lo|, |hi|)``. Sizing the diagonal by
+    ``max(|inf|, |sup|)`` let the side the test never reads license the side
+    it does: ``sqrt(exp(x))`` on ``[-20, 20]`` has ``H = [-6.3e29, 5.3e12]``,
+    the slack became ``2e15`` and swallowed the genuinely positive ``5.3e12``,
+    so a convex function was certified *concave* and a nonconvex ``g >= c``
+    row went to the local-NLP fast path with ``gap_certified=True``.
     """
     lo = np.asarray(H.lo, dtype=np.float64)
     hi = np.asarray(H.hi, dtype=np.float64)
-    row_mag = np.linalg.norm(np.maximum(np.abs(lo), np.abs(hi)), axis=1)
+    if side == "lower":
+        diag = np.abs(np.diag(lo))
+    elif side == "upper":
+        diag = np.abs(np.diag(hi))
+    else:
+        raise ValueError(f"side must be 'lower' or 'upper', got {side!r}")
+    mag = np.maximum(np.abs(lo), np.abs(hi))
+    np.fill_diagonal(mag, diag)
+    row_mag = np.linalg.norm(mag, axis=1)
     slack = np.array([psd_decision_slack(float(m)) for m in row_mag], dtype=np.float64)
     if floor is not None:
         slack = np.maximum(slack, float(floor))
@@ -616,7 +634,9 @@ def gershgorin_certifies_psd(H: Interval, floor: float | None = None) -> bool:
     hi = np.asarray(H.hi, dtype=np.float64)
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return False
-    return bool(np.all(gershgorin_row_lower_bounds(H) >= -_row_decision_slack(H, floor)))
+    return bool(
+        np.all(gershgorin_row_lower_bounds(H) >= -_row_decision_slack(H, floor, side="lower"))
+    )
 
 
 def gershgorin_certifies_nsd(H: Interval, floor: float | None = None) -> bool:
@@ -625,7 +645,9 @@ def gershgorin_certifies_nsd(H: Interval, floor: float | None = None) -> bool:
     hi = np.asarray(H.hi, dtype=np.float64)
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return False
-    return bool(np.all(gershgorin_row_upper_bounds(H) <= _row_decision_slack(H, floor)))
+    return bool(
+        np.all(gershgorin_row_upper_bounds(H) <= _row_decision_slack(H, floor, side="upper"))
+    )
 
 
 def psd_2x2_sufficient(H: Interval) -> bool:

@@ -1321,6 +1321,34 @@ def _require_fused_xlog(E: Any, name: str) -> None:
 _LOG1P_TAYLOR = 5e-4
 
 
+def _atanh(E: Any, a: Any) -> Any:
+    """``atanh(a)`` accurately near ``-1``; the native opcode cancels there.
+
+    POUNCE's ``atanh`` opcode has the accuracy of Rust's ``f64::atanh``, which
+    computes ``0.5 * ln_1p(2a / (1 - a))``: near ``a = -1`` the argument of
+    ``ln_1p`` is ``-1 + delta`` with ``delta`` lost to rounding. Measured at
+    ``a = -1 + 1e-13`` it returns ``-15.312667`` against the true ``-15.313221``
+    (3.6e-5 relative; 3.0e-3 at ``a = -1 + 1e-15``), and ``min atanh(x)``
+    certified that wrong objective. Workaround until the opcode is fixed
+    upstream in POUNCE (tracking issue pending in jkitchin/pounce).
+
+    For ``|a| >= 0.5`` the form ``0.5 * log((1 + a) / (1 - a))`` is accurate:
+    the factor that approaches zero (``1 + a`` near ``-1``, ``1 - a`` near
+    ``+1``) is computed exactly (Sterbenz), the other is within one rounding of
+    a number in ``[1.5, 2]``. For ``|a| < 0.5`` the native opcode is accurate
+    and the log form is not (``log`` of ``1 + 2a`` loses ``a`` below the
+    rounding gap of 1), so it is kept there. As in :func:`_log1p`, ``select``
+    evaluates both arms, so each is fed an argument in its own safe range.
+    """
+    half = E.const_(0.5)
+    one = E.const_(1.0)
+    small = E.compare("<", _abs(E, a), half)
+    a_small = E.select(small, a, E.const_(0.0))
+    a_big = E.select(small, E.const_(0.75), a)
+    near = half * E.log((one + a_big) / (one - a_big))
+    return E.select(small, E.atanh(a_small), near)
+
+
 def _log1p(E: Any, a: Any) -> Any:
     """``log1p(a)`` accurately for small ``|a|``; the tape has no ``log1p`` opcode.
 
@@ -1434,7 +1462,6 @@ def _lower_function(expr: FunctionCall, E: Any, args: list, budget: _Budget) -> 
         "tanh",
         "asinh",
         "acosh",
-        "atanh",
         "erf",
     }
     if name == "sqrt":
@@ -1462,6 +1489,9 @@ def _lower_function(expr: FunctionCall, E: Any, args: list, budget: _Budget) -> 
     if name == "log1p":
         _require(args, 1, name)
         return _map(lambda a: _log1p(E, a), arg0())
+    if name == "atanh":
+        _require(args, 1, name)
+        return _map(lambda a: _atanh(E, a), arg0())
     if name == "log2":
         _require(args, 1, name)
         return _map(lambda a: E.log(a) * E.const_(1.0 / math.log(2.0)), arg0())

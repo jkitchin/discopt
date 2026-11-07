@@ -55,6 +55,38 @@ def _round_up(x: Number) -> np.ndarray:
     return np.nextafter(x, np.float64(np.inf))
 
 
+#: Library-result widening, in ulps: the same margin as the Rust layer's
+#: ``presolve::directed::LIB_ULPS``. numpy/scipy transcendentals are not
+#: correctly rounded; measured against a 50-digit mpmath reference over 20k
+#: points each, ``scipy.special.erf`` errs by up to 2.18 ulps, ``np.tan`` 2.49,
+#: ``expit`` 2.01, ``arccosh`` 1.61, ``arcsinh`` 1.38 and ``tanh`` 1.10, so the
+#: one-ulp nudge of :func:`_round_down` let the true value fall outside.
+LIB_ULPS = 4.0
+
+#: Largest integer power ``Interval.__pow__`` takes by repeated multiplication.
+_POW_LOOP_MAX = 64
+
+
+def _lib_down(x: Number) -> np.ndarray:
+    """Sound lower bound on the exact value of a *library* result ``x``.
+
+    Widens by :data:`LIB_ULPS` relative ulps plus one, like the Rust
+    ``directed::lib_down``. Infinities and NaN pass through unchanged.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    with np.errstate(invalid="ignore", over="ignore"):
+        w = np.where(np.isfinite(x), x - LIB_ULPS * np.finfo(np.float64).eps * np.abs(x), x)
+    return np.nextafter(w, np.float64(-np.inf))
+
+
+def _lib_up(x: Number) -> np.ndarray:
+    """Upward twin of :func:`_lib_down`."""
+    x = np.asarray(x, dtype=np.float64)
+    with np.errstate(invalid="ignore", over="ignore"):
+        w = np.where(np.isfinite(x), x + LIB_ULPS * np.finfo(np.float64).eps * np.abs(x), x)
+    return np.nextafter(w, np.float64(np.inf))
+
+
 def _round_down_exact0(x: Number) -> np.ndarray:
     """:func:`_round_down`, but leaving an **exact zero** exactly zero (#957).
 
@@ -359,12 +391,40 @@ class Interval:
                 if not bool(np.any(underflowed)):
                     return Interval(_round_down_exact0(lo), _round_up_exact0(hi))
             return Interval(_round_down(lo), _round_up(hi))
-        # General integer power via repeated squaring; soundness
-        # preserved because every op outward-rounds.
-        result = self
-        for _ in range(n - 1):
-            result = result * self
-        return result
+        # General integer power. Up to ``_POW_LOOP_MAX`` it is repeated
+        # multiplication, sound because every op outward-rounds; the incremental
+        # engine's ``_monomial_aux_bounds`` reproduces exactly this loop and its
+        # build is gated on parity with it, so the loop stays as it was. Past that
+        # the loop is impractical (it is O(n): ``x**1e19`` hung a solve far past
+        # its ``time_limit``) and the power is taken in closed form: ``t**n`` is
+        # nondecreasing on R for odd ``n`` and a function of ``|t|`` for even
+        # ``n``. ``np.power`` is a libm ``pow``, widened by :data:`LIB_ULPS`; an
+        # underflow to ``0`` is covered by the widening's trailing ``nextafter``.
+        # (The closed form is also tighter for even ``n`` on a box straddling 0,
+        # where the loop gives ``x*x*x*x`` on ``[-1, 1]`` as ``[-1, 1]``. Using it
+        # for small ``n`` is a bound-changing change, out of scope here.)
+        if n <= _POW_LOOP_MAX:
+            result = self
+            for _ in range(n - 1):
+                result = result * self
+            return result
+        lo = np.asarray(self.lo, dtype=np.float64)
+        hi = np.asarray(self.hi, dtype=np.float64)
+        p = float(n)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            if n % 2 == 1:
+                r_lo = np.power(lo, p)
+                r_hi = np.power(hi, p)
+                return Interval(_lib_down(r_lo), _lib_up(r_hi))
+            a_lo = np.abs(lo)
+            a_hi = np.abs(hi)
+            m_lo = np.where(self.contains_zero(), 0.0, np.minimum(a_lo, a_hi))
+            m_hi = np.maximum(a_lo, a_hi)
+            r_lo = np.power(m_lo, p)
+            r_hi = np.power(m_hi, p)
+        # An even power is nonnegative: ``0 ** n`` is an exact zero, and a
+        # library lower bound below zero is clipped to zero (still sound).
+        return Interval(np.maximum(_lib_down(r_lo), 0.0), _lib_up(r_hi))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -387,7 +447,7 @@ def _monotonic_nondec(x: Interval, f) -> Interval:
     with np.errstate(over="ignore", invalid="ignore"):
         lo = f(x.lo)
         hi = f(x.hi)
-    return Interval(_round_down(lo), _round_up(hi))
+    return Interval(_lib_down(lo), _lib_up(hi))
 
 
 def _monotonic_nonincr(x: Interval, f) -> Interval:
@@ -395,7 +455,7 @@ def _monotonic_nonincr(x: Interval, f) -> Interval:
     with np.errstate(over="ignore", invalid="ignore"):
         lo = f(x.hi)
         hi = f(x.lo)
-    return Interval(_round_down(lo), _round_up(hi))
+    return Interval(_lib_down(lo), _lib_up(hi))
 
 
 def _monotonic_nondec_safe(x: Interval, f) -> Interval:
@@ -409,8 +469,8 @@ def _monotonic_nondec_safe(x: Interval, f) -> Interval:
     soundly abstains instead of trusting an undefined evaluation.
     """
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        lo = _round_down(f(x.lo))
-        hi = _round_up(f(x.hi))
+        lo = _lib_down(f(x.lo))
+        hi = _lib_up(f(x.hi))
     lo = np.where(np.isnan(lo), -np.inf, lo)
     hi = np.where(np.isnan(hi), np.inf, hi)
     return Interval(lo, hi)
@@ -424,8 +484,8 @@ def _monotonic_nonincr_safe(x: Interval, f) -> Interval:
     ``f(x.lo)``; out-of-domain ``NaN`` endpoints collapse outward.
     """
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        lo = _round_down(f(x.hi))
-        hi = _round_up(f(x.lo))
+        lo = _lib_down(f(x.hi))
+        hi = _lib_up(f(x.lo))
     lo = np.where(np.isnan(lo), -np.inf, lo)
     hi = np.where(np.isnan(hi), np.inf, hi)
     return Interval(lo, hi)
@@ -505,9 +565,10 @@ def cosh(x: Interval) -> Interval:
     zero_in = x.contains_zero()
     ch_lo = np.cosh(x.lo)
     ch_hi = np.cosh(x.hi)
-    lo = np.where(zero_in, 1.0, np.minimum(ch_lo, ch_hi))
+    lo = np.where(zero_in, 1.0, np.minimum(_lib_down(ch_lo), _lib_down(ch_hi)))
     hi = np.maximum(ch_lo, ch_hi)
-    return Interval(_round_down(lo), _round_up(hi))
+    # cosh >= 1 everywhere, so the library lower bound is clipped at 1.
+    return Interval(np.maximum(lo, 1.0), _lib_up(hi))
 
 
 def entropy(x: Interval) -> Interval:
@@ -542,7 +603,8 @@ def entropy(x: Interval) -> Interval:
     hi = np.maximum(f_lo, f_hi)
     lo = np.where(in_domain, lo, -np.inf)
     hi = np.where(in_domain, hi, np.inf)
-    return Interval(_round_down(lo), _round_up(hi))
+    # ``t * log(t)`` is a library ``log`` and one product: library widening.
+    return Interval(_lib_down(lo), _lib_up(hi))
 
 
 def centropy(x: Interval, y: Interval) -> Interval:
@@ -675,7 +737,7 @@ def tan(x: Interval) -> Interval:
         tan_hi = np.tan(hi)
     out_lo = np.where(same_branch, tan_lo, -inf)
     out_hi = np.where(same_branch, tan_hi, inf)
-    return Interval(_round_down(out_lo), _round_up(out_hi))
+    return Interval(_lib_down(out_lo), _lib_up(out_hi))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -733,7 +795,16 @@ def sigmoid(x: Interval) -> Interval:
     """``sigmoid`` is nondecreasing on all of R; image in ``(0, 1)``."""
     from scipy.special import expit as _expit
 
-    return _monotonic_nondec(x, _expit)
+    out = _monotonic_nondec(x, _expit)
+    # ``expit`` loses the subnormal range: ``expit(-711)`` returns ``0`` while
+    # the exact value is ``1.6e-309``, so even the widened upper endpoint
+    # (``2e-323``) excluded it. ``sigmoid(t) = e^t / (1 + e^t) < e^t`` for
+    # every ``t``, and ``exp`` keeps its subnormal range, so the upper endpoint
+    # is capped below by the widened ``exp`` where ``expit`` has gone tiny.
+    with np.errstate(over="ignore", under="ignore"):
+        exp_hi = _lib_up(np.exp(x.hi))
+    hi = np.where(np.asarray(x.hi) < -30.0, np.maximum(out.hi, exp_hi), out.hi)
+    return Interval(np.maximum(out.lo, 0.0), np.minimum(hi, 1.0))
 
 
 def softplus(x: Interval) -> Interval:

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from discopt.constants import bound_is_open
 from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
     binary_box_is_default,
@@ -214,14 +215,14 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
             # branch below and keeps its integrality from the INTORG marker,
             # which is written independently of this section (EX-3).
             lines.append(f" BV BND  {vname}")
-        elif lb_val <= -1e19 and ub_val >= 1e19:
+        elif bound_is_open(lb_val) and bound_is_open(ub_val):
             # Free variable
             lines.append(f" FR BND  {vname}")
-        elif lb_val <= -1e19:
+        elif bound_is_open(lb_val):
             # Only upper bound
             lines.append(f" MI BND  {vname}")
             lines.append(f" UP BND  {vname}  {_fmt(ub_val)}")
-        elif ub_val >= 1e19:
+        elif bound_is_open(ub_val):
             # Only lower bound
             lines.append(f" LO BND  {vname}  {_fmt(lb_val)}")
         elif np.isclose(lb_val, ub_val, atol=1e-12):

@@ -879,7 +879,9 @@ pub fn write_nl_with_row_order(
     out.push_str("b\n");
     for &old in &order {
         let v = &flat[old];
-        let (has_lb, has_ub) = (v.lb > -1e18, v.ub < 1e18);
+        // Open only at the declared-no-bound box (`DEFAULT_VARIABLE_BOUND`, 9.999e19)
+        // or beyond; a `1e18` cut dropped `ub = 1e18` and made a bounded model unbounded.
+        let (has_lb, has_ub) = (v.lb > -9.999e19, v.ub < 9.999e19);
         if has_lb && has_ub {
             if (v.lb - v.ub).abs() < 1e-15 {
                 out.push_str(&format!("4 {}\n", py_float(v.lb)));

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from discopt.constants import DEFAULT_VARIABLE_BOUND, bound_is_open
 from discopt.export import _arrays
 from discopt.export._common import binary_box_is_default, refuse_non_algebraic_relations
 from discopt.modeling.core import (
@@ -54,7 +55,7 @@ def _starting_level(lb: float, ub: float) -> float:
     midpoint of a finite box, one unit in from a half-open side, origin when
     fully free.
     """
-    lo_f, hi_f = lb > -1e18, ub < 1e18
+    lo_f, hi_f = not bound_is_open(lb), not bound_is_open(ub)
     if lo_f and hi_f:
         return 0.5 * (lb + ub)
     if lo_f:
@@ -291,7 +292,9 @@ class _GamsWriter:
                 groups["binary"].append(var)
             elif var.var_type == VarType.INTEGER:
                 groups["integer"].append(var)
-            elif np.all(np.asarray(var.lb) >= 0) and np.any(np.asarray(var.lb) < 1e18):
+            elif np.all(np.asarray(var.lb) >= 0) and np.any(
+                np.asarray(var.lb) < DEFAULT_VARIABLE_BOUND
+            ):
                 groups["positive"].append(var)
             else:
                 groups["free"].append(var)
@@ -344,9 +347,9 @@ class _GamsWriter:
                 # BARON. `ravel()[0]` reads the single element for both shapes.
                 lb_val = float(np.ravel(lb_arr)[0])
                 ub_val = float(np.ravel(ub_arr)[0])
-                if lb_val > -1e18:
+                if not bound_is_open(lb_val):
                     lines.append(f"{var.name}.lo = {lb_val};")
-                if ub_val < 1e18:
+                if not bound_is_open(ub_val):
                     lines.append(f"{var.name}.up = {ub_val};")
                 given = self._initial_point.get((var.name, 0))
                 lvl = float(given) if given is not None else _starting_level(lb_val, ub_val)
@@ -362,8 +365,8 @@ class _GamsWriter:
                 # GAMS then solves a different model than discopt. Emit the
                 # uniform case compactly over the whole domain and, when
                 # heterogeneous, emit one line per element at its 1-based label.
-                self._write_array_bound(lines, var, lb_arr, "lo", -1e18, np.greater)
-                self._write_array_bound(lines, var, ub_arr, "up", 1e18, np.less)
+                self._write_array_bound(lines, var, lb_arr, "lo")
+                self._write_array_bound(lines, var, ub_arr, "up")
                 self._write_given_levels(lines, var)
 
         lines.append("")
@@ -389,14 +392,14 @@ class _GamsWriter:
         idx = np.unravel_index(k, var.shape)
         return ", ".join(f"'{i + 1}'" for i in np.atleast_1d(idx))
 
-    def _write_array_bound(self, lines, var, arr, kind, inf_sentinel, cmp):
+    def _write_array_bound(self, lines, var, arr, kind):
         """Emit ``.lo``/``.up`` bounds for an array variable, per element.
 
-        ``kind`` is ``"lo"`` or ``"up"``; ``cmp(value, inf_sentinel)`` decides
-        whether the bound is finite enough to emit (``np.greater`` for lower,
-        ``np.less`` for upper). Uniform bounds are compacted to one domain-wide
-        assignment; heterogeneous bounds are written one element at a time so no
-        per-element bound is ever dropped (X-2 / EX-4).
+        ``kind`` is ``"lo"`` or ``"up"``; a bound is emitted unless it is open
+        (``bound_is_open``: non-finite or at the declared-no-bound box). Uniform
+        bounds are compacted to one domain-wide assignment; heterogeneous bounds
+        are written one element at a time so no per-element bound is ever dropped
+        (X-2 / EX-4).
         """
         flat = np.asarray(arr, dtype=np.float64).ravel()
         if flat.size == 0:
@@ -406,7 +409,7 @@ class _GamsWriter:
 
         if np.all(flat == flat[0]):
             val = float(flat[0])
-            if bool(cmp(val, inf_sentinel)):
+            if not bound_is_open(val):
                 target = f"{var.name}.{kind}({dom})" if has_dom else f"{var.name}.{kind}"
                 lines.append(f"{target} = {val};")
             return
@@ -417,7 +420,7 @@ class _GamsWriter:
         # only occurs for the degenerate size-1 arrays handled above.
         for k in range(flat.size):
             val = float(flat[k])
-            if not bool(cmp(val, inf_sentinel)):
+            if bound_is_open(val):
                 continue
             if has_dom:
                 lines.append(f"{var.name}.{kind}({self._element_label(var, k)}) = {val};")
