@@ -1883,6 +1883,43 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    2026-09-06 and 2026-11-04 (correctness fixes whose costs were never measured), so a
    bisect is the first lever. Owner direction (2026-11-06): HiGHS independence, no
    fallback; review HiGHS's MIP code for what it does differently.
+   **D2 status, 2026-11-07 (paused for D3; resume after).** Details:
+   `highs-parity-d2-analysis.md` follow-ups 6-22.
+
+   *Graduated (default ON):*
+   - `DISCOPT_MILP_NODE_GMI`: in-tree Gomory cuts, globally valid, shared through an
+     aging pool. Certified 96 -> 107; nodes -33 %.
+   - `DISCOPT_MILP_ALIGNED_SLACKS` + `DISCOPT_MILP_SUBMIP` (bundle). The route had
+     starved its own root cut loop: `fiber` root gap 61.6 % -> 4.3 %. The bundle adds a
+     RENS/RINS sub-MIP with FBBT-propagated neighbourhoods. Certified 107 -> 114; nodes
+     -16 %; median primal gap 0.187 -> 0.012.
+
+   On MIPLIB-38 + M (62 instances, 20 s), Rust now certifies about **38 per rep** (32 at
+   the start of the session); HiGHS certifies about 59.
+
+   *Retired:* `DISCOPT_RINS`, `DISCOPT_MILP_NODE_SEP`.
+   *Default OFF, not graduated:* `DISCOPT_MILP_IMPROVE_DIVE`, `DISCOPT_MILP_REENTRY_CUTS`.
+
+   *Residual: 24 instances never certify, grouped by cause.*
+
+   | group | rows | what remains |
+   |---|---|---|
+   | Near (within ~1 % on both sides) | `b-ball`, `fiber`, `istra`, `kaihu`, `gesa2`, `bppc8-02` | — |
+   | Dual-limited | `mik` x4 | incumbent optimal, bound 3 % off. HiGHS needs in-tree cuts here (`node_cuts_off` costs 10-14x); c-MIR/aggregation at nodes was tried and did not move them. |
+   | Primal-limited | `obra`, `beavma`, `sp150x300d`, `nexp` x2, `neos17`, `gsvm2rl3` | — |
+   | No incumbent | `2122`, `enlight_hard`, `amur`, `issue-2446`, `p0548` | RENS never gets an eligible node. `issue-2446` spends 20 s in root LP work. |
+   | LP throughput | `neos-911970` | 7 nodes in 20 s |
+
+   *Measured non-levers* (do not repeat): full presolve — the Rust route on
+   HiGHS-presolved models fixes only `p0548`; the objective cutoff alone (8 % of
+   pivots); RINS as built earlier; original-row c-MIR at nodes.
+
+   *Next levers, in order:*
+   1. first-incumbent heuristics: RENS from the root LP and feasibility pump/jump, for
+      the 5 no-incumbent rows;
+   2. the root LP cost on `issue-2446` / `neos-911970`;
+   3. in-tree c-MIR with aggregation on `mik`;
+   4. plunging with a hot LP (expert R1).
 2. **D3 -- the convex-route OA master.** The Rust lazy master is cert-clean but loses
    5/94 and 10/47 certifications at 1.3-1.8x wall; it is the same MILP engine, so it
    largely inherits D2's per-node gap. It is also the largest single HiGHS reach left
