@@ -521,6 +521,7 @@ counters!(
     SubtolCapNumerical,
     WarmSubtolRepair,
     WarmSubtolRepairNoop,
+    WarmSubtolRepairSkippedInf,
     WarmSubtolRepairFailed,
     // #1953: a column the `SUBTOL_NOISE_REL` test set aside as rounding whose
     // reduced cost survived one dual-refinement step with margin over its measured

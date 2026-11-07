@@ -355,6 +355,7 @@ pub fn solve_lp_py<'py>(
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
         warm_flip_boxed: false,
+        subtol_skip_inf_room: false,
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
@@ -495,6 +496,7 @@ pub fn solve_lp_warm_py<'py>(
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
         warm_flip_boxed: false,
+        subtol_skip_inf_room: false,
     };
     let b_slice = b.as_slice()?;
 
@@ -618,6 +620,7 @@ pub fn solve_lp_warm_csc_py<'py>(
         cold_dual_start: false,
         // #1935: see `SimplexOptions::warm_flip_boxed` (default off).
         warm_flip_boxed,
+        subtol_skip_inf_room: false,
     };
     let start = match (start_col_status, start_basic_vars) {
         (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
@@ -756,6 +759,7 @@ pub fn solve_lp_batch_py<'py>(
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
         warm_flip_boxed: false,
+        subtol_skip_inf_room: false,
     };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
@@ -1973,6 +1977,7 @@ pub(crate) fn milp_options(
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
             cold_dual_start: false,
             warm_flip_boxed: false,
+            subtol_skip_inf_room: false,
         },
     })
 }

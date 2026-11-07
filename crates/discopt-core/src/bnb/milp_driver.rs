@@ -803,6 +803,25 @@ fn parse_sb_armed(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// D2 engine work (`DISCOPT_MILP_SUBTOL_INF_SKIP`, default OFF): node LPs skip the
+/// #1595 sub-`tol` primal repair when only infinite-room columns trigger it (see
+/// [`SimplexOptions::subtol_skip_inf_room`]). Only with the NS node bound on, which
+/// keeps every node bound valid for the duals the dual simplex stopped at.
+fn subtol_inf_skip_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_SUBTOL_INF_SKIP").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            other => panic!(
+                "DISCOPT_MILP_SUBTOL_INF_SKIP={other:?} is not recognized (expected \
+                 1/true/yes or 0/false/no). Refusing rather than silently picking an arm."
+            ),
+        }
+    })
+}
+
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -2918,6 +2937,9 @@ fn solve_milp_node_search(
     let node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
+        if subtol_inf_skip_enabled() && ns_node_bound_enabled() {
+            sx.subtol_skip_inf_room = true;
+        }
         sx
     };
     // D2: the root cut loop's LP options (`DISCOPT_MILP_ROOT_FULL_BASIS`).
