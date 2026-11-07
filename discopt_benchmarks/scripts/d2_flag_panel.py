@@ -2,7 +2,7 @@
 here before any run (CLAUDE.md section 5; the plan's Phase 4 standing rule, plus the two
 bars the P4.4 panel lacked).
 
-``--flag NAME`` is set to ``--on-value`` (default ``1``) in the ON arm and REMOVED in the
+``--flag NAME`` (or a comma-separated bundle, toggled together) is set to ``--on-value`` (default ``1``) in the ON arm and REMOVED in the
 OFF arm; ``--fired REGEX`` names the driver profile counters that prove the mechanism ran
 (summed per solve; ON must be > 0, OFF must be 0). Population and arms as
 ``p44_gmi_repair_panel.py``: MIPLIB-38 + the M panel, Rust MILP route, fresh subprocess per
@@ -52,10 +52,12 @@ _CTR = re.compile(r"$^")
 
 
 def solve(path: str, on: bool, a) -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in (FLAG, "DISCOPT_LP_STD_ENGINE")}
+    flags = FLAG.split(",")  # a comma-separated bundle toggles together
+    env = {k: v for k, v in os.environ.items() if k not in (*flags, "DISCOPT_LP_STD_ENGINE")}
     env.update(PYTHONUNBUFFERED="1", DISCOPT_LP_MILP_BACKEND="rust", DISCOPT_PROFILE="1")
     if on:
-        env[FLAG] = ON_VALUE
+        for f in flags:
+            env[f] = ON_VALUE
     cmd = [sys.executable, str(PANEL_PY), "worker", path, "R", str(a.time_limit), str(a.gap),
            str(a.max_nodes)]  # fmt: skip
     load = os.getloadavg()[0]
