@@ -2328,6 +2328,7 @@ fn solve_milp_node_search(
     let mut gmi_folded: usize = 0;
     let mut gmi_fold_nnz: usize = 0;
     let mut gmi_fold_nnz0: Option<usize> = None;
+    let mut gmi_fold_slack_cols: Vec<usize> = Vec::new();
     let mut gmi_fold_pending: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
@@ -3083,6 +3084,22 @@ fn solve_milp_node_search(
             // so a closed gap is a rigorous certificate even after node-LP
             // failures; withholding `Optimal` here was pure over-conservatism.
             if let Some(basis) = out.basis {
+                // W1 entry instrumentation: folded cut rows with a basic slack at
+                // this node's optimum (HiGHS ages exactly these out).
+                if crate::profile::enabled() && !gmi_fold_slack_cols.is_empty() {
+                    let basic = gmi_fold_slack_cols
+                        .iter()
+                        .filter(|&&j| basis.col_status.get(j).is_none_or(|&st| st == BASIC))
+                        .count();
+                    crate::profile::incr_by(
+                        crate::profile::Ctr::NodeGmiFoldRowsSeen,
+                        gmi_fold_slack_cols.len() as u64,
+                    );
+                    crate::profile::incr_by(
+                        crate::profile::Ctr::NodeGmiFoldRowsBasic,
+                        basic as u64,
+                    );
+                }
                 tm.set_node_basis(id, Some(basis));
             }
             if let Some((cand, cobj)) = out.incumbent {
@@ -3353,7 +3370,11 @@ fn solve_milp_node_search(
             // re-separated copy is not re-admitted to the pool).
             let (fold_cap, fold_uses, fold_ratio) = node_gmi_fold();
             let mut fold = vec![false; gmi_pool.len()];
-            let nnz0 = *gmi_fold_nnz0.get_or_insert_with(|| csc_w.raw().2.len());
+            let nnz0 = *gmi_fold_nnz0.get_or_insert_with(|| {
+                let z = csc_w.raw().2.len();
+                crate::profile::incr_by(crate::profile::Ctr::NodeGmiFoldNnz0, z as u64);
+                z
+            });
             let nnz_budget = fold_ratio * nnz0 as f64;
             if fold_cap > 0 {
                 let mut hot: Vec<usize> = (0..gmi_pool.len())
@@ -3369,6 +3390,7 @@ fn solve_milp_node_search(
                         continue;
                     }
                     gmi_fold_nnz += nz;
+                    crate::profile::incr_by(crate::profile::Ctr::NodeGmiFoldNnz, nz as u64);
                     fold[k] = true;
                     drop[k] = true;
                     gmi_folded += 1;
@@ -3494,6 +3516,8 @@ fn solve_milp_node_search(
             pending_cuts.append(&mut node_pending);
         }
         if !gmi_fold_pending.is_empty() {
+            let base = n_w + pending_cuts.len();
+            gmi_fold_slack_cols.extend(base..base + gmi_fold_pending.len());
             crate::profile::incr_by(
                 crate::profile::Ctr::NodeCutsFolded,
                 gmi_fold_pending.len() as u64,
