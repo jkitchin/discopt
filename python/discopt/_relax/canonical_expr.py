@@ -255,6 +255,22 @@ class _Canonicalizer:
             return self._const(1.0)
         return self._mk("pow", ("pow", base.key, float(p)), (base,), float(p))
 
+    def _abs_if_sign_lost(self, base: CNode, q: float, e: float) -> CNode:
+        """Base to use when folding ``(base^q)^e`` into ``base^(q*e)``.
+
+        ``base`` itself when the fold is an identity on the expression's real
+        domain; ``|base|`` when ``q`` is an integer, ``e`` is fractional and
+        ``q*e`` is not an even integer, the one case where ``base^q`` may be
+        negative-based yet the fold drops its sign (see ``_prod``).
+        """
+        q, e = float(q), float(e)
+        if e.is_integer() or not q.is_integer():
+            return base
+        qe = q * e
+        if qe.is_integer() and qe % 2 == 0:
+            return base
+        return self._call("abs", base)
+
     def _call(self, name: str, arg: CNode) -> CNode:
         if arg.kind == "const":
             folded = _fold_const_call(name, (arg.payload,))
@@ -356,16 +372,29 @@ class _Canonicalizer:
                     raise UnsupportedCanonicalization("non-real constant power")
                 coef_acc *= factor
                 continue
+            # Flattening a power of a power or of a product. ``(b^q)^e = b^(q*e)`` and
+            # ``(prod c_i^q_i)^e = prod c_i^(q_i*e)`` are identities only when every
+            # base is nonnegative. For a FRACTIONAL ``e`` the inner value must be >= 0
+            # for the outer power to be real, but a factor raised to an INTEGER inner
+            # exponent can still be negative: ``(x^2)^0.5`` is ``|x|``, not ``x``, and
+            # ``(x*y)^0.5`` is defined at ``x = y = -1`` while ``x^0.5 * y^0.5`` is not.
+            # Folding them unchecked gave ``x*(x**2)**0.5 -> x**2`` (sign flipped on
+            # ``x < 0``) and a certified wrong optimum. The exact identity there is
+            # ``(prod c_i^q_i)^e = prod |c_i|^(q_i*e)`` (the inner product equals its
+            # own absolute value), so such a factor folds as ``|c_i|``. ``abs`` is
+            # unnecessary when ``q_i`` is fractional (then ``c_i >= 0`` on the
+            # expression's domain already) or ``q_i*e`` is an even integer.
             if base.kind == "prod":
                 inner_exps = base.payload[0]
                 inner_coef = base.payload[1] if len(base.payload) > 1 else 1.0
-                coef_acc *= float(inner_coef) ** exp
+                frac = not float(exp).is_integer()
+                coef_acc *= (abs(float(inner_coef)) if frac else float(inner_coef)) ** exp
                 for ie, ich in zip(inner_exps, base.children):
-                    stack.append((ich, ie * exp))
+                    stack.append((self._abs_if_sign_lost(ich, ie, exp), ie * exp))
                 continue
             if base.kind == "pow":
-                # (b^q)^exp -> b^(q*exp), keep folding.
-                stack.append((base.children[0], base.payload * exp))
+                q = base.payload
+                stack.append((self._abs_if_sign_lost(base.children[0], q, exp), q * exp))
                 continue
             if base.kind == "sum":
                 # A monic scaled single term ``c·g`` (one child, zero const) inside a
