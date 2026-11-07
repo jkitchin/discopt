@@ -240,15 +240,21 @@ def _solve_spec(
 
 
 def build_server():
-    """The FastMCP server object (import-checked; raises a helpful ImportError)."""
+    """The MCP server object (raises an ImportError naming the extra if the SDK is missing)."""
     try:
-        from mcp.server.fastmcp import FastMCP
-    except ImportError as exc:
-        raise ImportError(
-            "`discopt mcp` needs the MCP Python SDK: pip install 'discopt[mcp]'"
-        ) from exc
+        # mcp 2.x renamed FastMCP to MCPServer; the decorator and run() API are
+        # unchanged, so support both majors.
+        from mcp.server.mcpserver import MCPServer as _Server
+    except ImportError:
+        try:
+            from mcp.server.fastmcp import FastMCP as _Server
+        except ImportError as exc:
+            raise ImportError(
+                "`discopt mcp` needs the MCP Python SDK: pip install 'discopt[mcp]' "
+                f"(import failed: {exc})"
+            ) from exc
 
-    server = FastMCP(
+    server = _Server(
         "discopt",
         instructions=(
             "discopt is a global MINLP solver. Build models in Python with "

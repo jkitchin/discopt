@@ -61,7 +61,9 @@ def _call_tools(calls):
                 out = []
                 for name, arguments in calls:
                     res = await session.call_tool(name, arguments)
-                    assert not res.isError, res.content
+                    # `isError` in mcp 1.x, `is_error` in 2.x.
+                    assert not getattr(res, "is_error", getattr(res, "isError", None)), res
+
                     out.append(json.loads(res.content[0].text))
                 return names, out
 
@@ -171,6 +173,7 @@ def test_print_config_points_at_this_interpreter():
 
 
 def test_missing_sdk_is_a_loud_install_hint(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
     with pytest.raises(ImportError, match=r"pip install 'discopt\[mcp\]'"):
         mcp_server.build_server()
