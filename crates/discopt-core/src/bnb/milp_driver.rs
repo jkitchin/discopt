@@ -803,6 +803,29 @@ fn parse_sb_armed(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// D2 W5 (`DISCOPT_MILP_NODE_EXPEL_ARTIFICIALS`, default OFF): run node LPs with
+/// [`SimplexOptions::expel_zero_artificials`], so a cold (two-phase) solve exports a
+/// full basis instead of one short by every artificial left basic at zero. A short
+/// basis is refused by the next warm start (`DualPrepRejectShape`), whose node then
+/// cold-solves too, and the defect cascades down the subtree. Measured on
+/// `neos-911970` with `DISCOPT_MILP_CUT_LP` (folded rows make the degenerate case
+/// common): 607 shape rejections, 247k phase-1 pivots, 1,309 nodes in 20 s against
+/// 6,531 with the cut LP off.
+fn node_expel_artificials_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_NODE_EXPEL_ARTIFICIALS").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            other => panic!(
+                "DISCOPT_MILP_NODE_EXPEL_ARTIFICIALS={other:?} is not recognized (expected \
+                 1/true/yes or 0/false/no). Refusing rather than silently picking an arm."
+            ),
+        }
+    })
+}
+
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -2918,6 +2941,9 @@ fn solve_milp_node_search(
     let node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
+        if node_expel_artificials_enabled() {
+            sx.expel_zero_artificials = true;
+        }
         sx
     };
     // D2: the root cut loop's LP options (`DISCOPT_MILP_ROOT_FULL_BASIS`).
