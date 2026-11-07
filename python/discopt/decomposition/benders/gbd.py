@@ -110,6 +110,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from discopt._openmp_guard import OpenMPRuntimeConflictError
 from discopt.decomposition._linear import relative_gap, solution_dict
 from discopt.decomposition.benders._feasibility import certify_recourse_feasibility
 from discopt.decomposition.structure import (
@@ -490,6 +491,10 @@ def solve_gbd(
             x0 = np.clip(x0 + 0.1 * span * h, sub_lb, sub_ub)
         try:
             res = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 300})  # type: ignore[arg-type]
+        except OpenMPRuntimeConflictError:
+            # #2205: an NLP backend that cannot load here refuses the solve; it is
+            # not a heuristic failure to log and step past.
+            raise
         except Exception:
             return _Recourse("nofeas")
 

@@ -24,7 +24,11 @@ The release procedure that produces these entries is documented in
   load" covers both a runtime the wheel ships (torch) and one its binaries link
   through their Mach-O load commands, followed through `@rpath`/`@loader_path`
   dependencies (cyipopt's Ipopt linking Homebrew's `libomp`, which cyipopt does not
-  ship). Builds that share one `libomp` pass. `KMP_DUPLICATE_LIB_OK` is never set by
+  ship). An explicit `nlp_solver="ipopt"` is checked once at solve entry and
+  refuses the solve; it is never silently replaced by another backend. Every broad
+  handler around an NLP-backend call re-raises the refusal instead of absorbing it,
+  and an auto-chosen heuristic backend that steps past it logs one WARNING. Builds
+  that share one `libomp` pass. `KMP_DUPLICATE_LIB_OK` is never set by
   discopt; if the user sets it the check only warns. On macOS the test suite skips,
   with a #2205 reason, a test that would load the second runtime into a worker,
   instead of losing the worker. Not covered: a bare `import torch` / `import

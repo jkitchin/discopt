@@ -192,26 +192,152 @@ def test_ipopt_solve_nlp_refuses(macos):
     assert "cyipopt" not in sys.modules
 
 
-def test_model_solve_with_ipopt_refuses(macos):
-    """End to end: `nlp_solver="ipopt"` refuses instead of the process aborting.
-
-    The model must really reach an Ipopt NLP solve: a pure quadratic is routed to
-    the convex-QP path and never imports cyipopt, which made the first version of
-    this test vacuous (it raised nothing on macOS). This one is nonconvex, and the
-    test asserts the refusal came from an Ipopt NLP entry point.
-    """
+def _nonconvex_model():
+    """Needs a real NLP solve: a pure quadratic goes to the convex-QP path instead."""
     import discopt.modeling as dm
 
     m = dm.Model("omp2205")
     x = m.continuous("x", lb=-2, ub=2)
     y = m.continuous("y", lb=-1, ub=1)
     m.minimize(dm.sin(3 * x) * y + x**2)
+    return m
+
+
+def test_model_solve_with_ipopt_refuses_at_entry(macos):
+    """End to end: an explicit `nlp_solver="ipopt"` refuses the SOLVE, up front.
+
+    Measured on macOS (PR #2207, second run): without the entry preflight the guard
+    fired six times inside heuristics, every refusal was swallowed by a broad
+    handler, and the solve returned ``optimal`` without ever using Ipopt. So the
+    outcome asserted here is the real one -- the solve raises and returns nothing --
+    and the refusal must come from ``solve_model`` itself, before any heuristic.
+    """
+    m = _nonconvex_model()
     macos(loaded={TORCH_OMP}, shipped={CYIPOPT_OMP})
-    with pytest.raises(guard.OpenMPRuntimeConflictError) as info:
-        m.solve(nlp_solver="ipopt", time_limit=60)
-    frames = {entry.name for entry in info.traceback}
-    assert frames & {"solve_nlp", "_solve_node_nlp_ipopt", "_ipopt_version"}, frames
+    calls = []
+    real = guard.check_openmp_compatible
+
+    def spy(module, **kw):
+        calls.append((module, sys._getframe(1).f_code.co_name))
+        return real(module, **kw)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(guard, "check_openmp_compatible", spy)
+        result = None
+        with pytest.raises(guard.OpenMPRuntimeConflictError, match="nlp_solver='ipopt'"):
+            result = m.solve(nlp_solver="ipopt", time_limit=60)
+    assert result is None
+    assert calls == [("cyipopt", "solve_model")], calls
     assert "cyipopt" not in sys.modules
+
+
+def test_refusal_inside_the_solve_is_never_swallowed(macos, monkeypatch):
+    """Defence in depth: if the clash appears only after the entry check passed,
+    no heuristic or node handler may absorb it and let the solve return."""
+    m = _nonconvex_model()
+    macos(loaded={TORCH_OMP}, shipped={CYIPOPT_OMP})
+    real = guard.check_openmp_compatible
+    seen = []
+
+    def passes_once(module, **kw):
+        seen.append(sys._getframe(1).f_code.co_name)
+        if len(seen) == 1:
+            return None  # the solve_model preflight
+        return real(module, **kw)
+
+    monkeypatch.setattr(guard, "check_openmp_compatible", passes_once)
+    with pytest.raises(guard.OpenMPRuntimeConflictError):
+        m.solve(nlp_solver="ipopt", time_limit=60)
+    assert seen[0] == "solve_model" and len(seen) >= 2, seen
+
+
+def test_explicit_heuristic_backend_refuses(macos):
+    from discopt.solver import _resolve_heuristic_backend
+
+    macos(loaded={TORCH_OMP}, shipped={CYIPOPT_OMP})
+    with pytest.raises(guard.OpenMPRuntimeConflictError):
+        _resolve_heuristic_backend("ipopt")
+
+
+def test_auto_heuristic_backend_falls_back_with_one_warning(macos, monkeypatch, caplog):
+    """No backend asked for: stepping past is sound, but it is a WARNING, once."""
+    import logging
+
+    from discopt._relax._fallback import FALLBACK_WARNINGS
+    from discopt.solver import _resolve_heuristic_backend
+    from discopt.solvers import nlp_backend
+
+    macos(loaded={TORCH_OMP}, shipped={CYIPOPT_OMP})
+    monkeypatch.setattr(nlp_backend, "_try_pounce", lambda: None)
+    monkeypatch.setattr(FALLBACK_WARNINGS, "seen", set())
+    with caplog.at_level(logging.DEBUG, logger="discopt"):
+        assert _resolve_heuristic_backend("ipm") is None
+        assert _resolve_heuristic_backend("ipm") is None
+    warnings_ = [r for r in caplog.records if r.levelno == logging.WARNING and "2205" in r.message]
+    assert len(warnings_) == 1, [r.message for r in caplog.records]
+
+
+def test_no_broad_handler_swallows_the_refusal():
+    """Every broad ``except`` around an NLP-backend call re-raises the refusal first.
+
+    Structural, over the whole package: the swallowing measured on macOS was at
+    such handlers, and a new one would reintroduce it silently.
+    """
+    import ast
+    import pathlib
+
+    import discopt
+
+    entry = {
+        "_resolve_heuristic_backend",
+        "_solve_root_node_multistart",
+        "_solve_node_nlp",
+        "_solve_node_nlp_ipopt",
+        "get_nlp_solver",
+        "solve_nlp",
+        "_try_cyipopt",
+        "_ipopt_version",
+        "load_torch_sequential",
+    }
+
+    def is_broad(handler):
+        if handler.type is None:
+            return True
+        types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        return any(
+            isinstance(t, ast.Name) and t.id in ("Exception", "BaseException", "RuntimeError")
+            for t in types
+        )
+
+    def calls_entry(body):
+        for node in body:
+            for c in ast.walk(node):
+                if isinstance(c, ast.Call):
+                    f = c.func
+                    name = getattr(f, "id", None) or getattr(f, "attr", None)
+                    if name in entry:
+                        return True
+        return False
+
+    checked, unguarded = 0, []
+    root = pathlib.Path(discopt.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Try) and calls_entry(node.body)):
+                continue
+            for i, handler in enumerate(node.handlers):
+                if is_broad(handler):
+                    checked += 1
+                    earlier = node.handlers[:i]
+                    if not any(
+                        isinstance(h.type, ast.Name) and h.type.id == "OpenMPRuntimeConflictError"
+                        for h in earlier
+                    ):
+                        unguarded.append(f"{path.relative_to(root)}:{handler.lineno}")
+                    break
+    assert checked >= 15, checked  # the scan really visited the known sites
+    assert not unguarded, unguarded
 
 
 # ── the test-suite plugin skips instead of aborting the worker ─────────────
