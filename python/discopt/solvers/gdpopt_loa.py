@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
+from discopt._openmp_guard import OpenMPRuntimeConflictError
+
 # The master MILP lives in the GDP algorithm framework (#1775 G3.2); LOA imports
 # it from there unchanged.
 from discopt.gdp.algorithms.master import (  # noqa: F401 - re-exported for callers and tests
@@ -210,6 +212,10 @@ def _solve_nlp_relaxation(
             return np.asarray(result.x, dtype=np.float64)
     except NLPIndexOverflowError:
         raise
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
+        raise
     except Exception as exc:  # noqa: BLE001 - no relaxation point is handled by the caller
         # Capability-disabling: without this point LOA starts from no relaxation
         # solution at all, so a silent skip looks like "the relaxation is useless".
@@ -283,6 +289,10 @@ def _solve_nlp_subproblem(
     except NLPIndexOverflowError:
         # Not a failed solve: the NLP cannot be posed to the solver at all, and
         # every configuration would fail the same way. Refuse loudly.
+        raise
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
         raise
     except Exception as exc:  # noqa: BLE001 - no subproblem point is handled by the caller
         # Capability-disabling: a swallowed failure here means LOA silently never

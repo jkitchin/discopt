@@ -64,6 +64,8 @@ jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.16"]
+# macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
+# both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
 # highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
 # extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
@@ -90,6 +92,7 @@ ml = ["scikit-learn>=1.0"]
 # the small ONNX toolchain, and torch is a multi-hundred-MB wheel nobody who
 # only reads ONNX should pay for. Declared 2026-09-20 (v0.9.0 audit) so the
 # reader's ImportError can name a real extra.
+# On macOS torch cannot share a process with the `ipopt` extra's cyipopt (#2205).
 torch = ["torch>=2.0"]
 # `ParetoFront.plot()` is the only matplotlib consumer in the package.
 plot = ["matplotlib>=3.5"]

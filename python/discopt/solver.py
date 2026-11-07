@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from discopt._evaluator_cache import Fingerprint as _EvaluatorFingerprint
     from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.modeling.core import ObjectiveSense
+from discopt._openmp_guard import OpenMPRuntimeConflictError
 from discopt._rust import PyTreeManager
 from discopt.constants import CONSTRAINT_INF as _CONSTRAINT_INF
 from discopt.constants import DEFAULT_VARIABLE_BOUND
@@ -2539,6 +2540,10 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
         )
         if getattr(r, "x", None) is not None:
             xr = np.asarray(r.x, dtype=np.float64)
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
+        raise
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native seed relaxation solve failed: %s", exc)
 
@@ -15441,6 +15446,15 @@ def solve_model(
             f"{sorted(_valid_nlp_solvers)}. (The 'ripopt' backend was replaced "
             "by 'pounce', a pure-Rust port of Ipopt.)"
         )
+    if nlp_solver in ("ipopt", "cyipopt"):
+        # #2205 preflight: an explicit Ipopt request that cannot load cyipopt in
+        # this process (macOS, a second OpenMP runtime) refuses the SOLVE here,
+        # once and loudly -- like a refused POUNCE option (#1590 N1), every node
+        # and heuristic would fail the same way. Without it the refusal reached
+        # only broad heuristic handlers and the solve returned without Ipopt.
+        from discopt._openmp_guard import check_openmp_compatible
+
+        check_openmp_compatible("cyipopt", feature=f"nlp_solver={nlp_solver!r}")
 
     # C-18: the "midpoint" mode returned the McCormick underestimator's VALUE at
     # the box midpoint, u(mid), and fed it into the node lower bound as if it were
@@ -23498,6 +23512,10 @@ def solve_model(
                         if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
                             _inject_incumbent(fp_sol, fp_obj)
                             logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
+                except OpenMPRuntimeConflictError:
+                    # #2205: an NLP backend that cannot load here refuses the solve; it is
+                    # not a heuristic failure to log and step past.
+                    raise
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
 
@@ -23590,6 +23608,10 @@ def solve_model(
                                         "NLP-relaxation feasibility pump found incumbent: obj=%.6g",
                                         fp_obj2,
                                     )
+                    except OpenMPRuntimeConflictError:
+                        # #2205: an NLP backend that cannot load here refuses the solve; it is
+                        # not a heuristic failure to log and step past.
+                        raise
                     except Exception as e:
                         logger.debug("NLP-relaxation feasibility pump failed: %s", e)
                     finally:
@@ -23649,6 +23671,10 @@ def solve_model(
                                     "Integer local search found incumbent: obj=%.6g",
                                     _obj_ils,
                                 )
+                    except OpenMPRuntimeConflictError:
+                        # #2205: an NLP backend that cannot load here refuses the solve; it is
+                        # not a heuristic failure to log and step past.
+                        raise
                     except Exception as e:
                         logger.debug("Integer local search failed: %s", e)
 
@@ -23688,6 +23714,10 @@ def solve_model(
                             if np.isfinite(_obj_dv) and _obj_dv < _SENTINEL_THRESHOLD and _dv_feas:
                                 _inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
                                 logger.info("Fractional diving found incumbent: obj=%.6g", _obj_dv)
+                    except OpenMPRuntimeConflictError:
+                        # #2205: an NLP backend that cannot load here refuses the solve; it is
+                        # not a heuristic failure to log and step past.
+                        raise
                     except Exception as e:
                         logger.debug("Fractional diving failed: %s", e)
 
@@ -23747,6 +23777,10 @@ def solve_model(
                         if np.isfinite(_obj_cms) and _obj_cms < _SENTINEL_THRESHOLD and _cms_feas:
                             _inject_incumbent(np.asarray(_x_cms).copy(), float(_obj_cms))
                             logger.info("Continuous multistart found incumbent: obj=%.6g", _obj_cms)
+                except OpenMPRuntimeConflictError:
+                    # #2205: an NLP backend that cannot load here refuses the solve; it is
+                    # not a heuristic failure to log and step past.
+                    raise
                 except Exception as e:
                     logger.debug("Continuous multistart failed: %s", e)
 
@@ -26042,6 +26076,20 @@ def _resolve_heuristic_backend(nlp_solver: str) -> Optional[Callable]:
             return get_nlp_solver(cast(Backend, backend))
         except ImportError:
             continue
+        except OpenMPRuntimeConflictError as exc:
+            if backend != "auto":
+                # #2205: an explicitly requested backend that cannot load here
+                # refuses the solve (solve_model's preflight normally gets there
+                # first); it is never silently swapped for another.
+                raise
+            # Auto-chosen: no backend was asked for, so stepping past is sound,
+            # but it is reported once per solve at WARNING, not buried in DEBUG.
+            _warn_fallback_once(
+                "heuristic NLP backend (auto)",
+                exc,
+                "running the heuristic without an NLP backend",
+            )
+            return None
     return None
 
 
@@ -29940,6 +29988,10 @@ def _solve_nlp_bb(
                                 tree.inject_incumbent(fp_sol, fp_obj)
                                 _root_incumbent = True
                                 logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
+                    except OpenMPRuntimeConflictError:
+                        # #2205: an NLP backend that cannot load here refuses the solve; it is
+                        # not a heuristic failure to log and step past.
+                        raise
                     except Exception as e:
                         logger.debug("Feasibility pump failed: %s", e)
 
@@ -29978,6 +30030,10 @@ def _solve_nlp_bb(
                             if np.isfinite(dv_obj) and dv_obj < _SENTINEL_THRESHOLD and dv_feas:
                                 tree.inject_incumbent(np.asarray(dv_sol).copy(), dv_obj)
                                 logger.info("NLP-BB fractional diving incumbent: obj=%.6g", dv_obj)
+                    except OpenMPRuntimeConflictError:
+                        # #2205: an NLP backend that cannot load here refuses the solve; it is
+                        # not a heuristic failure to log and step past.
+                        raise
                     except Exception as e:
                         logger.debug("Fractional diving failed: %s", e)
 
@@ -31736,6 +31792,9 @@ def _solve_node_nlp_ipopt(
     options: dict,
 ):
     """Solve node NLP with cyipopt (Ipopt)."""
+    from discopt._openmp_guard import check_openmp_compatible
+
+    check_openmp_compatible("cyipopt", feature="nlp_solver='ipopt'")
     try:
         import cyipopt
     except ImportError:

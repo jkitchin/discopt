@@ -97,6 +97,11 @@ def load_torch_sequential(
     -------
     NetworkDefinition
     """
+    from discopt._openmp_guard import check_openmp_compatible
+
+    # On macOS a process that already holds cyipopt's libomp aborts when torch
+    # loads its own (#2205); refuse with an explanation instead.
+    check_openmp_compatible("torch", feature="load_torch_sequential")
     try:
         import torch.nn as nn
     except ImportError as exc:
