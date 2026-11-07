@@ -597,24 +597,24 @@ def _sym_cross(a: dict, b: dict) -> _HMap:
     return _HMap(keys[ix] * _KEY_SHIFT + keys[jx], lo, hi)
 
 
-_AFFINE_HESS_TOL = 1e-300
-
-
 def _hess_is_exactly_zero(hess: _HMap) -> bool:
-    """``True`` iff the sparse Hessian has no curvature above ``_AFFINE_HESS_TOL``.
+    """``True`` iff every entry of the sparse Hessian is the point ``[0, 0]``.
 
     An empty map is the common affine case (no second-order entry was
-    ever produced). A non-empty map can still be "affine" when every
-    entry encloses ``0`` within a few ULPs (subnormals from
-    outward-rounded cancellations). The tolerance ``1e-300`` sits ~270
-    orders of magnitude below any plausible real curvature term, so it
-    cannot misclassify genuine curvature as affine.
+    ever produced); a non-empty map qualifies only when every entry is
+    exactly zero. This is a *proof* that the function is affine, which the
+    rank-1 fast paths (``_rank1_quotient``, the ``g**2`` / ``g*g`` metadata)
+    require: they drop the ``H_g`` / ``H_h`` terms outright.
+
+    No absolute tolerance (#2192): a Hessian can be arbitrarily small in
+    absolute terms and still matter once scaled by a large factor. The old
+    ``1e-300`` threshold let ``k*(x-1)**2 / (k*(1+x**2))`` with ``k = 2**-1000``
+    take the rank-1 path and be certified CONVEX while nonconvex.
 
     Sufficient-only: a false ``False`` merely skips the rank-1 fast path
-    and falls through to Gershgorin.
+    and falls through to the generic chain rule and Gershgorin.
     """
-    tol = _AFFINE_HESS_TOL
-    return not bool(np.any((np.abs(hess.lo) > tol) | (np.abs(hess.hi) > tol)))
+    return not bool(np.any((hess.lo != 0.0) | (hess.hi != 0.0)))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1192,14 +1192,19 @@ def _power(expr: BinaryOp, base: _SparseAD, n_vars: int) -> _SparseAD:
         return _unbounded(n_vars)
     p = float(raw)
 
-    if np.isclose(p, 0.0):
+    # Exact comparisons only (#2191): an exponent within ``np.isclose`` of 0, 1
+    # or an integer is a *different function*, not a rounding of one, so
+    # replacing ``g**p`` by ``1``, ``g`` or ``g**round(p)`` drops real curvature
+    # that outward rounding does not cover (``(w**p)**2 / w`` with
+    # ``p = 1 - 2**-17`` was certified CONVEX while strictly concave).
+    if p == 0.0:
         return _SparseAD(value=_ONE, grad={}, hess=_H0, n=n_vars)
-    if np.isclose(p, 1.0):
+    if p == 1.0:
         return base
 
     # Integer exponent path — computed without leaving interval arithmetic.
     p_int = int(p)
-    if np.isclose(p, float(p_int)):
+    if p == float(p_int):
         return _integer_power(base, p_int, n_vars)
 
     # Fractional: require strictly positive base; use exp(p log g).

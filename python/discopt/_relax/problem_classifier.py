@@ -467,6 +467,57 @@ class _NotQuadraticError(Exception):
 #: is a defect in the rung and propagates rather than silently falling through.
 _EXTRACTION_DECLINES = (_NotLinearError, _NotQuadraticError)
 
+
+class ClassificationMismatchError(RuntimeError):
+    """A model classified LP/QP whose objective is not affine/quadratic.
+
+    Raised by the tape extraction rungs, which build the LP/QP objective from
+    derivatives at the origin and are therefore exact only when the classifier was
+    right. A mismatch is a classifier defect; linearising anyway produced a
+    certified false optimum (``minimize x - 2*x**(1 + 2**-43)`` on ``[0, 8]``
+    reported ``optimal`` 0 where the optimum is -8, while ``max_degree`` read the
+    power as linear within 1e-12). Refusing is the only sound answer here: the JAX
+    rung behind the tape linearises just as blindly.
+    """
+
+
+#: Deterministic probe patterns shared by the tape rungs' soundness gates: two, so
+#: one cannot agree by coincidence, the second not a multiple of the first.
+_TAPE_PROBE_PATTERNS = ((7, 1.0), (5, -0.5))
+
+
+def _tape_probe_points(model: Model, n_orig: int):
+    """The tape gates' probe points, clipped into the variable box."""
+    lb_p, ub_p = _get_variable_bounds(model)
+    for _period, _scale in _TAPE_PROBE_PATTERNS:
+        x_probe = np.array(
+            [_scale * ((j % _period) + 1) / _period for j in range(n_orig)], dtype=np.float64
+        )
+        x_probe = np.clip(x_probe, lb_p, ub_p)
+        yield np.where(np.isfinite(x_probe), x_probe, 0.0)
+
+
+def _check_tape_objective_model(ev, model: Model, n_orig: int, kind: str, model_of) -> None:
+    """Raise :class:`ClassificationMismatchError` unless the tape objective matches
+    ``model_of(x) -> (value, magnitude)`` at the probe points.
+
+    ``magnitude`` is the sum of the model's term magnitudes at ``x``: the rounding
+    error of a correct extraction scales with it, not with the (possibly cancelled)
+    value, so a genuine LP with large cancelling coefficients is not refused.
+    """
+    for x_probe in _tape_probe_points(model, n_orig):
+        f_probe = float(ev.evaluate_objective(x_probe))
+        f_model, magnitude = model_of(x_probe)
+        tol = 1e-9 * (1.0 + abs(f_probe) + magnitude)
+        if not (np.isfinite(f_probe) and abs(f_probe - f_model) <= tol):
+            raise ClassificationMismatchError(
+                f"model {model.name!r} was classified with a {kind} objective, but the "
+                f"objective is {f_probe!r} at a probe point where its {kind} model from "
+                f"the origin gives {f_model!r}. The classifier is wrong for this model; "
+                f"refusing to replace the objective by that model."
+            )
+
+
 #: What ``discopt._rust.model_to_repr`` raises for a model it cannot represent
 #: (#1520): ``ValueError`` for an unrepresentable construct (a disjunctive row, a
 #: bad sense, a shape it cannot lower), ``TypeError`` for an expression type its
@@ -953,15 +1004,17 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
                     # x**2 => quadratic
                     if _is_const_expr(node.right):
                         pval = _eval_const(node.right)
-                        if abs(pval - 2.0) < 1e-12:
+                        # Exact only (#2191 class): ``x**(2 + 2**-42)`` is not a
+                        # quadratic; a 1e-12 window extracted it as one.
+                        if pval == 2.0:
                             idx = _get_var_index(node.left)
                             if idx is not None:
                                 _qadd(idx, idx, 2.0 * scale)  # x^2 = 0.5 * 2 * x^2
                                 continue
-                        if abs(pval - 1.0) < 1e-12:
+                        if pval == 1.0:
                             stack.append((node.left, scale, allow_array))
                             continue
-                        if abs(pval) < 1e-12:
+                        if pval == 0.0:
                             const += scale
                             continue
                     raise _NotQuadraticError(f"Power with exponent {node.right}")
@@ -2362,13 +2415,7 @@ def _extract_lp_data_tape(model: Model, *, for_qp: bool = False) -> LPData | Non
     # 1/7)`` matches its origin tangent exactly at ``x = 1/7``, which is the
     # first pattern), and the second pattern is not a multiple of the first.
     # Deterministic, not random, so a decline is reproducible.
-    lb_p, ub_p = _get_variable_bounds(model)
-    for _period, _scale in ((7, 1.0), (5, -0.5)):
-        x_probe = np.array(
-            [_scale * ((j % _period) + 1) / _period for j in range(n_orig)], dtype=np.float64
-        )
-        x_probe = np.clip(x_probe, lb_p, ub_p)
-        x_probe = np.where(np.isfinite(x_probe), x_probe, 0.0)
+    for x_probe in _tape_probe_points(model, n_orig):
         body_probe = np.asarray(ev.evaluate_constraints(x_probe), dtype=np.float64).reshape(-1)
         affine_probe = body0.copy()
         if jac_vals.size:
@@ -2387,6 +2434,17 @@ def _extract_lp_data_tape(model: Model, *, for_qp: bool = False) -> LPData | Non
     # construction and this `c` is discarded. Gating on it would decline every QP.
     c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
     obj_const = float(ev.evaluate_objective(x_zero))
+    if not for_qp:
+        # The LP objective *is* this affine model, so it gets the same gate as the
+        # bodies -- except that a mismatch refuses instead of falling back (see
+        # ClassificationMismatchError). ``for_qp`` callers discard ``c``.
+        _check_tape_objective_model(
+            ev,
+            model,
+            n_orig,
+            "linear",
+            lambda x: (obj_const + float(c_vec @ x), float(np.abs(c_vec * x).sum())),
+        )
 
     assert model._objective is not None
     _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -2730,6 +2788,16 @@ def _qp_terms_tape(model: Model, n_orig: int) -> tuple[Any, np.ndarray, float] |
         Q = (lower + _sp.tril(lower, -1).T).tocsr()
     c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
     obj_const = float(ev.evaluate_objective(x_zero))
+
+    # "Quadratic by construction" holds only if the classifier was right; a
+    # 1e-12 exponent window read ``x**(2 + 2**-42)`` as ``x**2``. Check the model.
+    def _quad_model(x):
+        Qx = Q @ x
+        absQx = abs(Q) @ np.abs(x)
+        val = obj_const + float(c_vec @ x) + 0.5 * float(x @ Qx)
+        return val, float(np.abs(c_vec * x).sum()) + 0.5 * float(np.abs(x) @ absQx)
+
+    _check_tape_objective_model(ev, model, n_orig, "quadratic", _quad_model)
     assert model._objective is not None
     if model._objective.sense == ObjectiveSense.MAXIMIZE:
         # Undo the tape's internal minimisation flip; see the docstring.

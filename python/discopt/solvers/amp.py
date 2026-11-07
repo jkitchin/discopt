@@ -300,7 +300,8 @@ def _flatten_objective_power_terms(
 
     if expr.op == "**":
         exponent = _scalar_constant(expr.right)
-        if exponent is None or abs(exponent - round(exponent)) > 1e-12:
+        # Exact integer only (#2191): a near-integer exponent is a different function.
+        if exponent is None or exponent != round(exponent):
             return None
         exponent_int = int(round(exponent))
         if exponent_int <= 0:
