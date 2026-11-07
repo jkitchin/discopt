@@ -216,6 +216,7 @@ def test_interval_atom_ulp_budget():
     sweep = _atom_sweep(np.random.default_rng(20261107), 3000)
     assert set(sweep) == set(I.ATOM_ULPS), set(sweep) ^ set(I.ATOM_ULPS)
     checks = 0
+    over = []
     for name, (f, g, xs) in sweep.items():
         with np.errstate(all="ignore"):
             ys = f(xs)
@@ -228,5 +229,7 @@ def test_interval_atom_ulp_budget():
             worst = max(worst, float(abs(mp.mpf(float(y)) - t) / ulp))
             checks += 1
         budget = 1.0 + I.ATOM_ULPS[name]
-        assert worst < budget, f"{name}: measured {worst:.3f} ulp, budget {budget}"
+        if worst >= budget:
+            over.append(f"{name}: measured {worst:.3f} ulp, budget {budget}")
+    assert not over, "; ".join(over)
     assert checks > 40000, checks

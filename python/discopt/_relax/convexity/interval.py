@@ -66,26 +66,29 @@ LIB_ULPS = 4.0
 #: *faithful* (error under one ulp), so the one-ulp nudge alone is sound, and the
 #: enclosure is bit-identical to the pre-``LIB_ULPS`` one. Anything else gets
 #: :data:`LIB_ULPS`. Measured against a 50-digit mpmath reference (20k points per
-#: atom, broad log-uniform sweeps over each domain, 2026-11-07, macOS arm64
-#: libm + numpy + scipy). Max error in ulps:
+#: atom, broad log-uniform sweeps over each domain, 2026-11-07). Max error in
+#: ulps, macOS arm64 libm / glibc 2.41 aarch64 (numpy 2.4, scipy 1.17):
 #:
-#: * faithful: ``sqrt`` 0.50, ``log`` 0.50, ``sinh`` 0.505, ``exp`` 0.51,
-#:   ``cosh`` 0.51, ``log1p`` 0.58, ``asin`` 0.63, ``atan`` 0.76;
-#: * widened: ``acos`` 0.92, ``asinh`` 0.98 (both too close to one ulp to rely on
-#:   a one-ulp nudge), ``tanh`` 1.15, ``softplus`` 1.20, ``atanh`` 1.24,
-#:   ``acosh`` 1.42, ``tan`` 2.20, ``erf`` 2.37, ``expit`` 2.01 (plus its subnormal
-#:   underflow, guarded separately in :func:`sigmoid`).
+#: * faithful on both: ``sqrt`` 0.50, ``log`` 0.50, ``exp`` 0.51 / 0.50,
+#:   ``log1p`` 0.58 / 0.63, ``asin`` 0.63 / 0.51, ``atan`` 0.76 / 0.51;
+#: * widened: ``sinh`` 0.505 / 1.52 (CI's x86_64 glibc measured 1.24),
+#:   ``cosh`` 0.51 / 0.99 (too close to one ulp to rely on a one-ulp nudge),
+#:   ``acos`` 0.92 / 0.52, ``asinh`` 0.98 / 1.16, ``tanh`` 1.15 / 1.17,
+#:   ``softplus`` 1.20 / 1.38, ``atanh`` 1.24 / 1.49, ``acosh`` 1.42 / 1.52,
+#:   ``tan`` 2.20 / 0.54, ``erf`` 2.37 / 2.36, ``expit`` 2.01 / 1.98 (plus its
+#:   subnormal underflow, guarded separately in :func:`sigmoid`).
 #:
-#: A faithful atom is one measured below 0.8 ulp. ``test_interval_atom_ulp_budget``
-#: re-measures every entry on the platform the suite runs on, so a libm whose
-#: ``exp`` is worse than faithful fails there instead of silently cutting.
+#: An atom is kept faithful only if it measured below 0.8 ulp on every platform
+#: measured. ``test_interval_atom_ulp_budget`` re-measures every entry on the
+#: platform the suite runs on, so a libm worse than this table fails there
+#: instead of silently cutting.
 ATOM_ULPS: dict[str, float] = {
     "exp": 0.0,
     "log1p": 0.0,
-    "sinh": 0.0,
-    "cosh": 0.0,
     "atan": 0.0,
     "asin": 0.0,
+    "sinh": LIB_ULPS,
+    "cosh": LIB_ULPS,
     "acos": LIB_ULPS,
     "asinh": LIB_ULPS,
     "tanh": LIB_ULPS,
