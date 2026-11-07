@@ -401,6 +401,30 @@ Entry (`d2-analysis/eng_rowprice_entry.jsonl.gz`):
   - Verdict: does not graduate. Kept as a documented opt-out pending the owner (audit
     row). A `p0548`-robust primal lever is the precondition for a third panel.
 
+**W5(a) cold LP solves through the dual simplex: built, entry failed, retired
+(2026-11-07).** `DISCOPT_LP_DUAL_COLD` was designed with the HiGHS expert:
+- the dual simplex from the all-logical basis of `A x - s = 0`;
+- HiGHS's auxiliary-LP dual phase 1 when that basis is not dual feasible;
+- only audited Optimals and verified Farkas rays accepted;
+- basic logicals exchanged out, so the exported basis is full;
+- short warm starts routed to it.
+
+Entry (`d2-analysis/w5a_dual_cold_entry.jsonl.gz`, 10 rows, 2 reps, 20 s):
+- Phase-1 pivots fell 85 % and short-basis refusals vanished (`bppc8-02` 1,640 -> 15).
+- Throughput collapsed: `neos-911970` 874 -> 45 nodes, `bppc8-02` 1,760 -> 1,150.
+- Controls were unchanged.
+
+With short starts left on their old path (`..._coldonly_entry.jsonl.gz`) it never fired:
+0 attempts on 4 rows. On these rows every cold primal solve is the fallback of a short
+warm start, and the primal repair from that start, phase 1 and all, is far cheaper than a
+dual solve from scratch.
+
+The ceiling was already measured: removing the short bases at their source
+(`NODE_EXPEL_ARTIFICIALS`) was panel-neutral. Retired, flag and implementation.
+
+What would still pay is a *warm* dual start from the short basis (completed with
+logicals for its uncovered rows), but the EXPEL ceiling says not much.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first
