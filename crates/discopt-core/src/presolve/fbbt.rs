@@ -4352,6 +4352,108 @@ mod tests {
         );
     }
 
+    // -- #2195: a near-integer exponent is not an integer exponent --
+
+    /// `2 + 0.9e-12`: within the old 1e-12 integrality tolerance of 2.
+    const P_2195: f64 = 2.0 + 0.9e-12;
+
+    #[test]
+    fn test_2195_interval_pow_near_integer_exponent_contains_true_value() {
+        let base = Interval::new(1.0, 1e7);
+        let r = interval_pow(&base, &Interval::point(P_2195));
+        let truth = 1e7f64.powf(P_2195); // 1e14 + 1450.9
+        assert!(truth > 1e14 + 725.0, "fixture: 1e7^p = {truth}");
+        assert!(
+            r.lo <= 1.0 && r.hi >= truth,
+            "{r:?} must contain [1, {truth}]"
+        );
+        // An exactly-integer point exponent still takes the integer path.
+        let sq = interval_pow(&Interval::new(-2.0, 3.0), &Interval::point(2.0));
+        assert!(
+            sq.lo == 0.0 && sq.hi >= 9.0 && sq.hi < 9.0 + 1e-12,
+            "{sq:?}"
+        );
+    }
+
+    /// `x^p >= 1e14 + 725` with `x` in `[1, ub]`: `x = 1e7` is feasible
+    /// (`1e7^p = 1e14 + 1450.9`), so neither FBBT pass may cut it off.
+    fn near_int_pow_ge(ub: f64, sign_domain: bool) -> Vec<Interval> {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let p = arena.add(ExprNode::Constant(P_2195));
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: x,
+            right: p,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Ge,
+                rhs: 1e14 + 725.0,
+                name: None,
+            }],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![1.0],
+                ub: vec![ub],
+            }],
+            n_vars: 1,
+        };
+        SIGN_DOMAIN_FORCE.with(|c| c.set(Some(sign_domain)));
+        let out = fbbt(&model, 20, 1e-9);
+        SIGN_DOMAIN_FORCE.with(|c| c.set(None));
+        out
+    }
+
+    #[test]
+    fn test_2195_forward_near_integer_pow_not_infeasible() {
+        // ub = 1e7: the old forward pass bounded x^p by 1e7^2 = 1e14 < rhs.
+        for on in [false, true] {
+            let b = near_int_pow_ge(1e7, on);
+            assert!(
+                b[0].lo <= 1e7 && b[0].hi >= 1e7,
+                "sign_domain={on}: x = 1e7 is feasible, got {:?}",
+                b[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_2195_backward_near_integer_pow_keeps_feasible_point() {
+        // ub = 1e7 + 1 keeps the forward pass feasible either way; the old
+        // backward pass inverted x^2 and raised lo to sqrt(rhs) ~ 1e7 + 3.6e-5,
+        // above the feasible x = 1e7. The true root is ~ 1e7 - 3.6e-5.
+        for on in [false, true] {
+            let b = near_int_pow_ge(1e7 + 1.0, on);
+            assert!(
+                b[0].lo <= 1e7 && b[0].hi >= 1e7,
+                "sign_domain={on}: x = 1e7 is feasible, got {:?}",
+                b[0]
+            );
+        }
+        // With the sign-domain rules on, the fractional inversion still
+        // tightens: lo is raised far above 1, to just below the true root.
+        let b = near_int_pow_ge(1e7 + 1.0, true);
+        assert!(
+            b[0].lo > 1e7 - 1.0,
+            "expected a tight lower bound, got {:?}",
+            b[0]
+        );
+    }
+
     // -- feasibility-tolerance regression tests (issue #27a) --
 
     #[test]

@@ -47,6 +47,10 @@ def _domain_arg(node: Expression):
         return node.args[0], _DOMAIN_LO[node.func_name]
     if isinstance(node, BinaryOp) and node.op == "**" and isinstance(node.right, Constant):
         p = np.asarray(node.right.value)
+        # The 1e-12 tolerance is deliberate here, unlike the FBBT sites made exact in #2194/#2195:
+        # treating a near-integer exponent as an integer only *omits* the
+        # `base >= 0` domain row, which can loosen a relaxation but never cut a
+        # feasible point.
         if p.ndim == 0 and np.isfinite(float(p)) and abs(float(p) - round(float(p))) >= 1e-12:
             return node.left, 0.0
     return None
