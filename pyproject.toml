@@ -64,7 +64,7 @@ jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.16"]
-# macOS: cyipopt's and torch's wheels each bundle libomp; one process cannot load
+# macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
 # both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
 # highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
