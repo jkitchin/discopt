@@ -145,6 +145,12 @@ timed_phases!(
     DiveRepair,
     // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`).
     SubMip,
+    // W1 (D2 plan): the node-GMI step's parts.
+    NodeGmiScan,
+    NodeGmiAugment,
+    NodeGmiLp,
+    NodeGmiNs,
+    NodeGmiSep,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,

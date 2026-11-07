@@ -553,6 +553,7 @@ struct LocalLp {
 
 impl LocalLp {
     fn step(&mut self, add: &[GomoryCut], simplex: &SimplexOptions) -> Option<bool> {
+        let t_aug = crate::profile::Timer::new(crate::profile::Phase::NodeGmiAugment);
         let (nc, nm, nn) = augment_csc_with_cuts(
             &self.csc,
             &mut self.b,
@@ -576,16 +577,22 @@ impl LocalLp {
             l: &self.l,
             u: &self.u,
         };
+        drop(t_aug);
+        let t_lp = crate::profile::Timer::new(crate::profile::Phase::NodeGmiLp);
         let sol = solve_lp_warm_scaled_csc(&lp, &self.b, &start, simplex, &self.csc);
+        drop(t_lp);
         self.pivots += sol.iters;
         if sol.status != LpStatus::Optimal {
             crate::profile::incr(crate::profile::Ctr::NodeGmiLpFail);
             return None;
         }
         let (cp, ri, vals) = self.csc.raw();
-        let Some(g) = ns_safe_bound_csc(
+        let t_ns = crate::profile::Timer::new(crate::profile::Phase::NodeGmiNs);
+        let ns = ns_safe_bound_csc(
             &sol.dual, &self.c, cp, ri, vals, self.m, self.n, &self.b, &self.l, &self.u,
-        ) else {
+        );
+        drop(t_ns);
+        let Some(g) = ns else {
             crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
             return None;
         };
@@ -656,10 +663,12 @@ fn node_local_gmi_bound(
         let mut gu = ctx.u_w.to_vec();
         gl.resize(lp.n, 0.0);
         gu.resize(lp.n, INF);
+        let t_sep = crate::profile::Timer::new(crate::profile::Phase::NodeGmiSep);
         let cuts = crate::lp::gomory::separate_gomory_cols_global(
             &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
             tol, 1e7,
         );
+        drop(t_sep);
         crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
         // The cuts are truncated to the working columns; select on the point there.
         let sel = select_cuts(
@@ -4203,6 +4212,7 @@ fn solve_node(
             // current working width.
             let mut pool_pick: Vec<(f64, usize)> = Vec::new();
             if ctx.node_gmi && !feasible && !ctx.gmi_pool.is_empty() {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::NodeGmiScan);
                 for (k, cut) in ctx.gmi_pool.iter().enumerate() {
                     let mut act = 0.0;
                     let mut nrm = 0.0;
