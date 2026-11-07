@@ -71,8 +71,13 @@ manuscript/*.toc
 # discopt.tex is generated from discopt.org via `scimax export discopt.org --format pdf`
 manuscript/discopt.tex
 
-# Claude Code
-.claude/
+# Claude Code. Ignored except the dev-only /adversary command, which
+# `discopt-dev adversary` looks up at .claude/commands/adversary.md and which is
+# deliberately not shipped by `discopt install-skills`.
+.claude/*
+!.claude/commands/
+.claude/commands/*
+!.claude/commands/adversary.md
 
 # Crucible knowledge base: track the wiki and bib, exclude generated /
 # copyrighted / transient artifacts.
