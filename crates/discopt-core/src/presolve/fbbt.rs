@@ -2109,80 +2109,50 @@ fn backward_propagate_with(
                     backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Sin => {
-                    // sin is monotone on each piece between consecutive extrema
-                    // at pi/2 + k*pi. If the forward input lies in one piece,
-                    // invert via asin with the right 2*m*pi offset; otherwise the
-                    // preimage is a union of intervals and we conservatively skip.
-                    use std::f64::consts::{FRAC_PI_2, PI};
+                    // sin has extrema at pi/2 + k*pi; piece k = [e_k, e_{k+1}] is
+                    // increasing for odd k (x = asin(y) + (k+1)*pi) and decreasing
+                    // for even k (x = pi - asin(y) + k*pi).
                     let inp = node_bounds[args[0].0];
-                    // Monotone iff no sin-extremum (pi/2 + k*pi) is strictly
-                    // interior to [inp.lo, inp.hi]; extrema at the endpoints are
-                    // fine. Take the smallest extremum >= inp.lo.
-                    let ext = FRAC_PI_2 + ((inp.lo - FRAC_PI_2) / PI).ceil() * PI;
-                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
-                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
-                        let mid = 0.5 * (inp.lo + inp.hi);
-                        let ylo = tightened.lo.clamp(-1.0, 1.0);
-                        let yhi = tightened.hi.clamp(-1.0, 1.0);
-                        let (new_lo, new_hi) = if mid.cos() >= 0.0 {
-                            // increasing piece centered at 2*m*pi
-                            let m = (mid / (2.0 * PI)).round();
+                    use std::f64::consts::FRAC_PI_2;
+                    let pre = trig_piece_preimage(inp, tightened, FRAC_PI_2, |k, ylo, yhi| {
+                        let off = k * PI;
+                        if k.rem_euclid(2.0) == 1.0 {
                             (
-                                abs_down(ylo.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(yhi.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
+                                ylo.asin() + off + PI,
+                                yhi.asin() + off + PI,
+                                off.abs() + 2.0 * PI,
                             )
                         } else {
-                            // decreasing piece centered at pi + 2*m*pi
-                            let m = ((mid - PI) / (2.0 * PI)).round();
                             (
-                                abs_down(PI - yhi.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(PI - ylo.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
+                                PI - yhi.asin() + off,
+                                PI - ylo.asin() + off,
+                                off.abs() + 2.0 * PI,
                             )
-                        };
-                        backward_propagate(
-                            arena,
-                            args[0],
-                            Interval::new(new_lo, new_hi),
-                            node_bounds,
-                            var_bounds,
-                        );
+                        }
+                    });
+                    if let Some(pre) = pre {
+                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                     }
                 }
                 MathFunc::Cos => {
-                    // cos is monotone on each piece [k*pi, (k+1)*pi]: decreasing
-                    // where sin>0, increasing where sin<0. acos(y) in [0, pi].
-                    use std::f64::consts::PI;
+                    // cos has extrema at k*pi; piece k = [k*pi, (k+1)*pi] is
+                    // decreasing for even k (x = acos(y) + k*pi) and increasing for
+                    // odd k (x = (k+1)*pi - acos(y)).
                     let inp = node_bounds[args[0].0];
-                    // Monotone iff no cos-extremum (k*pi) is strictly interior.
-                    let ext = (inp.lo / PI).ceil() * PI;
-                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
-                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
-                        let mid = 0.5 * (inp.lo + inp.hi);
-                        let ylo = tightened.lo.clamp(-1.0, 1.0);
-                        let yhi = tightened.hi.clamp(-1.0, 1.0);
-                        let m = (mid / (2.0 * PI)).round();
-                        let (new_lo, new_hi) = if mid.sin() > 0.0 {
-                            // decreasing piece [2m*pi, pi+2m*pi]: x = acos(y) + 2m*pi,
-                            // larger y -> smaller x.
-                            (
-                                abs_down(yhi.acos() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(ylo.acos() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                            )
+                    let pre = trig_piece_preimage(inp, tightened, 0.0, |k, ylo, yhi| {
+                        let off = k * PI;
+                        if k.rem_euclid(2.0) == 0.0 {
+                            (yhi.acos() + off, ylo.acos() + off, off.abs() + PI)
                         } else {
-                            // increasing piece [pi+2m'*pi, 2pi+2m'*pi]:
-                            // x = 2*pi*m - acos(y) (m rounds to the piece's right end).
                             (
-                                abs_down(2.0 * PI * m - ylo.acos(), (2.0 * PI * m).abs() + PI),
-                                abs_up(2.0 * PI * m - yhi.acos(), (2.0 * PI * m).abs() + PI),
+                                off + PI - ylo.acos(),
+                                off + PI - yhi.acos(),
+                                off.abs() + 2.0 * PI,
                             )
-                        };
-                        backward_propagate(
-                            arena,
-                            args[0],
-                            Interval::new(new_lo, new_hi),
-                            node_bounds,
-                            var_bounds,
-                        );
+                        }
+                    });
+                    if let Some(pre) = pre {
+                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                     }
                 }
                 _ => {
@@ -2254,6 +2224,87 @@ fn backward_propagate_with(
         | ExprNode::Parameter { .. }
         | ExprNode::MatMul { .. } => {}
     }
+}
+
+/// Sound backward preimage of `sin`/`cos` over `inp`, given the image `tightened`.
+///
+/// The function has extrema at `phase + k*pi`, and on piece `k` (between extrema
+/// `k` and `k + 1`) it is monotone with the inverse `piece(k, ylo, yhi) ->
+/// (lo, hi, scale)`. An extremum computed in f64 is only known to within `err`,
+/// so each candidate is classified against the box with that margin:
+///
+/// * provably interior -- the preimage is a union of intervals: decline;
+/// * provably outside -- irrelevant;
+/// * within `err` of an endpoint -- *ambiguous*: the strip between the endpoint
+///   and the extremum's far error bound may belong to the neighbouring piece, so
+///   it is kept whole and hulled with the piece's preimage.
+///
+/// The piece is read off the midpoint of the box with the ambiguous strips
+/// removed, which is at least `err` from every extremum, so the comparison is
+/// decided correctly. This replaced an absolute `1e-12` monotonicity slack plus a
+/// piece choice from the *untrimmed* midpoint: an extremum within 1e-12 inside
+/// an endpoint was accepted as "monotone", the strip beyond it was inverted on
+/// the wrong piece and dropped, and `sin(1.570796326794 + 1e-12*n) >= 0.5`
+/// tightened `n >= 0` to `n >= 1`, cutting the optimum `n = 0`.
+fn trig_piece_preimage(
+    inp: Interval,
+    tightened: Interval,
+    phase: f64,
+    piece: impl Fn(f64, f64, f64) -> (f64, f64, f64),
+) -> Option<Interval> {
+    if !(inp.lo.is_finite() && inp.hi.is_finite()) || inp.hi - inp.lo > PI {
+        return None;
+    }
+    let mag = inp.lo.abs().max(inp.hi.abs()) + 2.0 * PI;
+    let err = 8.0 * f64::EPSILON * mag;
+    if 8.0 * err >= PI {
+        return None;
+    }
+    let ylo = tightened.lo.clamp(-1.0, 1.0);
+    let yhi = tightened.hi.clamp(-1.0, 1.0);
+    let k0 = ((inp.lo - phase) / PI).floor() - 1.0;
+    let (mut core_lo, mut core_hi) = (inp.lo, inp.hi);
+    let (mut strip_lo, mut strip_hi) = (None::<f64>, None::<f64>);
+    for i in 0..=5 {
+        let e = phase + (k0 + i as f64) * PI;
+        if e + err < inp.lo || e - err > inp.hi {
+            continue;
+        }
+        if e - err > inp.lo && e + err < inp.hi {
+            return None; // interior extremum: preimage is not one interval
+        }
+        if (e - inp.lo).abs() <= (e - inp.hi).abs() {
+            strip_lo = Some(strip_lo.map_or(e + err, |s: f64| s.max(e + err)));
+            core_lo = core_lo.max(e + err);
+        } else {
+            strip_hi = Some(strip_hi.map_or(e - err, |s: f64| s.min(e - err)));
+            core_hi = core_hi.min(e - err);
+        }
+    }
+    if core_lo >= core_hi {
+        return None;
+    }
+    let mid = 0.5 * (core_lo + core_hi);
+    let k = ((mid - phase) / PI).floor();
+    // `mid` is >= err from every extremum, so `k` must bracket it; check anyway.
+    if !(phase + k * PI < mid && mid < phase + (k + 1.0) * PI) {
+        return None;
+    }
+    let (lo, hi, scale) = piece(k, ylo, yhi);
+    let mut lo = abs_down(lo, scale);
+    let mut hi = abs_up(hi, scale);
+    if !(lo.is_finite() && hi.is_finite()) {
+        return None;
+    }
+    if let Some(s) = strip_lo {
+        lo = lo.min(inp.lo);
+        hi = hi.max(s.min(inp.hi));
+    }
+    if let Some(s) = strip_hi {
+        hi = hi.max(inp.hi);
+        lo = lo.min(s.max(inp.lo));
+    }
+    Some(Interval::new(lo, hi))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -6245,5 +6296,171 @@ mod tests_near_integer_pow {
         // x^3 over a sign-straddling base still uses the odd-power rule.
         let enc = interval_pow(&Interval::new(-2.0, 2.0), &Interval::new(3.0, 3.0));
         assert!(enc.lo <= -8.0 && enc.hi >= 8.0, "{:?}", enc);
+    }
+}
+
+#[cfg(test)]
+mod tests_trig_backward {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    fn sin_pre(lo: f64, hi: f64, ylo: f64, yhi: f64) -> Option<Interval> {
+        trig_piece_preimage(
+            Interval::new(lo, hi),
+            Interval::new(ylo, yhi),
+            FRAC_PI_2,
+            |k, ylo, yhi| {
+                let off = k * PI;
+                if k.rem_euclid(2.0) == 1.0 {
+                    (
+                        ylo.asin() + off + PI,
+                        yhi.asin() + off + PI,
+                        off.abs() + 2.0 * PI,
+                    )
+                } else {
+                    (
+                        PI - yhi.asin() + off,
+                        PI - ylo.asin() + off,
+                        off.abs() + 2.0 * PI,
+                    )
+                }
+            },
+        )
+    }
+
+    fn cos_pre(lo: f64, hi: f64, ylo: f64, yhi: f64) -> Option<Interval> {
+        trig_piece_preimage(
+            Interval::new(lo, hi),
+            Interval::new(ylo, yhi),
+            0.0,
+            |k, ylo, yhi| {
+                let off = k * PI;
+                if k.rem_euclid(2.0) == 0.0 {
+                    (yhi.acos() + off, ylo.acos() + off, off.abs() + PI)
+                } else {
+                    (
+                        off + PI - ylo.acos(),
+                        off + PI - yhi.acos(),
+                        off.abs() + 2.0 * PI,
+                    )
+                }
+            },
+        )
+    }
+
+    /// The adversarial case: an extremum 9e-13 inside the lower endpoint. The old
+    /// 1e-12 slack called the box monotone, inverted it on the wrong piece and
+    /// dropped `[TH0, pi/2]`, which is feasible (`sin(TH0) = 1 - 4e-25`). The
+    /// extremum is now provably interior, so the rule declines.
+    #[test]
+    fn extremum_just_inside_an_endpoint_is_not_monotone() {
+        let th0 = 1.570796326794;
+        for ylo in [0.5, -1.0] {
+            assert!(sin_pre(th0, th0 + 1e-9, ylo, 1.0).is_none());
+        }
+        assert!(cos_pre(3.141592653589, 3.141592653589 + 1e-9, -1.0, 1.0).is_none());
+        assert!(sin_pre(FRAC_PI_2 - 1e-9, FRAC_PI_2 + 1e-13, 0.5, 1.0).is_none());
+    }
+
+    /// An extremum within its rounding error of an endpoint is ambiguous: the
+    /// strip on the far side is kept whole and the rest still tightens.
+    #[test]
+    fn ambiguous_extremum_at_an_endpoint_keeps_the_strip() {
+        // The real pi/2 is 6e-17 above FRAC_PI_2.
+        let p = sin_pre(FRAC_PI_2 - 1e-9, FRAC_PI_2, 0.5, 1.0).expect("keeps");
+        assert!(p.hi >= FRAC_PI_2 && p.lo <= FRAC_PI_2 - 1e-9, "{:?}", p);
+        let p = sin_pre(FRAC_PI_2, FRAC_PI_2 + 1e-9, 0.5, 1.0).expect("keeps");
+        assert!(p.lo <= FRAC_PI_2 && p.hi >= FRAC_PI_2 + 1e-9, "{:?}", p);
+        let p = cos_pre(PI, PI + 1e-9, -1.0, -0.5).expect("keeps");
+        assert!(p.lo <= PI && p.hi >= PI + 1e-9, "{:?}", p);
+    }
+
+    #[test]
+    fn monotone_boxes_still_tighten() {
+        let p = sin_pre(0.1, 1.0, 0.5, 1.0).unwrap();
+        assert!(
+            (p.lo - 0.5f64.asin()).abs() < 1e-12 && p.hi >= 1.0,
+            "{:?}",
+            p
+        );
+        let p = sin_pre(2.0, 3.0, 0.0, 0.5).unwrap();
+        assert!(
+            (p.lo - (PI - 0.5f64.asin())).abs() < 1e-12 && p.hi >= 3.0,
+            "{:?}",
+            p
+        );
+        let p = cos_pre(0.5, 3.0, -1.0, 0.0).unwrap();
+        assert!((p.lo - FRAC_PI_2).abs() < 1e-12 && p.hi >= 3.0, "{:?}", p);
+        let p = cos_pre(-3.0, -0.5, -1.0, 0.0).unwrap();
+        assert!((p.hi + FRAC_PI_2).abs() < 1e-12 && p.lo <= -3.0, "{:?}", p);
+        // Shifted by whole periods.
+        let s = 200.0 * PI;
+        let p = sin_pre(s + 0.1, s + 1.0, 0.5, 1.0).unwrap();
+        assert!((p.lo - (s + 0.5f64.asin())).abs() < 1e-9, "{:?}", p);
+        // An extremum at an endpoint: the strip is kept, the far side tightens.
+        let p = sin_pre(FRAC_PI_2, 2.0, 0.99, 1.0).unwrap();
+        assert!(
+            p.lo <= FRAC_PI_2 && (p.hi - (PI - 0.99f64.asin())).abs() < 1e-12,
+            "{:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn non_monotone_boxes_decline() {
+        assert!(sin_pre(1.0, 2.0, 0.5, 1.0).is_none()); // pi/2 interior
+        assert!(cos_pre(-0.5, 0.5, 0.5, 1.0).is_none()); // 0 interior
+        assert!(sin_pre(0.0, PI + 1e-6, 0.5, 1.0).is_none()); // wider than pi
+        assert!(sin_pre(f64::NEG_INFINITY, 0.0, 0.5, 1.0).is_none());
+        assert!(sin_pre(1e17, 1e17 + 1.0, 0.5, 1.0).is_none()); // extrema unresolvable
+    }
+
+    /// Every sampled point whose sine/cosine lies in the image interval is kept.
+    #[test]
+    fn sampled_feasible_points_are_never_cut() {
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut checks = 0usize;
+        for case in 0..4000 {
+            // Boxes clustered near extrema (offsets down to 1e-15) and at random.
+            let k = (next() * 40.0 - 20.0).floor();
+            let phase = if case % 2 == 0 { FRAC_PI_2 } else { 0.0 };
+            let e = phase + k * PI;
+            let near = 10f64.powf(-15.0 + 14.0 * next()) * if next() < 0.5 { -1.0 } else { 1.0 };
+            let lo = if case % 3 == 0 {
+                e + near
+            } else {
+                e + next() * 6.0 - 3.0
+            };
+            let hi = lo + 10f64.powf(-12.0 + 12.5 * next());
+            let a = next() * 2.0 - 1.0;
+            let b = next() * 2.0 - 1.0;
+            let (ylo, yhi) = (a.min(b), a.max(b));
+            let pre = if phase != 0.0 {
+                sin_pre(lo, hi, ylo, yhi)
+            } else {
+                cos_pre(lo, hi, ylo, yhi)
+            };
+            let Some(pre) = pre else { continue };
+            for i in 0..=64 {
+                let x = lo + (hi - lo) * (i as f64) / 64.0;
+                let x = x.clamp(lo, hi);
+                let y = if phase != 0.0 { x.sin() } else { x.cos() };
+                // Clearly inside the image (f64 sin/cos err by about an ulp).
+                if y > ylo + 1e-15 && y < yhi - 1e-15 {
+                    assert!(
+                        pre.lo <= x && x <= pre.hi,
+                        "cut x={x:e} box=[{lo:e},{hi:e}] y in [{ylo},{yhi}] pre={pre:?}"
+                    );
+                    checks += 1;
+                }
+            }
+        }
+        assert!(checks > 20000, "only {checks} checks executed");
     }
 }
