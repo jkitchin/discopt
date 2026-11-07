@@ -237,6 +237,43 @@ columns with variable-bound substitution, several scaling factors (deltas) per
 aggregation, and complementation. A rewrite of `lp/cmir.rs`'s aggregation is planned
 with a root-bound differential against SCIP as its entry, not a flag flip.
 
+**Update 2026-11-07 (evening): port started; the separator is the root lever, but route
+adoption is blocked by LP numerics.** The third consult is in the commits: HiGHS's
+`HighsCutGeneration` / `HighsPathSeparator` against our `cmir.rs`.
+
+Root bound on `mik-1` / `mik-5` (`d2-analysis/w4_root_bound.py`):
+
+| arm | `mik-1` | `mik-5` |
+|---|---|---|
+| GMI only (today) | -51,757 | -53,674 |
+| our c-MIR, old delta rule | -52,544 | -54,463 |
+| + HiGHS delta selection (`DISCOPT_MILP_CMIR_HIGHS`) | -51,558 | -53,483 |
+| + flip pass (`DISCOPT_MILP_CMIR_FLIP`) | -51,532 | -53,483 |
+| + lifted mixed-integer cover (`DISCOPT_MILP_LIFTED_MIC`, brute-force tested) | -51,493 | -53,381 |
+| SCIP aggregation only | -51,173 | -52,786 |
+| HiGHS whole root | -50,587 | -52,372 |
+
+The old rule tried the first 8 integer coefficients by index; HiGHS tries every
+integer off its bound.
+
+Route adoption (`DISCOPT_MILP_D2_CMIR` plus the above): the §5 panel failed
+(`w4_cmir_bundle_panel_r3.json.gz`).
+- Cert-clean, but certified 124 -> 120 and 4 dual losses.
+- Lost `dcmulti` and `bell5`; gained `gesa2` and `p0548`.
+
+The failure is LP numerics, not the cuts (`w4_cmir_followups.jsonl.gz`).
+- With c-MIR rows, the root re-solves end in thousands of sub-tolerance-repair
+  primal pivots: `dcmulti` spent the 10 s root slice there, with 6 iteration-limit
+  verdicts.
+- HiGHS-style power-of-two cut scaling fixed `dcmulti` (certified in 7 s) and `iskar`
+  (13 -> 3 s).
+- It moved other trajectories: `gesa2` open again, and `istra`/`kaihu` slower.
+
+Remaining W4 steps, after the W5 engine items (a) and (d):
+- small-coefficient removal plus scaling validated on a panel;
+- deeper path aggregation (expert step 4);
+- tableau rows through the c-MIR pipeline (step 5).
+
 ### W5 — LP engine throughput (G5, plus `issue-2446`)  *expected +1-2, broad speed*
 
 **Evidence.**

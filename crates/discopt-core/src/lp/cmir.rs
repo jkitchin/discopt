@@ -714,6 +714,9 @@ fn lifted_mic_cut(
             }
         }
     }
+    if !drop_small_coeffs(&mut cx, &mut rx, l, u) {
+        return None;
+    }
     let mut out: BTreeMap<usize, f64> = BTreeMap::new();
     let (mut max_c, mut min_c, mut mag) = (0.0f64, f64::INFINITY, rx.abs());
     for (&j, &v) in &cx {
@@ -736,6 +739,13 @@ fn lifted_mic_cut(
         return None;
     }
     rx += RHS_SAFETY * (1.0 + mag);
+    let f = (2.0f64).powi(-(max_c.log2().round() as i32));
+    if f.is_finite() && f > 0.0 {
+        for v in out.values_mut() {
+            *v *= f;
+        }
+        rx *= f;
+    }
     let act: f64 = out.iter().map(|(&j, &v)| v * x[j]).sum();
     let norm = out.values().map(|v| v * v).sum::<f64>().sqrt();
     let efficacy = (act - rx) / norm;
@@ -744,6 +754,31 @@ fn lifted_mic_cut(
         rhs: rx,
         efficacy,
     })
+}
+
+/// HiGHS's small-coefficient removal (`HighsCutGeneration.cpp:784-805`) on a cut
+/// `sum v_j z_j <= rx`: a coefficient at most `100 * feastol * max(max|v|, 1e-3)`
+/// leaves the cut by charging its minimum over the box to the rhs (#1236: `v > 0`
+/// charges `v * l_j`, `v < 0` charges `v * u_j`). A small coefficient on a column
+/// with an infinite bound in that direction rejects the cut (`false`), as in HiGHS.
+fn drop_small_coeffs(cx: &mut BTreeMap<usize, f64>, rx: &mut f64, l: &[f64], u: &[f64]) -> bool {
+    let maxabs = cx.values().fold(0.0f64, |m, v| m.max(v.abs()));
+    let minc = 100.0 * HIGHS_FEASTOL * maxabs.max(1e-3);
+    let mut drop: Vec<usize> = Vec::new();
+    for (&j, &v) in cx.iter() {
+        if v != 0.0 && v.abs() <= minc {
+            let pin = if v > 0.0 { l[j] } else { u[j] };
+            if pin <= -INF || pin >= INF {
+                return false;
+            }
+            *rx -= v * pin;
+            drop.push(j);
+        }
+    }
+    for j in drop {
+        cx.remove(&j);
+    }
+    true
 }
 
 /// The cut [`try_delta`] produces at one scaling, if any.
@@ -925,6 +960,9 @@ fn try_delta(
             }
         }
     }
+    if highs_cmir_enabled() && !drop_small_coeffs(&mut cx, &mut rx, l, u) {
+        return;
+    }
     // #1236: a term leaves the cut only by charging its maximum over the box to the
     // rhs (`v z_j <= ...` dropped needs `rx -= min_box(v z_j)`); otherwise it stays.
     let mut max_c = 0.0f64;
@@ -960,6 +998,16 @@ fn try_delta(
         return;
     }
     rx += RHS_SAFETY * (1.0 + mag);
+    if highs_cmir_enabled() {
+        // HiGHS scales every cut (`postprocessCut`); a power of two keeps it exact.
+        let f = (2.0f64).powi(-(max_c.log2().round() as i32));
+        if f.is_finite() && f > 0.0 {
+            for v in out.values_mut() {
+                *v *= f;
+            }
+            rx *= f;
+        }
+    }
     let act: f64 = out.iter().map(|(&j, &v)| v * x[j]).sum();
     let norm = out.values().map(|v| v * v).sum::<f64>().sqrt();
     let efficacy = (act - rx) / norm;
@@ -1263,7 +1311,11 @@ mod tests {
             }
             let mut has_neg = false;
             for _ in 0..nc {
-                let w = if r.next() < 0.7 { -(1.0 + r.next() * 9.0) } else { 1.0 + r.next() * 5.0 };
+                let w = if r.next() < 0.7 {
+                    -(1.0 + r.next() * 9.0)
+                } else {
+                    1.0 + r.next() * 5.0
+                };
                 has_neg |= w < 0.0;
                 vals.push(w);
                 upper.push(INF);
