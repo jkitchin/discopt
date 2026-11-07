@@ -350,6 +350,47 @@ The engine work, in order, each with an R1-LP-panel entry (P2.6) and a kill crit
   incremental, row-wise, hyper-sparse reduced-cost update. That is engine item (b),
   applied to the primal.
 
+**Engine step 2 (2026-11-07, late): row-wise pivot row for the incremental pricing.**
+
+What was built (under `DISCOPT_LP_PRIMAL_INCR_PRICING`, no new flag). The handoff's
+`eng_rowprice.patch`, with the HiGHS expert's fixes:
+- the CSR copy is built lazily on the first incremental update and cached on the
+  `Simplex` (HiGHS keeps `ar_matrix_` persistently, `HEkk.cpp` 2276), not once per loop;
+- HiGHS's `updateVerify` (`HEkkPrimal.cpp` 2539): the pivot read off the row must agree
+  with the FTRANed column's within 1e-7 relative, or the basis is refactorized;
+- counters for both arms (`PrimalRowPriceSparse` / `PrimalRowPriceDense` /
+  `PrimalRowPriceVerifyFail`) and a `PivotRowPrice` phase timer. `PriceSweep` times only
+  the entering-column scan, which this step does not change.
+
+Rust lib tests: 1033/1033 with and without the flag.
+- The #2202 test's premise (the inherited start ends `Numerical`) holds only in the
+  default arm: incremental pricing decides that LP on its own (already true with step 1
+  alone).
+- So that arm now asserts the inherited start is decided correctly, against HiGHS.
+
+Entry (`d2-analysis/eng_rowprice_entry.jsonl.gz`):
+- Setup: 9 rows, 2 reps, 20 s, the flag ON in both arms.
+- Arms: A' = the same build with the row-wise branch forced off (measurement only); B =
+  step 2. The `.so` was swapped per solve, arm order alternating (`eng_rowprice_ab.sh`).
+- Pivot-row update time, A' -> B (ms):
+
+  | row | A' | B |
+  |---|---|---|
+  | `p0548` | 516 / 489 | 95 / 93 |
+  | `2122` | 6,032 / 5,874 | 1,473 / 1,539 |
+  | `enlight_hard` | 381 / 367 | 92 / 89 |
+  | `obra` | 119 / 117 | 30 / 29 |
+  | `sp150x300d` | 2,208 / 1,871 | 881 / 1,036 |
+  | `bppc8-02` | 9,256 / 9,274 | 6,237 / 6,168 |
+  | `beavma` | 687 / 752 | 451 / 447 |
+
+- Per update that is 2-6x cheaper (`p0548` 13.8 -> 2.3 us).
+- The row-wise arm took 72 % (`beavma`) to ~100 % of the updates.
+- The verify fired 1-2 times, on `2122` only, in both arms.
+- Statuses were unchanged and node counts within run noise; the rows are wall-limited
+  elsewhere (node LP total time is level).
+- Re-panelled together with step 1 below.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first

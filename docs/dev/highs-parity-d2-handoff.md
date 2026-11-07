@@ -38,6 +38,45 @@ the short version: what is on, what is off, and what to do first.
 - the root-basis and recent-basis fallbacks of the cut LP;
 - the nnz-ratio fold cap.
 
+## Full-suite result and the one branch-caused failure (2026-11-07, late)
+
+`pytest python/tests -m "not slow" -n 4` on `1dccb8e3`: 7 failed, 20,680 passed.
+- 6 are environmental: 3 need `cyipopt` (no Ipopt C library in the container), 3 need
+  `sympy` (pass once it is installed).
+- 1 is branch-caused: `test_nlpbb_unscaled_refine::test_large_coefficient_rows_leave_through_the_gate`.
+  It passes on `origin/main` (4.8 s) and fails here (61 s, the refine never runs).
+
+**Cause, bisected (Python file, then hunk).** The D3 default flip of
+`_convex_route_oa_master` to the in-house master. With `=highs` the test passes.
+- The route's `lp_nlp_bb` master returns `infeasible` in 0.2 s. HiGHS returns a point
+  at 0.0282905 on the same master. NLP-BB then runs alone and finds no incumbent in 60 s.
+- On the captured master MILP (17 columns), the in-house driver says INFEASIBLE with the
+  D3 lazy root cuts on (`DISCOPT_MILP_LAZY_ROOT_CUTS`, the c-MIR part). It says OPTIMAL
+  without them, and main's driver says OPTIMAL too.
+
+**It is not a false certificate.**
+- Checked in exact rationals, none of the 256 integer points in that master's box
+  satisfies its rows. The closest misses the budget row `sum x = 1` by 3.35e-7.
+- That 3.35e-7 is exactly the residual of HiGHS's point and of main's "optimal" point.
+- The route gets the same box on main (`x9 in [87078, 87079]`, ...), so the box is
+  exactly infeasible upstream of this branch.
+- Main and HiGHS accept a tolerance-feasible point. This branch's trajectory proves
+  exact emptiness first: Farkas fathoms at margin 1e-9, plus FBBT through
+  `x15 = 55000 x6` and integer rounding.
+
+**What it leaves open (D3).**
+- The in-house master's infeasibility proofs are exact. Its incumbent acceptance is
+  tolerance-based (`ROW_VERIFY_TOL` 1e-6). A master that is feasible only within
+  tolerance therefore gets "infeasible" or "feasible" depending on the trajectory.
+- HiGHS's propagation accepts a continuous tightening only above `1000 * feastol` and
+  30 % of the domain (`HighsDomain.cpp` 1349-1410). Ours accepts anything above the
+  pivot tolerance.
+- Porting that rule was tried and did not fix this master (the Farkas path still
+  fathoms), so it was not kept.
+- The test stays red until D3 settles how an exact-proof master meets a tolerance-only
+  feasible box. The options are tolerance-robust Farkas and FBBT margins, or
+  confirmation by a second engine.
+
 ## First things to do
 
 1. **Run the full `-m "not slow"` suite.** `origin/main` was merged at `8c86eab9`; the

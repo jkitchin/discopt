@@ -162,6 +162,8 @@ timed_phases!(
     NodeReduce,
     PriceBtran,
     PriceSweep,
+    // Pivot-row reduced-cost update of the primal incremental pricing (engine step 2).
+    PivotRowPrice,
     AlphaFtran,
     FtUpdate,
     Refactorize,
@@ -347,6 +349,11 @@ counters!(
     // Primal incremental pricing: exact re-price before an optimality claim.
     PrimalIncrExactRecheck,
     PrimalIncrDriftReprice,
+    // Row-wise (hyper-sparse) pivot row of the incremental pricing, its column-wise
+    // fallback, and the pivot row/column disagreement that forces a refactorization.
+    PrimalRowPriceSparse,
+    PrimalRowPriceDense,
+    PrimalRowPriceVerifyFail,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
