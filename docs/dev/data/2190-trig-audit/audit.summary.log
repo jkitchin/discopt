@@ -1,0 +1,23 @@
+cases 11705
+interval.cos                                  checks= 11705 misses=    0
+interval.sin                                  checks= 11705 misses=    0
+interval.tan                                  checks= 11705 misses=    0
+nbt free window                               checks=     1 misses=    0
+nbt periodic window end_up                    checks=  4008 misses=    0
+nbt periodic window start_down                checks=  4008 misses=    0
+operator_relaxations.trig_range(cos)          checks= 11705 misses=    0
+operator_relaxations.trig_range(sin)          checks= 11705 misses=    0
+operator_relaxations.trig_range(tan)          checks= 11705 misses=    0
+ro._cos_interval                              checks= 11705 misses=    0
+ro._sin_interval                              checks= 11705 misses=    0
+rust fbbt backward cos ge                     checks=  1500 misses=    0
+rust fbbt backward cos le                     checks=  1500 misses=    0
+rust fbbt backward sin ge                     checks=  1500 misses=    0
+rust fbbt backward sin le                     checks=  1500 misses=    0
+rust fbbt forward cos                         checks=  1500 misses=    0
+rust fbbt forward sin                         checks=  1500 misses=    0
+uniform_relax._curv_cos                       checks= 11705 misses=    0
+uniform_relax._curv_sin                       checks= 11705 misses=    0
+uniform_relax._curv_tan                       checks= 11705 misses=    0
+uniform_relax._tan_branch_safe                checks= 11705 misses=    0
+total checks 157477
