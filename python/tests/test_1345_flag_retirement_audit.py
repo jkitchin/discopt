@@ -90,9 +90,24 @@ NOT_A_GATE = {
 }
 
 
-def _gates() -> tuple[dict[str, list], dict[str, str]]:
-    """(all sites by flag, default-OFF solver-math gates -> first read site)."""
-    sites = scan()
+@pytest.fixture(scope="module")
+def all_sites() -> dict[str, list]:
+    """One scan per module. A cold `scan()` is ~14 s (it imports the package and
+    calls accessors), and every test here used to pay it in its call phase, which put
+    eight of them on the fast-lane time-budget allowlist (#2211 added two more and
+    tripped the budget). The scan is a pure function of the tree, so sharing it moves
+    the cost to fixture setup, which the budget does not count. Tests must not mutate it.
+    """
+    return scan()
+
+
+@pytest.fixture(scope="module")
+def rust_sites() -> dict[str, list]:
+    return scan_rust()
+
+
+def _gates(sites: dict[str, list]) -> dict[str, str]:
+    """Default-OFF solver-math gates -> first read site."""
     gates = {}
     for flag, s in sorted(sites.items()):
         if polarity_of(s) != "off" or flag in OUT_OF_SCOPE:
@@ -104,21 +119,21 @@ def _gates() -> tuple[dict[str, list], dict[str, str]]:
     for flag, s in sites.items():
         if flag == "DISCOPT_LP_SPATIAL_PLUNGE":
             gates[flag] = s[0].where
-    return sites, gates
+    return gates
 
 
 def test_the_audit_document_exists():
     assert AUDIT.is_file(), f"{AUDIT} is the standing record CLAUDE.md §5 points at"
 
 
-def test_no_read_is_left_unclassified():
+def test_no_read_is_left_unclassified(all_sites):
     """Every `DISCOPT_*` read lands in a named bucket; nothing falls off the edge.
 
     This is the guard the pre-#1421 scan lacked. It had no notion of a read it could
     not classify, so 50 flags were not "unclassified" — they were simply absent, and
     absence looks exactly like a clean bill of health.
     """
-    sites = scan()
+    sites = all_sites
     unknown = {f: s for f, s in sites.items() if polarity_of(s) == "unknown"}
     unaccounted = sorted(set(unknown) - set(NOT_A_GATE))
     assert not unaccounted, (
@@ -136,8 +151,8 @@ def test_no_read_is_left_unclassified():
     )
 
 
-def test_every_default_off_solver_math_gate_has_an_audit_verdict():
-    sites, gates = _gates()
+def test_every_default_off_solver_math_gate_has_an_audit_verdict(all_sites):
+    gates = _gates(all_sites)
     audit = AUDIT.read_text()
     assert gates, "classification removed every flag — the exclusion sets are wrong"
 
@@ -178,9 +193,9 @@ def test_every_default_off_solver_math_gate_has_an_audit_verdict():
     )
 
 
-def test_the_exemption_tables_name_real_flags():
+def test_the_exemption_tables_name_real_flags(all_sites):
     """A stale entry is a silent exemption for a flag that no longer exists."""
-    sites = scan()
+    sites = all_sites
     for label, table in (
         ("OUT_OF_SCOPE", OUT_OF_SCOPE),
         ("NOT_A_GATE", NOT_A_GATE),
@@ -192,13 +207,13 @@ def test_the_exemption_tables_name_real_flags():
         )
 
 
-def test_the_scan_sees_every_read_form():
+def test_the_scan_sees_every_read_form(all_sites):
     """The #1421 regression test. Fails against the pre-#1421 single-regex scan.
 
     Each form below is represented by a flag that form is the ONLY way to reach. The
     old scan saw the first one and none of the rest.
     """
-    sites = scan()
+    sites = all_sites
     expected = {
         "DISCOPT_G_CONVEX_CUTS": "literal",  # environ.get(F, "0") -- the only old form
         "DISCOPT_RLT": "env_flag",  # _env_flag(F, default=False)
@@ -223,13 +238,13 @@ def test_the_scan_sees_every_read_form():
         assert form in forms, f"no read of form {form!r} found — the scan narrowed"
 
 
-def test_polarity_is_not_read_off_the_default_literal():
+def test_polarity_is_not_read_off_the_default_literal(all_sites):
     """The trap #1421 names: `""` is the default of both ON and OFF gates.
 
     A widening that treated every empty default as OFF would misclassify all five of
     the default-ON gates below, and quietly demand audit rows for shipped defaults.
     """
-    sites = scan()
+    sites = all_sites
     on_with_empty_default = [
         "DISCOPT_CONVEX_STALL_ABSTAIN",
         "DISCOPT_GDP_CONFIG_PRIMAL",
@@ -265,9 +280,9 @@ def test_the_word_vocabularies_are_disjoint():
 
 
 @pytest.mark.parametrize("excluded", sorted(OUT_OF_SCOPE))
-def test_the_out_of_scope_flags_are_still_default_off(excluded):
+def test_the_out_of_scope_flags_are_still_default_off(excluded, all_sites):
     """Guard the exclusion list: an excluded flag that flipped ON should be removed."""
-    sites = scan()
+    sites = all_sites
     assert excluded in sites, (
         f"{excluded} is on the OUT_OF_SCOPE list but is no longer read at all. Drop it "
         "from the list rather than leaving a stale exemption."
@@ -287,7 +302,7 @@ def test_the_audit_states_the_three_states_from_claude_md():
 # ------------------------------------------------------------------ #2211: Rust reads
 
 
-def test_the_scan_reads_the_rust_core():
+def test_the_scan_reads_the_rust_core(all_sites):
     """The #2211 regression test: fails against the Python-only scan.
 
     `DISCOPT_SIMPLEX_NO_EXPAND` is read only in `lp/simplex/primal.rs`; before #2211
@@ -295,7 +310,7 @@ def test_the_scan_reads_the_rust_core():
     `DISCOPT_PRIMAL_EXPAND_RESET`, the gate #2211 was filed on, was retired by the
     panel that row prompted.)
     """
-    sites = scan()
+    sites = all_sites
     rust = [s for v in sites.values() for s in v if s.path.startswith("crates/")]
     assert len(rust) >= 30, f"only {len(rust)} Rust read sites -- the Rust scan narrowed"
     assert "DISCOPT_SIMPLEX_NO_EXPAND" in sites, "the Rust scan does not reach primal.rs"
@@ -323,8 +338,8 @@ RUST_EXPECTED = {
 }
 
 
-def test_the_rust_scan_classifies_every_shape_on_the_live_tree():
-    sites = scan_rust()
+def test_the_rust_scan_classifies_every_shape_on_the_live_tree(rust_sites):
+    sites = rust_sites
     checked = 0
     for flag, (form, pol) in RUST_EXPECTED.items():
         assert flag in sites, f"{flag} is no longer read in crates/; re-pick this example"
@@ -426,10 +441,10 @@ def test_the_rust_scan_ignores_comments_and_test_code():
         assert gone not in text, f"{gone} survived stripping"
 
 
-def test_no_rust_read_is_left_unclassified():
+def test_no_rust_read_is_left_unclassified(rust_sites):
     """Rule 3 for the Rust half, stated on its own so a failure names the language."""
     unknown = {
-        f: [s.where for s in v if s.polarity.startswith("unknown")] for f, v in scan_rust().items()
+        f: [s.where for s in v if s.polarity.startswith("unknown")] for f, v in rust_sites.items()
     }
     unknown = {f: w for f, w in unknown.items() if w}
     assert not unknown, (
