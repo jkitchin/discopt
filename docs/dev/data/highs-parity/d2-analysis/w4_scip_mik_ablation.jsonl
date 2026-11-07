@@ -1,0 +1,13 @@
+{"name": "mik-250-20-75-1", "arm": "default", "status": "optimal", "nodes": 3029, "time": 23.6, "gap": 0.0, "primal": -49715.99999999998, "dual": -49715.99999999998}
+{"name": "mik-250-20-75-1", "arm": "no-gomory", "status": "optimal", "nodes": 5495, "time": 8.2, "gap": 0.0, "primal": -49716.0, "dual": -49716.0}
+{"name": "mik-250-20-75-1", "arm": "no-aggregation", "status": "optimal", "nodes": 6708, "time": 13.1, "gap": 0.0, "primal": -49716.0, "dual": -49716.0}
+{"name": "mik-250-20-75-1", "arm": "no-gomory-no-aggr", "status": "timelimit", "nodes": 93229, "time": 30.0, "gap": 0.1103948754912539, "primal": -49716.0, "dual": -55204.39162992318}
+{"name": "mik-250-20-75-1", "arm": "root-only-both", "status": "optimal", "nodes": 27457, "time": 28.6, "gap": 0.0, "primal": -49715.99999999998, "dual": -49715.99999999998}
+{"name": "mik-250-20-75-1", "arm": "aggr-intree-only", "status": "optimal", "nodes": 8322, "time": 28.3, "gap": 0.0, "primal": -49715.99999999998, "dual": -49715.99999999998}
+{"name": "mik-250-20-75-5", "arm": "default", "status": "optimal", "nodes": 2698, "time": 15.1, "gap": 0.0, "primal": -51531.99999999999, "dual": -51531.99999999999}
+{"name": "mik-250-20-75-5", "arm": "no-gomory", "status": "optimal", "nodes": 4669, "time": 6.6, "gap": 0.0, "primal": -51532.0, "dual": -51532.0}
+{"name": "mik-250-20-75-5", "arm": "no-aggregation", "status": "optimal", "nodes": 10347, "time": 20.2, "gap": 0.0, "primal": -51532.0, "dual": -51532.0}
+{"name": "mik-250-20-75-5", "arm": "no-gomory-no-aggr", "status": "timelimit", "nodes": 87824, "time": 30.0, "gap": 0.09606053909497966, "primal": -51532.0, "dual": -56482.19170064249}
+{"name": "mik-250-20-75-5", "arm": "root-only-both", "status": "optimal", "nodes": 15030, "time": 15.4, "gap": 0.0, "primal": -51531.99999999999, "dual": -51531.99999999999}
+{"name": "mik-250-20-75-5", "arm": "aggr-intree-only", "status": "optimal", "nodes": 5313, "time": 13.8, "gap": 0.0, "primal": -51531.99999999999, "dual": -51531.99999999999}
+executed 12

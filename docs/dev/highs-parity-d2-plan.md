@@ -212,6 +212,31 @@ Then run the Rust probe on the 4 `mik` rows.
 
 **Size:** 1-2 days.
 
+**Status 2026-11-07: entry done; the existing separator is not the lever.**
+
+SCIP ablation (`d2-analysis/w4_scip_mik_ablation.*`, presolve off, 30 s):
+
+| SCIP arm | `mik-1` | `mik-5` |
+|---|---|---|
+| default | certified, 23.6 s | certified, 15.1 s |
+| **Gomory off (c-MIR/aggregation only)** | **certified, 8.2 s** | **certified, 6.6 s** |
+| aggregation off | certified, 13.1 s | certified, 20.2 s |
+| both off | open, 11 % gap | open, 9.6 % gap |
+| both root-only | certified, 27k nodes | certified, 15k nodes |
+
+Aggregation is the family that matters, and SCIP's root alone gets most of the way: its
+c-MIR-only root bound on `mik-1` is -51,173 in 0.4 s (LP -59,157, optimum -49,716).
+The Rust route's root loop runs GMI only (`SepCmirCuts` 0). Turning on the #2107
+aggregated c-MIR separator there (temporary flag, removed) generated 712-966 cuts per
+instance. The 20 s bounds did not move (`d2-analysis/w4_d2_cmir_entry.jsonl.gz`):
+`mik-1` -51,192 -> -51,281, `mik-3` -53,609 -> -53,790, `mik-2` and `mik-5` within
+0.1 %. Our whole 20 s tree ends about where SCIP's root does.
+
+So W4 needs a separator rebuilt to SCIP's design: path aggregation over continuous
+columns with variable-bound substitution, several scaling factors (deltas) per
+aggregation, and complementation. A rewrite of `lp/cmir.rs`'s aggregation is planned
+with a root-bound differential against SCIP as its entry, not a flag flip.
+
 ### W5 — LP engine throughput (G5, plus `issue-2446`)  *expected +1-2, broad speed*
 
 **Evidence.**
