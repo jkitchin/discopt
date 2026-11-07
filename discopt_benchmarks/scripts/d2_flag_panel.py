@@ -2,7 +2,8 @@
 here before any run (CLAUDE.md section 5; the plan's Phase 4 standing rule, plus the two
 bars the P4.4 panel lacked).
 
-``--flag NAME`` (or a comma-separated bundle, toggled together) is set to ``--on-value`` (default ``1``) in the ON arm and REMOVED in the
+``--flag NAME`` (or a comma-separated bundle, toggled together) is set to
+``--on-value`` (default ``1``) in the ON arm and REMOVED in the
 OFF arm; ``--fired REGEX`` names the driver profile counters that prove the mechanism ran
 (summed per solve; ON must be > 0, OFF must be 0). Population and arms as
 ``p44_gmi_repair_panel.py``: MIPLIB-38 + the M panel, Rust MILP route, fresh subprocess per
