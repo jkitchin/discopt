@@ -366,3 +366,65 @@ def test_portfolio_wait_is_validated():
         compute_iis(
             _two_iis_model(), include_integrality=True, portfolio=("ICB",), portfolio_wait="slow"
         )
+
+
+def test_portfolio_true_means_the_default_portfolio(monkeypatch):
+    """#2206: ``portfolio=True`` used to die with ``'bool' object is not iterable``."""
+    import discopt._iis_milp as engine
+
+    seen = {}
+    real = engine._portfolio_iis
+
+    def spy(arrays, kwargs, portfolio, *a, **k):
+        seen["portfolio"] = portfolio
+        return real(arrays, kwargs, portfolio, *a, **k)
+
+    monkeypatch.setattr(engine, "_portfolio_iis", spy)
+    res = _two_iis_model().compute_iis(
+        include_integrality=True, include_bounds=False, portfolio=True
+    )
+    assert tuple(seen["portfolio"]) == DEFAULT_PORTFOLIO
+    assert [m["order"] for m in res.portfolio_members] == list(DEFAULT_PORTFOLIO)
+    assert _names(res) == ["c0", "c1"]
+
+
+def test_portfolio_false_means_no_portfolio(monkeypatch):
+    import discopt._iis_milp as engine
+
+    def boom(*a, **k):
+        raise AssertionError("portfolio=False must not start a portfolio")
+
+    monkeypatch.setattr(engine, "_portfolio_iis", boom)
+    res = compute_iis(
+        _two_iis_model(), include_integrality=True, include_bounds=False, portfolio=False
+    )
+    assert res.portfolio_members is None
+    # and it is not mistaken for a portfolio on the default path either
+    compute_iis(_two_iis_model(), portfolio=False)
+
+
+@pytest.mark.parametrize("bad", ["ICB", "CIB-r", b"ICB"])
+@pytest.mark.parametrize("integrality", [True, False])
+def test_bare_string_portfolio_is_refused(bad, integrality):
+    """#2206: a bare string iterated as one-letter orders ("I", "C", "B")."""
+    with pytest.raises(TypeError, match=r"sequence of order strings.*bare string"):
+        compute_iis(_two_iis_model(), include_integrality=integrality, portfolio=bad)
+
+
+@pytest.mark.parametrize("bad", [3, 1.5, object()])
+def test_non_iterable_portfolio_is_refused(bad):
+    with pytest.raises(TypeError, match="sequence of order strings"):
+        compute_iis(_two_iis_model(), include_integrality=True, portfolio=bad)
+
+
+def test_non_string_portfolio_member_is_refused():
+    with pytest.raises(TypeError, match="non-string member"):
+        compute_iis(_two_iis_model(), include_integrality=True, portfolio=["ICB", True])
+
+
+def test_milp_iis_arrays_normalizes_portfolio_too():
+    """``discopt.mipcc`` enters at ``milp_iis_arrays``, bypassing ``compute_iis``."""
+    from discopt._iis_milp import milp_iis_arrays
+
+    with pytest.raises(TypeError, match="bare string"):
+        milp_iis_arrays((None,) * 7, portfolio="ICB")

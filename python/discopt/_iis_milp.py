@@ -1014,7 +1014,7 @@ def milp_iis(
     total_time_limit: Optional[float] = None,
     sat_candidate: bool = True,
     order: str = "ICB",
-    portfolio: Optional[Sequence[str]] = None,
+    portfolio: Optional[Sequence[str] | bool] = None,
     workers: Optional[int] = None,
     portfolio_wait: str = "fast",
 ) -> MilpIIS:
@@ -1116,6 +1116,7 @@ def milp_iis(
     if col_lb.size != lin.n:
         raise AssertionError(f"column count mismatch: {col_lb.size} vs extractor {lin.n}")
     arrays = (A, row_lo, row_hi, row_groups, col_lb, col_ub, is_int)
+    portfolio = _normalize_portfolio(portfolio)
     if portfolio_wait not in PORTFOLIO_WAITS:
         raise ValueError(
             f"portfolio_wait must be one of {sorted(PORTFOLIO_WAITS)}, got {portfolio_wait!r}"
@@ -1171,6 +1172,7 @@ def milp_iis_arrays(
     """
     if t_start is None:
         t_start = time.perf_counter()
+    portfolio = _normalize_portfolio(portfolio)
     kwargs: dict[str, Any] = dict(
         include_bounds=include_bounds,
         time_limit=time_limit,
@@ -1873,6 +1875,37 @@ def _milp_iis_arrays(
 #: completion (its exact confirmations need ~20 s each on otra), so it costs a
 #: core there and nothing else.
 DEFAULT_PORTFOLIO: tuple[str, ...] = ("ICB", "CIB", "ICB-r", "ICB-n", "CIB-l")
+
+
+def _normalize_portfolio(portfolio: Any) -> Optional[tuple[str, ...]]:
+    """Validate the public ``portfolio=`` argument and return it as a tuple (#2206).
+
+    ``True`` means :data:`DEFAULT_PORTFOLIO` and ``False`` means no portfolio
+    (same as ``None``): both are the natural first guess for a switch-like
+    argument. A bare ``str`` is refused -- it would iterate as one-letter
+    "orders" (``"ICB"`` -> ``"I", "C", "B"``) -- as is anything that is not an
+    iterable of strings. Order *syntax* is checked later by :func:`_parse_order`.
+    """
+    if portfolio is None or portfolio is False:
+        return None
+    if portfolio is True:
+        return DEFAULT_PORTFOLIO
+    hint = (
+        "portfolio must be a sequence of order strings such as ['ICB', 'CIB-r'] "
+        "(or True for DEFAULT_PORTFOLIO)"
+    )
+    if isinstance(portfolio, (str, bytes)):
+        raise TypeError(f"{hint}, got the bare string {portfolio!r}; wrap it: [{portfolio!r}]")
+    try:
+        orders = tuple(portfolio)
+    except TypeError:
+        raise TypeError(f"{hint}, got {type(portfolio).__name__} {portfolio!r}") from None
+    bad = [o for o in orders if not isinstance(o, str)]
+    if bad:
+        raise TypeError(f"{hint}, got non-string member(s) {bad!r}")
+    return orders
+
+
 #: Wall time held back from the members' budget for process start-up and for
 #: returning their results, capped at this fraction of the budget.
 _PORTFOLIO_MARGIN_S = 2.0
