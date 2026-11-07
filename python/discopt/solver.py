@@ -321,9 +321,22 @@ def _heur_wall_cost_enabled() -> bool:
 
 
 def _new_heur_state() -> dict[str, Any]:
-    """A fresh improver-governor state (#1344); with the #2176 timing fields when ON."""
+    """A fresh improver-governor state (#1344); with the #2176 timing fields when ON.
+
+    Under ``deterministic`` the timing fields are left out, so the governor takes the
+    fixed-cost test exactly as ``DISCOPT_HEUR_WALL_COST=0`` does (#2216). The
+    wall-priced test is a **role-2** gate by #912's definition. It decides how much
+    improver work runs (whether RINS / local branching / enumeration is admitted) by
+    comparing two measured walls, so the answer depends on machine speed and load.
+    Measured on ``cvxnonsep_nsig30`` at ``deterministic=True, max_nodes=2000,
+    time_limit=120``: four repeats in one process gave four different decision
+    sequences (39 wall-priced decisions each; 21/21/21/20 admitted) and the issue's
+    two incumbents, 130.6287126437295 and 130.62871265397885, at the same 165 nodes
+    and bound. With the fixed-cost test the sequence was identical in every repeat.
+    The flag still applies to every non-deterministic solve.
+    """
     st: dict[str, Any] = {"calls": 0, "found": 0, "cost": 0.0}
-    if _heur_wall_cost_enabled():
+    if _heur_wall_cost_enabled() and not _tuning().deterministic:
         st.update(walls={}, wall=0.0, started={})
     return st
 
