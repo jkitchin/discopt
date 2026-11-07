@@ -29,7 +29,7 @@ the short version: what is on, what is off, and what to do first.
 |---|---|
 | `DISCOPT_MILP_RAND_ROUND` | sound, primal-positive, fails 2b alone; graduate with the next primal lever or retire at the end of D2 (audit row) |
 | `DISCOPT_MILP_D2_CMIR`, `DISCOPT_MILP_CMIR_HIGHS`, `DISCOPT_MILP_CMIR_FLIP`, `DISCOPT_MILP_LIFTED_MIC` | W4 c-MIR port; root bound on `mik-1` -52,544 -> -51,493. Route panel failed (LP numerics), see the plan's W4 update. Re-panel after the engine work |
-| `DISCOPT_LP_PRIMAL_INCR_PRICING` | engine step 1: incremental reduced costs in the primal simplex. Pricing 2-6x cheaper on the primal-heavy rows. Its §5 panel ran at handoff; the verdict is in the commit after this file |
+| `DISCOPT_LP_PRIMAL_INCR_PRICING` | engine step 1: incremental reduced costs in the primal simplex. Pricing 2-6x cheaper on the primal-heavy rows. §5 panel (`d2-analysis/eng_incr_pricing_panel_r3.json.gz`): cert-clean, nodes -16 % (2b passes), 1 dual loss, median primal gap level. It **narrowly fails**: certified 125 -> 124 and `p0548`'s incumbent lost in one rep. `p0548` also lost an incumbent in the RAND_ROUND and EXPEL panels, so check it as a trajectory-sensitive row first. Re-panel together with step 2 (row-wise pricing) |
 
 **Retired this session (measurement recorded in the plan):**
 - `DISCOPT_MILP_SUBMIP_SCHED`;
