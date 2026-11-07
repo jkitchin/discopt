@@ -14,7 +14,6 @@ the real ``dyld`` image list runs on macOS only.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 
 import numpy as np
@@ -188,17 +187,15 @@ def test_ipopt_solve_nlp_refuses(macos):
     assert "cyipopt" not in sys.modules
 
 
-@pytest.mark.skipif(
-    importlib.util.find_spec("cyipopt") is None,
-    reason="without cyipopt installed, nlp_solver='ipopt' never reaches an Ipopt import",
-)
 def test_model_solve_with_ipopt_refuses(macos):
     """End to end: `nlp_solver="ipopt"` refuses instead of the process aborting."""
     import discopt.modeling as dm
 
     m = dm.Model("omp2205")
     x = m.continuous("x", lb=-2, ub=2)
-    m.minimize((x - 1) ** 2)
+    # A smooth nonlinear objective: a pure quadratic is routed to the QP path and
+    # never reaches Ipopt, which is what made the first version of this test vacuous.
+    m.minimize(dm.exp(x) + (x - 1) ** 2)
     macos(loaded={TORCH_OMP}, shipped={CYIPOPT_OMP})
     with pytest.raises(guard.OpenMPRuntimeConflictError):
         m.solve(nlp_solver="ipopt")
