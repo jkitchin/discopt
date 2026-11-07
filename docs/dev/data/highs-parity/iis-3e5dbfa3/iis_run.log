@@ -1,0 +1,58 @@
+run: models=56 reps=2 mipcc={'path': '/root/Dropbox/projects/discopt-minlp-benchmark/mipcc27', 'found': False}
+[iis 1/56] 04664f0bd22a2f5c same=True cons=2 bnds=3 ints=0 solves=27 irreducible=True complete=True
+[iis 2/56] 078109be21de54d6 same=True cons=2 bnds=0 ints=1 solves=11 irreducible=True complete=True
+[iis 3/56] 0ee55d743a7f1d4f same=True cons=3 bnds=2 ints=0 solves=24 irreducible=True complete=True
+[iis 4/56] 12126958712d331e same=False rc=1: ValueError: compute_iis: the model is feasible — there is no infeasibility to explain.
+[iis 5/56] 1d578861f93b5b71 same=True cons=1 bnds=3 ints=0 solves=23 irreducible=True complete=True
+[iis 6/56] 1ec8e0a9f8f1c72c same=True cons=3 bnds=3 ints=1 solves=26 irreducible=True complete=True
+[iis 7/56] 220b33f80c96d93b same=True cons=2 bnds=0 ints=0 solves=11 irreducible=True complete=True
+[iis 8/56] 31829ea29cfbd56b same=True cons=2 bnds=2 ints=0 solves=20 irreducible=True complete=True
+[iis 9/56] 34db13325e1b7e9b same=True cons=2 bnds=1 ints=0 solves=20 irreducible=True complete=True
+[iis 10/56] 35c8baf4d55c124b same=True cons=2 bnds=0 ints=0 solves=12 irreducible=True complete=True
+[iis 11/56] 3797e88c3c90df5d same=True cons=1 bnds=3 ints=0 solves=24 irreducible=True complete=True
+[iis 12/56] 3e102933220b85bf same=True cons=2 bnds=3 ints=0 solves=25 irreducible=True complete=True
+[iis 13/56] 3e38f4b1b3752c67 same=True cons=3 bnds=2 ints=0 solves=23 irreducible=True complete=True
+[iis 14/56] 3e427344ac4791fe same=True cons=1 bnds=2 ints=0 solves=21 irreducible=True complete=True
+[iis 15/56] 41296b0c340cf210 same=True cons=1 bnds=0 ints=1 solves=7 irreducible=True complete=True
+[iis 16/56] 41cbd21c9741c633 same=True cons=1 bnds=1 ints=0 solves=10 irreducible=True complete=True
+[iis 17/56] 462ed5f6fbe75fe6 same=True cons=2 bnds=0 ints=0 solves=16 irreducible=True complete=True
+[iis 18/56] 48e0e041c2552b34 same=True cons=1 bnds=3 ints=0 solves=22 irreducible=True complete=True
+[iis 19/56] 51b999a5213eafad same=True cons=2 bnds=3 ints=0 solves=25 irreducible=True complete=True
+[iis 20/56] 615233bf341b8552 same=True cons=2 bnds=3 ints=0 solves=21 irreducible=True complete=True
+[iis 21/56] 645858197f60fc12 same=True cons=2 bnds=0 ints=0 solves=12 irreducible=True complete=True
+[iis 22/56] 6a0d46c6d5944d92 same=True cons=1 bnds=1 ints=0 solves=17 irreducible=True complete=True
+[iis 23/56] 6a9fd6661d63f667 same=False rc=1: ValueError: compute_iis: the model is feasible — there is no infeasibility to explain.
+[iis 24/56] 6dc1c72a601335ff same=True cons=2 bnds=3 ints=0 solves=21 irreducible=True complete=True
+[iis 25/56] 6e890b49289ca18d same=True cons=2 bnds=3 ints=1 solves=24 irreducible=True complete=True
+[iis 26/56] 705eb3ad205c86f3 same=True cons=3 bnds=1 ints=2 solves=21 irreducible=True complete=True
+[iis 27/56] 70d0d874e1d1c3b9 same=True cons=2 bnds=0 ints=0 solves=14 irreducible=True complete=True
+[iis 28/56] 70d3b384092a1047 same=True cons=2 bnds=2 ints=0 solves=20 irreducible=True complete=True
+[iis 29/56] 782f38f89aa5dfe1 same=True cons=2 bnds=0 ints=0 solves=12 irreducible=True complete=True
+[iis 30/56] 81902b995a8c324d same=True cons=1 bnds=2 ints=0 solves=16 irreducible=True complete=True
+[iis 31/56] 82884eb8832ff97a same=True cons=2 bnds=0 ints=0 solves=29 irreducible=True complete=True
+[iis 32/56] 867f6ad726860468 same=True cons=1 bnds=1 ints=0 solves=13 irreducible=True complete=True
+[iis 33/56] 8ae113541fbf1583 same=True cons=1 bnds=1 ints=0 solves=11 irreducible=True complete=True
+[iis 34/56] 97083706a8966d15 same=True cons=4 bnds=1 ints=1 solves=23 irreducible=True complete=True
+[iis 35/56] 98fca78d1c93a377 same=True cons=2 bnds=3 ints=0 solves=25 irreducible=True complete=True
+[iis 36/56] 9c781214bca95cc5 same=True cons=3 bnds=1 ints=0 solves=23 irreducible=True complete=True
+[iis 37/56] 9f677a19a4ef56db same=True cons=1 bnds=3 ints=0 solves=24 irreducible=True complete=True
+[iis 38/56] 9fb29f954e045f93 same=True cons=1 bnds=2 ints=0 solves=26 irreducible=True complete=True
+[iis 39/56] a099b98cf4796db1 same=True cons=2 bnds=3 ints=0 solves=24 irreducible=True complete=True
+[iis 40/56] a42bb9ea75053e4c same=True cons=3 bnds=0 ints=0 solves=17 irreducible=True complete=True
+[iis 41/56] ae2d29e43e77a80c same=True cons=2 bnds=0 ints=0 solves=31 irreducible=True complete=True
+[iis 42/56] b26b1eb7717aaf11 same=True cons=1 bnds=4 ints=0 solves=26 irreducible=True complete=True
+[iis 43/56] b42ca31ab8f97d54 same=True cons=1 bnds=3 ints=0 solves=22 irreducible=True complete=True
+[iis 44/56] b5d4acf5ee10069d same=True cons=1 bnds=4 ints=0 solves=24 irreducible=True complete=True
+[iis 45/56] c2361b4f1dee29af same=True cons=2 bnds=0 ints=0 solves=13 irreducible=True complete=True
+[iis 46/56] c2568609ac8d8da2 same=True cons=1 bnds=3 ints=0 solves=21 irreducible=True complete=True
+[iis 47/56] c6f797d7d6aed7a5 same=True cons=2 bnds=3 ints=0 solves=26 irreducible=True complete=True
+[iis 48/56] d5bac80dadfd081c same=True cons=1 bnds=2 ints=0 solves=23 irreducible=True complete=True
+[iis 49/56] d7446f8a07b0ea37 same=True cons=2 bnds=1 ints=3 solves=22 irreducible=True complete=True
+[iis 50/56] dfd8ca2d040b220b same=False rc=1: ValueError: compute_iis: the model is feasible — there is no infeasibility to explain.
+[iis 51/56] e5474cec3b8fe883 same=True cons=1 bnds=2 ints=0 solves=16 irreducible=True complete=True
+[iis 52/56] e5580a1c8b69a9ae same=True cons=2 bnds=3 ints=0 solves=23 irreducible=True complete=True
+[iis 53/56] e71ca9d8c5e23b5d same=True cons=2 bnds=0 ints=0 solves=14 irreducible=True complete=True
+[iis 54/56] f55c50e7d60f1f69 same=True cons=1 bnds=1 ints=0 solves=12 irreducible=True complete=True
+[iis 55/56] f7de0d662dc894de same=True cons=2 bnds=2 ints=0 solves=22 irreducible=True complete=True
+[iis 56/56] f819cc464ba6f802 same=True cons=3 bnds=2 ints=0 solves=23 irreducible=True complete=True
+run: models=56 ran=53 deterministic=53/53 errors=6

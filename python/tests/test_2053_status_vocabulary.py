@@ -19,6 +19,16 @@ import numpy as np
 import pytest
 from discopt import status as st
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_engine(monkeypatch):
+    """These tests exercise the HiGHS engine behind ``solve_lp_std``.
+    Since highs-parity P6.4 (2026-11-07) the default engine is the in-house
+    one, so these HiGHS-path tests pin ``DISCOPT_LP_STD_ENGINE=highs`` (a test that sets it still
+    overrides)."""
+    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
+
+
 PKG = pathlib.Path(st.__file__).resolve().parent
 
 # ``status=`` literals in these files belong to other result types (a node LP
@@ -106,6 +116,8 @@ def test_highs_lp_iteration_limit_is_iteration_limit(monkeypatch):
 
 
 def test_model_solve_reports_iteration_limit_on_the_lp_route(monkeypatch):
+    # highs-parity D1: an LP defaults to the Rust route; this caps HiGHS's iterations.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     _cap_iterations(monkeypatch)
     r = _lp_model().solve(time_limit=30.0)
     assert r.status == "iteration_limit"

@@ -1,0 +1,14 @@
+header load=(0.4951171875, 0.49072265625, 0.2890625) arms=['rust@20', 'rust@60', 'rust@120', 'rust-nopresolve@60', 'rust-nocmir@60', 'highs@20'] reps=2
+[rep 0] rust@20                time_limit obj=None bound=447859.38672243495 cert=False nodes=7 wall=21.3 (22s) 
+[rep 0] rust@60                time_limit obj=None bound=448369.12163830904 cert=False nodes=75 wall=61.0 (61s) 
+[rep 0] rust@120               time_limit obj=None bound=448817.5429016184 cert=False nodes=155 wall=121.3 (122s) 
+[rep 0] rust-nopresolve@60     time_limit obj=None bound=448369.12163830904 cert=False nodes=77 wall=61.0 (61s) 
+[rep 0] rust-nocmir@60         time_limit obj=None bound=448369.12163830904 cert=False nodes=73 wall=60.4 (61s) 
+[rep 0] highs@20               optimal obj=450623.7692106869 bound=450587.0036674801 cert=True nodes=7 wall=8.8 (9s) 
+[rep 1] rust@60                time_limit obj=None bound=448369.12163830904 cert=False nodes=75 wall=60.3 (61s) 
+[rep 1] rust@120               time_limit obj=None bound=448817.5429016184 cert=False nodes=153 wall=120.2 (121s) 
+[rep 1] rust-nopresolve@60     time_limit obj=None bound=448369.12163830904 cert=False nodes=75 wall=60.6 (61s) 
+[rep 1] rust-nocmir@60         time_limit obj=None bound=448369.12163830904 cert=False nodes=73 wall=60.8 (61s) 
+[rep 1] highs@20               optimal obj=450623.7692106869 bound=450587.0036674801 cert=True nodes=7 wall=8.7 (9s) 
+[rep 1] rust@20                time_limit obj=None bound=447859.38672243495 cert=False nodes=7 wall=21.2 (22s) 
+uc: executed=12 violations=0

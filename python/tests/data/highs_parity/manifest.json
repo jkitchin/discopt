@@ -1,0 +1,2741 @@
+{
+ "fixtures": [
+  {
+   "file": "R6__alan__000.npz",
+   "role": "R6",
+   "instance": "alan",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__alan__001.npz",
+   "role": "R6",
+   "instance": "alan",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__002.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__003.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__004.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__005.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__006.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-rows] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__007.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-rows] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__008.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-rows] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__009.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-rows] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_alan__010.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[alan.nl-rows] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 8,
+   "m": 7,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__011.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 0.0,
+   "n": 802,
+   "m": 665,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__012.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": -1.1368683772161603e-13,
+   "n": 322,
+   "m": 250,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__013.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 0.0,
+   "n": 386,
+   "m": 305,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__014.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 0.0,
+   "n": 797,
+   "m": 660,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__015.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 0.0,
+   "n": 805,
+   "m": 668,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex14__016.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex14_1_7.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 0.0,
+   "n": 798,
+   "m": 661,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex7___017.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex7_3_1.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1.0,
+   "n": 62,
+   "m": 26,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex7___018.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex7_3_1.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 2.625,
+   "n": 60,
+   "m": 24,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex7___019.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex7_3_1.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1314224.0,
+   "n": 48,
+   "m": 12,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex7___020.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex7_3_1.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 1.0,
+   "n": 62,
+   "m": 26,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_ex7___021.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[ex7_3_1.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 1.0,
+   "n": 62,
+   "m": 26,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__022.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1202.0420730636972,
+   "n": 377,
+   "m": 234,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__023.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1212.4642873500572,
+   "n": 377,
+   "m": 234,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__024.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1283.0198780883331,
+   "n": 377,
+   "m": 234,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__025.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1202.0420730637434,
+   "n": 389,
+   "m": 242,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__026.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1212.4642873500957,
+   "n": 389,
+   "m": 242,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__027.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1202.0420729356447,
+   "n": 389,
+   "m": 242,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__028.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-shift] (call)",
+   "caller": "1869_free_column",
+   "objective": 1212.4642872340355,
+   "n": 389,
+   "m": 242,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__029.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 1202.0420730637077,
+   "n": 383,
+   "m": 238,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__030.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 1202.0420730637063,
+   "n": 383,
+   "m": 238,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_laun__031.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[launch.nl-rows] (call)",
+   "caller": "1869_free_column",
+   "objective": 1212.464287350066,
+   "n": 383,
+   "m": 238,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_nvs0__032.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[nvs07.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 128,
+   "m": 437,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_m__033.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_miqp2.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 4,
+   "m": 3,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_m__034.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_miqp2.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 4,
+   "m": 3,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__035.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__036.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__037.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__038.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__039.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__040.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__041.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__042.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__043.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__044.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__045.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__046.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__047.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__048.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__049.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__050.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__051.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__052.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__053.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__054.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__055.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__056.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__057.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__058.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__059.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__060.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__061.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__062.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__063.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__064.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__065.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__066.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__067.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__068.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__069.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__070.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_invariance_py__test_corpus_panel_st_t__071.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[st_testgr3.nl-shift] (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_translation_rescaling_invariance_py____072.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_translation_rescaling_invariance.py::test_linear_node_verified_empty_needs_a_proof (call)",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 2,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_translation_rescaling_invariance_py____073.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_translation_rescaling_invariance.py::test_linear_node_verified_empty_needs_a_proof (call)",
+   "caller": "1537_arbitration",
+   "objective": 0.0,
+   "n": 2,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_1537_translation_rescaling_invariance_py____074.npz",
+   "role": "R6",
+   "instance": "python/tests/test_1537_translation_rescaling_invariance.py::test_linear_node_verified_empty_needs_a_proof (call)",
+   "caller": "1537_arbitration",
+   "objective": 0.0,
+   "n": 2,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1611_remainder_py__test_d30_rescue_b__075.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1611_remainder.py::test_d30_rescue_bound_includes_cuts_and_node_box (call)",
+   "caller": "1611_rescue",
+   "objective": 3.5,
+   "n": 3,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1611_remainder_py__test_d30_rescue_c__076.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1611_remainder.py::test_d30_rescue_certifies_infeasible_node (call)",
+   "caller": "1611_rescue",
+   "objective": null,
+   "n": 3,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1611_remainder_py__test_d30_lazy_ben__077.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1611_remainder.py::test_d30_lazy_benders_master_certifies (call)",
+   "caller": "1611_rescue",
+   "objective": null,
+   "n": 133,
+   "m": 121,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1869_free_column_lp_cert_py__test_fl__078.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1869_free_column_lp_cert.py::test_flag_off_leaves_the_root_lp_uncertified (call)",
+   "caller": "1869_free_column",
+   "objective": 1.5631940186722204e-13,
+   "n": 54,
+   "m": 30,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1869_free_column_lp_cert_py__test_4s__079.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1869_free_column_lp_cert.py::test_4stufen_root_bound_is_below_the_best_known_dual (call)",
+   "caller": "1869_free_column",
+   "objective": 11672.150997456296,
+   "n": 495,
+   "m": 267,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1869_free_column_lp_cert_py__test_he__080.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1869_free_column_lp_cert.py::test_helper_refuses_an_unbounded_lp (call)",
+   "caller": "1869_free_column",
+   "objective": null,
+   "n": 3,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__python_tests_test_issue_1869_free_column_lp_cert_py__test_he__081.npz",
+   "role": "R6",
+   "instance": "python/tests/test_issue_1869_free_column_lp_cert.py::test_helper_bound_is_below_a_known_lp_optimum (call)",
+   "caller": "1869_free_column",
+   "objective": -1.0,
+   "n": 3,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__082.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -3.7323355675662757,
+   "n": 191,
+   "m": 154,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__083.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -3.6072162094559346,
+   "n": 191,
+   "m": 154,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__084.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -2.37523230810131,
+   "n": 190,
+   "m": 153,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__085.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.520965393094311,
+   "n": 190,
+   "m": 153,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__086.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -1.419312994097616,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__087.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.2793185051648952,
+   "n": 191,
+   "m": 154,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__088.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.27931850516487566,
+   "n": 191,
+   "m": 154,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__089.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.907242447240364,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__090.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.05927565827160097,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__091.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.045623973673897034,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__092.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.5665243630142358,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3_nlpbb__093.npz",
+   "role": "R6",
+   "instance": "ex8_5_3@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.04562397367392279,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__094.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -9.413797590558051,
+   "n": 189,
+   "m": 152,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__095.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -9.345484008273594,
+   "n": 189,
+   "m": 152,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__096.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -1.1349393518916955,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__097.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -1.4289710754410248,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__098.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -1.357058147371852,
+   "n": 193,
+   "m": 156,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__099.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": 0.054208118032356145,
+   "n": 195,
+   "m": 158,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__100.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -1.0615751418534334,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__101.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.5342969415942742,
+   "n": 192,
+   "m": 155,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_4_nlpbb__102.npz",
+   "role": "R6",
+   "instance": "ex8_5_4@nlpbb",
+   "caller": "1869_free_column",
+   "objective": -0.5342969415942753,
+   "n": 193,
+   "m": 156,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__ex8_5_3__103.npz",
+   "role": "R6",
+   "instance": "ex8_5_3",
+   "caller": "1869_free_column",
+   "objective": -0.07057735219612682,
+   "n": 191,
+   "m": 154,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__prolog__104.npz",
+   "role": "R6",
+   "instance": "prolog",
+   "caller": "1869_free_column",
+   "objective": 1.7053025658242404e-13,
+   "n": 60,
+   "m": 34,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__105.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -503024837004.5614,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__106.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -248177814504.55414,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__108.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -154484794552.11414,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__109.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -96375150075.6436,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__110.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -47762998317.8296,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__112.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 73829.95025088306,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__113.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -23042413200.641335,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__114.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -61215931839.25337,
+   "n": 149,
+   "m": 118,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__115.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 74774.20021461694,
+   "n": 128,
+   "m": 97,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__116.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -11192916942.82847,
+   "n": 150,
+   "m": 119,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__117.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -29542520921.628498,
+   "n": 149,
+   "m": 118,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__120.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 47534.201113993506,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__121.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 75724.45017812349,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__122.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -14353064440.283585,
+   "n": 149,
+   "m": 118,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__123.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 46781.95129134499,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__124.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 46035.70132010776,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__125.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 76680.69980068314,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__126.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -6804519334.642417,
+   "n": 149,
+   "m": 118,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__127.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 88623.6995229462,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__128.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 93854.94931774146,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__130.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 87595.44972246664,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__131.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 23696.95201075529,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__132.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 99236.1992760176,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__133.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 107021.94857752645,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__134.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 32996.95134864314,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__135.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 100330.44923406717,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__136.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 7765.452644673091,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__137.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 15070.452450950728,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__138.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 12240.702567934484,
+   "n": 131,
+   "m": 100,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__139.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 32370.701847614684,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__140.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -848189015.521006,
+   "n": 145,
+   "m": 114,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__141.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": 31750.451871602607,
+   "n": 127,
+   "m": 96,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__nvs16__142.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "objective": -832057697.7500511,
+   "n": 143,
+   "m": 112,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_miqp1_nlpbb__143.npz",
+   "role": "R6",
+   "instance": "st_miqp1@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 5,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_miqp1_nlpbb__144.npz",
+   "role": "R6",
+   "instance": "st_miqp1@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 5,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_miqp2_nlpbb__145.npz",
+   "role": "R6",
+   "instance": "st_miqp2@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 4,
+   "m": 3,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__146.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__147.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__148.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__149.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__150.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__151.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__152.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__153.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__154.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__155.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__156.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__157.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__158.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__159.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__160.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__161.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__162.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__163.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__164.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__165.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__166.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__167.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__168.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__169.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__170.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__171.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__172.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__173.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__174.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__175.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__176.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__177.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__178.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__179.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__180.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__181.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R6__st_testgr3_nlpbb__182.npz",
+   "role": "R6",
+   "instance": "st_testgr3@nlpbb",
+   "caller": "1537_arbitration",
+   "objective": null,
+   "n": 20,
+   "m": 20,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__syn05m_nlpbb__000.npz",
+   "role": "R4",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -838.2581711634401,
+   "n": 52,
+   "m": 32,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__tls2_nlpbb__001.npz",
+   "role": "R4",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 2.532529964896663,
+   "n": 73,
+   "m": 36,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__clay0303hfsg_nlpbb__002.npz",
+   "role": "R4",
+   "instance": "clay0303hfsg@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30_nlpbb__003.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30@nlpbb",
+   "caller": null,
+   "objective": 130.4799730077551,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30__004.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30",
+   "caller": null,
+   "objective": 130.4799730535655,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30_nlpbb__005.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30@nlpbb",
+   "caller": null,
+   "objective": 78.74479744024917,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig40r_nlpbb__006.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig40r@nlpbb",
+   "caller": null,
+   "objective": 86.53908372609848,
+   "n": 142,
+   "m": 60,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30__007.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30",
+   "caller": null,
+   "objective": 78.74479744024917,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__ex1223a_nlpbb__008.npz",
+   "role": "R4",
+   "instance": "ex1223a@nlpbb",
+   "caller": null,
+   "objective": 4.487460805270537,
+   "n": 16,
+   "m": 9,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__009.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+   "caller": null,
+   "objective": -1.5497207641601562e-06,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__010.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+   "caller": null,
+   "objective": 130.4799730077551,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__011.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-rows] (call)",
+   "caller": null,
+   "objective": 130.47997367571645,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__012.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-shift] (call)",
+   "caller": null,
+   "objective": 78.74479744024917,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__013.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-rows] (call)",
+   "caller": null,
+   "objective": 78.74479744024917,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__014.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+   "caller": null,
+   "objective": 86.52672694996,
+   "n": 161,
+   "m": 79,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_flay__015.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+   "caller": null,
+   "objective": 30.98386675622453,
+   "n": 50,
+   "m": 24,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_m3_n__016.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[m3.nl-shift] (call)",
+   "caller": null,
+   "objective": -1.8838909454643726e-07,
+   "n": 69,
+   "m": 43,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_issue_1611_remainder_py__test_d30_lazy_ben__017.npz",
+   "role": "R4",
+   "instance": "python/tests/test_issue_1611_remainder.py::test_d30_lazy_benders_master_certifies (call)",
+   "caller": null,
+   "objective": 118.09627692405766,
+   "n": 13,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__portfol_roundlot__018.npz",
+   "role": "R4",
+   "instance": "portfol_roundlot",
+   "caller": null,
+   "objective": 0.028290212372127168,
+   "n": 28,
+   "m": 11,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__portfol_roundlot_nlpbb__019.npz",
+   "role": "R4",
+   "instance": "portfol_roundlot@nlpbb",
+   "caller": null,
+   "objective": 0.028290212372127168,
+   "n": 28,
+   "m": 11,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__fac2_nlpbb__020.npz",
+   "role": "R4",
+   "instance": "fac2@nlpbb",
+   "caller": null,
+   "objective": 255334502.65438378,
+   "n": 99,
+   "m": 33,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__flay02m_nlpbb__021.npz",
+   "role": "R4",
+   "instance": "flay02m@nlpbb",
+   "caller": null,
+   "objective": 30.821227060541897,
+   "n": 33,
+   "m": 19,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__flay03m_nlpbb__022.npz",
+   "role": "R4",
+   "instance": "flay03m@nlpbb",
+   "caller": null,
+   "objective": 30.983866756259253,
+   "n": 50,
+   "m": 24,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__nvs03_nlpbb__023.npz",
+   "role": "R4",
+   "instance": "nvs03@nlpbb",
+   "caller": null,
+   "objective": 8.152139989257744,
+   "n": 4,
+   "m": 2,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__m3_nlpbb__024.npz",
+   "role": "R4",
+   "instance": "m3@nlpbb",
+   "caller": null,
+   "objective": -7.232972893707424e-13,
+   "n": 69,
+   "m": 43,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__syn05m_nlpbb__025.npz",
+   "role": "R4",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -837.7324008979831,
+   "n": 52,
+   "m": 32,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__tls2_nlpbb__026.npz",
+   "role": "R4",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 2.6875619617524826,
+   "n": 73,
+   "m": 36,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__clay0303hfsg_nlpbb__027.npz",
+   "role": "R4",
+   "instance": "clay0303hfsg@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30_nlpbb__028.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30@nlpbb",
+   "caller": null,
+   "objective": 130.5009281556348,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30__029.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30",
+   "caller": null,
+   "objective": 130.50092819161884,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30_nlpbb__030.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30@nlpbb",
+   "caller": null,
+   "objective": 78.85984262912234,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig40r_nlpbb__031.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig40r@nlpbb",
+   "caller": null,
+   "objective": 86.5390861470166,
+   "n": 142,
+   "m": 60,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30__032.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30",
+   "caller": null,
+   "objective": 78.85984262912234,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__ex1223a_nlpbb__033.npz",
+   "role": "R4",
+   "instance": "ex1223a@nlpbb",
+   "caller": null,
+   "objective": 4.579582402436678,
+   "n": 16,
+   "m": 9,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__034.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+   "caller": null,
+   "objective": -1.5497207641601562e-06,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__035.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+   "caller": null,
+   "objective": 130.5009281556348,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__036.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-rows] (call)",
+   "caller": null,
+   "objective": 130.50092897106694,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__037.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-shift] (call)",
+   "caller": null,
+   "objective": 78.85984262912234,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__038.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig30.nl-rows] (call)",
+   "caller": null,
+   "objective": 78.85984262912234,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__039.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+   "caller": null,
+   "objective": 86.5769814811647,
+   "n": 161,
+   "m": 79,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_flay__040.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+   "caller": null,
+   "objective": 30.983866758320232,
+   "n": 50,
+   "m": 24,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_m3_n__041.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[m3.nl-shift] (call)",
+   "caller": null,
+   "objective": 1.9096497108403128,
+   "n": 69,
+   "m": 43,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_issue_1611_remainder_py__test_d30_lazy_ben__042.npz",
+   "role": "R4",
+   "instance": "python/tests/test_issue_1611_remainder.py::test_d30_lazy_benders_master_certifies (call)",
+   "caller": null,
+   "objective": 122.718689948174,
+   "n": 17,
+   "m": 5,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__portfol_roundlot__043.npz",
+   "role": "R4",
+   "instance": "portfol_roundlot",
+   "caller": null,
+   "objective": 0.028290230392547265,
+   "n": 28,
+   "m": 11,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__portfol_roundlot_nlpbb__044.npz",
+   "role": "R4",
+   "instance": "portfol_roundlot@nlpbb",
+   "caller": null,
+   "objective": 0.028290230392547265,
+   "n": 28,
+   "m": 11,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__fac2_nlpbb__045.npz",
+   "role": "R4",
+   "instance": "fac2@nlpbb",
+   "caller": null,
+   "objective": 255339465.70681638,
+   "n": 99,
+   "m": 33,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__flay02m_nlpbb__046.npz",
+   "role": "R4",
+   "instance": "flay02m@nlpbb",
+   "caller": null,
+   "objective": 30.95093591181369,
+   "n": 33,
+   "m": 19,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__flay03m_nlpbb__047.npz",
+   "role": "R4",
+   "instance": "flay03m@nlpbb",
+   "caller": null,
+   "objective": 30.98386675834688,
+   "n": 50,
+   "m": 24,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__nvs03_nlpbb__048.npz",
+   "role": "R4",
+   "instance": "nvs03@nlpbb",
+   "caller": null,
+   "objective": 15.999999999999915,
+   "n": 4,
+   "m": 2,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__m3_nlpbb__049.npz",
+   "role": "R4",
+   "instance": "m3@nlpbb",
+   "caller": null,
+   "objective": 4.924918777042651,
+   "n": 69,
+   "m": 43,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__syn05m_nlpbb__050.npz",
+   "role": "R4",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -837.4448653273353,
+   "n": 52,
+   "m": 32,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__tls2_nlpbb__051.npz",
+   "role": "R4",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 2.5412297534923836,
+   "n": 73,
+   "m": 36,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__clay0303hfsg_nlpbb__052.npz",
+   "role": "R4",
+   "instance": "clay0303hfsg@nlpbb",
+   "caller": null,
+   "objective": -5.8718385480978e-10,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30_nlpbb__053.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30@nlpbb",
+   "caller": null,
+   "objective": 130.51068701729125,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_nsig30__054.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_nsig30",
+   "caller": null,
+   "objective": 130.510687090239,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30_nlpbb__055.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30@nlpbb",
+   "caller": null,
+   "objective": 78.81167696263016,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__cvxnonsep_psig30__056.npz",
+   "role": "R4",
+   "instance": "cvxnonsep_psig30",
+   "caller": null,
+   "objective": 78.81167696263016,
+   "n": 30,
+   "m": 0,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__ex1223a_nlpbb__057.npz",
+   "role": "R4",
+   "instance": "ex1223a@nlpbb",
+   "caller": null,
+   "objective": 4.487460805270496,
+   "n": 16,
+   "m": 9,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_clay__058.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+   "caller": null,
+   "objective": -1.5497207641601562e-06,
+   "n": 249,
+   "m": 150,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R4__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__059.npz",
+   "role": "R4",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_nsig30.nl-shift] (call)",
+   "caller": null,
+   "objective": 130.51068701729125,
+   "n": 31,
+   "m": 1,
+   "gmi_cuts": 0
+  },
+  {
+   "file": "R3__syn05m_nlpbb__000.npz",
+   "role": "R3",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -1144.5243118573585,
+   "n": 20,
+   "m": 42,
+   "gmi_cuts": 3
+  },
+  {
+   "file": "R3__tls2_nlpbb__001.npz",
+   "role": "R3",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 0.7495123407035993,
+   "n": 37,
+   "m": 77,
+   "gmi_cuts": 10
+  },
+  {
+   "file": "R3__clay0303hfsg_nlpbb__002.npz",
+   "role": "R3",
+   "instance": "clay0303hfsg@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 99,
+   "m": 268,
+   "gmi_cuts": 12
+  },
+  {
+   "file": "R3__cvxnonsep_psig40r_nlpbb__003.npz",
+   "role": "R3",
+   "instance": "cvxnonsep_psig40r@nlpbb",
+   "caller": null,
+   "objective": 86.29684484824934,
+   "n": 82,
+   "m": 446,
+   "gmi_cuts": 15
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_clay__004.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+   "caller": null,
+   "objective": -841317620.0,
+   "n": 99,
+   "m": 375,
+   "gmi_cuts": 8
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__005.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+   "caller": null,
+   "objective": -24638644.70315503,
+   "n": 82,
+   "m": 446,
+   "gmi_cuts": 15
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_flay__006.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+   "caller": null,
+   "objective": -945.0161339999945,
+   "n": 26,
+   "m": 63,
+   "gmi_cuts": 6
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_m3_n__007.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[m3.nl-shift] (call)",
+   "caller": null,
+   "objective": -227154.0,
+   "n": 26,
+   "m": 47,
+   "gmi_cuts": 3
+  },
+  {
+   "file": "R3__portfol_roundlot__008.npz",
+   "role": "R3",
+   "instance": "portfol_roundlot",
+   "caller": null,
+   "objective": 0.028289805894640863,
+   "n": 17,
+   "m": 38,
+   "gmi_cuts": 3
+  },
+  {
+   "file": "R3__portfol_roundlot_nlpbb__009.npz",
+   "role": "R3",
+   "instance": "portfol_roundlot@nlpbb",
+   "caller": null,
+   "objective": 0.028289805894640863,
+   "n": 17,
+   "m": 38,
+   "gmi_cuts": 3
+  },
+  {
+   "file": "R3__flay02m_nlpbb__010.npz",
+   "role": "R3",
+   "instance": "flay02m@nlpbb",
+   "caller": null,
+   "objective": 28.28427089598504,
+   "n": 14,
+   "m": 37,
+   "gmi_cuts": 2
+  },
+  {
+   "file": "R3__flay03m_nlpbb__011.npz",
+   "role": "R3",
+   "instance": "flay03m@nlpbb",
+   "caller": null,
+   "objective": 30.983866000005413,
+   "n": 26,
+   "m": 63,
+   "gmi_cuts": 6
+  },
+  {
+   "file": "R3__m3_nlpbb__012.npz",
+   "role": "R3",
+   "instance": "m3@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 26,
+   "m": 101,
+   "gmi_cuts": 4
+  },
+  {
+   "file": "R3__syn05m_nlpbb__013.npz",
+   "role": "R3",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -1009.5620720311584,
+   "n": 20,
+   "m": 46,
+   "gmi_cuts": 2
+  },
+  {
+   "file": "R3__tls2_nlpbb__014.npz",
+   "role": "R3",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 0.7499003584290461,
+   "n": 37,
+   "m": 81,
+   "gmi_cuts": 10
+  },
+  {
+   "file": "R3__clay0303hfsg_nlpbb__015.npz",
+   "role": "R3",
+   "instance": "clay0303hfsg@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 99,
+   "m": 276,
+   "gmi_cuts": 7
+  },
+  {
+   "file": "R3__cvxnonsep_psig40r_nlpbb__016.npz",
+   "role": "R3",
+   "instance": "cvxnonsep_psig40r@nlpbb",
+   "caller": null,
+   "objective": 86.30318957305995,
+   "n": 82,
+   "m": 458,
+   "gmi_cuts": 14
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_clay__017.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[clay0303hfsg.nl-shift] (call)",
+   "caller": null,
+   "objective": -841317620.0,
+   "n": 99,
+   "m": 440,
+   "gmi_cuts": 7
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__018.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+   "caller": null,
+   "objective": -24638644.696863186,
+   "n": 82,
+   "m": 458,
+   "gmi_cuts": 14
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_flay__019.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[flay03m.nl-shift] (call)",
+   "caller": null,
+   "objective": -945.0161339999968,
+   "n": 26,
+   "m": 71,
+   "gmi_cuts": 6
+  },
+  {
+   "file": "R3__flay02m_nlpbb__020.npz",
+   "role": "R3",
+   "instance": "flay02m@nlpbb",
+   "caller": null,
+   "objective": 28.284270895983862,
+   "n": 14,
+   "m": 41,
+   "gmi_cuts": 2
+  },
+  {
+   "file": "R3__flay03m_nlpbb__021.npz",
+   "role": "R3",
+   "instance": "flay03m@nlpbb",
+   "caller": null,
+   "objective": 30.9838660000068,
+   "n": 26,
+   "m": 71,
+   "gmi_cuts": 6
+  },
+  {
+   "file": "R3__m3_nlpbb__022.npz",
+   "role": "R3",
+   "instance": "m3@nlpbb",
+   "caller": null,
+   "objective": 0.0,
+   "n": 26,
+   "m": 198,
+   "gmi_cuts": 5
+  },
+  {
+   "file": "R3__syn05m_nlpbb__023.npz",
+   "role": "R3",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -1005.5823460900558,
+   "n": 20,
+   "m": 49,
+   "gmi_cuts": 2
+  },
+  {
+   "file": "R3__tls2_nlpbb__024.npz",
+   "role": "R3",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 0.7500085471269433,
+   "n": 37,
+   "m": 88,
+   "gmi_cuts": 7
+  },
+  {
+   "file": "R3__cvxnonsep_psig40r_nlpbb__025.npz",
+   "role": "R3",
+   "instance": "cvxnonsep_psig40r@nlpbb",
+   "caller": null,
+   "objective": 86.33109537228329,
+   "n": 82,
+   "m": 488,
+   "gmi_cuts": 15
+  },
+  {
+   "file": "R3__python_tests_test_1537_invariance_py__test_corpus_panel_cvxn__026.npz",
+   "role": "R3",
+   "instance": "python/tests/test_1537_invariance.py::test_corpus_panel[cvxnonsep_psig40r.nl-shift] (call)",
+   "caller": null,
+   "objective": -24638644.6690266,
+   "n": 82,
+   "m": 488,
+   "gmi_cuts": 15
+  },
+  {
+   "file": "R3__flay02m_nlpbb__027.npz",
+   "role": "R3",
+   "instance": "flay02m@nlpbb",
+   "caller": null,
+   "objective": 28.44075035351485,
+   "n": 14,
+   "m": 56,
+   "gmi_cuts": 3
+  },
+  {
+   "file": "R3__syn05m_nlpbb__028.npz",
+   "role": "R3",
+   "instance": "syn05m@nlpbb",
+   "caller": null,
+   "objective": -988.9770523583563,
+   "n": 20,
+   "m": 50,
+   "gmi_cuts": 1
+  },
+  {
+   "file": "R3__tls2_nlpbb__029.npz",
+   "role": "R3",
+   "instance": "tls2@nlpbb",
+   "caller": null,
+   "objective": 0.7501549146136142,
+   "n": 37,
+   "m": 93,
+   "gmi_cuts": 10
+  }
+ ],
+ "hard": [
+  {
+   "file": "hard/R6__nvs16__107.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "plain_highs_status": "Unknown",
+   "route_objective": -355590405644.96747,
+   "plain_highs_objective": null,
+   "n": 150,
+   "m": 119
+  },
+  {
+   "file": "hard/R6__nvs16__111.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "plain_highs_status": "Unknown",
+   "route_objective": -123452827714.42963,
+   "plain_highs_objective": null,
+   "n": 149,
+   "m": 118
+  },
+  {
+   "file": "hard/R6__nvs16__118.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "plain_highs_status": "Optimal",
+   "route_objective": 57029.200286921754,
+   "plain_highs_objective": 57029.203021027286,
+   "n": 131,
+   "m": 100
+  },
+  {
+   "file": "hard/R6__nvs16__119.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "plain_highs_status": "Optimal",
+   "route_objective": 52173.70092845658,
+   "plain_highs_objective": 52173.703124999956,
+   "n": 131,
+   "m": 100
+  },
+  {
+   "file": "hard/R6__nvs16__129.npz",
+   "role": "R6",
+   "instance": "nvs16",
+   "caller": "1869_free_column",
+   "plain_highs_status": "Infeasible",
+   "route_objective": 86573.19976168855,
+   "plain_highs_objective": null,
+   "n": 128,
+   "m": 97
+  }
+ ]
+}

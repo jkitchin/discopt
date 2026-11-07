@@ -197,13 +197,29 @@ def discover_models(
     GAMS) at build time is still listed, and :func:`solve_model` records its build
     failure as an ``ERROR`` run rather than hiding it — honest reporting over a
     hardcoded, environment-specific skip list.
+
+    Without ``gdplib`` installed, a request that names *only* the vendored Pyomo
+    examples (``pyomo.<name>``) or generated instances (``cgdp.<...>``) still
+    resolves -- neither needs GDPlib. Any other request raises the ``ImportError``,
+    so a missing GDPlib cannot silently shrink a panel.
     """
-    import gdplib
+    from benchmarks import convex_gdp_generator as cg
+    from benchmarks import pyomo_gdp_examples as px
+
+    try:
+        import gdplib
+    except ImportError:
+        needs_gdplib = include is None or any(
+            not (n.startswith(px.PREFIX) or cg.is_name(n)) for n in include
+        )
+        if needs_gdplib:
+            raise
+        gdplib = None
 
     exclude_set = set(exclude or [])
     specs: list[GDPModelSpec] = []
     seen: set[str] = set()
-    for mod_info in pkgutil.iter_modules(gdplib.__path__):
+    for mod_info in pkgutil.iter_modules(gdplib.__path__) if gdplib is not None else ():
         mod_name = mod_info.name
         try:
             sub = importlib.import_module(f"gdplib.{mod_name}")
@@ -230,8 +246,6 @@ def discover_models(
         # resolved only when asked for by name, so the default sweep is unchanged.
         # An unknown ``pyomo.`` name is dropped like any other absent name; the
         # --suite path refuses that loudly.
-        from benchmarks import pyomo_gdp_examples as px
-
         for name in sorted(want):
             if name.startswith(px.PREFIX) and name[len(px.PREFIX) :] in px.CATALOG:
                 specs.append(
@@ -239,8 +253,6 @@ def discover_models(
                 )
         # #1917: seeded convex-quadratic GDP instances (``cgdp.<family>_<size>_s<seed>``),
         # likewise resolved only by name.
-        from benchmarks import convex_gdp_generator as cg
-
         for name in sorted(want):
             if cg.is_name(name):
                 specs.append(

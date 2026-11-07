@@ -10582,7 +10582,8 @@ def _convex_minlp_route_enabled() -> bool:
 
 
 def _convex_route_oa_master() -> str:
-    """The MILP engine for the routed OA master: always HiGHS.
+    """The MILP engine for the routed OA master: HiGHS, or the in-house lazy master
+    when ``DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex`` (highs-parity P5.1, opt-in).
 
     HiGHS is discopt's MILP solver. ``DISCOPT_CONVEX_ROUTE_OA_MASTER`` once
     selected between ``highs`` (default since performance-plan §25.13) and
@@ -10612,10 +10613,22 @@ def _convex_route_oa_master() -> str:
     (``milp_highs``), and OA reads only ``master_result.bound``.
     """
     raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
-    if raw is not None and raw.strip().lower() != "highs":
+    val = None if raw is None else raw.strip().lower()
+    # highs-parity D3, owner decision 2026-11-07 ("the point is to eliminate HiGHS"):
+    # the in-house lazy master is the DEFAULT, with the three D3 levers on
+    # (`DISCOPT_MILP_NODE_GMI_LAZY`, `DISCOPT_MILP_LAZY_ROOT_CUTS`,
+    # `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`). P5.1 panels (data
+    # `docs/dev/data/highs-parity/p5.1/d3_up_*`), cert-clean, 0 violations, 0 errors:
+    # syn/rsyn 26 vs HiGHS 29 at 1.03x wall; route 89 vs 92 at 1.42x. The residual
+    # (6 instances) is an owner-ACCEPTED gap, tracked in the plan's D3 status.
+    # `=highs` keeps the HiGHS master as an opt-out.
+    if val is None or val == "simplex":
+        return "simplex"
+    if val != "highs":
         raise ValueError(
-            "DISCOPT_CONVEX_ROUTE_OA_MASTER was retired (the routed OA master is "
-            "always HiGHS); unset it. To keep a convex MINLP off this route, set "
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'simplex' "
+            "(default, the in-house lazy master) or 'highs' (opt-out); 'auto' stays "
+            "retired. To keep a convex MINLP off this route, set "
             "DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy
@@ -13765,8 +13778,9 @@ def _scoped_highs_options(fn: _F) -> _F:
 
             warnings.warn(
                 "highs_options was not used: it applies only to a pure LP or MILP "
-                "solved on the HiGHS route (milp_backend='highs', the default), and "
-                "this solve did not take that route.",
+                "solved on the HiGHS route (a MILP's default; an LP's since "
+                "highs-parity D1 only with DISCOPT_LP_BACKEND=highs or "
+                "milp_backend='highs'), and this solve did not take that route.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -14970,15 +14984,16 @@ def solve_model(
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     milp_backend : {"highs", "native"}, optional
-        Engine for a pure LP or MILP model (#1535). The default ``None`` defers
-        to the ``DISCOPT_LP_MILP_BACKEND`` env var, which itself defaults to
-        HiGHS. ``"highs"`` names HiGHS with discopt-verified certificates, by
-        far the faster choice. ``"native"`` forces discopt's own branch and
-        bound -- the in-house LP solve (Rust simplex, POUNCE if it declines)
-        for an LP, discopt's MILP tree for a MILP -- so the search can be
-        watched: ``node_count`` is the tree's, ``strategy`` selects nodes,
-        ``branching_rule`` picks the branching variable, ``node_callback``
-        fires after every batch, and ``milp_cuts`` switches the root cut loop.
+        Engine for a pure LP or MILP model (#1535). The default ``None`` defers to the
+        environment: a MILP to ``DISCOPT_LP_MILP_BACKEND`` (default HiGHS), an LP to
+        :func:`_lp_backend` (``DISCOPT_LP_BACKEND``, default the in-house Rust simplex since
+        highs-parity D1). ``"highs"`` names HiGHS with discopt-verified certificates, by far
+        the faster choice on a MILP. ``"native"`` forces discopt's own branch and bound --
+        the in-house LP solve (Rust simplex, POUNCE if it declines) for an LP, discopt's
+        MILP tree for a MILP -- so the search can be watched: ``node_count`` is the tree's,
+        ``strategy`` selects nodes, ``branching_rule`` picks the branching variable,
+        ``node_callback`` fires after every batch, and ``milp_cuts`` switches the root cut
+        loop.
         Meant for teaching and inspection on small models, not for
         performance. ``lazy_constraints`` / ``incumbent_callback`` /
         ``cut_callback`` send a MILP to spatial branch and bound, which honours
@@ -18686,11 +18701,14 @@ def solve_model(
                     UserWarning,
                     stacklevel=2,
                 )
-            if _lpm_backend == "highs":
+            # highs-parity D1: a pure LP with no ``milp_backend`` named follows
+            # ``_lp_backend()`` (default rust); an explicit keyword still decides.
+            _lp_engine_choice = _lp_backend() if milp_backend is None else _lpm_backend
+            if _lp_engine_choice == "highs":
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
-            if _lpm_backend == "native" and _lp_res.algorithm_route is None:
+            if _lp_res.algorithm_route is None:
                 _lp_stats = _lp_res.solver_stats or {}
                 _lp_engine = (
                     "Rust simplex"
@@ -18699,8 +18717,12 @@ def solve_model(
                     if "lp/engine_pounce" in _lp_stats
                     else "no engine certified"
                 )
+                # highs-parity D1: the default LP route names itself, as the HiGHS
+                # route (``highs-lp: ...``) and ``native`` always did.
                 _lp_res.algorithm_route = (
                     f"native-lp: discopt LP solve, {_lp_engine} (milp_backend='native')"
+                    if _lpm_backend == "native"
+                    else f"rust-lp: discopt LP solve, {_lp_engine}"
                 )
             return _lp_res
         elif problem_class == ProblemClass.QP and not _callbacks_force_bb:
@@ -35767,11 +35789,9 @@ def _highs_lp_verifier_available() -> bool:
     corroborates it, and the multiplier-free node bound falls back to the
     box-only bound (#1537).
     """
-    try:
-        import highspy  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    from discopt._optional_highs import highs_available
+
+    return highs_available()
 
 
 def _convex_qp_node_lower_bound(
@@ -38568,6 +38588,31 @@ def _lp_milp_backend() -> str:
     return val
 
 
+def _lp_backend() -> str:
+    """Which engine solves a pure LP when no ``milp_backend`` is named: ``"rust"``
+    (default since highs-parity D1, 2026-11-05) or ``"highs"``.
+
+    Precedence: ``DISCOPT_LP_BACKEND`` if set; else ``DISCOPT_LP_MILP_BACKEND`` if set
+    (so every A/B run and opt-out that named the joint variable keeps its meaning); else
+    ``"rust"``. MILP is not affected -- it reads only ``DISCOPT_LP_MILP_BACKEND``
+    (:func:`_lp_milp_backend`, default ``"highs"``).
+
+    D1's evidence (``docs/dev/highs-parity-plan.md`` P2.6, ``p2.6/gate_L_INF.json``): 3
+    rounds under a load gate, 480 solves, 0 incorrect; the Rust route certifies all 25 L
+    LPs like the HiGHS route and decides every INF LP correctly, at 1.07x the HiGHS
+    route's wall on L (0.97x on INF). ``=highs`` is the opt-out, kept so the default can
+    be A/B'd. Any other value is refused loudly, like :func:`_lp_milp_backend`.
+    """
+    for var in ("DISCOPT_LP_BACKEND", "DISCOPT_LP_MILP_BACKEND"):
+        raw = os.environ.get(var)
+        if raw is not None:
+            val = raw.strip().lower()
+            if val not in ("rust", "highs"):
+                raise ValueError(f"{var}={val!r}: expected 'rust' or 'highs'")
+            return val
+    return "rust"
+
+
 #: Values the ``milp_backend=`` keyword of :func:`solve_model` accepts (#1535).
 _MILP_BACKEND_VALUES = ("highs", "native")
 
@@ -38624,7 +38669,7 @@ def _highs_takes_pure_lp_milp(
     """
     if backend is None:
         backend = _lp_milp_backend()
-    if backend != "highs" or solver_name == "gurobi":
+    if backend not in _pure_route_presolve_skip_backends() or solver_name == "gurobi":
         return False
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
@@ -38639,6 +38684,19 @@ def _highs_takes_pure_lp_milp(
         and not lagrangian_bound
         and _milp_is_exactly_linear(model)
     )
+
+
+def _pure_route_presolve_skip_backends() -> tuple[str, ...]:
+    """Backends whose pure LP/MILP route skips discopt's root presolve.
+
+    HiGHS since #1229 (it presolves itself; plan §12 H5). The Rust route since
+    highs-parity P2.0: P2.1 found root presolve the largest single piece of the Rust LP
+    route's wall (up to 4.8 s on a 13 ms LP), and skipping it left all 65 L/M/INF
+    instances' status, certificate and objective identical (0 incorrect) while the Rust
+    arm's total wall fell 190.6 -> 137.4 s (``docs/dev/highs-parity-plan.md`` P2.0). The
+    declared box stays valid, merely looser, so skipping is never unsound.
+    """
+    return ("highs", "rust")
 
 
 def _milp_is_exactly_linear(model: Model) -> bool:
@@ -38791,7 +38849,7 @@ def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, tim
     """
     import scipy.sparse as _sp
 
-    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std
+    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std_rust_first
 
     lb = np.maximum(np.asarray(sf.xl, dtype=np.float64).copy(), -INF)
     ub = np.minimum(np.asarray(sf.xu, dtype=np.float64).copy(), INF)
@@ -38834,7 +38892,9 @@ def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, tim
         lb = np.concatenate([lb, s_lo])
         ub = np.concatenate([ub, s_hi])
     node_sf = StdForm.from_arrays(c, A, b, lb, ub, float(sf.obj_const), None)
-    out = solve_lp_std(node_sf, time_limit=time_limit)
+    # highs-parity P1.2: the Rust engine first, HiGHS only when Rust is not decisive
+    # (same certificate ladder either way; the two agreed on every rescue LP measured).
+    out = solve_lp_std_rust_first(node_sf, time_limit=time_limit)
     if out.status == "infeasible":
         return "infeasible", None, None
     if out.bound is not None and np.isfinite(out.bound) and out.x is not None:
@@ -38901,7 +38961,9 @@ def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = Non
 
     _, n_orig, sf = _highs_std_form(model)
     rem = None if time_limit is None else float(time_limit) - (time.perf_counter() - t_start)
-    out = solve_lp_std(sf, time_limit=rem)
+    # The explicit HiGHS LP route (``DISCOPT_LP_BACKEND=highs``) runs HiGHS: the seam's
+    # default is the in-house engine since highs-parity P6.4.
+    out = solve_lp_std(sf, time_limit=rem, engine="highs")
     wall = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
     route = _highs_route_label("lp", out)
@@ -39506,6 +39568,136 @@ _MILP_ENGINE_FRONTIER_BYTES = 2 << 30
 _MILP_ENGINE_UNCAPPED_NODES = min(1 << 62, sys.maxsize)
 
 
+#: Least wall (seconds) worth a re-entry under ``DISCOPT_MILP_REENTRY_SPEND``: below
+#: it a restarted search re-solves little more than its root.
+_MILP_REENTRY_MIN_S = 1.0
+
+
+def _milp_reentry_spend_enabled() -> bool:
+    """``DISCOPT_MILP_REENTRY_SPEND`` gate (highs-parity P4.0): re-enter on an
+    uncertified ``feasible`` whenever at least ``_MILP_REENTRY_MIN_S`` remains.
+
+    Without it the #698 re-entry runs only when the remaining time exceeds run 1's
+    stall slice (``_milp_budget``). That slice is half the remaining time below the
+    10 s cap, so for any ``time_limit`` under about 20 s the remainder after run 1 is
+    *always* smaller than the slice and the re-entry never runs: measured on the
+    MIPLIB-38 rows the Rust route leaves uncertified at ``time_limit=20``
+    (``docs/dev/data/highs-parity/p4.1``), 20 of 24 returned at 10.1-11.1 s. The
+    premise "a restart with less budget cannot beat it" ignores that run 2 starts
+    from run 1's incumbent (and the #280 swap reseed). Adoption is unchanged: only a
+    certified or strictly better result whose point passes ``_point_feasible`` is
+    taken, and the tighter of the two valid bounds is kept.
+
+    Changes the search, so gated per CLAUDE.md section 5; read at call time.
+    **Graduated (default ON, 2026-11-05, owner).** §5 panel
+    (``docs/dev/data/highs-parity/p4.0``): in-repo MINLP corpus ON vs OFF at 20 s, 2
+    reps, cert-clean (148 rows, 0 problems, certified 112 = 112, 260 incumbent checks)
+    and neutral there; MIPLIB-38 uncertified rows at 20 s, 2 reps, cert-clean on 144
+    rows and net-positive: the four ``mik-250-20-75-*`` rows go from a 25-89 % primal
+    gap to <= 0.3 % on both reps. ``DISCOPT_MILP_REENTRY_SPEND=0`` restores the legacy
+    gate.
+    """
+    return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "1") != "0"
+
+
+def _milp_reentry_cuts_enabled() -> bool:
+    """``DISCOPT_MILP_REENTRY_CUTS`` gate (highs-parity D2): give the #698 re-entry
+    (run 2 of ``_solve_milp_simplex``) the same root cut budget as run 1.
+
+    Run 2 rebuilds the tree from the root, but it was called without ``**_cut_opts``.
+    So it separated with the binding's historical single pass (``root_cuts=16,
+    cut_rounds=1``) while run 1 got the graduated ``_milp_root_cut_budget`` (500 cuts
+    over 50 rounds). Since P4.0 graduated, run 2 is where most of a 20 s solve's wall
+    goes, and it runs on the weaker root. This is the same class of omission as
+    #1323, where run 2 also dropped ``abs_gap_tol``. Found by the D2 HiGHS-expert
+    Phase B review (``docs/dev/highs-parity-d2-phaseB-expert.md``). ON passes
+    ``_milp_root_cut_budget(<run-2 budget>)``.
+
+    Bound-changing (a different root LP, hence a different tree), so gated per
+    CLAUDE.md section 5 and default OFF until its panel passes; read at call time.
+    """
+    return os.environ.get("DISCOPT_MILP_REENTRY_CUTS", "0") == "1"
+
+
+def _milp_aligned_slacks_enabled() -> bool:
+    """``DISCOPT_MILP_ALIGNED_SLACKS`` gate (highs-parity D2): hand the native MILP driver
+    an *aligned* standard form, where column ``n_orig + r`` is row ``r``'s slack.
+
+    ``extract_lp_data`` gives slack columns to inequality rows only, in an order unrelated
+    to the rows. The driver's root cut loop assumes column ``ns + r`` is row ``r``'s slack
+    (``BaseRows.slack_coef``). Measured on the MIPLIB rows that plain HiGHS B&B certifies
+    and the route does not:
+
+    * ``fiber``: 363 equality rows, no slack columns, rank 352. The 11 dependent rows keep
+      a basic artificial, the root basis is short, and GMI declines it
+      (``SepGomoryShortBasis``). One root cut round, 0 cuts: route root gap 61.6 %, against
+      8.7 % for the same driver on inequality pairs.
+    * ``nexp-50-20-1-1``: 522 slacks for 540 rows, none at ``ns + r``, so the structural
+      rewrite drops every cut touching a slack (``SubstDropNoSlack``).
+
+    ON permutes each row's existing slack (a singleton column past ``n_orig``) to
+    ``n_orig + r`` and gives every row without one a new slack fixed at ``[0, 0]``; any
+    other auxiliary column follows. The feasible set is unchanged (a column permutation
+    plus zero-fixed columns), the structural columns keep their positions, and every
+    check after the solve still reads the original ``lp_data``. The driver's rewrite
+    moves a fixed slack's term to the rhs exactly (``SubstFixedSlack``). Read at call time.
+
+    **Graduated (default ON, 2026-11-07, highs-parity D2), bundled with the driver's
+    ``DISCOPT_MILP_SUBMIP``.** MIPLIB-38 + M (3 reps, 20 s, 372 solves,
+    ``docs/dev/data/highs-parity/d2-analysis/bundle_aligned_submip_panel.json.gz``):
+    cert-clean; certified 107 -> 114; nodes on the always-certified set -16 %; 2 dual
+    losses (cap 2); no incumbent lost; median primal gap 0.187 -> 0.012. In-repo MINLP
+    corpus (2 reps, 20 s, ``bundle_corpus.jsonl``): 0 problem instances, 260 incumbent
+    checks, certified 112 -> 113. ``=0`` restores the extraction order.
+    """
+    return os.environ.get("DISCOPT_MILP_ALIGNED_SLACKS", "1") != "0"
+
+
+def _milp_aligned_lp(lp_data, n_orig: int):
+    """The aligned standard form described in :func:`_milp_aligned_slacks_enabled`."""
+    import scipy.sparse as _sp
+
+    A = _sp.csc_matrix(lp_data.A_eq)
+    m, n = A.shape
+    slack_of_row = [-1] * m
+    for k in range(n_orig, n):
+        lo, hi = A.indptr[k], A.indptr[k + 1]
+        if hi - lo == 1:
+            r = int(A.indices[lo])
+            if slack_of_row[r] < 0:
+                slack_of_row[r] = k
+    used = {k for k in slack_of_row if k >= 0}
+    rest = [k for k in range(n_orig, n) if k not in used]
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    cols = [A[:, :n_orig]]
+    cc, ll, uu = [c[:n_orig]], [xl[:n_orig]], [xu[:n_orig]]
+    for r in range(m):
+        k = slack_of_row[r]
+        if k >= 0:
+            cols.append(A[:, k])
+            cc.append(c[k : k + 1])
+            ll.append(xl[k : k + 1])
+            uu.append(xu[k : k + 1])
+        else:
+            cols.append(_sp.csc_matrix(([1.0], ([r], [0])), shape=(m, 1)))
+            cc.append(np.zeros(1))
+            ll.append(np.zeros(1))
+            uu.append(np.zeros(1))
+    for k in rest:
+        cols.append(A[:, k])
+        cc.append(c[k : k + 1])
+        ll.append(xl[k : k + 1])
+        uu.append(xu[k : k + 1])
+    return lp_data._replace(
+        A_eq=_sp.hstack(cols, format="csc"),
+        c=np.concatenate(cc),
+        x_l=np.concatenate(ll),
+        x_u=np.concatenate(uu),
+    )
+
+
 def _milp_engine_full_budget_enabled() -> bool:
     """``DISCOPT_MILP_ENGINE_FULL_BUDGET`` gate (#1874): let the native MILP
     engine use the caller's budget instead of stopping on the 100k-node default.
@@ -39699,10 +39891,13 @@ def _solve_milp_simplex(
     # is the same driver with the same options and return tuple, entered without the
     # densify. See ``_csc_for_rust_milp`` for the measurement and the bit-for-bit
     # structural equivalence that keeps this bound-neutral.
-    _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(lp_data.A_eq)
+    n_orig = sum(v.size for v in model._variables)
+    # D2 (``DISCOPT_MILP_ALIGNED_SLACKS``): the driver's own copy; every check below
+    # keeps reading the original ``lp_data``.
+    _drv = _milp_aligned_lp(lp_data, n_orig) if _milp_aligned_slacks_enabled() else lp_data
+    _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     if _A_m == 0:
         return None  # no constraints — let the default path handle it
-    n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
@@ -39768,15 +39963,15 @@ def _solve_milp_simplex(
     _stopped_on_nodes = False
 
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
-        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        np.ascontiguousarray(_drv.c, dtype=np.float64),
         _A_m,
         _A_n,
         _A_ptr,
         _A_idx,
         _A_val,
-        np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+        np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+        np.ascontiguousarray(_drv.x_u, dtype=np.float64),
         np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
         n_orig,
         float(lp_data.obj_const),
@@ -39812,7 +40007,7 @@ def _solve_milp_simplex(
         _A_gate,
         np.asarray(lp_data.b_eq),
         n_orig,
-        _A_n - n_orig,
+        lp_data.A_eq.shape[1] - n_orig,
         np.asarray(lp_data.x_u, dtype=np.float64),
         row_sense=_declared_row_senses(lp_data, _A_gate),
     )
@@ -39907,7 +40102,13 @@ def _solve_milp_simplex(
             )
         if _run2_nodes <= 0:
             _stopped_on_nodes = True
-        elif _reentry_remaining > _milp_budget + 1e-9:
+        elif _reentry_remaining > (
+            # #1116: under ``deterministic`` a wall-clock-decided restart would make
+            # the search machine-dependent, so the legacy condition stands there.
+            _MILP_REENTRY_MIN_S
+            if _milp_reentry_spend_enabled() and not _tuning().deterministic
+            else _milp_budget + 1e-9
+        ):
             _stopped_on_nodes = False
             _xo1 = np.asarray(x_struct, dtype=np.float64)[:n_orig]
             _seed2 = None
@@ -39942,15 +40143,15 @@ def _solve_milp_simplex(
                 _nodes2,
                 _iters2,
             ) = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
                 n_orig,
                 float(lp_data.obj_const),
@@ -39964,6 +40165,11 @@ def _solve_milp_simplex(
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_debug.rust_hook(),
+                **(
+                    (_milp_root_cut_budget(_reentry_remaining) or {})
+                    if _milp_reentry_cuts_enabled()
+                    else {}
+                ),
                 **_frontier_opts,
             )
             # #1874: a node- or frontier-capped run 2 stopped on a node budget.
@@ -39981,7 +40187,17 @@ def _solve_milp_simplex(
                     status = _status2
                     x_struct = _x2
                     obj = _obj2
-                    bound = _bound2
+                    # Both runs' bounds are valid lower bounds on the same problem
+                    # (the comment above): keep the tighter. Replacing it threw run
+                    # 1's away whenever run 2 won on the primal side -- measured
+                    # (highs-parity P4.0 entry, mik-250-20-75-{1,2,3,5} at 20 s): the
+                    # dual gap went 0.03 -> 0.12 while the incumbent reached the
+                    # optimum, because the restarted tree had not caught up.
+                    # A certifying run 2 closes its own gap; its bound stands as is.
+                    if _certifies or (
+                        np.isfinite(_bound2) and (not np.isfinite(bound) or _bound2 > bound)
+                    ):
+                        bound = _bound2
                     nodes = nodes + _nodes2
                     # Accumulated in the same branch as ``nodes`` and nowhere
                     # else: a work metric whose numerator counts the re-entry's
@@ -40114,15 +40330,15 @@ def _solve_milp_simplex(
         _t_root = time.perf_counter()
         if relu_cuts is None:
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
                 n_orig,
                 float(lp_data.obj_const),
@@ -40139,15 +40355,15 @@ def _solve_milp_simplex(
             # is the frontier minimum after the root's separation rounds, a valid
             # bound over the root box.
             _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_csc_py(
-                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
                 _A_m,
                 _A_n,
                 _A_ptr,
                 _A_idx,
                 _A_val,
-                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
-                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
                 np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
                 n_orig,
                 float(lp_data.obj_const),
@@ -40989,6 +41205,9 @@ def _solve_milp_bb(
 
         t_jax_start = time.perf_counter()
         result_ids = np.array(batch_ids, dtype=np.int64)
+        # How many of this batch's nodes were evaluated (highs-parity P0.7 / D0): the
+        # deadline is checked before every node, not only once per batch.
+        _n_eval = n_batch
 
         if _structured_avail:
             # Path B: solve each node's relaxation with the structured engine
@@ -41005,6 +41224,16 @@ def _solve_milp_bb(
             # (node_id, column) pairs from `_integral_claim_branch_col` (#1414).
             _unpromotable_hints: list[tuple[int, int]] = []
             for i in range(n_batch):
+                # The time limit is a contract (highs-parity D0). Checked once per
+                # batch, a batch of ~1 s node LPs ran 4-8 s past it: on the #1667
+                # unit-commitment model the route returned at 141-147 s on a 120 s
+                # limit and at up to 88 s on 60 s. The first node always runs (the
+                # loop head admitted this batch before the deadline); the rest are
+                # requeued below with the bound they were popped with -- open, never
+                # pruned without a proof.
+                if i > 0 and time.perf_counter() - t_start >= time_limit:
+                    _n_eval = i
+                    break
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
                 _mid = 0.5 * np.add(*_clip_start_box(node_lb, node_ub))
@@ -41054,6 +41283,17 @@ def _solve_milp_bb(
                 "The JAX LP-IPM node fallback was retired in #370; build the Rust "
                 "extension or install POUNCE."
             )
+
+        if _n_eval < n_batch:
+            # Deadline reached mid-batch: hand the unevaluated nodes back to the open
+            # frontier (``requeue_nodes`` keeps each one's pop-time bound, valid for
+            # its whole subtree) and carry only the evaluated ones forward.
+            tree.requeue_nodes(np.ascontiguousarray(result_ids[_n_eval:]))
+            batch_lb, batch_ub = batch_lb[:_n_eval], batch_ub[:_n_eval]
+            batch_ids, result_ids = batch_ids[:_n_eval], result_ids[:_n_eval]
+            result_lbs, result_sols = result_lbs[:_n_eval], result_sols[:_n_eval]
+            result_feas, result_excl = result_feas[:_n_eval], result_excl[:_n_eval]
+            n_batch = _n_eval
 
         # Lagrangian node bounds: combine a valid dual lower bound with each
         # node's LP relaxation bound. Gated by cadence and applied only to nodes

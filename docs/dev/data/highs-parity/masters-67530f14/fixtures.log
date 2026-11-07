@@ -1,0 +1,9 @@
+fixture fixture__tls2_master0: n=37 ub=46 eq=6 int=33
+fixture fixture__rsyn0830m_master0: n=250 ub=830 eq=85 int=94
+fixture fixture__fac2_master0: n=67 ub=397 eq=21 int=12
+fixture fixture__m6_final_master_2115: n=86 ub=258 eq=0 int=30
+fixture fixture__clay0203_master: n=30 ub=525 eq=6 int=18
+fixture fixture__milp_default_box_clay0203_master: n=30 ub=537 eq=0 int=18
+fixture fixture__clay0204hfsg_master: n=164 ub=709 eq=42 int=32
+fixture fixture__rsyn0820m_master: n=215 ub=390 eq=78 int=84
+fixtures: written=8

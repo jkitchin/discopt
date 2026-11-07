@@ -1,0 +1,4 @@
+iskar {"mode": "G-pool", "extra": {"separating/poolfreq": -1, "conflict/enable": false}} -> {'status': 'timelimit', 'nodes': 68096, 't': 60.0, 'bound': 36.4886, 'calls': 1617, 'cuts': 3780, 'nodes_sep': 462, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 3790}
+iskar {"mode": "G-pool", "extra": {"conflict/enable": false}} -> {'status': 'optimal', 'nodes': 21105, 't': 22.9, 'bound': 37.0, 'calls': 847, 'cuts': 1735, 'nodes_sep': 240, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1769}
+iskar {"mode": "G-sub", "extra": {"conflict/enable": false}} -> {'status': 'timelimit', 'nodes': 60746, 't': 60.0, 'bound': 35.9511, 'calls': 1812, 'cuts': 5399, 'nodes_sep': 482, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 5404}
+executed 3

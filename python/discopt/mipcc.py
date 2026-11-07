@@ -74,7 +74,9 @@ def budget(limit: float) -> tuple[float, float]:
 
 def read_mps(path: str) -> dict:
     """The model's arrays and names, via HiGHS's MPS reader."""
-    import highspy
+    from discopt._optional_highs import require_highspy
+
+    highspy = require_highspy("discopt.mipcc (HiGHS MPS reader / checker)")
     import scipy.sparse as sp
 
     tmpdir = None
@@ -315,8 +317,9 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     still reject (#2145 review: the borderline zone). Undecided within
     ``time_limit``, or a point that fails the 1e-5 rule (the checker then
     retries tighter): ``False`` -- the doubly proven answer stands."""
-    import highspy
+    from discopt._optional_highs import require_highspy
 
+    highspy = require_highspy("discopt.mipcc (HiGHS MPS reader / checker)")
     if time_limit <= 0.5:
         return False
     m, n = data["row_lo"].size, data["col_lb"].size

@@ -21,6 +21,16 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_engine(monkeypatch):
+    """These tests exercise the HiGHS engine behind ``solve_lp_std``.
+    Since highs-parity P6.4 (2026-11-07) the default engine is the in-house
+    one, so these HiGHS-path tests pin ``DISCOPT_LP_STD_ENGINE=highs`` (a test that sets it still
+    overrides)."""
+    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
+
+
 pytest.importorskip("highspy")
 
 

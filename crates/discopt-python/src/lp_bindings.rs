@@ -1884,6 +1884,99 @@ pub fn solve_milp_lazy_csc_py<'py>(
 /// fully sparse driver under `allow_threads`, and marshals the result back. Both the
 /// dense entry (`solve_milp_py`) and the CSC entry (`solve_milp_csc_py`) funnel here
 /// after producing the working `SparseCols`.
+/// The [`MilpOptions`] every Python MILP entry point builds from its keyword
+/// arguments: `solve_milp_csc_py` (through [`run_milp_hooked`]) and the
+/// `MilpHandle` pyclass (highs-parity P3.1), so a handle solve and a fresh solve
+/// with the same arguments run under the same options by construction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn milp_options(
+    n_struct: usize,
+    int_cols: Vec<usize>,
+    max_nodes: usize,
+    max_open_nodes: Option<usize>,
+    time_limit_s: Option<f64>,
+    gap_tol: f64,
+    abs_gap_tol: Option<f64>,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cmir_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    node_hook_rounds: usize,
+    node_hook_cut_cap: usize,
+    initial_incumbent: Option<Vec<f64>>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
+) -> PyResult<MilpOptions> {
+    Ok(MilpOptions {
+        n_struct,
+        integer_cols: int_cols,
+        max_nodes,
+        max_open_nodes,
+        time_limit_s: parse_budget_secs(time_limit_s)?,
+        gap_tol,
+        // #1315: `None` -- what a caller who named no absolute tolerance sends --
+        // keeps the engine's historical behaviour exactly: no absolute arm.
+        abs_gap_tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cmir_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        node_hook_rounds,
+        node_hook_cut_cap,
+        initial_incumbent,
+        root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
+        root_cut_prune,
+        simplex: SimplexOptions {
+            tol,
+            max_iter: 100_000,
+            // The MILP driver clones this and injects its own wall-clock deadline
+            // from `time_limit_s`, so the base options leave it unset.
+            deadline: None,
+            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
+            // P1.0 (measured OFF, deliberately): turning this on makes the primal
+            // emit a FULL length-`m` basis of real columns instead of dropping the
+            // slot a degenerate basic artificial occupies, which stops
+            // `PreparedDual::prepare` rejecting the node basis on shape (measured
+            // 619/620 rejections on the rsyn0840m OA master). But once the root cut
+            // loop stopped cold-solving every round, flipping it was *exactly*
+            // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
+            // (sound but not net-positive is not a graduation).
+            expel_zero_artificials: false,
+            bank_deadline_duals: false,
+            recover_unstable_pivot: false,
+            // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+            // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+            dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+            dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+            cold_dual_start: false,
+            warm_flip_boxed: false,
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_milp_hooked<'py>(
     py: Python<'py>,
@@ -1944,16 +2037,15 @@ fn run_milp_hooked<'py>(
              fractional-node hook; pass one of them",
         ));
     }
-    let opts = MilpOptions {
+    let opts = milp_options(
         n_struct,
-        integer_cols: int_cols,
+        int_cols,
         max_nodes,
         max_open_nodes,
-        time_limit_s: parse_budget_secs(time_limit_s)?,
+        time_limit_s,
         gap_tol,
-        // #1315: `None` -- what a caller who named no absolute tolerance sends --
-        // keeps the engine's historical behaviour exactly: no absolute arm.
         abs_gap_tol,
+        tol,
         root_cuts,
         cut_rounds,
         gmi_cuts,
@@ -1970,39 +2062,12 @@ fn run_milp_hooked<'py>(
         sb_node_budget,
         node_hook_rounds,
         node_hook_cut_cap,
-        initial_incumbent: initial_incumbent
+        initial_incumbent
             .map(|arr| arr.as_slice().map(|s| s.to_vec()))
             .transpose()?,
-        root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
+        root_cut_time_s,
         root_cut_prune,
-        simplex: SimplexOptions {
-            tol,
-            max_iter: 100_000,
-            // The MILP driver clones this and injects its own wall-clock deadline
-            // from `time_limit_s`, so the base options leave it unset.
-            deadline: None,
-            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
-            warm_stall_guard: true,
-            warm_stall_cap_override: None,
-            // P1.0 (measured OFF, deliberately): turning this on makes the primal
-            // emit a FULL length-`m` basis of real columns instead of dropping the
-            // slot a degenerate basic artificial occupies, which stops
-            // `PreparedDual::prepare` rejecting the node basis on shape (measured
-            // 619/620 rejections on the rsyn0840m OA master). But once the root cut
-            // loop stopped cold-solving every round, flipping it was *exactly*
-            // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
-            // (sound but not net-positive is not a graduation).
-            expel_zero_artificials: false,
-            bank_deadline_duals: false,
-            recover_unstable_pivot: false,
-            // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
-            // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
-            dual_stall_patience: SimplexOptions::default().dual_stall_patience,
-            dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
-            cold_dual_start: false,
-            warm_flip_boxed: false,
-        },
-    };
+    )?;
     // Wrap an attached Python debugger (if any) as a core hook. It is created
     // before releasing the GIL and re-acquires it per checkpoint; when absent,
     // the search runs the untouched (bound-neutral) path.

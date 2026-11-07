@@ -1,0 +1,86 @@
+capture-gdp: gdplib not installed; skipping 17: ['batch_processing', 'biofuel', 'cstr', 'disease_model', 'ex1_linan_2023', 'gdp_col', 'hda', 'kaibel', 'med_term_purchasing', 'methanol', 'mod_hens', 'modprodnet', 'positioning', 'small_batch', 'spectralog', 'stranded_gas', 'syngas']
+[gdp 1/7] pyomo.eight_process: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 2/7] pyomo.eight_process_logical: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 3/7] pyomo.strip_packing_concrete: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 4/7] pyomo.constrained_layout_clay0203: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 5/7] pyomo.ex_633_trespalacios: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 6/7] pyomo.nonconvex_hen: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+[gdp 7/7] pyomo.jobshop_small: rc=1 
+Traceback (most recent call last):
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 146, in <module>
+    capture(*args)
+    ~~~~~~~^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/scripts/gdp_master_backend_entry.py", line 47, in capture
+    spec = gr.discover_models(include=[name])[0]
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/user/discopt/discopt_benchmarks/benchmarks/gdplib_runner.py", line 201, in discover_models
+    import gdplib
+ModuleNotFoundError: No module named 'gdplib'
+
+capture-gdp: instances=7 masters=0

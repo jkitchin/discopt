@@ -1,0 +1,385 @@
+{
+ "rows": [
+  {
+   "name": "neos-1425699",
+   "opt": 3179698976.996124,
+   "certified": true,
+   "status": "optimal",
+   "obj": 3179698977.0,
+   "bound": 3179698976.996746,
+   "nodes": 1,
+   "wall": 0.0024783810004009865
+  },
+  {
+   "name": "blend2",
+   "opt": 7.598985,
+   "certified": true,
+   "status": "optimal",
+   "obj": 7.598985000000005,
+   "bound": 7.5989849999914005,
+   "nodes": 8085,
+   "wall": 3.1506392100000085
+  },
+  {
+   "name": "enlight8",
+   "opt": 27.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 27.0,
+   "bound": 27.0,
+   "nodes": 126743,
+   "wall": 18.1055310010006
+  },
+  {
+   "name": "p0201",
+   "opt": 7614.999999999997,
+   "certified": true,
+   "status": "optimal",
+   "obj": 7614.999999999998,
+   "bound": 7614.999999991451,
+   "nodes": 607,
+   "wall": 0.3184376079998401
+  },
+  {
+   "name": "mik-250-20-75-5",
+   "opt": -51532.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": -25062.999999999956,
+   "bound": -52981.19722908911,
+   "nodes": 36937,
+   "wall": 20.020800738000617
+  },
+  {
+   "name": "neos-911970",
+   "opt": 54.76,
+   "certified": false,
+   "status": "feasible",
+   "obj": 229.12999999999997,
+   "bound": 23.259999999970866,
+   "nodes": 23,
+   "wall": 20.01484569599961
+  },
+  {
+   "name": "mik-250-20-75-3",
+   "opt": -52242.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": -39298.999999999985,
+   "bound": -53609.75322830301,
+   "nodes": 31945,
+   "wall": 20.01992206900013
+  },
+  {
+   "name": "fiber",
+   "opt": 405935.18,
+   "certified": false,
+   "status": "feasible",
+   "obj": 446232.13999999955,
+   "bound": 382997.69895379094,
+   "nodes": 9049,
+   "wall": 20.012588460999723
+  },
+  {
+   "name": "khb05250",
+   "opt": 106940225.9999999,
+   "certified": true,
+   "status": "optimal",
+   "obj": 106940225.99999952,
+   "bound": 106940225.99958953,
+   "nodes": 65,
+   "wall": 0.43546031000005314
+  },
+  {
+   "name": "nexp-50-20-1-1",
+   "opt": 28.99999999999999,
+   "certified": false,
+   "status": "feasible",
+   "obj": 51.0,
+   "bound": 23.0,
+   "nodes": 26721,
+   "wall": 20.019828589999634
+  },
+  {
+   "name": "mik-250-20-75-2",
+   "opt": -50768.00000000001,
+   "certified": false,
+   "status": "feasible",
+   "obj": -29920.99999999997,
+   "bound": -52349.122148698916,
+   "nodes": 31639,
+   "wall": 20.01779736700064
+  },
+  {
+   "name": "22433",
+   "opt": 21477.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 21477.0,
+   "bound": 21476.999999971693,
+   "nodes": 123,
+   "wall": 3.8121997850003027
+  },
+  {
+   "name": "nexp-50-20-4-2",
+   "opt": 70.99999999999999,
+   "certified": false,
+   "status": "feasible",
+   "obj": 85.0,
+   "bound": 66.0,
+   "nodes": 14533,
+   "wall": 20.023536394000075
+  },
+  {
+   "name": "gt2",
+   "opt": 21165.99999999978,
+   "certified": false,
+   "status": "feasible",
+   "obj": 31661.0,
+   "bound": 21165.999999978834,
+   "nodes": 199873,
+   "wall": 20.061812703000214
+  },
+  {
+   "name": "mik-250-20-75-1",
+   "opt": -49716.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": -5528.999999999964,
+   "bound": -51244.62682571742,
+   "nodes": 41045,
+   "wall": 20.01959989199986
+  },
+  {
+   "name": "23588",
+   "opt": 8089.999999999998,
+   "certified": true,
+   "status": "optimal",
+   "obj": 8090.0,
+   "bound": 8089.9999999899555,
+   "nodes": 2269,
+   "wall": 3.153587461000825
+  },
+  {
+   "name": "flugpl",
+   "opt": 1201500.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 1201499.9999999995,
+   "bound": 1201499.9999982377,
+   "nodes": 275,
+   "wall": 0.03522957899986068
+  },
+  {
+   "name": "dcmulti",
+   "opt": 188182.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 188189.20000000027,
+   "bound": 188175.28461518255,
+   "nodes": 2899,
+   "wall": 4.109207514000445
+  },
+  {
+   "name": "enlight_hard",
+   "opt": 37.0,
+   "certified": false,
+   "status": "node_limit",
+   "obj": null,
+   "bound": 26.0,
+   "nodes": 46463,
+   "wall": 20.014454725000178
+  },
+  {
+   "name": "sp150x300d",
+   "opt": 69.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 80.0,
+   "bound": 60.0,
+   "nodes": 53847,
+   "wall": 20.021446351999657
+  },
+  {
+   "name": "gen",
+   "opt": 112313.3627179998,
+   "certified": true,
+   "status": "optimal",
+   "obj": 112313.36271799976,
+   "bound": 112302.5179818331,
+   "nodes": 1035,
+   "wall": 1.499232798999401
+  },
+  {
+   "name": "neos17",
+   "opt": 0.1500025774,
+   "certified": false,
+   "status": "feasible",
+   "obj": 0.3598626473526475,
+   "bound": 0.09832827021748995,
+   "nodes": 23717,
+   "wall": 20.00938494699949
+  },
+  {
+   "name": "beavma",
+   "opt": 383285.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 542295.0,
+   "bound": 344761.5983192715,
+   "nodes": 37151,
+   "wall": 20.011059374999604
+  },
+  {
+   "name": "neos-3611447-jijia",
+   "opt": 107.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 107.0,
+   "bound": 106.9899999998501,
+   "nodes": 50207,
+   "wall": 13.869897716000196
+  },
+  {
+   "name": "neos-3610051-istra",
+   "opt": 49.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 48.99999999999999,
+   "bound": 48.30958333327693,
+   "nodes": 42583,
+   "wall": 20.02063414300028
+  },
+  {
+   "name": "neos-3611689-kaihu",
+   "opt": 119.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 133.0,
+   "bound": 117.44954497070141,
+   "nodes": 66029,
+   "wall": 20.02597676699952
+  },
+  {
+   "name": "neos-3610040-iskar",
+   "opt": 37.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 38.999999999999964,
+   "bound": 36.18499999995167,
+   "nodes": 89607,
+   "wall": 20.038527742999577
+  },
+  {
+   "name": "neos-5192052-neckar",
+   "opt": -11670000.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": -11669999.999999998,
+   "bound": -11670000.000022262,
+   "nodes": 9,
+   "wall": 0.0059730300008595805
+  },
+  {
+   "name": "neos-2624317-amur",
+   "opt": 3.5223968,
+   "certified": false,
+   "status": "node_limit",
+   "obj": null,
+   "bound": -1e-12,
+   "nodes": 55,
+   "wall": 20.02116588899935
+  },
+  {
+   "name": "app2-2",
+   "opt": 212040.3571429,
+   "certified": true,
+   "status": "optimal",
+   "obj": 212042.49999999767,
+   "bound": 212040.35714264508,
+   "nodes": 225,
+   "wall": 0.07819400999960635
+  },
+  {
+   "name": "b-ball",
+   "opt": -1.50000000000001,
+   "certified": false,
+   "status": "feasible",
+   "obj": -1.5000000000002551,
+   "bound": -1.5045174513695256,
+   "nodes": 252051,
+   "wall": 20.079418811999858
+  },
+  {
+   "name": "bppc8-02",
+   "opt": 506.9999999999998,
+   "certified": false,
+   "status": "feasible",
+   "obj": 507.99999999999983,
+   "bound": 506.99999999916,
+   "nodes": 53739,
+   "wall": 20.01238940300027
+  },
+  {
+   "name": "supportcase16",
+   "opt": 288.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 288.0,
+   "bound": 288.0,
+   "nodes": 91,
+   "wall": 0.5643988900001204
+  },
+  {
+   "name": "supportcase14",
+   "opt": 288.0,
+   "certified": true,
+   "status": "optimal",
+   "obj": 288.0,
+   "bound": 288.0,
+   "nodes": 95,
+   "wall": 1.2630268979992252
+  },
+  {
+   "name": "f2gap40400",
+   "opt": 20771.99999999983,
+   "certified": true,
+   "status": "optimal",
+   "obj": 20772.000000000004,
+   "bound": 20772.0,
+   "nodes": 1,
+   "wall": 0.020451114000024972
+  },
+  {
+   "name": "gsvm2rl3",
+   "opt": 0.33652753,
+   "certified": false,
+   "status": "feasible",
+   "obj": 0.5863548183028107,
+   "bound": 0.20339933248975794,
+   "nodes": 82853,
+   "wall": 20.032313538999915
+  },
+  {
+   "name": "neos-3118745-obra",
+   "opt": 255.0,
+   "certified": false,
+   "status": "feasible",
+   "obj": 338.0,
+   "bound": 253.83333333307544,
+   "nodes": 63,
+   "wall": 20.016767761000665
+  },
+  {
+   "name": "gr4x6",
+   "opt": 202.3499999999979,
+   "certified": true,
+   "status": "optimal",
+   "obj": 202.34999999999997,
+   "bound": 202.3499999997477,
+   "nodes": 125,
+   "wall": 0.10811098900012439
+  }
+ ],
+ "incorrect": []
+}

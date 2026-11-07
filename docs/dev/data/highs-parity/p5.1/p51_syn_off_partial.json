@@ -1,0 +1,269 @@
+{
+ "header": {
+  "commit": "bd49011e",
+  "load": [
+   1.5556640625,
+   1.88330078125,
+   2.11962890625
+  ],
+  "highs": "1.15.1"
+ },
+ "args": {
+  "population": "syn",
+  "kernel": "off",
+  "spans": "0,3,6",
+  "time_limit": 30.0,
+  "only": "",
+  "out": "/tmp/claude-0/-home-user-discopt/38303ad9-c9f4-5a5b-9f75-f33b92707a61/scratchpad/p51_syn_off.json"
+ },
+ "rows": [
+  {
+   "model": "rsyn0805m",
+   "off": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1296.120602752685,
+    "bound": 1296.1206028877511,
+    "wall": 5.379760643999816,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "optimal",
+    "cert": true,
+    "obj": 1296.120602752909,
+    "bound": 1296.1206029046496,
+    "wall": 2.110389330000089,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex)",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "rsyn0805m02m",
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 1445.870794850904,
+    "bound": 3718.2583660569735,
+    "wall": 30.066230857999926,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.07s (status=feasible) -> fell back to the default path with 14.90s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "off": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 2238.395445503872,
+    "bound": 3687.1831454113803,
+    "wall": 30.061525321999852,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 25.01s (status=feasible) -> fell back to the default path with 4.94s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  },
+  {
+   "model": "rsyn0805m03m",
+   "off": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 2617.2399906562696,
+    "bound": 4548.918264995929,
+    "wall": 31.191717399000026,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=highs); did not certify in 16.85s (status=feasible) -> fell back to the default path with 13.10s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   },
+   "on": {
+    "status": "feasible",
+    "cert": false,
+    "obj": 2296.409447516461,
+    "bound": 5718.472599128231,
+    "wall": 30.18470269599993,
+    "feas_ok": true,
+    "route": "mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE; master=simplex); did not certify in 15.08s (status=feasible) -> fell back to the default path with 14.87s",
+    "fired": true,
+    "checks": 2,
+    "violations": []
+   }
+  }
+ ],
+ "errors": [],
+ "skipped": [
+  [
+   "rsyn0805hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0805m02hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0805m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0805m04hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0810hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0810m02hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0810m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0810m04hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0815hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0815m02hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0815m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0815m04hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0820hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0820m02hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0820m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0830hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0830m02hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0830m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0840hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0840m03hfsg",
+   "not routed"
+  ],
+  [
+   "rsyn0840m04hfsg",
+   "not routed"
+  ],
+  [
+   "syn05hfsg",
+   "not routed"
+  ],
+  [
+   "syn05m02hfsg",
+   "not routed"
+  ],
+  [
+   "syn05m03hfsg",
+   "not routed"
+  ],
+  [
+   "syn05m04hfsg",
+   "not routed"
+  ],
+  [
+   "syn10hfsg",
+   "not routed"
+  ],
+  [
+   "syn10m02hfsg",
+   "not routed"
+  ],
+  [
+   "syn10m03hfsg",
+   "not routed"
+  ],
+  [
+   "syn10m04hfsg",
+   "not routed"
+  ],
+  [
+   "syn15hfsg",
+   "not routed"
+  ],
+  [
+   "syn15m02hfsg",
+   "not routed"
+  ],
+  [
+   "syn15m03hfsg",
+   "not routed"
+  ],
+  [
+   "syn15m04hfsg",
+   "not routed"
+  ],
+  [
+   "syn20hfsg",
+   "not routed"
+  ],
+  [
+   "syn20m02hfsg",
+   "not routed"
+  ],
+  [
+   "syn20m03hfsg",
+   "not routed"
+  ],
+  [
+   "syn20m04hfsg",
+   "not routed"
+  ],
+  [
+   "syn30hfsg",
+   "not routed"
+  ],
+  [
+   "syn30m02hfsg",
+   "not routed"
+  ],
+  [
+   "syn30m03hfsg",
+   "not routed"
+  ],
+  [
+   "syn40hfsg",
+   "not routed"
+  ]
+ ]
+}

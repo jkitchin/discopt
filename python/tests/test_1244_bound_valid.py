@@ -416,7 +416,7 @@ def test_a_round_trip_never_strengthens_a_stored_certificate():
 
 
 @pytest.mark.smoke
-def test_the_highs_lp_route_names_its_safe_bound():
+def test_the_highs_lp_route_names_its_safe_bound(monkeypatch):
     """That route's LP bound is a Neumaier-Shcherbina SAFE bound.
 
     Strictly stronger than the floating-point LP duals the other routes' bounds
@@ -428,6 +428,8 @@ def test_the_highs_lp_route_names_its_safe_bound():
     m.subject_to(dm.sum(x) <= 4.0)
     m.subject_to(x[0] + 2 * x[1] <= 5.0)
     m.maximize(3 * x[0] + 2 * x[1] + x[2])
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     res = m.solve(time_limit=30)
     assert res.algorithm_route and "highs-lp" in res.algorithm_route
     assert res.bound_valid is True

@@ -1,0 +1,9 @@
+neos-3610051-istra     gmi=0 feasible  bound=48.3131 obj=48.99999999999999 nodes=43159 lifted=['0']
+neos-3610051-istra     gmi=1 feasible  bound=48.2725 obj=48.99999999999999 nodes=32741 lifted=['1293']
+neos-3610040-iskar     gmi=0 feasible  bound=36.1925 obj=38.999999999999964 nodes=92507 lifted=['0']
+neos-3610040-iskar     gmi=1 feasible  bound=36.1378 obj=42.0 nodes=72249 lifted=['2926']
+neos-3611689-kaihu     gmi=0 feasible  bound=117.4735 obj=133.0 nodes=67677 lifted=['0']
+neos-3611689-kaihu     gmi=1 feasible  bound=117.3421 obj=133.0 nodes=52449 lifted=['2029']
+executed 6
+
+[exited with code 0]

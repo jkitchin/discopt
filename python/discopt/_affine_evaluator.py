@@ -61,7 +61,7 @@ def affine_constraint_rows(
     :func:`discopt.modeling.core._builder_row_constraint` builds: ``a x - b`` for
     ``<=``/``==``, ``b - a x`` (sense ``<=``) for ``>=``.
     """
-    from discopt._relax.affine_array import NotAffineError, affine_of
+    from discopt._relax.affine_array import NotAffineError, affine_of, scalar_linear_of
 
     # One memo for every row (#1987): the bodies share their variable and element
     # nodes, which a per-row walk rebuilt as a sparse matrix once per row.
@@ -70,10 +70,40 @@ def affine_constraint_rows(
     blocks = []
     row_map: list[tuple[int, int, Any]] = []
     start = 0
+    # Scalar linear rows (the ``.nl`` shape) skip the per-node sparse algebra and
+    # are assembled as one COO block per run of such rows (highs-parity P2.0).
+    s_rows: list[np.ndarray] = []
+    s_cols: list[np.ndarray] = []
+    s_vals: list[np.ndarray] = []
+    s_b: list[float] = []
+
+    def _flush_scalar() -> None:
+        if not s_b:
+            return
+        k = len(s_b)
+        M = sp.csr_matrix(
+            (np.concatenate(s_vals), (np.concatenate(s_rows), np.concatenate(s_cols))),
+            shape=(k, n_orig),
+        )
+        blocks.append((M, np.asarray(s_b, dtype=np.float64)))
+        for buf in (s_rows, s_cols, s_vals, s_b):
+            buf.clear()
+
     try:
         for con in model._constraints:
             if not isinstance(con, Constraint):
                 continue
+            lin = scalar_linear_of(con.body, model._flat_var_offset, n_orig)
+            if lin is not None:
+                cols, vals, b0 = lin
+                s_rows.append(np.full(cols.shape[0], len(s_b), dtype=np.int64))
+                s_cols.append(cols)
+                s_vals.append(vals)
+                s_b.append(b0)
+                row_map.append((start, start + 1, con))
+                start += 1
+                continue
+            _flush_scalar()
             aff = affine_of(con.body, model._flat_var_offset, n_orig, memo=memo)
             M = aff.M if aff.M is not None else sp.csr_matrix((aff.size, n_orig))
             blocks.append((M, aff.b))
@@ -81,6 +111,7 @@ def affine_constraint_rows(
             start += aff.size
     except NotAffineError:
         return None
+    _flush_scalar()
     builder_blocks = getattr(model, "_builder_linear_blocks", None)
     if builder_blocks:
         lazy_rows = [
@@ -154,7 +185,7 @@ class AffineEvaluator:
         pure-Python degree walks, so a nonlinear model is declined before any
         matrix is assembled.
         """
-        from discopt._relax.affine_array import NotAffineError, affine_of
+        from discopt._relax.affine_array import NotAffineError, affine_of, scalar_linear_of
         from discopt.modeling.core import _expression_degree, _is_fast_linear_quadratic_family
 
         if model._objective is None or not _is_fast_linear_quadratic_family(model):
@@ -167,13 +198,18 @@ class AffineEvaluator:
         rows = affine_constraint_rows(model, n, memo)
         if rows is None:
             return None
+        J, g0, row_map = rows
+        lin = scalar_linear_of(obj, model._flat_var_offset, n)
+        if lin is not None:
+            cols, vals, c0 = lin
+            c = _csr_rows(sp.csr_matrix((vals, (np.zeros_like(cols), cols)), shape=(1, n)), n)
+            return cls(model, J, g0, row_map, c, c0)
         try:
             aff = affine_of(obj, model._flat_var_offset, n, memo=memo)
         except NotAffineError:
             return None
         if aff.size != 1:
             return None
-        J, g0, row_map = rows
         c = None if aff.M is None else _csr_rows(aff.M, n)
         return cls(model, J, g0, row_map, c, float(aff.b[0]))
 

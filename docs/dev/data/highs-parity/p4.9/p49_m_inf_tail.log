@@ -1,0 +1,48 @@
+header {"load": [1.89111328125, 2.54833984375, 2.31591796875], "commit": "d8d40da0", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 4.0} arms ['R', 'H'] n 40
+[run 1/40] M    1451                     {'R': ('optimal', 1, 2.0, '0.079'), 'H': ('optimal', 0, 2.0, '0.083')}
+[run 2/40] M    2122                     {'R': ('feasible', 3, -384502.24594869756, '20.457'), 'H': ('optimal', 2, -187612.9441943997, '1.595')}
+[run 3/40] M    2171                     {'R': ('optimal', 17, -22375.758546075132, '0.125'), 'H': ('optimal', 1, -22375.758546075085, '0.202')}
+[run 4/40] M    bell5                    {'R': ('optimal', 20429, 8966406.491519999, '3.051'), 'H': ('optimal', 416, 8966413.70538, '0.648')}
+[run 5/40] M    bound_implied            {'R': ('optimal', 1, 0.0, '0.120'), 'H': ('optimal', 1, 0.0, '0.119')}
+[run 6/40] M    dcmulti                  {'R': ('optimal', 5287, 188182.00000000183, '2.907'), 'H': ('optimal', 3, 188182.0, '2.328')}
+[run 7/40] M    egout                    {'R': ('optimal', 17, 568.1007, '1.452'), 'H': ('optimal', 1, 568.1007, '0.240')}
+[run 8/40] M    fixed-binary             {'R': ('optimal', 1, 0.0, '0.085'), 'H': ('optimal', 0, 0.0, '0.101')}
+[run 9/40] M    flugpl                   {'R': ('optimal', 319, 1201499.9999999984, '0.127'), 'H': ('optimal', 51, 1201500.0, '0.188')}
+[run 10/40] M    gesa2                    {'R': ('feasible', 11527, 26469004.577775314, '21.046'), 'H': ('optimal', 1, 25779856.371697903, '2.497')}
+[run 11/40] M    gt2                      {'R': ('feasible', 81185, 24106.0, '20.131'), 'H': ('optimal', 1, 21166.0, '0.233')}
+[run 12/40] M    issue-2095               {'R': ('optimal', 1, 3.0, '0.113'), 'H': ('optimal', 1, 3.0, '0.156')}
+[run 13/40] M    issue-2173               {'R': ('optimal', 87, -26770.807548852565, '0.408'), 'H': ('optimal', 29, -26770.807548852565, '0.743')}
+[run 14/40] M    issue-2204               {'R': ('optimal', 1, 6.0, '0.078'), 'H': ('optimal', 1, 6.0, '0.088')}
+[run 15/40] M    issue-2290               {'R': ('optimal', 1, -1.6666666666, '0.108'), 'H': ('optimal', 0, -1.6666666666, '0.129')}
+[run 16/40] M    issue-2388               {'R': ('optimal', 1, 0.0, '0.107'), 'H': ('optimal', 1, 0.0, '0.114')}
+[run 17/40] M    issue-2446               {'R': ('time_limit', 1, None, '20.072'), 'H': ('optimal', 1, -785.3552363096959, '4.451')}
+[run 18/40] M    issue-2585               {'R': ('optimal', 1, -175.91000000000003, '0.084'), 'H': ('optimal', 0, -175.91000000000003, '0.096')}
+[run 19/40] M    lseu                     {'R': ('optimal', 5551, 1120.0, '0.724'), 'H': ('optimal', 5, 1120.0, '0.407')}
+[run 20/40] M    p01                      {'R': ('optimal', 1, 263.0, '0.154'), 'H': ('optimal', 1, 263.0, '0.173')}
+[run 21/40] M    p0548                    {'R': ('time_limit', 1245, None, '13.083'), 'H': ('optimal', 0, 8691.0, '0.524')}
+[run 22/40] M    rgn                      {'R': ('optimal', 2949, 82.1999992400036, '0.516'), 'H': ('optimal', 1, 82.19999923999998, '0.421')}
+[run 23/40] M    small_mip                {'R': ('optimal', 1, 3.2368421052631438, '0.074'), 'H': ('optimal', 0, 3.236842105263158, '0.101')}
+[run 24/40] M    sp150x300d               {'R': ('time_limit', 1963, None, '20.031'), 'H': ('optimal', 1, 69.0, '1.231')}
+[run 25/40] INF  bgetam                   {'R': ('infeasible', 0, None, '0.331'), 'H': ('infeasible', 0, None, '0.258')}
+[run 26/40] INF  box1                     {'R': ('infeasible', 0, None, '0.126'), 'H': ('infeasible', 0, None, '0.131')}
+[run 27/40] INF  cplex1                   {'R': ('infeasible', 0, None, '1.444'), 'H': ('infeasible', 0, None, '0.898')}
+[run 28/40] INF  ex72a                    {'R': ('infeasible', 0, None, '0.104'), 'H': ('infeasible', 0, None, '0.106')}
+[run 29/40] INF  forest6                  {'R': ('infeasible', 0, None, '0.092'), 'H': ('infeasible', 0, None, '0.096')}
+[run 30/40] INF  galenet                  {'R': ('infeasible', 0, None, '0.078'), 'H': ('infeasible', 0, None, '0.078')}
+[run 31/40] INF  gams10am                 {'R': ('infeasible', 0, None, '0.072'), 'H': ('infeasible', 0, None, '0.064')}
+  note R: answered by root presolve, neither engine ran
+  note H: answered by root presolve, neither engine ran
+[run 32/40] INF  gas11                    {'R': ('unbounded', 0, None, '0.365'), 'H': ('unbounded', 0, None, '0.259')}
+[run 33/40] INF  infeasible-mip0          {'R': ('infeasible', 23, None, '0.088'), 'H': ('infeasible', 7, None, '0.316')}
+[run 34/40] INF  infeasible-mip1          {'R': ('infeasible', 71, None, '0.088'), 'H': ('infeasible', 16, None, '0.304')}
+[run 35/40] INF  issue-2402               {'R': ('infeasible', 1, None, '0.086'), 'H': ('infeasible', 0, None, '0.096')}
+[run 36/40] INF  issue-2874-3             {'R': ('infeasible', 1, None, '0.061'), 'H': ('infeasible', 0, None, '0.100')}
+[run 37/40] INF  klein1                   {'R': ('infeasible', 0, None, '0.183'), 'H': ('infeasible', 0, None, '0.211')}
+[run 38/40] INF  refinery                 {'R': ('infeasible', 0, None, '1.534'), 'H': ('infeasible', 0, None, '0.242')}
+[run 39/40] INF  vol1                     {'R': ('infeasible', 0, None, '1.626'), 'H': ('infeasible', 0, None, '0.202')}
+[run 40/40] INF  woodinfe                 {'R': ('infeasible', 0, None, '0.082'), 'H': ('infeasible', 0, None, '0.091')}
+run: panel=INF executed=96
+run: panel=M executed=144
+run: presolve_answered={'R': 1, 'H': 1}
+run: executed=240 incorrect_count=0 walls_gated=0/40 load_end=(1.27490234375, 1.8583984375, 2.10888671875)
+MINF_EXIT 0

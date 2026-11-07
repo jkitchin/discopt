@@ -34,7 +34,20 @@ from typing import Optional
 
 import numpy as np
 import scipy.sparse as sparse
-from scipy.optimize import lsq_linear
+
+
+def lsq_linear(*args, **kwargs):
+    """:func:`scipy.optimize.lsq_linear`, imported on first use (highs-parity P2.0).
+
+    ``scipy.optimize`` costs ~0.16 s to import, and this module is imported by every
+    solve (via ``discopt.validation``) while the refit runs only on the NLP dual path:
+    measured, the pure LP route never calls it. A module-level name, so a test can
+    still patch ``_dual_recovery.lsq_linear``.
+    """
+    from scipy.optimize import lsq_linear as _lsq_linear
+
+    return _lsq_linear(*args, **kwargs)
+
 
 # Distance within which a point counts as sitting ON a bound / row. Matches
 # ``examiner.ACTIVE_TOL``; kept here so the solver does not have to import the

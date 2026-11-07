@@ -1201,8 +1201,17 @@ pub(super) fn farkas_ray_certifies_cols(
     if farkas_ray_certifies_raw(y, cols, n, m, b, l, u) {
         return true;
     }
-    farkas_ray_cleanup_enabled()
+    if farkas_ray_cleanup_enabled()
         && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL)
+    {
+        return true;
+    }
+    // highs-parity P3.2 (`DISCOPT_FARKAS_EXACT_OPEN`, default ON): a ray that must
+    // have an exactly-zero reduced cost on an open column cannot certify in floating
+    // point at all; decide it over the rationals (`farkas_exact`). Sound either way:
+    // the exact check is a proof or a refusal.
+    super::farkas_exact::farkas_exact_open_enabled()
+        && super::farkas_exact::farkas_exact_open(y, cols, n, m, b, l, u)
 }
 
 /// Whether the phase-1 artificial drive-out is monotone in the artificial sum
@@ -1306,7 +1315,7 @@ pub(super) fn farkas_ray_certifies_cleaned(
 }
 
 /// The rigorous verifier behind [`farkas_ray_certifies_cols`] (no cleanup retry).
-fn farkas_ray_certifies_raw(
+pub(super) fn farkas_ray_certifies_raw(
     y: &[f64],
     cols: &SparseCols,
     n: usize,

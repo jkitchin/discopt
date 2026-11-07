@@ -19,6 +19,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from discopt import _iis_backend as _bk
 from discopt import _iis_milp
 from discopt._iis_milp import milp_iis
 from discopt._iis_reduce import Infeasible, Model, reduced_infeasible
@@ -163,7 +164,7 @@ def test_engine_confirms_through_the_reduction_when_presolve_free_cannot(monkeyp
 
     def solve(self, presolve, stop_at=None):
         if presolve == "off":
-            return highspy.HighsModelStatus.kTimeLimit  # the raw route fails
+            return _bk.OTHER  # the raw route fails
         return real(self, presolve, stop_at)
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)
@@ -218,7 +219,7 @@ def test_a_refuted_presolve_on_claim_is_not_recorded_as_proven(monkeypatch):
 
     def solve(self, presolve, stop_at=None):
         if presolve == "choose":
-            return highspy.HighsModelStatus.kInfeasible  # a false presolve-on claim
+            return _bk.INFEASIBLE  # a false presolve-on claim
         return real(self, presolve, stop_at)
 
     monkeypatch.setattr(_iis_milp._Engine, "_solve", solve)

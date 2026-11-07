@@ -1,0 +1,7 @@
+neos-3610051-istra     gmi=0 feasible  bound=48.3150 obj=48.99999999999999 nodes=43609 lifted=['NodeGmiNodes=0', 'NodeGmiRaw=0', 'NodeGmiCuts=0', 'NodeGmiLpFail=0', 'NodeGmiNsAbstain=0', 'NodeGmiLifted=0', 'NodeGmiInheritSolves=0']
+neos-3610051-istra     gmi=1 feasible  bound=48.1838 obj=48.99999999999999 nodes=21251 lifted=['NodeGmiNodes=1343', 'NodeGmiRaw=18144', 'NodeGmiCuts=16601', 'NodeGmiLpFail=0', 'NodeGmiNsAbstain=1563', 'NodeGmiLifted=7381', 'NodeGmiInheritSolves=10673']
+neos-3610040-iskar     gmi=0 feasible  bound=36.1904 obj=38.999999999999964 nodes=91805 lifted=['NodeGmiNodes=0', 'NodeGmiRaw=0', 'NodeGmiCuts=0', 'NodeGmiLpFail=0', 'NodeGmiNsAbstain=0', 'NodeGmiLifted=0', 'NodeGmiInheritSolves=0']
+neos-3610040-iskar     gmi=1 feasible  bound=36.0795 obj=42.0 nodes=42351 lifted=['NodeGmiNodes=2661', 'NodeGmiRaw=31611', 'NodeGmiCuts=30911', 'NodeGmiLpFail=0', 'NodeGmiNsAbstain=3221', 'NodeGmiLifted=15320', 'NodeGmiInheritSolves=21171']
+neos-3611689-kaihu     gmi=0 feasible  bound=117.4642 obj=133.0 nodes=67031 lifted=['NodeGmiNodes=0', 'NodeGmiRaw=0', 'NodeGmiCuts=0', 'NodeGmiLpFail=0', 'NodeGmiNsAbstain=0', 'NodeGmiLifted=0', 'NodeGmiInheritSolves=0']
+neos-3611689-kaihu     gmi=1 feasible  bound=117.1060 obj=133.0 nodes=34121 lifted=['NodeGmiNodes=2192', 'NodeGmiRaw=32942', 'NodeGmiCuts=31385', 'NodeGmiLpFail=897', 'NodeGmiNsAbstain=2354', 'NodeGmiLifted=10228', 'NodeGmiInheritSolves=17053']
+executed 6

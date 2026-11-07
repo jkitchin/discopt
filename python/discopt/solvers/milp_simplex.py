@@ -71,6 +71,68 @@ _LEGACY_CUT_PROFILE: dict[str, object] = {
     "cut_select": False,
 }
 
+
+def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
+    """Scale each row of the lazy master by a power of two near ``1 / max|a_ij|``
+    (highs-parity D3, ``DISCOPT_MILP_LAZY_ROW_EQUILIBRATE``).
+
+    A positive row scaling changes neither the feasible set nor ``x``, the objective or
+    the bound, and powers of two are exact in floating point. It exists because the
+    P5.1 route panel loses its row-scaled variants (``m3@6``, ``flay03m@6``,
+    ``tls2@6``, ``clay0303hfsg@3/@6``: rows multiplied by 10^U(-span, span)). On
+    ``m3@6`` the Rust lazy master stops after 47 nodes / 0.16 s with status
+    ``feasible`` and bound ``-inf``: a node fathomed without a proof (the unresolved
+    path), where HiGHS's own scaling certifies it. Bound-changing in the §5 sense
+    (different pivot paths). **Default ON** with the D3 master flip (owner,
+    2026-11-07); ``=0`` opts out.
+    """
+
+    def scale(A, b):
+        if A is None:
+            return A, b
+        A = sp.csr_matrix(A, dtype=np.float64)
+        mx = np.zeros(A.shape[0])
+        nz = np.diff(A.indptr) > 0
+        if nz.any():
+            mx[nz] = np.maximum.reduceat(np.abs(A.data), A.indptr[:-1][nz])
+        f = np.ones(A.shape[0])
+        ok = mx > 0
+        # Scale UP only (f >= 1). Scaling a large row DOWN loosens its feasibility
+        # tolerance in original units: measured on ``portfol_roundlot`` (span 0), a
+        # down-scaled master returned a point violating an original row by 9e-6, and
+        # the NLP-BB feasibility guard refused it. Up-scaling small rows, where the
+        # pivoting trouble is, only tightens.
+        f[ok] = np.maximum(1.0, np.exp2(-np.round(np.log2(mx[ok]))))
+        return sp.csr_matrix(sp.diags(f) @ A), np.asarray(b, dtype=np.float64) * f
+
+    A_ub, b_ub = scale(A_ub, b_ub)
+    A_eq, b_eq = scale(A_eq, b_eq)
+    return A_ub, b_ub, A_eq, b_eq
+
+
+def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
+    """Root cut options for the lazy (OA / LP-NLP-BB) master (highs-parity D3).
+
+    ``DISCOPT_MILP_LAZY_ROOT_CUTS=1`` gives the lazy master the root budget the pure-MILP
+    route graduated in September (500 cuts over 50 rounds, efficacy selection) plus the
+    #2107 aggregated c-MIR. That separator was built on exactly these masters: on the
+    ``syn20m03m`` / ``rsyn0820m`` OA masters, one aggregation step closes most of the root
+    gap. The master otherwise runs at :data:`_LEGACY_CUT_PROFILE` (16 cuts, 1 round).
+    Profile of ``syn20m03m`` on the Rust master: 22.8 s of a 30 s solve is in the master
+    tree (14,382 nodes, 35 lazy callbacks), while HiGHS's master certifies it in 9 s. The
+    root-cut phase is capped at a quarter of the master's time. Bound-changing (different
+    master cuts). **Default ON** with the D3 master flip (owner, 2026-11-07); ``=0``
+    opts out. Read at call time.
+    """
+    if os.environ.get("DISCOPT_MILP_LAZY_ROOT_CUTS", "1") == "0" or base.get("root_cuts") == 0:
+        return base
+    out = dict(base)
+    out.update(root_cuts=500, cut_rounds=50, cut_select=True, cmir_cuts=True)
+    if time_limit is not None:
+        out["root_cut_time_s"] = max(0.5, 0.25 * float(time_limit))
+    return out
+
+
 #: The budget the loop is worth now that a round is warm (#1066) — reached ONLY
 #: through :func:`solve_milp`'s escalation, never as a blanket default. Applying
 #: it unconditionally was measured and rejected: it costs the ``tls2`` masters
@@ -1569,6 +1631,8 @@ def solve_milp_with_lazy_cuts(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
+    if os.environ.get("DISCOPT_MILP_LAZY_ROW_EQUILIBRATE", "1") != "0":
+        A_ub, b_ub, A_eq, b_eq = _equilibrate_rows(A_ub, b_ub, A_eq, b_eq)
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m
 
@@ -1728,7 +1792,7 @@ def solve_milp_with_lazy_cuts(
         node_callback=_node_hook,
         node_hook_rounds=int(node_hook_rounds) if _node_hook is not None else 0,
         node_hook_cut_cap=int(node_hook_cut_cap) if _node_hook is not None else 0,
-        **std.lp_kwargs,
+        **_lazy_root_cut_kwargs(std.lp_kwargs, time_limit),
     )
     wall_time = time.perf_counter() - t0
     # The binding counts calls the driver actually made; this side counts calls it

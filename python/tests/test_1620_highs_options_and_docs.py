@@ -59,7 +59,9 @@ def test_highs_options_search_option_passes_through_and_keeps_the_answer():
     assert opt.gap_certified
 
 
-def test_highs_options_applies_to_the_lp_route(capfd):
+def test_highs_options_applies_to_the_lp_route(capfd, monkeypatch):
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     m = dm.Model("lp1620")
     a = m.continuous("a", lb=0, ub=10)
     b = m.continuous("b", lb=0, ub=10)

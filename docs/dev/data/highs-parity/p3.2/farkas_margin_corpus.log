@@ -1,0 +1,82 @@
+DISCOPT_FARKAS_EXACT_OPEN: 74 instances, 20.0 s, 2 jobs
+[1/74] rep0 alan: OFF optimal cert=True bound=2.9249999996590272 | ON optimal cert=True bound=2.9249999996590272 nodes 13/13 load 1.29/1.29 
+[2/74] rep0 4stufen: OFF time_limit cert=False bound=19713.0360634282 | ON time_limit cert=False bound=19713.0360634282 nodes 3/3 load 2.43/1.29 
+[3/74] rep0 bchoco06: OFF time_limit cert=False bound=0.9999887833681252 | ON time_limit cert=False bound=0.9999887833681252 nodes 3/3 load 2.43/1.29 
+[4/74] rep0 bchoco07: OFF time_limit cert=False bound=0.9999909424951968 | ON time_limit cert=False bound=0.9999909424951968 nodes 3/3 load 2.84/2.75 
+[5/74] rep0 bchoco08: OFF time_limit cert=False bound=0.9999923302831512 | ON time_limit cert=False bound=0.9999923302831512 nodes 3/3 load 2.75/2.84 
+[6/74] rep0 beuster: OFF time_limit cert=False bound=6372.124622070452 | ON time_limit cert=False bound=6372.124622070452 nodes 3/3 load 2.6/2.5 
+[7/74] rep0 casctanks: OFF time_limit cert=False bound=5.826144467479539 | ON time_limit cert=False bound=5.826144467479537 nodes 3/3 load 2.46/2.6 
+[8/74] rep0 chance: OFF optimal cert=True bound=29.89437815425806 | ON optimal cert=True bound=29.89437815425806 nodes 0/0 load 2.51/2.47 
+[9/74] rep0 clay0303hfsg: OFF optimal cert=True bound=26669.109572485642 | ON optimal cert=True bound=26669.109572485642 nodes 164/164 load 2.43/2.47 
+[10/74] rep0 contvar: OFF time_limit cert=False bound=171259.2725613927 | ON time_limit cert=False bound=171259.2725613927 nodes 3/3 load 2.47/2.33 
+[11/74] rep0 cvxnonsep_nsig30: OFF optimal cert=True bound=130.61841392487696 | ON optimal cert=True bound=130.61841392487696 nodes 1412/1412 load 2.44/2.36 
+[12/74] rep0 cvxnonsep_psig40r: OFF optimal cert=True bound=86.53657911270008 | ON optimal cert=True bound=86.53657911270008 nodes 8/8 load 2.53/2.31 
+[13/74] rep0 dispatch: OFF optimal cert=True bound=3155.2873921555433 | ON optimal cert=True bound=3155.2873921555433 nodes 1/1 load 2.53/2.53 
+[14/74] rep0 ex1221: OFF optimal cert=True bound=7.667180068812996 | ON optimal cert=True bound=7.667180068812996 nodes 3/3 load 2.56/2.53 
+[15/74] rep0 ex1222: OFF optimal cert=True bound=1.0765430833322536 | ON optimal cert=True bound=1.0765430833322536 nodes 3/3 load 2.56/2.56 
+[16/74] rep0 ex1224: OFF optimal cert=True bound=-0.9434705000000072 | ON optimal cert=True bound=-0.9434705000000072 nodes 5/5 load 2.56/2.56 
+[17/74] rep0 ex1225: OFF optimal cert=True bound=30.999999999999687 | ON optimal cert=True bound=30.999999999999687 nodes 5/5 load 2.52/2.52 
+[18/74] rep0 cvxnonsep_psig30: OFF optimal cert=True bound=78.99179856949351 | ON optimal cert=True bound=78.99179856949351 nodes 923/796 load 2.37/2.53 
+[19/74] rep0 ex1226: OFF optimal cert=True bound=-17.000000000000416 | ON optimal cert=True bound=-17.000000000000416 nodes 5/5 load 2.97/2.8 
+[20/74] rep0 ex14_1_9: OFF optimal cert=True bound=-1.9775220375077173e-16 | ON optimal cert=True bound=-1.9775220375077173e-16 nodes 5/5 load 3.05/3.06 
+[21/74] rep0 ex14_1_7: OFF optimal cert=True bound=-1e-12 | ON optimal cert=True bound=-1e-12 nodes 3/3 load 2.8/3.06 
+[22/74] rep0 ex7_3_1: OFF optimal cert=True bound=0.34173955312361126 | ON optimal cert=True bound=0.34173955312361126 nodes 5/5 load 3.13/3.05 
+[23/74] rep0 ex4_1_5: OFF optimal cert=True bound=-1.0003715904744824e-09 | ON optimal cert=True bound=-1.0003715904744824e-09 nodes 159/159 load 3.05/3.13 
+[24/74] rep0 fac2: OFF optimal cert=True bound=331837498.17643344 | ON optimal cert=True bound=331837498.17643344 nodes 7/7 load 3.6/3.13 
+[25/74] rep0 flay02m: OFF optimal cert=True bound=37.947331916928526 | ON optimal cert=True bound=37.947331916928526 nodes 3/3 load 3.6/3.6 
+[26/74] rep0 flay03m: OFF optimal cert=True bound=48.98844775290874 | ON optimal cert=True bound=48.98844775290874 nodes 280/280 load 3.47/3.6 
+[27/74] rep0 gbd: OFF optimal cert=True bound=2.1999999999968 | ON optimal cert=True bound=2.1999999999968 nodes 0/0 load 3.47/3.47 
+[28/74] rep0 gkocis: OFF optimal cert=True bound=-1.9230987510727555 | ON optimal cert=True bound=-1.9230987510727555 nodes 5/5 load 3.35/3.35 
+[29/74] rep0 haverly: OFF optimal cert=True bound=-400.00000015489013 | ON optimal cert=True bound=-400.00000015489013 nodes 69/69 load 3.35/3.3 
+[30/74] rep0 ex8_5_3: OFF feasible cert=False bound=-0.004160378964035094 | ON feasible cert=False bound=-0.004160378964035094 nodes 201/219 load 3.13/3.32 
+[31/74] rep0 hda: OFF time_limit cert=False bound=-119694.2441393808 | ON time_limit cert=False bound=-119694.2441393808 nodes 3/3 load 3.07/3.27 
+[32/74] rep0 heatexch_gen1: OFF feasible cert=False bound=38183.53174601837 | ON feasible cert=False bound=38183.53174601837 nodes 3/3 load 3.08/3.04 
+[33/74] rep0 heatexch_gen2: OFF feasible cert=False bound=555767.7902857299 | ON feasible cert=False bound=555767.7902857299 nodes 3/3 load 2.74/3.03 
+[34/74] rep0 heatexch_gen3: OFF time_limit cert=False bound=43887.57992562059 | ON time_limit cert=False bound=43887.57992562059 nodes 3/3 load 2.8/2.58 
+[35/74] rep0 m3: OFF optimal cert=True bound=37.7999999998928 | ON optimal cert=True bound=37.7999999998928 nodes 12/12 load 2.65/2.65 
+[36/74] rep0 launch: OFF optimal cert=True bound=2257.797553268617 | ON optimal cert=True bound=2257.797553268617 nodes 5/5 load 2.53/2.54 
+[37/74] rep0 nvs01: OFF optimal cert=True bound=12.469668821568018 | ON optimal cert=True bound=12.469668821568018 nodes 5/5 load 2.92/2.65 
+[38/74] rep0 nvs02: OFF optimal cert=True bound=5.964184523068852 | ON optimal cert=True bound=5.964184523068852 nodes 301/301 load 2.77/2.77 
+[39/74] rep0 nvs03: OFF optimal cert=True bound=15.999999999982915 | ON optimal cert=True bound=15.999999999982915 nodes 3/3 load 2.77/2.77 
+[40/74] rep0 nvs04: OFF optimal cert=True bound=0.7199999999999773 | ON optimal cert=True bound=0.7199999999999773 nodes 5/5 load 2.77/2.77 
+[41/74] rep0 nvs06: OFF optimal cert=True bound=1.7703124999500992 | ON optimal cert=True bound=1.7703124999500992 nodes 1/1 load 2.77/2.7 
+[42/74] rep0 nvs07: OFF optimal cert=True bound=3.9999999999949987 | ON optimal cert=True bound=3.9999999999949987 nodes 3/3 load 2.7/2.7 
+[43/74] rep0 nvs08: OFF optimal cert=True bound=23.449727347181057 | ON optimal cert=True bound=23.449727347181057 nodes 5/5 load 2.7/2.7 
+[44/74] rep0 nvs09: OFF optimal cert=True bound=-43.13433691804334 | ON optimal cert=True bound=-43.13433691804334 nodes 31/31 load 2.82/2.97 
+[45/74] rep0 nvs10: OFF optimal cert=True bound=-310.8000000003177 | ON optimal cert=True bound=-310.8000000003177 nodes 8/8 load 2.99/2.99 
+[46/74] rep0 nvs11: OFF optimal cert=True bound=-431.0092378508183 | ON optimal cert=True bound=-431.0092378508183 nodes 42/42 load 3.08/3.08 
+[47/74] rep0 nvs12: OFF optimal cert=True bound=-481.2000000004844 | ON optimal cert=True bound=-481.2000000004844 nodes 62/62 load 3.08/3.07 
+[48/74] rep0 nvs13: OFF optimal cert=True bound=-585.2000000006469 | ON optimal cert=True bound=-585.2000000164578 nodes 23/19 load 3.07/3.07 
+[49/74] rep0 nvs05: OFF feasible cert=False bound=3.8358328332922156 | ON feasible cert=False bound=3.8358328332922156 nodes 13/11 load 2.82/2.77 
+[50/74] rep0 nvs14: OFF optimal cert=True bound=-40358.15476930149 | ON optimal cert=True bound=-40358.15476930149 nodes 303/303 load 3.07/2.98 
+[51/74] rep0 nvs15: OFF optimal cert=True bound=0.9999999999961277 | ON optimal cert=True bound=0.9999999999961277 nodes 8/8 load 2.98/2.98 
+[52/74] rep0 nvs21: OFF optimal cert=True bound=-5.684782500007601 | ON optimal cert=True bound=-5.684782500007601 nodes 5/5 load 2.98/2.98 
+[53/74] rep0 oaer: OFF optimal cert=True bound=-1.9230985228940891 | ON optimal cert=True bound=-1.9230985228940891 nodes 3/3 load 2.98/2.98 
+[54/74] rep0 st_e11: OFF optimal cert=True bound=189.3116296865995 | ON optimal cert=True bound=189.3116296865995 nodes 5/5 load 2.9/2.9 
+[55/74] rep0 st_e13: OFF optimal cert=True bound=1.999999999997 | ON optimal cert=True bound=1.999999999997 nodes 1/1 load 3.07/3.07 
+[56/74] rep0 st_e29: OFF optimal cert=True bound=-0.9434705000000072 | ON optimal cert=True bound=-0.9434705000000072 nodes 5/5 load 3.31/3.07 
+[57/74] rep0 st_e36: OFF optimal cert=True bound=-246.00000000045293 | ON optimal cert=True bound=-246.00000000045293 nodes 109/109 load 3.31/3.23 
+[58/74] rep0 prolog: OFF feasible cert=False bound=None | ON feasible cert=False bound=None nodes 117/117 load 2.98/3.36 
+[59/74] rep0 st_e38: OFF optimal cert=True bound=7197.727148009189 | ON optimal cert=True bound=7197.727148009189 nodes 3/3 load 4.12/4.12 
+[60/74] rep0 st_miqp1: OFF optimal cert=True bound=280.9999999997175 | ON optimal cert=True bound=280.9999999997175 nodes 3/3 load 3.95/3.95 
+[61/74] rep0 st_miqp2: OFF optimal cert=True bound=1.9999999999469644 | ON optimal cert=True bound=1.9999999999469644 nodes 2/2 load 3.95/3.95 
+[62/74] rep0 st_miqp3: OFF optimal cert=True bound=-6.000000000008493 | ON optimal cert=True bound=-6.000000000008493 nodes 1/1 load 3.95/3.95 
+[63/74] rep0 st_miqp4: OFF optimal cert=True bound=-4574.0000000045775 | ON optimal cert=True bound=-4574.0000000045775 nodes 1/1 load 3.95/3.95 
+[64/74] rep0 st_miqp5: OFF optimal cert=True bound=-333.88888890070234 | ON optimal cert=True bound=-333.88888890070234 nodes 1/1 load 3.95/3.95 
+[65/74] rep0 st_test1: OFF optimal cert=True bound=-3.4689037408334897e-11 | ON optimal cert=True bound=-3.4689037408334897e-11 nodes 17/17 load 3.95/3.95 
+[66/74] rep0 syn05hfsg: OFF optimal cert=True bound=837.7420768788216 | ON optimal cert=True bound=837.7420768788216 nodes 2/2 load 3.79/3.79 
+[67/74] rep0 st_testgr3: OFF optimal cert=True bound=-20.59000000002205 | ON optimal cert=True bound=-20.59000000002205 nodes 23/23 load 3.79/3.79 
+[68/74] rep0 tls2: OFF optimal cert=True bound=5.299999999999999 | ON optimal cert=True bound=5.299999999999999 nodes 23/23 load 3.73/3.79 
+[69/74] rep0 tanksize: OFF optimal cert=True bound=1.2685218386975698 | ON optimal cert=True bound=1.2685218386975698 nodes 461/461 load 3.79/3.73 
+[70/74] rep0 tspn05: OFF optimal cert=True bound=191.25513611344041 | ON optimal cert=True bound=191.25513611344041 nodes 21/21 load 3.73/3.75 
+[71/74] rep0 tspn08: OFF feasible cert=False bound=246.46625866978357 | ON feasible cert=False bound=246.46625866978357 nodes 15/15 load 3.48/3.75 
+[72/74] rep0 tspn10: OFF feasible cert=False bound=165.1198903310219 | ON feasible cert=False bound=165.1198903310219 nodes 15/15 load 3.69/3.44 
+[73/74] rep0 tspn12: OFF feasible cert=False bound=183.32577435388293 | ON feasible cert=False bound=183.32577435388293 nodes 7/7 load 3.34/3.14 
+[74/74] rep0 wallfix: OFF feasible cert=False bound=0.0 | ON feasible cert=False bound=0.0 nodes 207/207 load 3.12/3.5 
+
+rows 74 | instances with a problem: 0
+certified OFF 56 -> ON 56 | gained [] | lost []
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 130
+wall 556 s

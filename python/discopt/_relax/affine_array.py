@@ -365,3 +365,158 @@ def affine_of(
             _combine(node, [memo[id(k)][1] for k in kids], offset_of, n, allow_parameters),
         )
     return memo[id(expr)][1]
+
+
+def scalar_linear_of(
+    expr: Expression, offset_of: Callable[[Variable], int], n: int
+) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+    """``(cols, vals, b)`` with ``expr(x) = vals @ x[cols] + b``, or ``None`` (highs-parity P2.0).
+
+    The fast path of :func:`affine_of` for the shape a ``.nl`` row has: a scalar tree
+    of ``+``, ``-``, ``neg``, n-ary sums and products/quotients by scalar constants
+    over scalar variables. :func:`affine_of` builds one scipy matrix per node, and
+    the constructor overhead (~0.2 ms) is the whole cost on such rows: 491 rows and
+    9,461 nodes took 1.7 s on ``scrs8``. Here the walk accumulates ``scale * leaf``
+    into one dict instead, with no matrix per node.
+
+    Exact in the same sense as :func:`affine_of`: the coefficients are products of
+    the same constants and sums of the same terms, so they can differ from it only by
+    the order of floating-point products and additions (round-off). Any node outside
+    that grammar -- an array shape, an index, a matrix product, a nonlinear operator,
+    a product of two non-constants -- returns ``None``, and the caller uses
+    :func:`affine_of`, which then raises or succeeds exactly as before.
+    """
+    coef: dict[int, float] = {}
+    b = 0.0
+    stack: list[tuple[Expression, float]] = [(expr, 1.0)]
+
+    def _scalar_const(node: Expression) -> Optional[float]:
+        if isinstance(node, (Constant, Parameter)):
+            v = np.asarray(node.value)
+            if v.shape == ():
+                return float(v)
+        return None
+
+    while stack:
+        node, scale = stack.pop()
+        if isinstance(node, Variable):
+            if node.shape != ():
+                return None
+            off = int(offset_of(node))
+            if off < 0 or off >= n:
+                return None
+            coef[off] = coef.get(off, 0.0) + scale
+        elif isinstance(node, (Constant, Parameter)):
+            c = _scalar_const(node)
+            if c is None:
+                return None
+            b += scale * c
+        elif isinstance(node, BinaryOp):
+            op = node.op
+            if op == "+":
+                stack.append((node.right, scale))
+                stack.append((node.left, scale))
+            elif op == "-":
+                stack.append((node.right, -scale))
+                stack.append((node.left, scale))
+            elif op == "*":
+                cl, cr = _scalar_const(node.left), _scalar_const(node.right)
+                if cl is not None:
+                    stack.append((node.right, scale * cl))
+                elif cr is not None:
+                    stack.append((node.left, scale * cr))
+                else:
+                    return None
+            elif op == "/":
+                cr = _scalar_const(node.right)
+                if cr is None or cr == 0.0:
+                    return None
+                stack.append((node.left, scale * (1.0 / cr)))
+            elif op == "**":
+                cr = _scalar_const(node.right)
+                if cr is None or cr != 1.0:
+                    return None
+                stack.append((node.left, scale))
+            else:
+                return None
+        elif isinstance(node, UnaryOp):
+            if node.op != "neg":
+                return None
+            stack.append((node.operand, -scale))
+        elif isinstance(node, SumOverExpression):
+            if any(getattr(t, "shape", None) != () for t in node.terms):
+                return None
+            for t in reversed(node.terms):
+                stack.append((t, scale))
+        else:
+            return None
+    cols = np.fromiter(coef.keys(), dtype=np.int64, count=len(coef))
+    vals = np.fromiter(coef.values(), dtype=np.float64, count=len(coef))
+    return cols, vals, float(b)
+
+
+def is_scalar_linear(expr: Expression, *, allow_parameters: bool = True) -> bool:
+    """True when ``expr`` is in :func:`scalar_linear_of`'s grammar, read structurally.
+
+    The same grammar -- a scalar tree of ``+``, ``-``, ``neg``, n-ary sums, products by
+    a scalar constant, quotients by a nonzero scalar constant and ``**1`` over scalar
+    variables and constants -- with no coefficient arithmetic and no variable offsets.
+    ``allow_parameters=False`` treats a ``Parameter`` as outside the grammar, for a
+    caller that only exempts ``Constant`` coefficients (``has_factorable_work``:
+    ``_find_clearable_denominator`` skips a ``Constant`` denominator only, so a row
+    with a ``Parameter`` in it gets the full scan rather than a shortcut).
+    """
+    consts: tuple[type, ...] = (Constant, Parameter) if allow_parameters else (Constant,)
+
+    def _scalar_const(node: Expression) -> Optional[float]:
+        if isinstance(node, consts):
+            v = np.asarray(node.value)  # type: ignore[attr-defined]
+            if v.shape == ():
+                return float(v)
+        return None
+
+    stack: list[Expression] = [expr]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, Variable):
+            if node.shape != ():
+                return False
+        elif isinstance(node, (Constant, Parameter)):
+            if _scalar_const(node) is None:
+                return False
+        elif isinstance(node, BinaryOp):
+            op = node.op
+            if op in ("+", "-"):
+                stack.append(node.right)
+                stack.append(node.left)
+            elif op == "*":
+                if _scalar_const(node.left) is not None:
+                    stack.append(node.right)
+                elif _scalar_const(node.right) is not None:
+                    stack.append(node.left)
+                else:
+                    return False
+            elif op == "/":
+                cr = _scalar_const(node.right)
+                if cr is None or cr == 0.0:
+                    return False
+                stack.append(node.left)
+            elif op == "**":
+                if _scalar_const(node.right) != 1.0:
+                    return False
+                stack.append(node.left)
+            else:
+                return False
+        elif isinstance(node, UnaryOp):
+            if node.op != "neg":
+                return False
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+        else:
+            return False
+    return True

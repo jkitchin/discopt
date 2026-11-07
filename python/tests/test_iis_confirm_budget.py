@@ -20,6 +20,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from discopt import _iis_backend as _bk
 from discopt import _iis_milp
 from discopt._iis_milp import _Engine, milp_iis
 
@@ -45,14 +46,14 @@ def _engine(probe_tl=0.5, deadline=None):
 def _captured_time_limits(eng, monkeypatch):
     """HiGHS time_limit values set by ``_solve``, relative to the run clock."""
     limits: list[float] = []
-    real = eng.h.setOptionValue
+    real = eng.backend.h.setOptionValue
 
     def spy(name, value):
         if name == "time_limit":
-            limits.append(value - eng.h.getRunTime())
+            limits.append(value - eng.backend.h.getRunTime())
         return real(name, value)
 
-    monkeypatch.setattr(eng.h, "setOptionValue", spy)
+    monkeypatch.setattr(eng.backend.h, "setOptionValue", spy)
     return limits
 
 
@@ -131,7 +132,7 @@ def test_final_confirmation_still_refutes_a_wrong_presolve_on_claim(monkeypatch)
 
     def solve(self, presolve, stop_at=None):
         if presolve == "off" and state["armed"] and not state["used"]:
-            return highspy.HighsModelStatus.kOptimal
+            return _bk.OPTIMAL
         return real_solve(self, presolve, stop_at)
 
     def witness(self, stop_at=None):

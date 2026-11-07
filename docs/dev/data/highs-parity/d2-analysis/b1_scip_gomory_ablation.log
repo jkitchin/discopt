@@ -1,0 +1,46 @@
+neos-3610040-iskar   drop=(none)         optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=aggregation    optimal    nodes=  3042 t=  3.9 bound=37.0000
+neos-3610040-iskar   drop=gomory         timelimit  nodes= 27882 t= 30.0 bound=35.9671
+neos-3610040-iskar   drop=zerohalf       optimal    nodes=  1605 t=  3.4 bound=37.0000
+neos-3610040-iskar   drop=impliedbounds  optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=clique         optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=intobj         optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=rapidlearning  optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=cmir           optimal    nodes=   909 t=  2.4 bound=37.0000
+neos-3610040-iskar   drop=flowcover      optimal    nodes=  1072 t=  3.5 bound=37.0000
+neos-3610040-iskar   drop=mcf            optimal    nodes=  1174 t=  3.2 bound=37.0000
+neos-3610040-iskar   drop=knapsackcover  optimal    nodes=  1228 t=  3.5 bound=37.0000
+neos-3610040-iskar   drop=strongcg       optimal    nodes=  1030 t=  2.5 bound=37.0000
+neos-3610040-iskar   drop=oddcycle       optimal    nodes=  1174 t=  3.1 bound=37.0000
+neos-3610040-iskar   drop=conflict       optimal    nodes=   617 t=  1.9 bound=37.0000
+neos-3610051-istra   drop=(none)         optimal    nodes=   961 t=  6.0 bound=49.0000
+neos-3610051-istra   drop=aggregation    optimal    nodes=  3384 t=  8.8 bound=49.0000
+neos-3610051-istra   drop=gomory         timelimit  nodes= 15529 t= 30.0 bound=47.9827
+neos-3610051-istra   drop=zerohalf       optimal    nodes=   515 t=  3.4 bound=49.0000
+neos-3610051-istra   drop=impliedbounds  optimal    nodes=   961 t=  6.1 bound=49.0000
+neos-3610051-istra   drop=clique         optimal    nodes=   961 t=  6.1 bound=49.0000
+neos-3610051-istra   drop=intobj         optimal    nodes=   961 t=  6.0 bound=49.0000
+neos-3610051-istra   drop=rapidlearning  optimal    nodes=   961 t=  6.1 bound=49.0000
+neos-3610051-istra   drop=cmir           optimal    nodes=  1154 t=  4.8 bound=49.0000
+neos-3610051-istra   drop=flowcover      optimal    nodes=  1179 t=  4.9 bound=49.0000
+neos-3610051-istra   drop=mcf            optimal    nodes=   961 t=  6.1 bound=49.0000
+neos-3610051-istra   drop=knapsackcover  optimal    nodes=  1577 t=  6.8 bound=49.0000
+neos-3610051-istra   drop=strongcg       optimal    nodes=   468 t=  3.4 bound=49.0000
+neos-3610051-istra   drop=oddcycle       optimal    nodes=   961 t=  6.1 bound=49.0000
+neos-3610051-istra   drop=conflict       optimal    nodes=   683 t=  4.5 bound=49.0000
+executed 30
+neos-3610040-iskar   all, gomory root-only    timelimit  nodes= 30555 t= 30.0 bound=36.0000
+neos-3610040-iskar   all, gomory tree-only    optimal    nodes=  1686 t=  3.5 bound=37.0000
+neos-3610040-iskar   gomory+aggregation       timelimit  nodes= 37899 t= 30.0 bound=35.4758
+neos-3610040-iskar   gomory+intobj            timelimit  nodes= 38479 t= 30.0 bound=35.4806
+neos-3610040-iskar   gomory+zerohalf          timelimit  nodes= 37695 t= 30.0 bound=35.4731
+neos-3610040-iskar   gomory+strongcg+cmir     timelimit  nodes= 38031 t= 30.0 bound=35.4765
+neos-3610040-iskar   gomory+gomorymi          optimal    nodes=  1526 t=  2.3 bound=37.0000
+neos-3610051-istra   all, gomory root-only    optimal    nodes= 11440 t= 26.5 bound=49.0000
+neos-3610051-istra   all, gomory tree-only    optimal    nodes=  1581 t=  6.5 bound=49.0000
+neos-3610051-istra   gomory+aggregation       timelimit  nodes= 19686 t= 30.0 bound=46.9782
+neos-3610051-istra   gomory+intobj            timelimit  nodes= 19637 t= 30.0 bound=46.9773
+neos-3610051-istra   gomory+zerohalf          timelimit  nodes= 19924 t= 30.0 bound=46.9824
+neos-3610051-istra   gomory+strongcg+cmir     timelimit  nodes= 20243 t= 30.0 bound=46.9930
+neos-3610051-istra   gomory+gomorymi          optimal    nodes=  5478 t= 11.1 bound=49.0000
+executed 14

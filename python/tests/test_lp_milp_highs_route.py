@@ -409,14 +409,15 @@ def test_highs_route_skips_discopt_root_presolve(monkeypatch, build):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(pp, "run_root_presolve", counting)
-    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    ref = build().solve()
-    rust_calls = len(calls)
-    assert rust_calls > 0  # the probe fires on the route that keeps presolve
+    # The control is the native route, which keeps presolve (the Rust route skips it
+    # too since highs-parity P2.0, so it can no longer show the probe firing).
+    ref = build().solve(milp_backend="native")
+    native_calls = len(calls)
+    assert native_calls > 0  # the probe fires on the route that keeps presolve
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     res = build().solve()
     assert _on_highs_route(res) and res.status == "optimal" and res.gap_certified
-    assert len(calls) == rust_calls
+    assert len(calls) == native_calls
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)
 
 

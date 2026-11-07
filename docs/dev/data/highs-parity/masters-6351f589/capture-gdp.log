@@ -1,0 +1,9 @@
+capture-gdp: gdplib not installed; skipping 17: ['batch_processing', 'biofuel', 'cstr', 'disease_model', 'ex1_linan_2023', 'gdp_col', 'hda', 'kaibel', 'med_term_purchasing', 'methanol', 'mod_hens', 'modprodnet', 'positioning', 'small_batch', 'spectralog', 'stranded_gas', 'syngas']
+[gdp 1/7] pyomo.eight_process: rc=0 pyomo.eight_process: status=optimal masters=3 wall=4.08
+[gdp 2/7] pyomo.eight_process_logical: rc=0 pyomo.eight_process_logical: status=optimal masters=3 wall=5.11
+[gdp 3/7] pyomo.strip_packing_concrete: rc=0 pyomo.strip_packing_concrete: status=optimal masters=1 wall=0.23
+[gdp 4/7] pyomo.constrained_layout_clay0203: rc=0 pyomo.constrained_layout_clay0203: status=optimal masters=12 wall=3.41
+[gdp 5/7] pyomo.ex_633_trespalacios: rc=0 pyomo.ex_633_trespalacios: status=optimal masters=5 wall=1.93
+[gdp 6/7] pyomo.nonconvex_hen: rc=0 pyomo.nonconvex_hen: status=optimal masters=28 wall=2.88
+[gdp 7/7] pyomo.jobshop_small: rc=0 pyomo.jobshop_small: status=optimal masters=1 wall=0.21
+capture-gdp: instances=7 masters=53

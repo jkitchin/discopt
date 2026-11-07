@@ -1,0 +1,43 @@
+header {"load": [1.26513671875, 1.775390625, 1.25048828125], "commit": "f36679e3", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python", "load_gate": 2.0} arms ['R', 'H', 'H0'] n 38
+[run 1/38] MIPLIB neos-1425699             {'R': ('time_limit', 3551, None, '20.100'), 'H': ('optimal', 1, 3179698977.0, '0.522'), 'H0': ('optimal', 1, 3179698977.0, '0.286')}
+[run 2/38] MIPLIB blend2                   {'R': ('optimal', 5793, 7.598985, '2.438'), 'H': ('optimal', 72, 7.598985, '4.819'), 'H0': ('optimal', 67, 7.598985, '3.364')}
+[run 3/38] MIPLIB enlight8                 {'R': ('optimal', 98706, 27.0, '9.257*'), 'H': ('optimal', 412, 27.0, '3.806*'), 'H0': ('optimal', 412, 27.00000000000027, '3.631*')}  (* wall indicative: load over the gate)
+[run 4/38] MIPLIB p0201                    {'R': ('optimal', 587, 7614.999999999998, '1.163*'), 'H': ('optimal', 5, 7615.0, '2.047*'), 'H0': ('optimal', 5, 7614.999999997075, '0.966*')}  (* wall indicative: load over the gate)
+[run 5/38] MIPLIB mik-250-20-75-5          {'R': ('feasible', 13113, -25062.999999999956, '12.376*'), 'H': ('optimal', 159, -51532.0, '13.200*'), 'H0': ('optimal', 71, -51532.00000000009, '3.332*')}  (* wall indicative: load over the gate)
+[run 6/38] MIPLIB neos-911970              {'R': ('feasible', 7, 226.5099999999999, '10.923*'), 'H': ('optimal', 1077, 54.760000000209644, '18.295*'), 'H0': ('optimal', 1370, 54.76000000000019, '15.345*')}  (* wall indicative: load over the gate)
+[run 7/38] MIPLIB mik-250-20-75-3          {'R': ('feasible', 8797, -39298.999999999985, '12.595*'), 'H': ('optimal', 433, -52242.0, '17.912*'), 'H0': ('optimal', 455, -52242.00000000018, '6.160*')}  (* wall indicative: load over the gate)
+[run 8/38] MIPLIB fiber                    {'R': ('feasible', 1205, 628445.84, '12.003*'), 'H': ('optimal', 7, 405935.18, '3.412*'), 'H0': ('optimal', 9, 405935.17999999196, '1.358*')}  (* wall indicative: load over the gate)
+[run 9/38] MIPLIB khb05250                 {'R': ('feasible', 715, 111632934.0000011, '12.608'), 'H': ('optimal', 1, 106940226.0, '3.800'), 'H0': ('optimal', 1, 106940226.0, '0.352')}
+[run 10/38] MIPLIB nexp-50-20-1-1           {'R': ('feasible', 7031, 48.0, '10.671*'), 'H': ('optimal', 1, 29.0, '0.900*'), 'H0': ('optimal', 1, 29.0, '0.087*')}  (* wall indicative: load over the gate)
+[run 11/38] MIPLIB mik-250-20-75-2          {'R': ('feasible', 9295, -29920.99999999997, '12.583*'), 'H': ('optimal', 91, -50767.999999997235, '9.433*'), 'H0': ('optimal', 89, -50768.00000057641, '4.179*')}  (* wall indicative: load over the gate)
+[run 12/38] MIPLIB 22433                    {'R': ('optimal', 149, 21476.999999999996, '2.011*'), 'H': ('optimal', 4, 21477.0, '4.898*'), 'H0': ('optimal', 1, 21477.0, '3.505*')}  (* wall indicative: load over the gate)
+[run 13/38] MIPLIB nexp-50-20-4-2           {'R': ('feasible', 127, 80.0, '11.556*'), 'H': ('optimal', 1, 71.0, '3.602*'), 'H0': ('optimal', 1, 71.0, '2.071*')}  (* wall indicative: load over the gate)
+[run 14/38] MIPLIB gt2                      {'R': ('feasible', 49589, 24106.0, '20.248*'), 'H': ('optimal', 1, 21166.0, '0.403*'), 'H0': ('optimal', 1, 21166.0, '0.073*')}  (* wall indicative: load over the gate)
+[run 15/38] MIPLIB mik-250-20-75-1          {'R': ('feasible', 14161, -5528.999999999964, '12.686*'), 'H': ('optimal', 453, -49716.0, '17.485*'), 'H0': ('optimal', 1099, -49716.00000000007, '10.201*')}  (* wall indicative: load over the gate)
+[run 16/38] MIPLIB 23588                    {'R': ('optimal', 3453, 8090.0, '3.540'), 'H': ('optimal', 997, 8090.0, '19.065'), 'H0': ('optimal', 476, 8089.999999999993, '13.743')}
+[run 17/38] MIPLIB flugpl                   {'R': ('optimal', 443, 1201499.9999999988, '0.132'), 'H': ('optimal', 51, 1201500.0, '0.257'), 'H0': ('optimal', 89, 1201500.0, '0.123')}
+[run 18/38] MIPLIB dcmulti                  {'R': ('optimal', 21353, 188182.0, '6.354'), 'H': ('optimal', 3, 188182.0, '3.806'), 'H0': ('optimal', 5, 188182.0, '1.662')}
+[run 19/38] MIPLIB enlight_hard             {'R': ('time_limit', 4040, None, '20.009'), 'H': ('feasible', 1384, 37.0, '13.192'), 'H0': ('optimal', 2303, 37.0, '17.001')}
+[run 20/38] MIPLIB sp150x300d               {'R': ('feasible', 5253, 93.0, '10.640*'), 'H': ('optimal', 1, 69.0, '1.945*'), 'H0': ('optimal', 1, 69.0, '0.083*')}  (* wall indicative: load over the gate)
+[run 21/38] MIPLIB gen                      {'R': ('optimal', 1765, 112313.36271800015, '4.575*'), 'H': ('optimal', 1, 112313.362718, '1.581*'), 'H0': ('optimal', 1, 112313.362718, '0.025*')}  (* wall indicative: load over the gate)
+[run 22/38] MIPLIB neos17                   {'R': ('feasible', 12063, 0.3960852875695731, '11.637*'), 'H': ('optimal', 1524, 0.15000257742257755, '16.062*'), 'H0': ('optimal', 428, 0.1500025774225771, '10.192*')}  (* wall indicative: load over the gate)
+[run 23/38] MIPLIB beavma                   {'R': ('feasible', 3857, 541302.2, '10.793*'), 'H': ('optimal', 1, 383285.0, '1.390*'), 'H0': ('optimal', 0, 383285.0, '0.303*')}  (* wall indicative: load over the gate)
+[run 24/38] MIPLIB neos-3611447-jijia       {'R': ('feasible', 39503, 133.0, '10.661*'), 'H': ('optimal', 384, 107.0, '5.082*'), 'H0': ('optimal', 384, 107.0, '3.229*')}  (* wall indicative: load over the gate)
+[run 25/38] MIPLIB neos-3610051-istra       {'R': ('feasible', 19851, 55.0, '11.069*'), 'H': ('optimal', 288, 49.0, '13.677*'), 'H0': ('optimal', 288, 48.99999999999997, '3.804*')}  (* wall indicative: load over the gate)
+[run 26/38] MIPLIB neos-3611689-kaihu       {'R': ('feasible', 47349, 145.0, '10.500*'), 'H': ('optimal', 283, 119.0, '4.762*'), 'H0': ('optimal', 283, 119.0, '2.432*')}  (* wall indicative: load over the gate)
+[run 27/38] MIPLIB neos-3610040-iskar       {'R': ('feasible', 48691, 42.0, '10.525*'), 'H': ('optimal', 380, 37.0, '11.201*'), 'H0': ('optimal', 380, 36.99999999999998, '2.164*')}  (* wall indicative: load over the gate)
+[run 28/38] MIPLIB neos-5192052-neckar      {'R': ('optimal', 25, -11669999.999999985, '0.432*'), 'H': ('optimal', 1, -11670000.0, '0.587*'), 'H0': ('optimal', 1, -11669999.999999994, '0.056*')}  (* wall indicative: load over the gate)
+[run 29/38] MIPLIB neos-2624317-amur        {'R': ('time_limit', 429, None, '20.014*'), 'H': ('feasible', 1042, 7.4855968, '13.449*'), 'H0': ('Time limit reached', 3366, 3.5223967999999988, '20.009*')}  (* wall indicative: load over the gate)
+[run 30/38] MIPLIB app2-2                   {'R': ('optimal', 225, 212042.49999999767, '1.903'), 'H': ('optimal', 1, 212040.5, '3.096'), 'H0': ('optimal', 1, 212040.5, '0.550')}
+[run 31/38] MIPLIB b-ball                   {'R': ('feasible', 214711, -1.5, '10.177'), 'H': ('optimal', 101, -1.5, '0.393'), 'H0': ('optimal', 102, -1.500001, '0.196')}
+[run 32/38] MIPLIB bppc8-02                 {'R': ('feasible', 8923, 513.0, '10.989*'), 'H': ('optimal', 152, 507.0, '1.489*'), 'H0': ('optimal', 1, 507.0, '0.378*')}  (* wall indicative: load over the gate)
+[run 33/38] MIPLIB supportcase16            {'R': ('optimal', 125, 287.99999999999994, '2.036*'), 'H': ('optimal', 1, 288.0, '0.796*'), 'H0': ('optimal', 1, 287.99999999999955, '0.068*')}  (* wall indicative: load over the gate)
+[run 34/38] MIPLIB supportcase14            {'R': ('optimal', 223, 288.0, '2.464'), 'H': ('optimal', 1, 288.0, '0.661'), 'H0': ('optimal', 1, 288.0000000000003, '0.070')}
+[run 35/38] MIPLIB f2gap40400               {'R': ('optimal', 1, 20772.000000000004, '0.582'), 'H': ('optimal', 1, 20772.0, '0.631'), 'H0': ('optimal', 1, 20772.0, '0.015')}
+[run 36/38] MIPLIB gsvm2rl3                 {'R': ('feasible', 40997, 0.5863548183028108, '11.101*'), 'H': ('optimal', 2547, 0.3365275339619651, '14.294*'), 'H0': ('Time limit reached', 4636, 0.33652753396149504, '20.002*')}  (* wall indicative: load over the gate)
+[run 37/38] MIPLIB neos-3118745-obra        {'R': ('feasible', 24191, 310.0, '11.333*'), 'H': ('feasible', 1505, 255.99999999999997, '21.010*'), 'H0': ('Time limit reached', 2151, 255.99999999999955, '20.006*')}  (* wall indicative: load over the gate)
+[run 38/38] MIPLIB gr4x6                    {'R': ('optimal', 195, 202.34999999999988, '0.202'), 'H': ('optimal', 1, 202.35000000000002, '0.209'), 'H0': ('optimal', 1, 202.35, '0.019')}
+run: panel=MIPLIB executed=342
+run: presolve_answered={}
+run: executed=342 incorrect_count=0 walls_gated=26/38 load_end=(1.89111328125, 1.87939453125, 1.919921875)
+RC=0 2026-11-04T13:14:53Z
