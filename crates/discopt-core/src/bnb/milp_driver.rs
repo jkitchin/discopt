@@ -1577,6 +1577,196 @@ fn try_sub_mip(
     }
 }
 
+// ---------------------------------------------------------------------------
+// D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`, default OFF)
+// ---------------------------------------------------------------------------
+// HiGHS's first incumbent on the no-incumbent D2 rows comes from randomized rounding
+// (`HighsPrimalHeuristics.cpp:1117-1202`, source letter `R`: `2122` and `issue-2446` at
+// the root, measured 2026-11-07), not from feasibility jump. Each integer column of a
+// relaxation point is rounded up when no row locks it up, down when none locks it down,
+// and to `floor(x + U(0.1, 0.9))` otherwise; it is fixed and the box propagated; then
+// the LP over the remaining continuous columns is solved on the BASE problem. HiGHS
+// runs it at the root and at every dive start while there is no incumbent
+// (`HighsMipSolverData.cpp:1859, 2112`, `HighsMipSolver.cpp:769`); here it runs on the
+// batch's best-bound fractional node at each batch boundary while there is none.
+// Soundness is the sub-MIP argument: a point is injected only after
+// `validate_seed_incumbent` re-verifies every original row, bound and integrality.
+
+/// `DISCOPT_MILP_RAND_ROUND`, read once; default OFF. Garbage is refused.
+fn rand_round_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_RAND_ROUND").unwrap_or_default();
+        parse_rand_round(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+fn parse_rand_round(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_RAND_ROUND={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// Fix-and-propagate work budget per rounding attempt, in matrix nonzeros touched
+/// (`fixes / stride × nnz`): integers are fixed in strides so the full-box FBBT runs
+/// at most `RAND_ROUND_WORK / nnz` times. HiGHS propagates incrementally after every
+/// fix; a stride of 1 matches it whenever the budget allows.
+const RAND_ROUND_WORK: usize = 20_000_000;
+
+/// Up/down locks of the structural columns (HiGHS `uplocks`/`downlocks`): the number
+/// of rows that moving the column up (down) can violate. A row `Σ a_j x_j + c_s s = b`
+/// with a continuous single-entry slack `s` absorbs a move of `x_j` unless the bound
+/// `s` would have to move toward is finite; a row without such a slack locks both ways.
+fn rounding_locks(base: &SubMipBase, ns: usize) -> (Vec<u32>, Vec<u32>) {
+    let (cp, ri, vals) = base.csc.raw();
+    // Each row's absorbing slack: (coefficient, lower, upper).
+    let mut slack: Vec<Option<(f64, f64, f64)>> = vec![None; base.m];
+    for k in ns..base.n {
+        if cp[k + 1] - cp[k] == 1 && !base.is_int_full[k] {
+            let r = ri[cp[k]];
+            if slack[r].is_none() {
+                slack[r] = Some((vals[cp[k]], base.l[k], base.u[k]));
+            }
+        }
+    }
+    let (mut up, mut down) = (vec![0u32; ns], vec![0u32; ns]);
+    for j in 0..ns {
+        for idx in cp[j]..cp[j + 1] {
+            let a = vals[idx];
+            if a == 0.0 {
+                continue;
+            }
+            match slack[ri[idx]] {
+                None => {
+                    up[j] += 1;
+                    down[j] += 1;
+                }
+                Some((cs, sl, su)) => {
+                    // x_j up by d needs s to move by -a d / cs.
+                    let s_up_when_x_up = -a / cs > 0.0;
+                    let (lim_up, lim_down) = (su < INF, sl > -INF);
+                    if if s_up_when_x_up { lim_up } else { lim_down } {
+                        up[j] += 1;
+                    }
+                    if if s_up_when_x_up { lim_down } else { lim_up } {
+                        down[j] += 1;
+                    }
+                }
+            }
+        }
+    }
+    (up, down)
+}
+
+/// Deterministic uniform draw in `[0, 1)` (splitmix64).
+fn rr_uniform(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// One HiGHS randomized-rounding attempt from relaxation point `node_x`. Returns a
+/// re-validated feasible point `(x over the structural columns, obj incl. obj_const)`.
+#[allow(clippy::too_many_arguments)]
+fn try_randomized_rounding(
+    base: &SubMipBase,
+    locks: &(Vec<u32>, Vec<u32>),
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    seed: u64,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+) -> Option<(Vec<f64>, f64)> {
+    if node_x.len() < ns {
+        return None;
+    }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::RandRound);
+    crate::profile::incr(crate::profile::Ctr::RandRoundRuns);
+    let feastol = opts.simplex.tol.max(1e-6);
+    let mut rng = seed ^ 0xD1B5_4A32_D192_ED03;
+    let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+    let nnz = base.csc.raw().2.len().max(1);
+    let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
+    let (mut sl, mut su) = (base.l.clone(), base.u.clone());
+    for (k, &j) in ints.iter().enumerate() {
+        let x = node_x[j];
+        let v = if locks.0[j] == 0 {
+            (x - feastol).ceil()
+        } else if locks.1[j] == 0 {
+            (x + feastol).floor()
+        } else {
+            (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
+        };
+        let v = v.min(su[j]).max(sl[j]);
+        sl[j] = v;
+        su[j] = v;
+        if (k + 1) % stride == 0 || k + 1 == ints.len() {
+            let pr = tighten_bounds_csc(
+                &base.csc,
+                base.m,
+                base.n,
+                &sl,
+                &su,
+                &base.b,
+                &base.is_int_full,
+                opts.simplex.tol,
+            );
+            if pr.infeasible {
+                crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
+                return None;
+            }
+            sl = pr.l;
+            su = pr.u;
+        }
+    }
+    let mut simplex = opts.simplex.clone();
+    if let Some(d) = deadline {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        simplex.deadline = Some(std::time::Instant::now() + left.mul_f64(0.25));
+    }
+    let sol = solve_lp_root_csc(
+        &base.csc, base.m, base.n, &base.c, &sl, &su, &base.b, &simplex,
+    );
+    if sol.status != LpStatus::Optimal || sol.x.len() < ns {
+        crate::profile::incr(crate::profile::Ctr::RandRoundLpFail);
+        return None;
+    }
+    match validate_seed_incumbent(
+        &sol.x[..ns],
+        ns,
+        is_int,
+        &base.csc,
+        &base.b,
+        &base.c,
+        &base.l,
+        &base.u,
+        base.m,
+        base.n,
+    ) {
+        Some((x, obj)) => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundFound);
+            Some((x, obj + obj_const))
+        }
+        None => {
+            crate::profile::incr(crate::profile::Ctr::RandRoundRejected);
+            None
+        }
+    }
+}
+
 thread_local! {
     /// Recursion depth of the MILP driver on this thread. A nested driver call
     /// (the retired A12 RINS sub-solve was one) must not call
@@ -2661,6 +2851,11 @@ fn solve_milp_node_search(
         b: b_w.clone(),
         is_int_full: is_int_full.clone(),
     });
+    // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): rounding locks over the base problem.
+    let rr_locks: Option<(Vec<u32>, Vec<u32>)> = sub_mip_base
+        .as_ref()
+        .filter(|_| rand_round_enabled())
+        .map(|b| rounding_locks(b, ns));
     // Global cut pool signatures — globally-valid cover cuts found anywhere in
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
@@ -3819,6 +4014,38 @@ fn solve_milp_node_search(
         // In the sequential reduce, so it is deterministic. RENS while the tree holds no
         // incumbent, RINS once it does; the candidate is the batch's best-bound
         // fractional node.
+        // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): HiGHS randomized rounding on the batch's
+        // best-bound fractional node, every batch while there is no incumbent.
+        if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
+            let no_inc = tm
+                .incumbent()
+                .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0);
+            if no_inc {
+                let cand = results
+                    .iter()
+                    .filter(|r| {
+                        !r.is_feasible
+                            && r.lower_bound < INFEAS_SENTINEL - 1.0
+                            && r.solution.len() >= ns
+                    })
+                    .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
+                if let Some(r) = cand {
+                    if let Some((x, v)) = try_randomized_rounding(
+                        base,
+                        locks,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &r.solution,
+                        batch_index as u64,
+                        opts,
+                        deadline,
+                    ) {
+                        tm.inject_incumbent(x, v);
+                    }
+                }
+            }
+        }
         if let Some(base) = sub_mip_base.as_ref() {
             let budget = sub_mip_node_budget(tm.stats().total_nodes, sub_mip_spent);
             sub_mip_since += 1;
@@ -7741,6 +7968,44 @@ mod tests {
         }
         for bad in ["2", "on", "y"] {
             assert!(parse_sb_armed(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn rand_round_parse_and_locks() {
+        for off in ["", "0", "no"] {
+            assert!(!parse_rand_round(off).unwrap());
+        }
+        assert!(parse_rand_round(" 1 ").unwrap());
+        assert!(parse_rand_round("on").is_err());
+        // Rows over x0, x1 (both integer) with aligned slacks (cols 2, 3, 4):
+        //   r0: x0 + x1 + s0 = 4, s0 in [0, inf)   (x0 + x1 <= 4: locks UP only)
+        //   r1: x0 - s1 = 1,      s1 in [0, inf)   (x0 >= 1: locks x0 DOWN only)
+        //   r2: x1 + s2 = 2,      s2 in [0, 0]     (equality: locks x1 both ways)
+        let csc = SparseCols::from_csc(
+            vec![0, 2, 4, 5, 6, 7],
+            vec![0, 1, 0, 2, 0, 1, 2],
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0],
+        );
+        let base = SubMipBase {
+            csc,
+            m: 3,
+            n: 5,
+            c: vec![0.0; 5],
+            l: vec![0.0, 0.0, 0.0, 0.0, 0.0],
+            u: vec![10.0, 10.0, INF, INF, 0.0],
+            b: vec![4.0, 1.0, 2.0],
+            is_int_full: vec![true, true, false, false, false],
+        };
+        let (up, down) = rounding_locks(&base, 2);
+        assert_eq!(up, vec![1, 2], "x0 up-locked by r0; x1 by r0 and r2");
+        assert_eq!(down, vec![1, 1], "x0 down-locked by r1; x1 by r2");
+        // The draw is deterministic and in [0, 1).
+        let (mut a, mut b) = (7u64, 7u64);
+        for _ in 0..100 {
+            let (u, v) = (rr_uniform(&mut a), rr_uniform(&mut b));
+            assert_eq!(u, v);
+            assert!((0.0..1.0).contains(&u));
         }
     }
 

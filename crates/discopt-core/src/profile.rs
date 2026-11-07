@@ -145,6 +145,8 @@ timed_phases!(
     DiveRepair,
     // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`).
     SubMip,
+    // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`).
+    RandRound,
     // W1 (D2 plan): the node-GMI step's parts.
     NodeGmiScan,
     NodeGmiAugment,
@@ -353,6 +355,11 @@ counters!(
     SubMipSubNodes,
     SubMipImproved,
     SubMipRejected,
+    RandRoundRuns,
+    RandRoundPropInfeas,
+    RandRoundLpFail,
+    RandRoundFound,
+    RandRoundRejected,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
