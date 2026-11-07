@@ -76,6 +76,14 @@ fn highs_cmir_enabled() -> bool {
     *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_HIGHS"))
 }
 
+/// D2 W4 (`DISCOPT_MILP_LIFTED_MIC`, default OFF): also try HiGHS's lifted
+/// mixed-integer cover (`HighsCutGeneration.cpp:25-129, 280-500`) on every c-MIR base
+/// row and keep whichever of the two cuts is more efficacious.
+fn lifted_mic_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_bool("DISCOPT_MILP_LIFTED_MIC"))
+}
+
 fn cmir_flip_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_FLIP"))
@@ -265,6 +273,7 @@ struct Cut {
 
 /// One integer term of the substituted row: column, complemented?, coefficient on
 /// `y'`, and whether `y'` is integer-valued (the C-4 premise).
+#[derive(Clone, Copy, Debug)]
 struct IntTerm {
     k: usize,
     comp: bool,
@@ -341,9 +350,30 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
     if ints.iter().all(|t| !t.int_ok) || !rhs2.is_finite() {
         return None; // no integer structure to round
     }
-    if highs_cmir_enabled() {
-        return cmir_row_highs(ctx, ints, &conts, rhs2);
+    let lifted = if lifted_mic_enabled() {
+        lifted_mic_cut(ctx, &ints, &conts, rhs2)
+    } else {
+        None
+    };
+    let mir = if highs_cmir_enabled() {
+        cmir_row_highs(ctx, ints, &conts, rhs2)
+    } else {
+        cmir_row_legacy(ctx, &ints, &conts, rhs2)
+    };
+    match (mir, lifted) {
+        (Some(a), Some(b)) => Some(if b.efficacy > a.efficacy { b } else { a }),
+        (a, b) => a.or(b),
     }
+}
+
+/// The pre-W4 delta selection (the first `MAX_DELTAS` integer coefficients by index).
+fn cmir_row_legacy(
+    ctx: &Ctx<'_>,
+    ints: &[IntTerm],
+    conts: &[(usize, Sub, f64)],
+    rhs2: f64,
+) -> Option<Cut> {
+    let (ints, conts) = (ints.to_vec(), conts.to_vec());
     let mut deltas: Vec<f64> = vec![1.0];
     for t in &ints {
         if t.int_ok && t.a.abs() > ctx.tol && deltas.len() <= MAX_DELTAS {
@@ -365,6 +395,355 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
         }
     }
     best
+}
+
+/// HiGHS's lifted mixed-integer cover on a `<=` knapsack in transformed space
+/// (`HighsCutGeneration.cpp:25-129` `determineCover(lpSol = true)` and `:280-500`
+/// `separateLiftedMixedIntegerCover`): `sum vals_i x_i <= rhs` with every integer
+/// `x_i in [0, upper_i]` (`upper_i` integral, `vals_i > 0`) and continuous `x_i >= 0`.
+/// Returns the cut's coefficients (same indexing) and rhs, `sum c_i x_i <= rhs_cut`.
+/// Continuous entries keep a negative coefficient and drop a positive one (a
+/// relaxation at their zero lower bound). Pure, so its validity is brute-forced
+/// directly in the tests.
+fn lifted_mic_knapsack(
+    vals: &[f64],
+    upper: &[f64],
+    solval: &[f64],
+    is_int: &[bool],
+    rhs: f64,
+) -> Option<(Vec<f64>, f64)> {
+    let feastol = HIGHS_FEASTOL;
+    if rhs <= 10.0 * feastol {
+        return None;
+    }
+    // determineCover(lpSol = true)
+    let mut cover: Vec<usize> = (0..vals.len())
+        .filter(|&j| is_int[j] && vals[j] > 0.0 && solval[j] > feastol)
+        .collect();
+    let max_cover = cover.len();
+    let at_upper = |j: usize| solval[j] >= upper[j] - feastol;
+    cover.sort_by_key(|&j| !at_upper(j));
+    let mut coversize = cover.iter().take_while(|&&j| at_upper(j)).count();
+    let mut coverweight: f64 = cover[..coversize].iter().map(|&j| vals[j] * upper[j]).sum();
+    cover[coversize..].sort_by(|&i, &j| {
+        let (bi, bj) = (upper[i] < 1.5, upper[j] < 1.5);
+        if bi != bj {
+            return bj.cmp(&bi);
+        }
+        let (ca, cb) = (solval[i] * vals[i], solval[j] * vals[j]);
+        if ca > cb + feastol {
+            return std::cmp::Ordering::Less;
+        }
+        if ca < cb - feastol {
+            return std::cmp::Ordering::Greater;
+        }
+        vals[j].total_cmp(&vals[i]).then(i.cmp(&j))
+    });
+    let minlambda = (10.0 * feastol).max(feastol * rhs.abs());
+    while coversize != max_cover {
+        if coverweight - rhs > minlambda {
+            break;
+        }
+        let j = cover[coversize];
+        coverweight += vals[j] * upper[j];
+        coversize += 1;
+    }
+    if coversize == 0 {
+        return None;
+    }
+    let lambda = coverweight - rhs;
+    if lambda <= minlambda {
+        return None;
+    }
+    cover.truncate(coversize);
+    let in_cover: Vec<bool> = {
+        let mut f = vec![false; vals.len()];
+        for &j in &cover {
+            f[j] = true;
+        }
+        f
+    };
+    // separateLiftedMixedIntegerCover
+    cover.sort_by(|&a, &b| vals[b].total_cmp(&vals[a]).then(a.cmp(&b)));
+    let mut a: Vec<f64> = Vec::with_capacity(coversize);
+    let mut u: Vec<f64> = Vec::with_capacity(coversize + 1);
+    let mut m: Vec<f64> = Vec::with_capacity(coversize + 1);
+    let (mut usum, mut msum) = (0.0f64, 0.0f64);
+    for &i in &cover {
+        u.push(usum);
+        m.push(msum);
+        a.push(vals[i]);
+        usum += upper[i];
+        msum += upper[i] * vals[i];
+    }
+    u.push(usum);
+    m.push(msum);
+    let cplus_end = |thr: f64| cover.iter().take_while(|&&i| thr <= vals[i]).count();
+    let mut lpos: Option<usize> = None;
+    let mut best_cplusend = 0usize;
+    let mut best_lval = 0.0f64;
+    let mut best_at_upper = true;
+    for (i, &j) in cover.iter().enumerate() {
+        let ub = upper[j];
+        let atu = solval[j] >= ub - feastol;
+        if atu && !best_at_upper {
+            continue;
+        }
+        let mju = ub * vals[j];
+        let mu = mju - lambda;
+        if mu <= 10.0 * feastol || vals[j].abs() < 1000.0 * feastol {
+            continue;
+        }
+        let mudival = mu / vals[j];
+        if (mudival - mudival.round()).abs() <= feastol {
+            continue;
+        }
+        let eta = mudival.ceil();
+        let thr = (ub - eta + 1.0) * vals[j];
+        let ce = cplus_end(thr);
+        let mut mcplus = m[ce];
+        if i < ce {
+            mcplus -= mju;
+        }
+        let jl = mcplus + eta * vals[j];
+        if jl > best_lval || (!atu && best_at_upper) {
+            lpos = Some(i);
+            best_cplusend = ce;
+            best_lval = jl;
+            best_at_upper = atu;
+        }
+    }
+    let lpos = lpos?;
+    let l = cover[lpos];
+    let al = vals[l];
+    let upperl = upper[l];
+    let mlu = upperl * al;
+    let mu = mlu - lambda;
+    let mut cv: Vec<usize> = cover[..best_cplusend].to_vec();
+    a.truncate(best_cplusend);
+    u.truncate(best_cplusend + 1);
+    m.truncate(best_cplusend + 1);
+    if lpos < best_cplusend {
+        a.remove(lpos);
+        cv.remove(lpos);
+        u.remove(lpos + 1);
+        m.remove(lpos + 1);
+        for i in (lpos + 1)..best_cplusend {
+            u[i] -= upperl;
+            m[i] -= mlu;
+        }
+    }
+    let cplussize = a.len();
+    let mudival = mu / al;
+    let eta = mudival.ceil();
+    let r = (mu - mudival.floor() * al).max(0.0);
+    let ulme1 = upperl - eta + 1.0;
+    let thr = ulme1 * al;
+    let kmin = (eta - upperl - 0.5).floor() as i64;
+    let phi_l = |aa: f64| -> f64 {
+        let mut k = ((aa / al) as i64).min(-1);
+        while k >= kmin {
+            let kf = k as f64;
+            if aa >= kf * al + r {
+                return aa - (kf + 1.0) * r;
+            }
+            if aa >= kf * al {
+                return kf * (al - r);
+            }
+            k -= 1;
+        }
+        kmin as f64 * (al - r)
+    };
+    let kmax = (upperl - eta + 0.5).floor() as i64;
+    let gamma_l = |z: f64| -> f64 {
+        for i in 0..cplussize {
+            let upi = upper[cv[i]] as i64;
+            for h in 0..=upi {
+                let hf = h as f64;
+                let mih = m[i] + hf * a[i];
+                let uih = u[i] + hf;
+                let mpd = mih + a[i] - thr;
+                if z <= mpd {
+                    return uih * ulme1 * (al - r);
+                }
+                let mut k = ((z - mpd) / al) as i64 - 1;
+                while k <= kmax {
+                    let kf = k as f64;
+                    if z <= mpd + kf * al + r {
+                        return (uih * ulme1 + kf) * (al - r);
+                    }
+                    if z <= mpd + (kf + 1.0) * al {
+                        return (uih * ulme1) * (al - r) + z - mih - a[i] + thr - (kf + 1.0) * r;
+                    }
+                    k += 1;
+                }
+            }
+        }
+        let mc = m[cplussize];
+        let mut p = ((z - mc) / al) as i64 - 1;
+        loop {
+            let pf = p as f64;
+            if z <= mc + pf * al + r {
+                return (u[cplussize] * ulme1 + pf) * (al - r);
+            }
+            if z <= mc + (pf + 1.0) * al {
+                return (u[cplussize] * ulme1) * (al - r) + z - mc - (pf + 1.0) * r;
+            }
+            p += 1;
+        }
+    };
+    let mut out = vec![0.0; vals.len()];
+    let mut cut_rhs = (upperl - eta) * r - lambda;
+    for i in 0..vals.len() {
+        let v = vals[i];
+        if v == 0.0 {
+            continue;
+        }
+        if !is_int[i] {
+            if v < 0.0 {
+                out[i] = v;
+            }
+            continue;
+        }
+        if in_cover[i] {
+            out[i] = -phi_l(-v);
+            cut_rhs += out[i] * upper[i];
+        } else {
+            out[i] = gamma_l(v);
+        }
+    }
+    if !cut_rhs.is_finite() || out.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some((out, cut_rhs))
+}
+
+/// `DISCOPT_MILP_LIFTED_MIC`: the lifted mixed-integer cover of one substituted c-MIR
+/// base row (`sum a y' + sum cs s <= rhs2`, `y'` complemented integers, `s >= 0`),
+/// mapped back to `z` exactly as [`try_delta`] maps a MIR. Every integer must have a
+/// finite integral range; integers with a negative coefficient are complemented the
+/// other way first (an affine identity on a finite bound).
+fn lifted_mic_cut(
+    ctx: &Ctx<'_>,
+    ints: &[IntTerm],
+    conts: &[(usize, Sub, f64)],
+    rhs2: f64,
+) -> Option<Cut> {
+    let (l, u, x) = (ctx.l, ctx.u, ctx.x);
+    let mut ints: Vec<IntTerm> = ints.to_vec();
+    let mut rhs = rhs2;
+    for t in ints.iter_mut() {
+        let k = t.k;
+        let range = u[k] - l[k];
+        if l[k] <= -INF || u[k] >= INF || (range - range.round()).abs() > INT_BOUND_TOL || !t.int_ok
+        {
+            return None;
+        }
+        if t.a < 0.0 {
+            let ak = if t.comp { -t.a } else { t.a };
+            let (old_b, new_b) = if t.comp { (u[k], l[k]) } else { (l[k], u[k]) };
+            rhs += ak * old_b - ak * new_b;
+            t.comp = !t.comp;
+            t.a = -t.a;
+        }
+    }
+    let n_i = ints.len();
+    let mut vals = Vec::with_capacity(n_i + conts.len());
+    let mut upper = Vec::with_capacity(n_i + conts.len());
+    let mut solval = Vec::with_capacity(n_i + conts.len());
+    let mut is_int = Vec::with_capacity(n_i + conts.len());
+    for t in &ints {
+        vals.push(t.a);
+        upper.push((u[t.k] - l[t.k]).round());
+        solval.push(if t.comp {
+            u[t.k] - x[t.k]
+        } else {
+            x[t.k] - l[t.k]
+        });
+        is_int.push(true);
+    }
+    for &(_, _, cs) in conts {
+        vals.push(cs);
+        upper.push(INF);
+        solval.push(0.0);
+        is_int.push(false);
+    }
+    let (cv, crhs) = lifted_mic_knapsack(&vals, &upper, &solval, &is_int, rhs)?;
+    // Back to z (same identities as `try_delta`).
+    let mut cx: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut rx = crhs;
+    let add = |cx: &mut BTreeMap<usize, f64>, j: usize, v: f64| {
+        if v != 0.0 {
+            *cx.entry(j).or_insert(0.0) += v;
+        }
+    };
+    for (t, &g) in ints.iter().zip(&cv[..n_i]) {
+        if g == 0.0 {
+            continue;
+        }
+        if t.comp {
+            add(&mut cx, t.k, -g);
+            rx -= g * u[t.k];
+        } else {
+            add(&mut cx, t.k, g);
+            rx += g * l[t.k];
+        }
+    }
+    for (&(j, sub, _), &g) in conts.iter().zip(&cv[n_i..]) {
+        if g == 0.0 {
+            continue;
+        }
+        match sub {
+            Sub::Lb => {
+                add(&mut cx, j, g);
+                rx += g * l[j];
+            }
+            Sub::Ub => {
+                add(&mut cx, j, -g);
+                rx -= g * u[j];
+            }
+            Sub::Vlb(vb) => {
+                add(&mut cx, j, g);
+                add(&mut cx, vb.k, -g * vb.m);
+                rx += g * vb.beta;
+            }
+            Sub::Vub(vb) => {
+                add(&mut cx, j, -g);
+                add(&mut cx, vb.k, g * vb.m);
+                rx -= g * vb.beta;
+            }
+        }
+    }
+    let mut out: BTreeMap<usize, f64> = BTreeMap::new();
+    let (mut max_c, mut min_c, mut mag) = (0.0f64, f64::INFINITY, rx.abs());
+    for (&j, &v) in &cx {
+        if v == 0.0 {
+            continue;
+        }
+        if !v.is_finite() {
+            return None;
+        }
+        max_c = max_c.max(v.abs());
+        min_c = min_c.min(v.abs());
+        mag += (v * x[j]).abs();
+        out.insert(j, v);
+    }
+    if out.is_empty()
+        || max_c > MAX_ABS_COEFF
+        || rx.abs() > MAX_ABS_COEFF
+        || max_c / min_c > MAX_DYNAMISM
+    {
+        return None;
+    }
+    rx += RHS_SAFETY * (1.0 + mag);
+    let act: f64 = out.iter().map(|(&j, &v)| v * x[j]).sum();
+    let norm = out.values().map(|v| v * v).sum::<f64>().sqrt();
+    let efficacy = (act - rx) / norm;
+    (efficacy > MIN_EFFICACY).then_some(Cut {
+        coef: out,
+        rhs: rx,
+        efficacy,
+    })
 }
 
 /// The cut [`try_delta`] produces at one scaling, if any.
@@ -859,6 +1238,78 @@ mod tests {
 
     fn feasible(md: &Model, z: &[f64]) -> bool {
         (0..md.n).all(|j| z[j] >= md.l[j] - 1e-12 && z[j] <= md.u[j] + 1e-12)
+    }
+
+    #[test]
+    fn lifted_mic_cut_holds_at_every_integer_point() {
+        // Brute force over random mixed-integer knapsacks `sum v_i y_i + sum w_c s_c <= b`
+        // with general integers y_i in [0, u_i] (u_i <= 4) and continuous s_c >= 0 of
+        // either sign. The cut keeps negative continuous coefficients unchanged and drops
+        // positive ones, so its worst case at an integer point is the smallest feasible
+        // continuous contribution: lhs = c.y - max(0, v.y - b) when some w_c < 0 (else
+        // the point must satisfy v.y <= b on its own).
+        let mut r = Rng(0x1d4c);
+        let (mut cuts, mut checks) = (0usize, 0usize);
+        for _ in 0..3000 {
+            let ni = 2 + (r.next() * 4.0) as usize; // 2..5 integers
+            let nc = (r.next() * 3.0) as usize; // 0..2 continuous
+            let mut vals = Vec::new();
+            let mut upper = Vec::new();
+            let mut is_int = Vec::new();
+            for _ in 0..ni {
+                vals.push((1.0 + r.next() * 19.0).round() + if r.next() < 0.3 { 0.5 } else { 0.0 });
+                upper.push((1.0 + r.next() * 3.99).floor());
+                is_int.push(true);
+            }
+            let mut has_neg = false;
+            for _ in 0..nc {
+                let w = if r.next() < 0.7 { -(1.0 + r.next() * 9.0) } else { 1.0 + r.next() * 5.0 };
+                has_neg |= w < 0.0;
+                vals.push(w);
+                upper.push(INF);
+                is_int.push(false);
+            }
+            let cap: f64 = (0..ni).map(|i| vals[i] * upper[i]).sum();
+            let b = (0.2 + 0.6 * r.next()) * cap;
+            let solval: Vec<f64> = (0..vals.len())
+                .map(|i| if is_int[i] { r.next() * upper[i] } else { 0.0 })
+                .collect();
+            let Some((c, crhs)) = lifted_mic_knapsack(&vals, &upper, &solval, &is_int, b) else {
+                continue;
+            };
+            cuts += 1;
+            // Enumerate every integer point of the box.
+            let mut y = vec![0usize; ni];
+            loop {
+                let vy: f64 = (0..ni).map(|i| vals[i] * y[i] as f64).sum();
+                let cy: f64 = (0..ni).map(|i| c[i] * y[i] as f64).sum();
+                let feasible = has_neg || vy <= b + 1e-9;
+                if feasible {
+                    let lhs = if has_neg { cy - (vy - b).max(0.0) } else { cy };
+                    checks += 1;
+                    assert!(
+                        lhs <= crhs + 1e-7 * (1.0 + crhs.abs()),
+                        "cut {c:?} <= {crhs} violated at y={y:?} (lhs {lhs}); vals {vals:?} \
+                         upper {upper:?} b {b}"
+                    );
+                }
+                let mut i = 0;
+                while i < ni {
+                    y[i] += 1;
+                    if y[i] as f64 <= upper[i] {
+                        break;
+                    }
+                    y[i] = 0;
+                    i += 1;
+                }
+                if i == ni {
+                    break;
+                }
+            }
+        }
+        eprintln!("lifted MIC brute force: {cuts} cuts, {checks} point checks");
+        assert!(cuts > 200, "only {cuts} lifted cuts produced");
+        assert!(checks > 10_000, "only {checks} checks");
     }
 
     #[test]
