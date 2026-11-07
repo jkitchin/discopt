@@ -1468,6 +1468,24 @@ fn p1_expel_forced_for_test() -> bool {
     false
 }
 
+/// `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine work, default OFF): maintain the primal
+/// simplex's reduced costs incrementally from the pivot row instead of re-pricing
+/// every column every pivot. Read once.
+fn incr_pricing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_PRIMAL_INCR_PRICING").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            other => panic!(
+                "DISCOPT_LP_PRIMAL_INCR_PRICING={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+            ),
+        }
+    })
+}
+
 struct Simplex<'a> {
     cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
     // residual, audit all go through it — no dense `m×n` copy is kept)
@@ -2923,6 +2941,14 @@ impl<'a> Simplex<'a> {
         // Exact-ratio-test rescues taken when a ray fails certification (#1597),
         // capped like the sub-tol pivots so a pathological LP cannot loop on them.
         let mut ray_rescues = 0usize;
+        // Engine work (`DISCOPT_LP_PRIMAL_INCR_PRICING`): reduced costs kept
+        // incrementally from the pivot row the Devex update already computes, instead
+        // of a fresh BTRAN for `y` plus an O(nnz) re-price every pivot. Re-derived
+        // exactly at loop start, after every refactorization, and before any
+        // optimality claim (so termination is always decided on exact prices).
+        let incr = incr_pricing_enabled();
+        let mut dvec: Option<Vec<f64>> = None;
+        let mut force_exact = false;
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -2938,14 +2964,27 @@ impl<'a> Simplex<'a> {
             {
                 return Err(LpStatus::IterLimit);
             }
-            // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j
-            let mut y: Vec<f64> = self.basis.iter().map(|&j| cost[j]).collect();
-            {
+            // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j (exact), or the
+            // incrementally maintained `dvec` (see `incr` above).
+            let use_incr = incr && !force_exact && dvec.is_some();
+            force_exact = false;
+            let mut y: Vec<f64> = Vec::new();
+            if !use_incr {
+                y = self.basis.iter().map(|&j| cost[j]).collect();
                 let _t = crate::profile::Timer::new(crate::profile::Phase::PriceBtran);
                 if self.lu.btran(&mut y).is_err() {
                     crate::profile::incr(crate::profile::Ctr::PrimalExitPriceBtranFail);
                     return Err(LpStatus::Numerical);
                 }
+            }
+            if incr && !use_incr {
+                let mut d = vec![0.0f64; self.na];
+                for (j, dj) in d.iter_mut().enumerate() {
+                    if self.stat[j] != BASIC {
+                        *dj = cost[j] - self.col_dot(j, &y, art_sign);
+                    }
+                }
+                dvec = Some(d);
             }
             let bland = stall > 2 * (self.na + 1);
             // choose entering: Devex (max dⱼ²/γⱼ over improving cols), with a
@@ -2958,7 +2997,10 @@ impl<'a> Simplex<'a> {
                 if self.stat[j] == BASIC {
                     continue;
                 }
-                let dj = cost[j] - self.col_dot(j, &y, art_sign);
+                let dj = match &dvec {
+                    Some(d) if incr => d[j],
+                    _ => cost[j] - self.col_dot(j, &y, art_sign),
+                };
                 // A free column sits at 0 under an `AT_LOWER` label and may move
                 // in EITHER direction, so it improves on any nonzero reduced
                 // cost. Reading the label alone (`AT_LOWER` ⇒ only `dj < 0`
@@ -2994,6 +3036,13 @@ impl<'a> Simplex<'a> {
                 }
             }
             drop(_t_sweep);
+            if enter.is_none() && use_incr {
+                // Never claim optimality on incrementally updated prices: re-price
+                // exactly and look again (this does not count as a pivot).
+                crate::profile::incr(crate::profile::Ctr::PrimalIncrExactRecheck);
+                force_exact = true;
+                continue;
+            }
             // #1595: before calling the vertex optimal, ask whether a sub-`tol`
             // reduced cost can still move the objective (see `subtol_candidates`
             // and `Self::subtol_entering`). Phase 2 only: phase 1's costs are the
@@ -3046,6 +3095,31 @@ impl<'a> Simplex<'a> {
                 if self.lu.ftran(&mut alpha).is_err() {
                     crate::profile::incr(crate::profile::Ctr::PrimalExitAlphaFtranFail);
                     return Err(LpStatus::Numerical);
+                }
+            }
+            if use_incr {
+                // Check the entering price exactly from the column just FTRANed:
+                // d_q = c_q - c_Bᵀ(B⁻¹A_q). On a sign flip or a material disagreement
+                // the incremental prices have drifted: re-price exactly and choose
+                // again (no pivot taken). Otherwise the exact d_q drives the update.
+                let mut cb_alpha = 0.0;
+                let mut mag = cost[q].abs();
+                for (i, &a) in alpha.iter().enumerate() {
+                    let t = cost[self.basis[i]] * a;
+                    cb_alpha += t;
+                    mag += t.abs();
+                }
+                let dq = cost[q] - cb_alpha;
+                let agree = dq * enter_dj > 0.0
+                    && (dq - enter_dj).abs() <= 1e-9 * mag.max(1.0) + 1e-6 * dq.abs();
+                if !agree {
+                    crate::profile::incr(crate::profile::Ctr::PrimalIncrDriftReprice);
+                    dvec = None;
+                    force_exact = true;
+                    continue;
+                }
+                if let Some(d) = dvec.as_mut() {
+                    d[q] = dq;
                 }
             }
 
@@ -3277,7 +3351,50 @@ impl<'a> Simplex<'a> {
                     // still factorizes it until `update` below). Pivot element is
                     // α at the leaving row; it is nonzero by the ratio test.
                     let pivot = alpha[slot];
-                    if !bland && pivot.abs() > self.tol {
+                    if incr && dvec.is_some() {
+                        // Reduced-cost update from the pivot row α_r = ρᵀA, ρ = B⁻ᵀe_r
+                        // (old basis): d_j -= (d_q/α_rq)·α_rj; the leaving column gets
+                        // -d_q/α_rq, the entering one 0. Fused with Devex below.
+                        let mut rho = vec![0.0; m];
+                        rho[slot] = 1.0;
+                        // A sub-`tol` pivot (the #1597 ray rescue) would make
+                        // d_q/α_rq ill-conditioned: re-price exactly instead.
+                        if pivot.abs() > self.tol && self.lu.btran(&mut rho).is_ok() {
+                            let d = dvec.as_mut().expect("checked");
+                            let theta = d[q] / pivot;
+                            let do_devex = !bland && pivot.abs() > self.tol;
+                            let gamma_q = gamma[q];
+                            for j in 0..self.na {
+                                if self.stat[j] != BASIC && j != q {
+                                    let arj = self.col_dot(j, &rho, art_sign);
+                                    if arj != 0.0 {
+                                        d[j] -= theta * arj;
+                                        if do_devex {
+                                            let cand = (arj / pivot) * (arj / pivot) * gamma_q;
+                                            if cand > gamma[j] {
+                                                gamma[j] = cand;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let leaving0 = self.basis[slot];
+                            d[leaving0] = -theta;
+                            d[q] = 0.0;
+                            if do_devex {
+                                gamma[leaving0] = (gamma_q / (pivot * pivot)).max(1.0);
+                                if gamma[leaving0] > 1e10 {
+                                    for g in gamma.iter_mut() {
+                                        *g = 1.0;
+                                    }
+                                }
+                            }
+                        } else {
+                            dvec = None; // re-derive exactly next iteration
+                        }
+                    } else if incr {
+                        dvec = None;
+                    } else if !bland && pivot.abs() > self.tol {
                         let gamma_q = gamma[q];
                         let mut rho = vec![0.0; m];
                         rho[slot] = 1.0;
@@ -3364,6 +3481,7 @@ impl<'a> Simplex<'a> {
                             crate::profile::incr(crate::profile::Ctr::PrimalExitXbAfterRefacFail);
                             LpStatus::Numerical
                         })?;
+                        dvec = None; // fresh factor: re-derive the prices exactly
                         updates = 0;
                         since_xb_refresh = 0;
                         refac_work_budget = self.lu.factor_nnz();

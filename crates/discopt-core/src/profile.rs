@@ -344,6 +344,9 @@ counters!(
     CutLpLenRejected,
     CutLpRelaxed,
     LazyNearIntegralBranch,
+    // Primal incremental pricing: exact re-price before an optimality claim.
+    PrimalIncrExactRecheck,
+    PrimalIncrDriftReprice,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
