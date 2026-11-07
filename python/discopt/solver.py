@@ -10614,21 +10614,21 @@ def _convex_route_oa_master() -> str:
     """
     raw = os.environ.get("DISCOPT_CONVEX_ROUTE_OA_MASTER")
     val = None if raw is None else raw.strip().lower()
-    if val == "simplex":
-        # highs-parity P5.1: the in-house lazy master (`milp_solver="simplex"`,
-        # `solve_milp_lazy_csc_py`) as an explicit opt-in -- a DOCUMENTED OPT-OUT of
-        # the HiGHS master, not a pending graduation. Its panel (2026-11-06, data
-        # `docs/dev/data/highs-parity/p5.1/`) was cert-clean but lost: route panel
-        # 92 -> 87 certified at 1.82x wall, syn/rsyn 29 -> 19 at 1.32x. It is kept
-        # because it needs no highspy (the route's master on an install without
-        # HiGHS). What would make it the default: certified >= HiGHS with 0 lost and
-        # wall <= 1.25x on the same panel (plan D3).
+    # highs-parity D3, owner decision 2026-11-07 ("the point is to eliminate HiGHS"):
+    # the in-house lazy master is the DEFAULT, with the three D3 levers on
+    # (`DISCOPT_MILP_NODE_GMI_LAZY`, `DISCOPT_MILP_LAZY_ROOT_CUTS`,
+    # `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`). P5.1 panels (data
+    # `docs/dev/data/highs-parity/p5.1/d3_up_*`), cert-clean, 0 violations, 0 errors:
+    # syn/rsyn 26 vs HiGHS 29 at 1.03x wall; route 89 vs 92 at 1.42x. The residual
+    # (6 instances) is an owner-ACCEPTED gap, tracked in the plan's D3 status.
+    # `=highs` keeps the HiGHS master as an opt-out.
+    if val is None or val == "simplex":
         return "simplex"
-    if val is not None and val != "highs":
+    if val != "highs":
         raise ValueError(
-            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'highs' "
-            "(default) or 'simplex' (the in-house lazy master, highs-parity P5.1); "
-            "'auto' stays retired. To keep a convex MINLP off this route, set "
+            f"DISCOPT_CONVEX_ROUTE_OA_MASTER={raw!r}: the routed OA master is 'simplex' "
+            "(default, the in-house lazy master) or 'highs' (opt-out); 'auto' stays "
+            "retired. To keep a convex MINLP off this route, set "
             "DISCOPT_CONVEX_MINLP_ROUTE=0."
         )
     from discopt.solvers.lp_milp_highs import require_highspy

@@ -19,6 +19,15 @@ import pytest
 from discopt.modeling.core import Model, from_nl
 from discopt.solver import _convex_minlp_auto_route, _convex_minlp_route_enabled
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_oa_master(monkeypatch):
+    """These tests cover the HiGHS OA master, an opt-out since highs-parity D3 flipped
+    the default to the in-house master (2026-11-07). Pin it, as a test that sets the
+    variable itself still overrides."""
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
+
+
 NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 
 ROUTE_ENV = "DISCOPT_CONVEX_MINLP_ROUTE"
@@ -72,7 +81,7 @@ class TestRouteGates:
 
     def test_fires_on_convex_minlp(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
-        monkeypatch.delenv(MASTER_ENV, raising=False)
+        monkeypatch.setenv(MASTER_ENV, "highs")
         monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
         # `"lp_nlp_bb"` since #1658 (performance-plan §76; `"oa"` from #1141 to then).
@@ -161,7 +170,7 @@ class TestRouteGates:
             return real_import(name, *a, **kw)
 
         monkeypatch.setattr(builtins, "__import__", _no_highs)
-        monkeypatch.delenv(MASTER_ENV, raising=False)
+        monkeypatch.setenv(MASTER_ENV, "highs")
         with pytest.raises(ImportError, match="highspy"):
             _convex_minlp_auto_route(_load("gbd"))
         monkeypatch.setenv(ROUTE_ENV, "0")
@@ -270,7 +279,7 @@ class TestRoutedMasterEngine:
 
     def test_default_solve_runs_the_master_on_highs(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
-        monkeypatch.delenv(MASTER_ENV, raising=False)
+        monkeypatch.setenv(MASTER_ENV, "highs")
         calls = self._count_highs_calls(monkeypatch)
         m = _load("gbd")
         r = m.solve(time_limit=60)
@@ -279,3 +288,14 @@ class TestRoutedMasterEngine:
         assert r.status == "optimal" and r.gap_certified
         assert r.objective == pytest.approx(2.2, abs=1e-6)
         assert len(calls) > 0
+
+
+def test_default_oa_master_is_the_in_house_engine(monkeypatch):
+    """highs-parity D3 (owner, 2026-11-07): the routed OA master defaults to the in-house
+    lazy master; ``=highs`` is the opt-out."""
+    from discopt.solver import _convex_route_oa_master
+
+    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
+    assert _convex_route_oa_master() == "simplex"
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
+    assert _convex_route_oa_master() == "highs"

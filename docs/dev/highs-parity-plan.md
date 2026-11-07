@@ -1947,6 +1947,12 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    Two-sided equilibration reached route 91 = 91 at 1.14x, but with the guarded error. That
    is why it was replaced by up-only scaling.
 
+   **Decided 2026-11-07 (owner: "the point is to eliminate HiGHS"):** (b) plus (c). The
+   default master is now `simplex`, and the three levers default ON (each with a `=0`
+   opt-out; `=highs` keeps the HiGHS master). The 6-instance residual is accepted for now
+   and is the D3 to-do list. Gates at the flip: smoke 4578 passed / 0 failed,
+   adversarial 19/19, `cargo test` clean.
+
    **Owner decision.** The bars (0 lost, wall <= 1.25x) are still missed, 6 instances across
    both panels. Choose one:
 

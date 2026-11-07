@@ -50,6 +50,14 @@ from discopt._relax.uniform_relax import _fix_single_var_equalities, build_unifo
 from discopt.modeling.core import Constraint
 
 
+@pytest.fixture(autouse=True)
+def _pin_highs_oa_master(monkeypatch):
+    """These tests cover the HiGHS OA master, an opt-out since highs-parity D3 flipped
+    the default to the in-house master (2026-11-07). Pin it, as a test that sets the
+    variable itself still overrides."""
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
+
+
 def _pinned_model(scale: float):
     m = dm.Model("pin")
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -201,7 +209,7 @@ def test_row_scaled_m3_certifies_on_the_highs_master(monkeypatch):
     (``milp_highs._fit_rows_to_window``), so the route certifies, with no bound
     above the optimum. The retired in-house master lost this certificate
     (performance-plan §25.13)."""
-    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     res = _per_row_scaled("m3.nl", 6.0).solve(time_limit=5)
     assert "master=highs" in (res.algorithm_route or ""), res.algorithm_route
     assert res.gap_certified, (res.status, res.bound, res.algorithm_route)
@@ -277,7 +285,7 @@ def test_row_equilibrated_fixed_nlp_converges_and_certifies_flay03m(monkeypatch)
     HiGHS stops at its own ``mip_rel_gap`` with bound 48.98962 (gap 3.6e-6, 393
     nodes, 0.28 s vs 333 nodes, 0.49 s), certified and below the optimum, but outside
     this 1e-6 pin, which reads the tree that runs past that gap."""
-    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     monkeypatch.setenv("DISCOPT_HIGHS_MASTER_LP_CUTS", "0")
     monkeypatch.setenv("DISCOPT_HIGHS_MASTER_NO_SUBMIP", "0")
     monkeypatch.setenv("DISCOPT_OA_NLP_ROW_EQUILIBRATE", "1")

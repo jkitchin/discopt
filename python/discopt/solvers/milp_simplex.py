@@ -83,7 +83,8 @@ def _equilibrate_rows(A_ub, b_ub, A_eq, b_eq):
     ``m3@6`` the Rust lazy master stops after 47 nodes / 0.16 s with status
     ``feasible`` and bound ``-inf``: a node fathomed without a proof (the unresolved
     path), where HiGHS's own scaling certifies it. Bound-changing in the §5 sense
-    (different pivot paths), so default OFF pending its panel.
+    (different pivot paths). **Default ON** with the D3 master flip (owner,
+    2026-11-07); ``=0`` opts out.
     """
 
     def scale(A, b):
@@ -120,9 +121,10 @@ def _lazy_root_cut_kwargs(base: dict, time_limit) -> dict:
     Profile of ``syn20m03m`` on the Rust master: 22.8 s of a 30 s solve is in the master
     tree (14,382 nodes, 35 lazy callbacks), while HiGHS's master certifies it in 9 s. The
     root-cut phase is capped at a quarter of the master's time. Bound-changing (different
-    master cuts), so default OFF pending its panel; read at call time.
+    master cuts). **Default ON** with the D3 master flip (owner, 2026-11-07); ``=0``
+    opts out. Read at call time.
     """
-    if os.environ.get("DISCOPT_MILP_LAZY_ROOT_CUTS", "0") != "1" or base.get("root_cuts") == 0:
+    if os.environ.get("DISCOPT_MILP_LAZY_ROOT_CUTS", "1") == "0" or base.get("root_cuts") == 0:
         return base
     out = dict(base)
     out.update(root_cuts=500, cut_rounds=50, cut_select=True, cmir_cuts=True)
@@ -1629,7 +1631,7 @@ def solve_milp_with_lazy_cuts(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
-    if os.environ.get("DISCOPT_MILP_LAZY_ROW_EQUILIBRATE", "0") == "1":
+    if os.environ.get("DISCOPT_MILP_LAZY_ROW_EQUILIBRATE", "1") != "0":
         A_ub, b_ub, A_eq, b_eq = _equilibrate_rows(A_ub, b_ub, A_eq, b_eq)
     std = _marshal_std_form(c, A_ub, b_ub, A_eq, b_eq, bounds, integrality)
     m = std.m

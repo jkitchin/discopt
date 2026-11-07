@@ -24,6 +24,15 @@ from discopt import Model  # noqa: E402
 from discopt.solvers import MILPResult, SolveStatus  # noqa: E402
 from discopt.solvers import milp_highs as MH  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_oa_master(monkeypatch):
+    """These tests cover the HiGHS OA master, an opt-out since highs-parity D3 flipped
+    the default to the in-house master (2026-11-07). Pin it, as a test that sets the
+    variable itself still overrides."""
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
+
+
 # #1634 seed 181 (cost scale 1e-3): truth 0.008014783411187928 at x = [0, 0, 1, 0, 1].
 C181 = [
     0.016422113453256008,

@@ -449,7 +449,8 @@ fn parse_node_gmi(raw: &str) -> Result<bool, String> {
 /// `DISCOPT_MILP_NODE_GMI_LAZY` (highs-parity D3), read once. Default OFF; garbage is
 /// refused. ON extends [`node_gmi_enabled`] to drivers with a lazy separator: the
 /// convex-route OA / LP-NLP-BB master, which P5.1 measured losing 5/94 route and 10/47
-/// syn/rsyn certifications against HiGHS. Bound-changing: default OFF pending its panel.
+/// syn/rsyn certifications against HiGHS. **Default ON** with the D3 master flip (owner,
+/// 2026-11-07); `=0` opts out.
 fn node_gmi_lazy_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -459,8 +460,8 @@ fn node_gmi_lazy_enabled() -> bool {
             .to_ascii_lowercase()
             .as_str()
         {
-            "" | "0" | "false" | "no" => false,
-            "1" | "true" | "yes" => true,
+            "0" | "false" | "no" => false,
+            "" | "1" | "true" | "yes" => true,
             other => panic!(
                 "DISCOPT_MILP_NODE_GMI_LAZY={other:?} is not recognized (expected 1/true/yes \
                  or 0/false/no). Refusing rather than silently picking an arm."
