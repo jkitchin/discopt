@@ -992,3 +992,21 @@ FBBT already turns into bounds. So the HiGHS ablation's "presolve_off costs `mik
 describes HiGHS's own search, not something the Rust route lacks. **Full presolve is not
 the next lever; it is deferred.** The remaining `mik` gap is in-tree cuts: in HiGHS,
 `node_cuts_off` costs `mik` 10-14x.
+
+**21. `DISCOPT_MILP_SUBMIP` quick check: a strong primal lever.**
+
+Setup: `submip_quick.json`, 8 rows, 1 rep, 20 s, aligned slacks on in both arms. The
+sub-MIP runs 2-6 RINS attempts per solve.
+
+| row | incumbent OFF | incumbent ON | optimum |
+|---|---|---|---|
+| `istra` | 56 | **49** | 49 |
+| `beavma` | 512,278 | 403,327 | 383,285 |
+| `bppc8-02` | 528 | 513 | 507 |
+| `sp150x300d` | 89 | 81 | 69 |
+| `gesa2` | 26.09M | 25.98M | 25.78M |
+
+- `obra` is unchanged. `2122` has no incumbent, and RENS never fires because none of its
+  node points is eligible.
+- Certified unchanged: `istra`'s bound sat at 48 in this run (49 in others).
+- Next: the panel with aligned slacks + sub-MIP together.
