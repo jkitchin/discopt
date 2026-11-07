@@ -12,6 +12,28 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **macOS: cyipopt and torch in one process now raise instead of aborting it
+  (#2205).** Each brings its own `libomp` (torch's wheel ships one; cyipopt's Ipopt
+  often links Homebrew's), and the second to load called
+  `abort()` (`OMP: Error #15`) with no traceback. Every discopt import of either
+  package (`nlp_solver="ipopt"`, the cyipopt NLP backend, `load_torch_sequential`)
+  now first compares the OpenMP runtimes already mapped into the process with the
+  ones the package would load, and raises
+  `discopt._openmp_guard.OpenMPRuntimeConflictError` (a `RuntimeError`, so
+  `except ImportError` fallbacks do not route around it) naming both files. "Would
+  load" covers both a runtime the wheel ships (torch) and one its binaries link
+  through their Mach-O load commands, followed through `@rpath`/`@loader_path`
+  dependencies (cyipopt's Ipopt linking Homebrew's `libomp`, which cyipopt does not
+  ship). An explicit `nlp_solver="ipopt"` is checked once at solve entry and
+  refuses the solve; it is never silently replaced by another backend. Every broad
+  handler around an NLP-backend call re-raises the refusal instead of absorbing it,
+  and an auto-chosen heuristic backend that steps past it logs one WARNING. Builds
+  that share one `libomp` pass. `KMP_DUPLICATE_LIB_OK` is never set by
+  discopt; if the user sets it the check only warns. On macOS the test suite skips,
+  with a #2205 reason, a test that would load the second runtime into a worker,
+  instead of losing the worker. Not covered: a bare `import torch` / `import
+  cyipopt` in the caller's own code, and a runtime loaded with `dlopen` at run
+  time. Linux is unaffected.
 - **MINLPLib `nous1` no longer stalls on undecided node LPs (#2202).** The 0.12.0
   known issue ("on macOS/arm64 `nous1` no longer certifies with
   `DISCOPT_DUAL_PROOF_PROPAGATION` on") was not a dual-proof defect. A child's node LP
@@ -24,7 +46,8 @@ The release procedure that produces these entries is documented in
   the slack basis, through the same audits and Farkas verification as every node LP;
   that decides all 40 captured failing LPs, agreeing with HiGHS, and all 24 permuted
   runs certify. `DISCOPT_NODE_LP_SLACK_RETRY=0` restores the previous behaviour.
-  `solver_stats` gains `tree/slack_retries` and `tree/slack_retry_decided`.
+  `solver_stats` gains `tree/slack_retries`, `tree/slack_retry_decided` and the
+  kernel's `tree/dual_proof_*` counters.
 
 ## [0.12.0] - 2026-11-07
 
@@ -367,7 +390,8 @@ bound; each has a regression test that fails before its fix.
   (`OMP: Error #15`: two copies of `libomp`). This is an interaction between those two
   packages' bundled OpenMP runtimes, not discopt code, but it affects a process that
   uses `nlp_solver="ipopt"` and the torch reader together, in either import order.
-  Run the two in separate processes until the runtimes are reconciled.
+  Run the two in separate processes until the runtimes are reconciled. Since the next release discopt raises
+  `OpenMPRuntimeConflictError` instead of letting the process abort.
 
 ## [0.11.1] - 2026-10-29
 

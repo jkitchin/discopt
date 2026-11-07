@@ -379,6 +379,9 @@ def _ipopt_version() -> tuple[int, ...]:
     may not, in which case callers must treat the version as unknown rather
     than assume a floor.
     """
+    from discopt._openmp_guard import check_openmp_compatible
+
+    check_openmp_compatible("cyipopt", feature="nlp_solver='ipopt'")
     try:
         import cyipopt
     except ImportError:  # pragma: no cover - guarded by callers
@@ -440,6 +443,9 @@ def solve_nlp(
     Returns:
         NLPResult with solution
     """
+    from discopt._openmp_guard import check_openmp_compatible
+
+    check_openmp_compatible("cyipopt", feature="nlp_solver='ipopt'")
     try:
         import cyipopt
     except ImportError:

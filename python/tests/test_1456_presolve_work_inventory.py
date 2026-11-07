@@ -310,6 +310,8 @@ _BUDGET_HOME = {
     # ``truck`` forced (81.5 s across 10.9 M correctly-budgeted iterations).
     "PresolveDeadline": "discopt._relax.presolve_deadline",
     "_SOC_SCAN_WORK_BUDGET": "discopt._relax.soc_rewrite",
+    # #2205: the Mach-O dependency walk behind the OpenMP-runtime preflight.
+    "_MACHO_WALK_MAX_FILES": "discopt._openmp_guard",
 }
 
 _CATEGORIES = ("terminal", "bounded", "wall", "trivial", "residual")
@@ -421,6 +423,14 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     # each exact on its own) when the work allowance is spent.
     ("discopt._relax.soc_rewrite", "rewrite_squared_soc", "bounded", "_SOC_SCAN_WORK_BUDGET"),
     ("discopt._relax.soc_rewrite", "rewrite_squared_soc_rows", "bounded", "_SOC_SCAN_WORK_BUDGET"),
+    # #2205: explicit nlp_solver="ipopt" preflight. A no-op off macOS; on macOS a
+    # header-only Mach-O walk over the package's binaries, cached per process.
+    (
+        "discopt._openmp_guard",
+        "check_openmp_compatible",
+        "bounded",
+        "_MACHO_WALK_MAX_FILES",
+    ),
     # --- wall: role 2, recorded in the #912 inventory -------------------------
     ("discopt._relax.nonlinear_bound_tightening", "tighten_nonlinear_bounds", "wall", "NBT"),
     ("discopt._relax.presolve_pipeline", "run_reverse_ad_tightening", "wall", "reverse-AD"),
