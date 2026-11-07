@@ -3108,9 +3108,6 @@ fn solve_milp_node_search(
     // from inside the simplex loop. Soundness is untouched: those steps only
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
-    // D2 W1 (`DISCOPT_MILP_CUT_LP`): the root basis, remapped through every cut-row
-    // deletion, as the warm start for a node whose stored basis a deletion invalidated.
-    let mut cut_lp_fallback: Option<Basis> = root_warm_basis.clone();
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
 
     // Interactive debugger bookkeeping. `dbg_iter` mirrors the Python loops'
@@ -3926,13 +3923,10 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
                     continue;
                 }
-                // A frontier basis with the slack nonbasic falls back to the root basis
-                // (below); without one, keep the row.
-                let basic_everywhere = || {
-                    tm.frontier_bases()
-                        .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC))
-                };
-                if cut_lp_fallback.is_some() || basic_everywhere() {
+                let basic_everywhere = tm
+                    .frontier_bases()
+                    .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
+                if basic_everywhere {
                     del.push(i);
                 } else {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
@@ -3998,21 +3992,7 @@ fn solve_milp_node_search(
                     .chain(cut_lp_rows.iter().map(|r| &r.cut))
                     .map(cut_signature)
                     .collect();
-                // The root basis has every folded slack basic (they were appended after
-                // it), so it always remaps; a stored basis that had a deleted slack
-                // nonbasic falls back to it, as HiGHS falls back to the root basis with
-                // the extra rows basic (`HighsMipSolver.cpp:711-719`).
-                cut_lp_fallback = cut_lp_fallback
-                    .as_ref()
-                    .map(|b| remap_basis_after_delete(b, &d.col_map).expect("root basis remaps"));
-                let mut fell_back = 0u64;
-                tm.map_bases(|b| {
-                    remap_basis_after_delete(b, &d.col_map).or_else(|| {
-                        fell_back += 1;
-                        cut_lp_fallback.clone()
-                    })
-                });
-                crate::profile::incr_by(crate::profile::Ctr::CutLpBasisFallback, fell_back);
+                tm.map_bases(|b| remap_basis_after_delete(b, &d.col_map));
             }
         }
     }
