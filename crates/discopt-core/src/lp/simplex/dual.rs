@@ -1573,6 +1573,25 @@ impl<'a> PreparedDual<'a> {
         Self::prepare(&lp, start, opts, sp)
     }
 
+    /// [`Self::reoptimize`] through the same degeneracy-armed path every other warm
+    /// entry takes ([`warm_dual_armed`]: the cost-perturbed restart after a
+    /// degenerate run, then the sub-tolerance repair). `start` is the basis this
+    /// `PreparedDual` was prepared from. D2 W1: strong-branch probes called
+    /// [`Self::reoptimize`] directly and so never reached the perturbation; on
+    /// `ex1266` with folded cut rows their only escape from degeneracy was Bland's
+    /// rule (21,856 Bland pivots against 21 perturbation attempts). HiGHS runs its
+    /// probes through the ordinary `resolveLp` (`HighsSearch.cpp:575`).
+    pub fn reoptimize_armed(
+        &self,
+        l: &[f64],
+        u: &[f64],
+        b: &[f64],
+        start: &Basis,
+        opts: &SimplexOptions,
+    ) -> LpSolve {
+        warm_dual_armed(self, self.sp, self.m, self.n, self.c, l, u, b, start, opts)
+    }
+
     /// Dual re-optimization from the prepared basis for bounds `l`/`u` and rhs
     /// `b`, returning a valid solution. On any numerical difficulty it cold-solves
     /// the same LP, so the result is always correct.

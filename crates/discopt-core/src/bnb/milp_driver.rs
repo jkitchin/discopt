@@ -763,6 +763,33 @@ fn delete_cut_rows(
     }
 }
 
+/// D2 W1 (`DISCOPT_MILP_SB_ARMED`, default OFF): run strong-branch probes through
+/// [`PreparedDual::reoptimize_armed`] (the degeneracy-armed warm path every other warm
+/// LP takes) instead of the bare [`PreparedDual::reoptimize`]. Only the pivot path
+/// changes; every probe is still verified on the original data. Evidence: on `ex1266`
+/// with `DISCOPT_MILP_CUT_LP` the probes ran 21,856 Bland pivots against 21
+/// perturbation attempts and the 2.45 s native-MILP slice reached 15 nodes (419 OFF);
+/// HiGHS probes go through its ordinary `resolveLp` (`HighsSearch.cpp:575`).
+fn sb_armed_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_SB_ARMED").unwrap_or_default();
+        parse_sb_armed(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`sb_armed_enabled`]; garbage is refused, not defaulted.
+fn parse_sb_armed(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_SB_ARMED={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -5231,13 +5258,12 @@ fn strong_branch(
         match &prepared {
             Some(p) => {
                 let (sl, su) = scale_bounds(l, u);
-                ctx.problem.verify(
-                    p.reoptimize(&sl, &su, ctx.sb, simplex),
-                    l,
-                    u,
-                    Some(basis),
-                    simplex,
-                )
+                let sol = if sb_armed_enabled() {
+                    p.reoptimize_armed(&sl, &su, ctx.sb, basis, simplex)
+                } else {
+                    p.reoptimize(&sl, &su, ctx.sb, simplex)
+                };
+                ctx.problem.verify(sol, l, u, Some(basis), simplex)
             }
             None => ctx.problem.solve_warm(l, u, basis, simplex),
         }
@@ -7688,6 +7714,19 @@ mod tests {
         }
         for bad in ["2", "on", "y"] {
             assert!(parse_node_gmi(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn sb_armed_parse_refuses_garbage() {
+        for off in ["", " ", "0", "false", "NO"] {
+            assert!(!parse_sb_armed(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " yes "] {
+            assert!(parse_sb_armed(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["2", "on", "y"] {
+            assert!(parse_sb_armed(bad).is_err(), "{bad:?} must be refused");
         }
     }
 
