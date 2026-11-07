@@ -156,6 +156,20 @@ Still open from W1:
 
 ### W3 — Sub-MIP schedule (G3)  *expected +2-4*
 
+**Status 2026-11-07: retired on its entry.** `DISCOPT_MILP_SUBMIP_SCHED` (HiGHS's
+schedule plus fix-and-propagate neighbourhood at the adaptive target rate) raised the
+number of sub-MIP attempts but almost never improved the incumbent. The median G3
+primal gap stayed at 0.250 -> 0.250 (`d2-analysis/w3_entry.jsonl.gz`). HiGHS's
+sub-MIPs win through the sub-solver (presolve, cliques, propagation), not the schedule.
+A stronger sub-solve, i.e. presolve on the neighbourhood, is the lever to test next on
+these rows.
+
+W2 status: randomized rounding (`DISCOPT_MILP_RAND_ROUND`) passed its entry (2 of 4 G2
+rows gain an incumbent). It is cert-clean and primal-positive on the panel, but fails
+2b alone, so it stays OFF pending a bundle (audit row). Entry probes on the G2 rows
+showed HiGHS's first incumbents there come from randomized rounding, a root sub-MIP and
+the tree, not from feasibility jump, so W2b (feasibility jump) is deprioritised.
+
 **Evidence.**
 - The graduated sub-MIP fires only 2-6 times per 20 s solve (stride 16 batches, with
   backoff).
