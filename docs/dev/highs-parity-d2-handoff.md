@@ -40,10 +40,11 @@ the short version: what is on, what is off, and what to do first.
 
 ## First things to do
 
-1. **Merge `origin/main`.** It was 20 commits ahead with a conflict at handoff. Run
-   smoke and the full `-m "not slow"` suite after it. That suite found 11
-   branch-caused regressions last time that smoke did not; 6 failures in this
-   container need `cyipopt`/`sympy` and are environmental.
+1. **Run the full `-m "not slow"` suite.** `origin/main` was merged at `8c86eab9`; the
+   audit test, `cargo test -p discopt-core --lib` (1032) and smoke (4610) pass. The full
+   suite found 11 branch-caused regressions last time that smoke did not; 6 failures in
+   this container need `cyipopt`/`sympy` and are environmental. The audit now has rows
+   for every default-OFF gate below (marker 62).
 2. **Engine step 2 (written, not built):**
    `docs/dev/data/highs-parity/d2-analysis/eng_rowprice.patch`.
    - It is a row-wise (hyper-sparse) pivot row for the incremental pricing: a CSR copy
