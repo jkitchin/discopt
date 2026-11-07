@@ -120,3 +120,32 @@ handling.
 - The QPLIB throughput run (#1008's class), on a machine with the corpus.
 - A start for the 52 refused LPs.
 - The 40-LP nous1 capture (§121) was not regenerated.
+
+## §5 corpus panel for `DISCOPT_LP_LOGICAL_DUAL_COLD` (`panel/`)
+
+`issue2115_graduation_panel.py --flag DISCOPT_LP_LOGICAL_DUAL_COLD --deterministic --max-nodes 2000
+--time-limit 120 --assert-unfired-identical --jobs 2`, 74 in-repo instances, each arm in its own
+process, on `c9d6e1c`'s release build.
+
+| | OFF | ON |
+|---|---|---|
+| violations (cert-clean) | — | **0** of 774 checks; 21 unfired instances bit-identical (3 skipped at the wall) |
+| certified | 59 | 59 |
+| nodes, all instances | 6839 | 6578 (−3.8 %) |
+| wall, all instances | 2254.7 s | 2253.1 s |
+| `LpVerdictNumerical` | 21,407 | 18,089 (−15 %) |
+| kernel `NodeLpSlackRetry` (#2202) | 1 (decided) | **0** |
+| cascade attempts / own decided / augmented decided / refused / fell back | — | 12,387 / 6,709 / 183 / 4,960 / 535 |
+
+Largest node changes: `ex8_5_3` 219 → 141 (28 s → 15 s), `nvs02` 301 → 183, `nvs12` 321 → 201;
+`tanksize` 461 → 529. One bound looser, `hda`: both arms stop at the 120 s wall, and ON reaches 1
+node against 3 (bound −4.66e8 vs −6996). 13 of its 21 attempts are not certified, and each failed
+attempt on its ~3000-row LPs is paid twice, by the scaled cold solve and by the #649 unscaled
+retry, before the primal runs.
+
+**Verdict: cert-clean, not yet net-positive. The flag stays OFF.** The mechanism works as
+measured on the fixtures: fewer `Numerical` LPs, and the kernel's slack retry no longer has
+anything to do. But on this corpus it buys no certificate, and on `hda` the cost of a failed
+attempt shows up as a looser bound. The next step is to make a failed attempt cheap, then re-run
+this panel: one attempt per cold solve instead of one per scaled and unscaled retry, and a pivot
+budget for the attempt on large LPs.
