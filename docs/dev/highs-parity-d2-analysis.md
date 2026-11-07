@@ -1010,3 +1010,24 @@ sub-MIP runs 2-6 RINS attempts per solve.
   node points is eligible.
 - Certified unchanged: `istra`'s bound sat at 48 in this run (49 in others).
 - Next: the panel with aligned slacks + sub-MIP together.
+
+**22. `DISCOPT_MILP_ALIGNED_SLACKS` §5 panel: not graduated (2b, 2d). Part of the run was
+contaminated by load I created.**
+
+Setup: `aligned_slacks_panel.json.gz`, MIPLIB-38 + M, 3 reps, 20 s, 372 solves.
+
+Results:
+
+- **BAR 1:** cert-clean, 372 checks.
+- **2a:** certified **101 -> 107** (`khb05250` 0 -> 3, `dcmulti` 2 -> 6, `kaihu` 0 -> 1,
+  `blend2` 3 -> 1).
+- **2b fails:** nodes on the always-certified set +5 % (79,110 -> 83,229).
+- **2c:** 2 dual losses (cap 2).
+- **2d fails:** `blend2` lost its incumbent.
+- **2e:** median primal gap 0.200 -> 0.149.
+
+The `blend2` failures are a load artifact (§9). During the panel I ran smoke (`-n 3`) and the
+sub-MIP quick check alongside it. `blend2` ON timed out at ~1,000 nodes in two reps.
+Unloaded, it certifies ON in 3.8 s (8,027 nodes; OFF 1.8 s, 5,925 nodes). The +5 % node
+count (2b) is not a timing artifact. Default stays OFF. The next graduation attempt runs it
+bundled with `DISCOPT_MILP_SUBMIP` (follow-up 21), on a quiet machine.
