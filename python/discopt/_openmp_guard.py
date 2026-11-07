@@ -166,6 +166,13 @@ _DYLIB_COMMANDS = {
 }
 _CPU_TYPES = {"arm64": 0x0100000C, "x86_64": 0x01000007}
 
+# Deterministic work budget for the dependency walk: the load commands of at most
+# this many binaries are read per package (header + load commands only, never
+# the whole file). Measured on macOS arm64 (#2207): cyipopt 0.00 s, torch 0.26 s once,
+# then cached per process. Recorded in the #1456 pre-solve inventory, since an
+# explicit nlp_solver="ipopt" runs this check before branch and bound starts.
+_MACHO_WALK_MAX_FILES = 2000
+
 # dyld's shared cache: never a third-party OpenMP runtime, and not files on disk.
 _SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 
@@ -270,7 +277,9 @@ def _expand(name: str, loader: str, rpaths: list[tuple[str, str]]) -> Iterator[s
         yield subst(name, loader_dir)
 
 
-def linked_omp_runtimes(binaries: Iterable[str], *, max_files: int = 2000) -> set[str]:
+def linked_omp_runtimes(
+    binaries: Iterable[str], *, max_files: int = _MACHO_WALK_MAX_FILES
+) -> set[str]:
     """Real paths of the OpenMP runtimes ``binaries`` load, following their dependencies.
 
     Walks ``LC_LOAD_DYLIB``-type commands from each Mach-O file in ``binaries``,
