@@ -3669,6 +3669,27 @@ def _fractional_power_base(expr):
 
 _PERIODIC_FUNCS = frozenset({"sin", "cos"})
 _TWO_PI = 2.0 * np.pi
+_EPS = float(np.finfo(np.float64).eps)
+# ``fl(pi)`` is below the real pi; one ulp up is above it, so
+# ``[-_PI_UP, _PI_UP]`` spans at least one true period (#2190).
+_PI_UP = float(np.nextafter(np.pi, np.inf))
+
+
+def _period_end_up(lo: float) -> float:
+    """A double ``>= lo + 2*pi`` (real arithmetic), close to it (#2190).
+
+    ``lo + _TWO_PI`` is NOT a full period: the double ``2*pi`` is below the real
+    one by ~2.4e-16 and the sum rounds to the nearest double, an error of up to
+    ``ulp(lo) / 2`` (6e-5 at ``lo = 1e12``). A window short of one period drops
+    the ``(sin, cos)`` values of the missing sliver, which is not lossless. The
+    margin ``4 eps (|lo| + 8)`` covers both errors several times over.
+    """
+    return float(np.nextafter(lo + _TWO_PI + 4.0 * _EPS * (abs(lo) + 8.0), np.inf))
+
+
+def _period_start_down(hi: float) -> float:
+    """A double ``<= hi - 2*pi`` (real arithmetic); see :func:`_period_end_up`."""
+    return float(np.nextafter(hi - _TWO_PI - 4.0 * _EPS * (abs(hi) + 8.0), -np.inf))
 
 
 class PeriodicVariableBoundRule(NonlinearBoundTighteningRule):
@@ -3810,15 +3831,16 @@ class PeriodicVariableBoundRule(NonlinearBoundTighteningRule):
                 continue
             lo, hi = float(lb[idx]), float(ub[idx])
             finite_lo, finite_hi = lo > -1e15, hi < 1e15
+            # Every window spans at least one *true* period (#2190) and never
+            # leaves the incoming box.
             if finite_lo and finite_hi:
-                if hi - lo > _TWO_PI + 1e-9:
-                    hi = lo + _TWO_PI
+                hi = min(hi, _period_end_up(lo))
             elif finite_lo:
-                hi = lo + _TWO_PI
+                hi = _period_end_up(lo)
             elif finite_hi:
-                lo = hi - _TWO_PI
+                lo = _period_start_down(hi)
             else:
-                lo, hi = -np.pi, np.pi
+                lo, hi = -_PI_UP, _PI_UP
             lb[idx], ub[idx] = lo, hi
         return lb, ub
 

@@ -1,0 +1,6 @@
+# #2187 shipping-head equivalence: head b267510 ('new' arm alone) vs the panel's 'new' arm (379e350)
+# compared: status, objective, bound, node count, over all 90 (instance, formulation) pairs
+identical: 87/90; different: 3
+random_s3 ext: panel-new ('feasible', -0.11403800051763976, -0.9366941117894876, 18356) 303s | head ('feasible', -0.11403800051763976, -0.8788070969848063, 18542) 303s | base ('feasible', -0.08479855295922116, -1.4449716543487514, 12282) 307s | #2187 mechanism stats on head: none
+random_s7 ext: panel-new ('feasible', -0.43049633515817126, -2.4297851637173484, 15040) 304s | head ('feasible', -0.5570588670897403, -1.2748936226802206, 17958) 303s | base ('optimal', -0.5570588670897403, -0.5570588670897404, 17958) 263s | #2187 mechanism stats on head: none (only the #1509 check's milp/refutation_margin)
+random_s8 ext: panel-new ('feasible', -0.06904824605303675, -3.394355681766942, 13147) 309s | head ('feasible', -0.10051493816239972, -2.874800284034564, 20053) 306s | base ('feasible', -0.06904824605303675, -3.792547104281139, 9659) 309s | #2187 mechanism stats on head: none

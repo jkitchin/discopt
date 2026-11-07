@@ -1,0 +1,9 @@
+# #2187: random_s7 relu_extended alone, interleaved new/base x2, time_limit 600 (backstop), threads=1, deterministic
+# new = head d5509b9 (marker present), base = merge base da8e38e (marker absent); only this probe running
+ 20:21:47 up  4:33,  0 user,  load average: 2.13, 3.91, 4.73
+new marker=True file=/user/discopt/python/discopt/__init__.py optimal obj=-0.5570588670897403 bound=-0.5570588670897404 nodes=17958 wall=263.1
+base marker=False file=atchpad/base2/python/discopt/__init__.py optimal obj=-0.5570588670897403 bound=-0.5570588670897404 nodes=17958 wall=263.0
+new marker=True file=/user/discopt/python/discopt/__init__.py optimal obj=-0.5570588670897403 bound=-0.5570588670897404 nodes=17958 wall=259.8
+base marker=False file=atchpad/base2/python/discopt/__init__.py optimal obj=-0.5570588670897403 bound=-0.5570588670897404 nodes=17958 wall=261.8
+ 20:39:17 up  4:51,  0 user,  load average: 1.59, 1.88, 2.77
+
