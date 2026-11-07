@@ -61,6 +61,34 @@ use super::simplex::sparse::SparseCols;
 const INF: f64 = 1e20;
 /// Minimum fractionality of the scaled rhs (avoids tiny `1 - f0` denominators).
 const FRAC_MIN: f64 = 1e-3;
+/// HiGHS's f0 window (`HighsCutGeneration.cpp:526`), under `DISCOPT_MILP_CMIR_HIGHS`.
+const FRAC_MIN_HIGHS: f64 = 0.005;
+/// HiGHS's feasibility tolerance for "off its bound" and delta deduplication.
+const HIGHS_FEASTOL: f64 = 1e-6;
+
+/// D2 W4 (`DISCOPT_MILP_CMIR_HIGHS`, default OFF): HiGHS's c-MIR delta selection
+/// (`HighsCutGeneration.cpp:529-636`): a candidate for every integer column off its
+/// bound at the LP point (not the first `MAX_DELTAS` by index), f0 in [0.005, 0.995],
+/// and the best delta retried as a coarser divisor (x2, x4, x8).
+/// `DISCOPT_MILP_CMIR_FLIP=1` adds HiGHS's complementation flip pass (`:638-677`).
+fn highs_cmir_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_HIGHS"))
+}
+
+fn cmir_flip_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_FLIP"))
+}
+
+fn env_bool(name: &str) -> bool {
+    let raw = std::env::var(name).unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => false,
+        "1" | "true" | "yes" => true,
+        other => panic!("{name}={other:?} is not recognized (expected 1 or 0)"),
+    }
+}
 /// Absolute cap on a cut coefficient or rhs.
 const MAX_ABS_COEFF: f64 = 1e7;
 /// Largest coefficient ratio a cut may carry.
@@ -313,6 +341,9 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
     if ints.iter().all(|t| !t.int_ok) || !rhs2.is_finite() {
         return None; // no integer structure to round
     }
+    if highs_cmir_enabled() {
+        return cmir_row_highs(ctx, ints, &conts, rhs2);
+    }
     let mut deltas: Vec<f64> = vec![1.0];
     for t in &ints {
         if t.int_ok && t.a.abs() > ctx.tol && deltas.len() <= MAX_DELTAS {
@@ -336,6 +367,109 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
     best
 }
 
+/// The cut [`try_delta`] produces at one scaling, if any.
+fn cut_at(
+    ctx: &Ctx<'_>,
+    ints: &[IntTerm],
+    conts: &[(usize, Sub, f64)],
+    rhs2: f64,
+    d: f64,
+) -> Option<Cut> {
+    let mut c = None;
+    try_delta(ctx, ints, conts, rhs2, d, &mut c);
+    c
+}
+
+/// `DISCOPT_MILP_CMIR_HIGHS`: HiGHS's delta selection, then (with
+/// `DISCOPT_MILP_CMIR_FLIP`) its complementation flip pass. Scalings here are
+/// `1 / delta` in HiGHS's divisor convention.
+fn cmir_row_highs(
+    ctx: &Ctx<'_>,
+    mut ints: Vec<IntTerm>,
+    conts: &[(usize, Sub, f64)],
+    mut rhs2: f64,
+) -> Option<Cut> {
+    let (l, u, x) = (ctx.l, ctx.u, ctx.x);
+    // Off-bound value of an integer term in its complemented space.
+    let off = |t: &IntTerm| {
+        if t.comp {
+            u[t.k] - x[t.k]
+        } else {
+            x[t.k] - l[t.k]
+        }
+    };
+    let mut divisors: Vec<f64> = vec![1.0];
+    for t in &ints {
+        let a = t.a.abs();
+        if t.int_ok
+            && a > ctx.tol
+            && off(t) > HIGHS_FEASTOL
+            && !divisors
+                .iter()
+                .any(|&e| (e - a).abs() <= 10.0 * HIGHS_FEASTOL)
+        {
+            divisors.push(a);
+        }
+    }
+    let mut best: Option<Cut> = None;
+    let mut best_div = 0.0;
+    for &dv in &divisors {
+        if let Some(c) = cut_at(ctx, &ints, conts, rhs2, 1.0 / dv) {
+            if best.as_ref().is_none_or(|b| c.efficacy > b.efficacy) {
+                best = Some(c);
+                best_div = dv;
+            }
+        }
+    }
+    best.as_ref()?;
+    for mult in [2.0, 4.0, 8.0] {
+        if let Some(c) = cut_at(ctx, &ints, conts, rhs2, 1.0 / (best_div * mult)) {
+            if best.as_ref().is_none_or(|b| c.efficacy > b.efficacy) {
+                best = Some(c);
+                best_div *= mult;
+            }
+        }
+    }
+    if cmir_flip_enabled() {
+        // Flip each integer with a finite upper bound whose LP value is off both
+        // bounds; keep the flip when the cut's efficacy improves. Complementing is an
+        // affine identity on the column's finite bound, so every flip is sound.
+        let d = 1.0 / best_div;
+        for i in 0..ints.len() {
+            let k = ints[i].k;
+            if u[k] >= INF || l[k] <= -INF {
+                continue;
+            }
+            if x[k] - l[k] <= HIGHS_FEASTOL || u[k] - x[k] <= HIGHS_FEASTOL {
+                continue;
+            }
+            let ak = if ints[i].comp { -ints[i].a } else { ints[i].a };
+            let saved = (ints[i].comp, ints[i].a, ints[i].int_ok, rhs2);
+            let (old_b, new_b) = if ints[i].comp {
+                (u[k], l[k])
+            } else {
+                (l[k], u[k])
+            };
+            rhs2 += ak * old_b - ak * new_b;
+            ints[i].comp = !ints[i].comp;
+            ints[i].a = -ints[i].a;
+            ints[i].int_ok = (new_b - new_b.round()).abs() <= INT_BOUND_TOL;
+            match cut_at(ctx, &ints, conts, rhs2, d) {
+                Some(c) if best.as_ref().is_none_or(|b| c.efficacy > b.efficacy) => {
+                    best = Some(c);
+                }
+                _ => {
+                    ints[i].comp = saved.0;
+                    ints[i].a = saved.1;
+                    ints[i].int_ok = saved.2;
+                    rhs2 = saved.3;
+                }
+            }
+        }
+    }
+    best
+}
+
 /// The MIR inequality of the substituted row at scaling `delta`, back in `z`.
 fn try_delta(
     ctx: &Ctx<'_>,
@@ -348,7 +482,12 @@ fn try_delta(
     let (l, u, x) = (ctx.l, ctx.u, ctx.x);
     let bt = delta * rhs2;
     let f0 = bt - bt.floor();
-    if !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f0) {
+    let fmin = if highs_cmir_enabled() {
+        FRAC_MIN_HIGHS
+    } else {
+        FRAC_MIN
+    };
+    if !(fmin..=1.0 - fmin).contains(&f0) {
         return;
     }
     let mut cx: BTreeMap<usize, f64> = BTreeMap::new();

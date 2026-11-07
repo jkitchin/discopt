@@ -39457,6 +39457,28 @@ def _solve_milp_highs(
     )
 
 
+def _milp_d2_cmir_enabled() -> bool:
+    """``DISCOPT_MILP_D2_CMIR`` (highs-parity D2 W4, default OFF): run the #2107
+    aggregated c-MIR separator in the pure-MILP route's root cut loop.
+
+    SCIP (presolve off, 30 s) certifies ``mik-250-20-75-1/5`` with aggregation /
+    c-MIR alone (Gomory off: 8.2 / 6.6 s); this route's root loop separates GMI only.
+    The separator as it stood did not move the bound (``d2-analysis/
+    w4_d2_cmir_entry.jsonl.gz``); with HiGHS's delta selection
+    (``DISCOPT_MILP_CMIR_HIGHS``) its root bound on ``mik-1`` goes -52,544 ->
+    -51,558 (``w4_root_bound.py``). Evaluated as a bundle with that flag.
+    """
+    raw = os.environ.get("DISCOPT_MILP_D2_CMIR")
+    if raw is None:
+        return False
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes"):
+        return True
+    if val in ("0", "false", "no", ""):
+        return False
+    raise ValueError(f"DISCOPT_MILP_D2_CMIR={raw!r} is not recognized (expected 1 or 0)")
+
+
 def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """Root cut options for the pure-MILP engine, or ``None`` to keep the
     binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
@@ -39519,6 +39541,9 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
         "root_cuts": 500,
         "cut_rounds": 50,
         "cut_select": True,
+        # highs-parity D2 W4 (`DISCOPT_MILP_D2_CMIR`, default OFF): the #2107
+        # aggregated c-MIR separator in this route's root loop.
+        "cmir_cuts": _milp_d2_cmir_enabled(),
         # Half the engine's slice, floored so a very short budget still gets one
         # useful pass. The loop stops early on tailing off, so on an instance
         # whose root closes in two rounds this ceiling is never reached.
