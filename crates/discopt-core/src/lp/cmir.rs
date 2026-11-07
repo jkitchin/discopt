@@ -73,7 +73,10 @@ const HIGHS_FEASTOL: f64 = 1e-6;
 /// `DISCOPT_MILP_CMIR_FLIP=1` adds HiGHS's complementation flip pass (`:638-677`).
 fn highs_cmir_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_HIGHS"))
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_CMIR_HIGHS").unwrap_or_default();
+        env_bool(&raw, "DISCOPT_MILP_CMIR_HIGHS")
+    })
 }
 
 /// D2 W4 (`DISCOPT_MILP_LIFTED_MIC`, default OFF): also try HiGHS's lifted
@@ -81,16 +84,21 @@ fn highs_cmir_enabled() -> bool {
 /// row and keep whichever of the two cuts is more efficacious.
 fn lifted_mic_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_bool("DISCOPT_MILP_LIFTED_MIC"))
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_LIFTED_MIC").unwrap_or_default();
+        env_bool(&raw, "DISCOPT_MILP_LIFTED_MIC")
+    })
 }
 
 fn cmir_flip_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_bool("DISCOPT_MILP_CMIR_FLIP"))
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_CMIR_FLIP").unwrap_or_default();
+        env_bool(&raw, "DISCOPT_MILP_CMIR_FLIP")
+    })
 }
 
-fn env_bool(name: &str) -> bool {
-    let raw = std::env::var(name).unwrap_or_default();
+fn env_bool(raw: &str, name: &str) -> bool {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "no" => false,
         "1" | "true" | "yes" => true,

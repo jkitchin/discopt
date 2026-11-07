@@ -1,0 +1,9 @@
+{"flag": "0", "load": 0.74, "status": "optimal", "cert": true, "bound": 1.5669248101642173, "nodes": 16903, "wall": 40.18519902400021, "undecided": 82.0, "slack_decided": 0.0}
+{"flag": "1", "load": 0.87, "status": "optimal", "cert": true, "bound": 1.566920485273106, "nodes": 12745, "wall": 27.8044458760005, "undecided": 0.0, "slack_decided": 20.0}
+{"flag": "1", "load": 1.02, "status": "optimal", "cert": true, "bound": 1.566920485273106, "nodes": 12745, "wall": 28.0423343450002, "undecided": 0.0, "slack_decided": 20.0}
+{"flag": "0", "load": 1.01, "status": "optimal", "cert": true, "bound": 1.5669248101642173, "nodes": 16903, "wall": 39.702138721000665, "undecided": 82.0, "slack_decided": 0.0}
+{"flag": "0", "load": 1.1, "status": "optimal", "cert": true, "bound": 1.5669248101642173, "nodes": 16903, "wall": 39.9476492040003, "undecided": 82.0, "slack_decided": 0.0}
+{"flag": "1", "load": 1.05, "status": "optimal", "cert": true, "bound": 1.566920485273106, "nodes": 12745, "wall": 27.66616827100006, "undecided": 0.0, "slack_decided": 20.0}
+retry=0: wall 39.94 +- 0.24 s over 3 runs
+retry=1: wall 27.84 +- 0.19 s over 3 runs
+executed assertions: 6

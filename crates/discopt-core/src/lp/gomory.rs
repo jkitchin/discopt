@@ -83,10 +83,18 @@ const MAX_ABS_COEFF: f64 = 1e7;
 /// What would re-graduate it: a density gate on these cuts and a re-run panel that also
 /// bars incumbent loss and per-node cost on the open population. `=1` opts in.
 pub(crate) fn gmi_repair_enabled() -> bool {
-    matches!(
-        std::env::var("DISCOPT_MILP_ROOT_GMI_REPAIR").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
+    let raw = std::env::var("DISCOPT_MILP_ROOT_GMI_REPAIR").unwrap_or_default();
+    parse_gmi_repair(&raw)
+}
+
+/// The parse table behind [`gmi_repair_enabled`]: `1`/`true`/`yes` opt in, anything
+/// else (unset included) reads as off, as before.
+fn parse_gmi_repair(raw: &str) -> bool {
+    match raw {
+        "" | "0" | "false" | "no" => false,
+        "1" | "true" | "yes" => true,
+        _ => false,
+    }
 }
 
 /// Work cap (`m·k²` flops) for the dense rank-revealing completion; above it the

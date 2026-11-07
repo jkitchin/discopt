@@ -102,6 +102,9 @@ REWRITE_CASES = {
     "entropy": lambda x, y: FunctionCall("entropy", x) + y,
     "centropy": lambda x, y: FunctionCall("centropy", x, y),
     "signpower": lambda x, y: FunctionCall("signpower", x, Constant(3.0)) + y,
+    # `atanh` is lowered by a two-branch rewrite (the native opcode cancels near
+    # -1); `v/2.5` spans [0.14, 0.96], so both branches and both signs are hit.
+    "atanh": lambda x, y: dm.atanh(x / 2.5) + dm.atanh(-y / 2.5),
     # #1491: `sqrt` (and `** 0.5`) lower through an edge-honest `select`; away
     # from the edge it must agree with JAX exactly like the native opcode did.
     "sqrt": lambda x, y: dm.sqrt(x * y) + x**0.5 + FunctionCall("signpower", x - y, Constant(0.5)),

@@ -61,14 +61,19 @@ pub(crate) fn farkas_exact_open_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         let raw = std::env::var("DISCOPT_FARKAS_EXACT_OPEN").unwrap_or_default();
-        match raw.trim() {
-            "0" | "false" | "False" | "off" | "OFF" => false,
-            "" | "1" | "true" | "True" | "on" | "ON" => true,
-            other => panic!(
-                "DISCOPT_FARKAS_EXACT_OPEN={other:?} is not a recognized value; use 1/on or 0/off"
-            ),
-        }
+        parse_farkas_exact_open(&raw)
     })
+}
+
+/// The parse table behind `DISCOPT_FARKAS_EXACT_OPEN`; garbage is refused.
+fn parse_farkas_exact_open(raw: &str) -> bool {
+    match raw.trim() {
+        "0" | "false" | "False" | "off" | "OFF" => false,
+        "" | "1" | "true" | "True" | "on" | "ON" => true,
+        other => panic!(
+            "DISCOPT_FARKAS_EXACT_OPEN={other:?} is not a recognized value; use 1/on or 0/off"
+        ),
+    }
 }
 
 fn q(v: f64) -> BigRational {

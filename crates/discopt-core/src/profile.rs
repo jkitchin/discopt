@@ -385,6 +385,11 @@ counters!(
     DualProofLearned,
     DualProofTightenings,
     DualProofFathoms,
+    // #2202: spatial-kernel node LPs re-solved from the cold-dual slack basis
+    // because the first solve (inherited warm start or cold primal) ended
+    // `Numerical`/`IterLimit`, and how many of those the re-solve decided.
+    NodeLpSlackRetry,
+    NodeLpSlackRetryDecided,
     // Degeneracy-stall detection in the warm dual loop (#1013). `DualStallTrips`
     // above fires only when the F2 *cap* is reached, so an LP that grinds below
     // the cap reads 0 there while 43% of its pivots take a zero-length step —
@@ -744,9 +749,6 @@ counters!(
     DriverIncumbentSnapRefused,
     DriverPolishAttempts,
     DriverPolishVerified,
-    ExpandResetArmed,
-    ExpandResetRetries,
-    ExpandResetRescues,
     // #1008 LU fill-in. Accumulated over every SPARSE `factorize_sparse` call:
     // the nonzero count of the basis handed in (`LuBasisNnz`), the nonzero count
     // of the `L`+`U` that came out (`LuFactorNnz`), and the call count

@@ -803,6 +803,30 @@ fn parse_sb_armed(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// The parse table behind `DISCOPT_MILP_NODE_GMI_LAZY`; garbage is refused, not defaulted.
+fn parse_node_gmi_lazy(raw: &str) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" => false,
+        "" | "1" | "true" | "yes" => true,
+        other => panic!(
+            "DISCOPT_MILP_NODE_GMI_LAZY={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+        ),
+    }
+}
+
+/// The parse table behind `DISCOPT_MILP_ROOT_FULL_BASIS`; garbage is refused, not defaulted.
+fn parse_root_full_basis(raw: &str) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => false,
+        "1" | "true" | "yes" => true,
+        other => panic!(
+            "DISCOPT_MILP_ROOT_FULL_BASIS={other:?} is not recognized (expected 1/true/yes \
+                 or 0/false/no). Refusing rather than silently picking an arm."
+        ),
+    }
+}
+
 fn node_gmi_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -831,19 +855,8 @@ fn parse_node_gmi(raw: &str) -> Result<bool, String> {
 fn node_gmi_lazy_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        match std::env::var("DISCOPT_MILP_NODE_GMI_LAZY")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "0" | "false" | "no" => false,
-            "" | "1" | "true" | "yes" => true,
-            other => panic!(
-                "DISCOPT_MILP_NODE_GMI_LAZY={other:?} is not recognized (expected 1/true/yes \
-                 or 0/false/no). Refusing rather than silently picking an arm."
-            ),
-        }
+        let raw = std::env::var("DISCOPT_MILP_NODE_GMI_LAZY").unwrap_or_default();
+        parse_node_gmi_lazy(&raw)
     })
 }
 
@@ -877,19 +890,8 @@ const NODE_GMI_MAX_CUTS: usize = 20;
 fn root_full_basis_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        match std::env::var("DISCOPT_MILP_ROOT_FULL_BASIS")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "" | "0" | "false" | "no" => false,
-            "1" | "true" | "yes" => true,
-            other => panic!(
-                "DISCOPT_MILP_ROOT_FULL_BASIS={other:?} is not recognized (expected 1/true/yes \
-                 or 0/false/no). Refusing rather than silently picking an arm."
-            ),
-        }
+        let raw = std::env::var("DISCOPT_MILP_ROOT_FULL_BASIS").unwrap_or_default();
+        parse_root_full_basis(&raw)
     })
 }
 

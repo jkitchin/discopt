@@ -1,0 +1,15 @@
+cvxnonsep_nsig30       OFF optimal                b=130.61841392487696 n=165 ExpandResetRetries=0 ExpandResetRescues=0 | ON optimal                b=130.61841392487696 n=165 ExpandResetRetries=0 ExpandResetRescues=0 fired=0 undecided None/None wall 102.1/102.4 load 3.41
+
+instances           : 1
+executed checks     : 13
+violations          : 0
+mechanism fired     : 0 on 0 instance(s) []
+unfired identical   : 1 checked, 0 skipped (wall backstop) []
+certified           : OFF 1 -> ON 1  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 165 -> ON 165
+wall  (all)         : OFF 102.1s -> ON 102.4s
+report              : /tmp/claude-0/-home-user-discopt/65190100-4f22-539e-a91a-7a9a3392e789/scratchpad/expand_panel/ctl1.json
+
+VERDICT: INCONCLUSIVE - the mechanism never fired.

@@ -3295,6 +3295,10 @@ def _try_native_spatial_kernel(
     # opts out; see the helper).
     if _kernel_dual_proof_enabled():
         solve_kwargs["dual_proof_propagation"] = True
+    # #2202: re-solve an undecided node LP from the slack basis (default ON; ``=0``
+    # opts out; see the helper).
+    if _kernel_node_lp_slack_retry_enabled():
+        solve_kwargs["node_lp_slack_retry"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #2092: the open-frontier memory budget (``DISCOPT_FRONTIER_MEMORY_MB``).
@@ -3720,6 +3724,16 @@ def _try_native_spatial_kernel(
     # (``DISCOPT_KERNEL_UNDECIDED_RETRY``) and how many decided; 0 when off.
     _native_stats["tree/prop_retries"] = float(int(res.get("n_prop_retries") or 0))
     _native_stats["tree/prop_retry_decided"] = float(int(res.get("n_prop_retry_decided") or 0))
+    # #2202: slack-basis re-solves of undecided node LPs
+    # (``DISCOPT_NODE_LP_SLACK_RETRY``) and how many decided; 0 when off.
+    _native_stats["tree/slack_retries"] = float(int(res.get("n_slack_retries") or 0))
+    _native_stats["tree/slack_retry_decided"] = float(int(res.get("n_slack_retry_decided") or 0))
+    # #2142 learned dual-proof rows (``DISCOPT_DUAL_PROOF_PROPAGATION``). #2202 needed
+    # these and found them only in the raw kernel dict; ``DISCOPT_PROFILE`` dumps
+    # print the pre-kernel MILP sub-solves' (zero) counters on this path.
+    _dp = res.get("dual_proof") or {}
+    for _k in ("rays", "global_lps", "learned", "tightenings", "fathoms"):
+        _native_stats[f"tree/dual_proof_{_k}"] = float(int(_dp.get(_k) or 0))
     # #2092: the search stopped on the frontier memory budget (status node_limit).
     _native_stats["tree/frontier_capped"] = float(bool(res.get("frontier_capped")))
 
@@ -12825,6 +12839,39 @@ def _kernel_undecided_retry_enabled() -> bool:
         "no",
         "off",
         "",
+    )
+
+
+def _kernel_node_lp_slack_retry_enabled() -> bool:
+    """#2202: ``DISCOPT_NODE_LP_SLACK_RETRY`` for the native spatial kernel
+    (``SpatialTreeConfig::node_lp_slack_retry``).
+
+    **Default ON; ``=0`` opts out** and restores the tree before it, bit for bit.
+
+    A node LP that ends ``Numerical`` / ``IterLimit`` is solved once more from the
+    sign-matched slack basis (slacks basic, each structural column at the bound its
+    objective sign selects), through the same entry, equilibration, feasibility audit
+    and Farkas verification as every node LP; only an ``Optimal`` / ``Infeasible``
+    answer replaces the first verdict. An undecided node otherwise branches with its
+    parent's bound.
+
+    The case it exists for (#2202): on MINLPLib ``nous1`` the basis a child inherits
+    from its parent (#1935) sends the warm dual into a breakdown and the cold primal
+    fallback ends ``Numerical`` too. HiGHS decides all 40 such captured node LPs, and
+    so does the slack start (same 36 optimal / 4 infeasible split, objectives equal to
+    6 digits); from the inherited start, none. Whether a run falls into the cascade
+    depends on the order of floating-point work: under fixed-row permutations nous1
+    stalled at the time limit with ~1,400 undecided nodes, with
+    ``DISCOPT_DUAL_PROOF_PROPAGATION`` on or off, and with this retry all 24 runs
+    (12 permutations x both dual-proof arms) certify. That is the macOS/arm64 stall
+    #2202 reported against #2169. Probe: ``tree/slack_retries`` /
+    ``tree/slack_retry_decided``; panel: performance-plan section 121.
+    """
+    return os.environ.get("DISCOPT_NODE_LP_SLACK_RETRY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

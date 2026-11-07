@@ -378,6 +378,43 @@ fn frac_root_down(y: f64, p: f64) -> Option<f64> {
     None
 }
 
+/// How a floating-point exponent `e` is treated by the power enclosures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExponentKind {
+    /// An exact integer that fits `i64` (`|e| < 2^62`).
+    Int(i64),
+    /// An exact integer too large for `i64`. Every double with `|e| >= 2^53`
+    /// is an even integer, so these are all even. They used to go through
+    /// `e.round() as i64`, which saturates: `2^63` became `i64::MAX` (an
+    /// *odd* power), `1e19` failed the round-trip test and was treated as a
+    /// fractional power (clamping the base to nonnegative), and
+    /// `-(2^63)` overflowed `-n` and recursed until the stack blew.
+    HugeEven,
+    /// Not an integer (or not finite).
+    NonInt,
+}
+
+/// Classify an exponent; the single integrality test for forward and backward pow.
+pub fn classify_exponent(e: f64) -> ExponentKind {
+    if !e.is_finite() || e != e.trunc() {
+        return ExponentKind::NonInt;
+    }
+    if e.abs() < 4.611_686_018_427_388e18 {
+        ExponentKind::Int(e as i64)
+    } else {
+        ExponentKind::HugeEven
+    }
+}
+
+/// `[a,b]^e` for a huge even integer `e` (`|e| >= 2^62`): a function of `|x|`,
+/// monotone in `|x|` (increasing for `e > 0`, decreasing for `e < 0`).
+fn interval_pow_huge_even(base: &Interval, e: f64) -> Interval {
+    let a = interval_abs(base);
+    // `powf` is a libm call; widen outward and keep the nonnegative floor.
+    let (small, large) = if e > 0.0 { (a.lo, a.hi) } else { (a.hi, a.lo) };
+    Interval::new(lib_down(small.powf(e)).max(0.0), lib_up(large.powf(e)))
+}
+
 /// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
@@ -387,11 +424,22 @@ pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
         return *base;
     }
     if n < 0 {
-        let pos = interval_pow_int(base, -n);
+        // `unsigned_abs`, not `-n`: `-i64::MIN` overflows.
+        let pos = interval_pow_uint(base, n.unsigned_abs());
         return interval_div(&Interval::point(1.0), &pos);
     }
+    interval_pow_uint(base, n as u64)
+}
+
+/// `[a,b]^n` for an integer `n >= 2` (`n` of 0 and 1 are handled by the caller).
+fn interval_pow_uint(base: &Interval, n: u64) -> Interval {
+    if n == 0 {
+        return Interval::point(1.0);
+    }
+    if n == 1 {
+        return *base;
+    }
     // Directed powers (#1504): `powi` is neither correctly rounded nor directed.
-    let n = n as u64;
     if n % 2 == 0 {
         // Even power: result is non-negative.
         if base.lo >= 0.0 {
@@ -417,10 +465,27 @@ pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
     // exclude the true value (by ~1e7 at x = 1e8), and the integer rule also
     // drops the nonnegative-base domain a non-integer power has.
     if exp.hi == exp.lo {
-        let e = exp.lo;
-        let e_int = e.round() as i64;
-        if e == e_int as f64 {
-            return interval_pow_int(base, e_int);
+        match classify_exponent(exp.lo) {
+            ExponentKind::Int(n) => return interval_pow_int(base, n),
+            ExponentKind::HugeEven => return interval_pow_huge_even(base, exp.lo),
+            ExponentKind::NonInt => {}
+        }
+    }
+    // A negative base with a non-point exponent that can take an integer value
+    // (an integer variable exponent, `x**n` with `n` in {2, 3}): the power is
+    // real there, with either sign. Clamping the base to `[0, 0]` gave
+    // `x**n in [0, 0]` for `x in [-2, -1]` and declared `x**n >= 3` infeasible
+    // although `(-2)**2 = 4`. Enclose by magnitude: `|x^k| = |x|^k`, so the
+    // image lies in `[-U, U]` with `U` the sup of `|x|^[c,d]`.
+    if base.lo < 0.0 && exp.hi != exp.lo {
+        let has_int = exp.lo.is_finite() && exp.hi.is_finite() && exp.lo.ceil() <= exp.hi.floor();
+        if !(exp.lo.is_finite() && exp.hi.is_finite()) || has_int {
+            let a = interval_abs(base);
+            let mag = interval_pow(&a, exp);
+            if !mag.hi.is_finite() || mag.is_formally_inverted() {
+                return Interval::entire();
+            }
+            return Interval::new(-mag.hi, mag.hi);
         }
     }
     // General case: base must be non-negative for real-valued power.
@@ -501,31 +566,58 @@ fn ln_up(x: f64) -> f64 {
     }
 }
 
-/// `log([a,b]) = [log(max(a, eps)), log(b)]`
+/// `log([a,b]) = [log(a), log(b)]`, with `log(a) = -inf` for `a <= 0`.
 pub fn interval_log(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(ln_down(lo), ln_up(a.hi))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        ln_down(a.lo)
+    };
+    Interval::new(lo, ln_up(a.hi))
 }
 
 /// `log2([a,b])`
 pub fn interval_log2(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(lib_down(lo.log2()), lib_up(a.hi.log2()))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        lib_down(a.lo.log2())
+    };
+    Interval::new(lo, lib_up(a.hi.log2()))
 }
 
 /// `log10([a,b])`
 pub fn interval_log10(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(lib_down(lo.log10()), lib_up(a.hi.log10()))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        lib_down(a.lo.log10())
+    };
+    Interval::new(lo, lib_up(a.hi.log10()))
 }
 
 /// `sqrt([a,b]) = [sqrt(max(a,0)), sqrt(b)]`
@@ -1115,19 +1207,23 @@ fn eval_node_interval(
                     // image at atanh(1 - 1e-12) ~ 14.2 and declared feasible
                     // models with x in (1 - 1e-12, 1) infeasible, #1908.) An
                     // argument wholly outside the domain gets `entire`: sound,
-                    // and it concludes nothing.
+                    // and it concludes nothing. `libm::atanh`, not `f64::atanh`:
+                    // std computes `0.5 * ln_1p(2x / (1 - x))`, which cancels
+                    // near -1 (`atanh(-1 + 1e-13)` came out -15.31267 against
+                    // the true -15.31322, 1.85e-2 relative at the last double),
+                    // far past any ulp widening.
                     if a0.hi <= -1.0 || a0.lo >= 1.0 {
                         Interval::entire()
                     } else {
                         let lo = if a0.lo <= -1.0 {
                             f64::NEG_INFINITY
                         } else {
-                            lib_down(a0.lo.atanh())
+                            lib_down(libm::atanh(a0.lo))
                         };
                         let hi = if a0.hi >= 1.0 {
                             f64::INFINITY
                         } else {
-                            lib_up(a0.hi.atanh())
+                            lib_up(libm::atanh(a0.hi))
                         };
                         Interval::new(lo, hi)
                     }
@@ -1652,11 +1748,17 @@ fn backward_propagate_with(
                 BinOp::Pow => {
                     // If exponent is constant integer, we can invert.
                     if let Some(exp_val) = arena.try_constant_value_pub(*right) {
-                        let exp_int = exp_val.round() as i64;
+                        // The same integrality test as the forward pass. A huge
+                        // even exponent (`|e| >= 2^62`) is neither branch: no
+                        // inversion is attempted, which is sound.
+                        let kind = classify_exponent(exp_val);
+                        let exp_int = match kind {
+                            ExponentKind::Int(n) => n,
+                            _ => 0,
+                        };
                         // #1982: a non-integer power is real-valued only on a
                         // nonnegative base -- the domain `interval_pow` assumes.
-                        // The same integrality test as the forward pass.
-                        if exp_val != exp_int as f64
+                        if kind == ExponentKind::NonInt
                             && exp_val.is_finite()
                             && SIGN_DOMAIN.with(|c| c.get())
                         {
@@ -1682,7 +1784,7 @@ fn backward_propagate_with(
                                 reduce_counts,
                             );
                         }
-                        if exp_val == exp_int as f64 && exp_int > 0 {
+                        if matches!(kind, ExponentKind::Int(_)) && exp_int > 0 {
                             // Roots are VERIFIED outward (#1504): `powf(1/n)`
                             // rounds to nearest, so the lower root could land
                             // above the true root and cut it. `root_down` /
@@ -1906,7 +2008,7 @@ fn backward_propagate_with(
                         &tightened,
                         -1.0,
                         1.0,
-                        f64::atanh,
+                        libm::atanh,
                         |x| lib_up(x.tanh()),
                         |x| lib_down(x.tanh()),
                     );
@@ -2109,80 +2211,50 @@ fn backward_propagate_with(
                     backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Sin => {
-                    // sin is monotone on each piece between consecutive extrema
-                    // at pi/2 + k*pi. If the forward input lies in one piece,
-                    // invert via asin with the right 2*m*pi offset; otherwise the
-                    // preimage is a union of intervals and we conservatively skip.
-                    use std::f64::consts::{FRAC_PI_2, PI};
+                    // sin has extrema at pi/2 + k*pi; piece k = [e_k, e_{k+1}] is
+                    // increasing for odd k (x = asin(y) + (k+1)*pi) and decreasing
+                    // for even k (x = pi - asin(y) + k*pi).
                     let inp = node_bounds[args[0].0];
-                    // Monotone iff no sin-extremum (pi/2 + k*pi) is strictly
-                    // interior to [inp.lo, inp.hi]; extrema at the endpoints are
-                    // fine. Take the smallest extremum >= inp.lo.
-                    let ext = FRAC_PI_2 + ((inp.lo - FRAC_PI_2) / PI).ceil() * PI;
-                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
-                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
-                        let mid = 0.5 * (inp.lo + inp.hi);
-                        let ylo = tightened.lo.clamp(-1.0, 1.0);
-                        let yhi = tightened.hi.clamp(-1.0, 1.0);
-                        let (new_lo, new_hi) = if mid.cos() >= 0.0 {
-                            // increasing piece centered at 2*m*pi
-                            let m = (mid / (2.0 * PI)).round();
+                    use std::f64::consts::FRAC_PI_2;
+                    let pre = trig_piece_preimage(inp, tightened, FRAC_PI_2, |k, ylo, yhi| {
+                        let off = k * PI;
+                        if k.rem_euclid(2.0) == 1.0 {
                             (
-                                abs_down(ylo.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(yhi.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
+                                ylo.asin() + off + PI,
+                                yhi.asin() + off + PI,
+                                off.abs() + 2.0 * PI,
                             )
                         } else {
-                            // decreasing piece centered at pi + 2*m*pi
-                            let m = ((mid - PI) / (2.0 * PI)).round();
                             (
-                                abs_down(PI - yhi.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(PI - ylo.asin() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
+                                PI - yhi.asin() + off,
+                                PI - ylo.asin() + off,
+                                off.abs() + 2.0 * PI,
                             )
-                        };
-                        backward_propagate(
-                            arena,
-                            args[0],
-                            Interval::new(new_lo, new_hi),
-                            node_bounds,
-                            var_bounds,
-                        );
+                        }
+                    });
+                    if let Some(pre) = pre {
+                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                     }
                 }
                 MathFunc::Cos => {
-                    // cos is monotone on each piece [k*pi, (k+1)*pi]: decreasing
-                    // where sin>0, increasing where sin<0. acos(y) in [0, pi].
-                    use std::f64::consts::PI;
+                    // cos has extrema at k*pi; piece k = [k*pi, (k+1)*pi] is
+                    // decreasing for even k (x = acos(y) + k*pi) and increasing for
+                    // odd k (x = (k+1)*pi - acos(y)).
                     let inp = node_bounds[args[0].0];
-                    // Monotone iff no cos-extremum (k*pi) is strictly interior.
-                    let ext = (inp.lo / PI).ceil() * PI;
-                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
-                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
-                        let mid = 0.5 * (inp.lo + inp.hi);
-                        let ylo = tightened.lo.clamp(-1.0, 1.0);
-                        let yhi = tightened.hi.clamp(-1.0, 1.0);
-                        let m = (mid / (2.0 * PI)).round();
-                        let (new_lo, new_hi) = if mid.sin() > 0.0 {
-                            // decreasing piece [2m*pi, pi+2m*pi]: x = acos(y) + 2m*pi,
-                            // larger y -> smaller x.
-                            (
-                                abs_down(yhi.acos() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                                abs_up(ylo.acos() + 2.0 * m * PI, (2.0 * m * PI).abs() + PI),
-                            )
+                    let pre = trig_piece_preimage(inp, tightened, 0.0, |k, ylo, yhi| {
+                        let off = k * PI;
+                        if k.rem_euclid(2.0) == 0.0 {
+                            (yhi.acos() + off, ylo.acos() + off, off.abs() + PI)
                         } else {
-                            // increasing piece [pi+2m'*pi, 2pi+2m'*pi]:
-                            // x = 2*pi*m - acos(y) (m rounds to the piece's right end).
                             (
-                                abs_down(2.0 * PI * m - ylo.acos(), (2.0 * PI * m).abs() + PI),
-                                abs_up(2.0 * PI * m - yhi.acos(), (2.0 * PI * m).abs() + PI),
+                                off + PI - ylo.acos(),
+                                off + PI - yhi.acos(),
+                                off.abs() + 2.0 * PI,
                             )
-                        };
-                        backward_propagate(
-                            arena,
-                            args[0],
-                            Interval::new(new_lo, new_hi),
-                            node_bounds,
-                            var_bounds,
-                        );
+                        }
+                    });
+                    if let Some(pre) = pre {
+                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                     }
                 }
                 _ => {
@@ -2254,6 +2326,87 @@ fn backward_propagate_with(
         | ExprNode::Parameter { .. }
         | ExprNode::MatMul { .. } => {}
     }
+}
+
+/// Sound backward preimage of `sin`/`cos` over `inp`, given the image `tightened`.
+///
+/// The function has extrema at `phase + k*pi`, and on piece `k` (between extrema
+/// `k` and `k + 1`) it is monotone with the inverse `piece(k, ylo, yhi) ->
+/// (lo, hi, scale)`. An extremum computed in f64 is only known to within `err`,
+/// so each candidate is classified against the box with that margin:
+///
+/// * provably interior -- the preimage is a union of intervals: decline;
+/// * provably outside -- irrelevant;
+/// * within `err` of an endpoint -- *ambiguous*: the strip between the endpoint
+///   and the extremum's far error bound may belong to the neighbouring piece, so
+///   it is kept whole and hulled with the piece's preimage.
+///
+/// The piece is read off the midpoint of the box with the ambiguous strips
+/// removed, which is at least `err` from every extremum, so the comparison is
+/// decided correctly. This replaced an absolute `1e-12` monotonicity slack plus a
+/// piece choice from the *untrimmed* midpoint: an extremum within 1e-12 inside
+/// an endpoint was accepted as "monotone", the strip beyond it was inverted on
+/// the wrong piece and dropped, and `sin(1.570796326794 + 1e-12*n) >= 0.5`
+/// tightened `n >= 0` to `n >= 1`, cutting the optimum `n = 0`.
+fn trig_piece_preimage(
+    inp: Interval,
+    tightened: Interval,
+    phase: f64,
+    piece: impl Fn(f64, f64, f64) -> (f64, f64, f64),
+) -> Option<Interval> {
+    if !(inp.lo.is_finite() && inp.hi.is_finite()) || inp.hi - inp.lo > PI {
+        return None;
+    }
+    let mag = inp.lo.abs().max(inp.hi.abs()) + 2.0 * PI;
+    let err = 8.0 * f64::EPSILON * mag;
+    if 8.0 * err >= PI {
+        return None;
+    }
+    let ylo = tightened.lo.clamp(-1.0, 1.0);
+    let yhi = tightened.hi.clamp(-1.0, 1.0);
+    let k0 = ((inp.lo - phase) / PI).floor() - 1.0;
+    let (mut core_lo, mut core_hi) = (inp.lo, inp.hi);
+    let (mut strip_lo, mut strip_hi) = (None::<f64>, None::<f64>);
+    for i in 0..=5 {
+        let e = phase + (k0 + i as f64) * PI;
+        if e + err < inp.lo || e - err > inp.hi {
+            continue;
+        }
+        if e - err > inp.lo && e + err < inp.hi {
+            return None; // interior extremum: preimage is not one interval
+        }
+        if (e - inp.lo).abs() <= (e - inp.hi).abs() {
+            strip_lo = Some(strip_lo.map_or(e + err, |s: f64| s.max(e + err)));
+            core_lo = core_lo.max(e + err);
+        } else {
+            strip_hi = Some(strip_hi.map_or(e - err, |s: f64| s.min(e - err)));
+            core_hi = core_hi.min(e - err);
+        }
+    }
+    if core_lo >= core_hi {
+        return None;
+    }
+    let mid = 0.5 * (core_lo + core_hi);
+    let k = ((mid - phase) / PI).floor();
+    // `mid` is >= err from every extremum, so `k` must bracket it; check anyway.
+    if !(phase + k * PI < mid && mid < phase + (k + 1.0) * PI) {
+        return None;
+    }
+    let (lo, hi, scale) = piece(k, ylo, yhi);
+    let mut lo = abs_down(lo, scale);
+    let mut hi = abs_up(hi, scale);
+    if !(lo.is_finite() && hi.is_finite()) {
+        return None;
+    }
+    if let Some(s) = strip_lo {
+        lo = lo.min(inp.lo);
+        hi = hi.max(s.min(inp.hi));
+    }
+    if let Some(s) = strip_hi {
+        hi = hi.max(inp.hi);
+        lo = lo.min(s.max(inp.lo));
+    }
+    Some(Interval::new(lo, hi))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -6245,5 +6398,257 @@ mod tests_near_integer_pow {
         // x^3 over a sign-straddling base still uses the odd-power rule.
         let enc = interval_pow(&Interval::new(-2.0, 2.0), &Interval::new(3.0, 3.0));
         assert!(enc.lo <= -8.0 && enc.hi >= 8.0, "{:?}", enc);
+    }
+}
+
+#[cfg(test)]
+mod tests_adversarial_2026_11 {
+    //! Enclosure misses found by mpmath-referenced fuzzing (2026-11-07).
+    use super::*;
+
+    #[test]
+    fn log_family_of_subnormal_and_zero_is_unbounded_or_exact() {
+        // ln(1e-320) = -736.83; the old MIN_POSITIVE clamp gave a floor of -708.4.
+        let r = interval_log(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -736.8, "{r:?}");
+        let r = interval_log2(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -1029.8, "{r:?}");
+        let r = interval_log10(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -320.0, "{r:?}");
+        // A box containing 0 reaches the pole.
+        for r in [
+            interval_log(&Interval::new(0.0, 1.0)),
+            interval_log2(&Interval::new(0.0, 1.0)),
+            interval_log10(&Interval::new(-1.0, 1.0)),
+        ] {
+            assert_eq!(r.lo, f64::NEG_INFINITY, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn atanh_near_minus_one_encloses_true_value() {
+        // mpmath, 50 digits.
+        let cases = [
+            (-0.999_f64, -3.800_201_167_250_199_587_f64),
+            (-1.0 + 1e-13, -15.313_221_246_314_329_389),
+            (
+                f64::from_bits((-1.0f64).to_bits() - 1),
+                -18.714_973_875_118_523_327,
+            ),
+        ];
+        for (x, truth) in cases {
+            let mut arena = ExprArena::new();
+            let v = arena.add(ExprNode::Variable {
+                name: "x".into(),
+                index: 0,
+                size: 1,
+                shape: vec![],
+            });
+            let f = arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Atanh,
+                args: vec![v],
+            });
+            let r = forward_propagate(&arena, f, &[Interval::new(x, x)])[f.0];
+            assert!(
+                r.lo <= truth && truth <= r.hi,
+                "atanh({x}) = {truth} not in {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn huge_integer_exponents_are_even_and_do_not_overflow() {
+        let base = Interval::new(-1.0, -0.5);
+        for e in [2f64.powi(62), 2f64.powi(63), 1e19, 1e300] {
+            assert_eq!(classify_exponent(e), ExponentKind::HugeEven);
+            let r = interval_pow(&base, &Interval::point(e));
+            // (-1)^e = 1 for an even e; the image is [~0, 1].
+            assert!(r.lo >= 0.0 && r.hi >= 1.0, "x^{e}: {r:?}");
+            let r = interval_pow(&base, &Interval::point(-e));
+            // (-1)^-e = 1, (-0.5)^-e = inf.
+            assert!(r.lo <= 1.0 && r.hi == f64::INFINITY, "x^-{e}: {r:?}");
+        }
+        // -(2^63) used to overflow `-n` and recurse until the stack blew.
+        let r = interval_pow_int(&base, i64::MIN);
+        assert!(r.lo <= 1.0, "{r:?}");
+        assert_eq!(classify_exponent(3.0), ExponentKind::Int(3));
+        assert_eq!(classify_exponent(3.5), ExponentKind::NonInt);
+        assert_eq!(classify_exponent(f64::INFINITY), ExponentKind::NonInt);
+    }
+
+    #[test]
+    fn negative_base_with_integer_valued_exponent_interval() {
+        // x in [-2, -1], n in [2, 3]: (-2)^2 = 4 and (-2)^3 = -8 are both real.
+        let r = interval_pow(&Interval::new(-2.0, -1.0), &Interval::new(2.0, 3.0));
+        assert!(r.lo <= -8.0 && r.hi >= 4.0, "{r:?}");
+        // An exponent interval holding no integer keeps the nonnegative-base domain.
+        let r = interval_pow(&Interval::new(-2.0, 4.0), &Interval::new(2.2, 2.8));
+        assert!(r.lo >= 0.0, "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests_trig_backward {
+    use super::*;
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    fn sin_pre(lo: f64, hi: f64, ylo: f64, yhi: f64) -> Option<Interval> {
+        trig_piece_preimage(
+            Interval::new(lo, hi),
+            Interval::new(ylo, yhi),
+            FRAC_PI_2,
+            |k, ylo, yhi| {
+                let off = k * PI;
+                if k.rem_euclid(2.0) == 1.0 {
+                    (
+                        ylo.asin() + off + PI,
+                        yhi.asin() + off + PI,
+                        off.abs() + 2.0 * PI,
+                    )
+                } else {
+                    (
+                        PI - yhi.asin() + off,
+                        PI - ylo.asin() + off,
+                        off.abs() + 2.0 * PI,
+                    )
+                }
+            },
+        )
+    }
+
+    fn cos_pre(lo: f64, hi: f64, ylo: f64, yhi: f64) -> Option<Interval> {
+        trig_piece_preimage(
+            Interval::new(lo, hi),
+            Interval::new(ylo, yhi),
+            0.0,
+            |k, ylo, yhi| {
+                let off = k * PI;
+                if k.rem_euclid(2.0) == 0.0 {
+                    (yhi.acos() + off, ylo.acos() + off, off.abs() + PI)
+                } else {
+                    (
+                        off + PI - ylo.acos(),
+                        off + PI - yhi.acos(),
+                        off.abs() + 2.0 * PI,
+                    )
+                }
+            },
+        )
+    }
+
+    /// The adversarial case: an extremum 9e-13 inside the lower endpoint. The old
+    /// 1e-12 slack called the box monotone, inverted it on the wrong piece and
+    /// dropped `[TH0, pi/2]`, which is feasible (`sin(TH0) = 1 - 4e-25`). The
+    /// extremum is now provably interior, so the rule declines.
+    #[test]
+    fn extremum_just_inside_an_endpoint_is_not_monotone() {
+        let th0 = 1.570796326794;
+        for ylo in [0.5, -1.0] {
+            assert!(sin_pre(th0, th0 + 1e-9, ylo, 1.0).is_none());
+        }
+        assert!(cos_pre(3.141592653589, 3.141592653589 + 1e-9, -1.0, 1.0).is_none());
+        assert!(sin_pre(FRAC_PI_2 - 1e-9, FRAC_PI_2 + 1e-13, 0.5, 1.0).is_none());
+    }
+
+    /// An extremum within its rounding error of an endpoint is ambiguous: the
+    /// strip on the far side is kept whole and the rest still tightens.
+    #[test]
+    fn ambiguous_extremum_at_an_endpoint_keeps_the_strip() {
+        // The real pi/2 is 6e-17 above FRAC_PI_2.
+        let p = sin_pre(FRAC_PI_2 - 1e-9, FRAC_PI_2, 0.5, 1.0).expect("keeps");
+        assert!(p.hi >= FRAC_PI_2 && p.lo <= FRAC_PI_2 - 1e-9, "{:?}", p);
+        let p = sin_pre(FRAC_PI_2, FRAC_PI_2 + 1e-9, 0.5, 1.0).expect("keeps");
+        assert!(p.lo <= FRAC_PI_2 && p.hi >= FRAC_PI_2 + 1e-9, "{:?}", p);
+        let p = cos_pre(PI, PI + 1e-9, -1.0, -0.5).expect("keeps");
+        assert!(p.lo <= PI && p.hi >= PI + 1e-9, "{:?}", p);
+    }
+
+    #[test]
+    fn monotone_boxes_still_tighten() {
+        let p = sin_pre(0.1, 1.0, 0.5, 1.0).unwrap();
+        assert!(
+            (p.lo - 0.5f64.asin()).abs() < 1e-12 && p.hi >= 1.0,
+            "{:?}",
+            p
+        );
+        let p = sin_pre(2.0, 3.0, 0.0, 0.5).unwrap();
+        assert!(
+            (p.lo - (PI - 0.5f64.asin())).abs() < 1e-12 && p.hi >= 3.0,
+            "{:?}",
+            p
+        );
+        let p = cos_pre(0.5, 3.0, -1.0, 0.0).unwrap();
+        assert!((p.lo - FRAC_PI_2).abs() < 1e-12 && p.hi >= 3.0, "{:?}", p);
+        let p = cos_pre(-3.0, -0.5, -1.0, 0.0).unwrap();
+        assert!((p.hi + FRAC_PI_2).abs() < 1e-12 && p.lo <= -3.0, "{:?}", p);
+        // Shifted by whole periods.
+        let s = 200.0 * PI;
+        let p = sin_pre(s + 0.1, s + 1.0, 0.5, 1.0).unwrap();
+        assert!((p.lo - (s + 0.5f64.asin())).abs() < 1e-9, "{:?}", p);
+        // An extremum at an endpoint: the strip is kept, the far side tightens.
+        let p = sin_pre(FRAC_PI_2, 2.0, 0.99, 1.0).unwrap();
+        assert!(
+            p.lo <= FRAC_PI_2 && (p.hi - (PI - 0.99f64.asin())).abs() < 1e-12,
+            "{:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn non_monotone_boxes_decline() {
+        assert!(sin_pre(1.0, 2.0, 0.5, 1.0).is_none()); // pi/2 interior
+        assert!(cos_pre(-0.5, 0.5, 0.5, 1.0).is_none()); // 0 interior
+        assert!(sin_pre(0.0, PI + 1e-6, 0.5, 1.0).is_none()); // wider than pi
+        assert!(sin_pre(f64::NEG_INFINITY, 0.0, 0.5, 1.0).is_none());
+        assert!(sin_pre(1e17, 1e17 + 1.0, 0.5, 1.0).is_none()); // extrema unresolvable
+    }
+
+    /// Every sampled point whose sine/cosine lies in the image interval is kept.
+    #[test]
+    fn sampled_feasible_points_are_never_cut() {
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut checks = 0usize;
+        for case in 0..4000 {
+            // Boxes clustered near extrema (offsets down to 1e-15) and at random.
+            let k = (next() * 40.0 - 20.0).floor();
+            let phase = if case % 2 == 0 { FRAC_PI_2 } else { 0.0 };
+            let e = phase + k * PI;
+            let near = 10f64.powf(-15.0 + 14.0 * next()) * if next() < 0.5 { -1.0 } else { 1.0 };
+            let lo = if case % 3 == 0 {
+                e + near
+            } else {
+                e + next() * 6.0 - 3.0
+            };
+            let hi = lo + 10f64.powf(-12.0 + 12.5 * next());
+            let a = next() * 2.0 - 1.0;
+            let b = next() * 2.0 - 1.0;
+            let (ylo, yhi) = (a.min(b), a.max(b));
+            let pre = if phase != 0.0 {
+                sin_pre(lo, hi, ylo, yhi)
+            } else {
+                cos_pre(lo, hi, ylo, yhi)
+            };
+            let Some(pre) = pre else { continue };
+            for i in 0..=64 {
+                let x = lo + (hi - lo) * (i as f64) / 64.0;
+                let x = x.clamp(lo, hi);
+                let y = if phase != 0.0 { x.sin() } else { x.cos() };
+                // Clearly inside the image (f64 sin/cos err by about an ulp).
+                if y > ylo + 1e-15 && y < yhi - 1e-15 {
+                    assert!(
+                        pre.lo <= x && x <= pre.hi,
+                        "cut x={x:e} box=[{lo:e},{hi:e}] y in [{ylo},{yhi}] pre={pre:?}"
+                    );
+                    checks += 1;
+                }
+            }
+        }
+        assert!(checks > 20000, "only {checks} checks executed");
     }
 }

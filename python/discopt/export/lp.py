@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from discopt.constants import bound_is_open
 from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
     binary_box_is_default,
@@ -176,11 +177,11 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
             # explicit bound line, which overrides the `Binaries` listing's
             # implicit 0-1 (EX-3).
             continue
-        if lb <= -1e19 and ub >= 1e19:
+        if bound_is_open(lb) and bound_is_open(ub):
             lines.append(f"  {vname} Free")
-        elif lb <= -1e19:
+        elif bound_is_open(lb):
             lines.append(f"  -Inf <= {vname} <= {_fmt_val(ub)}")
-        elif ub >= 1e19:
+        elif bound_is_open(ub):
             lines.append(f"  {_fmt_val(lb)} <= {vname} <= +Inf")
         else:
             lines.append(f"  {_fmt_val(lb)} <= {vname} <= {_fmt_val(ub)}")

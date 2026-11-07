@@ -79,6 +79,8 @@ cutest = ["pycutest>=1.8.0"]
 # `discopt gams-register` to merge into an existing gamsconfig.yaml.
 gams = ["gamsapi[core]>=45", "pyyaml>=6"]
 llm = ["litellm>=1.0"]
+# `discopt mcp`: the Model Context Protocol server (python/discopt/mcp_server.py).
+mcp = ["mcp>=1.2"]
 # First-order conic solver for the strong-Shor SDP root bound (issue #661,
 # `DISCOPT_SHOR_SDP_ROOT_BOUND`). Missing scs is a sound no-op.
 sdp = ["scs>=3.2"]
@@ -137,6 +139,8 @@ dev = [
     # test_ci_changes_gate.py until 2026-08-09, a file that no longer exists.
     # (Also in the `gams` extra, for gamsconfig.yaml merging.)
     "pyyaml>=6",
+    # test_mcp_server.py drives `discopt mcp` through a real MCP client session.
+    "mcp>=1.2",
     "pytest-xdist",
     # Property-based round trip and fuzzing of the native model format
     # (test_serialize_property.py / test_serialize_fuzz.py, serialization plan WP-4).

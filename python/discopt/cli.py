@@ -75,7 +75,16 @@ def _cmd_about(_args):
 
     deps = ["numpy", "scipy", "highspy", "pounce-solver"]
     # jax/jaxlib are the `discopt[jax]` extra (#1873).
-    optional_deps = ["jax", "jaxlib", "cyipopt", "litellm", "pycutest", "onnx", "onnxruntime"]
+    optional_deps = [
+        "jax",
+        "jaxlib",
+        "cyipopt",
+        "litellm",
+        "mcp",
+        "pycutest",
+        "onnx",
+        "onnxruntime",
+    ]
     for name in deps:
         try:
             ver = importlib.metadata.version(name)
@@ -346,6 +355,23 @@ def _cmd_install_skills(args):
     )
     if verb_counts["skip"]:
         print(f"  {verb_counts['skip']} already existed; pass --force to overwrite.")
+
+
+def _cmd_mcp(args):
+    """Run the discopt MCP server on stdio, or print its client config."""
+    import json
+
+    from discopt import mcp_server
+
+    if args.print_config:
+        print(json.dumps(mcp_server.desktop_config(), indent=2))
+        return
+    try:
+        server = mcp_server.build_server()
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    server.run()
 
 
 def _cmd_daemon(args):
@@ -661,6 +687,7 @@ _BUILTIN_COMMANDS = frozenset(
         "gams-verify",
         "upgrade-model",
         "install-skills",
+        "mcp",
         "help",
     }
 )
@@ -821,6 +848,17 @@ def main():
         help="Overwrite existing files at the destination.",
     )
     p_skills.set_defaults(func=_cmd_install_skills)
+
+    p_mcp = subparsers.add_parser(
+        "mcp",
+        help="Run the discopt MCP server on stdio (for Claude Desktop and other clients)",
+    )
+    p_mcp.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print the claude_desktop_config.json entry for this install and exit.",
+    )
+    p_mcp.set_defaults(func=_cmd_mcp)
 
     # Plugin subcommands can pull heavy optional deps
     # (e.g. ``discopt.doe.cli`` ~0.4 s: streamlit/pandas), so register them

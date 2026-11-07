@@ -10,6 +10,16 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **`discopt mcp`: a Model Context Protocol server.** Install with
+  `pip install 'discopt[mcp]'`, then register it with Claude Desktop (or any MCP
+  client) using the entry `discopt mcp --print-config` prints. Tools:
+  `solve_python`, `solve_file` (`.nl`, `.gms`, `.dopt`/`.json[.gz]`, `.py`),
+  `model_summary`, `convert_model` and `discopt_info`. Every request runs in a
+  subprocess worker, so solver output cannot corrupt the stdio JSON-RPC stream and
+  an overrunning solve is killed. See `docs/mcp.md`.
+
 ### Fixed
 
 - **macOS: cyipopt and torch in one process now raise instead of aborting it
@@ -34,6 +44,20 @@ The release procedure that produces these entries is documented in
   instead of losing the worker. Not covered: a bare `import torch` / `import
   cyipopt` in the caller's own code, and a runtime loaded with `dlopen` at run
   time. Linux is unaffected.
+- **MINLPLib `nous1` no longer stalls on undecided node LPs (#2202).** The 0.12.0
+  known issue ("on macOS/arm64 `nous1` no longer certifies with
+  `DISCOPT_DUAL_PROOF_PROPAGATION` on") was not a dual-proof defect. A child's node LP
+  starts from the basis its parent ended on; on `nous1` that start sends the warm dual
+  simplex into a breakdown, and the cold fallback ends `Numerical` too, so the node is
+  undecided and branches with its parent's bound. Whether a run falls into this
+  depends only on the order of floating-point work: with the kernel's rows permuted,
+  Linux stalls the same way (bound 1.485 at 120 s, ~1,400 undecided nodes) with the
+  flag on **or** off. The native kernel now re-solves an undecided node LP once from
+  the slack basis, through the same audits and Farkas verification as every node LP;
+  that decides all 40 captured failing LPs, agreeing with HiGHS, and all 24 permuted
+  runs certify. `DISCOPT_NODE_LP_SLACK_RETRY=0` restores the previous behaviour.
+  `solver_stats` gains `tree/slack_retries`, `tree/slack_retry_decided` and the
+  kernel's `tree/dual_proof_*` counters.
 
 ## [0.12.0] - 2026-11-07
 

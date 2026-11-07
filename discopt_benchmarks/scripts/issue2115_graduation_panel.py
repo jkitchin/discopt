@@ -6,6 +6,8 @@
 * ``DISCOPT_SUBTOL_NOISE_GLOBAL`` -- the #1595 sub-``tol`` noise test measured
   against ``‖a_j‖₁·‖y‖∞`` (the scale of ``y``'s error), not only a column's own
   terms;
+* ``DISCOPT_NODE_LP_SLACK_RETRY`` (#2202) -- an undecided spatial-kernel node LP
+  is re-solved once from the sign-matched slack basis;
 * ``DISCOPT_LP_DUAL_REBUILD`` (#2142, retired by its panel) -- at the warm
   dual's empty-ratio-test exit, refactorize and tolerate a leaving row within
   ``1e-7(1+|bound|)`` instead of handing the LP to the cold primal. Run it with
@@ -182,6 +184,31 @@ _FLAGS = {
         "leak": lambda off: off["KernelPresolveCalls"],
         "show": ("KernelPresolveApplied", "KernelPresolveEliminated"),
     },
+    # #2202: re-solve an undecided spatial-kernel node LP once from the sign-matched
+    # slack basis (``DISCOPT_NODE_LP_SLACK_RETRY``). It runs only where a node LP
+    # ended ``Numerical``/``IterLimit``, so ``NodeLpSlackRetry`` ON is where it ran
+    # and ``NodeLpSlackRetryDecided`` ON is what it changed; OFF both must be 0.
+    "DISCOPT_NODE_LP_SLACK_RETRY": {
+        "fired": lambda off, on: on["NodeLpSlackRetryDecided"],
+        "ran": lambda off, on: on["NodeLpSlackRetryDecided"] > 0,
+        "leak": lambda off: off["NodeLpSlackRetry"],
+        "show": ("NodeLpSlackRetry", "NodeLpSlackRetryDecided"),
+    },
+    # #2211: the #956 T2' EXPAND-free re-solve of an undecided cold primal
+    # (``DISCOPT_PRIMAL_EXPAND_RESET``, `lp/simplex/primal.rs`). RETIRED by this panel
+    # (docs/dev/data/2211-expand-reset/); the build no longer has the ExpandReset*
+    # counters. Kept so ``--rows`` re-derives the verdict. The retry ran only
+    # after a cold `solve_lp_cols` ended ``Numerical``/``IterLimit``, so
+    # ``ExpandResetRetries`` ON is where it ran and ``ExpandResetRescues`` ON (a
+    # terminal certificate the first solve lacked) is what it changed. OFF the
+    # re-solve's copy is never taken, so ``ExpandResetRetries`` OFF must be 0.
+    # (``ExpandResetArmed`` is not used: no code path increments it.)
+    "DISCOPT_PRIMAL_EXPAND_RESET": {
+        "fired": lambda off, on: on["ExpandResetRescues"],
+        "ran": lambda off, on: on["ExpandResetRescues"] > 0,
+        "leak": lambda off: off["ExpandResetRetries"],
+        "show": ("ExpandResetRetries", "ExpandResetRescues"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -211,6 +238,11 @@ _CTRS = (
     "KernelPresolveCalls",
     "KernelPresolveApplied",
     "KernelPresolveEliminated",
+    "NodeLpSlackRetry",
+    "NodeLpSlackRetryDecided",
+    "ExpandResetArmed",
+    "ExpandResetRetries",
+    "ExpandResetRescues",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 

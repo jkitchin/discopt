@@ -283,6 +283,11 @@ pub struct SpatialNodeResult {
     /// (an envelope generator emitted a different number of rows than at the
     /// parent), so the node was solved without it.
     pub warm_shape_mismatch: bool,
+    /// #2202: `None` when no slack-basis re-solve ran (the first solve decided, or
+    /// the retry is off); `Some(decided)` when one did, `decided` being whether it
+    /// replaced the undecided first verdict
+    /// ([`crate::bnb::spatial_tree::SpatialTreeConfig::node_lp_slack_retry`]).
+    pub slack_retry: Option<bool>,
 }
 
 /// Assemble the node LP over the box `(lo, hi)` (both length `n_cols`; `lo/hi` on the
@@ -514,6 +519,56 @@ fn cold_dual_start_basis(
     })
 }
 
+/// Solve one assembled node LP from `start` (a warm or cold-dual basis; `None` is
+/// the cold two-phase primal) and, when `slack_retry` is set and that ends
+/// undecided, once more from the sign-matched slack basis (#2202, see
+/// [`crate::bnb::spatial_tree::SpatialTreeConfig::node_lp_slack_retry`]).
+/// `started_cold_dual` says `start` already IS that basis, so a retry would repeat
+/// the same solve. Returns the solve, the number of LP solves, the pivots over all
+/// of them, and the retry outcome (see [`SpatialNodeResult::slack_retry`]).
+#[allow(clippy::too_many_arguments)]
+fn solve_node_lp(
+    sp: &SparseCols,
+    m: usize,
+    n_total: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&crate::lp::basis::Basis>,
+    started_cold_dual: bool,
+    opts: &SimplexOptions,
+    slack_retry: bool,
+) -> (crate::lp::simplex::LpSolve, usize, usize, Option<bool>) {
+    let mut sol = match start {
+        Some(basis) => solve_lp_warm_csc(sp.clone(), m, n_total, c, l, u, b, Some(basis), opts),
+        None => solve_lp_cols_scaled(sp.clone(), m, n_total, c, l, u, b, opts),
+    };
+    let mut n_solves = 1usize;
+    let mut n_pivots = sol.iters;
+    let mut outcome = None;
+    if slack_retry
+        && !started_cold_dual
+        && matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit)
+    {
+        if let Some(slack) = cold_dual_start_basis(c, l, u, m, n_total) {
+            crate::profile::incr(crate::profile::Ctr::NodeLpSlackRetry);
+            let retry = solve_lp_warm_csc(sp.clone(), m, n_total, c, l, u, b, Some(&slack), opts);
+            n_solves += 1;
+            n_pivots += retry.iters;
+            // Only a terminal certificate replaces the first verdict. `Unbounded` is
+            // not one here: the tree treats it as undecided either way.
+            let decided = matches!(retry.status, LpStatus::Optimal | LpStatus::Infeasible);
+            if decided {
+                crate::profile::incr(crate::profile::Ctr::NodeLpSlackRetryDecided);
+                sol = retry;
+            }
+            outcome = Some(decided);
+        }
+    }
+    (sol, n_solves, n_pivots, outcome)
+}
+
 /// Run one native spatial node over the box `(lo, hi)` (length `n_cols`): assemble,
 /// solve the relaxation, and — if `run_obbt` and candidates exist — run the in-kernel
 /// OBBT sweep warm-started from the node's optimal basis.
@@ -548,7 +603,7 @@ pub fn solve_spatial_node_from(
     opts: &SimplexOptions,
     warm: Option<&crate::lp::basis::Basis>,
 ) -> SpatialNodeResult {
-    solve_spatial_node_with_cuts(spec, lo, hi, run_obbt, opts, warm, &[])
+    solve_spatial_node_with_cuts(spec, lo, hi, run_obbt, opts, warm, &[], false)
 }
 
 /// [`solve_spatial_node_from`] over the node LP extended by `cuts`
@@ -556,6 +611,9 @@ pub fn solve_spatial_node_from(
 /// feasible point of the box; the bound and verdict rules are unchanged (the
 /// Neumaier–Shcherbina bound on the returned duals, a verified Farkas ray for
 /// `Infeasible`), and the cut rows enter the safe-bound evaluation like any row.
+/// `slack_retry` re-solves an undecided LP once from the sign-matched slack basis
+/// (#2202, [`crate::bnb::spatial_tree::SpatialTreeConfig::node_lp_slack_retry`]).
+#[allow(clippy::too_many_arguments)]
 pub fn solve_spatial_node_with_cuts(
     spec: &SpatialKernelSpec,
     lo: &[f64],
@@ -564,6 +622,7 @@ pub fn solve_spatial_node_with_cuts(
     opts: &SimplexOptions,
     warm: Option<&crate::lp::basis::Basis>,
     cuts: &[FixedRow],
+    slack_retry: bool,
 ) -> SpatialNodeResult {
     let lp = assemble_node_lp_with_cuts(spec, lo, hi, cuts);
     // Objective padded with zeros over the slack columns.
@@ -600,32 +659,23 @@ pub fn solve_spatial_node_with_cuts(
         }
         None => None,
     };
+    let started_cold_dual = warm.is_none() && start.is_some();
     let t_lp = std::time::Instant::now();
-    let sol = match start {
-        Some(basis) => solve_lp_warm_csc(
-            lp.sp.clone(),
-            lp.m,
-            lp.n_total,
-            &c,
-            &lp.l,
-            &lp.u,
-            &lp.b,
-            Some(basis),
-            opts,
-        ),
-        None => solve_lp_cols_scaled(
-            lp.sp.clone(),
-            lp.m,
-            lp.n_total,
-            &c,
-            &lp.l,
-            &lp.u,
-            &lp.b,
-            opts,
-        ),
-    };
+    let (sol, n_lp_solves, n_pivots, slack_retry) = solve_node_lp(
+        &lp.sp,
+        lp.m,
+        lp.n_total,
+        &c,
+        &lp.l,
+        &lp.u,
+        &lp.b,
+        start,
+        started_cold_dual,
+        opts,
+        slack_retry,
+    );
     let lp_s = t_lp.elapsed().as_secs_f64();
-    let mut n_lp_solves = 1usize;
+    let mut n_lp_solves = n_lp_solves;
 
     // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective
     // (which can drift above the true optimum and cause an unsound fathom). `-inf`
@@ -664,12 +714,13 @@ pub fn solve_spatial_node_with_cuts(
         dual: sol.dual,
         tightened,
         n_lp_solves,
-        n_pivots: sol.iters,
+        n_pivots,
         lp_s,
         obj: sol.obj,
         basis: sol.basis,
         warm_started,
         warm_shape_mismatch,
+        slack_retry,
     }
 }
 
@@ -1009,5 +1060,170 @@ mod tests {
             // x+y<=2 with the other var >=0 gives max x = 2, min x = 0.
             assert!((glo - 0.0).abs() < 1e-6 && (ghi - 2.0).abs() < 1e-6);
         }
+    }
+
+    /// A captured node-LP fixture (`bnb/testdata/*.json`): the assembled LP in CSC
+    /// form, the start basis the kernel handed it, and HiGHS's objective (`null`
+    /// when HiGHS proved it infeasible).
+    struct NodeLpFixture {
+        m: usize,
+        n: usize,
+        sp: SparseCols,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+        start: crate::lp::basis::Basis,
+        highs_obj: Option<f64>,
+    }
+
+    fn parse_node_lp_fixture(json: &str) -> NodeLpFixture {
+        fn tail<'a>(json: &'a str, key: &str) -> &'a str {
+            let k = format!("\"{key}\":");
+            let at = json
+                .find(&k)
+                .unwrap_or_else(|| panic!("fixture lacks {key}"));
+            json[at + k.len()..].trim_start()
+        }
+        fn nums(json: &str, key: &str) -> Vec<f64> {
+            let s = tail(json, key);
+            let close = s.find(']').expect("array");
+            s[1..close]
+                .split(',')
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.trim().parse::<f64>().expect("number"))
+                .collect()
+        }
+        let ints =
+            |key: &str| -> Vec<usize> { nums(json, key).iter().map(|&v| v as usize).collect() };
+        let scalar = |key: &str| -> usize {
+            let s = tail(json, key);
+            let end = s.find([',', '}']).expect("scalar");
+            s[..end].trim().parse().expect("integer")
+        };
+        let highs_obj = {
+            let s = tail(json, "highs_obj");
+            let end = s.find([',', '}']).expect("scalar");
+            let t = s[..end].trim();
+            (t != "null").then(|| t.parse::<f64>().expect("highs_obj"))
+        };
+        NodeLpFixture {
+            m: scalar("m"),
+            n: scalar("n"),
+            sp: SparseCols::from_csc(ints("col_ptr"), ints("row_idx"), nums(json, "vals")),
+            c: nums(json, "c"),
+            l: nums(json, "l"),
+            u: nums(json, "u"),
+            b: nums(json, "b"),
+            start: crate::lp::basis::Basis {
+                col_status: nums(json, "col_status").iter().map(|&v| v as i8).collect(),
+                basic_vars: ints("basic_vars"),
+            },
+            highs_obj,
+        }
+    }
+
+    /// #2202: MINLPLib `nous1` node LPs that end `Numerical` from the basis the kernel
+    /// inherited from the parent. HiGHS decides both: the first is optimal at
+    /// `highs_obj`, the second infeasible. Without the slack-basis retry the node is
+    /// undecided (the defect; under fixed-row permutations it stalls the tree with
+    /// ~1,400 such nodes). With it, the same entry, audits and Farkas check decide
+    /// both, and the optimum and its safe bound agree with HiGHS.
+    #[test]
+    fn inherited_basis_numerical_node_lp_is_decided_by_slack_retry_2202() {
+        let opts = SimplexOptions {
+            // The kernel's default-path warm mode (`_native_warm_start_mode() == 2`).
+            warm_flip_boxed: true,
+            ..SimplexOptions::default()
+        };
+        let mut n_checked = 0usize;
+        for (json, want_infeasible) in [
+            (
+                include_str!("testdata/nous1_inherited_basis_numerical_lp.json"),
+                false,
+            ),
+            (
+                include_str!("testdata/nous1_inherited_basis_numerical_infeasible_lp.json"),
+                true,
+            ),
+        ] {
+            let f = parse_node_lp_fixture(json);
+            assert_eq!(f.start.col_status.len(), f.n);
+            assert_eq!(f.start.basic_vars.len(), f.m);
+            assert_eq!(f.highs_obj.is_none(), want_infeasible);
+            let run = |retry: bool| {
+                solve_node_lp(
+                    &f.sp,
+                    f.m,
+                    f.n,
+                    &f.c,
+                    &f.l,
+                    &f.u,
+                    &f.b,
+                    Some(&f.start),
+                    false,
+                    &opts,
+                    retry,
+                )
+            };
+            // Fails before: the inherited start leaves the LP undecided.
+            let (before, solves_before, _, outcome_before) = run(false);
+            assert_eq!(before.status, LpStatus::Numerical, "the captured defect");
+            assert_eq!((solves_before, outcome_before), (1, None));
+            // Passes after.
+            let (after, solves_after, _, outcome_after) = run(true);
+            assert_eq!(solves_after, 2, "exactly one retry");
+            assert_eq!(outcome_after, Some(true), "the retry decided it");
+            match f.highs_obj {
+                Some(obj) => {
+                    assert_eq!(after.status, LpStatus::Optimal);
+                    assert!(
+                        (after.obj - obj).abs() <= 1e-6 * (1.0 + obj.abs()),
+                        "obj {} vs HiGHS {obj}",
+                        after.obj
+                    );
+                    let (cp, ri, vals) = f.sp.raw();
+                    let safe = ns_safe_bound_csc(
+                        &after.dual,
+                        &f.c,
+                        cp,
+                        ri,
+                        vals,
+                        f.m,
+                        f.n,
+                        &f.b,
+                        &f.l,
+                        &f.u,
+                    )
+                    .expect("certifiable duals");
+                    assert!(
+                        safe <= obj + 1e-9 * (1.0 + obj.abs()),
+                        "safe bound {safe} > {obj}"
+                    );
+                    assert!(
+                        safe >= obj - 1e-6 * (1.0 + obj.abs()),
+                        "safe bound {safe} loose"
+                    );
+                }
+                None => assert_eq!(after.status, LpStatus::Infeasible),
+            }
+            // A start that already IS the slack basis is not retried.
+            let (_, solves_cold, _, outcome_cold) = solve_node_lp(
+                &f.sp,
+                f.m,
+                f.n,
+                &f.c,
+                &f.l,
+                &f.u,
+                &f.b,
+                Some(&f.start),
+                true,
+                &opts,
+                true,
+            );
+            assert_eq!((solves_cold, outcome_cold), (1, None));
+            n_checked += 1;
+        }
+        assert_eq!(n_checked, 2, "both fixtures exercised");
     }
 }
