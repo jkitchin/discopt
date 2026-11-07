@@ -55,35 +55,70 @@ def _round_up(x: Number) -> np.ndarray:
     return np.nextafter(x, np.float64(np.inf))
 
 
-#: Library-result widening, in ulps: the same margin as the Rust layer's
-#: ``presolve::directed::LIB_ULPS``. numpy/scipy transcendentals are not
-#: correctly rounded; measured against a 50-digit mpmath reference over 20k
-#: points each, ``scipy.special.erf`` errs by up to 2.18 ulps, ``np.tan`` 2.49,
-#: ``expit`` 2.01, ``arccosh`` 1.61, ``arcsinh`` 1.38 and ``tanh`` 1.10, so the
-#: one-ulp nudge of :func:`_round_down` let the true value fall outside.
+#: Library-result widening, in ulps beyond the one-ulp nudge: the same margin as
+#: the Rust layer's ``presolve::directed::LIB_ULPS``. It is the *default* for a
+#: library atom, and applies to every atom not measured faithful (see
+#: :data:`ATOM_ULPS`).
 LIB_ULPS = 4.0
+
+#: Per-atom extra widening, in ulps beyond the one-ulp nudge of
+#: :func:`_round_down`/:func:`_round_up`. ``0.0`` means the atom was measured
+#: *faithful* (error under one ulp), so the one-ulp nudge alone is sound, and the
+#: enclosure is bit-identical to the pre-``LIB_ULPS`` one. Anything else gets
+#: :data:`LIB_ULPS`. Measured against a 50-digit mpmath reference (20k points per
+#: atom, broad log-uniform sweeps over each domain, 2026-11-07, macOS arm64
+#: libm + numpy + scipy). Max error in ulps:
+#:
+#: * faithful: ``sqrt`` 0.50, ``log`` 0.50, ``sinh`` 0.505, ``exp`` 0.51,
+#:   ``cosh`` 0.51, ``log1p`` 0.58, ``asin`` 0.63, ``atan`` 0.76;
+#: * widened: ``acos`` 0.92, ``asinh`` 0.98 (both too close to one ulp to rely on
+#:   a one-ulp nudge), ``tanh`` 1.15, ``softplus`` 1.20, ``atanh`` 1.24,
+#:   ``acosh`` 1.42, ``tan`` 2.20, ``erf`` 2.37, ``expit`` 2.01 (plus its subnormal
+#:   underflow, guarded separately in :func:`sigmoid`).
+#:
+#: A faithful atom is one measured below 0.8 ulp. ``test_interval_atom_ulp_budget``
+#: re-measures every entry on the platform the suite runs on, so a libm whose
+#: ``exp`` is worse than faithful fails there instead of silently cutting.
+ATOM_ULPS: dict[str, float] = {
+    "exp": 0.0,
+    "log1p": 0.0,
+    "sinh": 0.0,
+    "cosh": 0.0,
+    "atan": 0.0,
+    "asin": 0.0,
+    "acos": LIB_ULPS,
+    "asinh": LIB_ULPS,
+    "tanh": LIB_ULPS,
+    "softplus": LIB_ULPS,
+    "atanh": LIB_ULPS,
+    "acosh": LIB_ULPS,
+    "tan": LIB_ULPS,
+    "erf": LIB_ULPS,
+    "expit": LIB_ULPS,
+}
 
 #: Largest integer power ``Interval.__pow__`` takes by repeated multiplication.
 _POW_LOOP_MAX = 64
 
 
-def _lib_down(x: Number) -> np.ndarray:
+def _lib_down(x: Number, ulps: float = LIB_ULPS) -> np.ndarray:
     """Sound lower bound on the exact value of a *library* result ``x``.
 
-    Widens by :data:`LIB_ULPS` relative ulps plus one, like the Rust
-    ``directed::lib_down``. Infinities and NaN pass through unchanged.
+    Widens by ``ulps`` relative ulps plus one, like the Rust
+    ``directed::lib_down``; ``ulps=0`` is exactly :func:`_round_down`.
+    Infinities and NaN pass through unchanged.
     """
     x = np.asarray(x, dtype=np.float64)
     with np.errstate(invalid="ignore", over="ignore"):
-        w = np.where(np.isfinite(x), x - LIB_ULPS * np.finfo(np.float64).eps * np.abs(x), x)
+        w = np.where(np.isfinite(x), x - ulps * np.finfo(np.float64).eps * np.abs(x), x)
     return np.nextafter(w, np.float64(-np.inf))
 
 
-def _lib_up(x: Number) -> np.ndarray:
+def _lib_up(x: Number, ulps: float = LIB_ULPS) -> np.ndarray:
     """Upward twin of :func:`_lib_down`."""
     x = np.asarray(x, dtype=np.float64)
     with np.errstate(invalid="ignore", over="ignore"):
-        w = np.where(np.isfinite(x), x + LIB_ULPS * np.finfo(np.float64).eps * np.abs(x), x)
+        w = np.where(np.isfinite(x), x + ulps * np.finfo(np.float64).eps * np.abs(x), x)
     return np.nextafter(w, np.float64(np.inf))
 
 
@@ -432,7 +467,7 @@ class Interval:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _monotonic_nondec(x: Interval, f) -> Interval:
+def _monotonic_nondec(x: Interval, f, ulps: float = LIB_ULPS) -> Interval:
     """Image of ``x`` under a nondecreasing function ``f``, outward-rounded."""
     # Deliberately the *unconditional* ``_round_down``/``_round_up``, not the
     # ``_exact0`` variants (#957): this wrapper is generic over ``f``, and
@@ -447,18 +482,18 @@ def _monotonic_nondec(x: Interval, f) -> Interval:
     with np.errstate(over="ignore", invalid="ignore"):
         lo = f(x.lo)
         hi = f(x.hi)
-    return Interval(_lib_down(lo), _lib_up(hi))
+    return Interval(_lib_down(lo, ulps), _lib_up(hi, ulps))
 
 
-def _monotonic_nonincr(x: Interval, f) -> Interval:
+def _monotonic_nonincr(x: Interval, f, ulps: float = LIB_ULPS) -> Interval:
     """Image of ``x`` under a nonincreasing function ``f``, outward-rounded."""
     with np.errstate(over="ignore", invalid="ignore"):
         lo = f(x.hi)
         hi = f(x.lo)
-    return Interval(_lib_down(lo), _lib_up(hi))
+    return Interval(_lib_down(lo, ulps), _lib_up(hi, ulps))
 
 
-def _monotonic_nondec_safe(x: Interval, f) -> Interval:
+def _monotonic_nondec_safe(x: Interval, f, ulps: float = LIB_ULPS) -> Interval:
     """Image of ``x`` under a nondecreasing ``f`` restricted to its domain.
 
     Like :func:`_monotonic_nondec`, but for partial-domain atoms (``asin``,
@@ -469,14 +504,14 @@ def _monotonic_nondec_safe(x: Interval, f) -> Interval:
     soundly abstains instead of trusting an undefined evaluation.
     """
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        lo = _lib_down(f(x.lo))
-        hi = _lib_up(f(x.hi))
+        lo = _lib_down(f(x.lo), ulps)
+        hi = _lib_up(f(x.hi), ulps)
     lo = np.where(np.isnan(lo), -np.inf, lo)
     hi = np.where(np.isnan(hi), np.inf, hi)
     return Interval(lo, hi)
 
 
-def _monotonic_nonincr_safe(x: Interval, f) -> Interval:
+def _monotonic_nonincr_safe(x: Interval, f, ulps: float = LIB_ULPS) -> Interval:
     """Image of ``x`` under a nonincreasing ``f`` restricted to its domain.
 
     The nonincreasing analogue of :func:`_monotonic_nondec_safe` (used by
@@ -484,8 +519,8 @@ def _monotonic_nonincr_safe(x: Interval, f) -> Interval:
     ``f(x.lo)``; out-of-domain ``NaN`` endpoints collapse outward.
     """
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        lo = _lib_down(f(x.hi))
-        hi = _lib_up(f(x.lo))
+        lo = _lib_down(f(x.hi), ulps)
+        hi = _lib_up(f(x.lo), ulps)
     lo = np.where(np.isnan(lo), -np.inf, lo)
     hi = np.where(np.isnan(hi), np.inf, hi)
     return Interval(lo, hi)
@@ -493,7 +528,7 @@ def _monotonic_nonincr_safe(x: Interval, f) -> Interval:
 
 def exp(x: Interval) -> Interval:
     """Sound enclosure of ``exp([lo, hi])``."""
-    return _monotonic_nondec(x, np.exp)
+    return _monotonic_nondec(x, np.exp, ATOM_ULPS["exp"])
 
 
 def log(x: Interval) -> Interval:
@@ -548,12 +583,12 @@ def absolute(x: Interval) -> Interval:
 
 def tanh(x: Interval) -> Interval:
     """``tanh`` is nondecreasing on all of R."""
-    return _monotonic_nondec(x, np.tanh)
+    return _monotonic_nondec(x, np.tanh, ATOM_ULPS["tanh"])
 
 
 def sinh(x: Interval) -> Interval:
     """``sinh`` is nondecreasing on all of R."""
-    return _monotonic_nondec(x, np.sinh)
+    return _monotonic_nondec(x, np.sinh, ATOM_ULPS["sinh"])
 
 
 def cosh(x: Interval) -> Interval:
@@ -565,10 +600,11 @@ def cosh(x: Interval) -> Interval:
     zero_in = x.contains_zero()
     ch_lo = np.cosh(x.lo)
     ch_hi = np.cosh(x.hi)
-    lo = np.where(zero_in, 1.0, np.minimum(_lib_down(ch_lo), _lib_down(ch_hi)))
+    u = ATOM_ULPS["cosh"]
+    lo = np.where(zero_in, 1.0, np.minimum(_lib_down(ch_lo, u), _lib_down(ch_hi, u)))
     hi = np.maximum(ch_lo, ch_hi)
     # cosh >= 1 everywhere, so the library lower bound is clipped at 1.
-    return Interval(np.maximum(lo, 1.0), _lib_up(hi))
+    return Interval(np.maximum(lo, 1.0), _lib_up(hi, u))
 
 
 def entropy(x: Interval) -> Interval:
@@ -737,7 +773,7 @@ def tan(x: Interval) -> Interval:
         tan_hi = np.tan(hi)
     out_lo = np.where(same_branch, tan_lo, -inf)
     out_hi = np.where(same_branch, tan_hi, inf)
-    return Interval(_lib_down(out_lo), _lib_up(out_hi))
+    return Interval(_lib_down(out_lo, ATOM_ULPS["tan"]), _lib_up(out_hi, ATOM_ULPS["tan"]))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -751,51 +787,51 @@ def tan(x: Interval) -> Interval:
 
 def atan(x: Interval) -> Interval:
     """``atan`` is nondecreasing on all of R; image in ``(-π/2, π/2)``."""
-    return _monotonic_nondec(x, np.arctan)
+    return _monotonic_nondec(x, np.arctan, ATOM_ULPS["atan"])
 
 
 def asinh(x: Interval) -> Interval:
     """``asinh`` is nondecreasing on all of R."""
-    return _monotonic_nondec(x, np.arcsinh)
+    return _monotonic_nondec(x, np.arcsinh, ATOM_ULPS["asinh"])
 
 
 def erf(x: Interval) -> Interval:
     """``erf`` is nondecreasing on all of R; image in ``(-1, 1)``."""
     from scipy.special import erf as _erf
 
-    return _monotonic_nondec(x, _erf)
+    return _monotonic_nondec(x, _erf, ATOM_ULPS["erf"])
 
 
 def asin(x: Interval) -> Interval:
     """``asin`` is nondecreasing on its domain ``[-1, 1]``."""
-    return _monotonic_nondec_safe(x, np.arcsin)
+    return _monotonic_nondec_safe(x, np.arcsin, ATOM_ULPS["asin"])
 
 
 def acos(x: Interval) -> Interval:
     """``acos`` is nonincreasing on its domain ``[-1, 1]``; image ``[0, π]``."""
-    return _monotonic_nonincr_safe(x, np.arccos)
+    return _monotonic_nonincr_safe(x, np.arccos, ATOM_ULPS["acos"])
 
 
 def acosh(x: Interval) -> Interval:
     """``acosh`` is nondecreasing on its domain ``[1, ∞)``; image ``[0, ∞)``."""
-    return _monotonic_nondec_safe(x, np.arccosh)
+    return _monotonic_nondec_safe(x, np.arccosh, ATOM_ULPS["acosh"])
 
 
 def atanh(x: Interval) -> Interval:
     """``atanh`` is nondecreasing on ``(-1, 1)`` with asymptotes at ``±1``."""
-    return _monotonic_nondec_safe(x, np.arctanh)
+    return _monotonic_nondec_safe(x, np.arctanh, ATOM_ULPS["atanh"])
 
 
 def log1p(x: Interval) -> Interval:
     """``log1p`` is nondecreasing on ``(-1, ∞)`` with an asymptote at ``-1``."""
-    return _monotonic_nondec_safe(x, np.log1p)
+    return _monotonic_nondec_safe(x, np.log1p, ATOM_ULPS["log1p"])
 
 
 def sigmoid(x: Interval) -> Interval:
     """``sigmoid`` is nondecreasing on all of R; image in ``(0, 1)``."""
     from scipy.special import expit as _expit
 
-    out = _monotonic_nondec(x, _expit)
+    out = _monotonic_nondec(x, _expit, ATOM_ULPS["expit"])
     # ``expit`` loses the subnormal range: ``expit(-711)`` returns ``0`` while
     # the exact value is ``1.6e-309``, so even the widened upper endpoint
     # (``2e-323``) excluded it. ``sigmoid(t) = e^t / (1 + e^t) < e^t`` for
@@ -809,7 +845,7 @@ def sigmoid(x: Interval) -> Interval:
 
 def softplus(x: Interval) -> Interval:
     """``softplus`` is nondecreasing on all of R; image in ``(0, ∞)``."""
-    return _monotonic_nondec(x, lambda v: np.logaddexp(v, 0.0))
+    return _monotonic_nondec(x, lambda v: np.logaddexp(v, 0.0), ATOM_ULPS["softplus"])
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -165,3 +165,68 @@ def test_library_atoms_random_sweep():
             assert mp.mpf(float(r.lo)) <= t <= mp.mpf(float(r.hi)), (fn.__name__, x)
             n += 1
     assert n == len(pairs) * len(pts)
+
+
+def _atom_sweep(rng, n):
+    """(numpy function, mpmath reference, sample points) per ``I.ATOM_ULPS`` key."""
+    import mpmath as mp
+    from scipy.special import erf, expit
+
+    def logu(lo, hi, signed=True):
+        v = 10.0 ** rng.uniform(lo, hi, n)
+        return v * (rng.choice([-1.0, 1.0], n) if signed else 1.0)
+
+    near_one = np.sign(rng.uniform(-1, 1, n)) * (1 - logu(-15.9, -1, signed=False))
+    return {
+        "exp": (np.exp, mp.exp, np.concatenate([rng.uniform(-745, 709, n), logu(-20, 2.5)])),
+        "log1p": (np.log1p, mp.log1p, logu(-300, 300, signed=False)),
+        "sinh": (np.sinh, mp.sinh, logu(-20, 2.85)),
+        "cosh": (np.cosh, mp.cosh, logu(-20, 2.85)),
+        "atan": (np.arctan, mp.atan, logu(-300, 300)),
+        "asin": (np.arcsin, mp.asin, rng.uniform(-1, 1, n)),
+        "acos": (np.arccos, mp.acos, rng.uniform(-1, 1, n)),
+        "asinh": (np.arcsinh, mp.asinh, logu(-300, 300)),
+        "tanh": (np.tanh, mp.tanh, logu(-20, 1.5)),
+        "softplus": (
+            lambda v: np.logaddexp(v, 0.0),
+            lambda t: mp.log1p(mp.exp(t)),
+            logu(-20, 2.85),
+        ),
+        "atanh": (np.arctanh, mp.atanh, np.concatenate([rng.uniform(-1, 1, n), near_one])),
+        "acosh": (np.arccosh, mp.acosh, 1 + logu(-15, 300, signed=False)),
+        "tan": (np.tan, mp.tan, logu(-10, 3)),
+        "erf": (erf, mp.erf, logu(-20, 0.8)),
+        # The subnormal tail is guarded separately in ``sigmoid``.
+        "expit": (expit, lambda t: mp.exp(t) / (1 + mp.exp(t)), logu(-20, 2.85)),
+    }
+
+
+def test_interval_atom_ulp_budget():
+    """Each atom's measured library error fits the widening ``ATOM_ULPS`` gives it.
+
+    A faithful atom (``ATOM_ULPS == 0``) gets only the one-ulp nudge, which is
+    sound only while the library errs by *under* one ulp; any other atom gets
+    ``LIB_ULPS`` extra. This re-measures every entry against mpmath on the
+    platform running the suite, so a libm or numpy SIMD path that is worse than
+    the table assumes fails here instead of silently shrinking an enclosure.
+    """
+    import mpmath as mp
+
+    mp.mp.dps = 50
+    sweep = _atom_sweep(np.random.default_rng(20261107), 3000)
+    assert set(sweep) == set(I.ATOM_ULPS), set(sweep) ^ set(I.ATOM_ULPS)
+    checks = 0
+    for name, (f, g, xs) in sweep.items():
+        with np.errstate(all="ignore"):
+            ys = f(xs)
+        worst = 0.0
+        for x, y in zip(xs, ys):
+            t = g(mp.mpf(float(x)))
+            if not np.isfinite(y) or not mp.isfinite(t) or abs(t) < 2.2250738585072014e-308:
+                continue
+            ulp = float(np.spacing(np.float64(abs(float(t)))))
+            worst = max(worst, float(abs(mp.mpf(float(y)) - t) / ulp))
+            checks += 1
+        budget = 1.0 + I.ATOM_ULPS[name]
+        assert worst < budget, f"{name}: measured {worst:.3f} ulp, budget {budget}"
+    assert checks > 40000, checks
