@@ -1924,6 +1924,38 @@ Every wall under the load gate (4.0); 0 incorrect anywhere.
    5/94 and 10/47 certifications at 1.3-1.8x wall; it is the same MILP engine, so it
    largely inherits D2's per-node gap. It is also the largest single HiGHS reach left
    on the default MINLP path (23 of the guard's 27).
+   **D3 status, 2026-11-07 (decision for the owner).** Data: `docs/dev/data/highs-parity/p5.1/d3_*`.
+
+   The Rust lazy OA master gained three default-OFF levers. Each fixes a measured cause:
+
+   - `DISCOPT_MILP_NODE_GMI_LAZY`: graduated node GMI, also under a lazy separator.
+   - `DISCOPT_MILP_LAZY_ROOT_CUTS`: the master used the legacy 16-cut single pass. It now
+     gets the graduated 500 x 50 budget plus c-MIR. `syn20m03m` spent 22.8 of 30 s in the
+     master tree.
+   - `DISCOPT_MILP_LAZY_ROW_EQUILIBRATE`: power-of-two row scaling, up only. The
+     row-scaled route variants stopped with an unresolved bound (`m3@6`: 47 nodes, bound
+     `-inf`). Scaling rows down was tried and rejected: it loosened feasibility, and the
+     NLP-BB guard caught a 9e-6 row violation on `portfol_roundlot`.
+
+   P5.1 panels, all three flags on (30 s, cert-clean, 0 violations, 0 errors):
+
+   | population | HiGHS | Rust at P5.1 | Rust now | wall ON/OFF (P5.1 -> now) | still lost |
+   |---|---|---|---|---|---|
+   | syn/rsyn | 29 | 19 | **26** | 1.32x -> **1.03x** | `rsyn0820m`, `rsyn0830m`, `syn30m03m` |
+   | route | 92 | 87 | **89** | 1.82x -> **1.42x** | `clay0303hfsg@3/@6` (need down-scaling), `portfol_roundlot@0` (costed by the root-cut flag) |
+
+   Two-sided equilibration reached route 91 = 91 at 1.14x, but with the guarded error. That
+   is why it was replaced by up-only scaling.
+
+   **Owner decision.** The bars (0 lost, wall <= 1.25x) are still missed, 6 instances across
+   both panels. Choose one:
+
+   - **(a)** keep HiGHS as the D3 master default, and graduate the three flags for the
+     opt-in `=simplex` master;
+   - **(b)** flip the default to `simplex` and accept the residual;
+   - **(c)** continue on the six instances: per-row equilibration choice, the
+     root-cut budget on portfolio masters, and the `rsyn` master trees.
+
 3. **The `solve_lp_std` seam default** (`DISCOPT_LP_STD_ENGINE=highs`): 5 corpus
    instances reach HiGHS only through it. R1-LP parity is met, so this is the cheapest
    remaining removal (a flip + the P1.x identity checks).
