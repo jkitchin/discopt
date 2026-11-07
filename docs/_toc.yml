@@ -64,6 +64,7 @@ parts:
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features
+      - file: mcp
       - file: notebooks/warm_start
       - file: notebooks/convex_fast_path
       - file: notebooks/convexity_detection

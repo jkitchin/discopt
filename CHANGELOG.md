@@ -10,6 +10,16 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **`discopt mcp`: a Model Context Protocol server.** Install with
+  `pip install 'discopt[mcp]'`, then register it with Claude Desktop (or any MCP
+  client) using the entry `discopt mcp --print-config` prints. Tools:
+  `solve_python`, `solve_file` (`.nl`, `.gms`, `.dopt`/`.json[.gz]`, `.py`),
+  `model_summary`, `convert_model` and `discopt_info`. Every request runs in a
+  subprocess worker, so solver output cannot corrupt the stdio JSON-RPC stream and
+  an overrunning solve is killed. See `docs/mcp.md`.
+
 ### Fixed
 
 - **macOS: cyipopt and torch in one process now raise instead of aborting it
