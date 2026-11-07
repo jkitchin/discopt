@@ -86,6 +86,62 @@ fn parse_logical_dual_cold(raw: &str) -> Result<bool, String> {
 
 std::thread_local! {
     static IN_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SCOPE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SCOPE_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run one caller-level cold solve (`f`) as a scope in which the cascade is tried
+/// at most once **to failure**.
+///
+/// The solve entries retry on the exactly-unscaled matrix after a bound-losing
+/// verdict (#649 in `solve_lp_warm_csc_inner`, #1935 in `solve_lp_cols_scaled`), and
+/// each retry reaches `solve_lp_cols` again. The cascade's own warm solve already
+/// runs that scaled-then-unscaled pair, so a second attempt on the same LP repeats
+/// work that has just failed. Measured on `hda` in the first §5 panel: 13 of 21
+/// attempts failed and every one was paid twice, leaving 1 node against 3 in the
+/// 120 s budget (`docs/dev/data/2212-cold-path/README.md`). Inside a scope, once an
+/// attempt has failed or been refused, later attempts are skipped and counted
+/// (`LogicalDualColdSkippedRepeat`). A decided attempt returns, so nothing follows it.
+/// Scopes nest; only the outermost one resets the state.
+pub(crate) fn cold_scope<T>(f: impl FnOnce() -> T) -> T {
+    struct Exit;
+    impl Drop for Exit {
+        fn drop(&mut self) {
+            SCOPE_DEPTH.with(|d| d.set(d.get() - 1));
+        }
+    }
+    if SCOPE_DEPTH.with(|d| d.get()) == 0 {
+        SCOPE_FAILED.with(|c| c.set(false));
+    }
+    SCOPE_DEPTH.with(|d| d.set(d.get() + 1));
+    let _exit = Exit;
+    f()
+}
+
+fn scope_failed() -> bool {
+    SCOPE_DEPTH.with(|d| d.get()) > 0 && SCOPE_FAILED.with(|c| c.get())
+}
+
+fn mark_scope_failed() {
+    if SCOPE_DEPTH.with(|d| d.get()) > 0 {
+        SCOPE_FAILED.with(|c| c.set(true));
+    }
+}
+
+/// Pivot budget for one cascade attempt: `min(max_iter, 2(m+n) + 1000)`.
+///
+/// Measured over every attempt that decided an LP in the entry experiment and the
+/// throughput panel (121 LPs): at most `0.65(m+n)` pivots, median `0.18(m+n)`, so
+/// this is over 3x the largest. An attempt that has not finished inside it is not
+/// going to, and the primal gets the rest of the caller's budget.
+fn attempt_budget(m: usize, n: usize, opts: &SimplexOptions) -> SimplexOptions {
+    let mut o = opts.clone();
+    o.max_iter = opts.max_iter.min(
+        2usize
+            .saturating_mul(m.saturating_add(n))
+            .saturating_add(1000),
+    );
+    o
 }
 
 /// Whether a logical-dual attempt is running on this thread (see the module doc).
@@ -208,7 +264,12 @@ pub(crate) fn logical_dual_cold(
     if m == 0 || in_attempt() {
         return None;
     }
+    if scope_failed() {
+        crate::profile::incr(crate::profile::Ctr::LogicalDualColdSkippedRepeat);
+        return None;
+    }
     crate::profile::incr(crate::profile::Ctr::LogicalDualColdAttempts);
+    let opts = &attempt_budget(m, n, opts);
 
     // Step 1: the LP's own logical columns.
     if let Some(start) = own_logical_start(sp, m, n, c, l, u) {
@@ -228,6 +289,7 @@ pub(crate) fn logical_dual_cold(
             Some(s) => col_status.push(s),
             None => {
                 crate::profile::incr(crate::profile::Ctr::LogicalDualColdRefused);
+                mark_scope_failed();
                 return None;
             }
         }
@@ -283,6 +345,7 @@ pub(crate) fn logical_dual_cold(
         return Some(sol);
     }
     crate::profile::incr(crate::profile::Ctr::LogicalDualColdFellBack);
+    mark_scope_failed();
     None
 }
 
@@ -361,7 +424,7 @@ mod tests {
 
     /// The engine's cold path on `lp`: the warm entry with no start, as a B&B node
     /// with nothing to inherit and the entry experiment's `cold` arm run it.
-    fn cold(lp: &Lp, on: bool) -> (LpSolve, [u64; 4]) {
+    fn cold(lp: &Lp, on: bool) -> (LpSolve, [u64; 5]) {
         let _flag = test_override::Scoped::new(on);
         let _guard = crate::profile::test_guard();
         crate::profile::reset();
@@ -383,6 +446,7 @@ mod tests {
             counter(Ctr::LogicalDualColdOwnDecided),
             counter(Ctr::LogicalDualColdAugDecided),
             counter(Ctr::LogicalDualColdFellBack),
+            counter(Ctr::LogicalDualColdSkippedRepeat),
         ];
         crate::profile::set_enabled(false);
         (sol, ctr)
@@ -390,6 +454,31 @@ mod tests {
 
     fn near(a: f64, b: f64) -> bool {
         (a - b).abs() <= 1e-6 * (1.0 + b.abs())
+    }
+
+    #[test]
+    fn attempt_budget_is_capped_by_size_and_by_the_callers_cap() {
+        let o = SimplexOptions::default();
+        assert_eq!(attempt_budget(100, 300, &o).max_iter, 1800);
+        let tight = SimplexOptions {
+            max_iter: 500,
+            ..SimplexOptions::default()
+        };
+        assert_eq!(attempt_budget(100, 300, &tight).max_iter, 500);
+    }
+
+    /// The scope state never leaks: outside any scope nothing is skipped, and the
+    /// outermost scope resets a failure left by an earlier solve.
+    #[test]
+    fn scope_failure_does_not_outlive_its_solve() {
+        assert!(!scope_failed());
+        cold_scope(|| {
+            mark_scope_failed();
+            assert!(scope_failed());
+            cold_scope(|| assert!(scope_failed(), "nested scopes share the state"));
+        });
+        assert!(!scope_failed(), "outside a scope nothing is skipped");
+        cold_scope(|| assert!(!scope_failed(), "a new solve starts clean"));
     }
 
     #[test]
@@ -483,13 +572,11 @@ mod tests {
         let lp = parse(include_str!("testdata/cstr_bigm_dual_rebuild_lp.json"));
         let (on, ctr) = cold(&lp, true);
         // Two cold solves reach `solve_lp_cols` here, the scaled one and the #649
-        // retry on the unscaled matrix, and each tries the cascade first: a failing
-        // LP pays for the attempt twice.
-        assert!(ctr[0] >= 1, "attempted");
-        assert_eq!(
-            ctr[3], ctr[0],
-            "no attempt certified, so the primal ran each time"
-        );
+        // retry on the unscaled matrix. The cascade is tried once; the retry's
+        // attempt is skipped (`cold_scope`) instead of repeating work that just failed.
+        assert_eq!(ctr[0], 1, "attempted once");
+        assert_eq!(ctr[3], 1, "not certified, so the primal ran");
+        assert!(ctr[4] >= 1, "the unscaled retry's attempt was skipped");
         assert!(
             !matches!(on.status, LpStatus::Optimal | LpStatus::Infeasible),
             "cstr decided as {:?}",

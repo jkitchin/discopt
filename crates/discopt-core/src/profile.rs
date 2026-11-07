@@ -658,6 +658,9 @@ counters!(
     LogicalDualColdAugDecided,
     LogicalDualColdRefused,
     LogicalDualColdFellBack,
+    // ...and attempts skipped because one already failed in the same caller-level
+    // cold solve (`cold_dual::cold_scope`).
+    LogicalDualColdSkippedRepeat,
     // #1510: the primal warm entry (`run_warm`) refusing the same malformed start.
     PrimalWarmRejectInfBound,
     DualPrepAccept,

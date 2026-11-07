@@ -339,12 +339,16 @@ pub fn solve_lp_warm_csc(
     start: Option<&Basis>,
     opts: &SimplexOptions,
 ) -> LpSolve {
-    if start.is_none() && super::primal::huge_bound_relax_enabled() {
-        if let Some(sol) = solve_huge_box_relaxed(&sp, m, n, c, l, u, b, opts) {
-            return sol;
+    // #2212: one caller-level solve, so the cold cascade is tried at most once to
+    // failure across this entry's scaled solve and its unscaled retries.
+    super::cold_dual::cold_scope(|| {
+        if start.is_none() && super::primal::huge_bound_relax_enabled() {
+            if let Some(sol) = solve_huge_box_relaxed(&sp, m, n, c, l, u, b, opts) {
+                return sol;
+            }
         }
-    }
-    solve_lp_warm_csc_counted(sp, m, n, c, l, u, b, start, opts)
+        solve_lp_warm_csc_counted(sp, m, n, c, l, u, b, start, opts)
+    })
 }
 
 /// A finite bound at or past this magnitude is a **huge** bound (#2125).

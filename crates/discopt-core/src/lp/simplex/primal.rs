@@ -236,37 +236,40 @@ pub fn solve_lp_cols_scaled(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    match Scaling::from_sparse(&cols, m, n) {
-        Some(scaling) => {
-            // #1935: the original matrix, kept for the post-solve audit below.
-            let original = cols.clone();
-            scaling.scale_cols(&mut cols);
-            let cs = scaling.scale_c(c);
-            let ls = scaling.scale_lower(l);
-            let us = scaling.scale_upper(u);
-            let bs = scaling.scale_b(b);
-            let mut sol = solve_lp_cols(cols, m, n, &cs, &ls, &us, &bs, opts);
-            // Map the certificate vectors back to the original space (mirrors
-            // `solve_lp`), so a caller's safe-bound / Farkas check sees them against
-            // the ORIGINAL A/b/bounds rather than the scaled system.
-            scaling.unscale_x(&mut sol.x);
-            scaling.unscale_dual(&mut sol.dual);
-            scaling.unscale_ray(&mut sol.ray);
-            // #1935: the scaled audit can pass a point the original LP refuses.
-            if optimal_fails_original_audit(&sol, &original, m, n, b, l, u) {
-                let alt = solve_lp_cols(original, m, n, c, l, u, b, opts);
-                return if retry_decided(&alt) {
-                    alt
-                } else {
-                    downgrade_false_optimal(sol)
-                };
+    // #2212: one caller-level solve (see `cold_dual::cold_scope`).
+    super::cold_dual::cold_scope(|| {
+        match Scaling::from_sparse(&cols, m, n) {
+            Some(scaling) => {
+                // #1935: the original matrix, kept for the post-solve audit below.
+                let original = cols.clone();
+                scaling.scale_cols(&mut cols);
+                let cs = scaling.scale_c(c);
+                let ls = scaling.scale_lower(l);
+                let us = scaling.scale_upper(u);
+                let bs = scaling.scale_b(b);
+                let mut sol = solve_lp_cols(cols, m, n, &cs, &ls, &us, &bs, opts);
+                // Map the certificate vectors back to the original space (mirrors
+                // `solve_lp`), so a caller's safe-bound / Farkas check sees them against
+                // the ORIGINAL A/b/bounds rather than the scaled system.
+                scaling.unscale_x(&mut sol.x);
+                scaling.unscale_dual(&mut sol.dual);
+                scaling.unscale_ray(&mut sol.ray);
+                // #1935: the scaled audit can pass a point the original LP refuses.
+                if optimal_fails_original_audit(&sol, &original, m, n, b, l, u) {
+                    let alt = solve_lp_cols(original, m, n, c, l, u, b, opts);
+                    return if retry_decided(&alt) {
+                        alt
+                    } else {
+                        downgrade_false_optimal(sol)
+                    };
+                }
+                sol
             }
-            sol
+            // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
+            // branch (`solve_lp_scaled` on the raw view).
+            None => solve_lp_cols(cols, m, n, c, l, u, b, opts),
         }
-        // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
-        // branch (`solve_lp_scaled` on the raw view).
-        None => solve_lp_cols(cols, m, n, c, l, u, b, opts),
-    }
+    })
 }
 
 /// Warm-started primal solve from an inherited `start` basis (cert:T1.4).
