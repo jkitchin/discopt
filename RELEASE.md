@@ -10,8 +10,10 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.11.1`** (patch bump on top of `v0.11.0`: the
-debugger REPL and JSON protocol show node lineage, #2049).
+The next planned release is **`v0.12.0`** (minor bump on top of `v0.11.1`: new
+public API -- `relu_complementarity`, `solve_mpec_multistart`,
+`solve_mpec(method="native")`, `SolveResult.multistart`, the GAMS `discopt.opt`
+option file -- and a changed default, the open-frontier memory budget, #2092).
 
 ---
 
