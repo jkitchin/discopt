@@ -698,9 +698,6 @@ counters!(
     DriverIncumbentSnapRefused,
     DriverPolishAttempts,
     DriverPolishVerified,
-    ExpandResetArmed,
-    ExpandResetRetries,
-    ExpandResetRescues,
     // #1008 LU fill-in. Accumulated over every SPARSE `factorize_sparse` call:
     // the nonzero count of the basis handed in (`LuBasisNnz`), the nonzero count
     // of the `L`+`U` that came out (`LuFactorNnz`), and the call count

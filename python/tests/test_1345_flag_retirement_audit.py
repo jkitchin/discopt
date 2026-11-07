@@ -290,21 +290,23 @@ def test_the_audit_states_the_three_states_from_claude_md():
 def test_the_scan_reads_the_rust_core():
     """The #2211 regression test: fails against the Python-only scan.
 
-    `DISCOPT_PRIMAL_EXPAND_RESET` is read only in `lp/simplex/primal.rs`; before #2211
-    `scan()` did not return it at all, so it could not owe a row.
+    `DISCOPT_SIMPLEX_NO_EXPAND` is read only in `lp/simplex/primal.rs`; before #2211
+    `scan()` did not return it at all, so it could not owe a row. (Its sibling
+    `DISCOPT_PRIMAL_EXPAND_RESET`, the gate #2211 was filed on, was retired by the
+    panel that row prompted.)
     """
     sites = scan()
     rust = [s for v in sites.values() for s in v if s.path.startswith("crates/")]
     assert len(rust) >= 30, f"only {len(rust)} Rust read sites -- the Rust scan narrowed"
-    assert "DISCOPT_PRIMAL_EXPAND_RESET" in sites, "the Rust scan does not reach primal.rs"
-    assert all(s.path.startswith("crates/") for s in sites["DISCOPT_PRIMAL_EXPAND_RESET"])
+    assert "DISCOPT_SIMPLEX_NO_EXPAND" in sites, "the Rust scan does not reach primal.rs"
+    assert all(s.path.startswith("crates/") for s in sites["DISCOPT_SIMPLEX_NO_EXPAND"])
 
 
 #: Live Rust flags, one or more per consumer shape, with the polarity read by hand from
 #: the parse site. Negated presence tests are the #1421 polarity trap in Rust form: the
 #: literal `"0"` appears in all three, and all three are default ON.
 RUST_EXPECTED = {
-    "DISCOPT_PRIMAL_EXPAND_RESET": ("rust_unwrap_or", "off"),  # .map(..).unwrap_or(false)
+    "DISCOPT_SIMPLEX_NO_EXPAND": ("rust_unwrap_or", "off"),  # .map(..).unwrap_or(false)
     "DISCOPT_NS_MARGIN": ("rust_unwrap_or", "on"),  # .map(..).unwrap_or(true)
     "DISCOPT_PRIMAL_XB_REFRESH": ("rust_unwrap_or", "selector"),  # .parse::<usize>().unwrap_or(0)
     "DISCOPT_TREE_SENTINEL_PRUNE_GUARD": ("rust_presence", "on"),  # !var(F).is_ok_and(=="0")

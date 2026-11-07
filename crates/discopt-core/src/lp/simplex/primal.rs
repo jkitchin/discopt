@@ -139,10 +139,7 @@ pub fn solve_lp_cols(
     // dual path already clones the CSC per solve — see dual.rs — so this is
     // in-family), and nothing extra with the route OFF (default).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
-    // #956 T2': keep a copy for the EXPAND-free retry too (flag-gated, so the clone
-    // is not paid on the default path).
     crate::profile::incr(crate::profile::Ctr::EntryCols);
-    let expand_retry_cols = expand_reset_retry_available().then(|| cols.clone());
     let mut sx0 = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
     sx0.no_expand = expand_suppressed_globally();
     let mut sol = sx0.run();
@@ -153,41 +150,19 @@ pub fn solve_lp_cols(
             });
         }
     }
-    // #956 T2': chained AFTER the #85 dense retry rather than instead of it — the
-    // dense retry returns early on the very solves this one exists to rescue, so an
-    // `if`/`else` here would leave the EXPAND retry permanently unreachable
-    // (measured: it armed 115 times against 597 entries, exactly the 482 solves the
-    // dense route had already claimed).
-    if let Some(cols2) = expand_retry_cols {
-        if let Some(rescued) = expand_reset_retry(&sol, || {
-            let mut sx = Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts);
-            sx.no_expand = true;
-            sx.run()
-        }) {
-            return rescued;
-        }
-    }
+    // #956 T2' had an EXPAND-free re-solve here (`DISCOPT_PRIMAL_EXPAND_RESET`),
+    // retired by #2211 on its §5 panel: 230 rescues on 14 corpus instances, 0
+    // certificates gained, 0 bounds tightened, one bound loosened (`4stufen`, where
+    // 1357 retries spent the wall budget). `docs/dev/flag-retirement-audit.md`.
     sol
-}
-
-/// Whether the #956 T2' EXPAND-free retry is enabled. Default OFF pending the
-/// plan's §5 panel; `DISCOPT_PRIMAL_EXPAND_RESET=1` opts in. Read once.
-fn expand_reset_retry_available() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("DISCOPT_PRIMAL_EXPAND_RESET")
-            .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
-            .unwrap_or(false)
-    })
 }
 
 /// Whether EXPAND is suppressed on the **primary** solve, not just the retry
 /// (`DISCOPT_SIMPLEX_NO_EXPAND=1`, default OFF, read once).
 ///
-/// This is the seam the #956 T2′ entry experiment needs. The retry above measures
-/// "how many already-failed solves does an EXPAND-free re-solve rescue" (4 %),
+/// This is the seam the #956 T2′ entry experiment needs. The retired retry
+/// (`DISCOPT_PRIMAL_EXPAND_RESET`, #2211) measured "how many already-failed solves
+/// does an EXPAND-free re-solve rescue" (4 %),
 /// which cannot settle whether EXPAND *causes* the bound excursions — a failed
 /// solve is already deep in trouble for other reasons. The question that decides
 /// the mechanism is what `Phase1EndBoxViolated` does when no pivot anywhere is
@@ -224,33 +199,6 @@ fn xb_refresh_cadence() -> usize {
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(0)
     })
-}
-
-/// Re-solve once with the EXPAND bound relaxation suppressed when the first solve
-/// failed to decide (#956 T2').
-///
-/// EXPAND permits each pivot a bounded bound violation to escape degeneracy; the
-/// measured failure mode is that those violations accumulate into the basis, so the
-/// solve ends primal-infeasible and `assemble`'s audit downgrades it to `Numerical`.
-/// Suppressing EXPAND makes the ratio test refuse any violation, so the retry either
-/// reaches a genuine certificate or stalls out on degeneracy — and only a terminal
-/// certificate is accepted, exactly like the #671 hardening retry. Soundness rests
-/// on the retry passing the SAME `assemble` audit as any other solve: this can
-/// rescue a solve that would have been `Numerical`, never certify a wrong `Optimal`.
-fn expand_reset_retry(sol: &LpSolve, resolve: impl FnOnce() -> LpSolve) -> Option<LpSolve> {
-    if !matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
-        return None;
-    }
-    crate::profile::incr(crate::profile::Ctr::ExpandResetRetries);
-    let retried = resolve();
-    if matches!(
-        retried.status,
-        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
-    ) {
-        crate::profile::incr(crate::profile::Ctr::ExpandResetRescues);
-        return Some(retried);
-    }
-    None
 }
 
 /// Sparse-native equivalent of [`solve_lp`]: a cold CSC solve with the SAME
