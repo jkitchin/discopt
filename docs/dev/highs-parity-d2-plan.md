@@ -255,6 +255,45 @@ named.
 
 **Size:** 1-3 days.
 
+**Status 2026-11-07: entry done; no quick win, the engine project is scoped.**
+
+HiGHS 1.15.1 reference, 1 thread:
+
+| instance | HiGHS | discopt |
+|---|---|---|
+| `neos-911970` | optimal 54.76 in 11 s, 1,370 nodes, about 72 LP iterations per node | 1,375 nodes in 20 s, incumbent 103.92, about 285 iterations per node |
+| `issue-2446` | optimal at the root in 0.12 s (presolve plus randomized rounding plus cuts) | — |
+
+So these two rows are not pure LP-speed rows, but the per-pivot gap is real.
+
+1. **Cold-solve warm-start cascade (found and measured; the fix is retired).**
+   - A cold two-phase node solve exports a basis short by every artificial left basic
+     at zero. The next warm start refuses it (`DualPrepRejectShape`) and cold-solves
+     too.
+   - The cut LP's folded rows made this common: on `neos-911970`, 628 rejections and
+     247k phase-1 pivots.
+   - `DISCOPT_MILP_NODE_EXPEL_ARTIFICIALS` (`SimplexOptions::expel_zero_artificials`
+     on node LPs) took the rejections to 0 (`d2-analysis/w5_expel_entry.jsonl.gz`).
+   - Its §5 panel (`w5_expel_panel_r3.json.gz`) was cert-clean but neutral:
+     certified 126 -> 125, nodes +1 %, `p0548` incumbent lost once. It was retired
+     per §5.
+2. **Per-pivot cost.**
+   - On the pure LP relaxation of `issue-2446`, discopt takes ~2,000 pivots at
+     ~50 µs/pivot; HiGHS takes 973 at ~9 µs/pivot.
+   - Our cold solves are a two-phase primal that re-prices every column every pivot
+     (a full BTRAN plus an O(nnz) sweep, `primal.rs` `PriceSweep`).
+   - HiGHS cold-solves with the dual simplex and updates reduced costs from a
+     hyper-sparse pivot row.
+   - Node LPs under the cut LP are also ~9x slower per solve on `neos-911970`
+     (23 ms vs 2.7 ms), because lazily deleted cut rows stay in the matrix.
+
+The engine work, in order, each with an R1-LP-panel entry (P2.6) and a kill criterion:
+- (a) cold solves through the dual simplex from a slack basis, with bound flipping;
+- (b) a row-wise copy of A for hyper-sparse PRICE in the dual;
+- (c) longer FT-update refactorization intervals;
+- (d) physical removal of lazily deleted cut rows via one exchange pivot per stored
+  basis (the expert's option b).
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first
