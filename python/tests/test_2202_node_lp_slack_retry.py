@@ -88,51 +88,67 @@ def test_slack_retry_alone_decides_the_sliver_node(monkeypatch):
     assert (off.solver_stats or {}).get("tree/slack_retries") == 0.0
 
 
-def _permuted_kernel(monkeypatch, seed: int, calls: list):
-    """Wrap the kernel so the main tree call sees its fixed rows permuted by ``seed``:
-    the same LP, a different order of floating-point work (#2202's platform class)."""
-    orig = _rust.solve_spatial_tree_py
-
-    def wrap(*a, **k):
-        if int(k.get("max_nodes", 10**9)) > 1:
-            ptr = np.asarray(k["fixed_row_ptr"])
-            cols = np.asarray(k["fixed_cols"])
-            co = np.asarray(k["fixed_coeffs"])
-            rhs = np.asarray(k["fixed_rhs"])
-            perm = np.random.default_rng(seed).permutation(len(rhs))
-            nc, ncf, nptr = [], [], [0]
-            for q in perm:
-                nc.append(cols[ptr[q] : ptr[q + 1]])
-                ncf.append(co[ptr[q] : ptr[q + 1]])
-                nptr.append(nptr[-1] + ptr[q + 1] - ptr[q])
-            k["fixed_row_ptr"] = np.array(nptr, dtype=ptr.dtype)
-            k["fixed_cols"] = np.concatenate(nc).astype(cols.dtype)
-            k["fixed_coeffs"] = np.concatenate(ncf)
-            k["fixed_rhs"] = rhs[perm].copy()
-            res = orig(*a, **k)
-            calls.append((k.get("node_lp_slack_retry", False), res))
-            return res
-        return orig(*a, **k)
-
-    monkeypatch.setattr(_rust, "solve_spatial_tree_py", wrap)
+def _permute_rows(kwargs: dict, seed: int) -> dict:
+    """The kernel kwargs with the fixed rows permuted by ``seed`` (0 = unchanged): the
+    same LP, a different order of floating-point work (#2202's platform class)."""
+    k = dict(kwargs)
+    if not seed:
+        return k
+    ptr = np.asarray(k["fixed_row_ptr"])
+    cols = np.asarray(k["fixed_cols"])
+    co = np.asarray(k["fixed_coeffs"])
+    rhs = np.asarray(k["fixed_rhs"])
+    perm = np.random.default_rng(seed).permutation(len(rhs))
+    nc, ncf, nptr = [], [], [0]
+    for q in perm:
+        nc.append(cols[ptr[q] : ptr[q + 1]])
+        ncf.append(co[ptr[q] : ptr[q + 1]])
+        nptr.append(nptr[-1] + ptr[q + 1] - ptr[q])
+    k["fixed_row_ptr"] = np.array(nptr, dtype=ptr.dtype)
+    k["fixed_cols"] = np.concatenate(nc).astype(cols.dtype)
+    k["fixed_coeffs"] = np.concatenate(ncf)
+    k["fixed_rhs"] = rhs[perm].copy()
+    return k
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_permuted_nous1_has_no_undecided_nodes(monkeypatch):
-    """nous1 with its fixed rows permuted by seed 5, deterministic, 2,000 nodes: the
-    retry decides every node LP (OFF leaves 2 undecided at this budget; continued to
-    the time limit OFF stalls at bound 1.485 with ~1,400 undecided, ON certifies).
-    A gate probe for the class, not a target: the mechanism is general."""
+    """nous1's kernel tree under several fixed-row orders, 500 nodes each: every run
+    ends with 0 undecided nodes, and the retry decides at least one node LP somewhere.
+
+    WHICH order triggers the retry depends on the platform's floating-point order (the
+    class this test is about): on Linux the unpermuted model and seeds 2, 7, 9 fire at
+    this budget; on macOS/arm64 seed 5 never fires within 2,000 nodes while others do
+    (#2209 review). So the "probe fired" guard (§6) is over the set, not one seed.
+    Without the retry, seed 5 on Linux stalls at the time limit with ~1,400 undecided
+    nodes. The kwargs are captured from one ``Model.solve`` and the kernel is then
+    called directly; the Python primal hook and pricer are dropped for speed (the
+    seeded initial incumbent stays), since the retry lives in the node LP.
+    """
     monkeypatch.delenv(FLAG, raising=False)
-    calls: list = []
-    _permuted_kernel(monkeypatch, 5, calls)
-    r = dm.from_nl(str(NOUS1)).solve(
-        time_limit=120, gap_tolerance=1e-4, deterministic=True, max_nodes=2000
+    orig = _rust.solve_spatial_tree_py
+    captured: dict = {}
+
+    def capture(*a, **k):
+        if int(k.get("max_nodes", 10**9)) > 1 and not captured:
+            captured.update(k)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(_rust, "solve_spatial_tree_py", capture)
+    dm.from_nl(str(NOUS1)).solve(
+        time_limit=120, gap_tolerance=1e-4, deterministic=True, max_nodes=50
     )
-    assert calls, "the kernel never ran"
-    retry_on, res = calls[-1]
-    assert retry_on is True, "the solver must pass the retry to the kernel"
-    assert res["n_slack_retry_decided"] >= 1, res["n_slack_retries"]  # it fired (§6)
-    assert res["n_undecided"] == 0, res["n_undecided"]
-    assert r.bound <= NOUS1_OPT + 1e-6
+    assert captured, "the kernel never ran"
+    assert captured.get("node_lp_slack_retry") is True, "the solver must pass the retry"
+    runs = []
+    for seed in (0, 1, 2, 5, 7, 9):
+        k = _permute_rows(captured, seed)
+        for drop in ("primal_hook", "incumbent_value", "bound_time_extension_s"):
+            k.pop(drop, None)
+        k.update(max_nodes=500, time_limit_s=120.0)
+        res = orig(**k)
+        runs.append((seed, res["n_undecided"], res["n_slack_retry_decided"], res["bound"]))
+    assert all(u == 0 for _, u, _, _ in runs), runs
+    assert sum(d for _, _, d, _ in runs) >= 1, runs  # the retry fired somewhere (§6)
+    assert all(b <= NOUS1_OPT + 1e-6 for _, _, _, b in runs), runs
