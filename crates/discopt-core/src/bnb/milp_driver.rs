@@ -868,6 +868,10 @@ struct CutLpRow {
     age: u32,
     /// The cut over the working columns below `col`.
     cut: GomoryCut,
+    /// Lazily deleted: aged out while a stored frontier basis still had the slack
+    /// nonbasic, so the slack was freed (`(-inf, inf)`, the row no longer binds) and
+    /// the row waits for physical deletion.
+    relaxed: bool,
 }
 
 /// What [`node_local_gmi_bound`] proved at one node.
@@ -3877,6 +3881,7 @@ fn solve_milp_node_search(
                     col: n_w + base + i,
                     age: 0,
                     cut: cut.clone(),
+                    relaxed: false,
                 });
             }
             crate::profile::incr_by(crate::profile::Ctr::CutLpFolded, cut_lp_fold.len() as u64);
@@ -3914,7 +3919,8 @@ fn solve_milp_node_search(
         if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
             let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
             let mut del: Vec<usize> = Vec::new();
-            for (i, r) in cut_lp_rows.iter().enumerate() {
+            let mut relaxed_any = false;
+            for (i, r) in cut_lp_rows.iter_mut().enumerate() {
                 if r.age <= CUT_LP_AGE_LIMIT {
                     continue;
                 }
@@ -3928,9 +3934,24 @@ fn solve_milp_node_search(
                     .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
                 if basic_everywhere {
                     del.push(i);
+                } else if !r.relaxed {
+                    // Lazy deletion: free the slack so the row stops binding; every
+                    // stored basis stays a basis of the LP (a free nonbasic column is
+                    // the engines' two-sided encoding). Dropping a constraint only
+                    // relaxes the LP, so every node bound stays valid.
+                    let col = r.col;
+                    l_w[col] = -INF;
+                    u_w[col] = INF;
+                    r.relaxed = true;
+                    relaxed_any = true;
+                    crate::profile::incr(crate::profile::Ctr::CutLpRelaxed);
                 } else {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
                 }
+            }
+            if relaxed_any {
+                slack_l = l_w[ns..].to_vec();
+                slack_u = u_w[ns..].to_vec();
             }
             if !del.is_empty() {
                 crate::profile::incr_by(crate::profile::Ctr::CutLpDeleted, del.len() as u64);
@@ -7836,6 +7857,7 @@ mod tests {
             col: 3 + i,
             age: 99,
             cut: k.clone(),
+            relaxed: false,
         };
         // Delete cut rows 1 and 2 (slacks 3, 4); keep 3 and 4, both of which use them.
         let mut gone = vec![row(1, &c2), row(0, &c1)];
