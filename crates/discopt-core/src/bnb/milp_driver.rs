@@ -575,42 +575,6 @@ fn cut_lp_select(
     sel
 }
 
-/// Delete rows `del_rows` and columns `del_cols` (both sorted ascending) from a CSC.
-fn delete_rows_cols(
-    sp: &SparseCols,
-    m: usize,
-    n: usize,
-    del_rows: &[usize],
-    del_cols: &[usize],
-) -> SparseCols {
-    let mut row_map = vec![usize::MAX; m];
-    let mut next = 0;
-    for (r, slot) in row_map.iter_mut().enumerate() {
-        if del_rows.binary_search(&r).is_err() {
-            *slot = next;
-            next += 1;
-        }
-    }
-    let (cp, ri, vals) = sp.raw();
-    let mut ncp = vec![0usize];
-    let mut nri = Vec::with_capacity(ri.len());
-    let mut nv = Vec::with_capacity(vals.len());
-    for j in 0..n {
-        if del_cols.binary_search(&j).is_ok() {
-            continue;
-        }
-        for idx in cp[j]..cp[j + 1] {
-            let r = row_map[ri[idx]];
-            if r != usize::MAX {
-                nri.push(r);
-                nv.push(vals[idx]);
-            }
-        }
-        ncp.push(nri.len());
-    }
-    SparseCols::from_csc(ncp, nri, nv)
-}
-
 /// Rewrite a cut over the working columns after cut rows are deleted: each deleted
 /// row is `a_r·x - s_r = rhs_r` with slack column `s_r`, so a term `γ·s_r` is replaced
 /// by `γ·(a_r·x - rhs_r)` (an identity on the row, so the cut stays valid), then the
@@ -674,6 +638,126 @@ fn remap_basis_after_delete(b: &Basis, col_map: &[usize]) -> Option<Basis> {
         basic_vars,
         col_status,
     })
+}
+
+/// The working LP after [`delete_cut_rows`].
+struct CutRowDeletion {
+    csc: SparseCols,
+    b: Vec<f64>,
+    /// Old column -> new column (`usize::MAX` = deleted).
+    col_map: Vec<usize>,
+    /// The deleted rows `(slack column, cut)` over the OLD columns, sorted by slack
+    /// column, for [`substitute_deleted_slacks`] on cuts held outside the matrix.
+    subs: Vec<(usize, GomoryCut)>,
+}
+
+/// Delete the folded cut rows `gone` from the working LP (`DISCOPT_MILP_CUT_LP`).
+///
+/// Each folded row is `a_r·x - s_r = rhs_r`. Deleting it drops row `r` and its slack
+/// column `s_r`; a kept folded row whose cut uses `s_r` is rewritten by substituting
+/// `s_r = a_r·x - rhs_r` (an exact identity on the deleted row) and rebuilt from its
+/// cut. The caller guarantees every row with a nonzero in a deleted slack column is a
+/// folded row (`gone` or `kept`); this is asserted. On return every cut in `gone` and
+/// `kept` is over the new columns and every `kept` row/col index is remapped.
+///
+/// Bases: substituting a deleted row whose slack is basic is a pivot on that slack, so
+/// a basis with every deleted slack basic stays a basis of the new LP once those
+/// slacks are dropped ([`remap_basis_after_delete`]).
+fn delete_cut_rows(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    gone: &mut [CutLpRow],
+    kept: &mut [CutLpRow],
+) -> CutRowDeletion {
+    gone.sort_by_key(|r| r.col);
+    let del_cols: Vec<usize> = gone.iter().map(|r| r.col).collect();
+    let mut del_rows: Vec<usize> = gone.iter().map(|r| r.row).collect();
+    del_rows.sort_unstable();
+    let mut col_map = vec![usize::MAX; n];
+    let mut next = 0;
+    for (j, slot) in col_map.iter_mut().enumerate() {
+        if del_cols.binary_search(&j).is_err() {
+            *slot = next;
+            next += 1;
+        }
+    }
+    let mut row_map = vec![usize::MAX; m];
+    let mut next = 0;
+    for (r, slot) in row_map.iter_mut().enumerate() {
+        if del_rows.binary_search(&r).is_err() {
+            *slot = next;
+            next += 1;
+        }
+    }
+    let (n_new, m_new) = (n - del_cols.len(), m - del_rows.len());
+    let subs: Vec<(usize, GomoryCut)> = gone.iter().map(|r| (r.col, r.cut.clone())).collect();
+    let subs_ref: Vec<(usize, &GomoryCut)> = subs.iter().map(|(c, k)| (*c, k)).collect();
+    for r in gone.iter_mut() {
+        substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
+    }
+    let kept_rows: HashSet<usize> = kept.iter().map(|r| r.row).collect();
+    let (cp, ri, vals) = sp.raw();
+    for &j in &del_cols {
+        for &r in &ri[cp[j]..cp[j + 1]] {
+            assert!(
+                kept_rows.contains(&r) || del_rows.binary_search(&r).is_ok(),
+                "deleted slack column {j} is used by row {r}, which is not a folded cut row"
+            );
+        }
+    }
+    // Triplets (col, row, val) of the new matrix: every untouched entry, then the
+    // kept folded rows rebuilt from their substituted cuts.
+    let mut trip: Vec<(usize, usize, f64)> = Vec::with_capacity(vals.len());
+    for j in 0..n {
+        let nj = col_map[j];
+        if nj == usize::MAX {
+            continue;
+        }
+        for idx in cp[j]..cp[j + 1] {
+            let r = ri[idx];
+            if row_map[r] == usize::MAX || kept_rows.contains(&r) {
+                continue;
+            }
+            trip.push((nj, row_map[r], vals[idx]));
+        }
+    }
+    let mut b_new: Vec<f64> = (0..m)
+        .filter(|&r| row_map[r] != usize::MAX)
+        .map(|r| b[r])
+        .collect();
+    for r in kept.iter_mut() {
+        substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
+        r.row = row_map[r.row];
+        r.col = col_map[r.col];
+        for (j, &v) in r.cut.coeffs.iter().enumerate() {
+            if v != 0.0 {
+                trip.push((j, r.row, v));
+            }
+        }
+        trip.push((r.col, r.row, -1.0));
+        b_new[r.row] = r.cut.rhs;
+    }
+    trip.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut ncp = vec![0usize; n_new + 1];
+    let mut nri = Vec::with_capacity(trip.len());
+    let mut nv = Vec::with_capacity(trip.len());
+    for &(j, r, v) in &trip {
+        ncp[j + 1] += 1;
+        nri.push(r);
+        nv.push(v);
+    }
+    for j in 0..n_new {
+        ncp[j + 1] += ncp[j];
+    }
+    debug_assert_eq!(b_new.len(), m_new);
+    CutRowDeletion {
+        csc: SparseCols::from_csc(ncp, nri, nv),
+        b: b_new,
+        col_map,
+        subs,
+    }
 }
 
 fn node_gmi_enabled() -> bool {
@@ -3813,13 +3897,21 @@ fn solve_milp_node_search(
         }
 
         // D2 W1: every CUT_LP_DELETE_EVERY batches, delete folded rows whose slack has
-        // been basic for more than CUT_LP_AGE_LIMIT batches and is basic in every stored
-        // frontier basis; they go back to the pool.
+        // been basic for more than CUT_LP_AGE_LIMIT node solves and is basic in every
+        // stored frontier basis; they go back to the pool. A row whose slack column is
+        // used by a matrix row that is not a folded cut is kept (that row could not be
+        // rewritten); folded rows that use it are rewritten by substitution.
         cut_lp_epoch += 1;
-        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 {
+        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
+            let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
             let mut del: Vec<usize> = Vec::new();
             for (i, r) in cut_lp_rows.iter().enumerate() {
                 if r.age <= CUT_LP_AGE_LIMIT {
+                    continue;
+                }
+                let (rows, _) = csc_w.col(r.col);
+                if rows.iter().any(|q| !managed.contains(q)) {
+                    crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
                     continue;
                 }
                 let basic_everywhere = tm
@@ -3843,38 +3935,10 @@ fn solve_milp_node_search(
                         kept.push(r);
                     }
                 }
-                gone.sort_by_key(|r| r.col);
-                let del_rows: Vec<usize> = {
-                    let mut v: Vec<usize> = gone.iter().map(|r| r.row).collect();
-                    v.sort_unstable();
-                    v
-                };
-                let del_cols: Vec<usize> = gone.iter().map(|r| r.col).collect();
-                let mut col_map = vec![usize::MAX; n_w];
-                let mut nxt = 0;
-                for (j, slot) in col_map.iter_mut().enumerate() {
-                    if del_cols.binary_search(&j).is_err() {
-                        *slot = nxt;
-                        nxt += 1;
-                    }
-                }
-                let mut row_map = vec![usize::MAX; m_w];
-                let mut nxt = 0;
-                for (r, slot) in row_map.iter_mut().enumerate() {
-                    if del_rows.binary_search(&r).is_err() {
-                        *slot = nxt;
-                        nxt += 1;
-                    }
-                }
-                csc_w = delete_rows_cols(&csc_w, m_w, n_w, &del_rows, &del_cols);
-                let keep_row = |r: usize| del_rows.binary_search(&r).is_err();
-                let keep_col = |j: usize| del_cols.binary_search(&j).is_err();
-                b_w = b_w
-                    .iter()
-                    .enumerate()
-                    .filter(|(r, _)| keep_row(*r))
-                    .map(|(_, &v)| v)
-                    .collect();
+                let d = delete_cut_rows(&csc_w, m_w, n_w, &b_w, &mut gone, &mut kept);
+                csc_w = d.csc;
+                b_w = d.b;
+                let keep_col = |j: usize| d.col_map[j] != usize::MAX;
                 c_w = c_w
                     .iter()
                     .enumerate()
@@ -3903,23 +3967,14 @@ fn solve_milp_node_search(
                 n_w -= gone.len();
                 slack_l = l_w[ns..].to_vec();
                 slack_u = u_w[ns..].to_vec();
-                // Rewrite every cut over the old columns: substitute the deleted slacks.
-                let subs: Vec<(usize, GomoryCut)> =
-                    gone.iter().map(|r| (r.col, r.cut.clone())).collect();
-                let subs_ref: Vec<(usize, &GomoryCut)> =
-                    subs.iter().map(|(c, k)| (*c, k)).collect();
+                // Pool cuts: the same substitution (they are not in the matrix).
+                let subs: Vec<(usize, &GomoryCut)> = d.subs.iter().map(|(c, k)| (*c, k)).collect();
                 for cut in gmi_pool.iter_mut() {
-                    substitute_deleted_slacks(cut, &subs_ref, &col_map);
-                }
-                for r in kept.iter_mut() {
-                    substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
-                    r.col = col_map[r.col];
-                    r.row = row_map[r.row];
+                    substitute_deleted_slacks(cut, &subs, &d.col_map);
                 }
                 cut_lp_rows = kept;
                 // Deleted rows return to the pool at age 1 (`HighsCutPool.cpp:150-160`).
-                for mut r in gone {
-                    substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
+                for r in gone {
                     gmi_pool.push(r.cut);
                     gmi_pool_age.push(1);
                 }
@@ -3928,7 +3983,7 @@ fn solve_milp_node_search(
                     .chain(cut_lp_rows.iter().map(|r| &r.cut))
                     .map(cut_signature)
                     .collect();
-                tm.map_bases(|b| remap_basis_after_delete(b, &col_map));
+                tm.map_bases(|b| remap_basis_after_delete(b, &d.col_map));
             }
         }
     }
@@ -7689,90 +7744,144 @@ mod tests {
         assert!((f - 0.05).abs() < 1e-12, "{f}");
     }
 
+    /// Evaluate every row of a CSC system at `v` minus `b`.
+    fn row_residuals(sp: &SparseCols, m: usize, n: usize, b: &[f64], v: &[f64]) -> Vec<f64> {
+        let (cp, ri, vals) = sp.raw();
+        let mut act = vec![0.0; m];
+        for j in 0..n {
+            for idx in cp[j]..cp[j + 1] {
+                act[ri[idx]] += vals[idx] * v[j];
+            }
+        }
+        act.iter().zip(b).map(|(a, bb)| a - bb).collect()
+    }
+
     #[test]
-    fn deleting_cut_rows_keeps_cuts_and_bases_consistent() {
-        // Working LP over 2 structurals: one model row (col 2 its slack) and two cut
-        // rows `a_r·x - s_r = rhs_r` (cols 3, 4). The second cut row references the
-        // first cut's slack.
-        let cut_a = GomoryCut {
+    fn deleting_cut_rows_keeps_every_row_equivalent() {
+        // Working LP over 2 structurals and one model row (col 2 its slack), then four
+        // folded cut rows `a_r·x - s_r = rhs_r` (slack cols 3..6) where later cuts use
+        // earlier cut slacks: the case the first deletion dropped silently (it removed
+        // a slack column that a kept cut row still used; p0548 certified 9154 > 8691).
+        let c1 = GomoryCut {
             coeffs: vec![1.0, 2.0, 0.0],
             rhs: 1.0,
         };
-        let cut_b = GomoryCut {
+        let c2 = GomoryCut {
             coeffs: vec![0.5, 0.0, 0.0, 3.0],
             rhs: 2.0,
+        };
+        let c3 = GomoryCut {
+            coeffs: vec![0.0, 1.0, 0.0, -1.0, 2.0],
+            rhs: -1.0,
+        };
+        let c4 = GomoryCut {
+            coeffs: vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.5],
+            rhs: 0.0,
         };
         let base = SparseCols::from_csc(vec![0, 1, 2, 3], vec![0, 0, 0], vec![1.0, 1.0, -1.0]);
         let mut b = vec![0.0];
         let (mut c, mut l, mut u) = (vec![0.0; 3], vec![0.0; 3], vec![10.0; 3]);
         let mut is_int = vec![false; 3];
-        let (sp, m, n) = augment_csc_with_cuts(
-            &base,
-            &mut b,
-            &mut c,
-            &mut l,
-            &mut u,
-            &mut is_int,
-            1,
-            3,
-            &[cut_a.clone(), cut_b.clone()],
-        );
-        assert_eq!((m, n), (3, 5));
-        // Delete both cut rows (rows 1,2; cols 3,4).
-        let out = delete_rows_cols(&sp, m, n, &[1, 2], &[3, 4]);
+        let cuts = [c1.clone(), c2.clone(), c3.clone(), c4.clone()];
+        // One fold per cut, as in the driver: each cut only uses columns that exist
+        // when it is appended.
+        let (mut sp, mut m, mut n) = (base.clone(), 1, 3);
+        for k in &cuts {
+            let (nsp, nm, nn) = augment_csc_with_cuts(
+                &sp,
+                &mut b,
+                &mut c,
+                &mut l,
+                &mut u,
+                &mut is_int,
+                m,
+                n,
+                std::slice::from_ref(k),
+            );
+            (sp, m, n) = (nsp, nm, nn);
+        }
+        assert_eq!((m, n), (5, 7));
+        let row = |i: usize, k: &GomoryCut| CutLpRow {
+            row: 1 + i,
+            col: 3 + i,
+            age: 99,
+            cut: k.clone(),
+        };
+        // Delete cut rows 1 and 2 (slacks 3, 4); keep 3 and 4, both of which use them.
+        let mut gone = vec![row(1, &c2), row(0, &c1)];
+        let mut kept = vec![row(2, &c3), row(3, &c4)];
+        let d = delete_cut_rows(&sp, m, n, &b, &mut gone, &mut kept);
+        assert_eq!(d.col_map, vec![0, 1, 2, usize::MAX, usize::MAX, 3, 4]);
         assert_eq!(
-            out.raw(),
-            base.raw(),
-            "deleting the appended rows restores the base LP"
+            (kept[0].row, kept[0].col, kept[1].row, kept[1].col),
+            (1, 3, 2, 4)
         );
-        // A pool cut using both deleted slacks: after substitution it must take the same
-        // value at every structural point (the slacks are functions of x).
-        let col_map = vec![0, 1, 2, usize::MAX, usize::MAX];
+        // A pool cut using every cut slack, rewritten the same way.
         let mut pc = GomoryCut {
-            coeffs: vec![1.0, -1.0, 0.0, 2.0, -0.5],
+            coeffs: vec![1.0, -1.0, 0.0, 2.0, -0.5, 1.5, -2.0],
             rhs: 0.25,
         };
         let orig = pc.clone();
-        substitute_deleted_slacks(&mut pc, &[(3, &cut_a), (4, &cut_b)], &col_map);
-        assert_eq!(pc.coeffs.len(), 3);
+        let subs: Vec<(usize, &GomoryCut)> = d.subs.iter().map(|(c, k)| (*c, k)).collect();
+        substitute_deleted_slacks(&mut pc, &subs, &d.col_map);
         let mut checked = 0;
-        for &(x0, x1, x2) in &[(0.0, 0.0, 0.0), (1.5, -2.0, 0.3), (7.0, 3.0, -1.0)] {
-            let s3 = x0 + 2.0 * x1 - 1.0;
-            let s4 = 0.5 * x0 + 3.0 * s3 - 2.0;
-            let full = [x0, x1, x2, s3, s4];
-            let old: f64 = orig
-                .coeffs
+        for &(x0, x1) in &[(0.0, 0.0), (1.5, -2.0), (7.0, 3.0), (-0.3, 0.9)] {
+            // Slacks from the ORIGINAL rows, in order (each cut uses earlier slacks).
+            let mut v = vec![x0, x1, 0.0];
+            v[2] = x0 + x1; // model row x0 + x1 - s = 0
+            for k in &cuts {
+                let a: f64 = k.coeffs.iter().zip(&v).map(|(a, x)| a * x).sum();
+                v.push(a - k.rhs);
+            }
+            assert!(row_residuals(&sp, m, n, &b, &v)
                 .iter()
-                .zip(full)
-                .map(|(a, v)| a * v)
-                .sum::<f64>()
-                - orig.rhs;
-            let new: f64 = pc.coeffs.iter().zip(full).map(|(a, v)| a * v).sum::<f64>() - pc.rhs;
+                .all(|r| r.abs() < 1e-12));
+            // The same point, projected: every row of the new LP must hold.
+            let w: Vec<f64> = (0..n)
+                .filter(|&j| d.col_map[j] != usize::MAX)
+                .map(|j| v[j])
+                .collect();
+            let res = row_residuals(&d.csc, m - 2, n - 2, &d.b, &w);
+            assert!(res.iter().all(|r| r.abs() < 1e-12), "{res:?}");
+            let old: f64 = orig.coeffs.iter().zip(&v).map(|(a, x)| a * x).sum::<f64>() - orig.rhs;
+            let new: f64 = pc.coeffs.iter().zip(&w).map(|(a, x)| a * x).sum::<f64>() - pc.rhs;
             assert!((old - new).abs() < 1e-12, "{old} vs {new}");
+            for g in &gone {
+                // A returned cut equals its own (deleted) slack over the new columns.
+                let val: f64 =
+                    g.cut.coeffs.iter().zip(&w).map(|(a, x)| a * x).sum::<f64>() - g.cut.rhs;
+                let s_old = v[g.col]; // `gone` keeps its old indices
+                assert!((val - s_old).abs() < 1e-12, "{val} vs {s_old}");
+            }
             checked += 1;
         }
-        assert_eq!(checked, 3);
+        assert_eq!(checked, 4);
         // Bases: the deleted slacks basic -> remapped; one nonbasic -> refused; a basis
-        // shorter than the matrix (slacks implicitly basic) -> kept as is.
+        // shorter than the matrix (slacks implicitly basic) -> kept.
+        let cm = &d.col_map;
         let basis = Basis {
-            basic_vars: vec![0, 3, 4],
-            col_status: vec![BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC],
+            basic_vars: vec![0, 3, 4, 5, 6],
+            col_status: vec![BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC, BASIC, BASIC],
         };
-        let r = remap_basis_after_delete(&basis, &col_map).unwrap();
-        assert_eq!(r.basic_vars, vec![0]);
-        assert_eq!(r.col_status, vec![BASIC, AT_LOWER, AT_LOWER]);
+        let r = remap_basis_after_delete(&basis, cm).unwrap();
+        assert_eq!(r.basic_vars, vec![0, 3, 4]);
+        assert_eq!(r.col_status, vec![BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC]);
         let bad = Basis {
-            basic_vars: vec![0, 1, 4],
-            col_status: vec![BASIC, BASIC, AT_LOWER, AT_LOWER, BASIC],
+            basic_vars: vec![0, 1, 4, 5, 6],
+            col_status: vec![BASIC, BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC, BASIC],
         };
-        assert!(remap_basis_after_delete(&bad, &col_map).is_none());
+        assert!(remap_basis_after_delete(&bad, cm).is_none());
         let short = Basis {
             basic_vars: vec![0],
             col_status: vec![BASIC, AT_LOWER, AT_LOWER],
         };
-        let r = remap_basis_after_delete(&short, &col_map).unwrap();
-        assert_eq!(r.basic_vars, vec![0]);
-        assert_eq!(r.col_status.len(), 3);
+        assert_eq!(
+            remap_basis_after_delete(&short, cm)
+                .unwrap()
+                .col_status
+                .len(),
+            3
+        );
     }
 
     #[test]
