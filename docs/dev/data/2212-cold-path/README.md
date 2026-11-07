@@ -6,7 +6,7 @@ Scripts (each asserts it loaded this checkout's `discopt`, prints an executed co
 |---|---|
 | `entry_experiment.py` → `fixtures.jsonl` | every captured LP fixture in the tree (`crates/discopt-core/src/{bnb,lp/simplex}/testdata/*_lp.json`, 19 LPs) under four starts, checked against HiGHS and independently of it |
 | `throughput_panel.py` → `throughput_nl.jsonl`, `throughput_nl.summary.log` | the #1008 question: cold dual from the logical start vs today's cold primal, on root relaxations (`build_uniform_relaxation`, `rlt_lineq` off/on), 3 interleaved reps per LP. `--corpus nl` is the in-repo corpus; `--corpus qplib` is #1008's own QPLIB selection (needs the corpus) |
-| `prepare_check_probe.py` → `prepare_check_probe.log` | the corpus solved through `Model.solve`, counting how often the new `PreparedDual::prepare` consistency check fires (it must not) |
+| `prepare_check_probe.py` → `prepare_check_probe.log` | the corpus solved through `Model.solve`, counting how often the new `PreparedDual::prepare` consistency check fires. **Result: 74 instances, 28,123 accepted warm starts, 0 rejections**, so no engine-internal caller produces an inconsistent start and the check is bound-neutral on the default path |
 
 ```
 DISCOPT_PROFILE=1 python -u docs/dev/data/2212-cold-path/entry_experiment.py
