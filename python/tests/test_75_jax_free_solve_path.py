@@ -771,6 +771,12 @@ import discopt._relax.problem_classifier as pc
 """
     + _DAE_MODEL
     + """
+# The LP rung's objective is an affine model from the origin, so it has to be
+# handed a linear objective: ``_DAE_MODEL``'s ``z(1)**2`` made both arms compare
+# two linearisations of a quadratic, which the LP tape rung now refuses
+# (``ClassificationMismatchError``, #2191 class). A real solve of that model takes
+# the QP route. The agreement under test is the vector-valued *bodies*.
+m.minimize(b.state_at("z", 1.0))
 # Tape arm FIRST, so "the tape works" cannot be jax quietly doing the work.
 tape = pc._extract_lp_data_tape(m)
 print("TAPE_NONE:" + str(tape is None))
