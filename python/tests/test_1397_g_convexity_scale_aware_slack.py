@@ -64,31 +64,21 @@ RELATIVE_CEILING = 1e-12
 U = float(np.finfo(np.float64).eps)
 
 
-def _diagonal_interval(diag_entries, row0_hi=None):
-    """Interval matrix ``diag(entries)``, its ``[0, 0]`` entry ``[entries[0], row0_hi]``.
+def _cancelling_pair(d_lo, d_hi, magnitude):
+    """``[[d, M], [M, d]]`` with ``d in [d_lo, d_hi]`` and point off-diagonals ``M``.
 
-    Diagonal, so the Gershgorin row bound is *exact* (no off-diagonal radius to
-    round outward) and ``λ_min`` is the least entry with no enclosure slop. That
-    removes the enclosure from the measurement and leaves only the gate.
-    ``row0_hi`` gives the negative row the tested magnitude (#1673 B4: the slack
-    is per row, so a row's licence is sized by that row alone).
+    The row's magnitude is carried by entries the Gershgorin *lower* bound reads
+    (``inf(H_ii)`` and ``|H_ij|``), so a near-zero bound ``d_lo - M`` is the
+    cancellation of two magnitude-``M`` terms -- the way a genuine zero
+    eigenvalue acquires an ``O(u*M)`` rounding excursion. (These arms used to put
+    the magnitude in ``sup(H_00)``, a value the PSD test never reads; sizing one
+    side's licence by the other side is exactly what let ``sqrt(exp(x))``, with
+    ``H = [-6.3e29, 5.3e12]``, be certified concave. See
+    ``test_gershgorin_one_sided_slack.py``.) ``lambda_min = d - M`` exactly.
     """
-    d = np.asarray(diag_entries, dtype=np.float64)
-    lo = np.diag(d)
-    hi = lo.copy()
-    if row0_hi is not None:
-        hi[0, 0] = float(row0_hi)
+    lo = np.array([[d_lo, magnitude], [magnitude, d_lo]], dtype=np.float64)
+    hi = np.array([[d_hi, magnitude], [magnitude, d_hi]], dtype=np.float64)
     return Interval(lo, hi)
-
-
-def _exact_min_diagonal(entries):
-    """``min`` of the entries in exact rational arithmetic.
-
-    Every binary64 is a rational, so ``Fraction`` over the same float entries
-    introduces no error of its own and a violation is a proof rather than an
-    estimate.
-    """
-    return min(Fraction(float(e)) for e in entries)
 
 
 @pytest.mark.parametrize("magnitude", MAGNITUDES)
@@ -101,17 +91,20 @@ def test_admitted_relative_nonconvexity_is_bounded_at_every_scale(magnitude):
     # Sweep the negative eigenvalue across the decades that bracket both the
     # historic absolute tolerance and the scaled slack at this magnitude.
     for exponent in range(-22, -3):
-        delta = 10.0**exponent
-        entries = [-delta] + [magnitude] * 3
-        aug = _diagonal_interval(entries, row0_hi=magnitude)
+        delta = magnitude * 10.0**exponent
+        d = magnitude - delta
+        if d == magnitude:
+            # Below an ulp of M the shift is not representable; probe one ulp.
+            d = float(np.nextafter(magnitude, -np.inf))
+        aug = _cancelling_pair(d, d, magnitude)
 
         # The magnitude of the row carrying the negative eigenvalue.
-        mag = float(np.hypot(delta, magnitude))
+        mag = float(np.hypot(d, magnitude))
         slack = psd_decision_slack(mag)
         admitted = gershgorin_certifies_psd(aug)
 
-        # The oracle: the exact least eigenvalue of a diagonal matrix.
-        exact_min = _exact_min_diagonal(entries)
+        # The oracle: lambda_min of [[d, M], [M, d]] is d - M, exact in rationals.
+        exact_min = Fraction(d) - Fraction(magnitude)
         assert exact_min < 0, "the sweep must actually probe indefinite matrices"
 
         checked += 1
@@ -184,8 +177,9 @@ def test_a_genuine_zero_eigenvalue_is_still_admitted_at_large_scale(magnitude):
     # outward rounding of an enclosure at this magnitude produces.
     roundoff = 5.0 * U * magnitude
     for factor in (0.1, 0.5, 1.0, 2.0):
-        entries = [-roundoff * factor] + [magnitude] * 3
-        aug = _diagonal_interval(entries, row0_hi=magnitude)
+        # The exact PSD [[M, M], [M, M]] (eigenvalues 0 and 2M), its diagonal's
+        # lower end rounded outward by the excursion.
+        aug = _cancelling_pair(magnitude - roundoff * factor, magnitude, magnitude)
         slack = psd_decision_slack(magnitude)
         checked += 1
         if factor <= 1.0:

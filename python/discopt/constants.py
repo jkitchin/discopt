@@ -40,6 +40,22 @@ CONSTRAINT_INF: float = 1e20
 # ---------------------------------------------------------------------------
 DEFAULT_VARIABLE_BOUND: float = 9.999e19
 
+
+def bound_is_open(v: float) -> bool:
+    """Whether a variable bound means "no bound" for an exporter.
+
+    Open means non-finite or at least the declared-no-bound box
+    ``DEFAULT_VARIABLE_BOUND``. Any smaller bound is finite as posed and has to be
+    written. The exporters used a ``1e18`` cut (``.nl``, GAMS) or a ``1e19`` cut
+    (LP, MPS), so ``ub = 1e18`` was dropped: ``maximize x`` with ``x <= 1e18``
+    solved to ``1e18`` directly and came back ``unbounded`` after a ``.nl``
+    round trip.
+    """
+    import math
+
+    return not math.isfinite(v) or abs(v) >= DEFAULT_VARIABLE_BOUND
+
+
 # ---------------------------------------------------------------------------
 # Starting-point generation
 # ---------------------------------------------------------------------------

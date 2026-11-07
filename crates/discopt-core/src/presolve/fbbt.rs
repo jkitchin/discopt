@@ -378,6 +378,43 @@ fn frac_root_down(y: f64, p: f64) -> Option<f64> {
     None
 }
 
+/// How a floating-point exponent `e` is treated by the power enclosures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExponentKind {
+    /// An exact integer that fits `i64` (`|e| < 2^62`).
+    Int(i64),
+    /// An exact integer too large for `i64`. Every double with `|e| >= 2^53`
+    /// is an even integer, so these are all even. They used to go through
+    /// `e.round() as i64`, which saturates: `2^63` became `i64::MAX` (an
+    /// *odd* power), `1e19` failed the round-trip test and was treated as a
+    /// fractional power (clamping the base to nonnegative), and
+    /// `-(2^63)` overflowed `-n` and recursed until the stack blew.
+    HugeEven,
+    /// Not an integer (or not finite).
+    NonInt,
+}
+
+/// Classify an exponent; the single integrality test for forward and backward pow.
+pub fn classify_exponent(e: f64) -> ExponentKind {
+    if !e.is_finite() || e != e.trunc() {
+        return ExponentKind::NonInt;
+    }
+    if e.abs() < 4.611_686_018_427_388e18 {
+        ExponentKind::Int(e as i64)
+    } else {
+        ExponentKind::HugeEven
+    }
+}
+
+/// `[a,b]^e` for a huge even integer `e` (`|e| >= 2^62`): a function of `|x|`,
+/// monotone in `|x|` (increasing for `e > 0`, decreasing for `e < 0`).
+fn interval_pow_huge_even(base: &Interval, e: f64) -> Interval {
+    let a = interval_abs(base);
+    // `powf` is a libm call; widen outward and keep the nonnegative floor.
+    let (small, large) = if e > 0.0 { (a.lo, a.hi) } else { (a.hi, a.lo) };
+    Interval::new(lib_down(small.powf(e)).max(0.0), lib_up(large.powf(e)))
+}
+
 /// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
@@ -387,11 +424,22 @@ pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
         return *base;
     }
     if n < 0 {
-        let pos = interval_pow_int(base, -n);
+        // `unsigned_abs`, not `-n`: `-i64::MIN` overflows.
+        let pos = interval_pow_uint(base, n.unsigned_abs());
         return interval_div(&Interval::point(1.0), &pos);
     }
+    interval_pow_uint(base, n as u64)
+}
+
+/// `[a,b]^n` for an integer `n >= 2` (`n` of 0 and 1 are handled by the caller).
+fn interval_pow_uint(base: &Interval, n: u64) -> Interval {
+    if n == 0 {
+        return Interval::point(1.0);
+    }
+    if n == 1 {
+        return *base;
+    }
     // Directed powers (#1504): `powi` is neither correctly rounded nor directed.
-    let n = n as u64;
     if n % 2 == 0 {
         // Even power: result is non-negative.
         if base.lo >= 0.0 {
@@ -417,10 +465,27 @@ pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
     // exclude the true value (by ~1e7 at x = 1e8), and the integer rule also
     // drops the nonnegative-base domain a non-integer power has.
     if exp.hi == exp.lo {
-        let e = exp.lo;
-        let e_int = e.round() as i64;
-        if e == e_int as f64 {
-            return interval_pow_int(base, e_int);
+        match classify_exponent(exp.lo) {
+            ExponentKind::Int(n) => return interval_pow_int(base, n),
+            ExponentKind::HugeEven => return interval_pow_huge_even(base, exp.lo),
+            ExponentKind::NonInt => {}
+        }
+    }
+    // A negative base with a non-point exponent that can take an integer value
+    // (an integer variable exponent, `x**n` with `n` in {2, 3}): the power is
+    // real there, with either sign. Clamping the base to `[0, 0]` gave
+    // `x**n in [0, 0]` for `x in [-2, -1]` and declared `x**n >= 3` infeasible
+    // although `(-2)**2 = 4`. Enclose by magnitude: `|x^k| = |x|^k`, so the
+    // image lies in `[-U, U]` with `U` the sup of `|x|^[c,d]`.
+    if base.lo < 0.0 && exp.hi != exp.lo {
+        let has_int = exp.lo.is_finite() && exp.hi.is_finite() && exp.lo.ceil() <= exp.hi.floor();
+        if !(exp.lo.is_finite() && exp.hi.is_finite()) || has_int {
+            let a = interval_abs(base);
+            let mag = interval_pow(&a, exp);
+            if !mag.hi.is_finite() || mag.is_formally_inverted() {
+                return Interval::entire();
+            }
+            return Interval::new(-mag.hi, mag.hi);
         }
     }
     // General case: base must be non-negative for real-valued power.
@@ -501,31 +566,58 @@ fn ln_up(x: f64) -> f64 {
     }
 }
 
-/// `log([a,b]) = [log(max(a, eps)), log(b)]`
+/// `log([a,b]) = [log(a), log(b)]`, with `log(a) = -inf` for `a <= 0`.
 pub fn interval_log(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(ln_down(lo), ln_up(a.hi))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        ln_down(a.lo)
+    };
+    Interval::new(lo, ln_up(a.hi))
 }
 
 /// `log2([a,b])`
 pub fn interval_log2(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(lib_down(lo.log2()), lib_up(a.hi.log2()))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        lib_down(a.lo.log2())
+    };
+    Interval::new(lo, lib_up(a.hi.log2()))
 }
 
 /// `log10([a,b])`
 pub fn interval_log10(a: &Interval) -> Interval {
-    let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
         return Interval::empty();
     }
-    Interval::new(lib_down(lo.log10()), lib_up(a.hi.log10()))
+    // A nonpositive lower end reaches the pole: the image is unbounded below.
+    // It used to be clamped to `f64::MIN_POSITIVE`, which gave a finite floor
+    // (`ln(2.2e-308) = -708.4`) to a box containing 0 *and* to a box of
+    // subnormals (`ln(1e-320) = -736.8`); a model needing `log(x) <= -709`
+    // was declared infeasible. A positive subnormal has a finite logarithm.
+    let lo = if a.lo <= 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        lib_down(a.lo.log10())
+    };
+    Interval::new(lo, lib_up(a.hi.log10()))
 }
 
 /// `sqrt([a,b]) = [sqrt(max(a,0)), sqrt(b)]`
@@ -1115,19 +1207,23 @@ fn eval_node_interval(
                     // image at atanh(1 - 1e-12) ~ 14.2 and declared feasible
                     // models with x in (1 - 1e-12, 1) infeasible, #1908.) An
                     // argument wholly outside the domain gets `entire`: sound,
-                    // and it concludes nothing.
+                    // and it concludes nothing. `libm::atanh`, not `f64::atanh`:
+                    // std computes `0.5 * ln_1p(2x / (1 - x))`, which cancels
+                    // near -1 (`atanh(-1 + 1e-13)` came out -15.31267 against
+                    // the true -15.31322, 1.85e-2 relative at the last double),
+                    // far past any ulp widening.
                     if a0.hi <= -1.0 || a0.lo >= 1.0 {
                         Interval::entire()
                     } else {
                         let lo = if a0.lo <= -1.0 {
                             f64::NEG_INFINITY
                         } else {
-                            lib_down(a0.lo.atanh())
+                            lib_down(libm::atanh(a0.lo))
                         };
                         let hi = if a0.hi >= 1.0 {
                             f64::INFINITY
                         } else {
-                            lib_up(a0.hi.atanh())
+                            lib_up(libm::atanh(a0.hi))
                         };
                         Interval::new(lo, hi)
                     }
@@ -1652,11 +1748,17 @@ fn backward_propagate_with(
                 BinOp::Pow => {
                     // If exponent is constant integer, we can invert.
                     if let Some(exp_val) = arena.try_constant_value_pub(*right) {
-                        let exp_int = exp_val.round() as i64;
+                        // The same integrality test as the forward pass. A huge
+                        // even exponent (`|e| >= 2^62`) is neither branch: no
+                        // inversion is attempted, which is sound.
+                        let kind = classify_exponent(exp_val);
+                        let exp_int = match kind {
+                            ExponentKind::Int(n) => n,
+                            _ => 0,
+                        };
                         // #1982: a non-integer power is real-valued only on a
                         // nonnegative base -- the domain `interval_pow` assumes.
-                        // The same integrality test as the forward pass.
-                        if exp_val != exp_int as f64
+                        if kind == ExponentKind::NonInt
                             && exp_val.is_finite()
                             && SIGN_DOMAIN.with(|c| c.get())
                         {
@@ -1682,7 +1784,7 @@ fn backward_propagate_with(
                                 reduce_counts,
                             );
                         }
-                        if exp_val == exp_int as f64 && exp_int > 0 {
+                        if matches!(kind, ExponentKind::Int(_)) && exp_int > 0 {
                             // Roots are VERIFIED outward (#1504): `powf(1/n)`
                             // rounds to nearest, so the lower root could land
                             // above the true root and cut it. `root_down` /
@@ -1906,7 +2008,7 @@ fn backward_propagate_with(
                         &tightened,
                         -1.0,
                         1.0,
-                        f64::atanh,
+                        libm::atanh,
                         |x| lib_up(x.tanh()),
                         |x| lib_down(x.tanh()),
                     );
@@ -6296,6 +6398,92 @@ mod tests_near_integer_pow {
         // x^3 over a sign-straddling base still uses the odd-power rule.
         let enc = interval_pow(&Interval::new(-2.0, 2.0), &Interval::new(3.0, 3.0));
         assert!(enc.lo <= -8.0 && enc.hi >= 8.0, "{:?}", enc);
+    }
+}
+
+#[cfg(test)]
+mod tests_adversarial_2026_11 {
+    //! Enclosure misses found by mpmath-referenced fuzzing (2026-11-07).
+    use super::*;
+
+    #[test]
+    fn log_family_of_subnormal_and_zero_is_unbounded_or_exact() {
+        // ln(1e-320) = -736.83; the old MIN_POSITIVE clamp gave a floor of -708.4.
+        let r = interval_log(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -736.8, "{r:?}");
+        let r = interval_log2(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -1029.8, "{r:?}");
+        let r = interval_log10(&Interval::new(1e-320, 1e-300));
+        assert!(r.lo <= -320.0, "{r:?}");
+        // A box containing 0 reaches the pole.
+        for r in [
+            interval_log(&Interval::new(0.0, 1.0)),
+            interval_log2(&Interval::new(0.0, 1.0)),
+            interval_log10(&Interval::new(-1.0, 1.0)),
+        ] {
+            assert_eq!(r.lo, f64::NEG_INFINITY, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn atanh_near_minus_one_encloses_true_value() {
+        // mpmath, 50 digits.
+        let cases = [
+            (-0.999_f64, -3.800_201_167_250_199_587_f64),
+            (-1.0 + 1e-13, -15.313_221_246_314_329_389),
+            (
+                f64::from_bits((-1.0f64).to_bits() - 1),
+                -18.714_973_875_118_523_327,
+            ),
+        ];
+        for (x, truth) in cases {
+            let mut arena = ExprArena::new();
+            let v = arena.add(ExprNode::Variable {
+                name: "x".into(),
+                index: 0,
+                size: 1,
+                shape: vec![],
+            });
+            let f = arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Atanh,
+                args: vec![v],
+            });
+            let r = forward_propagate(&arena, f, &[Interval::new(x, x)])[f.0];
+            assert!(
+                r.lo <= truth && truth <= r.hi,
+                "atanh({x}) = {truth} not in {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn huge_integer_exponents_are_even_and_do_not_overflow() {
+        let base = Interval::new(-1.0, -0.5);
+        for e in [2f64.powi(62), 2f64.powi(63), 1e19, 1e300] {
+            assert_eq!(classify_exponent(e), ExponentKind::HugeEven);
+            let r = interval_pow(&base, &Interval::point(e));
+            // (-1)^e = 1 for an even e; the image is [~0, 1].
+            assert!(r.lo >= 0.0 && r.hi >= 1.0, "x^{e}: {r:?}");
+            let r = interval_pow(&base, &Interval::point(-e));
+            // (-1)^-e = 1, (-0.5)^-e = inf.
+            assert!(r.lo <= 1.0 && r.hi == f64::INFINITY, "x^-{e}: {r:?}");
+        }
+        // -(2^63) used to overflow `-n` and recurse until the stack blew.
+        let r = interval_pow_int(&base, i64::MIN);
+        assert!(r.lo <= 1.0, "{r:?}");
+        assert_eq!(classify_exponent(3.0), ExponentKind::Int(3));
+        assert_eq!(classify_exponent(3.5), ExponentKind::NonInt);
+        assert_eq!(classify_exponent(f64::INFINITY), ExponentKind::NonInt);
+    }
+
+    #[test]
+    fn negative_base_with_integer_valued_exponent_interval() {
+        // x in [-2, -1], n in [2, 3]: (-2)^2 = 4 and (-2)^3 = -8 are both real.
+        let r = interval_pow(&Interval::new(-2.0, -1.0), &Interval::new(2.0, 3.0));
+        assert!(r.lo <= -8.0 && r.hi >= 4.0, "{r:?}");
+        // An exponent interval holding no integer keeps the nonnegative-base domain.
+        let r = interval_pow(&Interval::new(-2.0, 4.0), &Interval::new(2.2, 2.8));
+        assert!(r.lo >= 0.0, "{r:?}");
     }
 }
 

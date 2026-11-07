@@ -2958,7 +2958,7 @@ def _build_abs(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Enve
     c2 = lt.scaled(-1.0).coeffs
     c2[w] = c2.get(w, 0.0) - 1.0
     ctx.add_row(c2, lt.const)
-    tight = _emit_secant_only(ctx, w, lt, lo, hi, abs, sign=+1.0)
+    tight = _emit_abs_secant(ctx, w, lt, lo, hi)
     return Envelope(rows=[], tight=tight)
 
 
@@ -2992,30 +2992,65 @@ def _build_sign(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Env
         c0, s = (-1.0, 2.0) if lo < 0.0 else (0.0, 1.0)
         coeffs = lt.scaled(s / hi).coeffs
         coeffs[w] = coeffs.get(w, 0.0) - 1.0
-        ctx.add_row(coeffs, -c0 - s * lt.const / hi)
+        rhs = -c0 - s * lt.const / hi
+        ctx.add_row(coeffs, _sign_row_rhs(rhs, s / hi, lo, hi, lt.const))
     if lo < 0.0:
         # w <= c0 - t/lo * s  ->  w + (s/lo) t <= c0, with (c0, s) = (1, 2) when the
         # box straddles 0 and (0, 1) when it ends at 0.
         c0, s = (1.0, 2.0) if hi > 0.0 else (0.0, 1.0)
         coeffs = lt.scaled(s / lo).coeffs
         coeffs[w] = coeffs.get(w, 0.0) + 1.0
-        ctx.add_row(coeffs, c0 - s * lt.const / lo)
+        rhs = c0 - s * lt.const / lo
+        ctx.add_row(coeffs, _sign_row_rhs(rhs, s / lo, lo, hi, lt.const))
     return Envelope(rows=[], tight=True)
 
 
-def _emit_secant_only(ctx, w, lt, lo, hi, f, sign) -> bool:
+def _sign_row_rhs(rhs: float, slope: float, lo: float, hi: float, cst: float) -> float:
+    """Right-hand side of a ``sign`` secant row, outward-guarded only when ``cst != 0``.
+
+    With a constant (``t = form + cst``) the rhs ``c0 - s*cst/hi`` is a rounded
+    product that can land inside the true envelope (``sign(x - 1e15)``); that is
+    what the guard covers. Without one the rhs is the exact ``-c0`` and must stay
+    exact: on a box ``[0, hi]`` the row ``w >= t/hi`` is what pins ``t <= 0`` when
+    ``sign(t) == 0`` is imposed, and an absolute floor of slack lets ``t`` sit at
+    ~1e-15*hi, where ``sign`` is 1, so branching never closes
+    (``test_sign_envelope[equality_at_jump]`` went from optimal to unknown).
+    """
+    if cst == 0.0:
+        return rhs
+    return relaxed_rhs(rhs, envelope_1d_slack(slope, lo, hi, 1.0, 1.0, cst, rhs))
+
+
+def _emit_abs_secant(ctx, w, lt, lo, hi) -> bool:
+    """``|t| <= slope*t + a``, the secant of ``|t|`` over ``[lo, hi]``, outward-rounded.
+
+    The textbook ``slope = (f(hi) - f(lo)) / (hi - lo)``, ``a = f(lo) - slope*lo``
+    cancels when ``|lo| >> hi > 0``: ``slope`` rounds to exactly ``-1`` and ``a``
+    to ``0``, though the true intercept is ``-2*hi*lo/(hi - lo) ~ 2*hi``. On
+    ``x in [-1e15, 0.05]`` the row became ``w + x <= 0``, which with ``w >= x``
+    forces ``x <= 0`` and cut off every point of ``(0, hi]``: ``maximize
+    x + 0.5*|x|`` certified ``0`` against the true ``0.075``. The closed forms below
+    have no cancellation (``a``'s factors share a sign), and the rhs is relaxed by
+    :func:`envelope_1d_slack` like every other 1-D envelope row.
+    """
     if not _finite(lo, hi) or (hi - lo) < _MIN_WIDTH:
         return False
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):  # see _emit_1d
-        flo, fhi = float(f(lo)), float(f(hi))
-    if not _finite(flo, fhi):
-        return False
-    slope = (fhi - flo) / (hi - lo)
-    a = flo - slope * lo
-    coeffs = {w: sign}
-    for j, c in lt.scaled(-sign * slope).coeffs.items():
+    width = hi - lo
+    if lo >= 0.0:
+        slope, a = 1.0, 0.0
+    elif hi <= 0.0:
+        slope, a = -1.0, 0.0
+    else:
+        slope = (hi + lo) / width
+        a = -2.0 * hi * lo / width
+    # w - slope*t <= a  with  t = form + const
+    coeffs = {w: 1.0}
+    for j, c in lt.scaled(-slope).coeffs.items():
         coeffs[j] = coeffs.get(j, 0.0) + c
-    ctx.add_row(coeffs, sign * (a + slope * lt.const))
+    rhs = a + slope * lt.const
+    ctx.add_row(
+        coeffs, relaxed_rhs(rhs, envelope_1d_slack(slope, lo, hi, abs(lo), abs(hi), lt.const, rhs))
+    )
     return True
 
 

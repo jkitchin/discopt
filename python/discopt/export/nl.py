@@ -32,6 +32,7 @@ from typing import Any, Optional, Union, cast
 
 import numpy as np
 
+from discopt.constants import bound_is_open
 from discopt.export import _arrays
 from discopt.export._common import refuse_non_algebraic_relations, variable_flat_offsets
 from discopt.modeling.core import (
@@ -1391,8 +1392,8 @@ class _NLWriter:
             lb = float(lb_arr[elem]) if elem < len(lb_arr) else float(lb_arr[0])
             ub = float(ub_arr[elem]) if elem < len(ub_arr) else float(ub_arr[0])
 
-            has_lb = lb > -1e18
-            has_ub = ub < 1e18
+            has_lb = not bound_is_open(lb)
+            has_ub = not bound_is_open(ub)
 
             if has_lb and has_ub:
                 if abs(lb - ub) < 1e-15:

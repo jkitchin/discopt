@@ -2655,7 +2655,7 @@ mod tests {
         let cases: [(MathFunc, f64, f64, fn(f64) -> f64); 5] = [
             (MathFunc::Asinh, -3.0, 3.0, f64::asinh),
             (MathFunc::Acosh, 1.0, 4.0, f64::acosh),
-            (MathFunc::Atanh, -0.9, 0.9, f64::atanh),
+            (MathFunc::Atanh, -0.9, 0.9, libm::atanh),
             (MathFunc::Erf, -2.0, 2.0, erf),
             (MathFunc::Entropy, 0.05, 3.0, xlogx),
         ];

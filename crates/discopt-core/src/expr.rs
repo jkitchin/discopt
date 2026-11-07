@@ -1720,7 +1720,7 @@ impl ExprArena {
                     MathFunc::Tanh => a0.tanh(),
                     MathFunc::Asinh => a0.asinh(),
                     MathFunc::Acosh => a0.acosh(),
-                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Atanh => libm::atanh(a0), // std cancels near -1
                     MathFunc::Erf => libm::erf(a0),
                     MathFunc::Log1p => a0.ln_1p(),
                     // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).
@@ -2183,7 +2183,7 @@ impl ModelRepr {
                     MathFunc::Tanh => a0.tanh(),
                     MathFunc::Asinh => a0.asinh(),
                     MathFunc::Acosh => a0.acosh(),
-                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Atanh => libm::atanh(a0), // std cancels near -1
                     MathFunc::Erf => libm::erf(a0),
                     MathFunc::Log1p => a0.ln_1p(),
                     // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).

@@ -1401,6 +1401,13 @@ _Monomial = tuple[int, ...]
 _AffineSquare = tuple[float, list[tuple[float, _Monomial]]]
 
 
+#: Largest integer power :func:`_product_to_monomial` expands into a repeated-index
+#: monomial. Every consumer (edge-concave quadratics, polynomial cuts) works on
+#: low-degree monomials; this bound exists only so a huge exponent cannot allocate
+#: a list of its own length.
+_MAX_MONOMIAL_DEGREE = 64
+
+
 def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomial] | None:
     """Fold a pure product of original variables / integer powers / constants.
 
@@ -1437,8 +1444,15 @@ def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomi
             exp_c = _constant_value(e.right)
             if base_flat is not None and exp_c is not None:
                 exp_val = exp_c
+                # Finite first: ``int(inf)`` raises. The monomial repeats the
+                # index ``n`` times, so ``x**1e19`` tried to build a 1e19-long
+                # list (OverflowError mid-solve). A degree past
+                # ``_MAX_MONOMIAL_DEGREE`` is declined, which drops a candidate
+                # cut and is sound.
+                if not math.isfinite(exp_val) or exp_val != int(exp_val):
+                    return False
                 n = int(exp_val)
-                if exp_val == n and n >= 1:
+                if 1 <= n <= _MAX_MONOMIAL_DEGREE:
                     idxs.extend([base_flat] * n)
                     return True
         return False
