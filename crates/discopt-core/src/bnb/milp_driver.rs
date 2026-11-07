@@ -2665,9 +2665,6 @@ fn solve_milp_node_search(
     let mut cut_lp_min_factor: f64 = CUT_LP_MIN_SCORE_FACTOR0;
     let mut cut_lp_epoch: usize = 0;
     let cut_lp_max_len = 100 + (0.15 * ns as f64) as usize;
-    // The last node optimum stored in the latest batch: the reference ("current") basis
-    // for deletion decisions and the warm-start fallback.
-    let mut cut_lp_ref: Option<Basis> = None;
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
@@ -3460,9 +3457,6 @@ fn solve_milp_node_search(
                         basic as u64,
                     );
                 }
-                if cut_lp_on {
-                    cut_lp_ref = Some(basis.clone());
-                }
                 tm.set_node_basis(id, Some(basis));
             }
             if let Some((cand, cobj)) = out.incumbent {
@@ -3929,15 +3923,10 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlockedRow);
                     continue;
                 }
-                // HiGHS deletes only rows basic in the worker LP's CURRENT basis
-                // (`HighsLpRelaxation.cpp:542, 660-666`); the batch's last node optimum
-                // plays that role. Stored frontier bases do not veto (HiGHS stores none
-                // on queued nodes, `HighsNodeQueue.h:142-160`); one that a deletion
-                // invalidates falls back to this reference basis below.
-                let basic_in_ref = cut_lp_ref
-                    .as_ref()
-                    .is_some_and(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
-                if basic_in_ref {
+                let basic_everywhere = tm
+                    .frontier_bases()
+                    .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
+                if basic_everywhere {
                     del.push(i);
                 } else {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
@@ -4003,23 +3992,7 @@ fn solve_milp_node_search(
                     .chain(cut_lp_rows.iter().map(|r| &r.cut))
                     .map(cut_signature)
                     .collect();
-                // A stored basis with a deleted slack nonbasic warm-starts from the
-                // reference basis instead: a recent, foreign basis, as every HiGHS queue
-                // node starts from the worker's current basis (`HighsSearch.cpp:848-870,
-                // 930`). Every deleted slack is basic in it, so it always remaps.
-                let fallback = cut_lp_ref
-                    .as_ref()
-                    .map(|b| remap_basis_after_delete(b, &d.col_map).expect("reference remaps"));
-                let mut fell_back = 0u64;
-                tm.map_bases(|b| {
-                    remap_basis_after_delete(b, &d.col_map).or_else(|| {
-                        fell_back += 1;
-                        fallback.clone()
-                    })
-                });
-                crate::profile::incr_by(crate::profile::Ctr::CutLpBasisFallback, fell_back);
-                // Keep the reference in the new column space (a batch may store none).
-                cut_lp_ref = fallback;
+                tm.map_bases(|b| remap_basis_after_delete(b, &d.col_map));
             }
         }
     }
