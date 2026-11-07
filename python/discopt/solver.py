@@ -31736,6 +31736,9 @@ def _solve_node_nlp_ipopt(
     options: dict,
 ):
     """Solve node NLP with cyipopt (Ipopt)."""
+    from discopt._openmp_guard import check_openmp_compatible
+
+    check_openmp_compatible("cyipopt", feature="nlp_solver='ipopt'")
     try:
         import cyipopt
     except ImportError:

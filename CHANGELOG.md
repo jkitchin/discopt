@@ -10,6 +10,21 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: cyipopt and torch in one process now raise instead of aborting it
+  (#2205).** Their pip wheels each bundle `libomp`, and the second to load called
+  `abort()` (`OMP: Error #15`) with no traceback. Every discopt import of either
+  package (`nlp_solver="ipopt"`, the cyipopt NLP backend, `load_torch_sequential`)
+  now first compares the OpenMP runtimes already mapped into the process with the
+  ones the package ships, and raises `discopt._openmp_guard.OpenMPRuntimeConflictError`
+  (a `RuntimeError`, so `except ImportError` fallbacks do not route around it)
+  naming both files. Builds that share one `libomp` pass. `KMP_DUPLICATE_LIB_OK` is
+  never set by discopt; if the user sets it the check only warns. On macOS the test
+  suite skips, with a #2205 reason, a test that would load the second runtime into
+  a worker, instead of losing the worker. Not detected: a package that links a
+  system `libomp` rather than shipping one, imported second. Linux is unaffected.
+
 ## [0.12.0] - 2026-11-07
 
 ### Added
@@ -351,7 +366,8 @@ bound; each has a regression test that fails before its fix.
   (`OMP: Error #15`: two copies of `libomp`). This is an interaction between those two
   packages' bundled OpenMP runtimes, not discopt code, but it affects a process that
   uses `nlp_solver="ipopt"` and the torch reader together, in either import order.
-  Run the two in separate processes until the runtimes are reconciled.
+  Run the two in separate processes until the runtimes are reconciled. Since the next release discopt raises
+  `OpenMPRuntimeConflictError` instead of letting the process abort.
 
 ## [0.11.1] - 2026-10-29
 

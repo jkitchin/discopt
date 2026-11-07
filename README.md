@@ -212,6 +212,12 @@ pip install "discopt[jax]"
 pip install "discopt[ipopt]"
 ```
 
+On macOS, `cyipopt` and `torch` (the `torch` extra, for
+`discopt.ml.readers.torch_reader`) from pip wheels each bundle their own OpenMP
+runtime and cannot be loaded into one process: the second aborts it. discopt
+detects this and raises `OpenMPRuntimeConflictError` instead (#2205). Use the two in
+separate processes, or use the default `nlp_solver="pounce"` where torch is needed.
+
 From a source checkout:
 
 ```bash

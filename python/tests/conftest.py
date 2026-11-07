@@ -7,6 +7,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 # Enable 64-bit precision for float64 support.
 os.environ["JAX_ENABLE_X64"] = "1"
 
+import _openmp_isolation
 import _sharding
 import _time_budget
 import pytest
@@ -162,6 +163,7 @@ def pytest_configure(config):
     """Register custom markers, the CI shard selector and the time budget."""
     config.pluginmanager.register(_sharding.ShardPlugin(), "discopt-shard")
     _time_budget.configure(config)
+    _openmp_isolation.configure(config)  # macOS cyipopt/torch libomp clash, #2205
     config.addinivalue_line("markers", "correctness: Known-optimum correctness validation")
     config.addinivalue_line("markers", "minlptests: MINLPTests.jl standardized NLP/MINLP problems")
     config.addinivalue_line("markers", "integration: solver-dependent integration tests")
