@@ -426,20 +426,253 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 /// (pool or conflict dual proofs) and stalls at 48.31 on `istra` (discopt: 48.32) when
 /// they stay in the subtree that made them (`highs-parity-d2-analysis.md` follow-ups
 /// 10-17, `highs-parity-d2-node-gmi-expert.md`).
-/// W1 entry (scratch): fold pool cuts used at >= `uses` nodes into the shared matrix,
-/// up to `cap` rows in total. `DISCOPT_MILP_NODE_GMI_FOLD=cap[:uses]`; unset/0 = off.
-fn node_gmi_fold() -> (usize, u32, f64) {
-    static V: std::sync::OnceLock<(usize, u32, f64)> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_MILP_NODE_GMI_FOLD").unwrap_or_default();
-        let mut it = raw.split(':');
-        let cap = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
-        let uses = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(3);
-        let nnz_ratio = it
-            .next()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(f64::INFINITY);
-        (cap, uses, nnz_ratio)
+/// D2 W1 (`DISCOPT_MILP_CUT_LP`, default OFF): HiGHS's persistent-LP cut policy for
+/// the node-GMI pool (`docs/dev/highs-parity-d2-w1-cut-lp-expert.md`).
+///
+/// * Pool cuts the batch's node LP points violate are selected by HiGHS's pool score
+///   with its adaptive threshold and 0.1 parallelism filter ([`cut_lp_select`],
+///   `HighsCutPool.cpp:315-418`) and **folded into the shared working LP** at the
+///   batch boundary, instead of every node re-solving a local copy with them.
+/// * A folded row ages each batch its slack is basic at every node optimum of the
+///   batch and resets when any node has it nonbasic; every
+///   [`CUT_LP_DELETE_EVERY`] batches rows older than [`CUT_LP_AGE_LIMIT`] are deleted
+///   and returned to the pool (`HighsLpRelaxation.cpp:629-676`, `HighsCutPool.cpp:150-160`).
+///   discopt keeps a basis on every open node, where HiGHS keeps one only along the
+///   active dive, so a row is deleted only when its slack is basic in every stored
+///   frontier basis; each basis then stays valid with the column removed.
+/// * New pool cuts start [`CUT_LP_POOL_NEW_AGE_HEADROOM`] batches short of the pool age
+///   limit (`HighsCutPool.cpp:609`) and cuts longer than `100 + 0.15·ns` nonzeros are
+///   not admitted (`HighsCutGeneration.cpp:974`).
+///
+/// Every folded row is a pool cut, globally valid by construction; deleting a cut row
+/// only relaxes the LP, so the node bound stays a valid (NS-verified) bound.
+fn cut_lp_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_CUT_LP").unwrap_or_default();
+        parse_cut_lp(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`cut_lp_enabled`]; garbage is refused, not defaulted.
+fn parse_cut_lp(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_CUT_LP={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// HiGHS `mip_lp_age_limit` (`HighsOptions.h:1176-1180`): a folded row whose slack has
+/// been basic for more than this many batches is deleted.
+const CUT_LP_AGE_LIMIT: u32 = 10;
+/// Deletion runs every `max(agelimit/2, 2)` epochs (`HighsLpRelaxation.cpp:639-646`).
+const CUT_LP_DELETE_EVERY: usize = 5;
+/// A new pool cut starts at `agelim - 5` (`HighsCutPool.cpp:609`).
+const CUT_LP_POOL_NEW_AGE_HEADROOM: u32 = 5;
+/// HiGHS parallelism limit within one selection (`HighsCutPool.cpp:400`).
+const CUT_LP_MAX_PARALLEL: f64 = 0.1;
+/// HiGHS initial `minScoreFactor` (`HighsCutPool.h:97`).
+const CUT_LP_MIN_SCORE_FACTOR0: f64 = 0.9;
+
+/// HiGHS's pool score of a `coeffs·x ≥ rhs` cut at `x` over the box `[l, u]`
+/// (`HighsCutPool.cpp:315-342`): `viol / (numActiveNzs · ‖a_active‖)`, where an entry
+/// is active unless its column sits at the bound that maximizes the cut's activity
+/// (HiGHS writes cuts as `a·x ≤ b`; ours is the negation). `None` when the cut is not
+/// violated by more than `feastol`.
+fn cut_pool_score(cut: &GomoryCut, x: &[f64], l: &[f64], u: &[f64], feastol: f64) -> Option<f64> {
+    let mut act = 0.0;
+    for (j, &a) in cut.coeffs.iter().enumerate() {
+        if a != 0.0 {
+            act += a * x[j];
+        }
+    }
+    let viol = cut.rhs - act;
+    if viol <= feastol {
+        return None;
+    }
+    let mut norm2 = 0.0;
+    let mut active = 0usize;
+    for (j, &a) in cut.coeffs.iter().enumerate() {
+        // `a > 0`: activity rises with x_j, the max is at u_j; active unless x_j = u_j.
+        let at_max = if a > 0.0 {
+            x[j] >= u[j] - feastol
+        } else if a < 0.0 {
+            x[j] <= l[j] + feastol
+        } else {
+            continue;
+        };
+        if !at_max {
+            norm2 += a * a;
+            active += 1;
+        }
+    }
+    if active == 0 {
+        // Every entry at its activity-maximizing bound and still violated: the box
+        // cannot satisfy the cut. Rank it first.
+        return Some(f64::MAX);
+    }
+    Some(viol / (active as f64 * norm2.sqrt()))
+}
+
+/// Cosine of the angle between two cuts' coefficient vectors.
+fn cut_parallelism(a: &GomoryCut, b: &GomoryCut) -> f64 {
+    let (mut dot, mut na, mut nb) = (0.0, 0.0, 0.0);
+    let n = a.coeffs.len().max(b.coeffs.len());
+    for j in 0..n {
+        let x = a.coeffs.get(j).copied().unwrap_or(0.0);
+        let y = b.coeffs.get(j).copied().unwrap_or(0.0);
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// HiGHS's pool selection (`HighsCutPool.cpp:347-418`): sort `(score, index)` by score,
+/// keep those at or above `min_factor · best_observed` with HiGHS's adaptation of
+/// `min_factor`, then drop a cut whose parallelism with an already-selected one exceeds
+/// [`CUT_LP_MAX_PARALLEL`]. Returns the selected pool indices. Pure, so the rule is
+/// asserted directly.
+fn cut_lp_select(
+    mut cands: Vec<(f64, usize)>,
+    pool: &[GomoryCut],
+    best_observed: &mut f64,
+    min_factor: &mut f64,
+) -> Vec<usize> {
+    if cands.is_empty() {
+        return Vec::new();
+    }
+    cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    *best_observed = best_observed.max(cands[0].0);
+    let min_score = *min_factor * *best_observed;
+    let mut num = cands.iter().take_while(|c| c.0 >= min_score).count();
+    let lower = cands.len() / 20;
+    let upper = cands.len() - 1;
+    if num <= lower {
+        num = (cands.len() / 2).max(1);
+        *min_factor = cands[num - 1].0 / *best_observed;
+    } else if num > upper {
+        *min_factor = cands[upper].0 / *best_observed;
+    }
+    cands.truncate(num);
+    let mut sel: Vec<usize> = Vec::new();
+    for &(_, k) in &cands {
+        if sel
+            .iter()
+            .any(|&s| cut_parallelism(&pool[s], &pool[k]) > CUT_LP_MAX_PARALLEL)
+        {
+            continue;
+        }
+        sel.push(k);
+    }
+    sel
+}
+
+/// Delete rows `del_rows` and columns `del_cols` (both sorted ascending) from a CSC.
+fn delete_rows_cols(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    del_rows: &[usize],
+    del_cols: &[usize],
+) -> SparseCols {
+    let mut row_map = vec![usize::MAX; m];
+    let mut next = 0;
+    for (r, slot) in row_map.iter_mut().enumerate() {
+        if del_rows.binary_search(&r).is_err() {
+            *slot = next;
+            next += 1;
+        }
+    }
+    let (cp, ri, vals) = sp.raw();
+    let mut ncp = vec![0usize];
+    let mut nri = Vec::with_capacity(ri.len());
+    let mut nv = Vec::with_capacity(vals.len());
+    for j in 0..n {
+        if del_cols.binary_search(&j).is_ok() {
+            continue;
+        }
+        for idx in cp[j]..cp[j + 1] {
+            let r = row_map[ri[idx]];
+            if r != usize::MAX {
+                nri.push(r);
+                nv.push(vals[idx]);
+            }
+        }
+        ncp.push(nri.len());
+    }
+    SparseCols::from_csc(ncp, nri, nv)
+}
+
+/// Rewrite a cut over the working columns after cut rows are deleted: each deleted
+/// row is `a_r·x - s_r = rhs_r` with slack column `s_r`, so a term `γ·s_r` is replaced
+/// by `γ·(a_r·x - rhs_r)` (an identity on the row, so the cut stays valid), then the
+/// deleted columns are compacted out by `col_map`. `rows` holds `(s_r, a_r)` sorted by
+/// `s_r` ascending; substitution runs from the highest slack down, since `a_r` only
+/// touches columns below `s_r`.
+fn substitute_deleted_slacks(cut: &mut GomoryCut, rows: &[(usize, &GomoryCut)], col_map: &[usize]) {
+    for &(s, row) in rows.iter().rev() {
+        let g = cut.coeffs.get(s).copied().unwrap_or(0.0);
+        if g == 0.0 {
+            continue;
+        }
+        if cut.coeffs.len() < row.coeffs.len() {
+            cut.coeffs.resize(row.coeffs.len(), 0.0);
+        }
+        for (j, &v) in row.coeffs.iter().enumerate() {
+            if v != 0.0 {
+                cut.coeffs[j] += g * v;
+            }
+        }
+        cut.rhs += g * row.rhs;
+        cut.coeffs[s] = 0.0;
+    }
+    let mut out = Vec::with_capacity(cut.coeffs.len());
+    for (j, &v) in cut.coeffs.iter().enumerate() {
+        let nj = col_map[j];
+        if nj != usize::MAX {
+            debug_assert_eq!(nj, out.len());
+            out.push(v);
+        } else {
+            debug_assert!(v == 0.0, "deleted column {j} left in a cut");
+        }
+    }
+    cut.coeffs = out;
+}
+
+/// Remap a stored basis after columns are deleted (`col_map[j] = usize::MAX` for a
+/// deleted column). `None` when a deleted column is nonbasic in it (the basis would
+/// not span the remaining rows). Columns past the basis length are implicitly basic
+/// slacks (`extend_basis`), so they need no entry.
+fn remap_basis_after_delete(b: &Basis, col_map: &[usize]) -> Option<Basis> {
+    let mut col_status = Vec::with_capacity(b.col_status.len());
+    for (j, &st) in b.col_status.iter().enumerate() {
+        if col_map[j] == usize::MAX {
+            if st != BASIC {
+                return None;
+            }
+        } else {
+            col_status.push(st);
+        }
+    }
+    let basic_vars = b
+        .basic_vars
+        .iter()
+        .filter_map(|&j| {
+            let nj = col_map[j];
+            (nj != usize::MAX).then_some(nj)
+        })
+        .collect();
+    Some(Basis {
+        basic_vars,
+        col_status,
     })
 }
 
@@ -538,6 +771,19 @@ fn root_full_basis_enabled() -> bool {
 const NODE_GMI_POOL_CAP: usize = 2000;
 const NODE_GMI_POOL_AGE: u32 = 30;
 const NODE_GMI_POOL_PER_NODE: usize = 20;
+
+/// D2 W1 (`DISCOPT_MILP_CUT_LP`): a pool cut folded into the shared working LP.
+struct CutLpRow {
+    /// Its row in the working matrix, and its surplus slack column (`a·x - s = rhs`).
+    row: usize,
+    col: usize,
+    /// Batches since a node optimum last had the slack nonbasic.
+    age: u32,
+    /// Nonbasic at some node optimum of the current batch.
+    active: bool,
+    /// The cut over the working columns below `col`.
+    cut: GomoryCut,
+}
 
 /// What [`node_local_gmi_bound`] proved at one node.
 struct LocalGmi {
@@ -2324,13 +2570,16 @@ fn solve_milp_node_search(
     // node appends the ones its point violates to a node-local copy.
     let mut gmi_pool: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_age: Vec<u32> = Vec::new();
-    let mut gmi_pool_uses: Vec<u32> = Vec::new();
-    let mut gmi_folded: usize = 0;
-    let mut gmi_fold_nnz: usize = 0;
-    let mut gmi_fold_nnz0: Option<usize> = None;
-    let mut gmi_fold_slack_cols: Vec<usize> = Vec::new();
-    let mut gmi_fold_pending: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
+    // D2 W1 (`DISCOPT_MILP_CUT_LP`): pool cuts folded into the shared LP, their aging
+    // state, and HiGHS's adaptive selection state.
+    let cut_lp_on = node_gmi_on && cut_lp_enabled() && lazy.is_none();
+    let mut cut_lp_rows: Vec<CutLpRow> = Vec::new();
+    let mut cut_lp_fold: Vec<GomoryCut> = Vec::new();
+    let mut cut_lp_best_score: f64 = 0.0;
+    let mut cut_lp_min_factor: f64 = CUT_LP_MIN_SCORE_FACTOR0;
+    let mut cut_lp_epoch: usize = 0;
+    let cut_lp_max_len = 100 + (0.15 * ns as f64) as usize;
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
@@ -2975,6 +3224,7 @@ fn solve_milp_node_search(
                 improve_dive: improve_batch,
                 node_gmi: node_gmi_on,
                 gmi_pool: &gmi_pool,
+                cut_lp: cut_lp_on,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -3041,10 +3291,18 @@ fn solve_milp_node_search(
         // D2 B1': global GMI cuts separated this batch, and pool cuts the batch used.
         let mut batch_new_gmi: Vec<GomoryCut> = Vec::new();
         let mut batch_used_gmi: Vec<usize> = Vec::new();
+        // D2 W1: best HiGHS score of each violated pool cut over the batch's nodes.
+        let mut batch_cut_score: HashMap<usize, f64> = HashMap::new();
         for (k, mut out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
             improve_dive_iters += out.dive_iters;
+            for (&c, &sc) in out.gmi_used.iter().zip(out.gmi_scores.iter()) {
+                let e = batch_cut_score.entry(c).or_insert(sc);
+                if sc > *e {
+                    *e = sc;
+                }
+            }
             batch_new_gmi.append(&mut out.gmi_new);
             batch_used_gmi.append(&mut out.gmi_used);
             if out.deferred {
@@ -3084,16 +3342,21 @@ fn solve_milp_node_search(
             // so a closed gap is a rigorous certificate even after node-LP
             // failures; withholding `Optimal` here was pure over-conservatism.
             if let Some(basis) = out.basis {
-                // W1 entry instrumentation: folded cut rows with a basic slack at
-                // this node's optimum (HiGHS ages exactly these out).
-                if crate::profile::enabled() && !gmi_fold_slack_cols.is_empty() {
-                    let basic = gmi_fold_slack_cols
+                // D2 W1: a folded row is active at this node when its slack is nonbasic
+                // (HiGHS resets the age of a nonbasic row, `HighsLpRelaxation.cpp:660`).
+                for r in cut_lp_rows.iter_mut() {
+                    if basis.col_status.get(r.col).is_some_and(|&st| st != BASIC) {
+                        r.active = true;
+                    }
+                }
+                if !cut_lp_rows.is_empty() {
+                    let basic = cut_lp_rows
                         .iter()
-                        .filter(|&&j| basis.col_status.get(j).is_none_or(|&st| st == BASIC))
+                        .filter(|r| basis.col_status.get(r.col).is_none_or(|&st| st == BASIC))
                         .count();
                     crate::profile::incr_by(
                         crate::profile::Ctr::NodeGmiFoldRowsSeen,
-                        gmi_fold_slack_cols.len() as u64,
+                        cut_lp_rows.len() as u64,
                     );
                     crate::profile::incr_by(
                         crate::profile::Ctr::NodeGmiFoldRowsBasic,
@@ -3345,16 +3608,41 @@ fn solve_milp_node_search(
                 if let Some(a) = gmi_pool_age.get_mut(k) {
                     *a = 0;
                 }
-                if let Some(u) = gmi_pool_uses.get_mut(k) {
-                    *u = u.saturating_add(1);
-                }
             }
             for cut in batch_new_gmi {
+                if cut_lp_on {
+                    // HiGHS length cap (`HighsCutGeneration.cpp:974`).
+                    let nz = cut.coeffs.iter().filter(|v| **v != 0.0).count();
+                    if nz > cut_lp_max_len {
+                        crate::profile::incr(crate::profile::Ctr::CutLpLenRejected);
+                        continue;
+                    }
+                }
                 if gmi_pool_sigs.insert(cut_signature(&cut)) {
                     gmi_pool.push(cut);
-                    gmi_pool_age.push(0);
-                    gmi_pool_uses.push(0);
+                    gmi_pool_age.push(if cut_lp_on {
+                        NODE_GMI_POOL_AGE - CUT_LP_POOL_NEW_AGE_HEADROOM
+                    } else {
+                        0
+                    });
                     crate::profile::incr(crate::profile::Ctr::NodeGmiPoolAdded);
+                }
+            }
+            // D2 W1: select this batch's violated pool cuts for the shared LP. They
+            // leave the pool (their signature stays, so a re-separated copy is not
+            // re-admitted while the row is in the LP).
+            let mut fold = vec![false; gmi_pool.len()];
+            if cut_lp_on && !batch_cut_score.is_empty() {
+                let mut cands: Vec<(f64, usize)> =
+                    batch_cut_score.iter().map(|(&k, &sc)| (sc, k)).collect();
+                cands.sort_by_key(|&(_, k)| k);
+                for k in cut_lp_select(
+                    cands,
+                    &gmi_pool,
+                    &mut cut_lp_best_score,
+                    &mut cut_lp_min_factor,
+                ) {
+                    fold[k] = true;
                 }
             }
             let over = gmi_pool.len().saturating_sub(NODE_GMI_POOL_CAP);
@@ -3362,60 +3650,30 @@ fn solve_milp_node_search(
             order.sort_by_key(|&k| std::cmp::Reverse(gmi_pool_age[k]));
             let mut drop = vec![false; gmi_pool.len()];
             for (rank, &k) in order.iter().enumerate() {
+                if fold[k] {
+                    continue;
+                }
                 if gmi_pool_age[k] > NODE_GMI_POOL_AGE || rank < over {
                     drop[k] = true;
                 }
             }
-            // W1 entry: hot cuts move into the shared matrix (signature kept, so a
-            // re-separated copy is not re-admitted to the pool).
-            let (fold_cap, fold_uses, fold_ratio) = node_gmi_fold();
-            let mut fold = vec![false; gmi_pool.len()];
-            let nnz0 = *gmi_fold_nnz0.get_or_insert_with(|| {
-                let z = csc_w.raw().2.len();
-                crate::profile::incr_by(crate::profile::Ctr::NodeGmiFoldNnz0, z as u64);
-                z
-            });
-            let nnz_budget = fold_ratio * nnz0 as f64;
-            if fold_cap > 0 {
-                let mut hot: Vec<usize> = (0..gmi_pool.len())
-                    .filter(|&k| !drop[k] && gmi_pool_uses[k] >= fold_uses)
-                    .collect();
-                hot.sort_by_key(|&k| (std::cmp::Reverse(gmi_pool_uses[k]), k));
-                for k in hot {
-                    if gmi_folded >= fold_cap {
-                        break;
-                    }
-                    let nz = gmi_pool[k].coeffs.iter().filter(|v| **v != 0.0).count();
-                    if (gmi_fold_nnz + nz) as f64 > nnz_budget {
-                        continue;
-                    }
-                    gmi_fold_nnz += nz;
-                    crate::profile::incr_by(crate::profile::Ctr::NodeGmiFoldNnz, nz as u64);
-                    fold[k] = true;
-                    drop[k] = true;
-                    gmi_folded += 1;
-                }
-            }
-            if drop.iter().any(|&d| d) {
+            if drop.iter().any(|&d| d) || fold.iter().any(|&f| f) {
                 let mut keep_pool = Vec::with_capacity(gmi_pool.len());
                 let mut keep_age = Vec::with_capacity(gmi_pool.len());
-                let mut keep_uses = Vec::with_capacity(gmi_pool.len());
                 for (k, mut cut) in gmi_pool.drain(..).enumerate() {
                     if fold[k] {
                         cut.coeffs.resize(n_w, 0.0);
-                        gmi_fold_pending.push(cut);
+                        cut_lp_fold.push(cut);
                     } else if drop[k] {
                         gmi_pool_sigs.remove(&cut_signature(&cut));
                         crate::profile::incr(crate::profile::Ctr::NodeGmiPoolDropped);
                     } else {
                         keep_pool.push(cut);
                         keep_age.push(gmi_pool_age[k]);
-                        keep_uses.push(gmi_pool_uses[k]);
                     }
                 }
                 gmi_pool = keep_pool;
                 gmi_pool_age = keep_age;
-                gmi_pool_uses = keep_uses;
             }
         }
 
@@ -3515,14 +3773,29 @@ fn solve_milp_node_search(
         if !node_pending.is_empty() {
             pending_cuts.append(&mut node_pending);
         }
-        if !gmi_fold_pending.is_empty() {
-            let base = n_w + pending_cuts.len();
-            gmi_fold_slack_cols.extend(base..base + gmi_fold_pending.len());
-            crate::profile::incr_by(
-                crate::profile::Ctr::NodeCutsFolded,
-                gmi_fold_pending.len() as u64,
-            );
-            pending_cuts.append(&mut gmi_fold_pending);
+        // D2 W1: age the folded rows on this batch's node optima, then append the
+        // newly selected pool cuts (tracked so they can be aged and deleted).
+        for r in cut_lp_rows.iter_mut() {
+            if r.active {
+                r.age = 0;
+            } else {
+                r.age = r.age.saturating_add(1);
+            }
+            r.active = false;
+        }
+        if !cut_lp_fold.is_empty() {
+            let base = pending_cuts.len();
+            for (i, cut) in cut_lp_fold.iter().enumerate() {
+                cut_lp_rows.push(CutLpRow {
+                    row: m_w + base + i,
+                    col: n_w + base + i,
+                    age: 0,
+                    active: false,
+                    cut: cut.clone(),
+                });
+            }
+            crate::profile::incr_by(crate::profile::Ctr::CutLpFolded, cut_lp_fold.len() as u64);
+            pending_cuts.append(&mut cut_lp_fold);
         }
 
         // Fold this batch's newly-found global cuts into the shared matrix.
@@ -3545,6 +3818,126 @@ fn solve_milp_node_search(
             n_w = nn;
             slack_l = l_w[ns..].to_vec();
             slack_u = u_w[ns..].to_vec();
+        }
+
+        // D2 W1: every CUT_LP_DELETE_EVERY batches, delete folded rows whose slack has
+        // been basic for more than CUT_LP_AGE_LIMIT batches and is basic in every stored
+        // frontier basis; they go back to the pool.
+        cut_lp_epoch += 1;
+        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 {
+            let mut del: Vec<usize> = Vec::new();
+            for (i, r) in cut_lp_rows.iter().enumerate() {
+                if r.age <= CUT_LP_AGE_LIMIT {
+                    continue;
+                }
+                let basic_everywhere = tm
+                    .frontier_bases()
+                    .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
+                if basic_everywhere {
+                    del.push(i);
+                } else {
+                    crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
+                }
+            }
+            if !del.is_empty() {
+                crate::profile::incr_by(crate::profile::Ctr::CutLpDeleted, del.len() as u64);
+                let del_set: HashSet<usize> = del.iter().copied().collect();
+                let mut gone: Vec<CutLpRow> = Vec::new();
+                let mut kept: Vec<CutLpRow> = Vec::new();
+                for (i, r) in cut_lp_rows.drain(..).enumerate() {
+                    if del_set.contains(&i) {
+                        gone.push(r);
+                    } else {
+                        kept.push(r);
+                    }
+                }
+                gone.sort_by_key(|r| r.col);
+                let del_rows: Vec<usize> = {
+                    let mut v: Vec<usize> = gone.iter().map(|r| r.row).collect();
+                    v.sort_unstable();
+                    v
+                };
+                let del_cols: Vec<usize> = gone.iter().map(|r| r.col).collect();
+                let mut col_map = vec![usize::MAX; n_w];
+                let mut nxt = 0;
+                for (j, slot) in col_map.iter_mut().enumerate() {
+                    if del_cols.binary_search(&j).is_err() {
+                        *slot = nxt;
+                        nxt += 1;
+                    }
+                }
+                let mut row_map = vec![usize::MAX; m_w];
+                let mut nxt = 0;
+                for (r, slot) in row_map.iter_mut().enumerate() {
+                    if del_rows.binary_search(&r).is_err() {
+                        *slot = nxt;
+                        nxt += 1;
+                    }
+                }
+                csc_w = delete_rows_cols(&csc_w, m_w, n_w, &del_rows, &del_cols);
+                let keep_row = |r: usize| del_rows.binary_search(&r).is_err();
+                let keep_col = |j: usize| del_cols.binary_search(&j).is_err();
+                b_w = b_w
+                    .iter()
+                    .enumerate()
+                    .filter(|(r, _)| keep_row(*r))
+                    .map(|(_, &v)| v)
+                    .collect();
+                c_w = c_w
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| keep_col(*j))
+                    .map(|(_, &v)| v)
+                    .collect();
+                l_w = l_w
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| keep_col(*j))
+                    .map(|(_, &v)| v)
+                    .collect();
+                u_w = u_w
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| keep_col(*j))
+                    .map(|(_, &v)| v)
+                    .collect();
+                is_int_full = is_int_full
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| keep_col(*j))
+                    .map(|(_, &v)| v)
+                    .collect();
+                m_w -= gone.len();
+                n_w -= gone.len();
+                slack_l = l_w[ns..].to_vec();
+                slack_u = u_w[ns..].to_vec();
+                // Rewrite every cut over the old columns: substitute the deleted slacks.
+                let subs: Vec<(usize, GomoryCut)> =
+                    gone.iter().map(|r| (r.col, r.cut.clone())).collect();
+                let subs_ref: Vec<(usize, &GomoryCut)> =
+                    subs.iter().map(|(c, k)| (*c, k)).collect();
+                for cut in gmi_pool.iter_mut() {
+                    substitute_deleted_slacks(cut, &subs_ref, &col_map);
+                }
+                for r in kept.iter_mut() {
+                    substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
+                    r.col = col_map[r.col];
+                    r.row = row_map[r.row];
+                }
+                cut_lp_rows = kept;
+                // Deleted rows return to the pool at age 1 (`HighsCutPool.cpp:150-160`).
+                for mut r in gone {
+                    substitute_deleted_slacks(&mut r.cut, &subs_ref, &col_map);
+                    gmi_pool.push(r.cut);
+                    gmi_pool_age.push(1);
+                }
+                gmi_pool_sigs = gmi_pool
+                    .iter()
+                    .chain(cut_lp_rows.iter().map(|r| &r.cut))
+                    .map(cut_signature)
+                    .collect();
+                tm.map_bases(|b| remap_basis_after_delete(b, &col_map));
+            }
         }
     }
 
@@ -3699,6 +4092,9 @@ struct NodeCtx<'a> {
     /// The global GMI pool (`DISCOPT_MILP_NODE_GMI`), over the working columns at the
     /// time each cut was separated (shorter than `n_w` after a fold: pad with zeros).
     gmi_pool: &'a [GomoryCut],
+    /// `DISCOPT_MILP_CUT_LP`: pool cuts are folded into the shared LP at the batch
+    /// boundary; the node only reports the violated ones with their HiGHS score.
+    cut_lp: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -3752,6 +4148,8 @@ struct NodeOutput {
     /// `DISCOPT_MILP_NODE_GMI`: new global cuts for the pool, and pool indices used.
     gmi_new: Vec<GomoryCut>,
     gmi_used: Vec<usize>,
+    /// `DISCOPT_MILP_CUT_LP`: HiGHS pool score of each `gmi_used` cut at this node.
+    gmi_scores: Vec<f64>,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
     /// #2136: the objective of `result.solution` when `result.is_feasible` (an
@@ -3821,6 +4219,7 @@ fn solve_node(
             dive_iters: 0,
             gmi_new: Vec::new(),
             gmi_used: Vec::new(),
+            gmi_scores: Vec::new(),
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -3879,6 +4278,7 @@ fn solve_node(
                 dive_iters: 0,
                 gmi_new: Vec::new(),
                 gmi_used: Vec::new(),
+                gmi_scores: Vec::new(),
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -3999,6 +4399,7 @@ fn solve_node(
         dive_iters: 0,
         gmi_new: Vec::new(),
         gmi_used: Vec::new(),
+        gmi_scores: Vec::new(),
     };
 
     match sol.status {
@@ -4299,7 +4700,19 @@ fn solve_node(
             // Pool cuts this node's point violates (top by efficacy), padded to the
             // current working width.
             let mut pool_pick: Vec<(f64, usize)> = Vec::new();
-            if ctx.node_gmi && !feasible && !ctx.gmi_pool.is_empty() {
+            if ctx.cut_lp && !feasible && !ctx.gmi_pool.is_empty() {
+                // D2 W1: report the violated pool cuts with their HiGHS score; the
+                // batch boundary folds the selected ones into the shared LP.
+                let _t = crate::profile::Timer::new(crate::profile::Phase::NodeGmiScan);
+                for (k, cut) in ctx.gmi_pool.iter().enumerate() {
+                    if let Some(sc) =
+                        cut_pool_score(cut, &sol.x, &full_l, &full_u, ctx.opts.simplex.tol)
+                    {
+                        out.gmi_used.push(k);
+                        out.gmi_scores.push(sc);
+                    }
+                }
+            } else if ctx.node_gmi && !feasible && !ctx.gmi_pool.is_empty() {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::NodeGmiScan);
                 for (k, cut) in ctx.gmi_pool.iter().enumerate() {
                     let mut act = 0.0;
@@ -4345,7 +4758,9 @@ fn solve_node(
                     })
                     .collect();
                 crate::profile::incr_by(crate::profile::Ctr::NodeGmiPoolUsed, rows.len() as u64);
-                out.gmi_used = pool_pick.iter().map(|&(_, k)| k).collect();
+                if !ctx.cut_lp {
+                    out.gmi_used = pool_pick.iter().map(|&(_, k)| k).collect();
+                }
                 let lg = node_local_gmi_bound(
                     ctx,
                     &full_l,
@@ -7176,6 +7591,196 @@ mod tests {
         for bad in ["2", "on", "y"] {
             assert!(parse_node_gmi(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn cut_lp_parse_refuses_garbage() {
+        // Default OFF: unset/empty reads as off.
+        for off in ["", " ", "0", "false", "NO"] {
+            assert!(!parse_cut_lp(off).unwrap(), "{off:?} must read as off");
+        }
+        for on in ["1", "true", " yes "] {
+            assert!(parse_cut_lp(on).unwrap(), "{on:?} must read as on");
+        }
+        for bad in ["2", "on", "y"] {
+            assert!(parse_cut_lp(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn cut_pool_score_matches_highs_definition() {
+        // x0 + x1 + x2 >= 2 at x = (0.5, 0.5, 0) over [0,1]^3: viol 1. x2 sits at its
+        // lower bound, which minimizes a positive term, so it is active; none is at its
+        // activity-maximizing upper bound -> 3 active, norm sqrt(3).
+        let cut = GomoryCut {
+            coeffs: vec![1.0, 1.0, 1.0],
+            rhs: 2.0,
+        };
+        let (l, u) = (vec![0.0; 3], vec![1.0; 3]);
+        let sc = cut_pool_score(&cut, &[0.5, 0.5, 0.0], &l, &u, 1e-9).unwrap();
+        assert!((sc - 1.0 / (3.0 * 3f64.sqrt())).abs() < 1e-12, "{sc}");
+        // x2 at its upper bound (activity max) is not active: 2 active, norm sqrt(2).
+        let cut2 = GomoryCut {
+            coeffs: vec![1.0, 1.0, 1.0],
+            rhs: 3.0,
+        };
+        let sc2 = cut_pool_score(&cut2, &[0.5, 0.5, 1.0], &l, &u, 1e-9).unwrap();
+        assert!((sc2 - 1.0 / (2.0 * 2f64.sqrt())).abs() < 1e-12, "{sc2}");
+        // Satisfied (or violated by at most feastol) -> None.
+        assert!(cut_pool_score(&cut, &[1.0, 1.0, 0.0], &l, &u, 1e-9).is_none());
+        // A negative coefficient is active unless its column is at the lower bound.
+        let neg = GomoryCut {
+            coeffs: vec![-1.0, 0.0, 0.0],
+            rhs: -0.25,
+        };
+        assert!(cut_pool_score(&neg, &[0.0, 0.0, 0.0], &l, &u, 1e-9).is_none());
+        let sn = cut_pool_score(&neg, &[0.5, 0.0, 0.0], &l, &u, 1e-9).unwrap();
+        assert!((sn - 0.25).abs() < 1e-12, "{sn}");
+    }
+
+    #[test]
+    fn cut_lp_select_applies_threshold_and_parallelism() {
+        let pool = vec![
+            GomoryCut {
+                coeffs: vec![1.0, 0.0, 0.0],
+                rhs: 1.0,
+            },
+            GomoryCut {
+                coeffs: vec![2.0, 0.0, 0.0],
+                rhs: 1.0,
+            }, // parallel to 0
+            GomoryCut {
+                coeffs: vec![0.0, 1.0, 0.0],
+                rhs: 1.0,
+            },
+            GomoryCut {
+                coeffs: vec![0.0, 0.0, 1.0],
+                rhs: 1.0,
+            },
+        ];
+        // Scores 1.0, 0.95, 0.92 pass 0.9 * best; 0.1 does not (and 1 of 4 is above
+        // len/20 = 0, so the factor is unchanged).
+        let (mut best, mut f) = (0.0, CUT_LP_MIN_SCORE_FACTOR0);
+        let sel = cut_lp_select(
+            vec![(0.95, 1), (1.0, 0), (0.92, 2), (0.1, 3)],
+            &pool,
+            &mut best,
+            &mut f,
+        );
+        assert_eq!(
+            sel,
+            vec![0, 2],
+            "cut 1 is parallel to cut 0; cut 3 is below the threshold"
+        );
+        assert_eq!(best, 1.0);
+        assert_eq!(f, CUT_LP_MIN_SCORE_FACTOR0);
+        // All above the threshold: num > len-1, so the factor drops to the last score.
+        let (mut best, mut f) = (0.0, CUT_LP_MIN_SCORE_FACTOR0);
+        let sel = cut_lp_select(
+            vec![(1.0, 0), (0.99, 2), (0.98, 3)],
+            &pool,
+            &mut best,
+            &mut f,
+        );
+        assert_eq!(sel, vec![0, 2, 3]);
+        assert!((f - 0.98).abs() < 1e-12, "{f}");
+        // A remembered best that nothing reaches: fall back to the top half and lower
+        // the factor (HiGHS's `numefficacious <= lowerThreshold` arm).
+        let (mut best, mut f) = (10.0, CUT_LP_MIN_SCORE_FACTOR0);
+        let sel = cut_lp_select(
+            vec![(1.0, 0), (0.5, 2), (0.4, 3), (0.3, 1)],
+            &pool,
+            &mut best,
+            &mut f,
+        );
+        assert_eq!(sel, vec![0, 2]);
+        assert!((f - 0.05).abs() < 1e-12, "{f}");
+    }
+
+    #[test]
+    fn deleting_cut_rows_keeps_cuts_and_bases_consistent() {
+        // Working LP over 2 structurals: one model row (col 2 its slack) and two cut
+        // rows `a_r·x - s_r = rhs_r` (cols 3, 4). The second cut row references the
+        // first cut's slack.
+        let cut_a = GomoryCut {
+            coeffs: vec![1.0, 2.0, 0.0],
+            rhs: 1.0,
+        };
+        let cut_b = GomoryCut {
+            coeffs: vec![0.5, 0.0, 0.0, 3.0],
+            rhs: 2.0,
+        };
+        let base = SparseCols::from_csc(vec![0, 1, 2, 3], vec![0, 0, 0], vec![1.0, 1.0, -1.0]);
+        let mut b = vec![0.0];
+        let (mut c, mut l, mut u) = (vec![0.0; 3], vec![0.0; 3], vec![10.0; 3]);
+        let mut is_int = vec![false; 3];
+        let (sp, m, n) = augment_csc_with_cuts(
+            &base,
+            &mut b,
+            &mut c,
+            &mut l,
+            &mut u,
+            &mut is_int,
+            1,
+            3,
+            &[cut_a.clone(), cut_b.clone()],
+        );
+        assert_eq!((m, n), (3, 5));
+        // Delete both cut rows (rows 1,2; cols 3,4).
+        let out = delete_rows_cols(&sp, m, n, &[1, 2], &[3, 4]);
+        assert_eq!(
+            out.raw(),
+            base.raw(),
+            "deleting the appended rows restores the base LP"
+        );
+        // A pool cut using both deleted slacks: after substitution it must take the same
+        // value at every structural point (the slacks are functions of x).
+        let col_map = vec![0, 1, 2, usize::MAX, usize::MAX];
+        let mut pc = GomoryCut {
+            coeffs: vec![1.0, -1.0, 0.0, 2.0, -0.5],
+            rhs: 0.25,
+        };
+        let orig = pc.clone();
+        substitute_deleted_slacks(&mut pc, &[(3, &cut_a), (4, &cut_b)], &col_map);
+        assert_eq!(pc.coeffs.len(), 3);
+        let mut checked = 0;
+        for &(x0, x1, x2) in &[(0.0, 0.0, 0.0), (1.5, -2.0, 0.3), (7.0, 3.0, -1.0)] {
+            let s3 = x0 + 2.0 * x1 - 1.0;
+            let s4 = 0.5 * x0 + 3.0 * s3 - 2.0;
+            let full = [x0, x1, x2, s3, s4];
+            let old: f64 = orig
+                .coeffs
+                .iter()
+                .zip(full)
+                .map(|(a, v)| a * v)
+                .sum::<f64>()
+                - orig.rhs;
+            let new: f64 = pc.coeffs.iter().zip(full).map(|(a, v)| a * v).sum::<f64>() - pc.rhs;
+            assert!((old - new).abs() < 1e-12, "{old} vs {new}");
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+        // Bases: the deleted slacks basic -> remapped; one nonbasic -> refused; a basis
+        // shorter than the matrix (slacks implicitly basic) -> kept as is.
+        let basis = Basis {
+            basic_vars: vec![0, 3, 4],
+            col_status: vec![BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC],
+        };
+        let r = remap_basis_after_delete(&basis, &col_map).unwrap();
+        assert_eq!(r.basic_vars, vec![0]);
+        assert_eq!(r.col_status, vec![BASIC, AT_LOWER, AT_LOWER]);
+        let bad = Basis {
+            basic_vars: vec![0, 1, 4],
+            col_status: vec![BASIC, BASIC, AT_LOWER, AT_LOWER, BASIC],
+        };
+        assert!(remap_basis_after_delete(&bad, &col_map).is_none());
+        let short = Basis {
+            basic_vars: vec![0],
+            col_status: vec![BASIC, AT_LOWER, AT_LOWER],
+        };
+        let r = remap_basis_after_delete(&short, &col_map).unwrap();
+        assert_eq!(r.basic_vars, vec![0]);
+        assert_eq!(r.col_status.len(), 3);
     }
 
     #[test]

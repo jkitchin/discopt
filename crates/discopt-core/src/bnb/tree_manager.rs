@@ -1785,6 +1785,19 @@ impl TreeManager {
         self.pool.get(id).basis.as_deref().cloned()
     }
 
+    /// Stored warm-start bases of the frontier nodes (D2 W1 cut-row deletion).
+    pub fn frontier_bases(&self) -> impl Iterator<Item = &crate::lp::basis::Basis> {
+        self.pool.frontier_bases()
+    }
+
+    /// Rewrite every stored basis (D2 W1 cut-row deletion); `None` drops it.
+    pub fn map_bases(
+        &mut self,
+        f: impl FnMut(&crate::lp::basis::Basis) -> Option<crate::lp::basis::Basis>,
+    ) {
+        self.pool.map_bases(f);
+    }
+
     /// Store a node's optimal basis before it is branched, so its children
     /// inherit it as their dual-simplex warm-start state.
     pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {

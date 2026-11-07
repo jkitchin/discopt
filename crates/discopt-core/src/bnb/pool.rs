@@ -265,6 +265,27 @@ impl NodePool {
         self.released[id.0] = true;
     }
 
+    /// Stored warm-start bases of the frontier (pending or evaluated) nodes.
+    pub fn frontier_bases(&self) -> impl Iterator<Item = &crate::lp::basis::Basis> {
+        self.nodes
+            .iter()
+            .filter(|n| matches!(n.status, NodeStatus::Pending | NodeStatus::Evaluated))
+            .filter_map(|n| n.basis.as_deref())
+    }
+
+    /// Rewrite every stored basis with `f` (`None` drops it). Used when the MILP
+    /// driver deletes cut rows from its working LP (D2 W1, `DISCOPT_MILP_CUT_LP`).
+    pub fn map_bases(
+        &mut self,
+        mut f: impl FnMut(&crate::lp::basis::Basis) -> Option<crate::lp::basis::Basis>,
+    ) {
+        for n in self.nodes.iter_mut() {
+            if let Some(b) = n.basis.as_deref() {
+                n.basis = f(b).map(std::sync::Arc::new);
+            }
+        }
+    }
+
     /// Whether [`Self::release_storage`] freed this node's vectors.
     pub fn is_released(&self, id: NodeId) -> bool {
         self.released[id.0]
