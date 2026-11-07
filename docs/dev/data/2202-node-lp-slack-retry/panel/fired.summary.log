@@ -1,0 +1,19 @@
+carton7                OFF time_limit             b=25.999999999993044 n=528 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON node_limit             b=85.92694266161317 n=2000 NodeLpSlackRetry=235 NodeLpSlackRetryDecided=233 fired=233 undecided 144.0/0.0 wall 118.9/102.5 load 7.03
+ex1252                 OFF time_limit             b=104762.14413242815 n=1022 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON node_limit             b=128890.92509761265 n=2000 NodeLpSlackRetry=280 NodeLpSlackRetryDecided=280 fired=280 undecided 28.0/0.0 wall 120.0/48.6 load 6.37
+ex1252a                OFF node_limit             b=128893.15416100372 n=2000 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON node_limit             b=128893.7410130738 n=2000 NodeLpSlackRetry=87 NodeLpSlackRetryDecided=85 fired=85 undecided 11.0/1.0 wall 19.2/17.2 load 7.35
+nvs20                  OFF optimal                b=230.89992307962422 n=177 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=230.89992307962422 n=177 NodeLpSlackRetry=9 NodeLpSlackRetryDecided=9 fired=9 undecided 0.0/0.0 wall 3.4/3.6 load 7.48
+st_e31                 OFF optimal                b=-2.000192384307945 n=1995 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=-2.000192384307945 n=1995 NodeLpSlackRetry=5 NodeLpSlackRetryDecided=5 fired=5 undecided 0.0/0.0 wall 21.5/21.8 load 6.38
+instances           : 5
+executed checks     : 51
+violations          : 0
+mechanism fired     : 612 on 5 instance(s) ['carton7', 'ex1252', 'ex1252a', 'nvs20', 'st_e31']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 2 -> ON 2  gained []
+bounds tighter      : 2 ['carton7', 'ex1252']  (where it ran: ['carton7', 'ex1252'])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 5722 -> ON 8172
+wall  (all)         : OFF 283.1s -> ON 193.7s
+wall  (fired)       : OFF 283.1s -> ON 193.7s over 5 instance(s)
+report              : /tmp/claude-0/panel/fired.json
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.
+exit=0

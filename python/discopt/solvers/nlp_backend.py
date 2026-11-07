@@ -24,6 +24,11 @@ def _try_pounce() -> Callable | None:
 
 
 def _try_cyipopt() -> Callable | None:
+    from discopt._openmp_guard import check_openmp_compatible
+
+    # Raises (rather than returning None) on a macOS OpenMP-runtime clash: the
+    # package is installed, and "auto" must not silently pretend it is not (#2205).
+    check_openmp_compatible("cyipopt", feature="the cyipopt NLP backend")
     try:
         import cyipopt  # noqa: F401
     except ImportError:
@@ -61,10 +66,21 @@ def get_nlp_solver(backend: Backend = "auto") -> Callable:
 
 
 def available_backends() -> list[str]:
-    """List names of NLP backends that import successfully."""
+    """List names of NLP backends that import successfully.
+
+    cyipopt is left out when importing it would abort this process on a second
+    OpenMP runtime (macOS, #2205): it cannot be imported *here*. Asking for it by
+    name through :func:`get_nlp_solver` raises the explanation instead.
+    """
+    from discopt._openmp_guard import OpenMPRuntimeConflictError
+
     names: list[str] = []
     if _try_pounce() is not None:
         names.append("pounce")
-    if _try_cyipopt() is not None:
+    try:
+        cyipopt_fn = _try_cyipopt()
+    except OpenMPRuntimeConflictError:
+        cyipopt_fn = None
+    if cyipopt_fn is not None:
         names.append("cyipopt")
     return names

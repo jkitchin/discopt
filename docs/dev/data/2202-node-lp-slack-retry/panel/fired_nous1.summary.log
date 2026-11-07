@@ -1,0 +1,15 @@
+nous1                  OFF node_limit             b=1.327785157902183 n=2000 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON node_limit             b=1.319022173652456 n=2000 NodeLpSlackRetry=5 NodeLpSlackRetryDecided=5 fired=5 undecided 0.0/0.0 wall 11.4/11.3 load 6.21
+instances           : 1
+executed checks     : 11
+violations          : 0
+mechanism fired     : 5 on 1 instance(s) ['nous1']
+unfired identical   : 0 checked, 0 skipped (wall backstop) []
+certified           : OFF 0 -> ON 0  gained []
+bounds tighter      : 0 []  (where it ran: [])
+bounds looser       : 1 ['nous1']  (where it ran: ['nous1'])
+nodes (all)         : OFF 2000 -> ON 2000
+wall  (all)         : OFF 11.4s -> ON 11.3s
+wall  (fired)       : OFF 11.4s -> ON 11.3s over 1 instance(s)
+report              : /tmp/claude-0/panel/fired_nous1.json
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.
+exit=0

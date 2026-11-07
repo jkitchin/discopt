@@ -1,0 +1,18 @@
+carton7                OFF time_limit             b=25.999999999993044 n=607 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON time_limit             b=69.37399999878235 n=2473 NodeLpSlackRetry=252 NodeLpSlackRetryDecided=247 fired=247 undecided 135.0/2.0 wall 118.8/120.1 load 1.01
+ex1252                 OFF time_limit             b=121832.20364639629 n=3148 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=128890.92539570229 n=2048 NodeLpSlackRetry=280 NodeLpSlackRetryDecided=280 fired=280 undecided 1550.0/0.0 wall 120.0/34.2 load 1.00
+ex1252a                OFF optimal                b=128893.45098264358 n=2048 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=128893.7410130738 n=2048 NodeLpSlackRetry=87 NodeLpSlackRetryDecided=85 fired=85 undecided 11.0/1.0 wall 19.3/16.9 load 1.17
+nvs20                  OFF optimal                b=230.89992307962422 n=177 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=230.89992307962422 n=177 NodeLpSlackRetry=9 NodeLpSlackRetryDecided=9 fired=9 undecided 0.0/0.0 wall 3.2/3.3 load 1.15
+st_e31                 OFF optimal                b=-2.0001894101465933 n=1581 NodeLpSlackRetry=0 NodeLpSlackRetryDecided=0 | ON optimal                b=-2.0001894101465933 n=1581 NodeLpSlackRetry=5 NodeLpSlackRetryDecided=5 fired=5 undecided 0.0/0.0 wall 7.1/7.3 load 1.12
+instances           : 5
+executed checks     : 55
+violations          : 0
+mechanism fired     : 626 on 5 instance(s) ['carton7', 'ex1252', 'ex1252a', 'nvs20', 'st_e31']
+certified           : OFF 3 -> ON 4  gained ['ex1252']
+bounds tighter      : 2 ['carton7', 'ex1252']  (where it ran: ['carton7', 'ex1252'])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 7561 -> ON 8327
+wall  (all)         : OFF 268.5s -> ON 181.8s
+wall  (fired)       : OFF 268.5s -> ON 181.8s over 5 instance(s)
+report              : /tmp/claude-0/panel/default_fired.json
+VERDICT: cert-clean, mechanism fired; read the benefit columns above.
+exit=0

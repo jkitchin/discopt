@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._openmp_guard import OpenMPRuntimeConflictError
 from discopt._work_budget import WorkBudget
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
@@ -2091,6 +2092,10 @@ def _solve_nlp_attempt(
             raw_status=getattr(result, "raw_status", None),
             raw_x=None if result.x is None else np.asarray(result.x, dtype=np.float64),
         )
+    except OpenMPRuntimeConflictError:
+        # #2205: an NLP backend that cannot load here refuses the solve; it is
+        # not a heuristic failure to log and step past.
+        raise
     except Exception as exc:  # noqa: BLE001 - an empty attempt is handled by the caller
         # Capability-disabling: no NLP point means no OA linearization from this
         # node, which reads as "OA cuts don't help" rather than as a failure.

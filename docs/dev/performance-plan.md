@@ -16044,3 +16044,113 @@ both-solved instances, before any build-out.
 The gate's ratios moved 1.97 -> 3.42 (big-M) on environment alone, and its CI clause sits
 about 1.6x above the point estimate on this 24-instance panel. #2182 closes on that basis
 (the decision is in `gdp-parity-baseline.md`).
+
+## 121. #2202: the nous1 "dual-proof stall" is an undecided-node-LP cascade; the slack-basis re-solve (2026-11-07)
+
+**Claim under test (#2202).** On macOS/arm64, MINLPLib `nous1` stopped certifying with
+`DISCOPT_DUAL_PROOF_PROPAGATION` on (time limit at 150 s, bound 1.345713), bisected to
+#2169; Linux still certified (25.5 s). The issue's own first hypothesis was an
+interaction with #2165's changed `Numerical` handling.
+
+**Re-framed by measurement.** #2169 is the PR that *introduced* dual proofs, so the bisect
+found the flag, not a regression inside it, and #2169's §112 panel ran on Linux (the
+`/home/user/discopt` paths in `docs/dev/data/2142-dual-proof/`): there is no evidence the
+flag ever certified nous1 on macOS. A platform-only stall with a bit-identical final bound
+across two runs pointed at a path effect, so the entry experiment perturbed only the
+order of floating-point work on Linux: the kernel's fixed rows permuted by a seed
+(`docs/dev/data/2202-node-lp-slack-retry/perm_probe.py`, the `e1_arm.py` technique).
+
+| perm seed | dual proof | before (120 s) | undecided nodes |
+|---|---|---|---|
+| 0 (as shipped) | ON | certified 40.3 s | 82 |
+| 5 | ON | **time limit, bound 1.4852** | **1,336–1,361** |
+| 5 | OFF | **time limit, bound 1.4920** | **1,367** |
+| 12 | ON | certified 62.9 s | 323 |
+| 12 | OFF | **time limit, bound 1.4487** | **1,423** |
+| 4, 9 | ON | certified 72.3 / 53.8 s | 305 / 203 |
+
+So the stall reproduces on Linux **with the flag on or off**, and wall time tracks one
+counter: the kernel's undecided nodes (an LP that ended `Numerical` / `IterLimit` and was
+branched with its parent's bound). The flag is a path perturbation, not the cause.
+
+**Mechanism.** A `node_observer` capture of seed 5 (OFF, 60 s) gives 589 `numerical` + 1
+`iter_limit` node LPs, every one warm-started, median 26 ms against ~1 ms for a decided
+node (17.2 s of the 60 s). They are benign: `m = 368`, `n = 472`, `|a_ij| <= 300`, bounds
+`<= 300`. Replayed offline (40 captured):
+
+| start | decided | agreement with HiGHS |
+|---|---|---|
+| inherited parent basis (warm dual, then cold-primal fallback) | **0 / 40** | — |
+| cold two-phase primal | 0 / 40 | — |
+| `DISCOPT_PRIMAL_EXPAND_RESET=1` (#956 T2′ EXPAND-free retry) | 16 / 40 | objectives to 6 digits |
+| `DISCOPT_SIMPLEX_NO_EXPAND=1` + `DISCOPT_PRIMAL_XB_REFRESH=1` | 21 / 40 | — |
+| **sign-matched slack basis (warm dual)** | **40 / 40** | **36 optimal + 4 infeasible = HiGHS's split; objectives to 6 digits** |
+
+Falsified on the way: exact-duplicate rows and fixed columns (removing both changes
+nothing), explicit zeros in the CSC (dropping them changes nothing), and narrow boxes
+(smallest positive width 0.075). The primal's counters on these LPs are #956 T2′'s:
+`Phase1EndBoxViolated` with `Phase1DriftDominates`, then `RefacFtFail` /
+`PrimalExitRefacFail`. This is the measurement §15b / the #956 follow-through plan named
+as decisive ("dump one of these node LPs and hand it to HiGHS: if HiGHS solves it, the fix
+belongs in phase-1 feasibility maintenance"). HiGHS solves them. The engine-level repair is
+still that; what this section ships is the node-level consequence: an undecided verdict
+from one start is not a property of the LP.
+
+**The fix (`DISCOPT_NODE_LP_SLACK_RETRY`, `SpatialTreeConfig::node_lp_slack_retry`).** A
+node LP that ends `Numerical` / `IterLimit` is solved once more from
+`cold_dual_start_basis` (slacks basic, each structural at the bound its objective sign
+selects) through `solve_lp_warm_csc`, the same entry, equilibration, final audit and
+Farkas verification as every node LP. Only `Optimal` / `Infeasible` replaces the first
+verdict. A node whose first solve already started there is not retried. Every in-tree
+node-LP call passes the flag (node, #1995 re-solve, integral probe, strong-branching init,
+separation rounds). Counters: profile `NodeLpSlackRetry{,Decided}`, `solver_stats`
+`tree/slack_retries`, `tree/slack_retry_decided`.
+
+**Entry result (nous1, 120 s, flag ON, interleaved pairs).**
+
+| perm seed | retry OFF | retry ON |
+|---|---|---|
+| 5 | time limit, bound 1.4852, 1,361 undecided | **certified 47.9 s, 1 undecided** |
+| 12 | certified 62.7 s, 323 undecided | certified 29.3 s, 0 undecided |
+| 0 | certified 40.3 s, 82 undecided | certified 28.1 s, 0 undecided |
+
+Seeds 1–12 × dual proof {ON, OFF} with the retry: **24 / 24 certified**, 0–1 undecided
+each (`sweep_retry_on.log`). Without it, 3 of those cells time out (seed 5 both arms,
+seed 12 OFF). These pairs ran two at a time on 4 cores (load ~2); they are node and
+certification evidence, not timing claims.
+
+**§5 panels (all on the final build; `docs/dev/data/2202-node-lp-slack-retry/panel/`).**
+
+* *Corpus* (74 instances, `--deterministic --max-nodes 2000 --time-limit 120
+  --assert-unfired-identical --jobs 2`): **cert-clean, 812 checks, 0 violations**; fires
+  on one instance (st_e38, identical result); 59 unfired instances bit-identical, 14
+  skipped at the wall backstop (all non-kernel routes, identical where they finished);
+  certified 59 → 59.
+* *Fire screen* (ON only, 2000 nodes, the 58 non-corpus `python/tests/data/minlplib`
+  instances plus nous1): acts on 6 — nous1, carton7, ex1252, ex1252a, nvs20, st_e31.
+* *Acting set, deterministic 2000 nodes, oracle `minlplib.solu`*: **cert-clean (51 + 11
+  checks)**. carton7 OFF hits the wall at 528 nodes (bound 26.0, 144 undecided), ON
+  completes 2000 nodes (bound 85.9); ex1252 OFF wall at 1,022 nodes (bound 104,762), ON
+  completes 2000 nodes in 48.6 s (bound 128,890.9, below the 128,893.7 optimum); ex1252a
+  128,893.15 → 128,893.74 (undecided 11 → 1); nvs20 and st_e31 identical. nous1 at the
+  equal 2000-node budget is 1.3278 → 1.3190, a path effect at an arbitrary cut-off; its
+  time to certification is the measurement below.
+* *Acting set, default path, 120 s, `--jobs 1`, load ≈ 1*: **cert-clean (55 checks),
+  certified 3 → 4**: ex1252 OFF time limit with **1,550 undecided nodes**, ON **optimal
+  in 34.2 s**; carton7 bound 26.0 → 69.4 (undecided 135 → 2); ex1252a 19.3 → 16.9 s;
+  nvs20, st_e31 identical. Wall over the set 268.5 → 181.8 s.
+* *nous1 to certification, default path, interleaved, load-gated (< 1.5), 3 reps*:
+  OFF **39.94 ± 0.24 s** (16,903 nodes, 82 undecided) → ON **27.84 ± 0.19 s** (12,745
+  nodes, 0 undecided, 20 retries decided).
+
+**Graduated default ON in the PR that introduced it** (cert-clean on every panel;
+net-positive: +1 certification, two looser-than-necessary bounds tightened, nous1 30 %
+faster and robust to row order). `DISCOPT_NODE_LP_SLACK_RETRY=0` restores the tree
+before it bit for bit (the Rust default is off).
+
+**What it does not fix.** The LP engine still cannot decide these LPs from the inherited
+start: the primal's phase-1 drift (#956 T2′) is untouched, and every retry costs a second
+solve on exactly the nodes that already cost ~26 ms. The retry removes the tree-level
+consequence; the engine-level fix stays #956's. Also measured and not shipped:
+`DISCOPT_PRIMAL_EXPAND_RESET` decides 16/40 of these LPs (it remains default OFF, and
+has no row in `flag-retirement-audit.md`, which this section does not settle).

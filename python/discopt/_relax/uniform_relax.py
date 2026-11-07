@@ -4925,11 +4925,18 @@ def _emit_piecewise_1d(
         #   -> row  sign*w_hat - sign*slope*coeff*x_hat - sign*(slope*const+intercept)*lam <= 0
         if not (_finite(slope, intercept)):
             return
+        # Outward guard on the ``lam`` coefficient, which carries the line's
+        # constant (the rhs is 0). The intercept ``flo - ssl*alo`` cancels, and on
+        # an AMP piece like [-5e8, 0.02] the rounded row cut x = 0.02 out of
+        # ``max x s.t. (3x)**2 >= 0.0018`` by 3e-8. Loosening by ``slack*lam`` is
+        # exactly vacuous when the piece is inactive (``lam = 0``) and the usual
+        # 1-d envelope slack when it is active.
+        slack = envelope_1d_slack(slope, alo, ahi, flo, fhi, const, 0.0)
         ctx.add_row(
             {
                 w_hat: sign,
                 x_hat: -sign * slope * coeff,
-                lam: -sign * (slope * const + intercept),
+                lam: -sign * (slope * const + intercept) - slack,
             },
             0.0,
         )
