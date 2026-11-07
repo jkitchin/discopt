@@ -156,6 +156,11 @@ def main(argv=None) -> int:
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--instances", default="")
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="keep the (instance index, rep) rows already in --out and run the rest",
+    )
     a = ap.parse_args(argv)
     global FLAG, ON_VALUE, _CTR
     FLAG, ON_VALUE = a.flag, a.on_value
@@ -173,15 +178,21 @@ def main(argv=None) -> int:
         k, mem, rep = job
         order = (False, True) if (k + rep) % 2 == 0 else (True, False)
         got = {("on" if on else "off"): solve(str(REPO / mem["path"]), on, a) for on in order}
-        return mem, rep, got
+        return k, mem, rep, got
 
     jobs = [(k, mem, rep) for rep in range(a.reps) for k, mem in enumerate(pop)]
     rows, executed = [], 0
+    if a.resume and Path(a.out).exists():
+        # Keyed by population INDEX, not name: the population has duplicate names.
+        rows = [r for r in json.loads(Path(a.out).read_text())["rows"] if "k" in r]
+        done = {(r["k"], r["rep"]) for r in rows}
+        jobs = [j for j in jobs if (j[0], j[2]) not in done]
+        print(f"resume: kept {len(rows)} rows, {len(jobs)} jobs left", flush=True)
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        for mem, rep, got in ex.map(one, jobs):
+        for k, mem, rep, got in ex.map(one, jobs):
             executed += 2
             opt, maxim = mem["oracle_objective"], mem["maximize"]
-            row = {"name": mem["name"], "panel": mem.get("panel"), "rep": rep, "opt": opt,
+            row = {"name": mem["name"], "k": k, "panel": mem.get("panel"), "rep": rep, "opt": opt,
                    "maximize": maxim, **got}  # fmt: skip
             row["problems"] = {arm: cert_problems(got[arm], opt, maxim) for arm in got}
             rows.append(row)
