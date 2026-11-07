@@ -1225,14 +1225,6 @@ impl ConvexKernelSpec {
         // most-fractional. Costs are learned in the tree's own "maximize sense·bound"
         // convention negated to a minimize (lower-bound-rising) convention.
         let mut pcosts = Pseudocosts::new(self.n);
-        // #807 W1: optional shared persistent LP (bounds-in-place dual-warm node
-        // solves). `None` unless DISCOPT_CVX_NATIVELP is set → OFF is bit-identical.
-        let mut warm = if native_lp_enabled() {
-            Some(W0WarmLp::new(self))
-        } else {
-            None
-        };
-
         // Root node over the FBBT-propagated global box.
         let mut root_lo = self.lb.clone();
         let mut root_hi = self.ub.clone();
@@ -1353,53 +1345,22 @@ impl ConvexKernelSpec {
                 continue; // empty box → fathom
             }
 
-            // Node relaxation: the shared persistent LP (warm tangent pool +
-            // node-local cuts — W2) when DISCOPT_CVX_NATIVELP is on, else today's
-            // per-node cold `solve_node_cut` (unchanged default path). Both return a
-            // sound, NS-certified dual bound.
-            let r = if let Some(w) = warm.as_mut() {
-                match w.solve_node(
-                    self,
-                    &lo,
-                    &hi,
-                    config.oa_tol,
-                    config.max_oa_rounds,
-                    config.max_sep_rounds,
-                    opts,
-                    config.deadline,
-                ) {
-                    Some((res, _pivots, _new_tan)) => {
-                        w.age_and_gc(opts.tol.max(1e-7), NATIVELP_POOL_CAP, NATIVELP_MAX_AGE);
-                        res
-                    }
-                    None => {
-                        // Warm solve gave up: it does not distinguish "proven
-                        // infeasible" from "numerically failed", so this subtree is
-                        // not certified as explored -- unless the cut-free retry
-                        // below resolves it (#871).
-                        self.solve_node_until(
-                            &lo,
-                            &hi,
-                            config.oa_tol,
-                            config.max_oa_rounds,
-                            opts,
-                            config.deadline,
-                        )
-                    }
-                }
-            } else {
-                // #911: the node loop gets the tree's deadline, so a single slow node
-                // can no longer overrun the whole budget between two deadline polls.
-                self.solve_node_cut_until(
-                    &lo,
-                    &hi,
-                    config.oa_tol,
-                    config.max_oa_rounds,
-                    config.max_sep_rounds,
-                    opts,
-                    config.deadline,
-                )
-            };
+            // Node relaxation: the per-node cold `solve_node_cut`. (The #807 shared
+            // persistent-LP route, `DISCOPT_CVX_NATIVELP`, was retired by #2211 on
+            // its W2 panel: cert-clean but net-negative wall on the seeded rsyn*
+            // panel, 26.2 s ON vs 19.9 s OFF; `docs/dev/native-warmlp-plan.md` §8.
+            // The W0 probe, `warmlp_w0_probe`, keeps the shared LP as an instrument.)
+            // #911: the node loop gets the tree's deadline, so a single slow node
+            // can no longer overrun the whole budget between two deadline polls.
+            let r = self.solve_node_cut_until(
+                &lo,
+                &hi,
+                config.oa_tol,
+                config.max_oa_rounds,
+                config.max_sep_rounds,
+                opts,
+                config.deadline,
+            );
             // #871: a node that breaks down numerically has proven nothing, so
             // poisoning the certificate is correct -- but premature. The breakdown is
             // caused by the separated pool itself: on clay0303hfsg one node reached
@@ -1629,28 +1590,6 @@ impl ConvexKernelSpec {
         }
     }
 }
-
-/// `DISCOPT_CVX_NATIVELP` opt-in (default-OFF) — route `solve_tree`'s node solves
-/// through the shared persistent LP (bounds-in-place dual-warm reoptimize) instead
-/// of a per-node cold `solve_node_cut`. Scoped to the pool-saturating `rsyn*`
-/// family (#807 W0); OFF is bit-identical to the shipped path. Read once.
-fn native_lp_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("DISCOPT_CVX_NATIVELP")
-            .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
-            .unwrap_or(false)
-    })
-}
-
-/// Tangent-pool GC cap for the persistent LP (generous: on the saturating `rsyn*`
-/// family the pool settles well below this, so GC rarely fires and the warm chain
-/// is preserved; it only bounds pathological growth).
-const NATIVELP_POOL_CAP: usize = 600;
-/// Rounds a tangent must sit non-binding before it is eligible for GC.
-const NATIVELP_MAX_AGE: u32 = 10;
 
 // ===========================================================================
 // W0 ENTRY-EXPERIMENT PROBE (#807) — TEMPORARY, reverted after W0 records.

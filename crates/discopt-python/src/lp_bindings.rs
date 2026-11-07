@@ -24,7 +24,7 @@ use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::refine::ns_safe_bound_csc;
 use discopt_core::lp::simplex::{
     solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc,
-    unstable_pivot_recovery_default, LpInstance, LpStatus, SimplexOptions, SparseCols,
+    LpInstance, LpStatus, SimplexOptions, SparseCols,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -607,10 +607,11 @@ pub fn solve_lp_warm_csc_py<'py>(
         // so a caller who passed no `time_limit` lost it — measured on
         // QPLIB_2170, that is the difference between `optimal 0` and no bound at
         // all. It now has its own gate. `deadline.is_some()` keeps the deadline
-        // path bit-identical to what its own graduation panel judged; the env
-        // opt-in extends it to deadline-free callers and is default-OFF until the
-        // §5 panel graduates it.
-        recover_unstable_pivot: deadline.is_some() || unstable_pivot_recovery_default(),
+        // path bit-identical to what its own graduation panel judged. The env
+        // opt-in that extended it to deadline-free callers
+        // (`DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`) was retired by #2211 on its §5
+        // panel: cert-clean, 0 bounds recovered (performance-plan §18e).
+        recover_unstable_pivot: deadline.is_some(),
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
         // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,

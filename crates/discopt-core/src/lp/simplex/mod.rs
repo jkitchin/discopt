@@ -31,7 +31,7 @@ pub mod sparse;
 pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
 pub use dual::{
     solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc,
-    unstable_pivot_recovery_default, PreparedDual,
+    PreparedDual,
 };
 pub use presolve::{tighten_bounds, tighten_bounds_csc, tighten_bounds_csc_with_row};
 pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
@@ -154,11 +154,13 @@ pub struct SimplexOptions {
     /// the caller gets nothing. One pivot, and the difference is whether a
     /// deadline was supplied.
     ///
-    /// Default `false` and opted into by `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY=1`:
-    /// re-selecting after a refactorize can land on a different degenerate
-    /// vertex, so this is bound-changing under §5 and needs a corpus panel that
-    /// is both cert-clean and net-positive before it graduates. The deadline
-    /// path's behavior is unchanged — it keeps the recovery it already had.
+    /// Default `false`; the deadline path (`solve_lp_std` with a `time_limit`)
+    /// turns it on. Re-selecting after a refactorize can land on a different
+    /// degenerate vertex, so extending it to deadline-free callers is
+    /// bound-changing under §5. Its opt-in, `DISCOPT_LP_UNSTABLE_PIVOT_RECOVERY`,
+    /// was **retired** by #2211 on its own panel (performance-plan §18e: 82 LPs,
+    /// cert-clean, 0 bounds recovered, retention 72/82 in both arms). Tests and
+    /// callers still set the field directly.
     pub recover_unstable_pivot: bool,
     /// Consecutive degenerate dual pivots after which a **stalled** warm re-solve
     /// is abandoned for the cold solve; `0` disables the bail (#1013).

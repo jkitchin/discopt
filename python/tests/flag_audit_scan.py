@@ -25,6 +25,15 @@ Three rules make this scan honest about what it cannot see:
 3. **Anything undecidable is ``unknown``, never assumed.** The caller must account for
    every ``unknown`` explicitly; silently defaulting them to "ON, not my problem" is
    how the 50 flags stayed invisible in the first place.
+
+Issue #2211: the same blind spot, one language over. The scan above walks
+``python/discopt`` only, so every gate the Rust core reads through ``std::env::var``
+(usually behind a ``OnceLock``) was invisible to it, and the audit's
+``live-solver-math-gates`` marker was a Python-only count. Ten default-OFF gates over
+solver math had no row, ``DISCOPT_PRIMAL_EXPAND_RESET`` among them. ``scan_rust``
+below reads ``crates/*/src`` and classifies each read by the expression that consumes
+it (see ``_rust_polarity``); ``scan()`` merges both languages, so a flag read on both
+sides with different polarity surfaces as ``mixed``.
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import ast
 import importlib
 import os
 import pathlib
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -40,6 +50,7 @@ from unittest import mock
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 PKG = REPO / "python" / "discopt"
+CRATES = REPO / "crates"
 
 #: Words a gate accepts as "on" and as "off". A membership test against the first set
 #: means the predicate IS the feature; against the second it is the feature's negation.
@@ -353,6 +364,249 @@ def scan() -> dict[str, list[Site]]:
 
     assert n_files > 100, f"only scanned {n_files} files — the scan measured nothing"
     assert by_flag, "no DISCOPT_* reads found — the scan stopped matching"
+    for flag, sites in scan_rust().items():
+        by_flag[flag].extend(sites)
+    return dict(by_flag)
+
+
+# ---------------------------------------------------------------- the Rust scan
+#
+# There is no Rust parser in the test environment, so this is a lexer plus a fixed
+# set of consumer shapes. That is only honest because of rule 3: a read whose
+# consumer matches none of the shapes is `unknown`, and the test fails on an
+# unaccounted `unknown`. A new spelling therefore breaks the test instead of
+# vanishing from it.
+#
+# The shapes, each with the value the expression takes when the variable is UNSET
+# (which is the default the audit asks about):
+#
+#   var(F)...map(..).unwrap_or(true|false)      -> that literal
+#   var(F)...unwrap_or(<number>)                -> numeric knob ("selector")
+#   var(F).is_ok_and(..) / .is_ok() / var_os(F).is_some()  -> false
+#   var_os(F).is_none() / var(F).is_err()       -> true
+#   match var(F) { Err(_) => true|false, .. }   -> that literal
+#   let raw = var(F).unwrap_or_default(); parse_x(&raw)
+#                                               -> the arm of parse_x that holds ""
+#
+# A leading `!` flips the first three. Polarity is the value of the read's own
+# expression, which every accessor in the tree names after the feature
+# (`*_enabled`, `cse_enabled`) -- the same convention `_call_accessor` relies on
+# for Python.
+
+_RUST_READ = re.compile(r"(?:\bstd\s*::\s*)?\benv\s*::\s*var(_os)?\s*\(")
+_RUST_LIT = re.compile(r'\s*"([^"\\]*)"\s*\)')
+_RUST_CONST = re.compile(
+    r'\bconst\s+([A-Z0-9_]+)\s*:\s*&(?:\'static\s+)?str\s*=\s*"(DISCOPT_[A-Z0-9_]+)"'
+)
+_RUST_RAW_OPEN = re.compile(r'r(#*)"')
+_RUST_CHAR = re.compile(r"'(\\.|[^\\'])'")
+_RUST_STR = re.compile(r'"([^"\\]*)"')
+
+
+def _rust_strip(src: str) -> str:
+    """Blank comments and test-only code, keeping every offset and line number.
+
+    Comments must go: doc comments quote `env::var("DISCOPT_…")` spellings, and a
+    docstring read as code is the "measured the docstring" failure. Test modules must
+    go too: they save and restore variables (`let prior = env::var_os(F)`), which is
+    not a gate and has no default.
+    """
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "/" and src.startswith("//", i):
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            out[i:j] = " " * (j - i)
+            i = j
+        elif c == "/" and src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out[i:j] = [ch if ch == "\n" else " " for ch in src[i:j]]
+            i = j
+        elif (
+            c == "r"
+            and (raw := _RUST_RAW_OPEN.match(src, i))
+            and not (i and (src[i - 1].isalnum() or src[i - 1] == "_"))
+        ):
+            hashes = raw.group(1)
+            end = src.find('"' + hashes, raw.end())
+            i = n if end < 0 else end + 1 + len(hashes)
+        elif c == '"':
+            j = i + 1
+            while j < n and src[j] != '"':
+                j += 2 if src[j] == "\\" else 1
+            i = j + 1
+        elif c == "'" and (ch_lit := _RUST_CHAR.match(src, i)):
+            i = ch_lit.end()
+        else:
+            i += 1
+    text = "".join(out)
+    # `#[cfg(test)]` items: blank from the attribute to the end of the item it marks.
+    for m in reversed(list(re.finditer(r"#\[cfg\(test\)\]", text))):
+        semi = text.find(";", m.end())
+        brace = text.find("{", m.end())
+        if brace < 0 or (0 <= semi < brace):
+            end = semi + 1
+        else:
+            end = _rust_block_end(text, brace)
+        text = (
+            text[: m.start()]
+            + "".join(ch if ch == "\n" else " " for ch in text[m.start() : end])
+            + text[end:]
+        )
+    return text
+
+
+def _rust_block_end(text: str, open_brace: int) -> int:
+    """Offset one past the `}` matching the `{` at ``open_brace``."""
+    depth = 0
+    for k in range(open_brace, len(text)):
+        if text[k] == "{":
+            depth += 1
+        elif text[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+    raise AssertionError(f"unbalanced braces after offset {open_brace}")
+
+
+def _rust_expr_tail(text: str, start: int) -> str:
+    """The consuming expression from ``start``: up to a `;`/`,` at depth 0, or the
+    bracket that closes the enclosing one. A `match` block is inside the tail."""
+    depth = 0
+    for k in range(start, len(text)):
+        ch = text[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return text[start:k]
+        elif ch in ";," and depth == 0:
+            return text[start:k]
+    return text[start:]
+
+
+def _rust_words(pattern: str) -> frozenset[str]:
+    return frozenset(w.lower() for w in _RUST_STR.findall(pattern))
+
+
+def _rust_vocab(words: frozenset[str]) -> str | None:
+    core = words - {""}
+    if core and core <= ON_WORDS:
+        return "on"
+    if core and core <= OFF_WORDS:
+        return "off"
+    return None
+
+
+def _rust_parse_table(text: str, fname: str) -> str:
+    """Polarity of ``fname(raw)`` at ``raw == ""``, read from its own match arms."""
+    m = re.search(rf"\bfn\s+{re.escape(fname)}\s*\(", text)
+    if not m:
+        return f"unknown:parse-fn-not-in-file:{fname}"
+    sig_end = text.find("{", m.end())
+    body = text[sig_end : _rust_block_end(text, sig_end)]
+    for arm in re.finditer(r"((?:\"[^\"]*\"\s*\|\s*)*\"[^\"]*\")\s*=>", body):
+        words = _rust_words(arm.group(1))
+        if "" in words:
+            pol = _rust_vocab(words)
+            return pol if pol else "unknown:parse-mixed-word-set"
+    # No arm names "": the empty string takes an early `return` instead. A numeric
+    # return type makes it a budget or count; anything else is undecided.
+    ret = text[m.end() : sig_end]
+    if re.search(r"is_empty\(\)", body) and re.search(
+        r"Result<\s*(usize|u\d+|i\d+|f64|f32)\b", ret
+    ):
+        return "selector"
+    return "unknown:parse-no-empty-arm"
+
+
+def _rust_polarity(text: str, start: int, end: int, os_form: bool) -> tuple[str, str]:
+    """(form, polarity) for the read spanning ``text[start:end]``."""
+    tail = _rust_expr_tail(text, end)
+    flat = re.sub(r"\s+", "", tail)
+    before = text[:start].rstrip()
+    negated = before.endswith("!") and not before.endswith("!=")
+
+    def flip(p: str) -> str:
+        return {"on": "off", "off": "on"}.get(p, p) if negated else p
+
+    # Presence tests: the value when unset is fixed by the method itself.
+    for meth, unset in (
+        (".is_ok_and(", "off"),
+        (".is_ok()", "off"),
+        (".is_some()", "off"),
+        (".is_none()", "on"),
+        (".is_err()", "on"),
+    ):
+        if flat.startswith(meth):
+            return "rust_presence", flip(unset)
+    # `match env::var(F) { Err(_) => <lit>, Ok(v) => … }`
+    if flat.startswith("{") and before.endswith("match"):
+        m = re.search(r"Err\(_\)=>(true|false)\b", flat)
+        if m:
+            return "rust_match", "on" if m.group(1) == "true" else "off"
+        return "rust_match", "unknown:match-err-arm-not-literal"
+    # `.map(..).unwrap_or(<lit>)` chains.
+    m = re.search(r"\.unwrap_or\(([^()]*)\)$", flat) or re.search(r"\.unwrap_or\(([^()]*)\)", flat)
+    if m and not flat.startswith(".unwrap_or_default()"):
+        arg = m.group(1)
+        if arg in ("true", "false"):
+            return "rust_unwrap_or", flip("on" if arg == "true" else "off")
+        if re.fullmatch(r"-?[0-9][0-9_]*(\.[0-9_]*)?([eE][-+]?[0-9]+)?(usize|f64|u\d+|i\d+)?", arg):
+            return "rust_unwrap_or", "selector"
+        return "rust_unwrap_or", f"unknown:unwrap_or-arg:{arg}"
+    # `let raw = env::var(F).unwrap_or_default(); parse_x(&raw)` (maybe `.unwrap_or_else(panic)`).
+    if flat.startswith(".unwrap_or_default()"):
+        bind = re.search(r"let\s+(\w+)\s*=\s*$", before)
+        if not bind:
+            return "rust_parse_table", "unknown:unwrap_or_default-not-bound"
+        name = bind.group(1)
+        call = re.search(rf"\b(\w+)\s*\(\s*&?\s*{name}\b", text[end : end + 400])
+        if not call:
+            return "rust_parse_table", "unknown:binding-not-parsed"
+        return "rust_parse_table", _rust_parse_table(text, call.group(1))
+    return "rust_unrecognised", "unknown:rust-consumer-shape"
+
+
+def scan_rust() -> dict[str, list[Site]]:
+    """Every `DISCOPT_*` read under ``crates/*/src`` (test modules excluded)."""
+    by_flag: dict[str, list[Site]] = defaultdict(list)
+    files = sorted(CRATES.glob("*/src/**/*.rs"))
+    n_reads = 0
+    for path in files:
+        text = _rust_strip(path.read_text())
+        consts = dict(_RUST_CONST.findall(text))
+        rel = str(path.relative_to(REPO))
+        for m in _RUST_READ.finditer(text):
+            n_reads += 1
+            lit = _RUST_LIT.match(text, m.end())
+            if lit:
+                flag = lit.group(1)
+                end = lit.end()
+            else:
+                ident = re.match(r"\s*([A-Z0-9_]+)\s*\)", text[m.end() :])
+                if not ident or ident.group(1) not in consts:
+                    # A non-literal, non-constant argument could name any flag.
+                    # Crash rather than skip: a skipped read is the #1421 blind spot.
+                    line = text.count("\n", 0, m.start()) + 1
+                    raise AssertionError(
+                        f"{rel}:{line}: env::var with an argument the scan cannot "
+                        "resolve to a name. Teach flag_audit_scan.py this form."
+                    )
+                flag = consts[ident.group(1)]
+                end = m.end() + ident.end()
+            if not flag.startswith("DISCOPT_"):
+                continue
+            form, pol = _rust_polarity(text, m.start(), end, bool(m.group(1)))
+            line = text.count("\n", 0, m.start()) + 1
+            by_flag[flag].append(Site(flag, form, pol, rel, line, "-"))
+
+    assert len(files) > 50, f"only {len(files)} Rust files under crates/ -- wrong root?"
+    assert n_reads > 0, "no env::var reads in crates/ -- the Rust scan stopped matching"
     return dict(by_flag)
 
 
@@ -378,8 +632,10 @@ def main() -> int:
     for flag, sites in sorted(by_flag.items()):
         buckets[polarity_of(sites)].append(flag)
 
+    n_rust = sum(1 for v in by_flag.values() for s in v if s.path.startswith("crates/"))
     print(f"distinct DISCOPT_* flags : {len(by_flag)}")
     print(f"read sites classified    : {n_sites}")
+    print(f"  of which Rust (crates/): {n_rust}")
     for kind in ("off", "on", "selector", "mixed", "unknown"):
         print(f"  {kind:10s} {len(buckets[kind]):4d}")
     for kind in ("off", "unknown", "mixed"):
@@ -387,8 +643,8 @@ def main() -> int:
         for flag in buckets[kind]:
             s = by_flag[flag][0]
             print(f"  {flag:42s} {s.polarity:34s} {s.form:12s} {s.where}")
-    print(f"\nEXECUTED CLASSIFICATIONS: {n_sites}")
-    if n_sites == 0:
+    print(f"\nEXECUTED CLASSIFICATIONS: {n_sites} ({n_rust} Rust)")
+    if n_sites == 0 or n_rust == 0:
         return 1
     return 0
 
