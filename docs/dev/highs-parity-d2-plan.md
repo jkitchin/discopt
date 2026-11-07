@@ -1,0 +1,209 @@
+# D2 plan — closing the pure-MILP gap to HiGHS (highs-parity)
+
+Status: **plan, 2026-11-07.** Branch `claude/happy-hamilton-0vvo3b`, PR jkitchin/discopt#2196.
+The owner's goal is to eliminate HiGHS. D2 (the pure-MILP route default) is the last
+default path that needs it. Evidence base: `highs-parity-d2-analysis.md` follow-ups 1-22,
+`highs-parity-d2-highs-ablation.md`, `highs-parity-d2-highs-expert-review.md`,
+`highs-parity-d2-phaseB-expert.md`, `highs-parity-d2-node-gmi-expert.md`.
+
+## 0. Where we are
+
+Panel: MIPLIB-38 + M (62 instances), 20 s, `gap 1e-4`.
+
+| | certified per rep |
+|---|---|
+| HiGHS 1.15.1 | ~59 / 62 |
+| Rust at the start of 2026-11-06 | ~32 / 62 |
+| Rust now (node GMI + aligned slacks + sub-MIP, all default ON) | **~38 / 62** |
+
+Rust certified 114 of 186 solves on the bundle panel. 24 instances never certify; by
+cause:
+
+| group | instances | what is missing |
+|---|---|---|
+| G1 near (within ~1 % on both sides) | `b-ball`, `fiber`, `istra`, `kaihu`, `gesa2`, `bppc8-02` | a little more bound or incumbent; time-sensitive |
+| G2 no incumbent | `2122`, `enlight_hard`, `neos-2624317-amur`, `issue-2446`, `p0548` | a first feasible point (and, for `issue-2446`, a root LP that finishes) |
+| G3 primal-limited | `neos-3118745-obra`, `beavma`, `sp150x300d`, `nexp-50-20-1-1`, `nexp-50-20-4-2`, `neos17`, `gsvm2rl3` | a better incumbent; the bound is at or near the optimum on several |
+| G4 dual-limited | `mik-250-20-75-1/2/3/5` | incumbent optimal, bound ~3 % off |
+| G5 LP throughput | `neos-911970` | 7 nodes in 20 s |
+
+**Measured non-levers. Do not re-propose them without new evidence:**
+- full presolve (the Rust route on HiGHS-presolved models fixes only `p0548`);
+- the objective cutoff alone (8 % of node pivots);
+- the improving dive (a primal-gap gain, but no certifications);
+- original-row c-MIR at nodes (`DISCOPT_MILP_NODE_SEP`, retired);
+- RINS as A12 built it (retired);
+- re-separating root cuts in the re-entry run (`DISCOPT_MILP_REENTRY_CUTS`: costs the
+  `mik` incumbents);
+- the A-series heap order;
+- GMI off a completed short basis (dense cuts).
+
+## 1. Working rules (what made the last two days productive)
+
+1. **Entry first, on the target rows, 1 rep, 20 s.** Kill the lever on the stated
+   criterion. A lever that does not move its target rows does not get a full panel.
+2. **Ask HiGHS or SCIP which mechanism certifies a row before building.** Use option or
+   separator ablations on the exact rows; `pyscipopt` is installed. Both of the
+   session's real wins (node GMI with a global pool; aligned slacks) came from such an
+   ablation or a profile, not from a design guess.
+3. **Graduate only on the pre-registered `d2_flag_panel.py` panel** (3 reps, bars 1 and
+   2a-2e, `--resume`) **plus `flag_onoff_corpus_panel.py`.** Run on a quiet machine:
+   concurrent jobs invalidated one panel (follow-up 22).
+4. Every lever is a default-OFF flag with an audit row and a regression test. Commit and
+   push after each step.
+
+## 2. Workstreams, in order of expected certifications per effort
+
+### W1 — Node-GMI per-node cost (G1, and helps everything)  *expected +3-5*
+
+**Evidence.** The graduated node GMI costs throughput:
+
+- `istra` falls from 13.5-16.4k nodes to 5-5.6k at 20 s, and stays open at 48 although
+  the direct probe reaches 48.47 and SCIP certifies it with the same cuts shared.
+- `kaihu` and `iskar` certify only because the lift outweighs the loss.
+
+The cost is structural. Every node that uses the pool:
+
+- clones the whole working CSC and appends up to 20 rows;
+- re-prepares a dual from the plain basis;
+- scans the whole pool densely (`O(pool x n_w)`) to pick violated cuts;
+- abstains in thousands of NS checks (`NodeGmiNsAbstain` 3-8k per solve).
+
+**Change.**
+- (a) Keep the pool sparse (CSR rows); compute violation with a sparse dot against
+  `sol.x`.
+- (b) Build the node-local LP by appending rows to a shared `PreparedDual`: reuse the
+  parent factor plus row updates, no CSC clone.
+- (c) Re-check NS with the open-column repair (`scaled_dual_for_open_columns_csc`)
+  before abstaining.
+- (d) Give pool rows to the node LP only when the node is in the best `k` of its batch
+  or its plain bound is within the lattice step of the next integer.
+
+**Entry.** On `istra`, `iskar`, `kaihu`, `jijia`, `b-ball` and `mik-1`, at 20 s:
+
+- nodes/s must be at least 2x the current node-GMI arm;
+- bounds no lower than now.
+
+**Kill:** < 1.5x nodes/s, or any target row loses its bound.
+
+**Size:** 1-2 days. This is bound-neutral per node (same cuts, same verified bound),
+so verify it as bound-neutral on fixed seeds first.
+
+### W2 — First incumbents (G2)  *expected +2-3*
+
+**Evidence.**
+- `2122` has bound = optimum and no incumbent: any feasible point certifies it.
+- `p0548` certifies in 323 nodes once it has HiGHS's presolved model.
+- The sub-MIP's RENS never fires on these rows: it needs a fractional batch candidate
+  and an LP that finishes.
+- HiGHS's first incumbents come from feasibility jump (`J`, 15/25 base rows) and
+  randomized rounding (`R`).
+
+**Change.**
+- (a) **RENS at the root**, right after the root cut loop, from the root LP point,
+  whenever there is no incumbent. The `try_sub_mip` path exists; only the call site is
+  new.
+- (b) **Feasibility jump** (Luteberget-Sandberg; HiGHS `HighsFeasibilityJump`): a
+  weighted local search over integer assignments, run before the tree, at an effort cap
+  of 5 % of LP iterations. A new module of ~400 lines.
+- (c) **Randomized rounding with propagation** at the first `k` batch candidates.
+
+**Entry.** On the 5 G2 rows, 20 s, count the rows with an incumbent: OFF has 0 of 5 on
+2 of them.
+
+**Kill:** fewer than 2 of 5 rows gain an incumbent.
+
+**Size:** (a) half a day; (b) 2-3 days; (c) 1 day.
+
+### W3 — Sub-MIP schedule (G3)  *expected +2-4*
+
+**Evidence.**
+- The graduated sub-MIP fires only 2-6 times per 20 s solve (stride 16 batches, with
+  backoff).
+- Even so it took `istra` 56 -> 49, `beavma` 512k -> 403k and `bppc8-02` 528 -> 513.
+- HiGHS runs RINS/RENS at every plunge start under an LP-iteration budget (10k free,
+  then 5 % of tree LP iterations; ablation §C.3), and its final incumbent is a sub-MIP
+  point on 20/25 rows.
+
+**Change.**
+- Replace the batch stride with an LP-iteration budget.
+- Fire on the best-bound node of every batch while inside the budget.
+- Use an adaptive fixing rate (start 0.6; halve on an infeasible sub-MIP, raise on
+  success).
+
+**Entry.** On the 7 G3 rows, 20 s, median primal gap and certified count.
+
+**Kill:** the median primal gap is not lower, or a G3/G1 row loses certification.
+
+**Size:** 1 day.
+
+### W4 — `mik`: in-tree c-MIR with a global pool (G4)  *expected +2-4*
+
+**Evidence.**
+- HiGHS certifies `mik` only with node separation (`node_cuts_off` costs 10-14x).
+- On `mik-1`, SCIP applies 3,865 `aggregation` and 3,428 `gomory` cuts, most of them in
+  the tree.
+- The retired Rust node c-MIR used the original rows only, aggregated at most 2 rows,
+  and folded into a capped matrix pool.
+- Node GMI moved `mik` bounds by 35-70 units, which is not enough.
+
+**Change.** Separate aggregated c-MIR at nodes into the **same global aging pool as
+node GMI** (that infrastructure exists), not the shared matrix. Use deeper aggregation
+(`CMIR_MAX_AGGR` 2 -> 6) with variable-bound substitution.
+
+**Entry, before any code.** A SCIP ablation on `mik-1` and `mik-5`, presolve off,
+`gomory` vs `aggregation` vs both, in-tree only. This shows which family is necessary.
+Then run the Rust probe on the 4 `mik` rows.
+
+**Kill:** no `mik` bound improves by > 0.5 % of the gap.
+
+**Size:** 1-2 days.
+
+### W5 — LP engine throughput (G5, plus `issue-2446`)  *expected +1-2, broad speed*
+
+**Evidence.**
+- `neos-911970`: 7 nodes in 20 s.
+- `issue-2446`: the whole 20 s goes to root LP work (111k pivots, 77k in phase 1,
+  2,049 refactorizations); HiGHS solves the instance in 0.8 s.
+
+**Change.**
+- Profile both LPs against HiGHS (pivots, refactorizations, per-pivot cost).
+- Candidates: the bound-flipping ratio test in the dual, the refactorization trigger,
+  phase-1 choice (a dual phase 1 on a bounded problem), and crash basis.
+- The fix follows the profile; no lever is chosen in advance.
+
+**Entry:** the profile itself. **Kill:** none; this is diagnostic until a cause is
+named.
+
+**Size:** 1-3 days.
+
+### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
+
+Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first
+child evaluation on the parent's factor, an objective limit, and heuristics inside the
+plunge. The improving-dive and node-GMI experience says to do it only with the hot LP
+(no re-prepare per node); a heap-order change alone is a measured non-lever.
+
+## 3. Sequence and gates
+
+| step | work | expected count | gate |
+|---|---|---|---|
+| 1 | W1 (node-GMI cost) | ~41-43 | entry, then panel + corpus, graduate |
+| 2 | W2a (root RENS) + W3 (sub-MIP schedule) | ~44-47 | entry per lever, one bundle panel |
+| 3 | W4 entry (SCIP on `mik`), then build | ~47-50 | entry, panel |
+| 4 | W2b (feasibility jump) | ~48-51 | entry, panel |
+| 5 | W5 profile -> fix | ~50-53 | entry, panel |
+| 6 | Re-measure against HiGHS; decide W6 or accept the residual | — | owner |
+
+After each graduation: re-run the D2 gate (Rust vs HiGHS on MIPLIB-38 + M, 1 rep, 20 s)
+and update §0. The parity bar for flipping `DISCOPT_LP_MILP_BACKEND` to `rust` is the
+plan's original R2 bar: certified >= HiGHS on the panel, 0 lost, wall <= 2x. Short of
+that, the owner decides whether to accept the residual (as D3 did).
+
+## 4. Risks
+
+- **Trajectory variance.** Single-rep counts swing by +/- 1-2 rows (`gt2` 1-ulp,
+  `khb05250` formulation). Entries use the target rows; graduation uses 3 reps.
+- **Load.** Never run two panels at once, and never run gates during a panel (follow-up
+  22).
+- **Container restarts.** They killed two panels; use `--resume` (added in `0a05d3c1`).
