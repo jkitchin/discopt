@@ -134,6 +134,19 @@ pub fn solve_lp_cols(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
+    // #2212 (`DISCOPT_LP_LOGICAL_DUAL_COLD`, default OFF): the dual simplex from a
+    // sign-matched logical basis first, accepted only with a certificate checked on
+    // this data; the primal below runs only when it declines. Inside such an attempt
+    // the attempt's own breakdown fallback lands here, and gets a `Numerical` stub
+    // instead of a primal solve of the attempt's LP (see `cold_dual`).
+    if super::cold_dual::in_attempt() {
+        return super::cold_dual::declined(n);
+    }
+    if super::cold_dual::logical_dual_cold_enabled() {
+        if let Some(sol) = super::cold_dual::logical_dual_cold(&cols, m, n, c, l, u, b, opts) {
+            return sol;
+        }
+    }
     // #85: `cols` is consumed by the solve, so a possible dense retry needs its
     // own copy up front. O(nnz), paid only with the density route ON (the warm
     // dual path already clones the CSC per solve — see dual.rs — so this is

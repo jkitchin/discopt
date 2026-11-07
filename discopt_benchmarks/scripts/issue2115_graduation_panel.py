@@ -209,6 +209,19 @@ _FLAGS = {
         "leak": lambda off: off["ExpandResetRetries"],
         "show": ("ExpandResetRetries", "ExpandResetRescues"),
     },
+    # #2212: the cold LP path tries the dual simplex from a sign-matched logical
+    # basis before the cold primal (``DISCOPT_LP_LOGICAL_DUAL_COLD``,
+    # `lp/simplex/cold_dual.rs`). An attempt that is not certified falls back to the
+    # unchanged primal, so only a certified attempt (``OwnDecided`` + ``AugDecided``)
+    # can change the search; OFF, no attempt is ever made.
+    "DISCOPT_LP_LOGICAL_DUAL_COLD": {
+        "fired": lambda off, on: on["LogicalDualColdOwnDecided"] + on["LogicalDualColdAugDecided"],
+        "ran": lambda off, on: (
+            on["LogicalDualColdOwnDecided"] + on["LogicalDualColdAugDecided"] > 0
+        ),
+        "leak": lambda off: off["LogicalDualColdAttempts"],
+        "show": ("LogicalDualColdAttempts", "LogicalDualColdOwnDecided"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -243,6 +256,11 @@ _CTRS = (
     "ExpandResetArmed",
     "ExpandResetRetries",
     "ExpandResetRescues",
+    "LogicalDualColdAttempts",
+    "LogicalDualColdOwnDecided",
+    "LogicalDualColdAugDecided",
+    "LogicalDualColdRefused",
+    "LogicalDualColdFellBack",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
