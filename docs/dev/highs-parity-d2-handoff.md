@@ -77,6 +77,18 @@ the short version: what is on, what is off, and what to do first.
   feasible box. The options are tolerance-robust Farkas and FBBT margins, or
   confirmation by a second engine.
 
+## Engine session 2026-11-07 (late): outcomes
+
+| item | outcome |
+|---|---|
+| engine step 2 (row-wise pivot row) | built (`deb1b1f`); pivot-row update 2-6x cheaper |
+| `DISCOPT_LP_PRIMAL_INCR_PRICING` (steps 1+2) | §5 panel fails on `p0548` alone (125 -> 123); **kept as a documented opt-out, owner to confirm or retire** |
+| W5(a) `DISCOPT_LP_DUAL_COLD` | entry failed (`neos-911970` 874 -> 45 nodes); retired |
+| W5(d) `DISCOPT_MILP_CUT_LP_EXCHANGE` | entry failed (`istra` loses its certificate, `enlight8` nodes /3); retired |
+
+Next: re-panel the W4 c-MIR bundle. The "faster engine" it was waiting for did not
+materialize as a default; steps 1+2 are available behind the opt-out flag.
+
 ## First things to do
 
 1. **Run the full `-m "not slow"` suite.** `origin/main` was merged at `8c86eab9`; the

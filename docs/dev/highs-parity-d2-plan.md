@@ -425,6 +425,28 @@ The ceiling was already measured: removing the short bases at their source
 What would still pay is a *warm* dual start from the short basis (completed with
 logicals for its uncovered rows), but the EXPEL ceiling says not much.
 
+**W5(d) physical removal of lazily deleted cut rows: built, entry failed, retired
+(2026-11-07).** `DISCOPT_MILP_CUT_LP_EXCHANGE` deleted every aged folded row (not only
+rows whose slack is basic in every stored basis). Each frontier basis with a deleted
+slack nonbasic first took the slack in by one exchange pivot (the expert's option b,
+memoized per shared basis).
+
+Entry (`d2-analysis/w5d_cut_lp_exchange_entry.jsonl.gz`, 10 rows, 2 reps, 20 s):
+- The matrix did shrink: relaxed rows went to 0 and node-LP time fell.
+- Throughput fell broadly:
+  - `neos-3610051-istra` lost its certificate (3.8 s -> time-out);
+  - `enlight8` nodes /3, `sp150x300d` /2, `beavma` -27 %;
+  - `b-ball` 2.3x slower.
+- Only `bppc8-02` gained (nodes x2), with `neos-911970` level.
+- The cost is structural. Every deletion epoch factorizes every frontier basis that
+  needs an exchange (14k factorizations on `b-ball`). Each failed exchange (up to 445
+  per run) drops a basis, and that node then cold-solves (shape refusals up 5-50x).
+- HiGHS avoids both because its open nodes store no basis.
+
+So the lazily relaxed rows are cheaper to carry than to remove this way. What would
+change that is a tree that keeps bases only on the dive stack, as HiGHS does. That is
+W6's territory, not a W5 lever. Retired, flag and implementation.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first

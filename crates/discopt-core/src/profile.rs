@@ -354,11 +354,6 @@ counters!(
     PrimalRowPriceSparse,
     PrimalRowPriceDense,
     PrimalRowPriceVerifyFail,
-    // D2 W5(d) `DISCOPT_MILP_CUT_LP_EXCHANGE`: stored bases factorized to take deleted
-    // cut slacks in, the exchange pivots made, and bases that could not be (dropped).
-    CutLpExchangeFactor,
-    CutLpExchangePivots,
-    CutLpExchangeFail,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).

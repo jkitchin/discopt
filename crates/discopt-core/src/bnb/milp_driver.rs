@@ -478,133 +478,6 @@ fn parse_cut_lp(raw: &str) -> Result<bool, String> {
     }
 }
 
-/// `DISCOPT_MILP_CUT_LP_EXCHANGE` (D2 W5(d), default OFF): physically delete every
-/// aged folded row, not only those whose slack is basic in every stored basis. A
-/// stored basis with a deleted slack nonbasic first takes that slack into its basis
-/// by one exchange pivot ([`exchange_in_deleted_slacks`]), so it stays a basis of the
-/// smaller LP; the lazy relaxation (`relaxed`, a free slack left in the matrix, which
-/// every later pivot still pays for) is no longer needed. Read once.
-fn cut_lp_exchange_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_MILP_CUT_LP_EXCHANGE").unwrap_or_default();
-        parse_cut_lp_exchange(&raw).unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
-/// The parse table behind [`cut_lp_exchange_enabled`]; garbage is refused.
-fn parse_cut_lp_exchange(raw: &str) -> Result<bool, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
-        other => Err(format!(
-            "DISCOPT_MILP_CUT_LP_EXCHANGE={other:?} is not recognized (expected 1/true/yes \
-             or 0/false/no). Refusing rather than silently picking an arm."
-        )),
-    }
-}
-
-/// W5(d): make every slack in `del` (sorted) basic in `basis` (a basis of the working
-/// LP `sp`, `m x n`, already extended to `n` columns) by one exchange pivot each, so
-/// [`remap_basis_after_delete`] keeps it. For a nonbasic deleted slack `s`:
-/// `alpha = B^-1 a_s`; the leaving slot is the largest `|alpha_p|` among slots NOT
-/// held by a deleted slack (those must stay basic), preferring a column with a finite
-/// bound among the slots within 10x of the largest; the leaving column goes to the
-/// bound its new reduced cost `-d_s / alpha_p` makes dual feasible when that bound is
-/// finite, else to a finite bound (a free one to `AT_LOWER`, the engines' "at 0").
-///
-/// The result is only a warm-start hint: the warm dual re-verifies dual feasibility
-/// (flipping boxed columns) and falls back on refusal, so a wrong bound costs pivots,
-/// never correctness. `None` when the basis cannot be factorized or no slot is
-/// eligible (the caller drops that basis, as today).
-#[allow(clippy::too_many_arguments)]
-fn exchange_in_deleted_slacks(
-    sp: &SparseCols,
-    m: usize,
-    n: usize,
-    c: &[f64],
-    l: &[f64],
-    u: &[f64],
-    basis: &Basis,
-    del: &[usize],
-) -> Option<Basis> {
-    const PIVOT_MIN: f64 = 1e-7;
-    let todo: Vec<usize> = del
-        .iter()
-        .copied()
-        .filter(|&s| basis.col_status.get(s).is_some_and(|&st| st != BASIC))
-        .collect();
-    if todo.is_empty() {
-        return Some(basis.clone());
-    }
-    if basis.basic_vars.len() != m || basis.col_status.len() != n {
-        return None;
-    }
-    let mut b = basis.clone();
-    let col_sparse = |j: usize| -> Vec<(usize, f64)> {
-        let (rows, vals) = sp.col(j);
-        rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
-    };
-    let mut lu = FeralLU::new();
-    let cols: Vec<Vec<(usize, f64)>> = b.basic_vars.iter().map(|&j| col_sparse(j)).collect();
-    crate::profile::incr(crate::profile::Ctr::CutLpExchangeFactor);
-    lu.factorize_sparse(m, &cols).ok()?;
-    for s in todo {
-        let mut alpha = vec![0.0; m];
-        for (r, v) in col_sparse(s) {
-            alpha[r] = v;
-        }
-        lu.ftran(&mut alpha).ok()?;
-        let amax = (0..m)
-            .filter(|&p| del.binary_search(&b.basic_vars[p]).is_err())
-            .map(|p| alpha[p].abs())
-            .fold(0.0f64, f64::max);
-        if amax <= PIVOT_MIN {
-            return None;
-        }
-        let finite = |j: usize| l[j] > -INF || u[j] < INF;
-        let mut best: Option<(usize, f64, bool)> = None;
-        for p in 0..m {
-            let j = b.basic_vars[p];
-            if del.binary_search(&j).is_ok() || alpha[p].abs() < 0.1 * amax {
-                continue;
-            }
-            let key = (finite(j), alpha[p].abs());
-            if best.is_none_or(|(_, a, f)| key > (f, a)) {
-                best = Some((p, alpha[p].abs(), key.0));
-            }
-        }
-        let (p, _, _) = best?;
-        // d_s = c_s - y.a_s with y = B^-T c_B.
-        let mut y: Vec<f64> = b.basic_vars.iter().map(|&j| c[j]).collect();
-        lu.btran(&mut y).ok()?;
-        let d_s = c[s] - sp.dot(s, &y);
-        let d_leave = -d_s / alpha[p];
-        let leaving = b.basic_vars[p];
-        let (lo, hi) = (l[leaving] > -INF, u[leaving] < INF);
-        b.col_status[leaving] = match (lo, hi) {
-            (true, true) => {
-                if d_leave >= 0.0 {
-                    AT_LOWER
-                } else {
-                    AT_UPPER
-                }
-            }
-            (false, true) => AT_UPPER,
-            _ => AT_LOWER,
-        };
-        let mut dense = vec![0.0; m];
-        for (r, v) in col_sparse(s) {
-            dense[r] = v;
-        }
-        lu.update(p, &dense).ok()?;
-        b.basic_vars[p] = s;
-        b.col_status[s] = BASIC;
-        crate::profile::incr(crate::profile::Ctr::CutLpExchangePivots);
-    }
-    Some(b)
-}
-
 /// HiGHS `mip_lp_age_limit` (`HighsOptions.h:1176-1180`): a folded row whose slack has
 /// been basic for more than this many batches is deleted.
 const CUT_LP_AGE_LIMIT: u32 = 10;
@@ -4366,7 +4239,6 @@ fn solve_milp_node_search(
         cut_lp_epoch += 1;
         if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
             let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
-            let exchange_on = cut_lp_exchange_enabled();
             let mut del: Vec<usize> = Vec::new();
             let mut relaxed_any = false;
             for (i, r) in cut_lp_rows.iter_mut().enumerate() {
@@ -4378,10 +4250,9 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlockedRow);
                     continue;
                 }
-                let basic_everywhere = exchange_on
-                    || tm
-                        .frontier_bases()
-                        .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
+                let basic_everywhere = tm
+                    .frontier_bases()
+                    .all(|b| b.col_status.get(r.col).is_none_or(|&st| st == BASIC));
                 if basic_everywhere {
                     del.push(i);
                 } else if !r.relaxed {
@@ -4414,28 +4285,6 @@ fn solve_milp_node_search(
                     } else {
                         kept.push(r);
                     }
-                }
-                if exchange_on {
-                    // W5(d): every stored basis takes the deleted slacks into its basis
-                    // first (memoized per shared basis), on the matrix before deletion.
-                    let mut dcols: Vec<usize> = gone.iter().map(|r| r.col).collect();
-                    dcols.sort_unstable();
-                    let mut memo: HashMap<usize, Option<Basis>> = HashMap::new();
-                    tm.map_frontier_bases(|b| {
-                        let key = b as *const Basis as usize;
-                        memo.entry(key)
-                            .or_insert_with(|| {
-                                let ext = extend_basis(b.clone(), n_w);
-                                let out = exchange_in_deleted_slacks(
-                                    &csc_w, m_w, n_w, &c_w, &l_w, &u_w, &ext, &dcols,
-                                );
-                                if out.is_none() {
-                                    crate::profile::incr(crate::profile::Ctr::CutLpExchangeFail);
-                                }
-                                out
-                            })
-                            .clone()
-                    });
                 }
                 let d = delete_cut_rows(&csc_w, m_w, n_w, &b_w, &mut gone, &mut kept);
                 csc_w = d.csc;
@@ -8328,103 +8177,6 @@ mod tests {
             }
         }
         act.iter().zip(b).map(|(a, bb)| a - bb).collect()
-    }
-
-    /// D2 W5(d): a stored basis with deleted cut slacks NONBASIC is exchanged so both
-    /// are basic, stays nonsingular, and survives `remap_basis_after_delete` as a
-    /// nonsingular basis of the smaller LP (today's path drops it). Same LP as
-    /// `deleting_cut_rows_keeps_every_row_equivalent`. Checks are counted.
-    #[test]
-    fn exchange_keeps_a_basis_with_nonbasic_deleted_slacks() {
-        let cuts = [
-            GomoryCut {
-                coeffs: vec![1.0, 2.0, 0.0],
-                rhs: 1.0,
-            },
-            GomoryCut {
-                coeffs: vec![0.5, 0.0, 0.0, 3.0],
-                rhs: 2.0,
-            },
-            GomoryCut {
-                coeffs: vec![0.0, 1.0, 0.0, -1.0, 2.0],
-                rhs: -1.0,
-            },
-            GomoryCut {
-                coeffs: vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.5],
-                rhs: 0.0,
-            },
-        ];
-        let base = SparseCols::from_csc(vec![0, 1, 2, 3], vec![0, 0, 0], vec![1.0, 1.0, -1.0]);
-        let mut b = vec![0.0];
-        let (mut c, mut l, mut u) = (vec![1.0, 2.0, 0.0], vec![0.0; 3], vec![10.0; 3]);
-        let mut is_int = vec![false; 3];
-        let (mut sp, mut m, mut n) = (base, 1, 3);
-        for k in &cuts {
-            let (nsp, nm, nn) = augment_csc_with_cuts(
-                &sp,
-                &mut b,
-                &mut c,
-                &mut l,
-                &mut u,
-                &mut is_int,
-                m,
-                n,
-                std::slice::from_ref(k),
-            );
-            (sp, m, n) = (nsp, nm, nn);
-        }
-        assert_eq!((m, n), (5, 7));
-        let nonsingular = |sp: &SparseCols, m: usize, basic: &[usize]| -> bool {
-            let cols: Vec<Vec<(usize, f64)>> = basic
-                .iter()
-                .map(|&j| {
-                    let (r, v) = sp.col(j);
-                    r.iter().zip(v).map(|(&i, &x)| (i, x)).collect()
-                })
-                .collect();
-            FeralLU::new().factorize_sparse(m, &cols).is_ok()
-        };
-        // Slacks 3 and 4 (cut rows 1, 2) are the ones deleted; 3 is nonbasic here.
-        let start = Basis {
-            basic_vars: vec![0, 1, 4, 5, 6],
-            col_status: vec![BASIC, BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC, BASIC],
-        };
-        assert!(nonsingular(&sp, m, &start.basic_vars), "premise: a basis");
-        let del = [3usize, 4];
-        let mut checked = 0;
-        let ex = exchange_in_deleted_slacks(&sp, m, n, &c, &l, &u, &start, &del)
-            .expect("an eligible leaving slot exists");
-        assert_eq!(ex.basic_vars.len(), m);
-        assert!(del.iter().all(|&s| ex.col_status[s] == BASIC));
-        assert_eq!(ex.col_status.iter().filter(|&&st| st == BASIC).count(), m);
-        assert!(nonsingular(&sp, m, &ex.basic_vars));
-        checked += 1;
-        // Delete rows 1 and 2 (slacks 3, 4) exactly as the driver does.
-        let row = |i: usize, k: &GomoryCut| CutLpRow {
-            row: 1 + i,
-            col: 3 + i,
-            age: 99,
-            cut: k.clone(),
-            relaxed: false,
-        };
-        let mut gone = vec![row(1, &cuts[1]), row(0, &cuts[0])];
-        let mut kept = vec![row(2, &cuts[2]), row(3, &cuts[3])];
-        let d = delete_cut_rows(&sp, m, n, &b, &mut gone, &mut kept);
-        assert!(
-            remap_basis_after_delete(&start, &d.col_map).is_none(),
-            "today: dropped"
-        );
-        let kept_basis = remap_basis_after_delete(&ex, &d.col_map).expect("kept");
-        assert_eq!(kept_basis.basic_vars.len(), m - 2);
-        assert!(nonsingular(&d.csc, m - 2, &kept_basis.basic_vars));
-        checked += 1;
-        // A basis with the deleted slacks already basic is returned unchanged.
-        assert_eq!(
-            exchange_in_deleted_slacks(&sp, m, n, &c, &l, &u, &ex, &del),
-            Some(ex.clone())
-        );
-        checked += 1;
-        assert_eq!(checked, 3);
     }
 
     #[test]
