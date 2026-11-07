@@ -433,8 +433,8 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 ///   with its adaptive threshold and 0.1 parallelism filter ([`cut_lp_select`],
 ///   `HighsCutPool.cpp:315-418`) and **folded into the shared working LP** at the
 ///   batch boundary, instead of every node re-solving a local copy with them.
-/// * A folded row ages by one on each node LP solve (in batch order) whose optimum has
-///   its slack basic and resets on one that has it nonbasic; every
+/// * A folded row ages by one on each node LP solve (in batch order) and resets on one
+///   where it is active (slack nonbasic with |dual| > [`CUT_LP_DUAL_TOL`]); every
 ///   [`CUT_LP_DELETE_EVERY`] batches rows older than [`CUT_LP_AGE_LIMIT`] are deleted
 ///   and returned to the pool (`HighsLpRelaxation.cpp:629-676`, `HighsCutPool.cpp:150-160`).
 ///   discopt keeps a basis on every open node, where HiGHS keeps one only along the
@@ -475,6 +475,9 @@ const CUT_LP_DELETE_EVERY: usize = 5;
 const CUT_LP_POOL_NEW_AGE_HEADROOM: u32 = 5;
 /// HiGHS parallelism limit within one selection (`HighsCutPool.cpp:400`).
 const CUT_LP_MAX_PARALLEL: f64 = 0.1;
+/// HiGHS `dual_feasibility_tolerance` default (1e-7): a folded row is active at a node
+/// optimum only when its dual exceeds it (`HighsLpRelaxation.cpp:660-673`).
+const CUT_LP_DUAL_TOL: f64 = 1e-7;
 /// HiGHS initial `minScoreFactor` (`HighsCutPool.h:97`).
 const CUT_LP_MIN_SCORE_FACTOR0: f64 = 0.9;
 
@@ -3225,6 +3228,7 @@ fn solve_milp_node_search(
         // solved through it, so an `Optimal` is verified against the ORIGINAL data
         // (the simplex's own audit runs in scaled units) before the tree sees it.
         let problem = ScaledProblem::new(csc_w.clone(), m_w, n_w, &c_w, &b_w);
+        let cut_lp_ids: Vec<(usize, usize)> = cut_lp_rows.iter().map(|r| (r.row, r.col)).collect();
         let scaling = problem.scaling();
         // Solve-space objective/rhs/CSC (scaled when `scaling` is `Some`); node
         // bounds are scaled per node (cheap). Never densified.
@@ -3307,6 +3311,7 @@ fn solve_milp_node_search(
                 node_gmi: node_gmi_on,
                 gmi_pool: &gmi_pool,
                 cut_lp: cut_lp_on,
+                cut_lp_rows: &cut_lp_ids,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -3425,13 +3430,17 @@ fn solve_milp_node_search(
             // failures; withholding `Optimal` here was pure over-conservatism.
             if let Some(basis) = out.basis {
                 // D2 W1: age every folded row on this node's LP solve, in batch order:
-                // reset when its slack is nonbasic, +1 when basic. HiGHS ages per LP
-                // solve the same way (`HighsLpRelaxation.cpp:660-673`).
-                for r in cut_lp_rows.iter_mut() {
-                    if basis.col_status.get(r.col).is_some_and(|&st| st != BASIC) {
-                        r.age = 0;
-                    } else {
-                        r.age = r.age.saturating_add(1);
+                // reset when active (nonbasic with a nonzero dual), +1 otherwise. HiGHS
+                // ages per LP solve the same way (`HighsLpRelaxation.cpp:660-673`).
+                // The rows folded at the end of the previous batch are exactly
+                // `cut_lp_rows` here (nothing is folded mid-batch).
+                if out.cut_lp_active.len() == cut_lp_rows.len() {
+                    for (r, &act) in cut_lp_rows.iter_mut().zip(&out.cut_lp_active) {
+                        if act {
+                            r.age = 0;
+                        } else {
+                            r.age = r.age.saturating_add(1);
+                        }
                     }
                 }
                 if !cut_lp_rows.is_empty() {
@@ -4142,6 +4151,8 @@ struct NodeCtx<'a> {
     /// `DISCOPT_MILP_CUT_LP`: pool cuts are folded into the shared LP at the batch
     /// boundary; the node only reports the violated ones with their HiGHS score.
     cut_lp: bool,
+    /// `DISCOPT_MILP_CUT_LP`: the folded rows `(row, slack column)` of this batch's LP.
+    cut_lp_rows: &'a [(usize, usize)],
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -4197,6 +4208,8 @@ struct NodeOutput {
     gmi_used: Vec<usize>,
     /// `DISCOPT_MILP_CUT_LP`: HiGHS pool score of each `gmi_used` cut at this node.
     gmi_scores: Vec<f64>,
+    /// `DISCOPT_MILP_CUT_LP`: per `ctx.cut_lp_rows` entry, active at this optimum.
+    cut_lp_active: Vec<bool>,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
     /// #2136: the objective of `result.solution` when `result.is_feasible` (an
@@ -4267,6 +4280,7 @@ fn solve_node(
             gmi_new: Vec::new(),
             gmi_used: Vec::new(),
             gmi_scores: Vec::new(),
+            cut_lp_active: Vec::new(),
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -4326,6 +4340,7 @@ fn solve_node(
                 gmi_new: Vec::new(),
                 gmi_used: Vec::new(),
                 gmi_scores: Vec::new(),
+                cut_lp_active: Vec::new(),
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -4447,6 +4462,7 @@ fn solve_node(
         gmi_new: Vec::new(),
         gmi_used: Vec::new(),
         gmi_scores: Vec::new(),
+        cut_lp_active: Vec::new(),
     };
 
     match sol.status {
@@ -4467,6 +4483,20 @@ fn solve_node(
                 }
                 None => std::borrow::Cow::Borrowed(&sol.dual),
             };
+            // D2 W1: which folded cut rows are active at this optimum -- slack
+            // nonbasic AND |dual| above the dual tolerance, HiGHS's age-reset test
+            // (`HighsLpRelaxation.cpp:660-673`). A degenerate row (nonbasic at a zero
+            // dual) ages like a basic one.
+            if !ctx.cut_lp_rows.is_empty() {
+                out.cut_lp_active = ctx
+                    .cut_lp_rows
+                    .iter()
+                    .map(|&(r, c)| {
+                        sol.basis.col_status.get(c).is_some_and(|&st| st != BASIC)
+                            && rc_dual.get(r).is_some_and(|y| y.abs() > CUT_LP_DUAL_TOL)
+                    })
+                    .collect();
+            }
             // #1953: the node's bound. With the gate on, the NS safe bound from the
             // node's own dual over its box (capped at the vertex value); the vertex
             // value alone is only as good as the simplex's optimality test, and a
