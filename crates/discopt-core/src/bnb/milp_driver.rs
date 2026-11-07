@@ -428,14 +428,18 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 /// 10-17, `highs-parity-d2-node-gmi-expert.md`).
 /// W1 entry (scratch): fold pool cuts used at >= `uses` nodes into the shared matrix,
 /// up to `cap` rows in total. `DISCOPT_MILP_NODE_GMI_FOLD=cap[:uses]`; unset/0 = off.
-fn node_gmi_fold() -> (usize, u32) {
-    static V: std::sync::OnceLock<(usize, u32)> = std::sync::OnceLock::new();
+fn node_gmi_fold() -> (usize, u32, f64) {
+    static V: std::sync::OnceLock<(usize, u32, f64)> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         let raw = std::env::var("DISCOPT_MILP_NODE_GMI_FOLD").unwrap_or_default();
         let mut it = raw.split(':');
         let cap = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
         let uses = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(3);
-        (cap, uses)
+        let nnz_ratio = it
+            .next()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(f64::INFINITY);
+        (cap, uses, nnz_ratio)
     })
 }
 
@@ -2322,6 +2326,8 @@ fn solve_milp_node_search(
     let mut gmi_pool_age: Vec<u32> = Vec::new();
     let mut gmi_pool_uses: Vec<u32> = Vec::new();
     let mut gmi_folded: usize = 0;
+    let mut gmi_fold_nnz: usize = 0;
+    let mut gmi_fold_nnz0: Option<usize> = None;
     let mut gmi_fold_pending: Vec<GomoryCut> = Vec::new();
     let mut gmi_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
@@ -3345,8 +3351,10 @@ fn solve_milp_node_search(
             }
             // W1 entry: hot cuts move into the shared matrix (signature kept, so a
             // re-separated copy is not re-admitted to the pool).
-            let (fold_cap, fold_uses) = node_gmi_fold();
+            let (fold_cap, fold_uses, fold_ratio) = node_gmi_fold();
             let mut fold = vec![false; gmi_pool.len()];
+            let nnz0 = *gmi_fold_nnz0.get_or_insert_with(|| csc_w.raw().2.len());
+            let nnz_budget = fold_ratio * nnz0 as f64;
             if fold_cap > 0 {
                 let mut hot: Vec<usize> = (0..gmi_pool.len())
                     .filter(|&k| !drop[k] && gmi_pool_uses[k] >= fold_uses)
@@ -3356,6 +3364,11 @@ fn solve_milp_node_search(
                     if gmi_folded >= fold_cap {
                         break;
                     }
+                    let nz = gmi_pool[k].coeffs.iter().filter(|v| **v != 0.0).count();
+                    if (gmi_fold_nnz + nz) as f64 > nnz_budget {
+                        continue;
+                    }
+                    gmi_fold_nnz += nz;
                     fold[k] = true;
                     drop[k] = true;
                     gmi_folded += 1;
