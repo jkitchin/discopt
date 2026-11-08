@@ -514,9 +514,9 @@ def test_a_roundoff_reduced_cost_fixes_nothing_at_a_node(magnitude):
 def test_the_reduced_cost_deadbands_themselves_did_not_move():
     """#1397 non-goal, again: the yardstick changed, not the constants."""
     from discopt._relax.node_reduce import _RC_TOL
-    from discopt.solver import _RCF_RC_TOL
 
-    assert _RCF_RC_TOL == 1e-7
+    # (The Python MILP tree's ``_RCF_RC_TOL`` went with the tree; its reduced-cost
+    # fixing now runs only in the Rust driver.)
     assert _RC_TOL == 1e-7
 
 

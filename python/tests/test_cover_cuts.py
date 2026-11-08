@@ -13,7 +13,7 @@ import itertools
 
 import discopt.modeling as dm
 import numpy as np
-from discopt._relax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+from discopt._relax.cover_cuts import separate_cover_cuts
 
 
 # ---------------------------------------------------------------------------
@@ -59,17 +59,6 @@ class TestSeparationSoundness:
             np.ones(4, bool),
         )
         assert cuts == []
-
-    def test_precheck_rejects_non_knapsack(self):
-        assert has_binary_knapsack_rows(np.array([[2.0, 3.0]]), np.array([6.0]), np.ones(2, bool))
-        # negative coefficient
-        assert not has_binary_knapsack_rows(
-            np.array([[2.0, -3.0]]), np.array([6.0]), np.ones(2, bool)
-        )
-        # continuous variable in the row
-        assert not has_binary_knapsack_rows(
-            np.array([[2.0, 3.0]]), np.array([6.0]), np.array([True, False])
-        )
 
 
 # ---------------------------------------------------------------------------

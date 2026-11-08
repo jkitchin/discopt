@@ -12997,29 +12997,6 @@ def _native_warm_start_mode() -> int:
     return int(raw)
 
 
-def _p3_force_cut_path_enabled() -> bool:
-    """cert:P3.1c experiment toggle (``DISCOPT_P3_FORCE_CUT_PATH``, default-OFF).
-
-    The Phase 3 1b measurement (``certification-gap-plan.md`` §7) found the
-    integer-product / graphpart class routes *away* from any cut seam: the
-    big-M reformulation rewrites ``nlp_solver`` from ``"pounce"`` to
-    ``"simplex"`` (``:3327``), sending the model to the monolithic Rust
-    ``_solve_milp_simplex`` engine, which has no root/per-node cut loop — so the
-    aggregation c-MIR / Gomory / cover separators never run. This flag is a
-    **cut-reachability entry-experiment lever only**: when set, it SKIPS that
-    ``nlp_solver→"simplex"`` reroute, keeping the model on the self-hosted
-    ``_solve_milp_bb`` path (``prefer_pounce=True``, which enables the integer
-    cut loop via ``_gomory_enabled``). It measures whether making cuts *reachable*
-    closes the 0b root gap (GO), before any invasive Rust cut-seam refactor.
-
-    Default-OFF and math-neutral when off: with the flag unset the reroute is
-    unchanged, so default dispatch/behavior is bit-for-bit identical."""
-    val = os.environ.get("DISCOPT_P3_FORCE_CUT_PATH")
-    if val is None:
-        return False
-    return val.lower() not in ("0", "", "false", "no", "off")
-
-
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
     """Choose at most one QCQP cut family by structure + size, in place.
 
@@ -17571,11 +17548,7 @@ def solve_model(
                 # DISCOPT_BINARY_QUADRATIC_MILP the exact MILP instead takes the
                 # default pure-MILP route (HiGHS, #1229), like any user MILP.
                 presolve = False
-                if (
-                    nlp_solver == "pounce"
-                    and not _p3_force_cut_path_enabled()
-                    and not binary_quadratic_milp_enabled()
-                ):
+                if nlp_solver == "pounce" and not binary_quadratic_milp_enabled():
                     nlp_solver = "simplex"
                 # Incumbent seeding. A user warm start is over the ORIGINAL
                 # variables; the aux columns (z = prod b, y = E(b),
@@ -17805,7 +17778,7 @@ def solve_model(
                     model._solve_deadline = _solve_t0 + float(time_limit)
                     if _iml_pure_milp and classify_problem(_iml) == ProblemClass.MILP:
                         presolve = False
-                        if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                        if nlp_solver == "pounce":
                             nlp_solver = "simplex"
                     elif _tuning().disjunctive_config_bound:
                         # #732 Stage 2 (default-OFF): root disjunctive
@@ -18104,14 +18077,10 @@ def solve_model(
             presolve = False
             if nlp_solver == "pounce":
                 # cert:P3.1c cut-reachability experiment (default-OFF): keep the
-                # reformulated MILP on the self-hosted _solve_milp_bb path (which
-                # has the root cut loop) instead of rerouting to the cut-less
-                # monolithic Rust _solve_milp_simplex engine, so the aggregation
-                # c-MIR / Gomory / cover separators can actually fire on this
-                # class. Math-neutral when the flag is unset. See
-                # _p3_force_cut_path_enabled / certification-gap-plan.md §7.
-                if not _p3_force_cut_path_enabled():
-                    nlp_solver = "simplex"
+                # reformulated MILP on the self-hosted Python MILP tree (which had the
+                # root cut loop). Retired with that tree: the Rust engine now runs its
+                # own root cut loop (cover, GMI, c-MIR), so the reroute is unconditional.
+                nlp_solver = "simplex"
             # Incumbent seeding. A user warm start (initial_solution) is over
             # the ORIGINAL variables; the big-M lift appends aux columns
             # (bits e_k = binary digits of x-lo, products v = e*other) that
@@ -37266,22 +37235,6 @@ def _pounce_round_incumbent(
         if rec is not None and rec[0] == "optimal":
             return rec[1], rec[2]
     return None
-
-
-# Reduced costs below this are treated as zero (basic / degenerate -> no fix).
-#
-# #1397: this absolute deadband answers a scale-free question ("is this reduced cost
-# structurally nonzero?") but ``d_j`` is a *difference* -- for POUNCE it is
-# ``mult_x_L - mult_x_U`` -- so its own magnitude says nothing about how much of it is
-# the round-off of the arithmetic that produced it. Two bound multipliers of magnitude
-# 1e9 differ by one ulp at 2.4e-7, which clears this deadband while carrying no
-# information. The unsound direction is specific and not conservative: RCF *divides*
-# the optimality gap by ``|d_j|``, so an over-stated ``|d_j|`` makes ``gap/|d_j|`` too
-# small and can fix the true optimum out of the box -- a false-optimal certificate.
-# The fix deflates ``|d_j|`` by its own round-off bound (``_numeric.roundoff_slack`` of
-# the terms the difference was taken of, reported as ``LPResult.rc_absum``) before both
-# the deadband test and the division. The constant itself does not move (#1397 non-goal).
-_RCF_RC_TOL = 1e-7
 
 
 def _project_cut_to_structural(coeffs, rhs, A, b, n_orig):

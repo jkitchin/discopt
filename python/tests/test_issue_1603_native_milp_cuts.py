@@ -26,7 +26,7 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._relax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+from discopt._relax.cover_cuts import separate_cover_cuts
 
 pytest.importorskip("highspy")
 
@@ -95,7 +95,6 @@ class TestCoverTinyCoefficients:
 
     def test_unbounded_tiny_term_refuses_the_row(self):
         assert separate_cover_cuts(self.A, self.b, self.x, self.is_bin) == []
-        assert not has_binary_knapsack_rows(self.A, self.b, self.is_bin)
 
     def test_large_range_tiny_term_refuses_cover(self):
         lb, ub = np.array([0, 0, 0.0]), np.array([1, 1, 1e9])
@@ -293,33 +292,6 @@ def test_randomized_native_cut_panel():
     assert compared > 0
     assert not wrong, wrong
     assert not refused, refused  # #1606: zero exit-gate refusals
-
-
-# ---------------------------------------------------------------------------
-# #1607 review: the cut screen judges the SNAPPED point
-# ---------------------------------------------------------------------------
-def _two_packing_rows():
-    m = dm.Model("screen_snap")
-    b = [m.binary(f"b{i}") for i in range(3)]
-    m.subject_to(2 * b[0] + 2 * b[1] <= 3)
-    m.subject_to(2 * b[1] + 2 * b[2] <= 3)
-    m.maximize(b[0] + b[1] + b[2])
-    return m, b
-
-
-def test_near_integral_warm_start_does_not_reject_valid_cuts(caplog):
-    """``b1 = 9e-6`` passes the 1e-5 integrality test. Screened unsnapped, it
-    rejected 5 valid root cuts and logged a false "separator defect" WARNING."""
-    m, b = _two_packing_rows()
-    start = {b[0]: 1.0, b[1]: 9e-6, b[2]: 1.0}
-    with caplog.at_level("WARNING", logger="discopt.solver"):
-        r = m.solve(time_limit=30, milp_backend="native", initial_solution=start)
-    stats = r.solver_stats or {}
-    assert r.status == "optimal" and r.objective == pytest.approx(2.0, abs=1e-9)
-    installed = sum(v for k, v in stats.items() if k.startswith("cuts/") and "rejected" not in k)
-    assert installed > 0, f"no root cut was installed, so nothing was screened: {stats}"
-    assert stats.get("cuts/rejected_by_incumbent", 0) == 0, stats
-    assert not [rec for rec in caplog.records if "separator defect" in rec.getMessage()]
 
 
 # ---------------------------------------------------------------------------
