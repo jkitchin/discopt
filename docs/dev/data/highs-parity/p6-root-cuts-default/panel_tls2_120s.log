@@ -1,0 +1,3 @@
+[run 1/1] tls2@nlpbb: highs cert=[True, True, True, True] nodes=[257, 359, 257, 257] bound=[5.29999999999368] wall=77.65441861199952  rust cert=[True, True, True, True] nodes=[189, 189, 159, 181] bound=[5.29999999999368] wall=66.45292988949996
+run: rows=1 executed=8 checks=72 violations=0 errors=0
+elapsed 612s

@@ -31177,7 +31177,8 @@ def _solve_nlp_bb(
     # bound by taking the TIGHTER of the two valid bounds, for the reported
     # bound/gap and the root diagnostics. Deliberately conservative: it never
     # upgrades ``gap_certified`` or the status — the LP is floating-point
-    # (HiGHS) and sits outside the trusted-node machinery, so certification
+    # (the in-house simplex, or HiGHS on the ``=highs`` opt-out) and sits
+    # outside the trusted-node machinery, so certification
     # continues to come solely from the tree logic above.
     if _root_cut_bound is not None and np.isfinite(_root_cut_bound):
         _rcb = float(_root_cut_bound)

@@ -2,9 +2,10 @@
 
 The Rust arm solves the root LP on the in-house simplex and takes GMI cuts from
 ``gomory_cuts_py`` at its vertex, projected to x-space and filtered exactly as the HiGHS
-separator's. Pinned here: engine selection (an install without highspy now gets the Rust
-root cuts instead of none, #1514), the exact-enumeration soundness check on the Rust arm,
-and the stage deadline reaching the Rust simplex.
+separator's. It is the default since highs-parity P6 (``=highs`` opts out). Pinned here:
+engine selection (an install without highspy gets the Rust root cuts instead of none,
+#1514; one with highspy gets them too unless it asks for HiGHS), the exact-enumeration
+soundness check on the Rust arm, and the stage deadline reaching the Rust simplex.
 """
 
 from __future__ import annotations
@@ -20,10 +21,13 @@ pytestmark = pytest.mark.unit
 
 
 def test_engine_selection(monkeypatch):
+    # highs-parity P6: unset is ``rust`` even with highspy installed; ``=highs`` opts out.
     monkeypatch.delenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", raising=False)
     pytest.importorskip("highspy")
+    assert rc.root_cuts_engine() == "rust"
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "highs")
     assert rc.root_cuts_engine() == "highs"
-    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "rust")
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", " Rust ")
     assert rc.root_cuts_engine() == "rust"
     monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "rsut")
     with pytest.raises(ValueError, match="DISCOPT_NLPBB_ROOT_CUTS_ENGINE"):
@@ -76,6 +80,25 @@ def test_no_highspy_install_gets_rust_root_cuts(monkeypatch):
         assert isinstance(h, rc._RustRootBasis)
         produced += len(rc.separate_gmi(root, h, x, root.A_le, root.b_le, max_cuts=16))
     assert produced > 0, "no GMI cut from the Rust arm: the test lost its teeth"
+
+
+def test_default_root_lp_runs_on_rust_with_highspy_installed(monkeypatch):
+    # The default reaches the solve, not only the selector: no HiGHS object is built.
+    highspy = pytest.importorskip("highspy")
+    monkeypatch.delenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", raising=False)
+
+    def _no_highs(*a, **k):
+        raise AssertionError("the default root-cut LP built a HiGHS instance")
+
+    monkeypatch.setattr(highspy, "Highs", _no_highs)
+    solved = 0
+    for seed in range(6):
+        obj, x, _duals, h = rc._solve_lp(_root(seed), [], [])
+        if x is None:
+            continue
+        assert isinstance(h, rc._RustRootBasis)
+        solved += 1
+    assert solved > 0, "no root LP solved: the test lost its teeth"
 
 
 def test_rust_gmi_cuts_valid_by_exact_enumeration(monkeypatch):

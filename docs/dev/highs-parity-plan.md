@@ -722,6 +722,13 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     HiGHS-arm properties: the Rust deadline is pinned in
     `test_highs_parity_p14_root_cuts_engine.py`, and the stall test's arithmetic assumes
     non-improving rounds come last (Rust: 66 rounds, 63 improving, one mid-run).
+  - **Superseded (2026-11-08, P6): `rust` is now the default** (`=highs` is the opt-out).
+    Re-run of this panel on the 18 instance-configurations where the stage fires today
+    (`data/highs-parity/p6-root-cuts-default/`): 708 checks, 0 violations, certified runs
+    49 HiGHS vs 50 Rust, bounds within 1e-6 rel on 18/18, nodes 0.982x, wall 1.006x
+    (1.013x on a low-load re-run of 7 rows). `tls2@nlpbb` is a 60 s cliff in both arms;
+    at 120 s both certify 4/4 (Rust 66.5 s, HiGHS 77.7 s). The stall test now asserts the
+    consecutive-stall invariant from the bound trace instead of the arithmetic above.
 
 ### Phase 2 — the LP engine (R1-LP)
 

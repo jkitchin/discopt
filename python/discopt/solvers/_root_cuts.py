@@ -7,10 +7,11 @@ experiment validated (probe: ``discopt_benchmarks/scripts/issue781_cutmgmt_probe
 
   * root LP = the model's linear rows + outer-approximation tangents of the
     convex nonlinear rows, iterated to OA convergence each round;
-  * separators: Gomory mixed-integer cuts from the HiGHS basis/tableau (the
-    load-bearing family — closes 75–93% of the remaining root spread on the
-    convex synthesis panel), plus the existing c-MIR and knapsack-cover
-    separators;
+  * separators: Gomory mixed-integer cuts from the root LP's basis/tableau --
+    the in-house simplex by default, HiGHS on ``DISCOPT_NLPBB_ROOT_CUTS_ENGINE=highs``
+    (see :func:`root_cuts_engine`). GMI is the load-bearing family: it closes
+    75–93% of the remaining root spread on the convex synthesis panel (measured
+    on HiGHS). Plus the existing c-MIR and knapsack-cover separators;
   * SCIP-style cut management: persistent pool, efficacy × orthogonality
     scoring, apply only the top-K per round (compounds on GMI: same-or-better
     bound with ~4× fewer cuts applied).
@@ -410,21 +411,25 @@ class _RootLP:
 def root_cuts_engine() -> str:
     """``DISCOPT_NLPBB_ROOT_CUTS_ENGINE``: who solves the root LP and yields the GMI basis.
 
-    ``highs`` or ``rust`` (highs-parity P1.4: the in-house simplex, GMI cuts from
-    ``gomory_cuts_py`` at its vertex). Unset: ``highs`` when ``highspy`` imports, else
-    ``rust`` -- an install without HiGHS used to get NO root cuts here (#1514).
+    ``rust`` (the default) or ``highs``. ``rust`` is the in-house simplex with GMI cuts
+    from ``gomory_cuts_py`` at its vertex (highs-parity P1.4); ``highs`` is the HiGHS root
+    LP with GMI rows read from its basis, and needs ``highspy``. Unset means ``rust``
+    whether or not ``highspy`` is installed, so the stage no longer depends on HiGHS.
 
-    Kept a documented opt-out, not the default, on P1.4's panel (11 instance-configurations
-    where the stage fires, 3 reps, 60 s): cert-clean (414 checks, 0 violations, identical
-    certified set), bounds tighter-or-equal on 11/11, nodes 0.999x, but wall 1.078x against
-    the 1.05x bar (``tls2`` 48.3 -> 65.4 s). It becomes the default when the Rust root LP
-    is no slower (P2) or HiGHS stops being installed (P6). Other values raise.
+    Both engines feed the same checks: ``_finish_root_lp`` cross-checks the LP objective
+    against the evaluator at the LP optimum, and the GMI rows from either basis go through
+    the same norm, dynamism, rhs-safety and violation filters before the pool sees them.
+
+    Default since highs-parity P6 (2026-11-08), on a re-run of P1.4's panel over the 18
+    instance-configurations where the stage fires today (3 reps, 60 s,
+    ``docs/dev/data/highs-parity/p6-root-cuts-default/``). The numbers are in the
+    ``highs-optional-inventory.md`` row #7. P1.4 had kept ``highs`` as the default on a
+    1.078x wall ratio, almost all of it ``tls2``. ``=highs`` stays as an opt-out to A/B the
+    two engines; other values raise.
     """
     raw = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS_ENGINE")
     if raw is None:
-        from discopt._optional_highs import highs_available
-
-        return "highs" if highs_available() else "rust"
+        return "rust"
     val = raw.strip().lower()
     if val not in ("highs", "rust"):
         raise ValueError(f"DISCOPT_NLPBB_ROOT_CUTS_ENGINE={val!r}: expected 'highs' or 'rust'")
@@ -473,9 +478,10 @@ def _solve_lp_rust(root: _RootLP, a_ub, b_ub, time_limit):
 
 
 def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
-    """Solve the root LP with HiGHS. Returns (obj_in_model_sense, x, duals, highs).
+    """Solve the root LP on the selected engine (``root_cuts_engine``: Rust by default,
+    HiGHS on ``=highs``). Returns (obj_in_model_sense, x, duals, basis).
 
-    ``time_limit`` (seconds) is handed to HiGHS so a single LP cannot outrun the
+    ``time_limit`` (seconds) is handed to the engine so a single LP cannot outrun the
     stage budget. Measured on ``rsyn0830m`` (#1066): one unbounded call here
     burned 81.3 s of a 150 s solve against a 10 s stage budget. A run that stops
     on the limit returns a non-optimal status and is reported as a declined LP
@@ -842,8 +848,8 @@ def generate_root_cuts(
     are flat masks. Raises :class:`RootCutsNotApplicable` on structural
     inapplicability (nonlinear objective) and ``ImportError`` for a missing
     highspy when ``DISCOPT_NLPBB_ROOT_CUTS_ENGINE=highs`` is forced — the caller
-    catches exactly those and degrades to no-op (#1514). Unset, a missing highspy
-    selects the Rust engine instead (P1.4).
+    catches exactly those and degrades to no-op (#1514). Unset, the Rust engine runs
+    and highspy is not imported (highs-parity P6).
 
     The returned ``cuts`` are only those BINDING at the final LP optimum (they
     are the ones carrying the bound); the rest served their purpose inside the
