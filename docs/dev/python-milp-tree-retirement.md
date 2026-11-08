@@ -259,3 +259,25 @@ also go is **unverified**: the spatial path may use them.
   measurement found)**.
 - **`DISCOPT_P3_FORCE_CUT_PATH`.** Already unreachable for its stated purpose (R9); retire
   it per the §5 "Retired" state.
+
+## Progress log
+
+- **2026-11-08, steps 4, 6, 11 and the stall route.** The Rust driver takes
+  `branch_rule` (`Reliability`/`MostFractional`/`LeastFractional`/`Strong`) and
+  `rel_gap_max_abs` (the tree's `max(|ub|,|lb|,1e-10)` denominator), and reports per-solve
+  `root_cut_rows` / `strong_probe_lps` (`_rust.milp_last_solve_stats()`, surfaced as
+  `cuts/root_rows` and `branching/strong_probe_lps`). `_solve_milp_simplex` passes
+  `branching_rule` and sets `rel_gap_max_abs` when `abs_gap_tolerance < gap_tolerance`, so
+  **R4 is gone** (`test_milp_engine_tight_abs_gap.py`). **R1 is gone**:
+  `milp_backend="native"` runs the engine (route
+  `native-milp: discopt monolithic Rust MILP engine (milp_backend='native', ...)`); the
+  `test_1535` branching and options tests are re-pointed at it. Tests of tree internals
+  (`test_issue_1603_native_milp_cuts.py` clique/backstop/#1606-repolish,
+  `test_milp_tree_time_limit_per_node.py`) reach the tree through the `DISCOPT_MILP_ENGINE=0`
+  opt-out until deletion. **R6e (the #291 stall) is gone** by default:
+  `DISCOPT_MILP_NO_STALL_TREE` and `DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX` graduated together
+  (open-box differential 148 checks / 0 violations, `data/python-milp-retirement/`).
+  Remaining routes into the tree: `withdrawn_bound_2163` (`DISCOPT_MILP_RUST_COEF_RESCUE`,
+  panel owed), `lagrangian_bound`, the `DISCOPT_MILP_ENGINE=0` opt-out, R11 (matrix POUNCE
+  backend), R12 (SHOT direct MILP), and engine declines (ReLU spec unavailable, feasibility
+  gate failures).

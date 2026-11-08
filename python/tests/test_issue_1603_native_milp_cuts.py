@@ -98,6 +98,10 @@ def test_clique_edges_are_flat_binary_columns():
 
 
 def test_non_binary_clique_edge_is_refused_loudly(monkeypatch):
+    # Python-MILP-tree internals: ``milp_backend="native"`` is the Rust engine since the
+    # retirement's R1 step, so the tree is reached through its opt-out until
+    # ``_solve_milp_bb`` is deleted (docs/dev/python-milp-tree-retirement.md).
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     # The old block-index edge (4, 5) names continuous columns d[0], d[1].
     monkeypatch.setattr(S, "_extract_clique_edges", lambda model: [(4, 5)])
     with pytest.raises(RuntimeError, match="binary flat columns"):
@@ -106,6 +110,10 @@ def test_non_binary_clique_edge_is_refused_loudly(monkeypatch):
 
 def test_backstop_rejects_cut_violated_by_verified_point(monkeypatch):
     """A separator that emits the old invalid cut is caught by the incumbent screen."""
+    # Python-MILP-tree internals: ``milp_backend="native"`` is the Rust engine since the
+    # retirement's R1 step, so the tree is reached through its opt-out until
+    # ``_solve_milp_bb`` is deleted (docs/dev/python-milp-tree-retirement.md).
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     import discopt._relax.cover_cuts as CC
 
     fired = [0]
@@ -394,13 +402,20 @@ def test_near_integral_warm_start_does_not_reject_valid_cuts(caplog):
 # #1606: an integral incumbent a node-LP residual off a declared row
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("seed", [73, 195])
-def test_issue_1606_lp_residual_incumbent_is_repolished(seed):
+def test_issue_1606_lp_residual_incumbent_is_repolished(seed, monkeypatch):
     """Native+cuts used to raise the #952 refusal here: the tree's integral
     incumbent sat on a tight valid GMI face, 1.15e-6 (seed 73) / 1.29e-6 (seed 195)
     off an original row. The exit now re-solves its continuous columns with the
     integers fixed, over the declared rows, and the gate accepts the result."""
+    # Python-MILP-tree internals: ``milp_backend="native"`` is the Rust engine since the
+    # retirement's R1 step, so the tree is reached through its opt-out until
+    # ``_solve_milp_bb`` is deleted (docs/dev/python-milp-tree-retirement.md).
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     ref = _random_milp(seed).solve(time_limit=30)
     r = _random_milp(seed).solve(time_limit=30, milp_backend="native")
+    assert r.algorithm_route.startswith("native-milp: discopt MILP branch and bound"), (
+        r.algorithm_route
+    )
     assert (r.solver_stats or {}).get("incumbent/repolished") == 1.0, (
         "the repolish arm did not fire -- this no longer exercises #1606",
         r.solver_stats,
@@ -409,6 +424,22 @@ def test_issue_1606_lp_residual_incumbent_is_repolished(seed):
     assert _close(r.objective, ref.objective), (r.objective, ref.objective)
     # The certificate: the bound never crosses the reported objective.
     sense = 1.0 if seed == 73 else -1.0  # 73 minimises, 195 maximises
+    assert sense * (r.bound - r.objective) <= 1e-9, (r.bound, r.objective)
+
+
+@pytest.mark.parametrize("seed", [73, 195])
+def test_issue_1606_instances_certify_on_the_rust_engine(seed):
+    """The user-visible half of #1606 on today's ``milp_backend="native"`` route (the
+    Rust engine): the same instances certify the reference optimum, bound on the
+    right side of the objective."""
+    ref = _random_milp(seed).solve(time_limit=30)
+    r = _random_milp(seed).solve(time_limit=30, milp_backend="native")
+    assert r.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP"), (
+        r.algorithm_route
+    )
+    assert r.status == "optimal" and r.gap_certified, r.status
+    assert _close(r.objective, ref.objective), (r.objective, ref.objective)
+    sense = 1.0 if seed == 73 else -1.0
     assert sense * (r.bound - r.objective) <= 1e-9, (r.bound, r.objective)
 
 

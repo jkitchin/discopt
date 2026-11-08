@@ -41,6 +41,10 @@ def _knapsack():
 
 
 def test_tree_stops_within_one_node_of_the_limit(monkeypatch):
+    # Python-MILP-tree internals: ``milp_backend="native"`` is the Rust engine since the
+    # retirement's R1 step, so the tree is reached through its opt-out until
+    # ``_solve_milp_bb`` is deleted (docs/dev/python-milp-tree-retirement.md).
+    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
     opt = _knapsack().solve(time_limit=60, milp_backend="native")
     assert opt.status == "optimal" and opt.gap_certified
 

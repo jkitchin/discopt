@@ -15063,12 +15063,12 @@ def solve_model(
         highs-parity D1). ``"highs"`` names HiGHS with discopt-verified certificates, by far
         the faster choice on a MILP. ``"native"`` forces discopt's own branch and bound --
         the in-house LP solve (Rust simplex, POUNCE if it declines) for an LP, discopt's
-        MILP tree for a MILP -- so the search can be watched: ``node_count`` is the tree's,
-        ``strategy`` selects nodes, ``branching_rule`` picks the branching variable,
-        ``node_callback`` fires after every batch, and ``milp_cuts`` switches the root cut
-        loop.
-        Meant for teaching and inspection on small models, not for
-        performance. ``lazy_constraints`` / ``incumbent_callback`` /
+        Rust MILP engine for a MILP -- so the search can be watched: ``node_count`` is the
+        engine's, ``strategy`` selects nodes, ``branching_rule`` picks the branching
+        variable, ``node_callback`` fires after every processed batch, and ``milp_cuts``
+        switches the root cut loop. (Before the Python-MILP-tree retirement this ran a
+        separate Python MILP tree; the engine now takes all four options.)
+        ``lazy_constraints`` / ``incumbent_callback`` /
         ``cut_callback`` send a MILP to spatial branch and bound, which honours
         them (#748); ``algorithm_route`` names the engine that ran. Refused for
         a model that is not an LP or MILP, with ``nlp_bb=True``, and (for
@@ -15081,14 +15081,15 @@ def solve_model(
         effect of cutting planes be shown one switch at a time.
     branching_rule : str, optional
         Only with ``milp_backend="native"`` on a MILP: which fractional integer
-        variable a node branches on. ``"pseudocost"`` (the tree's default:
-        reliability pseudocosts, most-fractional until a variable has
-        observations), ``"most_fractional"``, ``"least_fractional"`` or
-        ``"strong"`` (full strong branching: both child LPs of every candidate
-        are solved and the largest product of objective degradations wins; the
-        probe LPs are counted in ``solver_stats["branching/strong_probe_lps"]``,
-        not in ``node_count``). Changes only the order of the search, never a
-        bound.
+        variable a node branches on. ``"pseudocost"`` (the engine's default:
+        reliability branching -- pseudocost scores once a variable has enough
+        observations, strong-branching probes on the unreliable ones within a node
+        budget), ``"most_fractional"``, ``"least_fractional"`` (neither probes) or
+        ``"strong"`` (full strong branching: both child LPs of every candidate at
+        every node are solved and the largest product of objective degradations
+        wins). Probe LPs are counted in
+        ``solver_stats["branching/strong_probe_lps"]``, not in ``node_count``.
+        Changes only the order of the search, never a bound.
     presolve : bool, default True
         Run presolve. ``False`` switches off discopt's root presolve (FBBT,
         variable elimination, probing) and, on a pure LP or MILP solved on the
@@ -18884,8 +18885,11 @@ def solve_model(
                 # Python-MILP-tree retirement: ``node_callback`` is observed through the
                 # Rust driver's AfterProcess hook (``_milp_node_callback_hook``), so it
                 # no longer keeps the MILP on the Python tree.
-                _want_engine = _lpm_backend != "native" and (
-                    nlp_solver == "simplex" or (_milp_engine_default_on() and not lagrangian_bound)
+                # Retirement step 11 (R1): ``milp_backend="native"`` is discopt's own MILP
+                # search, which is now the Rust engine -- it takes ``strategy``,
+                # ``branching_rule``, ``milp_cuts`` and ``node_callback``.
+                _want_engine = nlp_solver == "simplex" or (
+                    _milp_engine_default_on() and not lagrangian_bound
                 )
                 # #1243: the monolithic engine's default RELATIVE arm is
                 # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
@@ -18926,7 +18930,19 @@ def solve_model(
                         incumbent_time_extension=incumbent_time_extension,
                         node_callback=node_callback,
                         root_cuts=milp_cuts is not False,
+                        branching_rule=branching_rule,
                     )
+                    if (
+                        _simplex_res is not None
+                        and _simplex_res.algorithm_route is None
+                        and _lpm_backend == "native"
+                    ):
+                        _simplex_res.algorithm_route = (
+                            f"native-milp: discopt monolithic Rust MILP engine "
+                            f"(milp_backend='native', strategy={strategy!r}, "
+                            f"branching_rule={branching_rule or 'pseudocost'!r}, "
+                            f"root cuts {'off' if milp_cuts is False else 'on'})"
+                        )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
                         # #1614 C1: the in-house engine answering a MILP must say so,
                         # and (P6.3) say when it ran because highspy is not installed.
@@ -40079,6 +40095,7 @@ def _solve_milp_simplex(
     relu_counts: Optional[dict] = None,
     node_callback: Optional[Callable] = None,
     root_cuts: bool = True,
+    branching_rule: Optional[str] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -40174,6 +40191,24 @@ def _solve_milp_simplex(
             return None
         solve_milp_csc_py = _relu_engine  # noqa: F811 -- same driver, hook attached
 
+    # Retirement step 4: the driver's per-solve counters (root cut rows, strong-branch
+    # probe LPs), summed over this function's searches -- the ``cuts/*`` and
+    # ``branching/strong_probe_lps`` stats the Python MILP tree reported.
+    _search_counts = {"root_cut_rows": 0, "strong_probe_lps": 0}
+    _solve_uncounted = solve_milp_csc_py
+
+    def solve_milp_csc_py(*a, **kw):  # noqa: F811 -- the same driver, counted
+        out = _solve_uncounted(*a, **kw)
+        if len(a) > 9 and len(a[9]) > 0:  # a search, not the integer-free LP probe
+            from discopt._rust import milp_last_solve_stats
+
+            st = milp_last_solve_stats()
+            if st is None:
+                raise RuntimeError("MILP driver returned without per-solve stats")
+            for k in _search_counts:
+                _search_counts[k] += int(st[k])
+        return out
+
     # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
     # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to None -> no
     # deadline, so a single node whose simplex fails to converge (or a degenerate
@@ -40256,6 +40291,9 @@ def _solve_milp_simplex(
     if _sel_req is not None:
         _sel_kw["node_selection"] = _sel_req["strategy"]
         _sel_req["used"] = True
+    # ``branching_rule`` (#1535, retirement step 4): the driver's branching-variable rule.
+    if branching_rule is not None:
+        _sel_kw["branching_rule"] = branching_rule
     # ``milp_cuts=False`` (#1535): no root cut loop.
     if not root_cuts:
         _cut_opts = {"root_cuts": 0, "cut_rounds": 0}
@@ -40319,6 +40357,9 @@ def _solve_milp_simplex(
         instrumentation: the driver returns the number either way.
         """
         _d = {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
+        _d["branching/strong_probe_lps"] = float(_search_counts["strong_probe_lps"])
+        if _search_counts["root_cut_rows"] > 0:
+            _d["cuts/root_rows"] = float(_search_counts["root_cut_rows"])
         if _no_stall_tree:
             _d["milp/no_stall_tree"] = 1.0
         if _coef_rescued:
@@ -40638,6 +40679,7 @@ def _solve_milp_simplex(
                 rel_gap_max_abs=_rel_gap_max_abs,
                 time_limit_s=_rem_ct,
                 **_cut_opts,
+                **_sel_kw,
             )
             logger.info(
                 "Rust MILP certificate withdrawn; the coefficient-tightened form "

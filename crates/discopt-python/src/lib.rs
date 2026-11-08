@@ -48,6 +48,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lp_bindings::gomory_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::profile_counters_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::profile_reset_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::milp_last_solve_stats_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::mir_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_warm_py, m)?)?;

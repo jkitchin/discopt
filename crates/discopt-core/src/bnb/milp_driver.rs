@@ -121,6 +121,13 @@ pub struct MilpResult {
     /// the shared relaxation (post-dedup, post-cap). `node_calls > 0` with
     /// `node_cuts_added == 0` means the separator ran and cut nothing.
     pub node_cuts_added: usize,
+    /// Root cut rows in the working LP when the search loop starts (after cleanup).
+    /// Zero with `root_cuts = 0` (`Model.solve(milp_cuts=False)`): the anti-vacuity
+    /// counter the Python tree's ``cuts/*`` stats were.
+    pub root_cut_rows: usize,
+    /// Strong-branching probe LPs solved over the whole search (two per probed
+    /// candidate). Surfaced as ``branching/strong_probe_lps``.
+    pub strong_probe_lps: usize,
 }
 
 /// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
@@ -2929,6 +2936,8 @@ fn solve_milp_node_search(
             lazy_requeues: 0,
             node_calls: 0,
             node_cuts_added: 0,
+            root_cut_rows: 0,
+            strong_probe_lps: 0,
         };
     };
     let RootBox { base_l, base_u } = rb;
@@ -3655,6 +3664,8 @@ fn solve_milp_node_search(
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
+    let root_cut_rows = m_w.saturating_sub(m_base0);
+    let mut strong_probe_lps: usize = 0;
 
     // Interactive debugger bookkeeping. `dbg_iter` mirrors the Python loops'
     // iteration counter; `dbg_last_inc` tracks the incumbent so the
@@ -4126,6 +4137,7 @@ fn solve_milp_node_search(
             if !out.sb_observations.is_empty() {
                 tm.record_sb_observations(&out.sb_observations);
             }
+            strong_probe_lps += out.sb_probes;
             // highs-parity P4.5 entry (counters only): how many free integer columns
             // the ROOT node's FBBT + reduced-cost fixing pins, against the root box.
             if !root_fix_counted {
@@ -4852,6 +4864,8 @@ fn solve_milp_node_search(
         lazy_requeues: lazy_requeue_events,
         node_calls,
         node_cuts_added,
+        root_cut_rows,
+        strong_probe_lps,
     };
     // #1296: a feasible point below an ancestor's bound means that bound was
     // wrong, so nothing derived from the tree's bound is a certificate.
@@ -5009,6 +5023,8 @@ struct NodeOutput {
     /// graduate these variables and stop re-probing them. Empty when the node did
     /// no strong branching.
     sb_observations: Vec<SbObservation>,
+    /// Strong-branching probe LPs this node solved.
+    sb_probes: usize,
     /// Node-propagation result: tightened structural bounds `(lb, ub)` to store
     /// on the node so its children inherit them. `None` when propagation is off
     /// or changed nothing.
@@ -5147,6 +5163,7 @@ fn solve_node(
             found_cuts: Vec::new(),
             branch_hint: None,
             sb_observations: Vec::new(),
+            sb_probes: 0,
             tightened: None,
             iters: 0,
             unbounded: false,
@@ -5209,6 +5226,7 @@ fn solve_node(
                 found_cuts: Vec::new(),
                 branch_hint: None,
                 sb_observations: Vec::new(),
+            sb_probes: 0,
                 tightened: None,
                 iters: 0,
                 unbounded: false,
@@ -5386,6 +5404,7 @@ fn solve_node(
         found_cuts: Vec::new(),
         branch_hint: None,
         sb_observations: Vec::new(),
+            sb_probes: 0,
         tightened,
         iters: sol.iters,
         unbounded: false,
@@ -5687,9 +5706,10 @@ fn solve_node(
                 if !prunable {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::StrongBranch);
                     let cands = ctx.tm.score_candidates(xs);
-                    let (best, piv, sb_obs) =
+                    let (best, piv, sb_obs, n_probes) =
                         strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
                     out.iters += piv;
+                    out.sb_probes = n_probes;
                     out.branch_hint = best;
                     out.sb_observations = sb_obs;
                 }
@@ -6124,8 +6144,9 @@ fn strong_branch(
     x: &[f64],
     node_obj: f64,
     cands: &[(usize, f64, u32, f64)],
-) -> (Option<usize>, usize, Vec<SbObservation>) {
+) -> (Option<usize>, usize, Vec<SbObservation>, usize) {
     let simplex = ctx.simplex;
+    let mut n_probes = 0usize;
     // Unreliable candidates, most-fractional (nearest 0.5) first.
     let mut cand: Vec<(usize, f64)> = cands
         .iter()
@@ -6133,7 +6154,7 @@ fn strong_branch(
         .map(|c| (c.0, c.1))
         .collect();
     if cand.is_empty() {
-        return (None, 0, Vec::new());
+        return (None, 0, Vec::new(), 0);
     }
     cand.sort_by(|a, c| {
         (c.1 - 0.5)
@@ -6214,6 +6235,7 @@ fn strong_branch(
         // Down branch: x_idx ≤ floor(x_idx).
         u[idx] = xi.floor();
         let dn = probe(&l, &u);
+        n_probes += 1;
         u[idx] = hi0;
         pivots += dn.iters;
         let d_dn = match dn.status {
@@ -6229,6 +6251,7 @@ fn strong_branch(
         // Up branch: x_idx ≥ ceil(x_idx).
         l[idx] = xi.ceil();
         let up = probe(&l, &u);
+        n_probes += 1;
         l[idx] = lo0;
         pivots += up.iters;
         let d_up = match up.status {
@@ -6247,7 +6270,7 @@ fn strong_branch(
             best = Some(idx);
         }
     }
-    (best, pivots, obs)
+    (best, pivots, obs, n_probes)
 }
 
 /// Opt-out (`DISCOPT_MILP_RC_FIX_REFACTOR=1`) that forces reduced-cost fixing to

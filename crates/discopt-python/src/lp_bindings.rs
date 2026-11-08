@@ -1412,6 +1412,31 @@ pub fn solve_milp_csc_py<'py>(
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
 
+thread_local! {
+    /// Per-solve counters of the last MILP-driver solve on this thread
+    /// (`run_milp_hooked`): `(root_cut_rows, strong_probe_lps)`.
+    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Counters of the last MILP-driver solve made on the calling thread
+/// (`solve_milp_csc_py` / `solve_milp_relu_csc_py`), as a dict
+/// `{"root_cut_rows", "strong_probe_lps"}`, or `None` before any solve. The solve
+/// runs on the calling thread, so a caller reading this right after its own call
+/// gets that call's numbers (Python-MILP-tree retirement: the stats the Python tree
+/// reported as ``cuts/*`` and ``branching/strong_probe_lps``).
+#[pyfunction]
+#[pyo3(name = "milp_last_solve_stats")]
+pub fn milp_last_solve_stats_py(py: Python<'_>) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
+    let Some((rows, probes)) = LAST_MILP_STATS.with(|c| c.get()) else {
+        return Ok(None);
+    };
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("root_cut_rows", rows)?;
+    d.set_item("strong_probe_lps", probes)?;
+    Ok(Some(d))
+}
+
 /// The native Anderson ideal-ReLU separator as a Python object (#2157).
 ///
 /// Same CSR neuron layout as [`solve_milp_relu_csc_py`]. `separate(x)` returns the
@@ -2247,6 +2272,9 @@ fn run_milp_hooked<'py>(
         MilpStatus::Unbounded => "unbounded",
         MilpStatus::NodeLimit => "node_limit",
     };
+    LAST_MILP_STATS.with(|c| {
+        c.set(Some((res.root_cut_rows, res.strong_probe_lps)));
+    });
     Ok((
         status.to_string(),
         PyArray1::from_vec(py, res.x),

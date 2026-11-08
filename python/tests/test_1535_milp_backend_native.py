@@ -69,16 +69,40 @@ def test_native_knapsack_branches_and_matches_highs():
     assert res.algorithm_route.startswith("native-milp")
 
 
-def test_native_milp_runs_the_python_tree_with_the_callers_options(monkeypatch):
+def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
+    """Python-MILP-tree retirement (R1): ``milp_backend="native"`` is the Rust MILP
+    engine, which takes the options the Python tree used to own."""
+    import discopt._rust as _rust
+
     highs = _spy(monkeypatch, "_solve_milp_highs")
     engine = _spy(monkeypatch, "_solve_milp_simplex")
     tree = _spy(monkeypatch, "_solve_milp_bb")
-    _knapsack().solve(milp_backend="native", strategy="depth_first", milp_cuts=False)
-    assert highs == [] and engine == []
-    assert len(tree) == 1
-    args, kwargs = tree[0]
-    assert args[4] == "depth_first"  # ``strategy`` is _solve_milp_bb's 5th positional
-    assert kwargs["root_cuts"] is False
+    drv: list = []
+    real = _rust.solve_milp_csc_py
+
+    def drv_spy(*a, **kw):
+        drv.append(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(_rust, "solve_milp_csc_py", drv_spy)
+    res = _knapsack().solve(
+        milp_backend="native",
+        strategy="depth_first",
+        milp_cuts=False,
+        branching_rule="most_fractional",
+    )
+    assert highs == [] and tree == []
+    assert len(engine) == 1
+    assert engine[0][1]["root_cuts"] is False
+    assert engine[0][1]["branching_rule"] == "most_fractional"
+    searches = [kw for kw in drv if "abs_gap_tol" in kw]
+    assert searches, "the engine never searched"
+    for kw in searches:
+        assert kw["node_selection"] == "depth_first"
+        assert kw["branching_rule"] == "most_fractional"
+        assert kw["root_cuts"] == 0
+    assert res.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP engine")
+    assert "strategy='depth_first'" in res.algorithm_route
 
 
 def test_default_route_is_unchanged(monkeypatch):
@@ -235,33 +259,23 @@ def _multi_knapsack(n: int = 20, k: int = 5, seed: int = 0) -> dm.Model:
     return m
 
 
-def test_branching_rules_change_the_search_but_not_the_answer(monkeypatch):
+def test_branching_rules_change_the_search_but_not_the_answer():
+    """On the Rust engine (retirement step 4): every rule certifies the same optimum;
+    the fractionality rules never probe, full strong branching probes more than the
+    default reliability rule (which probes only unreliable candidates, within a node
+    budget), and the rules do not all explore the same tree."""
     ref = _multi_knapsack().solve()
-    hinted = []
-    real = S._milp_branching_hints
-
-    def spy(*args, **kwargs):
-        out = real(*args, **kwargs)
-        hinted.append((args[0], len(out[0])))
-        return out
-
-    monkeypatch.setattr(S, "_milp_branching_hints", spy)
-    nodes = {}
+    nodes, probes = {}, {}
     for rule in S._MILP_BRANCHING_RULES:
-        res = _multi_knapsack().solve(
-            milp_backend="native", milp_cuts=False, branching_rule=rule, batch_size=1
-        )
+        res = _multi_knapsack().solve(milp_backend="native", milp_cuts=False, branching_rule=rule)
         assert res.status == "optimal" and res.gap_certified
         assert res.objective == pytest.approx(ref.objective, abs=1e-6)
         assert f"branching_rule={rule!r}" in res.algorithm_route
+        assert res.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP")
         nodes[rule] = res.node_count
-        probes = (res.solver_stats or {}).get("branching/strong_probe_lps", 0)
-        assert (probes > 0) == (rule == "strong")
-    # Every non-default rule handed the tree hints (the probe fired), and the
-    # rules did not all explore the same tree.
-    for rule in ("most_fractional", "least_fractional", "strong"):
-        assert sum(n for r, n in hinted if r == rule) > 0, rule
-    assert not any(r == "pseudocost" for r, _ in hinted)
+        probes[rule] = (res.solver_stats or {})["branching/strong_probe_lps"]
+    assert probes["most_fractional"] == probes["least_fractional"] == 0, probes
+    assert probes["strong"] > 0 and probes["strong"] >= probes["pseudocost"], probes
     assert len(set(nodes.values())) > 1, nodes
 
 
