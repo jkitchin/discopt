@@ -821,6 +821,8 @@ mod tests {
             selection: crate::bnb::pool::SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,

@@ -305,3 +305,43 @@ def test_hook_sound_and_helpful_on_a_branching_tree(monkeypatch):
     assert on.objective == pytest.approx(opt, abs=1e-3)
     # A valid extra lower bound can only prune more (or tie), never explore more.
     assert on.node_count <= off.node_count
+
+
+@pytest.mark.smoke
+def test_hook_runs_on_the_rust_engine_soundly_and_prunes():
+    """Python-MILP-tree retirement: ``lagrangian_bound=True`` runs on the Rust MILP
+    engine through its ``MilpBoundHook``. Both arms on the engine with root cuts off
+    (``milp_backend="native", milp_cuts=False``) so the tree branches; the hook must
+    fire (§6), raise node bounds, keep the brute-force optimum, and not explore more.
+    """
+
+    def build():
+        # The 11-column instance above closes at the engine's root; this size branches
+        # (measured: 7 nodes with root cuts off).
+        n = 18
+        c = np.random.default_rng(2).integers(1, 7, n)
+        m = dm.Model("branch18")
+        x = m.binary("x", shape=(n,))
+        m.minimize(sum(int(c[i]) * x[i] for i in range(n)))
+        m.subject_to(sum((i + 1) * x[i] for i in range(n)) >= 90)
+        cpl = sum(x[i] for i in range(n)) <= 8
+        m.subject_to(cpl)
+        m.mark_coupling(cpl)
+        return m, c, n
+
+    m_off, c, n = build()
+    opt = _branching_brute(c, n, cap=8, target=90)
+    off = m_off.solve(time_limit=60, milp_backend="native", milp_cuts=False)
+    on = build()[0].solve(
+        time_limit=60, milp_backend="native", milp_cuts=False, lagrangian_bound=True
+    )
+    for r in (off, on):
+        assert r.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP")
+        assert r.status == "optimal" and r.gap_certified
+        assert r.objective == pytest.approx(opt, abs=1e-6)
+    assert off.node_count > 1, "instance no longer branches on the engine"
+    st = on.solver_stats or {}
+    assert st.get("lagrangian/node_bound_calls", 0) > 0, st
+    assert st.get("lagrangian/node_bound_raised", 0) > 0, st
+    assert "lagrangian/node_bound_calls" not in (off.solver_stats or {})
+    assert on.node_count <= off.node_count, (on.node_count, off.node_count)

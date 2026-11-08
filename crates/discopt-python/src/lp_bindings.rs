@@ -12,9 +12,9 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use discopt_core::bnb::milp_driver::{
-    solve_milp_node_hooked as core_solve_milp_node_hooked, MilpCheckpoint, MilpDebugControl,
-    MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpNodeHook, MilpNodeVerdict,
-    MilpOptions, MilpStatus,
+    solve_milp_node_hooked as core_solve_milp_node_hooked, MilpBoundHook, MilpCheckpoint,
+    MilpDebugControl, MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpNodeHook,
+    MilpNodeVerdict, MilpOptions, MilpStatus,
 };
 use discopt_core::bnb::relu_ideal::ReluIdealSeparator;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
@@ -1016,6 +1016,40 @@ struct PyMilpNodeHook {
     pending: std::sync::Mutex<Option<PyErr>>,
 }
 
+/// A Python per-node lower-bound callable `f(lb, ub) -> float | None` as a core
+/// [`MilpBoundHook`] (`Model.solve(lagrangian_bound=True)` on the Rust engine). A
+/// raising callable contributes nothing to the node (sound) and its first error is
+/// re-raised after the search (CLAUDE.md §7: never swallowed).
+struct PyBoundHook {
+    callback: Py<PyAny>,
+    pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl MilpBoundHook for PyBoundHook {
+    fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64> {
+        if self.pending.lock().unwrap().is_some() {
+            return None;
+        }
+        Python::with_gil(|py| {
+            let r = self
+                .callback
+                .bind(py)
+                .call1((PyArray1::from_slice(py, lb), PyArray1::from_slice(py, ub)))
+                .and_then(|v| v.extract::<Option<f64>>());
+            match r {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut slot = self.pending.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
+                    None
+                }
+            }
+        })
+    }
+}
+
 impl PyMilpNodeHook {
     /// Record the first failure only — later ones are consequences of it.
     fn fail(&self, e: PyErr) -> MilpNodeVerdict {
@@ -1283,7 +1317,7 @@ pub fn ns_safe_bound_csc_py(
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
                     stall_time_s=None, node_selection=None,
                     extend_no_incumbent_s=None, branching_rule=None,
-                    rel_gap_max_abs=false))]
+                    rel_gap_max_abs=false, node_bound_hook=None, node_bound_every=1))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1328,6 +1362,8 @@ pub fn solve_milp_csc_py<'py>(
     extend_no_incumbent_s: Option<f64>,
     branching_rule: Option<String>,
     rel_gap_max_abs: bool,
+    node_bound_hook: Option<Py<PyAny>>,
+    node_bound_every: usize,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
     let branch_rule = parse_branching_rule(branching_rule.as_deref())?;
@@ -1407,6 +1443,8 @@ pub fn solve_milp_csc_py<'py>(
             selection,
             branch_rule,
             rel_gap_max_abs,
+            bound_hook: node_bound_hook,
+            bound_hook_every: node_bound_every,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1415,7 +1453,7 @@ pub fn solve_milp_csc_py<'py>(
 thread_local! {
     /// Per-solve counters of the last MILP-driver solve on this thread
     /// (`run_milp_hooked`): `(root_cut_rows, strong_probe_lps)`.
-    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize)>> =
+    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize, usize, usize)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -1430,12 +1468,14 @@ thread_local! {
 pub fn milp_last_solve_stats_py(
     py: Python<'_>,
 ) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
-    let Some((rows, probes)) = LAST_MILP_STATS.with(|c| c.get()) else {
+    let Some((rows, probes, bh_calls, bh_raised)) = LAST_MILP_STATS.with(|c| c.get()) else {
         return Ok(None);
     };
     let d = pyo3::types::PyDict::new(py);
     d.set_item("root_cut_rows", rows)?;
     d.set_item("strong_probe_lps", probes)?;
+    d.set_item("bound_hook_calls", bh_calls)?;
+    d.set_item("bound_hook_raised", bh_raised)?;
     Ok(Some(d))
 }
 
@@ -1747,6 +1787,8 @@ pub fn solve_milp_relu_csc_py<'py>(
             selection: parse_node_selection(node_selection.as_deref())?,
             branch_rule: parse_branching_rule(branching_rule.as_deref())?,
             rel_gap_max_abs,
+            bound_hook: None,
+            bound_hook_every: 1,
         },
     )?;
     Ok((
@@ -1958,6 +2000,9 @@ struct MilpExtra {
     selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
     branch_rule: Option<discopt_core::bnb::branching::BranchRule>,
     rel_gap_max_abs: bool,
+    /// Python `f(lb, ub) -> float | None` node lower-bound source.
+    bound_hook: Option<Py<PyAny>>,
+    bound_hook_every: usize,
 }
 
 /// `Model.solve(branching_rule=...)`'s names, refused when unknown (never defaulted).
@@ -2048,6 +2093,8 @@ pub(crate) fn milp_options(
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
         rel_gap_max_abs: false,
+        bound_hook: None,
+        bound_hook_every: 1,
         extend_no_incumbent_s: None,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
@@ -2202,6 +2249,22 @@ fn run_milp_hooked<'py>(
         rel_gap_max_abs: extra.rel_gap_max_abs || opts.rel_gap_max_abs,
         ..opts
     };
+    if extra.bound_hook_every == 0 {
+        return Err(PyValueError::new_err("node_bound_every must be >= 1"));
+    }
+    let bound_hook: Option<std::sync::Arc<PyBoundHook>> = extra.bound_hook.map(|cb| {
+        std::sync::Arc::new(PyBoundHook {
+            callback: cb,
+            pending: std::sync::Mutex::new(None),
+        })
+    });
+    let opts = MilpOptions {
+        bound_hook: bound_hook
+            .clone()
+            .map(|h| h as std::sync::Arc<dyn MilpBoundHook>),
+        bound_hook_every: extra.bound_hook_every,
+        ..opts
+    };
     // Wrap an attached Python debugger (if any) as a core hook. It is created
     // before releasing the GIL and re-acquires it per checkpoint; when absent,
     // the search runs the untouched (bound-neutral) path.
@@ -2267,6 +2330,11 @@ fn run_milp_hooked<'py>(
             return Err(err);
         }
     }
+    if let Some(h) = bound_hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",
@@ -2275,7 +2343,12 @@ fn run_milp_hooked<'py>(
         MilpStatus::NodeLimit => "node_limit",
     };
     LAST_MILP_STATS.with(|c| {
-        c.set(Some((res.root_cut_rows, res.strong_probe_lps)));
+        c.set(Some((
+            res.root_cut_rows,
+            res.strong_probe_lps,
+            res.bound_hook_calls,
+            res.bound_hook_raised,
+        )));
     });
     Ok((
         status.to_string(),

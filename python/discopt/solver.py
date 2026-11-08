@@ -18870,12 +18870,9 @@ def solve_model(
                 # below — by DEFAULT for a pure MILP; falls through to the
                 # Python ``_solve_milp_bb`` whenever the engine defers.
                 #
-                # ``lagrangian_bound`` is the one request that must NOT be
-                # silently rerouted: the monolithic engine has no per-node hook,
-                # so honoring the user's explicit ask means staying on the Python
-                # path. An explicit ``nlp_solver="simplex"`` still warns and
-                # proceeds (unchanged behavior); the *default* route simply
-                # declines to take over.
+                # ``lagrangian_bound`` runs on the engine too since the retirement:
+                # the driver's ``MilpBoundHook`` takes the Lagrangian node bound
+                # (``_solve_milp_simplex(lagrangian_bound=...)``).
                 _engine_bound: Optional[float] = None
                 # Carries the engine's valid dual bound and the work it spent
                 # back out when it DEFERS, so neither is thrown away (see below).
@@ -18888,9 +18885,7 @@ def solve_model(
                 # Retirement step 11 (R1): ``milp_backend="native"`` is discopt's own MILP
                 # search, which is now the Rust engine -- it takes ``strategy``,
                 # ``branching_rule``, ``milp_cuts`` and ``node_callback``.
-                _want_engine = nlp_solver == "simplex" or (
-                    _milp_engine_default_on() and not lagrangian_bound
-                )
+                _want_engine = nlp_solver == "simplex" or _milp_engine_default_on()
                 # #1243: the monolithic engine's default RELATIVE arm is
                 # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
                 # near a zero optimum it converges on a gap the Python tree's
@@ -18908,12 +18903,6 @@ def solve_model(
                 # criterion. It used to be dropped here entirely, making the
                 # documented parameter a no-op on this whole route.
                 if _want_engine:
-                    if lagrangian_bound:
-                        logger.warning(
-                            "lagrangian_bound is ignored with nlp_solver='simplex' (the "
-                            "monolithic Rust MILP engine has no per-node hook); use the "
-                            "default nlp_solver='pounce' MILP path to enable it."
-                        )
                     _simplex_res = _solve_milp_simplex(
                         model,
                         time_limit,
@@ -18931,6 +18920,8 @@ def solve_model(
                         node_callback=node_callback,
                         root_cuts=milp_cuts is not False,
                         branching_rule=branching_rule,
+                        lagrangian_bound=lagrangian_bound,
+                        lagrangian_frequency=lagrangian_frequency,
                     )
                     if (
                         _simplex_res is not None
@@ -18941,7 +18932,8 @@ def solve_model(
                             f"native-milp: discopt monolithic Rust MILP engine "
                             f"(milp_backend='native', strategy={strategy!r}, "
                             f"branching_rule={branching_rule or 'pseudocost'!r}, "
-                            f"root cuts {'off' if milp_cuts is False else 'on'})"
+                            f"root cuts {'off' if milp_cuts is False else 'on'}"
+                            f"{', lagrangian_bound node hook' if lagrangian_bound else ''})"
                         )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
                         # #1614 C1: the in-house engine answering a MILP must say so,
@@ -18949,6 +18941,8 @@ def solve_model(
                         from discopt._optional_highs import highs_available
 
                         _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
+                        if lagrangian_bound:
+                            _why += "; lagrangian_bound node hook"
                         if (
                             _why == "default"
                             and os.environ.get("DISCOPT_LP_MILP_BACKEND") is None
@@ -40094,6 +40088,8 @@ def _solve_milp_simplex(
     node_callback: Optional[Callable] = None,
     root_cuts: bool = True,
     branching_rule: Optional[str] = None,
+    lagrangian_bound: bool = False,
+    lagrangian_frequency: int = 1,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -40220,7 +40216,12 @@ def _solve_milp_simplex(
     # Retirement step 4: the driver's per-solve counters (root cut rows, strong-branch
     # probe LPs), summed over this function's searches -- the ``cuts/*`` and
     # ``branching/strong_probe_lps`` stats the Python MILP tree reported.
-    _search_counts = {"root_cut_rows": 0, "strong_probe_lps": 0}
+    _search_counts = {
+        "root_cut_rows": 0,
+        "strong_probe_lps": 0,
+        "bound_hook_calls": 0,
+        "bound_hook_raised": 0,
+    }
     _solve_uncounted = solve_milp_csc_py
 
     def _solve_counted(*a: Any, **kw: Any) -> Any:
@@ -40322,6 +40323,26 @@ def _solve_milp_simplex(
     # ``branching_rule`` (#1535, retirement step 4): the driver's branching-variable rule.
     if branching_rule is not None:
         _sel_kw["branching_rule"] = branching_rule
+    # ``lagrangian_bound`` (retirement): the Lagrangian node bound the Python tree
+    # max-combined with each node's LP bound, as the driver's ``MilpBoundHook``. Same
+    # scope as before -- a linear minimization with coupling structure; otherwise it
+    # no-ops -- and the same multipliers, fixed once at the root box.
+    if lagrangian_bound and relu_cuts is None:
+        from discopt.decomposition.lagrangian.node_bounder import LagrangianNodeBounder
+
+        _lag = LagrangianNodeBounder.try_build(model)
+        if _lag is None:
+            logger.info(
+                "lagrangian_bound: model is not a linear minimization with coupling "
+                "structure; node-bound hook disabled."
+            )
+        else:
+            _lag.solve_root_dual(
+                np.asarray(lp_data.x_l[:n_orig], dtype=np.float64),
+                np.asarray(lp_data.x_u[:n_orig], dtype=np.float64),
+            )
+            _sel_kw["node_bound_hook"] = _lag.node_bound
+            _sel_kw["node_bound_every"] = max(1, int(lagrangian_frequency))
     # ``milp_cuts=False`` (#1535): no root cut loop.
     if not root_cuts:
         _cut_opts = {"root_cuts": 0, "cut_rounds": 0}
@@ -40386,6 +40407,9 @@ def _solve_milp_simplex(
         _d["branching/strong_probe_lps"] = float(_search_counts["strong_probe_lps"])
         if _search_counts["root_cut_rows"] > 0:
             _d["cuts/root_rows"] = float(_search_counts["root_cut_rows"])
+        if "node_bound_hook" in _sel_kw:
+            _d["lagrangian/node_bound_calls"] = float(_search_counts["bound_hook_calls"])
+            _d["lagrangian/node_bound_raised"] = float(_search_counts["bound_hook_raised"])
         if _no_stall_tree:
             _d["milp/no_stall_tree"] = 1.0
         if _coef_entry_rewritten:

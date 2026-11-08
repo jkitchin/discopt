@@ -114,6 +114,8 @@ fn opts(inst: &Instance) -> MilpOptions {
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
         rel_gap_max_abs: false,
+        bound_hook: None,
+        bound_hook_every: 1,
         extend_no_incumbent_s: None,
         gap_tol: 1e-6,
         abs_gap_tol: None,

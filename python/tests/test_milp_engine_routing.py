@@ -147,23 +147,25 @@ def test_opt_out_keeps_the_python_path(monkeypatch):
     assert res.objective == pytest.approx(-17.0, abs=1e-6)
 
 
-def test_lagrangian_bound_is_not_silently_rerouted(monkeypatch):
-    """``lagrangian_bound`` needs a per-node hook the monolithic engine does not
-    have. An explicit ``nlp_solver="simplex"`` warns and proceeds (unchanged), but
-    the *default* route must decline rather than quietly ignore the request."""
+def test_lagrangian_bound_runs_on_the_engine_with_its_hook(monkeypatch):
+    """Python-MILP-tree retirement: ``lagrangian_bound`` used to keep a MILP on the
+    Python tree (the engine had no per-node hook). The engine now takes the
+    Lagrangian node bound through its ``MilpBoundHook``, so the request is honoured
+    there rather than rerouted."""
     import discopt.solver as sv
 
-    seen: list[int] = []
+    seen: list[dict] = []
     real = sv._solve_milp_simplex
 
     def spy(*args, **kwargs):
-        seen.append(1)
+        seen.append(kwargs)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(sv, "_solve_milp_simplex", spy)
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.delenv("DISCOPT_MILP_ENGINE", raising=False)
     _milp().solve(time_limit=30.0, lagrangian_bound=True)
-    assert not seen, "lagrangian_bound was silently rerouted to the hookless engine"
+    assert seen and seen[0].get("lagrangian_bound") is True, seen
 
 
 # --------------------------------------------------------------------------

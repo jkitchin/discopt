@@ -128,6 +128,10 @@ pub struct MilpResult {
     /// Strong-branching probe LPs solved over the whole search (two per probed
     /// candidate). Surfaced as ``branching/strong_probe_lps``.
     pub strong_probe_lps: usize,
+    /// [`MilpBoundHook`] calls made (the anti-vacuity counter, CLAUDE.md §6).
+    pub bound_hook_calls: usize,
+    /// [`MilpBoundHook`] calls whose value raised the node's bound.
+    pub bound_hook_raised: usize,
 }
 
 /// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
@@ -301,6 +305,22 @@ pub enum MilpNodeVerdict {
 pub trait MilpNodeHook: Sync {
     /// Separate the fractional point `x` (length `n_struct`).
     fn separate_node(&self, x: &[f64]) -> MilpNodeVerdict;
+}
+
+/// An external per-node **lower-bound** source (Python-MILP-tree retirement: the
+/// `Model.solve(lagrangian_bound=True)` Lagrangian node bound the Python tree applied).
+///
+/// Called in the sequential reduce, in batch order, for each node that produced a
+/// real (finite, non-sentinel), fractional LP bound, every
+/// [`MilpOptions::bound_hook_every`]-th batch. Its value must be a **valid** lower
+/// bound on `min cᵀx + obj_const` over the node's structural box; the driver keeps
+/// `max(LP bound, hook bound)`, so a valid hook can only tighten. `None` (or a
+/// non-finite value) leaves the node exactly as an unhooked search would.
+///
+/// **Zero effect when absent.**
+pub trait MilpBoundHook: Send + Sync {
+    /// A valid lower bound over the node box `[lb, ub]` (structural columns).
+    fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64>;
 }
 
 /// How many times one node may be re-solved after a lazy veto before the search
@@ -1494,6 +1514,11 @@ pub struct MilpOptions {
     /// (R4, Python-MILP-tree retirement step 6). Only the stopping test changes; no
     /// node bound does.
     pub rel_gap_max_abs: bool,
+    /// External per-node lower-bound source ([`MilpBoundHook`]); `None` = none
+    /// (bound-neutral).
+    pub bound_hook: Option<std::sync::Arc<dyn MilpBoundHook>>,
+    /// Call [`Self::bound_hook`] on every `bound_hook_every`-th batch (`>= 1`).
+    pub bound_hook_every: usize,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -2938,6 +2963,8 @@ fn solve_milp_node_search(
             node_cuts_added: 0,
             root_cut_rows: 0,
             strong_probe_lps: 0,
+            bound_hook_calls: 0,
+            bound_hook_raised: 0,
         };
     };
     let RootBox { base_l, base_u } = rb;
@@ -3666,6 +3693,8 @@ fn solve_milp_node_search(
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
     let mut strong_probe_lps: usize = 0;
+    let mut bound_hook_calls: usize = 0;
+    let mut bound_hook_raised: usize = 0;
 
     // Interactive debugger bookkeeping. `dbg_iter` mirrors the Python loops'
     // iteration counter; `dbg_last_inc` tracks the incumbent so the
@@ -4364,6 +4393,25 @@ fn solve_milp_node_search(
                     }
                 }
             }
+            // External node bound (`MilpBoundHook`): max-combined into the node's
+            // real LP bound; never consulted for a sentinel, an integral node, or a
+            // failed solve. Sequential, in batch order, so the search is deterministic.
+            if let Some(h) = opts.bound_hook.as_ref() {
+                let lb0 = out.result.lower_bound;
+                if batch_index % opts.bound_hook_every.max(1) == 0
+                    && !out.result.is_feasible
+                    && lb0.is_finite()
+                    && lb0 < INFEAS_SENTINEL
+                {
+                    bound_hook_calls += 1;
+                    if let Some(v) = h.node_bound(&batch.lb[k], &batch.ub[k]) {
+                        if v.is_finite() && v < INFEAS_SENTINEL && v > lb0 {
+                            out.result.lower_bound = v;
+                            bound_hook_raised += 1;
+                        }
+                    }
+                }
+            }
             point_values.push(out.point_value);
             results.push(out.result);
         }
@@ -4866,6 +4914,8 @@ fn solve_milp_node_search(
         node_cuts_added,
         root_cut_rows,
         strong_probe_lps,
+        bound_hook_calls,
+        bound_hook_raised,
     };
     // #1296: a feasible point below an ancestor's bound means that bound was
     // wrong, so nothing derived from the tree's bound is a certificate.
@@ -8133,6 +8183,8 @@ mod tests {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -9034,6 +9086,8 @@ mod tests {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -9132,6 +9186,82 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 0.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    /// `MilpBoundHook` (retirement: `lagrangian_bound`): a hook that returns `None`
+    /// is bound-neutral (same nodes, same answer), and a hook returning a valid
+    /// bound -- here the true optimum, valid at every node -- raises node bounds and
+    /// never changes the certified answer.
+    #[test]
+    fn bound_hook_is_neutral_when_silent_and_only_tightens() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct Fixed(Option<f64>, AtomicUsize);
+        impl MilpBoundHook for Fixed {
+            fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64> {
+                assert_eq!(lb.len(), 8);
+                assert_eq!(ub.len(), 8);
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0
+            }
+        }
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w
+            .iter()
+            .enumerate()
+            .map(|(i, v)| -(v + 0.3 * i as f64 + 0.5))
+            .collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |hook: Option<Arc<dyn MilpBoundHook>>| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.bound_hook = hook;
+            solve_milp(&lp, &[20.5], 0.0, &o)
+        };
+        let base = run(None);
+        assert_eq!(base.status, MilpStatus::Optimal);
+        assert!(
+            base.nodes > 3,
+            "instance too easy to show anything: {}",
+            base.nodes
+        );
+        let silent = Arc::new(Fixed(None, AtomicUsize::new(0)));
+        let r0 = run(Some(silent.clone()));
+        assert!(silent.1.load(Ordering::Relaxed) > 0, "the hook never ran");
+        assert_eq!(r0.bound_hook_calls, silent.1.load(Ordering::Relaxed));
+        assert_eq!(r0.bound_hook_raised, 0);
+        assert_eq!((r0.nodes, r0.status), (base.nodes, base.status));
+        assert_eq!(r0.obj, base.obj);
+        let tight = Arc::new(Fixed(Some(base.obj), AtomicUsize::new(0)));
+        let r1 = run(Some(tight.clone()));
+        assert_eq!(r1.status, MilpStatus::Optimal);
+        assert!(
+            (r1.obj - base.obj).abs() <= 1e-9,
+            "{} vs {}",
+            r1.obj,
+            base.obj
+        );
+        assert!(r1.bound_hook_raised > 0, "no node bound was raised");
+        assert!(r1.nodes <= base.nodes, "{} > {}", r1.nodes, base.nodes);
     }
 
     /// Retirement step 4 (`branching_rule`): every rule certifies the same optimum
@@ -9899,6 +10029,8 @@ mod tests {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -10039,6 +10171,8 @@ pub(crate) mod sparse_milp_diff {
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 rel_gap_max_abs: false,
+                bound_hook: None,
+                bound_hook_every: 1,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10344,6 +10478,8 @@ pub(crate) mod sparse_milp_diff {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -10657,6 +10793,8 @@ mod lazy_separation {
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 rel_gap_max_abs: false,
+                bound_hook: None,
+                bound_hook_every: 1,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10960,6 +11098,8 @@ mod node_separation {
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 rel_gap_max_abs: false,
+                bound_hook: None,
+                bound_hook_every: 1,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -11246,6 +11386,8 @@ mod lazy_infeasible_node {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -11388,6 +11530,8 @@ mod root_cut_budget_tests {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -12174,6 +12318,8 @@ mod tiny_entry_tests {
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
             rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
