@@ -257,23 +257,6 @@ class TestGomoryGate:
         assert S.GOMORY_CUTS_ENABLED is None  # auto by default
         assert S._gomory_enabled(False) is False
 
-    def test_auto_on_in_pounce_mode_and_correct(self):
-        # solve_milp runs prefer_pounce=True (POUNCE node solves), so GMI
-        # auto-enables; confirm the knapsack a naive GMI got wrong is correct.
-        pytest.importorskip("pounce")
-        from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_pounce import solve_milp
-
-        r = solve_milp(
-            c=np.array([-10.0, -9.0, -8.0, -1.0]),
-            A_ub=np.array([[5.0, 5.0, 5.0, 5.0]]),
-            b_ub=np.array([9.0]),
-            bounds=[(0, 1)] * 4,
-            integrality=np.array([1, 1, 1, 1]),
-        )
-        assert r.status == SolveStatus.OPTIMAL
-        assert abs(r.objective - (-10.0)) < 1e-4
-
 
 class TestMirCuts:
     """MIR cuts from original ``<=`` rows (basis-free, complement GMI)."""
@@ -299,21 +282,3 @@ class TestMirCuts:
             for b1 in (0, 1):
                 if b0 + b1 <= 1.5:
                     assert coeffs[0] @ np.array([b0, b1]) <= rhs[0] + 1e-6
-
-    def test_mir_in_pounce_solve_stays_correct(self):
-        # solve_milp runs prefer_pounce=True, so MIR (and GMI) are auto-on;
-        # confirm a general-integer MILP matches the Rust simplex B&B optimum.
-        pytest.importorskip("pounce")
-        from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_pounce import solve_milp
-        from discopt.solvers.milp_simplex import solve_milp as ref_milp
-
-        rng = np.random.default_rng(7)
-        c = rng.integers(-5, 6, 4).astype(float)
-        A = rng.integers(0, 4, (3, 4)).astype(float)
-        b = (A @ rng.integers(0, 4, 4) + rng.integers(1, 5, 3)).astype(float)
-        kw = dict(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * 4, integrality=np.ones(4))
-        rp = solve_milp(**kw)
-        rh = ref_milp(**kw)
-        assert rp.status == SolveStatus.OPTIMAL
-        assert abs(rp.objective - rh.objective) < 1e-3

@@ -1,70 +1,31 @@
-"""POUNCE MILP solver: matrix-form MILP via the self-hosted branch & bound.
+"""Retired: the matrix-form "POUNCE" MILP backend (Python-MILP-tree retirement, R11).
 
-POUNCE has no *matrix* MILP solver — "POUNCE MILP" is the discopt Rust-tree
-B&B with POUNCE LP relaxations (Phase 1). This adapter exposes that B&B behind
-the same signature/``MILPResult`` contract as
-:func:`discopt.solvers.milp_simplex.solve_milp` by building a ``Model`` from the
-matrix data, running ``_solve_milp_bb(prefer_pounce=True)``, and mapping the
-result back. It lets the matrix-form MILP consumers (the OA / GDP-LOA masters
-and ``milp_relaxation``) run with **only POUNCE installed** (no HiGHS).
+This module used to build a ``Model`` from the matrix data and run the Python MILP
+tree (``solver._solve_milp_bb``) with POUNCE interior-point node LPs. That tree is
+retired in favour of discopt's Rust MILP engine, and IPM node LPs were deliberately
+not ported (no warm start across branches, no basis, no exact vertex -- the reasons
+#356 took the matrix-MILP default off them;
+``docs/dev/python-milp-tree-retirement.md``). ``solve_milp`` here is kept so code that
+imports it, or selects ``backend="pounce"``, keeps working: it is the Rust simplex
+engine, :func:`discopt.solvers.milp_simplex.solve_milp`, and says so with a
+``FutureWarning``.
 """
 
 from __future__ import annotations
 
-import time
+import warnings
 from typing import Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.solvers import MILPResult, SolveStatus
+from discopt.solvers import MILPResult
 
-# SolveResult status string -> (MILPResult SolveStatus, keep_incumbent_x).
-# "feasible"/"node_limit" carry a real incumbent that consumers (OA/GDP) use
-# via the ITERATION_LIMIT+x path, but are *not* certified optimal.
-_STATUS_MAP: dict[str, tuple[SolveStatus, bool]] = {
-    "optimal": (SolveStatus.OPTIMAL, True),
-    "feasible": (SolveStatus.ITERATION_LIMIT, True),
-    "node_limit": (SolveStatus.ITERATION_LIMIT, True),
-    "iteration_limit": (SolveStatus.ITERATION_LIMIT, True),
-    "time_limit": (SolveStatus.TIME_LIMIT, True),
-    "infeasible": (SolveStatus.INFEASIBLE, False),
-    "unbounded": (SolveStatus.UNBOUNDED, False),
-    "error": (SolveStatus.ERROR, False),
-}
-
-_INF = 1e20
-
-
-def _linear_expr(coeffs: np.ndarray, xs: list):
-    """Build ``sum_j coeffs[j] * xs[j]`` over non-zero coefficients."""
-    expr = None
-    for j, a in enumerate(coeffs):
-        if a != 0.0:
-            term = float(a) * xs[j]
-            expr = term if expr is None else expr + term
-    if expr is None:
-        # All-zero row/objective: a valid zero expression.
-        return 0.0 * xs[0]
-    return expr
-
-
-def _add_rows(model, A, b, xs, sense: str) -> None:
-    if A is None or b is None:
-        return
-    A = (
-        np.asarray(A.todense(), dtype=np.float64)
-        if sp.issparse(A)
-        else np.asarray(A, dtype=np.float64)
-    )
-    b = np.asarray(b, dtype=np.float64).ravel()
-    for i in range(A.shape[0]):
-        lhs = _linear_expr(A[i], xs)
-        rhs = float(b[i])
-        if sense == "<=":
-            model.subject_to(lhs <= rhs)
-        else:
-            model.subject_to(lhs == rhs)
+RETIRED_MESSAGE = (
+    "the matrix 'pounce' MILP backend is retired; this solve runs discopt's Rust "
+    "simplex MILP engine (discopt.solvers.milp_simplex.solve_milp). Select "
+    "backend='simplex' (or milp_solver='simplex') to silence this warning."
+)
 
 
 def solve_milp(
@@ -79,90 +40,20 @@ def solve_milp(
     gap_tolerance: float = 1e-4,
     max_nodes: int = 100_000,
 ) -> MILPResult:
-    """Solve ``min c^T x`` over the MILP via the self-hosted B&B (POUNCE).
+    """Alias for :func:`discopt.solvers.milp_simplex.solve_milp` (same contract),
+    with a ``FutureWarning`` that the POUNCE matrix MILP backend is retired."""
+    from discopt.solvers.milp_simplex import solve_milp as _simplex_solve_milp
 
-    Same signature/semantics as :func:`discopt.solvers.milp_simplex.solve_milp`.
-    ``bounds`` default to ``(0, +inf)`` per variable when ``None``;
-    ``integrality[j] == 1`` marks variable ``j`` integer (all continuous when
-    ``None``).
-
-    ``max_nodes`` is the B&B node budget -- a deterministic stop, unlike
-    ``time_limit``, so a caller that needs a load-independent result (a test)
-    can bound the search by work instead of wall clock. The default is the
-    budget this driver always used; the other matrix backends already take it.
-    """
-    # The clock starts here, not after the model is built: ``time_limit`` is the
-    # caller's stopping contract, and building the rows took 0.69 s of a 10 s
-    # budget on a loaded CI runner, which the tree then granted again.
-    t0 = time.perf_counter()
-    import discopt.modeling as dm
-    from discopt.solver import _solve_milp_bb
-
-    c_arr = np.asarray(c, dtype=np.float64).ravel()
-    n = len(c_arr)
-    if bounds is not None:
-        lbs = [float(lo) for lo, _ in bounds]
-        ubs = [float(hi) for _, hi in bounds]
-    else:
-        lbs = [0.0] * n
-        ubs = [float("inf")] * n
-    # Snap tiny floating-point bound inversions (lb just above ub) so the
-    # self-hosted B&B's per-node LP relaxations are not rejected by POUNCE's
-    # strict bound validation (see lp_pounce._snap_inverted_bounds).
-    from discopt.solvers.lp_pounce import _snap_inverted_bounds
-
-    _lb_snap, _ub_snap = _snap_inverted_bounds(
-        np.asarray(lbs, dtype=np.float64), np.asarray(ubs, dtype=np.float64)
-    )
-    lbs = _lb_snap.tolist()
-    ubs = _ub_snap.tolist()
-    is_int = (
-        np.zeros(n, dtype=bool) if integrality is None else (np.asarray(integrality).ravel() == 1)
-    )
-
-    m = dm.Model("milp_pounce")
-    xs = []
-    for j in range(n):
-        lo = lbs[j] if np.isfinite(lbs[j]) else -_INF
-        hi = ubs[j] if np.isfinite(ubs[j]) else _INF
-        if is_int[j]:
-            xs.append(m.integer(f"x{j}", lb=lo, ub=hi))
-        else:
-            xs.append(m.continuous(f"x{j}", lb=lo, ub=hi))
-
-    m.minimize(_linear_expr(c_arr, xs))
-    _add_rows(m, A_ub, b_ub, xs, "<=")
-    _add_rows(m, A_eq, b_eq, xs, "==")
-
-    res = _solve_milp_bb(
-        m,
-        time_limit if time_limit is not None else 1e9,
-        gap_tolerance,
-        16,  # batch_size
-        "best_first",  # strategy
-        int(max_nodes),
-        t0,
-        prefer_pounce=True,
-    )
-    wall_time = time.perf_counter() - t0
-
-    status, keep_x = _STATUS_MAP.get(res.status, (SolveStatus.ERROR, False))
-    x = None
-    if keep_x and res.x is not None:
-        x = np.array(
-            [float(np.asarray(res.x[f"x{j}"]).ravel()[0]) for j in range(n)], dtype=np.float64
-        )
-
-    # ``objective`` is the incumbent (upper bound). ``bound`` is the rigorous
-    # dual lower bound: ``res.bound`` is the B&B global lower bound, already set
-    # to ``None`` by the driver when the gap is not certified, so it is a sound
-    # lower bound on every exit. Callers needing a lower bound must read it.
-    return MILPResult(
-        status=status,
-        x=x,
-        objective=res.objective if x is not None else None,
-        bound=res.bound,
-        gap=res.gap,
-        node_count=int(res.node_count),
-        wall_time=wall_time,
+    warnings.warn(RETIRED_MESSAGE, FutureWarning, stacklevel=2)
+    return _simplex_solve_milp(
+        c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        max_nodes=max_nodes,
     )

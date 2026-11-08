@@ -139,17 +139,15 @@ def get_qp_solver(prefer_pounce: bool = False) -> Callable:
 
 
 def _milp_pounce() -> Callable | None:
-    # POUNCE "matrix MILP" is the self-hosted B&B; available iff POUNCE is.
-    try:
-        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-
-        if not POUNCE_AVAILABLE:
-            return None
-        from discopt.solvers.milp_pounce import solve_milp
-
-        return solve_milp
-    except ImportError:
+    # Retired (Python-MILP-tree retirement, R11): the matrix "POUNCE" MILP backend was
+    # the Python MILP tree with IPM node LPs. ``backend="pounce"`` now names the
+    # retirement alias, which runs the Rust simplex engine and warns that it does
+    # (``milp_pounce.solve_milp``). Available iff that engine is.
+    if _milp_simplex() is None:
         return None
+    from discopt.solvers.milp_pounce import solve_milp
+
+    return solve_milp
 
 
 def _milp_simplex() -> Callable | None:
@@ -188,9 +186,11 @@ def _milp_gurobi() -> Callable | None:
 def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Callable:
     """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
 
-    ``backend`` selects the preferred engine: ``"auto"`` (**simplex-first** — the
-    pure-Rust warm-started-simplex B&B — then POUNCE; or POUNCE-first under
-    ``prefer_pounce``), ``"pounce"``, ``"simplex"``, ``"gurobi"``, or ``"highs"``. The preferred
+    ``backend`` selects the preferred engine: ``"auto"`` (the pure-Rust
+    warm-started-simplex B&B), ``"pounce"`` (retired, R11: an alias that runs the same
+    Rust engine and warns), ``"simplex"``, ``"gurobi"``, or ``"highs"``.
+    ``prefer_pounce`` is accepted and ignored since the POUNCE matrix MILP backend was
+    retired. The preferred
     engine is tried first and the call falls back to the standard order if it is
     unavailable, so selection never fails when *any* backend is importable. An
     explicit Gurobi selection returns the optional wrapper; a missing ``gurobipy``
@@ -202,8 +202,6 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     reaches the exact B&B optimum (a rigorous bound, unlike the POUNCE IPM's
     analytic-center objective that can drift on ill-conditioned LPs — #145) and is
     fast on the lifted, ill-conditioned relaxations where the POUNCE IPM is slow.
-    POUNCE remains as the fallback (HiGHS removed, issue #356). ``prefer_pounce``
-    (the POUNCE-only mode) keeps its POUNCE-first order unchanged.
 
     ``"highs"`` (issue #1060) is the one backend with **no** fallback order: it is
     an explicit opt-in for the MIP-NLP *master*, never reachable from ``"auto"``,
@@ -217,7 +215,10 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     valid = {"auto", "pounce", "simplex", "gurobi", "highs"}
     if backend not in valid:
         raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
-    base = (_milp_pounce, _milp_simplex) if prefer_pounce else (_milp_simplex, _milp_pounce)
+    # ``prefer_pounce`` no longer changes the engine: the POUNCE matrix MILP backend is
+    # retired (R11), so every default order is the Rust simplex engine.
+    del prefer_pounce
+    base = (_milp_simplex,)
     if backend == "simplex":
         order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
     elif backend == "highs":

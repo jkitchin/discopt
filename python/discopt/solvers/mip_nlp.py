@@ -498,37 +498,17 @@ def _try_direct_milp(
     result = None
     if backend == "gurobi":
         result = solver_module._solve_milp_gurobi(model, t_start, time_limit, gap_tolerance)
-    elif backend == "simplex":
+    else:
+        # Python-MILP-tree retirement (R12): "auto", "simplex" and "pounce" (an alias
+        # since the matrix POUNCE MILP backend was retired) all run discopt's Rust
+        # MILP engine. An engine that defers returns ``None`` and the caller falls
+        # back to the SHOT loop, as an unavailable backend always did.
         result = solver_module._solve_milp_simplex(
             model,
             time_limit,
             gap_tolerance,
             max_iterations,
             t_start,
-        )
-    elif backend == "pounce":
-        result = solver_module._solve_milp_bb(
-            model,
-            time_limit,
-            gap_tolerance,
-            16,
-            "best_first",
-            max_iterations,
-            t_start,
-            prefer_pounce=True,
-            node_engine="simplex",
-        )
-    else:
-        result = solver_module._solve_milp_bb(
-            model,
-            time_limit,
-            gap_tolerance,
-            16,
-            "best_first",
-            max_iterations,
-            t_start,
-            prefer_pounce=nlp_solver == "pounce",
-            node_engine="simplex" if nlp_solver == "pounce" else "pounce",
         )
     if result is None:
         return None, _direct_attempt(

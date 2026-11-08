@@ -24,11 +24,10 @@ from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.milp_simplex import solve_milp as simplex_milp  # noqa: E402
 
 
-class TestSimplexAdapterVsPounce:
+class TestSimplexAdapterVsEnumeration:
     @pytest.mark.parametrize("seed", list(range(8)))
-    def test_matches_pounce(self, seed):
-        pytest.importorskip("pounce")
-        from discopt.solvers.milp_pounce import solve_milp as ref_milp
+    def test_matches_enumeration(self, seed):
+        import itertools
 
         rng = np.random.default_rng(seed)
         n = 5
@@ -38,13 +37,15 @@ class TestSimplexAdapterVsPounce:
         bounds = [(0.0, 1.0)] * n
         integ = np.ones(n)
         rs = simplex_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=integ)
-        rh = ref_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=integ)
-        if rh.status != SolveStatus.OPTIMAL:
-            return
+        # Exact oracle by enumeration (2^5 points). The POUNCE matrix backend this
+        # used to compare against is retired and runs this same engine.
+        want = min(
+            float(c @ np.asarray(p))
+            for p in itertools.product((0.0, 1.0), repeat=n)
+            if np.all(A @ np.asarray(p) <= b + 1e-9)
+        )
         assert rs.status == SolveStatus.OPTIMAL
-        # POUNCE is an interior-point reference, so allow the project rel
-        # tolerance rather than the exact-vs-exact 1e-6 the HiGHS oracle gave.
-        assert abs(rs.objective - rh.objective) < 1e-4, f"seed={seed}"
+        assert abs(rs.objective - want) < 1e-6, f"seed={seed}"
 
     def test_equality_rows_supported(self):
         # x0 + x1 == 1, binary, minimize -x0 - 2 x1 → x1=1, obj -2.

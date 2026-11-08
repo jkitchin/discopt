@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from discopt.modeling.core import from_nl
-from discopt.solvers import SolveStatus, milp_simplex
+from discopt.solvers import milp_simplex
 from discopt.solvers.lp_backend import get_milp_solver
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
@@ -110,22 +110,6 @@ def test_captured_master_is_not_certified_above_a_feasible_point():
     )
 
 
-#: POUNCE's node budget on the captured master. POUNCE does not close this master in
-#: any test-sized budget (measured: 48,523 nodes in 600 s, dual bound still
-#: 2.55e8 against 3.32e8), so with a 60 s wall-clock limit its answer was whatever
-#: incumbent the runner's speed let it reach -- +0.32 on an idle machine, ``None``
-#: after 15 nodes on a loaded CI runner (main 2d2fe75c, run 37221240848). A node
-#: budget makes it the same search everywhere. Measured (best-first, batch 16):
-#: no incumbent at 48 nodes, +22911 at 100, and +2.18 at 200 -- identical at
-#: 200, 600, 2000 and 48,523 nodes -- so 200 is the smallest budget at which the
-#: comparison below is meaningful; ~20 s on a heavily loaded laptop.
-POUNCE_MAX_NODES = 200
-
-#: Wall-clock guard for the POUNCE arm only: a hang stop, never the budget that
-#: decides the answer (that is ``POUNCE_MAX_NODES``).
-POUNCE_WALL_GUARD = 100.0
-
-
 @pytest.mark.smoke
 @pytest.mark.requires_highs
 def test_all_milp_backends_agree_on_the_captured_master():
@@ -133,8 +117,8 @@ def test_all_milp_backends_agree_on_the_captured_master():
 
     HiGHS solves this master correctly; before the fix the in-house simplex was
     alone in certifying a wrong answer, which is the signature that made the
-    defect attributable at all. POUNCE is checked in its own test below, under a
-    deterministic node budget.
+    defect attributable at all. (The POUNCE matrix backend that was checked in its own
+    test here is retired; it now runs the in-house engine.)
     """
     problem, _z, attained = _load_master()
     slack = ABS_SLACK_BACKENDS
@@ -147,46 +131,6 @@ def test_all_milp_backends_agree_on_the_captured_master():
             f"backend {backend!r} returned {res.objective!r} above {attained!r}"
         )
     assert checked == 3, "a backend was skipped; this comparison proves nothing"
-
-
-@pytest.mark.smoke
-def test_pounce_agrees_on_the_captured_master_within_a_node_budget():
-    """POUNCE under a node budget: its incumbent is within slack, its bound is sound.
-
-    Work-bounded, not clock-bounded, so the result does not depend on runner load.
-    """
-    from discopt.solvers.lp_backend import _milp_pounce
-    from discopt.solvers.milp_pounce import solve_milp as pounce_solve_milp
-
-    if _milp_pounce() is None:
-        pytest.skip("POUNCE is not installed")
-    problem, _z, attained = _load_master()
-    res = pounce_solve_milp(
-        time_limit=POUNCE_WALL_GUARD,
-        gap_tolerance=1e-4,
-        max_nodes=POUNCE_MAX_NODES,
-        **problem,
-    )
-    if res.status == SolveStatus.TIME_LIMIT or (
-        res.status != SolveStatus.OPTIMAL and res.node_count < POUNCE_MAX_NODES
-    ):
-        # The hang guard fired before the node budget was spent: the runner, not
-        # the solver, decided this exit. ``feasible`` from the B&B driver is labelled
-        # ITERATION_LIMIT whether the clock or the node budget stopped it, so the
-        # node count is what tells the two apart.
-        pytest.skip(
-            f"POUNCE hit the {POUNCE_WALL_GUARD} s wall guard after {res.node_count} of "
-            f"{POUNCE_MAX_NODES} nodes; nothing deterministic to compare"
-        )
-    assert res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT), res.status
-    slack = ABS_SLACK_BACKENDS
-    assert res.objective is not None and res.objective <= attained + slack, (
-        f"POUNCE returned {res.objective!r} above {attained!r} after {res.node_count} nodes"
-    )
-    # Soundness: whatever the budget, the dual bound may never pass a feasible point.
-    assert res.bound is None or res.bound <= attained + slack, (
-        f"POUNCE dual bound {res.bound!r} above a feasible point of {attained!r}"
-    )
 
 
 @pytest.mark.smoke

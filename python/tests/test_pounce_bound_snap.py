@@ -52,7 +52,8 @@ def test_lp_does_not_mask_genuine_inversion():
 
 
 def test_milp_snaps_tiny_inverted_bound():
-    from discopt.solvers.milp_pounce import solve_milp
+    # The matrix MILP engine (the retired POUNCE backend's alias runs it too).
+    from discopt.solvers.milp_simplex import solve_milp
 
     c, bounds = _tiny_inverted_bounds_lp()
     integrality = np.array([1, 0])  # x integer, y continuous

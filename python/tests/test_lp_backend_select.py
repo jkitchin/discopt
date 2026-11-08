@@ -67,10 +67,11 @@ def test_default_milp_prefers_simplex():
     assert lp_backend.get_milp_solver().__module__ == "discopt.solvers.milp_simplex"
 
 
-def test_prefer_pounce_milp_uses_self_hosted_bb():
-    pytest.importorskip("pounce")
+def test_prefer_pounce_milp_uses_the_rust_engine():
+    # R11: the POUNCE matrix MILP backend is retired; prefer_pounce no longer
+    # changes the engine.
     assert (
-        lp_backend.get_milp_solver(prefer_pounce=True).__module__ == "discopt.solvers.milp_pounce"
+        lp_backend.get_milp_solver(prefer_pounce=True).__module__ == "discopt.solvers.milp_simplex"
     )
 
 
@@ -89,10 +90,10 @@ class TestPounceOnlyInstall:
         _without_highs(monkeypatch)
         assert lp_backend.get_milp_solver().__module__ == "discopt.solvers.milp_simplex"
 
-    def test_milp_selector_falls_back_to_pounce_without_simplex(self, monkeypatch):
-        # When BOTH HiGHS and the Rust simplex binding are unavailable, the matrix
-        # MILP falls back to the POUNCE self-hosted B&B.
-        pytest.importorskip("pounce")
+    def test_milp_selector_refuses_without_the_rust_engine(self, monkeypatch):
+        # R11: with the Rust simplex binding unavailable there is no matrix MILP
+        # engine left (the POUNCE self-hosted B&B fallback is retired): the
+        # selector raises rather than quietly picking something else.
         real_import = builtins.__import__
         blocked = ("lp_highs", "qp_highs", "milp_highs", "milp_simplex")
 
@@ -102,7 +103,8 @@ class TestPounceOnlyInstall:
             return real_import(name, *a, **k)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        assert lp_backend.get_milp_solver().__module__ == "discopt.solvers.milp_pounce"
+        with pytest.raises(ImportError):
+            lp_backend.get_milp_solver()
 
     def test_oa_master_is_highs_free(self, monkeypatch):
         """The OA convex-MINLP master MILP solves without HiGHS (via the

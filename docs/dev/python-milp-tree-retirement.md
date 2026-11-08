@@ -281,3 +281,18 @@ also go is **unverified**: the spatial path may use them.
   panel owed), `lagrangian_bound`, the `DISCOPT_MILP_ENGINE=0` opt-out, R11 (matrix POUNCE
   backend), R12 (SHOT direct MILP), and engine declines (ReLU spec unavailable, feasibility
   gate failures).
+- **2026-11-08, step 10 (R11, R12).** `milp_pounce.solve_milp` is now an alias for
+  `milp_simplex.solve_milp` that raises a `FutureWarning` (the IPM-node tree is not
+  ported, §4); `get_milp_solver(backend="pounce")` returns it and `prefer_pounce` no longer
+  changes the engine, so `milp_solver="pounce"` in AMP/OA/GDP and `milp_relaxation` keeps
+  working on the Rust engine. `_try_direct_milp` (SHOT profile) runs `_solve_milp_simplex`
+  for `"auto"`, `"simplex"` and `"pounce"`; a deferral falls back to the SHOT loop.
+  Tests that used `milp_pounce` as a *reference* would have compared the engine to itself
+  (vacuous, CLAUDE.md §6) and now use exhaustive enumeration
+  (`test_milp_simplex.py`, `test_amp_simplex_backend.py`); tree-internal tests of that
+  backend are deleted (`test_rust_crossover` GMI/MIR-in-pounce-mode,
+  `test_1236`'s POUNCE node-budget arm, the POUNCE node-deadline plumbing, replaced by a
+  wall-clock check on the alias). **Capability not carried over, recorded:** the POUNCE
+  backend seeded the root LP bound even under a ~zero budget (#15); at `time_limit=1e-6`
+  the engine returns no bound. `"auto"` has always been the engine, so AMP's default
+  never had that seeding; it was `test_milp_bb_pounce_no_jax_ipm.py`, now removed.
