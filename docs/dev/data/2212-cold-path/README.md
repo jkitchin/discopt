@@ -149,3 +149,40 @@ anything to do. But on this corpus it buys no certificate, and on `hda` the cost
 attempt shows up as a looser bound. The next step is to make a failed attempt cheap, then re-run
 this panel: one attempt per cold solve instead of one per scaled and unscaled retry, and a pivot
 budget for the attempt on large LPs.
+
+### Second panel: a failed attempt made cheap (`30c9b84`, `panel/corpus_cheap_attempt.*`)
+
+Hypothesis: `hda`'s loss is each failed attempt being paid twice (the scaled solve and the #649
+unscaled retry), so making a failed attempt cheap restores it. Change: one attempt per
+caller-level solve (`cold_scope`) and a pivot budget `min(max_iter, 2(m+n)+1000)` (over 3x the
+largest the 121 decided LPs used). Kill criterion, set before the run: decided attempts falling
+noticeably below the first panel's 6,892 means the budget is too tight. Same protocol, same corpus.
+
+| | first panel | cheap attempt |
+|---|---|---|
+| violations | 0 | 0 |
+| certified OFF → ON | 59 → 59 | 59 → 59 |
+| nodes ON (OFF ≈ 6,845) | 6,578 | 6,604 |
+| attempts / decided / refused / fell back | 12,387 / 6,892 / 4,960 / 535 | 9,867 / 6,719 / 2,833 / 315 |
+| `LpVerdictNumerical` ON (OFF ≈ 21,450) | 18,089 | 17,136 |
+| `hda` | 1 node vs 3, bound −4.66e8 vs −6996 | **unchanged** |
+
+**The hypothesis is falsified.** `hda`'s attempts fell from 21 to 16 and its loss did not move.
+Decided attempts fell 2.5 % (6,892 → 6,719), at the edge of the kill criterion. The cause is
+not attributed: the budget, or a skipped unscaled repeat that would have decided. The panel
+did not record `LogicalDualColdSkippedRepeat` (it was missing from the panel's counter list,
+added since), so this run cannot say which.
+
+**What `hda` is** (`panel/hda_300s.*`, root solve with a 300 s limit, both arms). Both end at
+**3 nodes with the same bound (−6995.66)**. The flag-on arm runs twice the LPs in the same wall
+(392 LP verdicts against 196), decides more of them (44 optimal against 28), and does twice the
+phase-1 work (719k pivots against 339k). Neither arm stops at its node cap: a pre-node stage
+issues LPs until the time limit, and with more of them decided it keeps doing more. So the
+120 s "looser bound" is a wall-budget effect of the flag doing *more* work, not a quality loss,
+and no per-attempt cost change could have fixed it.
+
+**Verdict after both panels: cert-clean, not net-positive on the in-repo corpus.** It decides
+more LPs (`Numerical` −20 %), makes the kernel's slack retry redundant, and saves nodes on some
+instances (`ex8_5_3` −36 %), but certifies nothing the OFF arm does not, and wall is flat. The
+flag stays OFF. What could still show a benefit: the QPLIB run (#1008's large equality-rich LPs,
+where the cold primal ground to `max_iter`), and covering the LPs whose start is refused.

@@ -261,6 +261,7 @@ _CTRS = (
     "LogicalDualColdAugDecided",
     "LogicalDualColdRefused",
     "LogicalDualColdFellBack",
+    "LogicalDualColdSkippedRepeat",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
