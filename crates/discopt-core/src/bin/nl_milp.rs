@@ -329,6 +329,7 @@ fn run() -> Result<(), String> {
         max_nodes: args.max_nodes,
         max_open_nodes: None,
         time_limit_s: Some(args.time_limit),
+        stall_time_s: None,
         gap_tol: args.gap_tol,
         // This CLI exposes only the relative tolerance, so there is no
         // absolute criterion to apply (#1315).

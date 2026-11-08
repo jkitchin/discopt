@@ -39720,6 +39720,25 @@ def _milp_reentry_spend_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_REENTRY_SPEND", "1") != "0"
 
 
+def _milp_run1_continue_enabled() -> bool:
+    """``DISCOPT_MILP_RUN1_CONTINUE`` gate (D2 review R0, default OFF until its panel).
+
+    Run 1 of ``_solve_milp_simplex`` is capped at the #291 stall slice (half the
+    remaining time, at most ``_SIMPLEX_MILP_BUDGET_CAP_S``), and an uncertified run 1
+    is then *restarted* from the root (run 2, the #698 re-entry): its cut pool,
+    pseudocosts and tree are discarded. Measured over the checked-in D2 entry files
+    (138 uncertified two-run rows at ``time_limit=20``): run 2's bound beat run 1's
+    on 12 (``nexp-50-20-4-2``, ``neos17``, ``gsvm2rl3``), matched or fell below it on
+    126 (``enlight8`` 20 -> 19; every ``mik``). With the flag, run 1 gets the whole
+    remaining budget and the stall guard moves into the driver (``stall_time_s``): it
+    stops at the slice only if it still has no incumbent, which is exactly the #291
+    case; a run holding an incumbent keeps searching. HiGHS's only restart keeps its
+    cut rows, pool, pseudocosts and incumbent (``HighsMipSolverData.cpp:1316-1420``).
+    Changes the search, so gated per CLAUDE.md section 5; read at call time.
+    """
+    return os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "0") == "1"
+
+
 def _milp_reentry_cuts_enabled() -> bool:
     """``DISCOPT_MILP_REENTRY_CUTS`` gate (highs-parity D2): give the #698 re-entry
     (run 2 of ``_solve_milp_simplex``) the same root cut budget as run 1.
@@ -40081,6 +40100,13 @@ def _solve_milp_simplex(
             _run1_nodes = _MILP_ENGINE_UNCAPPED_NODES
         _frontier_opts["max_open_nodes"] = _milp_engine_max_open_nodes(_A_n, _A_m)
     _stopped_on_nodes = False
+    # D2 review R0 (``DISCOPT_MILP_RUN1_CONTINUE``): the whole remaining budget, with
+    # the #291 stall slice enforced by the driver only while it has no incumbent.
+    _run1_time = _milp_budget
+    _run1_stall: dict = {}
+    if _milp_run1_continue_enabled() and not _tuning().deterministic:
+        _run1_time = max(_milp_budget, float(time_limit) - (time.perf_counter() - t_start))
+        _run1_stall["stall_time_s"] = float(_milp_budget)
 
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
         np.ascontiguousarray(_drv.c, dtype=np.float64),
@@ -40099,10 +40125,11 @@ def _solve_milp_simplex(
         float(gap_tolerance),
         abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
         initial_incumbent=_seed,
-        time_limit_s=float(_milp_budget),
+        time_limit_s=float(_run1_time),
         debug_hook=_debug.rust_hook(),
         **_cut_opts,
         **_frontier_opts,
+        **_run1_stall,
     )
 
     def _driver_stats() -> dict[str, float]:

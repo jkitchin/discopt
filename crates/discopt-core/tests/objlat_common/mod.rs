@@ -73,6 +73,7 @@ pub fn options() -> MilpOptions {
         max_nodes: 200_000,
         max_open_nodes: None,
         time_limit_s: Some(60.0),
+        stall_time_s: None,
         gap_tol: 1e-9,
         abs_gap_tol: None,
         root_cuts: 0,

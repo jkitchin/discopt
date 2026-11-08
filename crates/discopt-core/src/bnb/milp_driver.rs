@@ -466,6 +466,61 @@ fn cut_lp_enabled() -> bool {
     })
 }
 
+/// `DISCOPT_MILP_CUT_LP_READMIT` (D2 review R1 fix A, default OFF until its panel):
+/// a folded cut row that was lazily relaxed (slack freed, see the deletion pass) is a
+/// candidate again. Nodes score the relaxed rows' cuts at their LP point like pool cuts,
+/// they compete in the same batch selection ([`cut_lp_select`]), and a selected row is
+/// re-admitted in place (slack back to `[0, inf)`, age 0). HiGHS returns a cut that
+/// leaves the LP to its pool at once (`HighsCutPool.cpp:150-160` `lpCutRemoved`), so the
+/// next node that violates it gets it back; discopt's relaxed rows were in neither the
+/// LP nor the pool. Entry (`docs/dev/highs-parity-d2-review.md` R1): with CUT_LP on,
+/// ~9,800 node LPs per `enlight8` solve violated a relaxed cut (~193k violations), and
+/// ~2,500 per `bppc8-02` solve. Every folded cut is globally valid, so re-admitting one
+/// only tightens the LP; a stored basis keeps its primal point (the freed slack sat
+/// nonbasic at 0, re-labelled at its restored lower bound 0).
+fn cut_lp_readmit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_CUT_LP_READMIT").unwrap_or_default();
+        parse_cut_lp_readmit(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// `DISCOPT_MILP_CUT_LP_DROP_RELAXED` (D2 review R1 fix D, default OFF until its
+/// panel): a lazily relaxed folded row that ages out again is physically deleted
+/// (and returns to the pool at age 1) instead of staying in the matrix. A stored basis
+/// that has its slack nonbasic cannot survive the row's removal, so it is dropped and
+/// that node re-solves without a warm start (speed only; a node's bound never rests on
+/// its stored basis). Measured with CUT_LP on (`enlight8`, 20 s): node LPs carried 339
+/// folded rows on a 64-row model, 95.6 % basic, and the deletion pass was blocked
+/// 10,652 times; node throughput 9.2k vs 49.2k with CUT_LP off.
+fn cut_lp_drop_relaxed_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_CUT_LP_DROP_RELAXED").unwrap_or_default();
+        parse_cut_lp_readmit(&raw)
+            .map_err(|e| {
+                e.replace(
+                    "DISCOPT_MILP_CUT_LP_READMIT",
+                    "DISCOPT_MILP_CUT_LP_DROP_RELAXED",
+                )
+            })
+            .unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`cut_lp_readmit_enabled`]; garbage is refused.
+fn parse_cut_lp_readmit(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_CUT_LP_READMIT={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no)"
+        )),
+    }
+}
+
 /// The parse table behind [`cut_lp_enabled`]; garbage is refused, not defaulted.
 fn parse_cut_lp(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -753,9 +808,19 @@ fn cut_parallelism(a: &GomoryCut, b: &GomoryCut) -> f64 {
 fn cut_lp_select(
     mut cands: Vec<(f64, usize)>,
     pool: &[GomoryCut],
+    extra: &[&GomoryCut],
     best_observed: &mut f64,
     min_factor: &mut f64,
 ) -> Vec<usize> {
+    // Index `k < pool.len()` names a pool cut; `pool.len() + i` names `extra[i]` (a
+    // relaxed folded row, `DISCOPT_MILP_CUT_LP_READMIT`).
+    let get = |k: usize| {
+        if k < pool.len() {
+            &pool[k]
+        } else {
+            extra[k - pool.len()]
+        }
+    };
     if cands.is_empty() {
         return Vec::new();
     }
@@ -776,7 +841,7 @@ fn cut_lp_select(
     for &(_, k) in &cands {
         if sel
             .iter()
-            .any(|&s| cut_parallelism(&pool[s], &pool[k]) > CUT_LP_MAX_PARALLEL)
+            .any(|&s| cut_parallelism(get(s), get(k)) > CUT_LP_MAX_PARALLEL)
         {
             continue;
         }
@@ -1383,6 +1448,13 @@ pub struct MilpOptions {
     /// "optimal". Keeps a single atomic MILP solve from overrunning a caller's
     /// `time_limit` (the McCormick LP relaxer node solve was the worst offender).
     pub time_limit_s: Option<f64>,
+    /// Stall guard (#291, moved into the driver by D2 review R0): when `Some(s)`, the
+    /// search stops (uncertified) at the first batch boundary after `s` seconds *only
+    /// if it still has no incumbent*; with one it runs on to `time_limit_s`. The
+    /// caller gets the same "stalled, no incumbent" exit it used to get from a
+    /// `time_limit_s = s` run, and a run holding an incumbent keeps its tree, pool and
+    /// pseudocosts instead of being restarted. `None` = no stall guard.
+    pub stall_time_s: Option<f64>,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -3095,6 +3167,8 @@ fn solve_milp_node_search(
     // D2 W1 (`DISCOPT_MILP_CUT_LP`): pool cuts folded into the shared LP, their aging
     // state, and HiGHS's adaptive selection state.
     let cut_lp_on = node_gmi_on && cut_lp_enabled() && lazy.is_none();
+    let cut_lp_readmit_on = cut_lp_on && cut_lp_readmit_enabled();
+    let cut_lp_drop_relaxed_on = cut_lp_on && cut_lp_drop_relaxed_enabled();
     let mut cut_lp_rows: Vec<CutLpRow> = Vec::new();
     let mut cut_lp_fold: Vec<GomoryCut> = Vec::new();
     let mut cut_lp_best_score: f64 = 0.0;
@@ -3618,6 +3692,16 @@ fn solve_milp_node_search(
                 break;
             }
         }
+        if let Some(st) = opts.stall_time_s {
+            let has_inc = tm
+                .incumbent()
+                .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0);
+            if !has_inc && t_start.elapsed().as_secs_f64() >= st {
+                crate::profile::incr(crate::profile::Ctr::MilpStallGuardStop);
+                gap_certified = false;
+                break;
+            }
+        }
         let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
             break;
@@ -3665,6 +3749,19 @@ fn solve_milp_node_search(
         // (the simplex's own audit runs in scaled units) before the tree sees it.
         let problem = ScaledProblem::new(csc_w.clone(), m_w, n_w, &c_w, &b_w);
         let cut_lp_ids: Vec<(usize, usize)> = cut_lp_rows.iter().map(|r| (r.row, r.col)).collect();
+        // Relaxed folded rows (index into `cut_lp_rows`, cut), for re-admission
+        // (`DISCOPT_MILP_CUT_LP_READMIT`) or, in profile builds, the R1 instrument.
+        let cut_lp_relaxed_idx: Vec<usize> = if cut_lp_readmit_on || crate::profile::enabled() {
+            (0..cut_lp_rows.len())
+                .filter(|&i| cut_lp_rows[i].relaxed)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let cut_lp_relaxed: Vec<&GomoryCut> = cut_lp_relaxed_idx
+            .iter()
+            .map(|&i| &cut_lp_rows[i].cut)
+            .collect();
         let scaling = problem.scaling();
         // Solve-space objective/rhs/CSC (scaled when `scaling` is `Some`); node
         // bounds are scaled per node (cheap). Never densified.
@@ -3748,6 +3845,9 @@ fn solve_milp_node_search(
                 gmi_pool: &gmi_pool,
                 cut_lp: cut_lp_on,
                 cut_lp_rows: &cut_lp_ids,
+                cut_lp_relaxed: &cut_lp_relaxed,
+                cut_lp_readmit: cut_lp_readmit_on,
+                cut_lp_drop_relaxed: cut_lp_drop_relaxed_on,
                 reliability: tm.get_reliability_threshold(),
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
@@ -3816,12 +3916,21 @@ fn solve_milp_node_search(
         let mut batch_used_gmi: Vec<usize> = Vec::new();
         // D2 W1: best HiGHS score of each violated pool cut over the batch's nodes.
         let mut batch_cut_score: HashMap<usize, f64> = HashMap::new();
+        // DISCOPT_MILP_CUT_LP_READMIT: the same, for relaxed folded rows (index into
+        // `cut_lp_relaxed_idx`).
+        let mut batch_relaxed_score: HashMap<usize, f64> = HashMap::new();
         for (k, mut out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
             improve_dive_iters += out.dive_iters;
             for (&c, &sc) in out.gmi_used.iter().zip(out.gmi_scores.iter()) {
                 let e = batch_cut_score.entry(c).or_insert(sc);
+                if sc > *e {
+                    *e = sc;
+                }
+            }
+            for (&c, &sc) in out.relaxed_used.iter().zip(out.relaxed_scores.iter()) {
+                let e = batch_relaxed_score.entry(c).or_insert(sc);
                 if sc > *e {
                     *e = sc;
                 }
@@ -4214,17 +4323,64 @@ fn solve_milp_node_search(
             // leave the pool (their signature stays, so a re-separated copy is not
             // re-admitted while the row is in the LP).
             let mut fold = vec![false; gmi_pool.len()];
-            if cut_lp_on && !batch_cut_score.is_empty() {
+            if cut_lp_on && (!batch_cut_score.is_empty() || !batch_relaxed_score.is_empty()) {
+                // Relaxed rows compete with pool cuts in one selection, indexed after
+                // the pool, as HiGHS's removed LP cuts compete in its pool.
+                let np = gmi_pool.len();
                 let mut cands: Vec<(f64, usize)> =
                     batch_cut_score.iter().map(|(&k, &sc)| (sc, k)).collect();
+                cands.extend(batch_relaxed_score.iter().map(|(&i, &sc)| (sc, np + i)));
                 cands.sort_by_key(|&(_, k)| k);
-                for k in cut_lp_select(
+                let extra: Vec<&GomoryCut> = cut_lp_relaxed_idx
+                    .iter()
+                    .map(|&i| &cut_lp_rows[i].cut)
+                    .collect();
+                let sel = cut_lp_select(
                     cands,
                     &gmi_pool,
+                    &extra,
                     &mut cut_lp_best_score,
                     &mut cut_lp_min_factor,
-                ) {
-                    fold[k] = true;
+                );
+                let mut readmit: Vec<usize> = Vec::new();
+                for k in sel {
+                    if k < np {
+                        fold[k] = true;
+                    } else {
+                        readmit.push(cut_lp_relaxed_idx[k - np]);
+                    }
+                }
+                // Re-admit in place: the slack back to its fold bounds `[0, inf)`, age 0.
+                // A stored basis had the freed slack nonbasic at 0 (the two-sided
+                // encoding); it is re-labelled at its lower bound 0, so every stored
+                // basis keeps its primal point.
+                if !readmit.is_empty() {
+                    let cols: HashSet<usize> =
+                        readmit.iter().map(|&i| cut_lp_rows[i].col).collect();
+                    for &i in &readmit {
+                        let r = &mut cut_lp_rows[i];
+                        l_w[r.col] = 0.0;
+                        u_w[r.col] = INF;
+                        r.relaxed = false;
+                        r.age = 0;
+                    }
+                    slack_l = l_w[ns..].to_vec();
+                    slack_u = u_w[ns..].to_vec();
+                    tm.map_bases(|b| {
+                        let mut nb = b.clone();
+                        for &c in &cols {
+                            if let Some(st) = nb.col_status.get_mut(c) {
+                                if *st != BASIC {
+                                    *st = AT_LOWER;
+                                }
+                            }
+                        }
+                        Some(nb)
+                    });
+                    crate::profile::incr_by(
+                        crate::profile::Ctr::CutLpReadmitted,
+                        readmit.len() as u64,
+                    );
                 }
             }
             let over = gmi_pool.len().saturating_sub(NODE_GMI_POOL_CAP);
@@ -4461,6 +4617,11 @@ fn solve_milp_node_search(
                     r.relaxed = true;
                     relaxed_any = true;
                     crate::profile::incr(crate::profile::Ctr::CutLpRelaxed);
+                } else if cut_lp_drop_relaxed_on {
+                    // DISCOPT_MILP_CUT_LP_DROP_RELAXED: delete it; bases that keep its
+                    // slack nonbasic are dropped by `remap_basis_after_delete`.
+                    del.push(i);
+                    crate::profile::incr(crate::profile::Ctr::CutLpRelaxedDropped);
                 } else {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
                 }
@@ -4529,7 +4690,13 @@ fn solve_milp_node_search(
                     .chain(cut_lp_rows.iter().map(|r| &r.cut))
                     .map(cut_signature)
                     .collect();
-                tm.map_bases(|b| remap_basis_after_delete(b, &d.col_map));
+                tm.map_bases(|b| {
+                    let nb = remap_basis_after_delete(b, &d.col_map);
+                    if nb.is_none() {
+                        crate::profile::incr(crate::profile::Ctr::CutLpBasisDropped);
+                    }
+                    nb
+                });
             }
         }
     }
@@ -4690,6 +4857,13 @@ struct NodeCtx<'a> {
     cut_lp: bool,
     /// `DISCOPT_MILP_CUT_LP`: the folded rows `(row, slack column)` of this batch's LP.
     cut_lp_rows: &'a [(usize, usize)],
+    /// The cuts of the lazily relaxed folded rows, in `cut_lp_relaxed_idx` order: scored
+    /// at the node point when `cut_lp_readmit` is on (or counted, profile builds only).
+    cut_lp_relaxed: &'a [&'a GomoryCut],
+    /// `DISCOPT_MILP_CUT_LP_READMIT`: report violated relaxed rows for re-admission.
+    cut_lp_readmit: bool,
+    /// `DISCOPT_MILP_CUT_LP_DROP_RELAXED` (also gates the depth-based root test).
+    cut_lp_drop_relaxed: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -4747,6 +4921,10 @@ struct NodeOutput {
     gmi_scores: Vec<f64>,
     /// `DISCOPT_MILP_CUT_LP`: per `ctx.cut_lp_rows` entry, active at this optimum.
     cut_lp_active: Vec<bool>,
+    /// `DISCOPT_MILP_CUT_LP_READMIT`: relaxed folded rows (index into the batch's
+    /// `cut_lp_relaxed`) this node's point violates, with their HiGHS pool score.
+    relaxed_used: Vec<usize>,
+    relaxed_scores: Vec<f64>,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
     /// #2136: the objective of `result.solution` when `result.is_feasible` (an
@@ -4876,6 +5054,8 @@ fn solve_node(
             gmi_used: Vec::new(),
             gmi_scores: Vec::new(),
             cut_lp_active: Vec::new(),
+            relaxed_used: Vec::new(),
+            relaxed_scores: Vec::new(),
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -4936,6 +5116,8 @@ fn solve_node(
                 gmi_used: Vec::new(),
                 gmi_scores: Vec::new(),
                 cut_lp_active: Vec::new(),
+                relaxed_used: Vec::new(),
+                relaxed_scores: Vec::new(),
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -4961,7 +5143,17 @@ fn solve_node(
     // The root is the only node solved cold (no inherited basis); the diving
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
-    let is_root = ctx.tm.node_basis(id).is_none();
+    // A node with no stored basis was taken for the root. Off the root that happens
+    // when a stored basis was dropped (`remap_basis_after_delete` -> None, the
+    // DISCOPT_MILP_CUT_LP_DROP_RELAXED path) or the parent's LP returned none; the
+    // root-only dive then ran at every such node. Under DROP_RELAXED the test is the
+    // node's depth; the default keeps the historical test (counted, to measure it).
+    let no_basis = ctx.tm.node_basis(id).is_none();
+    let off_root = ctx.tm.node_depth(id).is_some_and(|d| d > 0);
+    if no_basis && off_root {
+        crate::profile::incr(crate::profile::Ctr::NodeNoBasisOffRoot);
+    }
+    let is_root = no_basis && !(off_root && ctx.cut_lp_drop_relaxed);
     let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
@@ -5101,6 +5293,8 @@ fn solve_node(
         gmi_used: Vec::new(),
         gmi_scores: Vec::new(),
         cut_lp_active: Vec::new(),
+        relaxed_used: Vec::new(),
+        relaxed_scores: Vec::new(),
     };
 
     match sol.status {
@@ -5433,6 +5627,30 @@ fn solve_node(
                         out.gmi_scores.push(sc);
                     }
                 }
+                // D2 review R1 entry (instrument only, profile builds): would a lazily
+                // relaxed row's cut tighten this node? It is in neither the LP nor the pool.
+                if !ctx.cut_lp_relaxed.is_empty() {
+                    let mut hit = 0u64;
+                    for (i, cut) in ctx.cut_lp_relaxed.iter().enumerate() {
+                        if let Some(sc) =
+                            cut_pool_score(cut, &sol.x, &full_l, &full_u, ctx.opts.simplex.tol)
+                        {
+                            hit += 1;
+                            if ctx.cut_lp_readmit {
+                                out.relaxed_used.push(i);
+                                out.relaxed_scores.push(sc);
+                            }
+                        }
+                    }
+                    crate::profile::incr_by(
+                        crate::profile::Ctr::CutLpRelaxedChecked,
+                        ctx.cut_lp_relaxed.len() as u64,
+                    );
+                    crate::profile::incr_by(crate::profile::Ctr::CutLpRelaxedViolated, hit);
+                    if hit > 0 {
+                        crate::profile::incr(crate::profile::Ctr::CutLpRelaxedViolatedNodes);
+                    }
+                }
             } else if ctx.node_gmi && !feasible && !ctx.gmi_pool.is_empty() {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::NodeGmiScan);
                 for (k, cut) in ctx.gmi_pool.iter().enumerate() {
@@ -5469,13 +5687,11 @@ fn solve_node(
                 }
                 let rows: Vec<GomoryCut> = pool_pick
                     .iter()
-                    .map(|&(_, k)| {
-                        let mut coeffs = ctx.gmi_pool[k].coeffs.clone();
+                    .map(|&(_, k)| &ctx.gmi_pool[k])
+                    .map(|c| {
+                        let mut coeffs = c.coeffs.clone();
                         coeffs.resize(ctx.n_w, 0.0);
-                        GomoryCut {
-                            coeffs,
-                            rhs: ctx.gmi_pool[k].rhs,
-                        }
+                        GomoryCut { coeffs, rhs: c.rhs }
                     })
                     .collect();
                 crate::profile::incr_by(crate::profile::Ctr::NodeGmiPoolUsed, rows.len() as u64);
@@ -7785,6 +8001,7 @@ mod tests {
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -8446,6 +8663,7 @@ mod tests {
         let sel = cut_lp_select(
             vec![(0.95, 1), (1.0, 0), (0.92, 2), (0.1, 3)],
             &pool,
+            &[],
             &mut best,
             &mut f,
         );
@@ -8461,6 +8679,7 @@ mod tests {
         let sel = cut_lp_select(
             vec![(1.0, 0), (0.99, 2), (0.98, 3)],
             &pool,
+            &[],
             &mut best,
             &mut f,
         );
@@ -8472,6 +8691,7 @@ mod tests {
         let sel = cut_lp_select(
             vec![(1.0, 0), (0.5, 2), (0.4, 3), (0.3, 1)],
             &pool,
+            &[],
             &mut best,
             &mut f,
         );
@@ -8678,6 +8898,7 @@ mod tests {
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 16,
@@ -9458,6 +9679,7 @@ mod tests {
             max_nodes: 5_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -9593,6 +9815,7 @@ pub(crate) mod sparse_milp_diff {
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
+                stall_time_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -9893,6 +10116,7 @@ pub(crate) mod sparse_milp_diff {
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -10201,6 +10425,7 @@ mod lazy_separation {
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
+                stall_time_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10499,6 +10724,7 @@ mod node_separation {
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
+                stall_time_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 0,
@@ -10780,6 +11006,7 @@ mod lazy_infeasible_node {
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -10917,6 +11144,7 @@ mod root_cut_budget_tests {
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 200,
@@ -11698,6 +11926,7 @@ mod tiny_entry_tests {
             max_nodes: 10_000,
             max_open_nodes: None,
             time_limit_s: None,
+            stall_time_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,

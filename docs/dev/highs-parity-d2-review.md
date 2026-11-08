@@ -255,3 +255,54 @@ parity, and it is the only gate shape that would survive the trajectory variance
 `HighsImplications.cpp:583`, `HighsCliqueTable.cpp:1605` separators. Not re-verified here
 *(consult)*: the per-worker LP copy (`HighsMipSolver.cpp:275-301`), `HighsCutPool` scoring
 lines, `HighsTransformedLp` global-bound transform.
+
+## Results, 2026-11-08 (owner: "if the default helps leave it on; I want HiGHS parity")
+
+`DISCOPT_MILP_CUT_LP` stays default ON: it nets +8 certifications on the 62-panel even with
+the `enlight8` loss. Every run below is `d2_flag_panel.py`, 20 s, 3 reps, interleaved arms;
+data in `data/highs-parity/d2-review/`. "OFF" is the shipped default (CUT_LP on).
+
+**R1 entry (`r1_entry.json`).** The regression reproduces: CUT_LP on, `enlight8` 0/3 at
+bound 20 (~8.7k nodes); CUT_LP=0, 3/3 at 27 (~46k nodes). A profile-only counter checks the
+lazily relaxed rows' cuts at every node point: ~9,800 node LPs per `enlight8` solve
+violate one (~193k violations), ~2,500 per `bppc8-02`. The kill (counter ~0) did not fire.
+
+**Fix A, re-admit relaxed rows in place (`DISCOPT_MILP_CUT_LP_READMIT`, `r1_fixA.json`).**
+Sound; `bppc8-02` bound 486.5 -> 491-493; `fiber`, `istra`, `kaihu`, `b-ball` keep 3/3;
+`enlight8` 20 -> 21, still 0/3 (kill clause "enlight8 not 3/3": A alone is not the fix).
+
+**Fix C, per-node pool lift alongside the fold (`r1_fixAC.json`, A+C): killed.** `fiber`
+3/3 -> 0/3, `b-ball` nodes x3, `enlight8` stays 21. Code removed (never committed).
+
+**Why the node rate collapses (`r1_rows.json`).** CUT_LP on, `enlight8`: node LPs carry 339
+folded rows on a 64-row model, 95.6 % basic; the deletion pass was blocked 10,652 times
+because a relaxed row's slack is nonbasic in some stored frontier basis. 9.2k vs 49.2k
+nodes with CUT_LP=0. (`fiber` 1 rep: CUT_LP=0 uncertified, so CUT_LP does help there.)
+
+**Fix D, delete aged relaxed rows and drop the bases that hold their slack nonbasic
+(`DISCOPT_MILP_CUT_LP_DROP_RELAXED`, `r1_fixD.json`): fails.** `fiber`/`istra`/`kaihu` lose
+certification. Part of that was a mislabel: a node with no stored basis was taken for the
+root and ran the root-only dive (`solve_node`'s `is_root`). With a depth-based root test
+under the flag (D', `r1_fixDp.json`) every W1 winner keeps 3/3, but `enlight8` falls to 18
+at ~3k nodes and `kaihu`'s nodes double: cold re-solves cost more than the dead rows.
+The default path never hits the mislabel (`NodeNoBasisOffRoot` = 0 in every default arm).
+
+**HiGHS-expert answer (critique addendum):** HiGHS never repairs a stored basis; its queued
+nodes hold none, so discarding a mismatched one is cheap there. The faithful port for
+discopt, where every frontier node keeps a basis, is **fix E**: keep D's physical deletion,
+but mark affected bases (m'+k basic candidates for m' rows) and repair each one lazily
+when its node is popped, with a rank-revealing elimination that leaves k columns without
+a pivot (HiGHS's `HFactor` primitive, `util/HFactor.cpp:395-425`, `:1263-1293`). Entry:
+repaired-solve pivots vs ordinary warm solves; kill at > 3x or any W1 winner losing a rep.
+
+**R0, keep run 1 going (`DISCOPT_MILP_RUN1_CONTINUE`, `r0_entry.json`).** Checked-in
+entries: run 2's bound beat run 1's on 12 of 138 uncertified two-run rows (the expert's
+"never" was too strong). Flag ON, 12 instances: cert-clean, certified 6 = 6; dual bound
+better on `enlight8` (20 -> 21, 3/3), `beavma` (~352k -> ~356k), `gsvm2rl3`
+(0.238 -> 0.253), `nexp-50-20-1-1` (25 -> 26, 2/3), `mik-1`/`mik-2`; worse on `neos17`
+(0.101 -> 0.067). Median primal gap 0.126 -> 0.240: run 2's seeded restart (and the #280
+swap) was producing the incumbents, as P4.0 recorded. Not graduable alone; it needs a
+primal lever that replaces what run 2's restart gave.
+
+**Next:** fix E (lazy basis repair) with A, then a §5 panel of A+E; R0 with a primal
+lever (seeded restart heuristics inside the continuing run).

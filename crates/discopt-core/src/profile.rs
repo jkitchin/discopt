@@ -343,6 +343,22 @@ counters!(
     CutLpDeleteBlockedRow,
     CutLpLenRejected,
     CutLpRelaxed,
+    // D2 review R1 entry (instrument only): lazily relaxed cut rows checked against a
+    // later node LP point, how many of those checks found the cut violated, and the
+    // nodes with at least one violated relaxed cut. A relaxed row neither binds nor
+    // returns to the pool, so a violated one is a lost cut.
+    CutLpRelaxedChecked,
+    CutLpRelaxedViolated,
+    CutLpRelaxedViolatedNodes,
+    // DISCOPT_MILP_CUT_LP_READMIT: relaxed folded rows re-admitted in place.
+    CutLpReadmitted,
+    // DISCOPT_MILP_CUT_LP_DROP_RELAXED: relaxed rows deleted, stored bases dropped.
+    CutLpRelaxedDropped,
+    CutLpBasisDropped,
+    // D2 review R0: the driver's stall guard stopped a run with no incumbent.
+    MilpStallGuardStop,
+    // A node evaluated with no stored basis below the root (was taken for the root).
+    NodeNoBasisOffRoot,
     LazyNearIntegralBranch,
     // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
     // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
