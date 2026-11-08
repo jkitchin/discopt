@@ -31,6 +31,15 @@ sys.path.insert(0, str(HERE))
 from discopt._rust import profile_counters_py, profile_reset_py, solve_lp_warm_csc_py  # noqa: E402
 from throughput_panel import highs, verdict  # noqa: E402  (also asserts the checkout)
 
+# #2212: `DISCOPT_LP_LOGICAL_DUAL_COLD` was RETIRED (docs/dev/flag-retirement-audit.md).
+# Against a tree without it, the "ON" arm runs the same code as OFF and would read as
+# "no effect" (CLAUDE.md §6), so refuse instead. Re-run from 70ae79b or earlier.
+if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_COLD", "").strip().lower() in ("1", "true", "on"):
+    raise SystemExit(
+        "DISCOPT_LP_LOGICAL_DUAL_COLD was retired (#2212); this arm would measure the "
+        "default path. Check out 70ae79b or earlier to reproduce the recorded rows."
+    )
+
 arm = os.environ.get("DISCOPT_LP_LOGICAL_DUAL_COLD", "0")
 z = np.load(sys.argv[1])
 n_lp = int(z["count"])

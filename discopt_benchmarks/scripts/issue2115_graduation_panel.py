@@ -211,7 +211,10 @@ _FLAGS = {
     },
     # #2212: the cold LP path tries the dual simplex from a sign-matched logical
     # basis before the cold primal (``DISCOPT_LP_LOGICAL_DUAL_COLD``,
-    # `lp/simplex/cold_dual.rs`). An attempt that is not certified falls back to the
+    # `lp/simplex/cold_dual.rs`). RETIRED by its panels (three in-repo corpus panels
+    # and the QPLIB whole-solve panel, docs/dev/data/2212-cold-path/panel/: cert-clean,
+    # not net-positive); the build no longer has the LogicalDualCold* counters. Kept so
+    # ``--rows`` re-derives the verdict. An attempt that is not certified falls back to the
     # unchanged primal, so only a certified attempt (``OwnDecided`` + ``AugDecided``)
     # can change the search; OFF, no attempt is ever made.
     "DISCOPT_LP_LOGICAL_DUAL_COLD": {

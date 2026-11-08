@@ -273,3 +273,45 @@ tolerance: infeasible at 1e-10, optimal 0.2397 at its defaults. The owner accept
 tolerance-dependent and pinned undecided (`cstr_node_lp_stays_undecided_with_the_flag_on_2212` in
 `lp/simplex/cold_dual.rs`, and the existing `captured_cstr_bigm_node_lp_stays_undecided_2142`),
 rather than a criterion this issue must meet.
+
+## §5 QPLIB whole-solve panel: retirement
+
+The owner ran the whole-solve panel the audit row said was still owed, on this branch's `70ae79b`
+(`panel/qplib44.summary.log`; the rows, `qplib44.jsonl`, are with the reviewer). It covered all 44
+instances matching the QPLIB filter: usable oracle, continuous, nonconvex, `nvars <= 400`,
+lift >= 300. That is the full class `throughput_panel.py --corpus qplib` sampled 13 of. Arms ran in
+separate processes, interleaved, on macOS at load 1.5 to 6.6. `qplib.solu` has only `=best=` values,
+so the bound checks are against best-known values.
+
+| | OFF | ON |
+|---|---|---|
+| violations (cert-clean) | — | **0** of 326 checks; fired on 41 of 44 |
+| certified | 0 | 0 |
+| nodes | 44,048 | 44,105 (+0.1 %) |
+| wall | 4,170.4 s | 4,208.0 s (+0.9 %) |
+| bounds tighter / looser | — | 14 / 10 (sign test over the 27 that differ: 15 better, 12 worse, p = 0.70) |
+| gap to `=best=`, geomean ON/OFF (31 with a bound in both) | — | 0.964 (median 1.000) |
+| no bound in either arm by 120 s | 13 | 13 |
+
+**What the instances show:**
+- The wins sit where the root LPs got faster and the 120 s wall binds: `QPLIB_1619` 1 → 22 nodes,
+  `QPLIB_1423` 169 → 479, `QPLIB_3318` 32 → 105, `QPLIB_1157` 175 → 207.
+- The losses sit at the node limit, where wall does not bind: a looser bound at the same 2,000
+  nodes on 7 of 13 (`1886`, `1913`, `1922`, `1931`, `6310`, ...). That reads as a different optimal
+  root vertex steering branching, not as LP cost.
+- Failed attempts cost nothing visible: `QPLIB_2635` made 3,796 attempts and `QPLIB_2967` 2,201,
+  all undecided, with nodes and wall unchanged.
+- 13 of 44 never leave the root in either arm. The cascade fires and decides there, but the root
+  stage is wall-limited for another reason.
+
+**Verdict: RETIRED (owner decision, 2026-11-08).** Four §5 panels: three in-repo corpus panels
+(certified 59 → 59) and this one. All are cert-clean; none is net-positive. The flag, `cold_dual.rs`,
+its hooks and its counters are deleted. The LP-level evidence stays recorded here: 18/19 fixtures,
+nous1 39/40, QPLIB root LPs 23 vs 19 decided at −27 % wall, both caller-side retries subsumed. It
+is not wrong; it does not move whole solves. Kept: the fixtures, the scripts (the arm scripts now
+refuse `DISCOPT_LP_LOGICAL_DUAL_COLD=1`; reproduce from `70ae79b`), and the two default-path fixes
+found along the way.
+
+#2212 stays open for the root cause the panels point at instead:
+- the 13 of 44 QPLIB instances whose root stage never completes in 120 s, with or without the flag;
+- the 52 of 148 root relaxations where a sign-matched logical start does not exist.

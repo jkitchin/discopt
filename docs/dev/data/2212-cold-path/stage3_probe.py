@@ -32,6 +32,15 @@ from discopt.ml.network import Activation, DenseLayer, NetworkDefinition  # noqa
 
 assert Path(discopt.__file__).resolve().is_relative_to(REPO), discopt.__file__
 assert os.environ.get("DISCOPT_LP_MILP_BACKEND") == "rust", "the stage lives in the Rust driver"
+# #2212: `DISCOPT_LP_LOGICAL_DUAL_COLD` was RETIRED (docs/dev/flag-retirement-audit.md).
+# Against a tree without it, the "ON" arm runs the same code as OFF and would read as
+# "no effect" (CLAUDE.md §6), so refuse instead. Re-run from 70ae79b or earlier.
+if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_COLD", "").strip().lower() in ("1", "true", "on"):
+    raise SystemExit(
+        "DISCOPT_LP_LOGICAL_DUAL_COLD was retired (#2212); this arm would measure the "
+        "default path. Check out 70ae79b or earlier to reproduce the recorded rows."
+    )
+
 NETS = json.loads((REPO / "python/tests/data/relu_bigm_2163_nets.json").read_text())
 
 n = 0

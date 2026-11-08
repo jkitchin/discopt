@@ -649,18 +649,6 @@ counters!(
     // apart from `DualPrepRejectShape` (which it also bumps) so a panel can show the
     // check never fires on a real caller.
     DualPrepRejectInconsistent,
-    // #2212 `DISCOPT_LP_LOGICAL_DUAL_COLD`: cold solves that tried the logical-basis
-    // dual first; decided from the LP's own logical columns; decided from #2163's
-    // augmented form; refused (a costed column's selected bound is open); and
-    // attempted but not certified, so the primal ran.
-    LogicalDualColdAttempts,
-    LogicalDualColdOwnDecided,
-    LogicalDualColdAugDecided,
-    LogicalDualColdRefused,
-    LogicalDualColdFellBack,
-    // ...and attempts skipped because one already failed in the same caller-level
-    // cold solve (`cold_dual::cold_scope`).
-    LogicalDualColdSkippedRepeat,
     // #1510: the primal warm entry (`run_warm`) refusing the same malformed start.
     PrimalWarmRejectInfBound,
     DualPrepAccept,

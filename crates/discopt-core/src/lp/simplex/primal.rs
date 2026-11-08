@@ -134,19 +134,6 @@ pub fn solve_lp_cols(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    // #2212 (`DISCOPT_LP_LOGICAL_DUAL_COLD`, default OFF): the dual simplex from a
-    // sign-matched logical basis first, accepted only with a certificate checked on
-    // this data; the primal below runs only when it declines. Inside such an attempt
-    // the attempt's own breakdown fallback lands here, and gets a `Numerical` stub
-    // instead of a primal solve of the attempt's LP (see `cold_dual`).
-    if super::cold_dual::in_attempt() {
-        return super::cold_dual::declined(n);
-    }
-    if super::cold_dual::logical_dual_cold_enabled() {
-        if let Some(sol) = super::cold_dual::logical_dual_cold(&cols, m, n, c, l, u, b, opts) {
-            return sol;
-        }
-    }
     // #85: `cols` is consumed by the solve, so a possible dense retry needs its
     // own copy up front. O(nnz), paid only with the density route ON (the warm
     // dual path already clones the CSC per solve — see dual.rs — so this is
@@ -236,40 +223,37 @@ pub fn solve_lp_cols_scaled(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    // #2212: one caller-level solve (see `cold_dual::cold_scope`).
-    super::cold_dual::cold_scope(|| {
-        match Scaling::from_sparse(&cols, m, n) {
-            Some(scaling) => {
-                // #1935: the original matrix, kept for the post-solve audit below.
-                let original = cols.clone();
-                scaling.scale_cols(&mut cols);
-                let cs = scaling.scale_c(c);
-                let ls = scaling.scale_lower(l);
-                let us = scaling.scale_upper(u);
-                let bs = scaling.scale_b(b);
-                let mut sol = solve_lp_cols(cols, m, n, &cs, &ls, &us, &bs, opts);
-                // Map the certificate vectors back to the original space (mirrors
-                // `solve_lp`), so a caller's safe-bound / Farkas check sees them against
-                // the ORIGINAL A/b/bounds rather than the scaled system.
-                scaling.unscale_x(&mut sol.x);
-                scaling.unscale_dual(&mut sol.dual);
-                scaling.unscale_ray(&mut sol.ray);
-                // #1935: the scaled audit can pass a point the original LP refuses.
-                if optimal_fails_original_audit(&sol, &original, m, n, b, l, u) {
-                    let alt = solve_lp_cols(original, m, n, c, l, u, b, opts);
-                    return if retry_decided(&alt) {
-                        alt
-                    } else {
-                        downgrade_false_optimal(sol)
-                    };
-                }
-                sol
+    match Scaling::from_sparse(&cols, m, n) {
+        Some(scaling) => {
+            // #1935: the original matrix, kept for the post-solve audit below.
+            let original = cols.clone();
+            scaling.scale_cols(&mut cols);
+            let cs = scaling.scale_c(c);
+            let ls = scaling.scale_lower(l);
+            let us = scaling.scale_upper(u);
+            let bs = scaling.scale_b(b);
+            let mut sol = solve_lp_cols(cols, m, n, &cs, &ls, &us, &bs, opts);
+            // Map the certificate vectors back to the original space (mirrors
+            // `solve_lp`), so a caller's safe-bound / Farkas check sees them against
+            // the ORIGINAL A/b/bounds rather than the scaled system.
+            scaling.unscale_x(&mut sol.x);
+            scaling.unscale_dual(&mut sol.dual);
+            scaling.unscale_ray(&mut sol.ray);
+            // #1935: the scaled audit can pass a point the original LP refuses.
+            if optimal_fails_original_audit(&sol, &original, m, n, b, l, u) {
+                let alt = solve_lp_cols(original, m, n, c, l, u, b, opts);
+                return if retry_decided(&alt) {
+                    alt
+                } else {
+                    downgrade_false_optimal(sol)
+                };
             }
-            // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
-            // branch (`solve_lp_scaled` on the raw view).
-            None => solve_lp_cols(cols, m, n, c, l, u, b, opts),
+            sol
         }
-    })
+        // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
+        // branch (`solve_lp_scaled` on the raw view).
+        None => solve_lp_cols(cols, m, n, c, l, u, b, opts),
+    }
 }
 
 /// Warm-started primal solve from an inherited `start` basis (cert:T1.4).
@@ -288,39 +272,6 @@ pub fn solve_lp_cols_scaled(
 /// takes the trusted cold path — the warm shortcut can only change speed.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_cols_warm(
-    cols: SparseCols,
-    m: usize,
-    n: usize,
-    c: &[f64],
-    l: &[f64],
-    u: &[f64],
-    b: &[f64],
-    start: &Basis,
-    opts: &SimplexOptions,
-) -> LpSolve {
-    // #2212: this entry has its OWN cold path (an unusable warm basis runs the
-    // two-phase primal directly, not through `solve_lp_cols`), so the cold cascade
-    // has to be offered here too. Measured on the re-captured nous1 node LPs: 13 of
-    // 40 inherited bases are singular, the dual refuses them, and this fallback ended
-    // `Numerical` without the cascade ever running. With the flag OFF nothing is
-    // cloned and the solve below is unchanged.
-    let keep = (super::cold_dual::logical_dual_cold_enabled() && !super::cold_dual::in_attempt())
-        .then(|| cols.clone());
-    let sol = solve_lp_cols_warm_primal(cols, m, n, c, l, u, b, start, opts);
-    if let Some(cols) = keep {
-        if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
-            if let Some(alt) = super::cold_dual::logical_dual_cold(&cols, m, n, c, l, u, b, opts) {
-                return alt;
-            }
-        }
-    }
-    sol
-}
-
-/// [`solve_lp_cols_warm`] without the #2212 cold cascade: the warm primal, its
-/// two-phase cold fallback and the #85 dense retry, exactly as before.
-#[allow(clippy::too_many_arguments)]
-fn solve_lp_cols_warm_primal(
     cols: SparseCols,
     m: usize,
     n: usize,
