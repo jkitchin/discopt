@@ -23,7 +23,6 @@ solve was conclusive (always the case for LP/MILP/convex models). See
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Sequence
@@ -164,13 +163,11 @@ class IISResult:
 
 
 def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
-    """The IIS matrix engine: an explicit argument, else ``DISCOPT_IIS_ENGINE``, else
-    ``"rust"``, discopt's own MILP driver. That default dates from 2026-11-07
-    (highs-parity P6.4; P3.2 measured 53/53 parity with HiGHS on the fixtures).
-    ``"highs"`` is the opt-out."""
-    if iis_engine is None:
-        iis_engine = os.environ.get("DISCOPT_IIS_ENGINE", "rust").strip().lower()
-    return iis_engine
+    """:func:`discopt._iis_milp._resolve_iis_engine` (the one definition), imported
+    lazily as this module imports ``_iis_milp`` everywhere else."""
+    from discopt._iis_milp import _resolve_iis_engine as _resolve
+
+    return _resolve(iis_engine)
 
 
 def _bound_candidates(model: "Model") -> list[tuple[int, str]]:

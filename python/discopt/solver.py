@@ -37388,13 +37388,13 @@ def _resolve_lp_milp_backend(milp_backend: Optional[str]) -> str:
     * ``"highs"`` -- the #1229 HiGHS route, with discopt-verified certificates.
     * ``"native"`` (#1535) -- discopt's own branch and bound, for teaching and for
       inspecting the search: an LP goes to the in-house Rust simplex, a MILP to the
-      Python-driven MILP tree (``_solve_milp_bb``), the engine that honours
-      ``strategy``, ``max_nodes``, ``node_callback`` and ``milp_cuts``. It does NOT
-      go to the monolithic Rust engine (``_solve_milp_simplex``), which takes none
-      of those options. Far slower than HiGHS on anything but small models.
+      Rust MILP engine (``_solve_milp_simplex``), which honours ``strategy``,
+      ``branching_rule``, ``max_nodes``, ``node_callback`` and ``milp_cuts``. (Before
+      the Python-MILP-tree retirement this was a separate Python tree.)
 
-    ``"rust"`` is reachable only through the env var: it is the legacy opt-out to the
-    monolithic Rust engine, kept for A/B runs, not a documented interface.
+    ``"rust"`` is reachable only through the env var: the same Rust MILP engine
+    without the ``"native"`` route label, kept for A/B runs, not a documented
+    interface.
     """
     if milp_backend is None:
         return _lp_milp_backend()
@@ -38400,7 +38400,9 @@ def _milp_rust_coef_entry_enabled() -> bool:
     families (3 families x 4 seeds x M in 1e4..1e12, Rust route): 120 oracle checks, 0
     soundness violations, 30 certificates gained, 0 lost. MIPLIB-38+M (62 x 3 x 20 s):
     bar 1 clean (372 checks), solved 125 -> 129, nodes on both-certified rows 49,164 ->
-    43,279, 1 dual loss (cap 2), no incumbent lost, median primal gap 0.160 -> 0.103;
+    43,279, 1 dual loss (cap 2; a weaker final gap at timeout on an uncertified instance, a
+    performance measure -- bounds are bar 1), no incumbent lost, median primal gap
+    0.160 -> 0.103;
     fired 60 ON / 0 OFF. Load reached ~8 on part of the MIPLIB run (the author's own test
     runs); arms were interleaved.
     """
@@ -38471,9 +38473,11 @@ def _milp_aligned_slacks_enabled() -> bool:
     ``DISCOPT_MILP_SUBMIP``.** MIPLIB-38 + M (3 reps, 20 s, 372 solves,
     ``docs/dev/data/highs-parity/d2-analysis/bundle_aligned_submip_panel.json.gz``):
     cert-clean; certified 107 -> 114; nodes on the always-certified set -16 %; 2 dual
-    losses (cap 2); no incumbent lost; median primal gap 0.187 -> 0.012. In-repo MINLP
-    corpus (2 reps, 20 s, ``bundle_corpus.jsonl``): 0 problem instances, 260 incumbent
-    checks, certified 112 -> 113. ``=0`` restores the extraction order.
+    losses (cap 2; a weaker final gap at timeout on an uncertified instance, a
+    performance measure -- bound validity is the cert-clean bar); no incumbent lost;
+    median primal gap 0.187 -> 0.012. In-repo MINLP corpus (2 reps, 20 s,
+    ``bundle_corpus.jsonl``): 0 problem instances, 260 incumbent checks, certified
+    112 -> 113. ``=0`` restores the extraction order.
     """
     return os.environ.get("DISCOPT_MILP_ALIGNED_SLACKS", "1") != "0"
 

@@ -467,7 +467,8 @@ fn parse_improve_dive(raw: &str) -> Result<usize, String> {
 /// folded rows made the unarmed strong-branch probes degenerate). Bundle §5 panel
 /// (`d2-analysis/w1_cut_lp_sb_armed_panel_r3.json.gz`, MIPLIB-38 + M, 3 reps, 20 s):
 /// cert-clean, certified 117 -> 125, nodes over the both-certified set -48 %, 2 dual
-/// losses (cap 2), no incumbent lost, median primal gap 0.105 -> 0.041; corpus
+/// losses (cap 2; a weaker final gap at timeout on an uncertified instance, a
+/// performance measure -- bound validity is the cert-clean bar), no incumbent lost, median primal gap 0.105 -> 0.041; corpus
 /// differential cert-clean (`nvs24`, the one row it flagged, certifies 5/5 in both
 /// arms at 17-19 s against the 20 s limit: a timing edge).
 ///

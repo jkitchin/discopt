@@ -290,7 +290,9 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     retries tighter): ``False`` -- the doubly proven answer stands."""
     from discopt._optional_highs import require_highspy
 
-    highspy = require_highspy("discopt.mipcc (HiGHS MPS reader / checker)")
+    highspy = require_highspy(
+        "discopt.mipcc (the HiGHS re-solve that mirrors the official checker)"
+    )
     if time_limit <= 0.5:
         return False
     m, n = data["row_lo"].size, data["col_lb"].size
