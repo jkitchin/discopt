@@ -39823,23 +39823,22 @@ def _milp_no_stall_tree_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "1") == "1"
 
 
-def _milp_rust_coef_rescue_enabled() -> bool:
-    """``DISCOPT_MILP_RUST_COEF_RESCUE`` gate (Python-MILP-tree retirement, default OFF
-    until its panel).
+def _milp_rust_coef_entry_enabled() -> bool:
+    """``DISCOPT_MILP_RUST_COEF_ENTRY`` gate (Python-MILP-tree retirement, default OFF
+    until its panel): apply the #1654 coefficient tightening to the Rust MILP engine's
+    standard form before the search (the HiGHS route has done so by default since
+    #1654 graduated), rather than only as a rescue after an uncertified search
+    (``DISCOPT_MILP_RUST_COEF_RESCUE``). Entry probe: the rescue misses a big-M model
+    whose first search spends the budget (#1654 sequencing at M = 1e10) or never
+    finds an incumbent (facility / fixed-charge at M = 1e12).
 
-    When the Rust driver finishes ``feasible`` with its certificate withdrawn (#2163: the
-    #1296 tiny-entry gate fires on a row whose dynamic range the LP layer cannot
-    represent, e.g. ``x <= 1e12 z``), ``_solve_milp_simplex`` used to hand the MILP to the
-    Python MILP tree. With the flag it applies the graduated #1654 coefficient
-    tightening (``lp_milp_highs.coefficient_tightened``, the HiGHS route's rescue,
-    certified 22/48 -> 48/48 on three big-M families) to the same standard form and
-    re-runs the Rust driver on it: ``x <= 1e12 z`` over ``x in [0, 10]`` becomes
-    ``x <= 10 z``, an exact reformulation of the integer-feasible set, so the tightened
-    certificate is a certificate of the model. Its point still goes through this
-    function's own feasibility gate on the ORIGINAL rows before anything is reported;
-    a tightened solve that is not certified changes nothing.
+    Entry probe (#1654 families, seed 0, M in {1e8, 1e10, 1e12}, Rust route, 20 s):
+    certified 9/9 with this flag, 5/9 with the rescue after an uncertified search, 0/9
+    with the rescue's original withdrawn-certificate trigger and with neither. The
+    rescue (``DISCOPT_MILP_RUST_COEF_RESCUE``) was retired on that measurement.
     """
-    return os.environ.get("DISCOPT_MILP_RUST_COEF_RESCUE", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_RUST_COEF_ENTRY", "0") == "1"
+
 
 
 def _milp_rust_open_default_box_enabled() -> bool:
@@ -40175,13 +40174,41 @@ def _solve_milp_simplex(
         _xl_o[:n_orig][_xl_o[:n_orig] <= -_dside] = -_CONSTRAINT_INF
         _xu_o[:n_orig][_xu_o[:n_orig] >= _dside] = _CONSTRAINT_INF
         _drv = _drv._replace(x_l=cast(Any, _xl_o), x_u=cast(Any, _xu_o))
+    _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    _coef_entry_rewritten = 0
+    if _milp_rust_coef_entry_enabled() and relu_cuts is None and _drv.A_eq.shape[0] > 0:
+        # DISCOPT_MILP_RUST_COEF_ENTRY: the #1654 coefficient tightening (graduated on
+        # the HiGHS route) applied to the Rust engine's standard form before the
+        # search, instead of as a rescue after it. An exact reformulation of the
+        # integer-feasible set over the box; the engine's point is still verified on
+        # the ORIGINAL rows (``lp_data``) by the gate below.
+        from discopt.solvers.lp_milp_highs import StdForm, coefficient_tightened
+        from discopt.solvers.lp_milp_highs import _implied_bounds_enabled as _ib_on
+
+        _sf_e = StdForm.from_arrays(
+            _drv.c,
+            _drv.A_eq,
+            _drv.b_eq,
+            _drv.x_l,
+            _drv.x_u,
+            float(lp_data.obj_const),
+            np.asarray(int_idx, dtype=np.int64),
+        )
+        _sf_e2, _coef_entry_rewritten = coefficient_tightened(_sf_e, implied_bounds=_ib_on())
+        if _sf_e2 is not None:
+            _drv = _drv._replace(
+                c=cast(Any, _sf_e2.c),
+                A_eq=cast(Any, _sf_e2.A),
+                b_eq=cast(Any, _sf_e2.b),
+                x_l=cast(Any, _sf_e2.xl),
+                x_u=cast(Any, _sf_e2.xu),
+            )
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     # A MILP with no constraints is solved by the driver itself (each column at the
     # bound its cost selects, integers rounded inward); it used to defer to the Python
     # MILP tree (Python-MILP-tree retirement step 2, census in
     # docs/dev/data/python-milp-retirement/).
-    _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
-    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
     if relu_cuts is not None:
         _relu_engine = _relu_native_engine(relu_cuts, lp_data, n_orig, int_idx, relu_counts)
@@ -40346,7 +40373,6 @@ def _solve_milp_simplex(
         **_sel_kw,
     )
 
-    _coef_rescued = False  # DISCOPT_MILP_RUST_COEF_RESCUE adopted the tightened solve
 
     def _driver_stats() -> dict[str, float]:
         """Total simplex iterations the driver spent over the whole tree.
@@ -40364,8 +40390,8 @@ def _solve_milp_simplex(
             _d["cuts/root_rows"] = float(_search_counts["root_cut_rows"])
         if _no_stall_tree:
             _d["milp/no_stall_tree"] = 1.0
-        if _coef_rescued:
-            _d["milp/rust_coef_rescue"] = 1.0
+        if _coef_entry_rewritten:
+            _d["milp/rust_coef_entry_rewritten"] = float(_coef_entry_rewritten)
         return _d
 
     # Feasibility gate (shared by the return path below and the #698 re-entry
@@ -40635,67 +40661,6 @@ def _solve_milp_simplex(
     # (#912). The engine's point, when it passes the model's own rows, is handed to
     # the tree as a warm start (re-verified there before injection), so deferring
     # never loses the incumbent in hand.
-    if (
-        status == "feasible"
-        and not np.isfinite(bound)
-        and not _stopped_on_nodes
-        and not _debug_stop_pending
-        and relu_cuts is None
-        and _milp_rust_coef_rescue_enabled()
-    ):
-        # DISCOPT_MILP_RUST_COEF_RESCUE: the #1654 tightened form on the same driver.
-        from discopt.solvers.lp_milp_highs import StdForm, coefficient_tightened
-        from discopt.solvers.lp_milp_highs import _implied_bounds_enabled as _ib_on
-
-        _sf = StdForm.from_arrays(
-            _drv.c,
-            _drv.A_eq,
-            _drv.b_eq,
-            _drv.x_l,
-            _drv.x_u,
-            float(lp_data.obj_const),
-            np.asarray(int_idx, dtype=np.int64),
-        )
-        _sf_ct, _n_ct = coefficient_tightened(_sf, implied_bounds=_ib_on())
-        _rem_ct = float(time_limit) - (time.perf_counter() - t_start)
-        if _sf_ct is not None and _rem_ct > 0.1:
-            import scipy.sparse as _sps_ct
-
-            _Act = _sps_ct.csc_matrix(_sf_ct.A)
-            _st_ct, _x_ct, _obj_ct, _bd_ct, _nd_ct, _it_ct = solve_milp_csc_py(
-                np.ascontiguousarray(_sf_ct.c, dtype=np.float64),
-                int(_Act.shape[0]),
-                int(_Act.shape[1]),
-                np.ascontiguousarray(_Act.indptr, dtype=np.int64),
-                np.ascontiguousarray(_Act.indices, dtype=np.int64),
-                np.ascontiguousarray(_Act.data, dtype=np.float64),
-                np.ascontiguousarray(_sf_ct.b, dtype=np.float64),
-                np.ascontiguousarray(_sf_ct.xl, dtype=np.float64),
-                np.ascontiguousarray(_sf_ct.xu, dtype=np.float64),
-                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
-                n_orig,
-                float(lp_data.obj_const),
-                int(max_nodes),
-                float(gap_tolerance),
-                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
-                rel_gap_max_abs=_rel_gap_max_abs,
-                time_limit_s=_rem_ct,
-                **_cut_opts,
-                **_sel_kw,
-            )
-            logger.info(
-                "Rust MILP certificate withdrawn; the coefficient-tightened form "
-                "(%d entries rewritten) gave %s, bound %s",
-                _n_ct,
-                _st_ct,
-                _bd_ct,
-            )
-            nodes = int(nodes) + int(_nd_ct)
-            _lp_iters = int(_lp_iters) + int(_it_ct)
-            if _st_ct in ("optimal", "feasible") and np.isfinite(_bd_ct):
-                # Adopt it: the gate below verifies the point on the ORIGINAL rows.
-                status, x_struct, obj, bound = _st_ct, _x_ct, _obj_ct, _bd_ct
-                _coef_rescued = True
     if (
         status == "feasible"
         and not np.isfinite(bound)

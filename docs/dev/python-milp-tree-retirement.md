@@ -277,8 +277,8 @@ also go is **unverified**: the spatial path may use them.
   opt-out until deletion. **R6e (the #291 stall) is gone** by default:
   `DISCOPT_MILP_NO_STALL_TREE` and `DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX` graduated together
   (open-box differential 148 checks / 0 violations, `data/python-milp-retirement/`).
-  Remaining routes into the tree: `withdrawn_bound_2163` (`DISCOPT_MILP_RUST_COEF_RESCUE`,
-  panel owed), `lagrangian_bound`, the `DISCOPT_MILP_ENGINE=0` opt-out, R11 (matrix POUNCE
+  Remaining routes into the tree: `withdrawn_bound_2163` (`DISCOPT_MILP_RUST_COEF_ENTRY`,
+  panels owed; it replaced the retired `..._COEF_RESCUE`), `lagrangian_bound`, the `DISCOPT_MILP_ENGINE=0` opt-out, R11 (matrix POUNCE
   backend), R12 (SHOT direct MILP), and engine declines (ReLU spec unavailable, feasibility
   gate failures).
 - **2026-11-08, step 10 (R11, R12).** `milp_pounce.solve_milp` is now an alias for

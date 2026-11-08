@@ -4,9 +4,11 @@
 ``M >= 10`` (#1380, #1414). From ``M ~ 1e11`` the Rust driver's #1296 gate withdraws its
 certificate (the LP layer cannot represent ``x``'s coefficient next to ``M``), and
 ``_solve_milp_simplex`` used to hand the MILP to the Python MILP tree (reason
-``withdrawn_bound_2163``). ``DISCOPT_MILP_RUST_COEF_RESCUE`` instead re-solves the
-graduated #1654 coefficient-tightened form (``x <= 10 z``) on the same driver and adopts
-its certificate after the point passes the original rows.
+``withdrawn_bound_2163``). ``DISCOPT_MILP_RUST_COEF_ENTRY`` applies the graduated #1654
+coefficient tightening (``x <= 10 z``) to the engine's standard form before the search;
+the point still passes the original rows. (It replaced ``DISCOPT_MILP_RUST_COEF_RESCUE``,
+which re-solved the tightened form only after an uncertified search: 5/9 vs 9/9 on the
+#1654 families' entry probe.)
 """
 
 from __future__ import annotations
@@ -28,9 +30,9 @@ def _bigm(M: float) -> dm.Model:  # noqa: N803
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("M", [1e11, 1e12, 1e15])
-def test_withdrawn_certificate_is_rescued_on_the_rust_route(monkeypatch, M):  # noqa: N803
+def test_big_m_is_certified_on_the_rust_route_with_entry_tightening(monkeypatch, M):  # noqa: N803
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    monkeypatch.setenv("DISCOPT_MILP_RUST_COEF_RESCUE", "1")
+    monkeypatch.setenv("DISCOPT_MILP_RUST_COEF_ENTRY", "1")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _bigm(M).solve(time_limit=30)
@@ -39,7 +41,7 @@ def test_withdrawn_certificate_is_rescued_on_the_rust_route(monkeypatch, M):  # 
     assert r.objective == pytest.approx(-7.0, abs=1e-9)
     assert r.bound <= -7.0 + 1e-6
     assert r.algorithm_route.startswith("native-milp"), r.algorithm_route
-    assert st.get("milp/rust_coef_rescue") == 1.0, st  # the rescue decided it (§6)
+    assert st.get("milp/rust_coef_entry_rewritten", 0) >= 1, st  # the row was rewritten (§6)
     assert "route/python_milp_tree_entry" not in st
 
 
@@ -47,7 +49,7 @@ def test_withdrawn_certificate_is_rescued_on_the_rust_route(monkeypatch, M):  # 
 def test_without_the_flag_the_case_still_reaches_the_tree(monkeypatch):
     """The legacy path, until the flag graduates: the deferral is counted."""
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    monkeypatch.setenv("DISCOPT_MILP_RUST_COEF_RESCUE", "0")
+    monkeypatch.setenv("DISCOPT_MILP_RUST_COEF_ENTRY", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _bigm(1e12).solve(time_limit=30)
