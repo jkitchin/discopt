@@ -38432,8 +38432,8 @@ def _milp_run1_continue_enabled() -> bool:
 def _milp_rust_coef_entry_enabled() -> bool:
     """``DISCOPT_MILP_RUST_COEF_ENTRY`` gate (Python-MILP-tree retirement; **graduated,
     default ON 2026-11-08**, ``=0`` opts out): apply the #1654 coefficient tightening to
-    the Rust MILP engine's standard form before the search (the HiGHS route has done so by default since
-    #1654 graduated), rather than only as a rescue after an uncertified search
+    the Rust MILP engine's standard form before the search (the HiGHS route has done
+    so by default since #1654 graduated), rather than only as a rescue after an uncertified search
     (``DISCOPT_MILP_RUST_COEF_RESCUE``). Entry probe: the rescue misses a big-M model
     whose first search spends the budget (#1654 sequencing at M = 1e10) or never
     finds an incumbent (facility / fixed-charge at M = 1e12).
