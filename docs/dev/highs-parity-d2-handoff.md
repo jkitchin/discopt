@@ -108,8 +108,16 @@ Evidence (plan, W5 section):
   flipped once);
 - corpus v2: 0 problems, 104 -> 105.
 
-It was graduated as a correctness fix. The full not-slow suite was re-run on it
-(result in the commit after `TOL_ROBUST graduated`).
+It was graduated as a correctness fix.
+
+Full `-m "not slow"` suite on the graduation (`74c43216`): 4 failed, 20,918 passed.
+- 3 failures need `cyipopt` (environmental).
+- 1 was `test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration`.
+  Its SHOT reduction cut cuts the incumbent by exactly the acceptance tolerance, so
+  only exact proofs make that master empty. The result checks (optimal 1000,
+  certified) hold on the default; the repair-trace checks now run under `=0` in a
+  subprocess.
+- `test_nlpbb_unscaled_refine`, the red test the work was for, passes.
 
 ## First things to do
 
