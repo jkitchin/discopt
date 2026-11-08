@@ -658,6 +658,13 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
     is possible from this change; the probe fires (3 rescue calls, all Rust-decisive,
     under `test_issue_1611_remainder.py`). Regression files #1537/#1611/#1869 pass (56).
     Test `test_highs_parity_p12_rust_first_rescue.py` (5; all fail before).
+    **Superseded 2026-11-08 (P6): the HiGHS fallback is removed.** Over every test that
+    reaches the rescue (`docs/dev/data/highs-parity/p6-node-bound-lp/`), 7 of 7 real
+    rescue LPs were decisive on Rust; the only non-decisive one was this test file's
+    synthetic engine failure. The rescue now calls `solve_lp_std` on its default engine
+    and treats an undecided answer as "none" (node keeps its sentinel).
+    `solve_lp_std_rust_first` is deleted; the test file checks the HiGHS-free seam and
+    the undecided-answer contract.
 - [x] **P1.3 — R4: Rust dual first in `_lp_dual`.** **KILLED 2026-11-04 (see result).** Scope: `convex_node_bound.py:215-260`.
   Reorder to `_simplex_dual` → HiGHS → row-equilibrated HiGHS; `_simplex_dual` gains the
   slack-form `sf` input so all three solve the same LP. Done: on the P0.5 R4 fixtures,

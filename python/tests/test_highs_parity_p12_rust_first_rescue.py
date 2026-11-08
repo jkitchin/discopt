@@ -1,10 +1,13 @@
-"""highs-parity P1.2: the #1611 linear-node rescue LP runs on the Rust engine first.
+"""highs-parity P1.2 -> P6: the #1611 linear-node rescue LP runs on the in-house engine
+only.
 
-``lp_milp_highs.solve_lp_std_rust_first`` solves on the Rust engine and falls to HiGHS
-whenever the Rust answer is not decisive. Both answers pass the same certificate ladder.
-It is used by ``_linear_node_lp_rescue`` only: P1.2's entry experiment found the two
-engines reach different verdicts on 1/94 #1537 arbitration LPs and 24/85 #1869
-free-column LPs, so those callers stay HiGHS-first (plan §7).
+P1.2 solved it on the Rust engine and fell back to HiGHS whenever the Rust answer was not
+decisive. P6 measured that fallback over every test that reaches the rescue
+(``docs/dev/data/highs-parity/p6-node-bound-lp/``): 7 of 7 real rescue LPs were decisive
+on Rust; the only non-decisive one was this file's own synthetic engine failure. The
+fallback was removed (owner: a non-decisive Rust answer is a place to harden, not to
+hand to HiGHS). An undecided answer now leaves the node open, which is the rescue's
+documented contract ("nothing is inferred from an unverified outcome").
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import numpy as np
 import pytest
 
 H = pytest.importorskip("discopt.solvers.lp_milp_highs")
-pytest.importorskip("highspy")
 
 _TESTS = Path(__file__).parent
 _FIX = _TESTS / "data" / "highs_parity"
@@ -34,23 +36,29 @@ def _cert_instance(name):
     return H.StdForm.from_arrays(g("c"), a, g("b"), g("xl"), g("xu"), float(g("obj_const")))
 
 
-def test_decisive_rust_answer_is_kept():
-    out = H.solve_lp_std_rust_first(_cert_instance("e226"), time_limit=60)
+def test_rescue_engine_needs_no_highs(monkeypatch):
+    """The rescue's LP seam (``solve_lp_std`` on its default engine) certifies the
+    instance with ``highspy`` blocked."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "highspy", None)
+    out = H.solve_lp_std(_cert_instance("e226"), time_limit=60)
     assert out.status == "optimal" and out.gap_certified
-    assert out.stats.get("lp/rust_first_decisive") == 1.0
-    assert "lp/rust_first_fallback" not in out.stats
+    assert sys.modules["highspy"] is None
 
 
-def test_undecided_rust_answer_falls_to_highs(monkeypatch):
+def test_undecided_rust_answer_leaves_the_node_open(monkeypatch):
+    """A non-decisive engine answer is no longer handed to HiGHS: the rescue returns
+    ``"none"`` (the caller keeps the node's sentinel) and infers nothing."""
+    from discopt import solver as S
     from discopt.solvers import lp_std_engine as E
 
     monkeypatch.setattr(
         E.RustEngine, "solve", lambda self, sf, **k: E.LpRaw("error", "rust:numerical")
     )
-    out = H.solve_lp_std_rust_first(_cert_instance("e226"), time_limit=60)
-    assert out.status == "optimal" and out.gap_certified
-    assert out.stats.get("lp/rust_first_fallback") == 1.0
-    assert out.labels["lp/rust_first_fallback"].startswith("rust error")
+    sf = _cert_instance("e226")
+    verdict = S._linear_node_lp_rescue(sf, sf.n, None, sf.xl, sf.xu, time_limit=60)
+    assert verdict == ("none", None, None)
 
 
 def _rescue_fixtures():
@@ -73,8 +81,9 @@ def test_rescue_fixture_verdict_unchanged(entry):
     sf = H.StdForm.from_arrays(
         rf["c"], rf["A"].tocsc(), rf["row_lo"], rf["col_lo"], rf["col_hi"], rf["obj_const"]
     )
+    pytest.importorskip("highspy")
     hi = H.solve_lp_std(sf, time_limit=60, engine="highs")
-    rf_out = H.solve_lp_std_rust_first(sf, time_limit=60)
+    rf_out = H.solve_lp_std(sf, time_limit=60)
     assert rf_out.status == hi.status
     if hi.bound is not None:
         assert rf_out.bound == pytest.approx(hi.bound, rel=1e-9, abs=1e-9)

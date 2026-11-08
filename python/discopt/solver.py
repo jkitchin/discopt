@@ -38925,19 +38925,19 @@ def _linear_rescue_std_form(model: Model, n_vars: int):
 
 
 def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, time_limit):
-    """Re-solve one node of a fully linear model as a HiGHS LP (#1611 D-30).
+    """Re-solve one node of a fully linear model as an LP (#1611 D-30).
 
     The node LP is ``sf`` with the first ``n_struct`` columns intersected with
     the node box and each pool cut ``a @ x  sense  rhs`` appended as the row
     ``a @ x - s = rhs`` with a fresh slack ``s`` bounded by the sense. Returns
     ``("infeasible", None, None)`` on a verified Farkas certificate (or an empty
-    box), ``("bound", lb, x)`` when HiGHS returned a Neumaier-Shcherbina safe
+    box), ``("bound", lb, x)`` when the solve returned a Neumaier-Shcherbina safe
     bound and a point, and ``("none", None, None)`` otherwise -- the caller then
     keeps the node's sentinel. Nothing is inferred from an unverified outcome.
     """
     import scipy.sparse as _sp
 
-    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std_rust_first
+    from discopt.solvers.lp_milp_highs import INF, StdForm, solve_lp_std
 
     lb = np.maximum(np.asarray(sf.xl, dtype=np.float64).copy(), -INF)
     ub = np.minimum(np.asarray(sf.xu, dtype=np.float64).copy(), INF)
@@ -38980,9 +38980,11 @@ def _linear_node_lp_rescue(sf, n_struct: int, cut_pool, node_lb, node_ub, *, tim
         lb = np.concatenate([lb, s_lo])
         ub = np.concatenate([ub, s_hi])
     node_sf = StdForm.from_arrays(c, A, b, lb, ub, float(sf.obj_const), None)
-    # highs-parity P1.2: the Rust engine first, HiGHS only when Rust is not decisive
-    # (same certificate ladder either way; the two agreed on every rescue LP measured).
-    out = solve_lp_std_rust_first(node_sf, time_limit=time_limit)
+    # highs-parity P6: the LP seam's default engine (the in-house simplex) only. P1.2's
+    # HiGHS fallback for a non-decisive Rust answer was removed: measured, every real
+    # rescue LP was decisive on Rust, and an undecided answer below infers nothing
+    # (the node keeps its sentinel). ``DISCOPT_LP_STD_ENGINE=highs`` still A/Bs it.
+    out = solve_lp_std(node_sf, time_limit=time_limit)
     if out.status == "infeasible":
         return "infeasible", None, None
     if out.bound is not None and np.isfinite(out.bound) and out.x is not None:
