@@ -44,9 +44,6 @@ ROLE_CALLERS = {
     "solve": "#3 solve_lp_std seam default (lp_std_engine.HighsEngine.solve)",
     "_convex_route_oa_master": "#4 convex-route OA master (D3)",
     "_require_highspy": "#4 convex-route OA master (D3), milp_highs",
-    # The frame is `_lp_dual` (the key used to read `_highs_lp_dual`, a name the function
-    # no longer has, so the corpus guard reported this documented reach as new).
-    "_lp_dual": "#8 convex node bound (HiGHS first, then the Rust simplex; P1.3 kill)",
 }
 
 _BLOCK_HIGHS = r"""

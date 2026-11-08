@@ -129,44 +129,6 @@ def _as_csr(J, m: int, n: int) -> sp.csr_matrix:
     return out
 
 
-def _solve_row_equilibrated(highspy, new_highs, J, xl, xu, s_lo, s_hi, grad):
-    """Solve ``min gradᵀx  s.t.  s_lo <= J x <= s_hi, xl <= x <= xu`` with each row
-    divided by its largest coefficient; returns ``(highs, scale, status_name)``.
-
-    A row dual ``y_s`` of the scaled rows is the dual ``y_s / scale`` of the unscaled
-    ones, in the sign convention of the slack form ``J x - s = 0`` (a positive dual
-    prices the row's lower side in both).
-    """
-    from discopt.solvers.lp_milp_highs import _status_name
-    from discopt.solvers.milp_highs import _to_highs_inf
-
-    Jr = sp.csr_matrix(J, dtype=np.float64)
-    m, n = Jr.shape
-    scale = np.ones(m)
-    if Jr.nnz:
-        row_max = np.asarray(abs(Jr).max(axis=1).todense()).ravel()
-        scale = np.where(row_max > 0.0, row_max, 1.0)
-    Js = sp.csc_matrix(sp.diags(1.0 / scale) @ Jr)
-    lp = highspy.HighsLp()
-    lp.num_col_, lp.num_row_ = n, m
-    lp.col_cost_ = np.asarray(grad, dtype=np.float64)
-    lp.col_lower_ = _to_highs_inf(xl, highspy)
-    lp.col_upper_ = _to_highs_inf(xu, highspy)
-    lp.row_lower_ = _to_highs_inf(np.where(s_lo <= -1e20, s_lo, s_lo / scale), highspy)
-    lp.row_upper_ = _to_highs_inf(np.where(s_hi >= 1e20, s_hi, s_hi / scale), highspy)
-    lp.sense_ = highspy.ObjSense.kMinimize
-    lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
-    lp.a_matrix_.num_col_, lp.a_matrix_.num_row_ = n, m
-    lp.a_matrix_.start_ = Js.indptr.astype(np.int32)
-    lp.a_matrix_.index_ = Js.indices.astype(np.int32)
-    lp.a_matrix_.value_ = Js.data
-    h = new_highs(highspy, [("presolve", "off")])
-    if h.passModel(lp) == highspy.HighsStatus.kError:
-        return h, scale, "refused by HiGHS passModel"
-    h.run()
-    return h, scale, _status_name(h)
-
-
 def _simplex_dual(J, xl, xu, s_lo, s_hi, grad):
     """The row dual of the linearised LP from the in-house Rust simplex, in the
     slack-form convention of :func:`_lp_dual`; ``(y, value)`` or ``(None, reason)``.
@@ -214,51 +176,24 @@ def _simplex_dual(J, xl, xu, s_lo, s_hi, grad):
 
 def _lp_dual(sf, J, xl, xu, s_lo, s_hi, grad):
     """A candidate row dual of the linearised node LP: ``(y, value, "")`` or
-    ``(None, None, reason)``.
+    ``(None, None, reason)``, from the in-house Rust simplex.
 
-    Any ``y`` is a valid input to the certificate (weak duality), so the sources are
-    tried in order of how good a dual they usually give, and none can make the bound
-    wrong: HiGHS on the slack form ``sf``; HiGHS on a row-equilibrated copy, because
-    HiGHS refuses ``|a_ij| >= 1e15`` outright (#1955's ``1e16`` row left the only node
-    of a two-variable MINLP unbounded); then the in-house Rust simplex, which is also
-    the only source where ``highspy`` is not installed (the browser build).
+    Any ``y`` is a valid input to the certificate (weak duality), so the source only
+    decides how tight the bound is, never whether it is valid. HiGHS used to be tried
+    first (then a row-equilibrated HiGHS copy, then this). highs-parity P6 measured:
+    - on every linearised node LP the in-repo tests make (252), the Rust simplex returned
+      a dual, with an LP value within 3.0e-9 relative of HiGHS's;
+    - on P1.3's 60 certificate fixtures, with the zero-dual candidate `_safe_bound` adds,
+      the Rust arm certifies no bound looser than the HiGHS arm (P1.3's kill, 3 translated
+      clay0303hfsg LPs, came from the Rust dual's norm, not a wrong dual).
+    Data: ``docs/dev/data/highs-parity/p6-node-bound-lp/``. ``sf`` is not needed to
+    produce the dual.
     """
-    from discopt.solvers.lp_milp_highs import (
-        HighsUnavailable,
-        _new_highs,
-        _pass_model,
-        _status_name,
-        require_highspy,
-    )
-
-    reasons = []
-    try:
-        highspy = require_highspy()
-    except HighsUnavailable:
-        highspy = None
-        reasons.append("highspy is not installed")
-    if highspy is not None:
-        h = _new_highs(highspy, [("presolve", "off")])
-        st, why = _pass_model(h, highspy, sf, integer=False)
-        if st == highspy.HighsStatus.kError:
-            reasons.append(f"HiGHS refused the LP ({why})")
-        else:
-            h.run()
-            name = _status_name(h)
-            if name == "kOptimal":
-                y = np.asarray(h.getSolution().row_dual, dtype=np.float64)
-                return y, float(h.getInfo().objective_function_value), ""
-            reasons.append(f"HiGHS {name}")
-        h, scale, name = _solve_row_equilibrated(highspy, _new_highs, J, xl, xu, s_lo, s_hi, grad)
-        if name == "kOptimal":
-            y = np.asarray(h.getSolution().row_dual, dtype=np.float64) / scale
-            return y, float(h.getInfo().objective_function_value), ""
-        reasons.append(f"row-equilibrated HiGHS {name}")
+    del sf
     y, val = _simplex_dual(J, xl, xu, s_lo, s_hi, grad)
     if y is not None:
         return y, val, ""
-    reasons.append(str(val))
-    return None, None, "linearised node LP: " + "; ".join(reasons)
+    return None, None, "linearised node LP: " + str(val)
 
 
 def convex_node_safe_bound(
@@ -359,15 +294,32 @@ def _safe_bound(evaluator, x, node_lb, node_ub, cl, cu, deadline, budget):
         return None, "linearised node LP dual is not finite"
     lp_obj = lp_val + sf.obj_const
     bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline, exact=False)
+    # Every multiplier gives a valid bound (weak duality), so the zero vector is a second
+    # candidate in both rungs, the larger bound kept. On a degenerate LP whose objective
+    # cancels large terms, an optimal dual of large norm keeps rounding slack in
+    # proportion to its norm, and the zero dual (the box-only bound) can be tighter.
+    # Measured (highs-parity P6, docs/dev/data/highs-parity/p6-node-bound-lp/): on the
+    # translated clay0303hfsg node LPs (objective constant ~8.4e8, optimum ~0) the Rust
+    # dual (|y| ~ 200) and the zero dual both certify ~-8.4e-4 here; after the exact
+    # correction, y gives -2.80e-6 and the zero dual -1.55e-6 (HiGHS's bound; its dual is 0).
+    b0, _p0, r0 = certify_lp_dual(np.zeros(sf.m), sf, lp_obj, deadline=deadline, exact=False)
+    if b0 is not None and (bound is None or b0 > bound):
+        bound, reason = b0, r0
     closed = bound is not None and lp_obj - bound <= CERT_ABS + CERT_REL * abs(lp_obj)
     if not closed and (budget is None or budget.exact_allowed):
         # The cheap rungs fell short; the exact correction is the expensive one, so it
         # runs only while this solve's ration lasts.
         if budget is not None:
             budget.exact_left -= 1
-        exact_bound, _prov, reason = certify_lp_dual(y, sf, lp_obj, deadline=deadline)
-        if exact_bound is not None and (bound is None or exact_bound > bound):
-            bound = exact_bound
+        # Both candidates, without stopping once y's bound looks closed: closed is judged
+        # against the engine's vertex value, which on the LPs above (-2.50e-6) sits below
+        # the true optimum, so y's -2.80e-6 looks closed while the zero dual's is tighter.
+        for cand in (y, np.zeros(sf.m)):
+            exact_bound, _prov, why = certify_lp_dual(cand, sf, lp_obj, deadline=deadline)
+            if exact_bound is not None and (bound is None or exact_bound > bound):
+                bound, reason = exact_bound, why
+            elif bound is None:
+                reason = why
     if bound is None or not np.isfinite(bound):
         return None, reason or "no finite Neumaier-Shcherbina bound from the LP dual"
     return float(bound), ""

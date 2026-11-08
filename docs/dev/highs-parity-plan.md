@@ -685,6 +685,15 @@ instances, where the task rests on one) · **Done** (commands + numeric threshol
   define a general LP class to carve out (CLAUDE.md §2), so R4 **stays HiGHS-first**
   (`_lp_dual` unchanged; the Rust simplex remains its third source). The 3 LPs join
   P2.1's profile list; re-open after P2 improves the Rust dual (P2.2–P2.5).
+  **Re-opened and resolved 2026-11-08 (P6, inventory #8).** The 3 LPs were never a
+  wrong Rust dual: both duals are optimal, HiGHS's is zero and Rust's has norm ~200, and on
+  an LP whose ~8.4e8 objective constant cancels the larger norm keeps ~1.25e-6 more slack
+  through the exact correction. `_safe_bound` now certifies the zero multiplier as a second
+  candidate in the cheap and the exact rung (weak duality; the larger is kept), and `_lp_dual`
+  is Rust-only. Entry re-run with that pipeline: 60 compared, 0 lost, 0 looser, Rust tighter
+  on 10 (`data/highs-parity/p6-node-bound-lp/`). A diagnosis committed earlier that day
+  (2d9d9253, "the Rust basis leaves wrong-sign reduced costs on open nonbasic columns") is
+  **retracted**: a position-aware check finds 0 optimality violations on all 6 Rust answers.
 - [x] **P1.4 — R3: root-cut LP and GMI on the Rust simplex (flagged).** Scope:
   `_root_cuts.py` `_solve_lp` (`:410`), `separate_gmi` (`:532`), new
   `DISCOPT_NLPBB_ROOT_CUTS_ENGINE={highs,rust}` (default `highs`), Rust: a binding that
@@ -2077,6 +2086,11 @@ Commit `d9a6009a`, P0.5's 60 R4 fixtures, compared 60. Measured: 0 lost, 55 with
 CERT_ABS + CERT_REL·|v|, 3 looser by 1.0–1.25e-6 (translated `clay0303hfsg`), 2 strictly
 tighter. Expected: none looser. Consequence: P1.3 killed, R4 stays HiGHS-first, the 3 LPs
 go to P2.1.
+
+**2026-11-08 — P6 #8: "the Rust basis on the 3 P1.3 LPs leaves wrong-sign reduced costs".**
+Measured (`p13_rc_optimality_check.py`, reduced cost judged by where x sits): 0
+violations on all 6 Rust answers, 1494 columns. Retracted. The real cause is the dual's
+norm; the zero-dual candidate closes it (60 compared, 0 lost, 0 looser).
 
 **2026-11-05 — P2.2: "a crash basis cuts the Rust LP route's cold iterations ≥ 30 %".**
 Commit `cada2c4e` + an uncommitted crash, L panel, Rust route, pivots summed over every LP
