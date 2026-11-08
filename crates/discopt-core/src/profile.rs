@@ -360,6 +360,9 @@ counters!(
     TolRobustRelaxedSolves,
     TolRobustRelaxedOptimal,
     TolRobustFarkasRefused,
+    // ...and FBBT emptiness verdicts confirmed over the relaxed rows / refused there.
+    TolRobustFbbtConfirm,
+    TolRobustFbbtRefused,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).

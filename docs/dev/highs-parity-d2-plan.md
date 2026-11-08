@@ -477,6 +477,22 @@ Evidence so far:
 - `nvs24` is a timing artifact. OFF certified at 18.5 s of 20 under load 7. Rerun
   alone, 3 reps (`..._nvs24_rerun.jsonl.gz`), each arm certified 2/3: OFF lost
   rep 0 and ON lost rep 2.
+- §5 MILP panel of that first design (`tol_robust_panel_v1_r3.json.gz`), which
+  relaxed EVERY propagation:
+  - cert-clean; certified 125 -> 126 (gained `p0548`);
+  - but nodes +12 %, 4 dual losses, and no incumbent in any rep on `enlight8` and
+    `nexp-50-20-1-1`: fails bar 2.
+- Retraction: the first guess, that the relaxed rows in the heuristics' propagation
+  were to blame, was falsified. With heuristics exact, both rows still found no
+  incumbent and node throughput fell 3-5x (`tol_robust_v2_entry.jsonl.gz`).
+- Second design: tightening stays exact; only an emptiness verdict (root presolve,
+  node, NS cutoff) is re-checked over the relaxed rows, and a box only the exact rows
+  empty keeps the relaxed result.
+  - Away from near-empty boxes the flag changes nothing.
+  - Entry, same file: `enlight8` and `nexp` match OFF (incumbent 27 / 41, nodes
+    within noise); `2122` and `p0548` unchanged.
+  - The fixture still returns OPTIMAL 0.02829, with 30 exact verdicts refused.
+  - Re-panel next.
 
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 

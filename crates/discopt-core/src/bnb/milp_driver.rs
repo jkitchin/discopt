@@ -493,7 +493,8 @@ fn parse_cut_lp(raw: &str) -> Result<bool, String> {
 ///   trajectory) returns the point.
 ///
 /// With it:
-/// - FBBT derives bounds from the relaxed rows (`tighten_bounds_csc_relaxed`).
+/// - An FBBT emptiness verdict (root presolve, node, NS cutoff) is confirmed over
+///   the relaxed rows (`tighten_bounds_csc_relaxed`); tightening stays exact.
 /// - A Farkas ray fathoms only if its bound survives `sum_i |y_i| eps_i` (in original
 ///   units).
 /// - A node LP that is infeasible but not robustly so is re-solved with each row's
@@ -567,6 +568,24 @@ fn fbbt_rows(
     fbbt_rows_with_row(csc, m, n, l, u, b, is_int, tol, None)
 }
 
+/// The exact-row FBBT, for the primal heuristics (sub-MIP, randomized rounding, the
+/// dive repair). Their propagation only chooses which candidates to try, and every
+/// candidate is verified, so it is not a proof and needs no confirmation under
+/// `DISCOPT_MILP_TOL_ROBUST`.
+#[allow(clippy::too_many_arguments)]
+fn fbbt_rows_exact(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+) -> crate::lp::simplex::presolve::PresolveResult {
+    tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, None, None)
+}
+
 /// [`fbbt_rows`] plus an extra (never relaxed) row, e.g. the objective cutoff.
 #[allow(clippy::too_many_arguments)]
 fn fbbt_rows_with_row(
@@ -580,8 +599,22 @@ fn fbbt_rows_with_row(
     tol: f64,
     extra: Option<(&[f64], f64)>,
 ) -> crate::lp::simplex::presolve::PresolveResult {
-    let eps = tol_robust_enabled().then(|| row_tolerances(csc, m, n, b, l, u));
-    tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, eps.as_deref(), extra)
+    let exact = tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, None, extra);
+    if !exact.infeasible || !tol_robust_enabled() {
+        return exact;
+    }
+    // An emptiness verdict is confirmed over the rows relaxed by their acceptance
+    // tolerance; a box only the exact rows empty keeps the relaxed result (never a
+    // fathom). Tightening of a non-empty box stays exact, so away from near-empty
+    // boxes the flag changes nothing (measured: relaxing every propagation cost
+    // `enlight8` and `nexp-50-20-1-1` every incumbent in the flag's first panel).
+    crate::profile::incr(crate::profile::Ctr::TolRobustFbbtConfirm);
+    let eps = row_tolerances(csc, m, n, b, l, u);
+    let relaxed = tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, Some(&eps), extra);
+    if !relaxed.infeasible {
+        crate::profile::incr(crate::profile::Ctr::TolRobustFbbtRefused);
+    }
+    relaxed
 }
 
 /// Robust Farkas test in ORIGINAL units (`y` the ray mapped to the original rows):
@@ -1659,7 +1692,7 @@ fn try_sub_mip(
     }
     // Propagate the fixings over the base rows: a consistent, smaller sub-box, or a
     // proof that this neighbourhood is empty (skip the solve).
-    let pr = fbbt_rows(
+    let pr = fbbt_rows_exact(
         &base.csc,
         base.m,
         base.n,
@@ -1874,7 +1907,7 @@ fn try_randomized_rounding(
         sl[j] = v;
         su[j] = v;
         if (k + 1) % stride == 0 || k + 1 == ints.len() {
-            let pr = fbbt_rows(
+            let pr = fbbt_rows_exact(
                 &base.csc,
                 base.m,
                 base.n,
@@ -7110,7 +7143,7 @@ fn try_dive_repair(
             // FBBT only removes points that violate a row, so the dive's box
             // still contains every feasible completion of the fixing.
             if improve {
-                let pr = fbbt_rows(
+                let pr = fbbt_rows_exact(
                     ctx.csc_rc,
                     ctx.m_w,
                     ctx.n_w,
