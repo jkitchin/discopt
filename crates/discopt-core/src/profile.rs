@@ -357,6 +357,8 @@ counters!(
     CutLpBasisDropped,
     // D2 review R0: the driver's stall guard stopped a run with no incumbent.
     MilpStallGuardStop,
+    // DISCOPT_MILP_NO_STALL_TREE: the deadline moved because there was no incumbent.
+    MilpNoIncumbentExtend,
     // A node evaluated with no stored basis below the root (was taken for the root).
     NodeNoBasisOffRoot,
     // #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE: engine entries' Numerical solves re-tried

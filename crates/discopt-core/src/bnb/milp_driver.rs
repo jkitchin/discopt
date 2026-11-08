@@ -1462,6 +1462,13 @@ pub struct MilpOptions {
     /// `time_limit_s = s` run, and a run holding an incumbent keeps its tree, pool and
     /// pseudocosts instead of being restarted. `None` = no stall guard.
     pub stall_time_s: Option<f64>,
+    /// When `time_limit_s` is reached with NO incumbent, move the deadline once to this
+    /// many seconds (from the start) and keep searching (`DISCOPT_MILP_NO_STALL_TREE`,
+    /// Python-MILP-tree retirement). Everything up to `time_limit_s` -- every budget
+    /// sized from the deadline -- is exactly what it is without it; a node skipped at
+    /// the deadline is re-queued (open, parent-inherited bound) rather than dropped while
+    /// the extension is still possible. `None` = no extension.
+    pub extend_no_incumbent_s: Option<f64>,
     /// Node selection rule (`Model.solve(strategy=...)`; Python-MILP-tree retirement
     /// step 3). `BestFirst` is the historical driver's rule and the default.
     pub selection: SelectionStrategy,
@@ -3193,14 +3200,17 @@ fn solve_milp_node_search(
     // deadline-aware variant used for all LP solves here. See
     // `SimplexOptions::deadline`.
     let t_start = std::time::Instant::now();
-    let deadline = opts
+    let mut deadline = opts
         .time_limit_s
         .map(|tl| t_start + std::time::Duration::from_secs_f64(tl));
-    let node_simplex = {
+    let mut node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
         sx
     };
+    // `extend_no_incumbent_s`: the effective time limit, and whether it already moved.
+    let mut eff_time_limit = opts.time_limit_s;
+    let mut extended = false;
     // D2: the root cut loop's LP options (`DISCOPT_MILP_ROOT_FULL_BASIS`).
     let root_simplex = {
         let mut sx = node_simplex.clone();
@@ -3701,10 +3711,25 @@ fn solve_milp_node_search(
             frontier_capped = true;
             break;
         }
-        if let Some(tl) = opts.time_limit_s {
+        if let Some(tl) = eff_time_limit {
             if t_start.elapsed().as_secs_f64() >= tl {
-                gap_certified = false;
-                break;
+                let has_inc = tm
+                    .incumbent()
+                    .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0);
+                match opts.extend_no_incumbent_s {
+                    Some(ext) if !extended && !has_inc && ext > tl => {
+                        // No incumbent at the limit: keep searching to `ext`.
+                        extended = true;
+                        eff_time_limit = Some(ext);
+                        deadline = Some(t_start + std::time::Duration::from_secs_f64(ext));
+                        node_simplex.deadline = deadline;
+                        crate::profile::incr(crate::profile::Ctr::MilpNoIncumbentExtend);
+                    }
+                    _ => {
+                        gap_certified = false;
+                        break;
+                    }
+                }
             }
         }
         if let Some(st) = opts.stall_time_s {
@@ -3954,6 +3979,20 @@ fn solve_milp_node_search(
             }
             batch_new_gmi.append(&mut out.gmi_new);
             batch_used_gmi.append(&mut out.gmi_used);
+            if out.deferred
+                && opts.extend_no_incumbent_s.is_some()
+                && !extended
+                && !tm
+                    .incumbent()
+                    .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0)
+            {
+                // The deadline may still move (`extend_no_incumbent_s`): put the node back
+                // open with its parent-inherited bound instead of dropping it. Sound
+                // either way: an open node keeps a valid bound, and a search that then
+                // stops is a limit status, never a certificate.
+                tm.requeue_node(id);
+                continue;
+            }
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
@@ -8038,6 +8077,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -8936,6 +8976,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 16,
@@ -9718,6 +9759,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -9855,6 +9897,7 @@ pub(crate) mod sparse_milp_diff {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10157,6 +10200,7 @@ pub(crate) mod sparse_milp_diff {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -10467,6 +10511,7 @@ mod lazy_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10767,6 +10812,7 @@ mod node_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 0,
@@ -11050,6 +11096,7 @@ mod lazy_infeasible_node {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -11189,6 +11236,7 @@ mod root_cut_budget_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 200,
@@ -11972,6 +12020,7 @@ mod tiny_entry_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,

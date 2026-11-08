@@ -39791,14 +39791,17 @@ def _milp_no_stall_tree_enabled() -> bool:
     Measured (``docs/dev/data/python-milp-retirement/``): on the MIPLIB-38+M panel that
     handoff ran ~60 times on 5 instances and the tree never found an incumbent; on the
     in-repo corpus it never ran. It is also the mechanism behind ``p0548``'s coin flip.
-    With the flag, a run 1 that stopped at the slice with no incumbent gets a second
-    NATIVE run over the remaining time instead (the tighter of the two valid bounds is
-    kept), and its result is returned -- certified, feasible, or uncertified with the
-    bound -- never the Python tree. Run 1 itself is untouched, so every solve that does
-    not stall takes exactly its old path. (A first version gave run 1 the whole budget
-    with a stop-if-incumbent slice; its §5 panel moved ``nexp-50-20-4-2``'s bound
-    68 -> 67 on 2 of 3 reps because run 1's internal budgets scale with its time limit,
-    a solve the flag should not have touched: ``docs/dev/data/python-milp-retirement/``.)
+    With the flag, run 1 is unchanged up to its slice (every budget it sizes from its
+    deadline included); only if it reaches the slice with NO incumbent does the driver
+    move its deadline to the whole remaining budget (``MilpOptions::
+    extend_no_incumbent_s``) and keep searching the same tree. Its result -- certified,
+    feasible, or uncertified with its valid bound -- is returned, never the Python
+    tree. Two earlier designs were measured and dropped
+    (``docs/dev/data/python-milp-retirement/``): v1 gave run 1 the whole budget from the
+    start, which changed run 1's budgets on solves that never stall
+    (``nexp-50-20-4-2`` 68 -> 67); v2 restarted a fresh native run after the slice,
+    which on ``issue-2446`` (2200 x 1963) never finished enough of a root to report any
+    bound -- the stall instances need run 1's own tree continued.
     """
     return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "0") == "1"
 
@@ -40198,6 +40201,12 @@ def _solve_milp_simplex(
     _run1_time = _milp_budget
     _run1_stall: dict = {}
     _no_stall_tree = _milp_no_stall_tree_enabled() and not _tuning().deterministic
+    if _no_stall_tree:
+        # Run 1 is unchanged up to its slice; only with NO incumbent there does the
+        # driver move its deadline to the whole remaining budget.
+        _run1_stall["extend_no_incumbent_s"] = max(
+            float(_run1_time), float(time_limit) - (time.perf_counter() - t_start)
+        )
     if _milp_run1_continue_enabled() and not _tuning().deterministic:
         _run1_time = max(_milp_budget, float(time_limit) - (time.perf_counter() - t_start))
         _run1_stall["stall_time_s"] = float(_milp_budget)
@@ -40258,8 +40267,6 @@ def _solve_milp_simplex(
         **_sel_kw,
     )
 
-    _ns_ran = False  # DISCOPT_MILP_NO_STALL_TREE's native continuation ran
-
     _coef_rescued = False  # DISCOPT_MILP_RUST_COEF_RESCUE adopted the tightened solve
 
     def _driver_stats() -> dict[str, float]:
@@ -40273,8 +40280,8 @@ def _solve_milp_simplex(
         instrumentation: the driver returns the number either way.
         """
         _d = {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
-        if _ns_ran:
-            _d["milp/no_stall_continuation"] = 1.0
+        if _no_stall_tree:
+            _d["milp/no_stall_tree"] = 1.0
         if _coef_rescued:
             _d["milp/rust_coef_rescue"] = 1.0
         return _d
@@ -40530,51 +40537,6 @@ def _solve_milp_simplex(
             gap_certified=False,
         )
 
-    # DISCOPT_MILP_NO_STALL_TREE: a run 1 that stopped at the #291 stall slice with no
-    # incumbent gets a second native run over the remaining time instead of the Python
-    # MILP tree. Everything before this point is unchanged, so a solve that does not
-    # stall takes exactly its old path.
-    if (
-        _no_stall_tree
-        and status == "node_limit"
-        and not _stopped_on_nodes
-        and not _debug_stop_pending
-        and relu_cuts is None
-    ):
-        _rem_ns = float(time_limit) - (time.perf_counter() - t_start)
-        if _rem_ns > 0.1:
-            _st_ns, _x_ns, _obj_ns, _bd_ns, _nd_ns, _it_ns = solve_milp_csc_py(
-                np.ascontiguousarray(_drv.c, dtype=np.float64),
-                _A_m,
-                _A_n,
-                _A_ptr,
-                _A_idx,
-                _A_val,
-                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
-                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
-                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
-                n_orig,
-                float(lp_data.obj_const),
-                _run1_nodes,
-                float(gap_tolerance),
-                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
-                initial_incumbent=_seed,
-                time_limit_s=_rem_ns,
-                debug_hook=_debug.rust_hook(),
-                **_cut_opts,
-                **_frontier_opts,
-            )
-            nodes = int(nodes) + int(_nd_ns)
-            _lp_iters = int(_lp_iters) + int(_it_ns)
-            _ns_ran = True
-            # Both bounds are valid for the model: keep the tighter (internal min sense).
-            _b_keep = max(
-                (b for b in (bound, _bd_ns) if b is not None and np.isfinite(b)),
-                default=float("-inf"),
-            )
-            status, x_struct, obj = _st_ns, _x_ns, _obj_ns
-            bound = _b_keep if _st_ns != "optimal" else _bd_ns
     # #2163: an engine search that ended ``feasible`` with NO finite bound, before
     # the clock or a node cap stopped it, finished without any certificate --
     # the driver withdrew it (an entry the LP cannot resolve, #1296's
@@ -40887,7 +40849,7 @@ def _solve_milp_simplex(
                 "milp_driver/nodes": _ds["lp/driver_nodes"],
             }
             deferred["reason"] = "stall_no_incumbent_291"
-        if _ns_ran and _debug_stopped_result() is None:
+        if _no_stall_tree and _debug_stopped_result() is None:
             # DISCOPT_MILP_NO_STALL_TREE: run 1 had the whole budget; its own result
             # (no incumbent, a valid bound) is the answer -- no handoff to the tree.
             _bv_ns = None
@@ -40898,8 +40860,8 @@ def _solve_milp_simplex(
             return SolveResult(
                 status="node_limit" if _stopped_on_nodes else "time_limit",
                 algorithm_route=(
-                    "native-milp: discopt monolithic Rust MILP engine (stall continuation; "
-                    "no Python MILP tree)"
+                    "native-milp: discopt monolithic Rust MILP engine (no incumbent; searched "
+                    "the whole budget, no Python MILP tree)"
                 ),
                 bound=_bv_ns,
                 wall_time=time.perf_counter() - t_start,

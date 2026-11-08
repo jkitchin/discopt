@@ -331,6 +331,7 @@ fn run() -> Result<(), String> {
         time_limit_s: Some(args.time_limit),
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        extend_no_incumbent_s: None,
         gap_tol: args.gap_tol,
         // This CLI exposes only the relative tolerance, so there is no
         // absolute criterion to apply (#1315).

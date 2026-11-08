@@ -1281,7 +1281,8 @@ pub fn ns_safe_bound_csc_py(
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
-                    stall_time_s=None, node_selection=None))]
+                    stall_time_s=None, node_selection=None,
+                    extend_no_incumbent_s=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1323,6 +1324,7 @@ pub fn solve_milp_csc_py<'py>(
     max_open_nodes: Option<usize>,
     stall_time_s: Option<f64>,
     node_selection: Option<String>,
+    extend_no_incumbent_s: Option<f64>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1397,6 +1399,7 @@ pub fn solve_milp_csc_py<'py>(
         None,
         MilpExtra {
             stall_time_s,
+            extend_no_incumbent_s,
             selection,
         },
     )?;
@@ -1906,6 +1909,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
 #[derive(Default)]
 struct MilpExtra {
     stall_time_s: Option<f64>,
+    extend_no_incumbent_s: Option<f64>,
     selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
 }
 
@@ -1974,6 +1978,7 @@ pub(crate) fn milp_options(
         time_limit_s: parse_budget_secs(time_limit_s)?,
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        extend_no_incumbent_s: None,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
         // keeps the engine's historical behaviour exactly: no absolute arm.
@@ -2121,6 +2126,7 @@ fn run_milp_hooked<'py>(
     )?;
     let opts = MilpOptions {
         stall_time_s: parse_budget_secs(extra.stall_time_s)?,
+        extend_no_incumbent_s: parse_budget_secs(extra.extend_no_incumbent_s)?,
         selection: extra.selection.unwrap_or(opts.selection),
         ..opts
     };
