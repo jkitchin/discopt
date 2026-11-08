@@ -18881,13 +18881,11 @@ def solve_model(
                 _deferred: dict = {}
                 # #1535: ``milp_backend="native"`` asks for the MILP tree below,
                 # the engine whose search the caller's options actually steer.
-                _want_engine = (
-                    _lpm_backend != "native"
-                    and not _observe_tree
-                    and (
-                        nlp_solver == "simplex"
-                        or (_milp_engine_default_on() and not lagrangian_bound)
-                    )
+                # Python-MILP-tree retirement: ``node_callback`` is observed through the
+                # Rust driver's AfterProcess hook (``_milp_node_callback_hook``), so it
+                # no longer keeps the MILP on the Python tree.
+                _want_engine = _lpm_backend != "native" and (
+                    nlp_solver == "simplex" or (_milp_engine_default_on() and not lagrangian_bound)
                 )
                 # #1243: the monolithic engine's RELATIVE arm is
                 # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
@@ -18937,6 +18935,8 @@ def solve_model(
                         # this engine is no absolute criterion at all (#1315).
                         abs_gap_tolerance=abs_gap_tolerance,
                         incumbent_time_extension=incumbent_time_extension,
+                        node_callback=node_callback,
+                        root_cuts=milp_cuts is not False,
                     )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
                         # #1614 C1: the in-house engine answering a MILP must say so,
@@ -39791,13 +39791,35 @@ def _milp_no_stall_tree_enabled() -> bool:
     Measured (``docs/dev/data/python-milp-retirement/``): on the MIPLIB-38+M panel that
     handoff ran ~60 times on 5 instances and the tree never found an incumbent; on the
     in-repo corpus it never ran. It is also the mechanism behind ``p0548``'s coin flip.
-    With the flag, run 1 gets the whole remaining budget and the driver stops at the
-    slice only if it HAS an incumbent (``stall_rule="stop_if_incumbent"``), so the
-    seeded run-2 restart that P4.0 measured (the ``mik`` incumbents) still happens; a
-    run 1 without an incumbent keeps searching to the time limit and returns its own
-    uncertified result with its valid bound instead of deferring.
+    With the flag, a run 1 that stopped at the slice with no incumbent gets a second
+    NATIVE run over the remaining time instead (the tighter of the two valid bounds is
+    kept), and its result is returned -- certified, feasible, or uncertified with the
+    bound -- never the Python tree. Run 1 itself is untouched, so every solve that does
+    not stall takes exactly its old path. (A first version gave run 1 the whole budget
+    with a stop-if-incumbent slice; its §5 panel moved ``nexp-50-20-4-2``'s bound
+    68 -> 67 on 2 of 3 reps because run 1's internal budgets scale with its time limit,
+    a solve the flag should not have touched: ``docs/dev/data/python-milp-retirement/``.)
     """
     return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "0") == "1"
+
+
+def _milp_rust_coef_rescue_enabled() -> bool:
+    """``DISCOPT_MILP_RUST_COEF_RESCUE`` gate (Python-MILP-tree retirement, default OFF
+    until its panel).
+
+    When the Rust driver finishes ``feasible`` with its certificate withdrawn (#2163: the
+    #1296 tiny-entry gate fires on a row whose dynamic range the LP layer cannot
+    represent, e.g. ``x <= 1e12 z``), ``_solve_milp_simplex`` used to hand the MILP to the
+    Python MILP tree. With the flag it applies the graduated #1654 coefficient
+    tightening (``lp_milp_highs.coefficient_tightened``, the HiGHS route's rescue,
+    certified 22/48 -> 48/48 on three big-M families) to the same standard form and
+    re-runs the Rust driver on it: ``x <= 1e12 z`` over ``x in [0, 10]`` becomes
+    ``x <= 10 z``, an exact reformulation of the integer-feasible set, so the tightened
+    certificate is a certificate of the model. Its point still goes through this
+    function's own feasibility gate on the ORIGINAL rows before anything is reported;
+    a tightened solve that is not certified changes nothing.
+    """
+    return os.environ.get("DISCOPT_MILP_RUST_COEF_RESCUE", "0") == "1"
 
 
 def _milp_reentry_cuts_enabled() -> bool:
@@ -40033,6 +40055,8 @@ def _solve_milp_simplex(
     incumbent_time_extension: float = 0.0,
     relu_cuts: Optional[dict] = None,
     relu_counts: Optional[dict] = None,
+    node_callback: Optional[Callable] = None,
+    root_cuts: bool = True,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -40173,16 +40197,41 @@ def _solve_milp_simplex(
     # the #291 stall slice enforced by the driver only while it has no incumbent.
     _run1_time = _milp_budget
     _run1_stall: dict = {}
-    _continue = _milp_run1_continue_enabled() and not _tuning().deterministic
     _no_stall_tree = _milp_no_stall_tree_enabled() and not _tuning().deterministic
-    if _continue or _no_stall_tree:
+    if _milp_run1_continue_enabled() and not _tuning().deterministic:
         _run1_time = max(_milp_budget, float(time_limit) - (time.perf_counter() - t_start))
-        if _continue and not _no_stall_tree:
-            _run1_stall["stall_time_s"] = float(_milp_budget)
-        elif _no_stall_tree and not _continue:
-            # Stop at the slice only with an incumbent (run 2 restarts from it).
-            _run1_stall["stall_time_s"] = float(_milp_budget)
-            _run1_stall["stall_rule"] = "stop_if_incumbent"
+        _run1_stall["stall_time_s"] = float(_milp_budget)
+
+    # Python-MILP-tree retirement: the options the Python tree used to own.
+    # ``strategy`` (#1722 scope): the driver's node selection; marks the request used.
+    _sel_req = _STRATEGY_REQUEST.get()
+    _sel_kw: dict = {}
+    if _sel_req is not None:
+        _sel_kw["node_selection"] = _sel_req["strategy"]
+        _sel_req["used"] = True
+    # ``milp_cuts=False`` (#1535): no root cut loop.
+    if not root_cuts:
+        _cut_opts = {"root_cuts": 0, "cut_rounds": 0}
+    # ``node_callback``: called once per processed batch, from the driver's
+    # AfterProcess checkpoint, with the same CallbackContext the tree built.
+    _cb_hook = (
+        _milp_node_callback_hook(
+            node_callback,
+            model,
+            model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE,
+            t_start,
+        )
+        if node_callback is not None
+        else None
+    )
+
+    def _hook():
+        dbg = _debug.rust_hook()
+        if _cb_hook is None:
+            return dbg
+        if dbg is None:
+            return _cb_hook
+        return lambda d: bool(dbg(d)) or bool(_cb_hook(d))
 
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
         np.ascontiguousarray(_drv.c, dtype=np.float64),
@@ -40202,11 +40251,16 @@ def _solve_milp_simplex(
         abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
         initial_incumbent=_seed,
         time_limit_s=float(_run1_time),
-        debug_hook=_debug.rust_hook(),
+        debug_hook=_hook(),
         **_cut_opts,
         **_frontier_opts,
         **_run1_stall,
+        **_sel_kw,
     )
+
+    _ns_ran = False  # DISCOPT_MILP_NO_STALL_TREE's native continuation ran
+
+    _coef_rescued = False  # DISCOPT_MILP_RUST_COEF_RESCUE adopted the tightened solve
 
     def _driver_stats() -> dict[str, float]:
         """Total simplex iterations the driver spent over the whole tree.
@@ -40218,7 +40272,12 @@ def _solve_milp_simplex(
         ``DISCOPT_PROFILE`` counter this product path drops on the floor. Pure
         instrumentation: the driver returns the number either way.
         """
-        return {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
+        _d = {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
+        if _ns_ran:
+            _d["milp/no_stall_continuation"] = 1.0
+        if _coef_rescued:
+            _d["milp/rust_coef_rescue"] = 1.0
+        return _d
 
     # Feasibility gate (shared by the return path below and the #698 re-entry
     # adoption test). The row/bound/integrality decomposition is independent of
@@ -40387,7 +40446,8 @@ def _solve_milp_simplex(
                 abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
-                debug_hook=_debug.rust_hook(),
+                debug_hook=_hook(),
+                **_sel_kw,
                 **(
                     (_milp_root_cut_budget(_reentry_remaining) or {})
                     if _milp_reentry_cuts_enabled()
@@ -40470,6 +40530,51 @@ def _solve_milp_simplex(
             gap_certified=False,
         )
 
+    # DISCOPT_MILP_NO_STALL_TREE: a run 1 that stopped at the #291 stall slice with no
+    # incumbent gets a second native run over the remaining time instead of the Python
+    # MILP tree. Everything before this point is unchanged, so a solve that does not
+    # stall takes exactly its old path.
+    if (
+        _no_stall_tree
+        and status == "node_limit"
+        and not _stopped_on_nodes
+        and not _debug_stop_pending
+        and relu_cuts is None
+    ):
+        _rem_ns = float(time_limit) - (time.perf_counter() - t_start)
+        if _rem_ns > 0.1:
+            _st_ns, _x_ns, _obj_ns, _bd_ns, _nd_ns, _it_ns = solve_milp_csc_py(
+                np.ascontiguousarray(_drv.c, dtype=np.float64),
+                _A_m,
+                _A_n,
+                _A_ptr,
+                _A_idx,
+                _A_val,
+                np.ascontiguousarray(_drv.b_eq, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_l, dtype=np.float64),
+                np.ascontiguousarray(_drv.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                n_orig,
+                float(lp_data.obj_const),
+                _run1_nodes,
+                float(gap_tolerance),
+                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                initial_incumbent=_seed,
+                time_limit_s=_rem_ns,
+                debug_hook=_debug.rust_hook(),
+                **_cut_opts,
+                **_frontier_opts,
+            )
+            nodes = int(nodes) + int(_nd_ns)
+            _lp_iters = int(_lp_iters) + int(_it_ns)
+            _ns_ran = True
+            # Both bounds are valid for the model: keep the tighter (internal min sense).
+            _b_keep = max(
+                (b for b in (bound, _bd_ns) if b is not None and np.isfinite(b)),
+                default=float("-inf"),
+            )
+            status, x_struct, obj = _st_ns, _x_ns, _obj_ns
+            bound = _b_keep if _st_ns != "optimal" else _bd_ns
     # #2163: an engine search that ended ``feasible`` with NO finite bound, before
     # the clock or a node cap stopped it, finished without any certificate --
     # the driver withdrew it (an entry the LP cannot resolve, #1296's
@@ -40485,6 +40590,65 @@ def _solve_milp_simplex(
     # (#912). The engine's point, when it passes the model's own rows, is handed to
     # the tree as a warm start (re-verified there before injection), so deferring
     # never loses the incumbent in hand.
+    if (
+        status == "feasible"
+        and not np.isfinite(bound)
+        and not _stopped_on_nodes
+        and not _debug_stop_pending
+        and relu_cuts is None
+        and _milp_rust_coef_rescue_enabled()
+    ):
+        # DISCOPT_MILP_RUST_COEF_RESCUE: the #1654 tightened form on the same driver.
+        from discopt.solvers.lp_milp_highs import StdForm, coefficient_tightened
+        from discopt.solvers.lp_milp_highs import _implied_bounds_enabled as _ib_on
+
+        _sf = StdForm.from_arrays(
+            _drv.c,
+            _drv.A_eq,
+            _drv.b_eq,
+            _drv.x_l,
+            _drv.x_u,
+            float(lp_data.obj_const),
+            np.asarray(int_idx, dtype=np.int64),
+        )
+        _sf_ct, _n_ct = coefficient_tightened(_sf, implied_bounds=_ib_on())
+        _rem_ct = float(time_limit) - (time.perf_counter() - t_start)
+        if _sf_ct is not None and _rem_ct > 0.1:
+            import scipy.sparse as _sps_ct
+
+            _Act = _sps_ct.csc_matrix(_sf_ct.A)
+            _st_ct, _x_ct, _obj_ct, _bd_ct, _nd_ct, _it_ct = solve_milp_csc_py(
+                np.ascontiguousarray(_sf_ct.c, dtype=np.float64),
+                int(_Act.shape[0]),
+                int(_Act.shape[1]),
+                np.ascontiguousarray(_Act.indptr, dtype=np.int64),
+                np.ascontiguousarray(_Act.indices, dtype=np.int64),
+                np.ascontiguousarray(_Act.data, dtype=np.float64),
+                np.ascontiguousarray(_sf_ct.b, dtype=np.float64),
+                np.ascontiguousarray(_sf_ct.xl, dtype=np.float64),
+                np.ascontiguousarray(_sf_ct.xu, dtype=np.float64),
+                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                n_orig,
+                float(lp_data.obj_const),
+                int(max_nodes),
+                float(gap_tolerance),
+                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                time_limit_s=_rem_ct,
+                **_cut_opts,
+            )
+            logger.info(
+                "Rust MILP certificate withdrawn; the coefficient-tightened form "
+                "(%d entries rewritten) gave %s, bound %s",
+                _n_ct,
+                _st_ct,
+                _bd_ct,
+            )
+            nodes = int(nodes) + int(_nd_ct)
+            _lp_iters = int(_lp_iters) + int(_it_ct)
+            if _st_ct in ("optimal", "feasible") and np.isfinite(_bd_ct):
+                # Adopt it: the gate below verifies the point on the ORIGINAL rows.
+                status, x_struct, obj, bound = _st_ct, _x_ct, _obj_ct, _bd_ct
+                _coef_rescued = True
     if (
         status == "feasible"
         and not np.isfinite(bound)
@@ -40723,16 +40887,20 @@ def _solve_milp_simplex(
                 "milp_driver/nodes": _ds["lp/driver_nodes"],
             }
             deferred["reason"] = "stall_no_incumbent_291"
-        if _no_stall_tree and _debug_stopped_result() is None:
+        if _ns_ran and _debug_stopped_result() is None:
             # DISCOPT_MILP_NO_STALL_TREE: run 1 had the whole budget; its own result
             # (no incumbent, a valid bound) is the answer -- no handoff to the tree.
             _bv_ns = None
             if bound is not None and np.isfinite(bound):
                 _bv_ns = float(-bound if maximize else bound)
             _ns_stats = _driver_stats()
-            _ns_stats["route/no_stall_tree"] = 1.0
+            _ns_stats["route/no_stall_tree"] = 1.0  # the continuation ran; no tree
             return SolveResult(
                 status="node_limit" if _stopped_on_nodes else "time_limit",
+                algorithm_route=(
+                    "native-milp: discopt monolithic Rust MILP engine (stall continuation; "
+                    "no Python MILP tree)"
+                ),
                 bound=_bv_ns,
                 wall_time=time.perf_counter() - t_start,
                 node_count=int(nodes),
@@ -40834,6 +41002,47 @@ def _milp_branching_hints(
                     pick = k
         hints.append((int(batch_ids[i]), int(int_cols[pick])))
     return hints, probes
+
+
+def _milp_node_callback_hook(
+    node_callback: Callable, model: Model, maximize: bool, t_start: float
+) -> Callable[[dict], bool]:
+    """A Rust-driver debug hook that calls ``node_callback(ctx, model)`` once per
+    processed batch (the driver's AfterProcess checkpoint), with the CallbackContext
+    the Python MILP tree built (:func:`_fire_milp_node_callback`): objective-valued
+    fields in the user's sense, ``best_bound`` the driver's valid global bound (``None``
+    while it has none), ``node_bound`` / ``x_relaxation`` the batch's best relaxation
+    (``None`` when no node of the batch has one). A raising callback is logged and the
+    search continues. Never stops the search (returns False)."""
+    from discopt.callbacks import CallbackContext
+
+    sign = -1.0 if maximize else 1.0
+
+    def hook(d: dict) -> bool:
+        if d.get("checkpoint") != "after_process":
+            return False
+        inc = d.get("incumbent")
+        inc_obj = sign * float(inc) if inc is not None and inc < _SENTINEL_THRESHOLD else None
+        gb = d.get("bound")
+        best = sign * float(gb) if gb is not None and np.isfinite(gb) else None
+        nb = d.get("node_bound")
+        xr = d.get("x_relaxation")
+        ctx = CallbackContext(
+            node_count=int(d.get("nodes", 0)),
+            incumbent_obj=inc_obj,
+            best_bound=best,
+            gap=(d.get("gap") if best is not None else None),
+            elapsed_time=time.perf_counter() - t_start,
+            x_relaxation=(np.asarray(xr, dtype=np.float64) if xr is not None else None),
+            node_bound=(sign * float(nb) if nb is not None else None),
+        )
+        try:
+            node_callback(ctx, model)
+        except Exception as e:  # noqa: BLE001 - a user callback must not abort the solve
+            logger.warning("Node callback raised an exception: %s", e)
+        return False
+
+    return hook
 
 
 def _fire_milp_node_callback(

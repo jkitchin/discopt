@@ -819,7 +819,6 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: crate::bnb::pool::SelectionStrategy::BestFirst,
-            stall_rule: crate::bnb::milp_driver::StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 200,

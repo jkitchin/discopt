@@ -80,11 +80,15 @@ def test_lp_route_warns_that_strategy_is_unused():
     assert len(ws) == 1 and "was not used" in str(ws[0].message)
 
 
-def test_rust_engine_route_warns_that_strategy_is_unused(monkeypatch):
+@pytest.mark.parametrize("strategy", ["depth_first", "best_estimate"])
+def test_rust_engine_route_honours_strategy(monkeypatch, strategy):
+    """Python-MILP-tree retirement: the Rust engine's node selection takes ``strategy``
+    (``MilpOptions::selection``), so the engine route uses it and does not warn."""
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    result, ws = _strategy_warnings(lambda: _knapsack().solve(strategy="depth_first"))
+    result, ws = _strategy_warnings(lambda: _knapsack().solve(strategy=strategy))
     assert result.objective == pytest.approx(25.0)
-    assert [w for w in ws if "was not used" in str(w.message)]
+    assert result.algorithm_route.startswith("native-milp"), result.algorithm_route
+    assert not [w for w in ws if "was not used" in str(w.message)]
 
 
 @pytest.mark.parametrize("strategy", ["depth_first", "best_estimate"])

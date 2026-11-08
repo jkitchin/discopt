@@ -135,6 +135,35 @@ def test_node_callback_fires_with_values_in_the_users_sense(maximize):
             assert c.best_bound <= res.objective + 1e-6
 
 
+@pytest.mark.parametrize("maximize", [True, False])
+def test_node_callback_on_the_engine_reports_the_same_payload(monkeypatch, maximize):
+    """Python-MILP-tree retirement: on the Rust engine the callback is fed from the
+    driver's batch checkpoint, with the tree's payload in the user's sense: the batch's
+    best relaxation (``node_bound`` / ``x_relaxation``) and a dual bound that never
+    crosses the optimum."""
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    seen = []
+    res = _knapsack(maximize=maximize).solve(node_callback=lambda ctx, m: seen.append(ctx))
+    assert res.status == "optimal" and res.algorithm_route.startswith("native-milp")
+    assert len(seen) > 0
+    counts = [c.node_count for c in seen]
+    assert counts == sorted(counts) and counts[-1] <= res.node_count
+    with_relax = [c for c in seen if c.x_relaxation is not None]
+    assert with_relax, "no batch reported a relaxation"
+    assert all(c.x_relaxation.shape == (20,) and c.node_bound is not None for c in with_relax)
+    for c in seen:
+        if c.best_bound is not None:
+            if maximize:
+                assert c.best_bound >= res.objective - 1e-6
+            else:
+                assert c.best_bound <= res.objective + 1e-6
+        if c.node_bound is not None:  # a node's relaxation bound also never crosses it
+            if maximize:
+                assert c.node_bound >= res.objective - 1e-6
+            else:
+                assert c.node_bound <= res.objective + 1e-6
+
+
 def test_native_lp_uses_the_discopt_simplex():
     ref = _lp().solve()
     res = _lp().solve(milp_backend="native")
@@ -260,8 +289,10 @@ def test_branching_rule_refused_on_an_lp():
 # ── callbacks on a MILP without milp_backend ────────────────────────────
 
 
-def test_node_callback_on_a_default_milp_runs_the_tree(monkeypatch):
-    """Previously the HiGHS route returned with the callback never called."""
+def test_node_callback_on_a_default_milp_runs_the_engine(monkeypatch):
+    """Previously the HiGHS route returned with the callback never called. Since the
+    Python-MILP-tree retirement the callback is served by the Rust engine's batch
+    checkpoint (``_milp_node_callback_hook``), not by the Python tree."""
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
     highs = _spy(monkeypatch, "_solve_milp_highs")
     seen = []
@@ -270,7 +301,8 @@ def test_node_callback_on_a_default_milp_runs_the_tree(monkeypatch):
     res = _knapsack().solve(node_callback=lambda ctx, m: seen.append(ctx))
     assert highs == []
     assert seen and res.node_count > 0
-    assert res.algorithm_route.startswith("milp-tree")
+    assert res.algorithm_route.startswith("native-milp"), res.algorithm_route
+    assert "route/python_milp_tree_entry" not in (res.solver_stats or {})
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)
 
 

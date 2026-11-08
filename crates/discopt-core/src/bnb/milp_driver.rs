@@ -1183,15 +1183,6 @@ struct CutLpRow {
     relaxed: bool,
 }
 
-/// See [`MilpOptions::stall_rule`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StallRule {
-    /// Stop at `stall_time_s` only while there is no incumbent (the #291 guard).
-    StopIfNoIncumbent,
-    /// Stop at `stall_time_s` only once there is an incumbent; without one, run on.
-    StopIfIncumbent,
-}
-
 /// What [`node_local_gmi_bound`] proved at one node.
 struct LocalGmi {
     /// Best NS-verified bound over the node box with the appended rows (no `obj_const`).
@@ -1471,12 +1462,6 @@ pub struct MilpOptions {
     /// `time_limit_s = s` run, and a run holding an incumbent keeps its tree, pool and
     /// pseudocosts instead of being restarted. `None` = no stall guard.
     pub stall_time_s: Option<f64>,
-    /// Which state `stall_time_s` stops on. `StopIfNoIncumbent` is the #291 guard
-    /// (stop only while there is no incumbent); `StopIfIncumbent` stops only once one
-    /// exists (the caller then restarts from it), and a search without one runs on to
-    /// `time_limit_s` instead of handing the MILP to another engine
-    /// (`DISCOPT_MILP_NO_STALL_TREE`, Python-MILP-tree retirement).
-    pub stall_rule: StallRule,
     /// Node selection rule (`Model.solve(strategy=...)`; Python-MILP-tree retirement
     /// step 3). `BestFirst` is the historical driver's rule and the default.
     pub selection: SelectionStrategy,
@@ -3726,11 +3711,7 @@ fn solve_milp_node_search(
             let has_inc = tm
                 .incumbent()
                 .is_some_and(|(_, v)| v < INFEAS_SENTINEL - 1.0);
-            let stop_now = match opts.stall_rule {
-                StallRule::StopIfNoIncumbent => !has_inc,
-                StallRule::StopIfIncumbent => has_inc,
-            };
-            if stop_now && t_start.elapsed().as_secs_f64() >= st {
+            if !has_inc && t_start.elapsed().as_secs_f64() >= st {
                 crate::profile::incr(crate::profile::Ctr::MilpStallGuardStop);
                 gap_certified = false;
                 break;
@@ -8057,7 +8038,6 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -8956,7 +8936,6 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 16,
@@ -9739,7 +9718,6 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -9877,7 +9855,6 @@ pub(crate) mod sparse_milp_diff {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
-                stall_rule: StallRule::StopIfNoIncumbent,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10180,7 +10157,6 @@ pub(crate) mod sparse_milp_diff {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -10491,7 +10467,6 @@ mod lazy_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
-                stall_rule: StallRule::StopIfNoIncumbent,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10792,7 +10767,6 @@ mod node_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
-                stall_rule: StallRule::StopIfNoIncumbent,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 0,
@@ -11076,7 +11050,6 @@ mod lazy_infeasible_node {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -11216,7 +11189,6 @@ mod root_cut_budget_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 200,
@@ -12000,7 +11972,6 @@ mod tiny_entry_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
-            stall_rule: StallRule::StopIfNoIncumbent,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
