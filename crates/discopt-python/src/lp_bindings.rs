@@ -1282,7 +1282,7 @@ pub fn ns_safe_bound_csc_py(
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
                     stall_time_s=None, node_selection=None,
-                    extend_no_incumbent_s=None))]
+                    extend_no_incumbent_s=None, branching_rule=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1325,8 +1325,10 @@ pub fn solve_milp_csc_py<'py>(
     stall_time_s: Option<f64>,
     node_selection: Option<String>,
     extend_no_incumbent_s: Option<f64>,
+    branching_rule: Option<String>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
+    let branch_rule = parse_branching_rule(branching_rule.as_deref())?;
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1401,6 +1403,7 @@ pub fn solve_milp_csc_py<'py>(
             stall_time_s,
             extend_no_incumbent_s,
             selection,
+            branch_rule,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1546,7 +1549,8 @@ impl PyReluIdealSeparator {
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
-                    node_selection=None, extend_no_incumbent_s=None))]
+                    node_selection=None, extend_no_incumbent_s=None,
+                    branching_rule=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_relu_csc_py<'py>(
     py: Python<'py>,
@@ -1599,6 +1603,7 @@ pub fn solve_milp_relu_csc_py<'py>(
     max_open_nodes: Option<usize>,
     node_selection: Option<String>,
     extend_no_incumbent_s: Option<f64>,
+    branching_rule: Option<String>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1709,6 +1714,7 @@ pub fn solve_milp_relu_csc_py<'py>(
             stall_time_s: None,
             extend_no_incumbent_s,
             selection: parse_node_selection(node_selection.as_deref())?,
+            branch_rule: parse_branching_rule(branching_rule.as_deref())?,
         },
     )?;
     Ok((
@@ -1918,6 +1924,28 @@ struct MilpExtra {
     stall_time_s: Option<f64>,
     extend_no_incumbent_s: Option<f64>,
     selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
+    branch_rule: Option<discopt_core::bnb::branching::BranchRule>,
+}
+
+/// `Model.solve(branching_rule=...)`'s names, refused when unknown (never defaulted).
+/// `"pseudocost"` is the driver's reliability branching.
+fn parse_branching_rule(
+    raw: Option<&str>,
+) -> PyResult<Option<discopt_core::bnb::branching::BranchRule>> {
+    use discopt_core::bnb::branching::BranchRule as R;
+    Ok(match raw {
+        None => None,
+        Some("pseudocost") => Some(R::Reliability),
+        Some("most_fractional") => Some(R::MostFractional),
+        Some("least_fractional") => Some(R::LeastFractional),
+        Some("strong") => Some(R::Strong),
+        Some(other) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "branching_rule={other:?}: expected 'pseudocost', 'most_fractional', \
+                 'least_fractional' or 'strong'"
+            )))
+        }
+    })
 }
 
 /// `Model.solve(strategy=...)`'s names, refused when unknown (never defaulted).
@@ -1985,6 +2013,7 @@ pub(crate) fn milp_options(
         time_limit_s: parse_budget_secs(time_limit_s)?,
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
         extend_no_incumbent_s: None,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
@@ -2135,6 +2164,7 @@ fn run_milp_hooked<'py>(
         stall_time_s: parse_budget_secs(extra.stall_time_s)?,
         extend_no_incumbent_s: parse_budget_secs(extra.extend_no_incumbent_s)?,
         selection: extra.selection.unwrap_or(opts.selection),
+        branch_rule: extra.branch_rule.unwrap_or(opts.branch_rule),
         ..opts
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created

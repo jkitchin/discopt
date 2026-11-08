@@ -33,6 +33,61 @@ pub struct BranchDecision {
     pub branch_point: f64,
 }
 
+/// Which integer column the MILP tree branches on (`Model.solve(branching_rule=...)`,
+/// Python-MILP-tree retirement step 4). Every rule changes only WHICH column is
+/// split; the split itself (`x <= floor(v)` / `x >= floor(v) + 1`) is an exhaustive
+/// cover, so no rule can cut off a feasible point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchRule {
+    /// Reliability branching: pseudocost scores once a column has
+    /// `reliability_threshold` observations, strong-branching probes before that
+    /// (the driver's historical rule, and the default).
+    #[default]
+    Reliability,
+    /// Fractional part closest to 1/2; no probes.
+    MostFractional,
+    /// Fractional part closest to an integer; no probes.
+    LeastFractional,
+    /// Full strong branching: probe both children of EVERY fractional candidate at
+    /// every node, whatever its pseudocost reliability and node count.
+    Strong,
+}
+
+/// Select the least-fractional variable (fractional part closest to an integer).
+/// Ties keep the first candidate. `None` when every integer column is integral.
+pub fn select_least_fractional_variable(
+    solution: &[f64],
+    variables: &[VarBranchInfo],
+) -> Option<BranchDecision> {
+    let mut best: Option<BranchDecision> = None;
+    let mut best_dist = f64::INFINITY;
+    for var in variables {
+        if !var.is_integer {
+            continue;
+        }
+        for i in 0..var.size {
+            let idx = var.offset + i;
+            if idx >= solution.len() {
+                continue;
+            }
+            let val = solution[idx];
+            let frac = val - val.floor();
+            if !(INTEGRALITY_TOL..=1.0 - INTEGRALITY_TOL).contains(&frac) {
+                continue;
+            }
+            let dist = frac.min(1.0 - frac);
+            if dist < best_dist {
+                best_dist = dist;
+                best = Some(BranchDecision {
+                    var_index: idx,
+                    branch_point: val.floor(),
+                });
+            }
+        }
+    }
+    best
+}
+
 /// Integrality tolerance: values within this distance of an integer are
 /// considered integral.
 const INTEGRALITY_TOL: f64 = 1e-5;

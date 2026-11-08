@@ -1472,6 +1472,9 @@ pub struct MilpOptions {
     /// Node selection rule (`Model.solve(strategy=...)`; Python-MILP-tree retirement
     /// step 3). `BestFirst` is the historical driver's rule and the default.
     pub selection: SelectionStrategy,
+    /// Branching-variable rule (`Model.solve(branching_rule=...)`; Python-MILP-tree
+    /// retirement step 4). `Reliability` is the historical rule and the default.
+    pub branch_rule: crate::bnb::branching::BranchRule,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -2921,6 +2924,7 @@ fn solve_milp_node_search(
     let glb = base_l[..ns].to_vec();
     let gub = base_u[..ns].to_vec();
     let mut tm = TreeManager::new(ns, glb, gub, int_info, opts.selection);
+    tm.set_branch_rule(opts.branch_rule);
     // Objective-lattice fathoming. Derived from the ORIGINAL cost vector and
     // integrality pattern, before any cut adds a slack column to `c_w`: the
     // lattice is a property of the model, and appended slacks carry zero cost so
@@ -3813,7 +3817,16 @@ fn solve_milp_node_search(
         // objective units, so they use the CSC of the *unscaled* working matrix. When
         // the matrix isn't scaled this is the same matrix as `csc_batch`.
         let csc_rc: &SparseCols = problem.original_matrix();
-        let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
+        // Branching rule (retirement step 4): `Strong` probes at every node whatever
+        // the node budget and `strong_branch`; the fractionality rules never probe
+        // (a probe's hint would override them).
+        let sb_active = match opts.branch_rule {
+            crate::bnb::branching::BranchRule::Reliability => {
+                opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget
+            }
+            crate::bnb::branching::BranchRule::Strong => true,
+            _ => false,
+        };
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut point_values: Vec<f64> = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -3890,7 +3903,11 @@ fn solve_milp_node_search(
                 cut_lp_relaxed: &cut_lp_relaxed,
                 cut_lp_readmit: cut_lp_readmit_on,
                 cut_lp_drop_relaxed: cut_lp_drop_relaxed_on,
-                reliability: tm.get_reliability_threshold(),
+                reliability: if opts.branch_rule == crate::bnb::branching::BranchRule::Strong {
+                    u32::MAX
+                } else {
+                    tm.get_reliability_threshold()
+                },
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
@@ -6112,7 +6129,9 @@ fn strong_branch(
             .partial_cmp(&(a.1 - 0.5).abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    cand.truncate(ctx.opts.sb_max_cands.max(1));
+    if ctx.opts.branch_rule != crate::bnb::branching::BranchRule::Strong {
+        cand.truncate(ctx.opts.sb_max_cands.max(1));
+    }
 
     const INFEAS_DELTA: f64 = 1e7; // a pruned child is a strong branching signal
     let eps = 1e-6;
@@ -8077,6 +8096,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -8976,6 +8996,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -9074,6 +9095,86 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 0.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    /// Retirement step 4 (`branching_rule`): every rule certifies the same optimum
+    /// on a bare tree (no cuts/heuristics/presolve), and the rules really are
+    /// different searches -- strong branching spends probe pivots the others do not,
+    /// and the two fractionality rules branch on different columns.
+    #[test]
+    fn branch_rules_certify_the_same_optimum() {
+        use crate::bnb::branching::BranchRule;
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w
+            .iter()
+            .enumerate()
+            .map(|(i, v)| -(v + 0.3 * i as f64 + 0.5))
+            .collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |rule: BranchRule| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.branch_rule = rule;
+            solve_milp(&lp, &[20.5], 0.0, &o)
+        };
+        let rel = run(BranchRule::Reliability);
+        let most = run(BranchRule::MostFractional);
+        let least = run(BranchRule::LeastFractional);
+        let strong = run(BranchRule::Strong);
+        let mut checked = 0;
+        for (name, r) in [
+            ("rel", &rel),
+            ("most", &most),
+            ("least", &least),
+            ("strong", &strong),
+        ] {
+            assert_eq!(r.status, MilpStatus::Optimal, "{name}");
+            assert!(
+                (r.obj - rel.obj).abs() <= 1e-6,
+                "{name}: {} vs {}",
+                r.obj,
+                rel.obj
+            );
+            assert!(r.bound <= r.obj + 1e-9, "{name}: bound past incumbent");
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+        // `strong_branch = false` above, so only the Strong rule probes.
+        assert!(
+            strong.nodes != most.nodes || strong.lp_iters != most.lp_iters,
+            "strong {}/{} most {}/{}",
+            strong.nodes,
+            strong.lp_iters,
+            most.nodes,
+            most.lp_iters
+        );
+        assert!(
+            most.nodes != least.nodes || most.lp_iters != least.lp_iters,
+            "most {}/{} least {}/{}",
+            most.nodes,
+            most.lp_iters,
+            least.nodes,
+            least.lp_iters
+        );
     }
 
     /// #1874: the open-frontier cap stops the search uncertified, with the
@@ -9759,6 +9860,7 @@ mod tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -9897,6 +9999,7 @@ pub(crate) mod sparse_milp_diff {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10200,6 +10303,7 @@ pub(crate) mod sparse_milp_diff {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -10511,6 +10615,7 @@ mod lazy_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10812,6 +10917,7 @@ mod node_separation {
                 time_limit_s: None,
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
+                branch_rule: crate::bnb::branching::BranchRule::Reliability,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -11096,6 +11202,7 @@ mod lazy_infeasible_node {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -11236,6 +11343,7 @@ mod root_cut_budget_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -12020,6 +12128,7 @@ mod tiny_entry_tests {
             time_limit_s: None,
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,

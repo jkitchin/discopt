@@ -281,6 +281,8 @@ pub struct TreeManager {
     pseudocosts: Pseudocosts,
     /// Whether pseudocost-based branching is enabled (default: true).
     use_pseudocosts: bool,
+    /// Branching rule (`BranchRule::Reliability` = the historical selection below).
+    branch_rule: crate::bnb::branching::BranchRule,
     /// Minimum observations before a variable's pseudocost is considered reliable.
     reliability_threshold: u32,
     /// Records of branching decisions: maps child NodeId → parent's BranchRecord.
@@ -443,6 +445,7 @@ impl TreeManager {
             branch_hints: HashMap::new(),
             pseudocosts,
             use_pseudocosts: true,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             reliability_threshold: 8,
             branch_records: HashMap::new(),
             nonconvex: false,
@@ -1112,7 +1115,21 @@ impl TreeManager {
                     }
                 })
                 .unwrap_or_else(|| {
-                    if self.use_pseudocosts {
+                    use crate::bnb::branching::BranchRule;
+                    if self.branch_rule == BranchRule::MostFractional {
+                        (
+                            select_branch_variable(&result.solution, &self.integer_vars),
+                            Vec::new(),
+                        )
+                    } else if self.branch_rule == BranchRule::LeastFractional {
+                        (
+                            crate::bnb::branching::select_least_fractional_variable(
+                                &result.solution,
+                                &self.integer_vars,
+                            ),
+                            Vec::new(),
+                        )
+                    } else if self.use_pseudocosts {
                         select_branch_variable_pseudocost(
                             &result.solution,
                             &self.integer_vars,
@@ -1982,6 +1999,17 @@ impl TreeManager {
             }
         }
         candidates
+    }
+
+    /// Set the branching rule (see [`crate::bnb::branching::BranchRule`]). Changes
+    /// only which column a node splits on, never a bound.
+    pub fn set_branch_rule(&mut self, rule: crate::bnb::branching::BranchRule) {
+        self.branch_rule = rule;
+    }
+
+    /// The branching rule in force.
+    pub fn branch_rule(&self) -> crate::bnb::branching::BranchRule {
+        self.branch_rule
     }
 
     /// Get the reliability threshold for pseudocost branching.
