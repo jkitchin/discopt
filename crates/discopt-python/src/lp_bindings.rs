@@ -857,6 +857,16 @@ impl MilpDebugHook for PyMilpHook {
                     Err(e) => e.print(py),
                 }
             }
+            // Python-MILP-tree retirement: the batch's best relaxation, for
+            // `node_callback` (`node_bound` / `x_relaxation`).
+            if let Some(nb) = state.batch_best_bound {
+                let _ = d.set_item("node_bound", nb);
+            }
+            if let Some(x) = state.batch_best_x {
+                if let Ok(lst) = PyList::new(py, x.iter().copied()) {
+                    let _ = d.set_item("x_relaxation", lst);
+                }
+            }
             if let Some(rows) = state.created {
                 match crate::bnb_bindings::lineage_to_dict(py, rows) {
                     Ok(v) => {
@@ -1271,7 +1281,7 @@ pub fn ns_safe_bound_csc_py(
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
-                    stall_time_s=None, node_selection=None))]
+                    stall_time_s=None, node_selection=None, stall_rule=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1313,8 +1323,10 @@ pub fn solve_milp_csc_py<'py>(
     max_open_nodes: Option<usize>,
     stall_time_s: Option<f64>,
     node_selection: Option<String>,
+    stall_rule: Option<String>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
+    let stall_rule = parse_stall_rule(stall_rule.as_deref())?;
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1387,6 +1399,7 @@ pub fn solve_milp_csc_py<'py>(
         None,
         MilpExtra {
             stall_time_s,
+            stall_rule,
             selection,
         },
     )?;
@@ -1896,7 +1909,25 @@ pub fn solve_milp_lazy_csc_py<'py>(
 #[derive(Default)]
 struct MilpExtra {
     stall_time_s: Option<f64>,
+    stall_rule: Option<discopt_core::bnb::milp_driver::StallRule>,
     selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
+}
+
+/// `stall_rule=` names (see `MilpOptions::stall_rule`), refused when unknown.
+fn parse_stall_rule(
+    raw: Option<&str>,
+) -> PyResult<Option<discopt_core::bnb::milp_driver::StallRule>> {
+    use discopt_core::bnb::milp_driver::StallRule as R;
+    Ok(match raw {
+        None => None,
+        Some("stop_if_no_incumbent") => Some(R::StopIfNoIncumbent),
+        Some("stop_if_incumbent") => Some(R::StopIfIncumbent),
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "stall_rule={other:?}: expected 'stop_if_no_incumbent' or 'stop_if_incumbent'"
+            )))
+        }
+    })
 }
 
 /// `Model.solve(strategy=...)`'s names, refused when unknown (never defaulted).
@@ -1964,6 +1995,7 @@ pub(crate) fn milp_options(
         time_limit_s: parse_budget_secs(time_limit_s)?,
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        stall_rule: discopt_core::bnb::milp_driver::StallRule::StopIfNoIncumbent,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
         // keeps the engine's historical behaviour exactly: no absolute arm.
@@ -2111,6 +2143,7 @@ fn run_milp_hooked<'py>(
     )?;
     let opts = MilpOptions {
         stall_time_s: parse_budget_secs(extra.stall_time_s)?,
+        stall_rule: extra.stall_rule.unwrap_or(opts.stall_rule),
         selection: extra.selection.unwrap_or(opts.selection),
         ..opts
     };

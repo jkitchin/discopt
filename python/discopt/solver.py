@@ -39781,6 +39781,25 @@ def _milp_run1_continue_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "0") == "1"
 
 
+def _milp_no_stall_tree_enabled() -> bool:
+    """``DISCOPT_MILP_NO_STALL_TREE`` gate (Python-MILP-tree retirement, default OFF
+    until its panel).
+
+    Run 1 of ``_solve_milp_simplex`` stops at the #291 stall slice (half the remaining
+    time, at most ``_SIMPLEX_MILP_BUDGET_CAP_S``). Without an incumbent there, the MILP
+    is handed to the Python MILP tree (``_solve_milp_bb``) with the rest of the budget.
+    Measured (``docs/dev/data/python-milp-retirement/``): on the MIPLIB-38+M panel that
+    handoff ran ~60 times on 5 instances and the tree never found an incumbent; on the
+    in-repo corpus it never ran. It is also the mechanism behind ``p0548``'s coin flip.
+    With the flag, run 1 gets the whole remaining budget and the driver stops at the
+    slice only if it HAS an incumbent (``stall_rule="stop_if_incumbent"``), so the
+    seeded run-2 restart that P4.0 measured (the ``mik`` incumbents) still happens; a
+    run 1 without an incumbent keeps searching to the time limit and returns its own
+    uncertified result with its valid bound instead of deferring.
+    """
+    return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "0") == "1"
+
+
 def _milp_reentry_cuts_enabled() -> bool:
     """``DISCOPT_MILP_REENTRY_CUTS`` gate (highs-parity D2): give the #698 re-entry
     (run 2 of ``_solve_milp_simplex``) the same root cut budget as run 1.
@@ -40081,10 +40100,10 @@ def _solve_milp_simplex(
     # keeps reading the original ``lp_data``.
     _drv = _milp_aligned_lp(lp_data, n_orig) if _milp_aligned_slacks_enabled() else lp_data
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
-    if _A_m == 0:
-        if deferred is not None:
-            deferred["reason"] = "no_constraints"
-        return None  # no constraints — let the default path handle it
+    # A MILP with no constraints is solved by the driver itself (each column at the
+    # bound its cost selects, integers rounded inward); it used to defer to the Python
+    # MILP tree (Python-MILP-tree retirement step 2, census in
+    # docs/dev/data/python-milp-retirement/).
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
@@ -40154,9 +40173,16 @@ def _solve_milp_simplex(
     # the #291 stall slice enforced by the driver only while it has no incumbent.
     _run1_time = _milp_budget
     _run1_stall: dict = {}
-    if _milp_run1_continue_enabled() and not _tuning().deterministic:
+    _continue = _milp_run1_continue_enabled() and not _tuning().deterministic
+    _no_stall_tree = _milp_no_stall_tree_enabled() and not _tuning().deterministic
+    if _continue or _no_stall_tree:
         _run1_time = max(_milp_budget, float(time_limit) - (time.perf_counter() - t_start))
-        _run1_stall["stall_time_s"] = float(_milp_budget)
+        if _continue and not _no_stall_tree:
+            _run1_stall["stall_time_s"] = float(_milp_budget)
+        elif _no_stall_tree and not _continue:
+            # Stop at the slice only with an incumbent (run 2 restarts from it).
+            _run1_stall["stall_time_s"] = float(_milp_budget)
+            _run1_stall["stall_rule"] = "stop_if_incumbent"
 
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
         np.ascontiguousarray(_drv.c, dtype=np.float64),
@@ -40697,6 +40723,22 @@ def _solve_milp_simplex(
                 "milp_driver/nodes": _ds["lp/driver_nodes"],
             }
             deferred["reason"] = "stall_no_incumbent_291"
+        if _no_stall_tree and _debug_stopped_result() is None:
+            # DISCOPT_MILP_NO_STALL_TREE: run 1 had the whole budget; its own result
+            # (no incumbent, a valid bound) is the answer -- no handoff to the tree.
+            _bv_ns = None
+            if bound is not None and np.isfinite(bound):
+                _bv_ns = float(-bound if maximize else bound)
+            _ns_stats = _driver_stats()
+            _ns_stats["route/no_stall_tree"] = 1.0
+            return SolveResult(
+                status="node_limit" if _stopped_on_nodes else "time_limit",
+                bound=_bv_ns,
+                wall_time=time.perf_counter() - t_start,
+                node_count=int(nodes),
+                gap_certified=False,
+                solver_stats=_ns_stats,
+            )
         return _debug_stopped_result()
     return SolveResult(
         status="infeasible",

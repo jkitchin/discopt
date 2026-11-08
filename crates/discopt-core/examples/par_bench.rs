@@ -112,6 +112,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         time_limit_s: None,
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        stall_rule: discopt_core::bnb::milp_driver::StallRule::StopIfNoIncumbent,
         gap_tol: 1e-6,
         abs_gap_tol: None,
         root_cuts: 16,
