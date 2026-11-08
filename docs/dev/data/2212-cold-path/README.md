@@ -114,10 +114,48 @@ implementations (the kernel's `cold_dual_start_basis`, #2163's stage) refuse the
 Reaching them needs a start for open costed columns: a big-M box, or HiGHS's free-column
 handling.
 
+## Throughput panel, QPLIB (#1008's class: 26 root relaxations, 3 reps, load ~3.5)
+
+`throughput_qplib.jsonl`, `throughput_qplib.summary.log`: `--corpus qplib` at `8108333`, the
+script's own selection (usable oracle, continuous, nonconvex, `nvars <= 400`, top 12 by RLT lift,
+plus QPLIB_1157), `rlt_lineq` off/on. Measured on macOS (14 cores) beside another session's pytest
+run: load 3.0 at start and 4.0 at end, with both arms under the same contention because they are
+interleaved. `1f73343` was measured too, and its status, objective, pivots and verdict are
+identical on every LP. Its wall times are within 4 % (primal 155.2 s, cascade 115.1 s).
+
+| | cold primal (today) | cascade (dual from logical start, else primal) |
+|---|---|---|
+| decided, agreeing with HiGHS | 19 / 26 | **23 / 26** (gains 4, loses none) |
+| contradicting HiGHS | 0 | 0 (50 executed checks) |
+| total wall, all 26 LPs | 160.9 s | **117.0 s (−27 %)** |
+| per-LP wall ratio, both decide (19) | — | geomean **0.374**, median 0.476, min 0.084, max 1.43 |
+| pivots, both decide | — | geomean 0.375× |
+
+**The four gains are all RLT relaxations where the primal fails:** `QPLIB_1535_rlt1` and
+`QPLIB_1703_rlt1` (primal `Numerical` after ~25 s, dual optimal in 10.1 s and 8.1 s),
+`QPLIB_1619_rlt1` (primal hits `max_iter` at 22.5 s, dual 2.2 s) and `QPLIB_1157_rlt1`, which is
+#1008's own case (primal hits `max_iter` at 11.1 s, dual 0.74 s). The other large wins are
+`rlt0`/`rlt1` pairs that both arms decide: `QPLIB_1967` 6.0 → 0.51 s, `QPLIB_1886` 1.05 → 0.11 s.
+
+**What it costs:**
+- `QPLIB_1745_rlt0` is the only LP both decide where the dual is slower, 1.43× (0.51 → 0.72 s,
+  2,327 → 3,371 pivots).
+- `QPLIB_1451_rlt1` is decided by neither arm, and the cascade pays for both: the dual reaches
+  `max_iter` and then the primal does too (39.8 s → 83.4 s). That is the "a failing LP pays the
+  attempt twice" cost from the audit row, measured.
+- `QPLIB_8784` (×2) is refused because it has an open costed bound. The primal returns
+  `unbounded` in 0 pivots, which agrees with HiGHS, but the panel counts only optimal and
+  infeasible verdicts as decided.
+
+**This is the net-positive LP-level evidence the in-repo corpus lacked.** It is root-relaxation
+throughput, not the §5 whole-solve panel: the three corpus panels above still show certified
+59 → 59. Graduation needs a certificate, node or wall gain on whole solves that include this class.
+
 ## What is still open for #2212
 
 - `cstr` (tolerance-dependent; nothing decides it).
-- The QPLIB throughput run (#1008's class), on a machine with the corpus.
+- ~~The QPLIB throughput run~~: done (section above), 23 vs 19 decided, −27 % wall.
+- A §5 whole-solve panel over QPLIB instances of this class (the corpus panels never reach it).
 - A start for the 52 refused LPs.
 - The 40-LP nous1 capture (§121) was not regenerated.
 
