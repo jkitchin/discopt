@@ -214,6 +214,26 @@ fn xb_refresh_cadence() -> usize {
 /// identical to the dense root solve.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_cols_scaled(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    // #2212: the engine's last-resort logical-basis dual (default OFF).
+    let rescue = super::dual::logical_dual_rescue_enabled().then(|| cols.clone());
+    let sol = solve_lp_cols_scaled_inner(cols, m, n, c, l, u, b, opts);
+    match rescue {
+        Some(orig) => super::dual::logical_dual_rescue(sol, &orig, m, n, c, l, u, b, opts),
+        None => sol,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_lp_cols_scaled_inner(
     mut cols: SparseCols,
     m: usize,
     n: usize,

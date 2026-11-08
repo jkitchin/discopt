@@ -302,94 +302,7 @@ impl ScaledProblem {
     /// basis can come back short; warm starts already refuse a short basis and
     /// solve cold), row duals and ray over the original rows.
     fn logical_basis_dual(&self, l: &[f64], u: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
-        const INF: f64 = 1e20;
-        let (m, n) = (self.m, self.n);
-        let mut col_status = Vec::with_capacity(n + m);
-        for j in 0..n {
-            let lo = l[j] > -INF;
-            let hi = u[j] < INF;
-            let c = self.c[j];
-            col_status.push(if c >= 0.0 && lo {
-                AT_LOWER
-            } else if c <= 0.0 && hi {
-                AT_UPPER
-            } else {
-                // No bound on the side the cost needs: the logical basis is not dual
-                // feasible and this stage does not apply.
-                return None;
-            });
-        }
-        col_status.extend(std::iter::repeat_n(BASIC, m));
-        crate::profile::incr(crate::profile::Ctr::LogicalBasisDualAttempts);
-        let (cp, ri, vals) = self.original.raw();
-        let mut col_ptr = cp.to_vec();
-        let mut row_idx = ri.to_vec();
-        let mut vv = vals.to_vec();
-        for i in 0..m {
-            row_idx.push(i);
-            vv.push(-1.0);
-            col_ptr.push(row_idx.len());
-        }
-        let aug = SparseCols::from_csc(col_ptr, row_idx, vv);
-        let mut c_a = self.c.clone();
-        c_a.resize(n + m, 0.0);
-        let mut l_a = l.to_vec();
-        l_a.extend_from_slice(&self.b);
-        let mut u_a = u.to_vec();
-        u_a.extend_from_slice(&self.b);
-        let b_a = vec![0.0; m];
-        let start = Basis {
-            col_status,
-            basic_vars: (n..n + m).collect(),
-        };
-        let view = LpView {
-            a: &[],
-            m,
-            n: n + m,
-            c: &c_a,
-            l: &l_a,
-            u: &u_a,
-        };
-        let w = solve_lp_warm_scaled_csc(&view, &b_a, &start, opts, &aug);
-        let x: Vec<f64> = w.x.iter().take(n).copied().collect();
-        let accepted = match w.status {
-            LpStatus::Optimal => {
-                w.dual.len() == m
-                    && point_passes_original_audit(&x, &self.original, m, n, &self.b, l, u)
-            }
-            LpStatus::Infeasible => {
-                farkas_ray_certifies_cols(&w.dual, &self.original, n, m, &self.b, l, u)
-            }
-            _ => false,
-        };
-        if !accepted {
-            return None;
-        }
-        crate::profile::incr(crate::profile::Ctr::LogicalBasisDualDecided);
-        let basis = Basis {
-            col_status: w.basis.col_status.iter().take(n).copied().collect(),
-            basic_vars: w
-                .basis
-                .basic_vars
-                .iter()
-                .copied()
-                .filter(|&j| j < n)
-                .collect(),
-        };
-        let obj = if w.status == LpStatus::Optimal {
-            x.iter().zip(&self.c).map(|(xj, cj)| xj * cj).sum()
-        } else {
-            w.obj
-        };
-        Some(LpSolve {
-            status: w.status,
-            x,
-            obj,
-            basis,
-            iters: w.iters,
-            dual: w.dual,
-            ray: w.ray,
-        })
+        logical_basis_dual_csc(&self.original, self.m, self.n, &self.c, l, u, &self.b, opts)
     }
 
     /// The choke point: check a solve-space result `sol` of this problem over
@@ -469,6 +382,106 @@ impl ScaledProblem {
             u,
         }
     }
+}
+
+/// [`ScaledProblem::logical_basis_dual`] on any CSC LP `A x = b, l <= x <= u` (#2163;
+/// the engine's last-resort stage since #2212). Same contract: ORIGINAL coordinates,
+/// accepted only with a certificate checked here, `None` otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn logical_basis_dual_csc(
+    original: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> Option<LpSolve> {
+    const INF: f64 = 1e20;
+    let mut col_status = Vec::with_capacity(n + m);
+    for j in 0..n {
+        let lo = l[j] > -INF;
+        let hi = u[j] < INF;
+        let c = c[j];
+        col_status.push(if c >= 0.0 && lo {
+            AT_LOWER
+        } else if c <= 0.0 && hi {
+            AT_UPPER
+        } else {
+            // No bound on the side the cost needs: the logical basis is not dual
+            // feasible and this stage does not apply.
+            return None;
+        });
+    }
+    col_status.extend(std::iter::repeat_n(BASIC, m));
+    crate::profile::incr(crate::profile::Ctr::LogicalBasisDualAttempts);
+    let (cp, ri, vals) = original.raw();
+    let mut col_ptr = cp.to_vec();
+    let mut row_idx = ri.to_vec();
+    let mut vv = vals.to_vec();
+    for i in 0..m {
+        row_idx.push(i);
+        vv.push(-1.0);
+        col_ptr.push(row_idx.len());
+    }
+    let aug = SparseCols::from_csc(col_ptr, row_idx, vv);
+    let mut c_a = c.to_vec();
+    c_a.resize(n + m, 0.0);
+    let mut l_a = l.to_vec();
+    l_a.extend_from_slice(b);
+    let mut u_a = u.to_vec();
+    u_a.extend_from_slice(b);
+    let b_a = vec![0.0; m];
+    let start = Basis {
+        col_status,
+        basic_vars: (n..n + m).collect(),
+    };
+    let view = LpView {
+        a: &[],
+        m,
+        n: n + m,
+        c: &c_a,
+        l: &l_a,
+        u: &u_a,
+    };
+    let w = solve_lp_warm_scaled_csc(&view, &b_a, &start, opts, &aug);
+    let x: Vec<f64> = w.x.iter().take(n).copied().collect();
+    let accepted = match w.status {
+        LpStatus::Optimal => {
+            w.dual.len() == m && point_passes_original_audit(&x, original, m, n, b, l, u)
+        }
+        LpStatus::Infeasible => farkas_ray_certifies_cols(&w.dual, original, n, m, b, l, u),
+        _ => false,
+    };
+    if !accepted {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::LogicalBasisDualDecided);
+    let basis = Basis {
+        col_status: w.basis.col_status.iter().take(n).copied().collect(),
+        basic_vars: w
+            .basis
+            .basic_vars
+            .iter()
+            .copied()
+            .filter(|&j| j < n)
+            .collect(),
+    };
+    let obj = if w.status == LpStatus::Optimal {
+        x.iter().zip(c).map(|(xj, cj)| xj * cj).sum()
+    } else {
+        w.obj
+    };
+    Some(LpSolve {
+        status: w.status,
+        x,
+        obj,
+        basis,
+        iters: w.iters,
+        dual: w.dual,
+        ray: w.ray,
+    })
 }
 
 #[cfg(test)]

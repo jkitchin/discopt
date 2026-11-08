@@ -344,7 +344,79 @@ pub fn solve_lp_warm_csc(
             return sol;
         }
     }
-    solve_lp_warm_csc_counted(sp, m, n, c, l, u, b, start, opts)
+    let original = logical_dual_rescue_enabled().then(|| sp.clone());
+    let sol = solve_lp_warm_csc_counted(sp, m, n, c, l, u, b, start, opts);
+    match original {
+        Some(orig) => logical_dual_rescue(sol, &orig, m, n, c, l, u, b, opts),
+        None => sol,
+    }
+}
+
+/// `DISCOPT_LP_LOGICAL_DUAL_RESCUE` (#2212, default OFF until its panel): when a solve
+/// through a public engine entry ([`solve_lp_warm_csc`],
+/// [`super::primal::solve_lp_cols_scaled`]) ends `Numerical`, re-solve the ORIGINAL LP
+/// with the dual simplex from the all-logical basis (HiGHS's start; the #2163 stage,
+/// [`super::scaled_problem::logical_basis_dual_csc`]), accepting only a certificate
+/// checked on the original data. Until now only two callers carried this as their own
+/// retry (the MILP driver's `ScaledProblem`, the spatial kernel's slack retry); every
+/// other engine caller got the `Numerical`. Entry experiment
+/// (`entry_2212_logical_basis_dual_on_pinned_fixtures`): on the 7 pinned fixtures the
+/// engine decides 2 and this stage 6, all matching HiGHS (the `cstr` #2142 fixture
+/// stays undecided). Fires only on `Numerical`, so a decided LP takes exactly its old
+/// path; `IterLimit` is left alone (it can be the caller's deadline).
+pub(crate) fn logical_dual_rescue_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_LOGICAL_DUAL_RESCUE").unwrap_or_default();
+        parse_logical_dual_rescue(&raw)
+    })
+}
+
+/// The parse table behind [`logical_dual_rescue_enabled`]; garbage is refused.
+fn parse_logical_dual_rescue(raw: &str) -> bool {
+    match raw.trim() {
+        "" | "0" | "false" | "off" => false,
+        "1" | "true" | "on" => true,
+        other => panic!(
+            "DISCOPT_LP_LOGICAL_DUAL_RESCUE={other:?} is not a recognized value; use 1/on or \
+             0/off"
+        ),
+    }
+}
+
+thread_local! {
+    static IN_LOGICAL_RESCUE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Apply the [`logical_dual_rescue_enabled`] stage to `sol` (a solve of the LP whose
+/// ORIGINAL, unscaled matrix is `original`). Never re-entered: the stage's own solve
+/// cannot trigger it again.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn logical_dual_rescue(
+    sol: LpSolve,
+    original: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    if sol.status != LpStatus::Numerical || IN_LOGICAL_RESCUE.with(|f| f.get()) {
+        return sol;
+    }
+    crate::profile::incr(crate::profile::Ctr::LpLogicalRescueAttempts);
+    IN_LOGICAL_RESCUE.with(|f| f.set(true));
+    let alt = super::scaled_problem::logical_basis_dual_csc(original, m, n, c, l, u, b, opts);
+    IN_LOGICAL_RESCUE.with(|f| f.set(false));
+    match alt {
+        Some(a) => {
+            crate::profile::incr(crate::profile::Ctr::LpLogicalRescueDecided);
+            a
+        }
+        None => sol,
+    }
 }
 
 /// A finite bound at or past this magnitude is a **huge** bound (#2125).
@@ -3681,6 +3753,221 @@ mod tests {
     /// panel (not net-positive; `docs/dev/flag-retirement-audit.md`). This pins the
     /// defect: a future fix that decides the LP must also match `highs_obj`, and
     /// then updates this test.
+    /// #2212: the engine's last-resort stage decides the pinned LPs the warm dual and
+    /// the cold primal both leave `Numerical`. Each fixture is first asserted undecided
+    /// from its captured start (the defect), then the stage
+    /// ([`logical_dual_rescue`], what the public entries apply under
+    /// `DISCOPT_LP_LOGICAL_DUAL_RESCUE`) must decide it with HiGHS's verdict and a
+    /// certificate checked on the original LP. `cstr` (#2142) is not in this list: the
+    /// stage leaves it undecided, and `captured_cstr_bigm_node_lp_stays_undecided_2142`
+    /// keeps pinning that.
+    #[test]
+    fn logical_dual_rescue_decides_the_numerical_fixtures_2212() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let o = SimplexOptions {
+            warm_flip_boxed: true,
+            ..opts()
+        };
+        let mut checked = 0usize;
+        for (json, want) in [
+            (
+                include_str!("../../bnb/testdata/nous1_inherited_basis_numerical_lp.json"),
+                Some(1.2060754564327338),
+            ),
+            (
+                include_str!(
+                    "../../bnb/testdata/nous1_inherited_basis_numerical_infeasible_lp.json"
+                ),
+                None,
+            ),
+            (
+                include_str!("testdata/relu_anderson_cuts_numerical_lp.json"),
+                Some(-254.27360315225872),
+            ),
+            (
+                include_str!("testdata/relu_anderson_cuts_false_optimal_lp.json"),
+                Some(22.36816528521379),
+            ),
+        ] {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                parse_stall_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let start = Basis {
+                col_status,
+                basic_vars,
+            };
+            let before =
+                solve_lp_warm_csc_counted(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &o);
+            assert_eq!(before.status, LpStatus::Numerical, "the captured defect");
+            let after = logical_dual_rescue(before, &sp, m, n, &c, &l, &u, &b, &o);
+            match want {
+                Some(h) => {
+                    assert_eq!(after.status, LpStatus::Optimal);
+                    assert!(
+                        (after.obj - h).abs() <= 1e-6 * (1.0 + h.abs()),
+                        "obj {} vs HiGHS {h}",
+                        after.obj
+                    );
+                }
+                None => assert_eq!(after.status, LpStatus::Infeasible),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::LpLogicalRescueAttempts),
+            4
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::LpLogicalRescueDecided),
+            4,
+            "the stage decided them"
+        );
+        crate::profile::set_enabled(false);
+    }
+
+    /// #2212 entry experiment (ignored; run with `--ignored --nocapture`): on every
+    /// pinned "warm dual and cold primal end Numerical" fixture, the engine from the
+    /// captured start vs the cold primal vs the dual from the sign-matched logical
+    /// basis (slacks basic, each structural at the bound its cost sign selects).
+    #[test]
+    #[ignore]
+    fn entry_2212_logical_basis_dual_on_pinned_fixtures() {
+        const INF_: f64 = 1e20;
+        let fixtures: [(&str, &str, Option<f64>); 7] = [
+            (
+                "nous1_opt",
+                include_str!("../../bnb/testdata/nous1_inherited_basis_numerical_lp.json"),
+                Some(1.2060754564327338),
+            ),
+            (
+                "nous1_inf",
+                include_str!(
+                    "../../bnb/testdata/nous1_inherited_basis_numerical_infeasible_lp.json"
+                ),
+                None,
+            ),
+            (
+                "cstr",
+                include_str!("testdata/cstr_bigm_dual_rebuild_lp.json"),
+                Some(0.23970172015135233),
+            ),
+            (
+                "relu_opt",
+                include_str!("testdata/relu_bigm_scaled_numerical_optimal_lp.json"),
+                Some(-6.806923340932464),
+            ),
+            (
+                "relu_inf",
+                include_str!("testdata/relu_bigm_scaled_numerical_infeasible_lp.json"),
+                None,
+            ),
+            (
+                "anderson_num",
+                include_str!("testdata/relu_anderson_cuts_numerical_lp.json"),
+                Some(-254.27360315225872),
+            ),
+            (
+                "anderson_fopt",
+                include_str!("testdata/relu_anderson_cuts_false_optimal_lp.json"),
+                Some(22.36816528521379),
+            ),
+        ];
+        let verdict = |sol: &LpSolve, want: Option<f64>| -> &'static str {
+            match (sol.status, want) {
+                (LpStatus::Optimal, Some(h)) if (sol.obj - h).abs() <= 1e-6 * (1.0 + h.abs()) => {
+                    "OK"
+                }
+                (LpStatus::Infeasible, None) => "OK",
+                (LpStatus::Optimal, _) | (LpStatus::Infeasible, _) => "WRONG",
+                _ => "undecided",
+            }
+        };
+        let mut compared = 0usize;
+        let mut decided = [0usize; 4];
+        for warm_flip in [false, true] {
+            let o = SimplexOptions {
+                warm_flip_boxed: warm_flip,
+                ..opts()
+            };
+            for (name, json, want) in fixtures.iter() {
+                let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                    parse_stall_fixture(json);
+                let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+                let start = Basis {
+                    col_status,
+                    basic_vars,
+                };
+                let a = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &o);
+                let p = solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &o);
+                // the sign-matched logical basis (slacks = last m columns)
+                let ns = n - m;
+                let mut st = vec![AT_LOWER; n];
+                let mut ok = true;
+                for j in 0..ns {
+                    if c[j] < 0.0 {
+                        if u[j] >= INF_ {
+                            ok = false;
+                        }
+                        st[j] = AT_UPPER;
+                    } else if l[j] <= -INF_ {
+                        ok = false;
+                    }
+                }
+                for s_ in st.iter_mut().skip(ns) {
+                    *s_ = BASIC;
+                }
+                let lg = if ok {
+                    let lb = Basis {
+                        col_status: st,
+                        basic_vars: (ns..n).collect(),
+                    };
+                    Some(solve_lp_warm_csc(
+                        sp.clone(),
+                        m,
+                        n,
+                        &c,
+                        &l,
+                        &u,
+                        &b,
+                        Some(&lb),
+                        &o,
+                    ))
+                } else {
+                    None
+                };
+                let (va, vp) = (verdict(&a, *want), verdict(&p, *want));
+                let vl = lg.as_ref().map_or("no-basis", |s| verdict(s, *want));
+                let aug = super::super::scaled_problem::logical_basis_dual_csc(
+                    &sp, m, n, &c, &l, &u, &b, &o,
+                );
+                let vg = aug.as_ref().map_or("refused", |s| verdict(s, *want));
+                println!(
+                    "      augmented_logical_dual={}",
+                    aug.as_ref().map_or("None".to_string(), |s| format!(
+                        "{:?}/{vg} ({} it, obj {:.10})",
+                        s.status, s.iters, s.obj
+                    ))
+                );
+                for (k, v) in [va, vp, vl, vg].iter().enumerate() {
+                    if *v == "OK" {
+                        decided[k] += 1;
+                    }
+                }
+                compared += 1;
+                println!(
+                    "flip={warm_flip} {name:14} engine={:?}/{va} ({} it)  cold_primal={:?}/{vp} ({} it)  logical_dual={}",
+                    a.status, a.iters, p.status, p.iters,
+                    lg.as_ref().map_or("n/a".to_string(), |s| format!("{:?}/{vl} ({} it, obj {:.10})", s.status, s.iters, s.obj)),
+                );
+            }
+        }
+        println!("compared {compared}; decided-and-correct: engine {}, cold primal {}, slack-logical dual {}, augmented logical dual {}", decided[0], decided[1], decided[2], decided[3]);
+        assert!(compared > 0);
+    }
+
     #[test]
     fn captured_cstr_bigm_node_lp_stays_undecided_2142() {
         let json = include_str!("testdata/cstr_bigm_dual_rebuild_lp.json");

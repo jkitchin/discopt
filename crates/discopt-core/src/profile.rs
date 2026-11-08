@@ -359,6 +359,10 @@ counters!(
     MilpStallGuardStop,
     // A node evaluated with no stored basis below the root (was taken for the root).
     NodeNoBasisOffRoot,
+    // #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE: engine entries' Numerical solves re-tried
+    // from the all-logical basis, and how many of those it decided (certified).
+    LpLogicalRescueAttempts,
+    LpLogicalRescueDecided,
     LazyNearIntegralBranch,
     // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
     // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
