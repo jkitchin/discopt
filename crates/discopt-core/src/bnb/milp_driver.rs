@@ -673,59 +673,6 @@ fn farkas_robust_csc(
     one(1.0) || one(-1.0)
 }
 
-/// `DISCOPT_MILP_TOL_ROBUST_BOUND` (highs-parity D3 follow-up, default OFF until its
-/// panel): the node's NS bound and the reduced-cost fixing gap hold over the points
-/// the incumbent check accepts, not only the exact rows (see
-/// [`tol_robust_enabled`] for that set). Over rows relaxed by `eps_i` the safe bound
-/// of a multiplier `y` drops by `sum_i |y_i| eps_i` (the rhs term `b'y` becomes a
-/// minimum over `[b_i - eps_i, b_i + eps_i]`), so without the correction a node
-/// holding an acceptable point slightly better than the incumbent can be pruned and
-/// a certified bound can sit just above the tolerance optimum. Read once.
-fn tol_robust_bound_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_MILP_TOL_ROBUST_BOUND").unwrap_or_default();
-        parse_tol_robust_bound(&raw).unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
-/// The parse table behind [`tol_robust_bound_enabled`]; garbage is refused.
-fn parse_tol_robust_bound(raw: &str) -> Result<bool, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
-        other => Err(format!(
-            "DISCOPT_MILP_TOL_ROBUST_BOUND={other:?} is not recognized (expected \
-             1/true/yes or 0/false/no). Refusing rather than silently picking an arm."
-        )),
-    }
-}
-
-/// `sum_i (|y_i| + rad_i) eps_i`, rounded up: what relaxing every row by its
-/// acceptance tolerance `eps` can take off a safe bound computed from the multiplier
-/// `y` (with componentwise uncertainty `rad`, zero for a point multiplier).
-fn tol_bound_slack(y: &[f64], rad: Option<&[f64]>, eps: &[f64]) -> f64 {
-    let mut s = 0.0f64;
-    for (i, (yi, e)) in y.iter().zip(eps).enumerate() {
-        let r = rad.and_then(|r| r.get(i)).copied().unwrap_or(0.0);
-        s = crate::presolve::directed::add_up(s, (yi.abs() + r) * e);
-    }
-    crate::presolve::directed::add_up(s, 0.0) * (1.0 + 4.0 * f64::EPSILON)
-}
-
-/// Apply [`tol_bound_slack`] to a safe bound `g` when the flag is on (counted).
-fn tol_robust_bound(g: f64, y: &[f64], rad: Option<&[f64]>, eps: Option<&[f64]>) -> f64 {
-    let Some(eps) = eps else {
-        return g;
-    };
-    let slack = tol_bound_slack(y, rad, eps);
-    crate::profile::incr(crate::profile::Ctr::TolBoundSlackApplied);
-    if slack > 1e-4 * (1.0 + g.abs()) {
-        crate::profile::incr(crate::profile::Ctr::TolBoundSlackMaterial);
-    }
-    crate::presolve::directed::sub_down(g, slack)
-}
-
 /// HiGHS `mip_lp_age_limit` (`HighsOptions.h:1176-1180`): a folded row whose slack has
 /// been basic for more than this many batches is deleted.
 const CUT_LP_AGE_LIMIT: u32 = 10;
@@ -2102,13 +2049,7 @@ fn ns_project_enabled() -> bool {
 /// noise sign, and a free column needs `r_j = 0` exactly, which scaling cannot
 /// produce. Valid for any `y`: weak duality holds for the exact `y*`, and the
 /// evaluation is a lower bound over every point of its enclosure.
-fn node_ns_bound_projected(
-    ctx: &NodeCtx,
-    y: &[f64],
-    l: &[f64],
-    u: &[f64],
-    eps: Option<&[f64]>,
-) -> Option<f64> {
+fn node_ns_bound_projected(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> {
     use crate::lp::simplex::project::{ns_bound_enclosed, project_dual_closed, ProjectFail};
     if !ns_project_enabled() {
         return None;
@@ -2128,8 +2069,7 @@ fn node_ns_bound_projected(
         }
     };
     crate::profile::incr(crate::profile::Ctr::NodeNsProjectTry);
-    let g = ns_bound_enclosed(&pd, ctx.c_w, ctx.csc_rc, m, n, ctx.b_w, l, u)
-        .map(|g| tol_robust_bound(g, &pd.y, Some(&pd.rad), eps));
+    let g = ns_bound_enclosed(&pd, ctx.c_w, ctx.csc_rc, m, n, ctx.b_w, l, u);
     if g.is_some() {
         crate::profile::incr(crate::profile::Ctr::NodeNsProjectRescue);
     }
@@ -2161,23 +2101,14 @@ fn node_ns_bound_projected(
 /// `>= L'`, or every point is `>= U`.
 fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> {
     let (cp, ri, vals) = ctx.csc_rc.raw();
-    // DISCOPT_MILP_TOL_ROBUST_BOUND: each bound below loses `sum |y_i| eps_i` for the
-    // multiplier that produced it, so it holds over the accepted points of the box.
-    let eps_box = |l: &[f64], u: &[f64]| {
-        tol_robust_bound_enabled()
-            .then(|| row_tolerances(ctx.csc_rc, ctx.m_w, ctx.n_w, ctx.b_w, l, u))
-    };
     // NS from `y`, then from its open-column repair over the same box.
     let ns = |l: &[f64], u: &[f64]| {
-        let eps = eps_box(l, u);
         ns_safe_bound_csc(y, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
-            .map(|g| tol_robust_bound(g, y, None, eps.as_deref()))
             .or_else(|| {
                 let y2 = scaled_dual_for_open_columns_csc(y, ctx.c_w, cp, ri, vals, ctx.n_w, l, u)?;
                 ns_safe_bound_csc(&y2, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
-                    .map(|g| tol_robust_bound(g, &y2, None, eps.as_deref()))
             })
-            .or_else(|| node_ns_bound_projected(ctx, y, l, u, eps.as_deref()))
+            .or_else(|| node_ns_bound_projected(ctx, y, l, u))
     };
     if let Some(g) = ns(l, u) {
         return Some(g);
@@ -5352,11 +5283,6 @@ fn solve_node(
                     ctx.ns,
                     ctx.is_int_full,
                     ctx.opts.simplex.tol,
-                    tol_robust_bound_enabled()
-                        .then(|| {
-                            row_tolerances(ctx.csc_rc, ctx.m_w, ctx.n_w, ctx.b_w, &full_l, &full_u)
-                        })
-                        .as_deref(),
                 ) {
                     out.tightened = Some(match out.tightened.take() {
                         Some((mut tl, mut tu)) => {
@@ -6118,7 +6044,6 @@ fn reduced_cost_fix(
     ns: usize,
     is_int: &[bool],
     tol: f64,
-    row_eps: Option<&[f64]>,
 ) -> Option<(Vec<f64>, Vec<f64>)> {
     if !incumbent.is_finite() || m == 0 {
         return None;
@@ -6170,17 +6095,6 @@ fn reduced_cost_fix(
             y
         };
 
-    // DISCOPT_MILP_TOL_ROBUST_BOUND: over the accepted points `y'Ax` can fall short
-    // of `y'b` by `sum |y_i| eps_i`, so the gap a fixing must respect widens by that.
-    // (When `node_obj` is an NS bound that already paid it, this counts it twice:
-    // weaker fixing, never an invalid one.)
-    let gap = match row_eps {
-        Some(eps) => {
-            let slack = tol_bound_slack(&y, None, eps);
-            crate::presolve::directed::add_up(gap, slack)
-        }
-        None => gap,
-    };
     let mut new_l = l[..ns].to_vec();
     let mut new_u = u[..ns].to_vec();
     let mut changed = false;
@@ -8051,7 +7965,7 @@ mod tests {
             let incumbent = sol.obj + 0.25 * k as f64;
             let reuse = reduced_cost_fix(
                 &sp, m, &c, &sol.basis, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int,
-                opts.tol, None,
+                opts.tol,
             );
             // An empty `dual` is exactly what a failed btran leaves behind, and it
             // is what drives the legacy from-scratch factorization branch.
@@ -8068,7 +7982,6 @@ mod tests {
                 ns,
                 &is_int,
                 opts.tol,
-                None,
             );
             assert_eq!(
                 reuse.is_some(),
@@ -8190,7 +8103,7 @@ mod tests {
         asserts += 1;
 
         let fixed = reduced_cost_fix(
-            &sp, m, &c, &basis, &y, node_obj, incumbent, &l, &u, ns, &is_int, 1e-9, None,
+            &sp, m, &c, &basis, &y, node_obj, incumbent, &l, &u, ns, &is_int, 1e-9,
         );
         let (_, new_u) = fixed.expect(
             "the fixture must still produce a fixing — a `None` here would satisfy \
@@ -8237,7 +8150,7 @@ mod tests {
             let incumbent = sol.obj + 0.25 * k as f64;
             if reduced_cost_fix(
                 &sp, m, &c, &sol.basis, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int,
-                opts.tol, None,
+                opts.tol,
             )
             .is_some()
             {
@@ -8304,7 +8217,6 @@ mod tests {
                     ns,
                     &is_int,
                     opts.tol,
-                    None,
                 )
                 .is_none(),
                 "k={k}: a singular basis must defeat the refactor path -- otherwise \
@@ -8312,8 +8224,7 @@ mod tests {
             );
             refac_attempts += 1;
             if reduced_cost_fix(
-                &sp, m, &c, &singular, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int,
-                opts.tol, None,
+                &sp, m, &c, &singular, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int, opts.tol,
             )
             .is_some()
             {
@@ -8578,32 +8489,6 @@ mod tests {
             }
         }
         act.iter().zip(b).map(|(a, bb)| a - bb).collect()
-    }
-
-    /// D3 follow-up (`DISCOPT_MILP_TOL_ROBUST_BOUND`): the safe bound loses exactly
-    /// `sum (|y_i| + rad_i) eps_i` (rounded up). On `min x s.t. x = 1` the exact
-    /// bound is 1 (y = 1) while an accepted point may sit at `1 - eps`; the robust
-    /// bound must not exceed that. Checks counted.
-    #[test]
-    fn tol_bound_slack_covers_the_accepted_set() {
-        let mut checked = 0;
-        let eps = [2e-6, 1e-6];
-        let s = tol_bound_slack(&[1.0, -3.0], None, &eps);
-        assert!(s >= 5e-6 && s <= 5e-6 * (1.0 + 1e-12), "{s}");
-        checked += 1;
-        let s = tol_bound_slack(&[1.0, -3.0], Some(&[0.5, 0.0]), &eps);
-        assert!(s >= 6e-6 && s <= 6e-6 * (1.0 + 1e-12), "{s}");
-        checked += 1;
-        let g = tol_robust_bound(1.0, &[1.0], None, Some(&[2e-6]));
-        assert!(
-            g <= 1.0 - 2e-6,
-            "robust bound {g} above the accepted optimum"
-        );
-        assert_eq!(tol_robust_bound(1.0, &[1.0], None, None), 1.0);
-        checked += 1;
-        assert!(parse_tol_robust_bound("1").unwrap() && !parse_tol_robust_bound("").unwrap());
-        assert!(parse_tol_robust_bound("maybe").is_err());
-        assert_eq!(checked, 3);
     }
 
     /// highs-parity D3 (`DISCOPT_MILP_TOL_ROBUST`): a Farkas ray that proves a box

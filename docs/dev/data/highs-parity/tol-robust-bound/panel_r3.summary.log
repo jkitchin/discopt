@@ -1,0 +1,40 @@
+[185/103] small_mip              r2 OFF optimal/True bnd=3.2368421052583805 n=1 | ON optimal/True bnd=3.2368421052583805 n=1 fired={'TolBoundSlackApplied': 2, 'TolBoundSlackMaterial': 0} load=5.7
+[186/103] sp150x300d             r2 OFF feasible/False bnd=62.0 n=9001 | ON feasible/False bnd=62.0 n=6787 fired={'TolBoundSlackApplied': 7563, 'TolBoundSlackMaterial': 0} load=5.4
+{
+ "bar1_problems": [],
+ "bar1_pass": true,
+ "bar1_checks": 372,
+ "solved": {
+  "off": 123,
+  "on": 122
+ },
+ "both_certified": 36,
+ "nodes_both_certified": {
+  "off": 37242.0,
+  "on": 38696.0
+ },
+ "population_open": 22,
+ "dual_losses": 0,
+ "dual_loss_cap": 2,
+ "incumbent_lost_on": [
+  "p0548"
+ ],
+ "median_primal_gap": {
+  "off": 0.1610685882420841,
+  "on": 0.1610685882420841
+ },
+ "bar2": {
+  "2a_solved_on_ge_off": false,
+  "2b_nodes_minus15_or_solved_plus2": false,
+  "2c_dual_losses_le_10pct": true,
+  "2d_no_incumbent_lost": false,
+  "2e_median_primal_not_higher": true
+ },
+ "bar2_pass": false,
+ "graduate": false,
+ "fired": {
+  "off": 0,
+  "on": 381096
+ }
+}
+d2 flag panel DISCOPT_MILP_TOL_ROBUST_BOUND: executed=206 fired={'off': 0, 'on': 381096}
