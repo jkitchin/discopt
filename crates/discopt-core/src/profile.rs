@@ -353,6 +353,10 @@ counters!(
     // ...and FBBT emptiness verdicts confirmed over the relaxed rows / refused there.
     TolRobustFbbtConfirm,
     TolRobustFbbtRefused,
+    // `DISCOPT_MILP_TOL_ROBUST_BOUND`: NS node bounds that paid the tolerance slack
+    // `sum |y_i| eps_i`, and those where it exceeded 1e-4 (1 + |g|) (the gap scale).
+    TolBoundSlackApplied,
+    TolBoundSlackMaterial,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
