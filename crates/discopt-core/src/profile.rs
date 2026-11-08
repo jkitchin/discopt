@@ -354,6 +354,12 @@ counters!(
     PrimalRowPriceSparse,
     PrimalRowPriceDense,
     PrimalRowPriceVerifyFail,
+    // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
+    // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
+    // and Farkas rays refused as a fathom because they do not survive the tolerance.
+    TolRobustRelaxedSolves,
+    TolRobustRelaxedOptimal,
+    TolRobustFarkasRefused,
     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
     P1ExpelPasses,
     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).

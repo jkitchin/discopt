@@ -28,8 +28,8 @@ use crate::lp::simplex::refine::{ns_safe_bound_csc, scaled_dual_for_open_columns
 use crate::lp::simplex::scaling::MAX_LINE_RANGE;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds_csc,
-    tighten_bounds_csc_with_row, LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
+    solve_lp, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc,
+    tighten_bounds_csc_relaxed, LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
 };
 use crate::presolve::directed::{
     add_down, add_up, div_down, div_up, mul_down, mul_up, sub_down, sub_up,
@@ -476,6 +476,167 @@ fn parse_cut_lp(raw: &str) -> Result<bool, String> {
              0/false/no). Refusing rather than silently picking an arm."
         )),
     }
+}
+
+/// `DISCOPT_MILP_TOL_ROBUST` (highs-parity D3, default OFF until its panel): every
+/// emptiness proof the driver acts on holds for the set its incumbent check accepts,
+/// rows within `ROW_VERIFY_TOL * (1 + |b_i|)`, not only for the exact rows.
+///
+/// Without it the proofs are exact while acceptance is tolerance-based, so a box that
+/// holds an acceptable point can be proved empty. Measured on the OA master of
+/// `portfol_roundlot` (fixture `portfol_roundlot_oa_master_tolerance_feasible.npz`):
+/// no integer point of its box satisfies the rows exactly; the best misses by 3.35e-7.
+/// - Node FBBT amplified that residual through `x15 = 55000 x6` and integer rounding
+///   into an empty box.
+/// - Node LP Farkas rays were accepted at a 1e-9 margin.
+/// - The master came back `INFEASIBLE`, where HiGHS (and the driver on another
+///   trajectory) returns the point.
+///
+/// With it:
+/// - FBBT derives bounds from the relaxed rows (`tighten_bounds_csc_relaxed`).
+/// - A Farkas ray fathoms only if its bound survives `sum_i |y_i| eps_i` (in original
+///   units).
+/// - A node LP that is infeasible but not robustly so is re-solved with each row's
+///   slack widened by its tolerance; that LP is a relaxation of the node over the
+///   accepted set, so its bound is valid and its point is an incumbent candidate,
+///   verified as always.
+fn tol_robust_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_MILP_TOL_ROBUST").unwrap_or_default();
+        parse_tol_robust(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`tol_robust_enabled`]; garbage is refused.
+fn parse_tol_robust(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" => Ok(false),
+        "1" | "true" | "yes" => Ok(true),
+        other => Err(format!(
+            "DISCOPT_MILP_TOL_ROBUST={other:?} is not recognized (expected 1/true/yes or \
+             0/false/no). Refusing rather than silently picking an arm."
+        )),
+    }
+}
+
+/// Per-row acceptance tolerance: how far row `i`'s structural residual may be off
+/// for a point the incumbent check accepts. `rows_verified` allows
+/// `ROW_VERIFY_TOL * (1 + |b_i|)` on the row itself, and `bounds_hold` lets each
+/// column sit `AUDIT_FEAS * (1 + |bound|)` past its bound; a row's own slack (a
+/// singleton column) turns that bound slack into row residual `|a_ij|` times it.
+fn row_tolerances(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> Vec<f64> {
+    let mut eps: Vec<f64> = b[..m]
+        .iter()
+        .map(|bi| ROW_VERIFY_TOL * (1.0 + bi.abs()))
+        .collect();
+    for j in 0..n.min(l.len()).min(u.len()) {
+        let (rows, vals) = csc.col(j);
+        if rows.len() != 1 || rows[0] >= m {
+            continue;
+        }
+        let mag = [l[j], u[j]]
+            .iter()
+            .filter(|v| v.abs() < INF)
+            .fold(0.0f64, |a, v| a.max(v.abs()));
+        eps[rows[0]] += vals[0].abs() * crate::lp::simplex::primal::AUDIT_FEAS * (1.0 + mag);
+    }
+    eps
+}
+
+/// The driver's FBBT: exact rows, or rows relaxed by [`row_tolerances`] under
+/// [`tol_robust_enabled`].
+#[allow(clippy::too_many_arguments)]
+fn fbbt_rows(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+) -> crate::lp::simplex::presolve::PresolveResult {
+    fbbt_rows_with_row(csc, m, n, l, u, b, is_int, tol, None)
+}
+
+/// [`fbbt_rows`] plus an extra (never relaxed) row, e.g. the objective cutoff.
+#[allow(clippy::too_many_arguments)]
+fn fbbt_rows_with_row(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+    extra: Option<(&[f64], f64)>,
+) -> crate::lp::simplex::presolve::PresolveResult {
+    let eps = tol_robust_enabled().then(|| row_tolerances(csc, m, n, b, l, u));
+    tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, eps.as_deref(), extra)
+}
+
+/// Robust Farkas test in ORIGINAL units (`y` the ray mapped to the original rows):
+/// some orientation of `y` proves the box empty even with every row relaxed by `eps`,
+/// i.e. `g(±y) - sum_i |y_i| eps_i` exceeds the same margin as
+/// [`farkas_safe_bound_csc`].
+#[allow(clippy::too_many_arguments)]
+fn farkas_robust_csc(
+    y: &[f64],
+    csc: &SparseCols,
+    b: &[f64],
+    eps: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    if y.len() != m || m == 0 {
+        return false;
+    }
+    let slack: f64 = y.iter().zip(eps).map(|(yi, e)| yi.abs() * e).sum();
+    let one = |sgn: f64| -> bool {
+        let ynorm = y.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+        let rc_tol = 1e-7 * ynorm.max(1.0);
+        let mut g = 0.0f64;
+        let mut scale = 0.0f64;
+        for i in 0..m {
+            let t = sgn * b[i] * y[i];
+            g += t;
+            scale = scale.max(t.abs());
+        }
+        for j in 0..n {
+            let mut rc = -sgn * csc.dot(j, y);
+            if rc.abs() <= rc_tol {
+                rc = 0.0;
+            }
+            let term = if rc > 0.0 {
+                if l[j] <= -INF {
+                    return false;
+                }
+                rc * l[j]
+            } else if rc < 0.0 {
+                if u[j] >= INF {
+                    return false;
+                }
+                rc * u[j]
+            } else {
+                0.0
+            };
+            g += term;
+            scale = scale.max(term.abs());
+        }
+        g - slack > 1e-9 * scale.max(1.0)
+    };
+    one(1.0) || one(-1.0)
 }
 
 /// HiGHS `mip_lp_age_limit` (`HighsOptions.h:1176-1180`): a folded row whose slack has
@@ -1498,7 +1659,7 @@ fn try_sub_mip(
     }
     // Propagate the fixings over the base rows: a consistent, smaller sub-box, or a
     // proof that this neighbourhood is empty (skip the solve).
-    let pr = tighten_bounds_csc(
+    let pr = fbbt_rows(
         &base.csc,
         base.m,
         base.n,
@@ -1713,7 +1874,7 @@ fn try_randomized_rounding(
         sl[j] = v;
         su[j] = v;
         if (k + 1) % stride == 0 || k + 1 == ints.len() {
-            let pr = tighten_bounds_csc(
+            let pr = fbbt_rows(
                 &base.csc,
                 base.m,
                 base.n,
@@ -1918,7 +2079,7 @@ fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> 
     if let Some(g) = ns(l, u) {
         return Some(g);
     }
-    let pr = tighten_bounds_csc(
+    let pr = fbbt_rows(
         ctx.csc_rc,
         ctx.m_w,
         ctx.n_w,
@@ -1936,7 +2097,7 @@ fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> 
         return Some(g);
     }
     let inc = ctx.inc_snapshot.filter(|v| v.is_finite())?;
-    let pr = tighten_bounds_csc_with_row(
+    let pr = fbbt_rows_with_row(
         ctx.csc_rc,
         ctx.m_w,
         ctx.n_w,
@@ -2168,7 +2329,7 @@ fn tiny_entry_gate_box(
             is_int[j] = true;
         }
     }
-    let pr = tighten_bounds_csc(csc, m, n, l, u, b, &is_int, opts.simplex.tol);
+    let pr = fbbt_rows(csc, m, n, l, u, b, &is_int, opts.simplex.tol);
     if pr.infeasible {
         return (l.to_vec(), u.to_vec());
     }
@@ -2454,7 +2615,7 @@ fn root_box(
         // cert:T0.3 — time root presolve bound reduction.
         let pr = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
-            tighten_bounds_csc(
+            fbbt_rows(
                 csc_w,
                 m,
                 n,
@@ -4570,6 +4731,64 @@ struct NodeOutput {
     deferred: bool,
 }
 
+/// [`farkas_robust_csc`] for a node ray `y_scaled` (solve coordinates) over the
+/// node box `l`, `u` (original units).
+fn robust_infeasible(ctx: &NodeCtx<'_>, y_scaled: &[f64], l: &[f64], u: &[f64]) -> bool {
+    let mut y = y_scaled.to_vec();
+    if let Some(s) = ctx.scaling {
+        s.unscale_dual(&mut y);
+    }
+    let eps = row_tolerances(ctx.csc_rc, ctx.m_w, ctx.n_w, ctx.b_w, l, u);
+    farkas_robust_csc(&y, ctx.csc_rc, ctx.b_w, &eps, l, u, ctx.m_w, ctx.n_w)
+}
+
+/// The node box with each row's own slack (its singleton column past the
+/// structurals) widened. `full = false`: by half the slack's own bound tolerance
+/// `AUDIT_FEAS * (1 + |bound|)`, so an LP point in it still passes `bounds_hold` with
+/// half of that in hand (an incumbent CANDIDATE). `full = true`: by the row's whole
+/// acceptance tolerance ([`row_tolerances`]) over the slack coefficient, the LP
+/// relaxation of every acceptable point of the node (a BOUND box). A row without a
+/// singleton slack is left exact there, which can only remove points from the
+/// candidate box; the bound box then misses that row's tolerance, so the NS bound
+/// over it is used only when every row has its slack (`None` otherwise).
+fn relax_row_slacks(
+    ctx: &NodeCtx<'_>,
+    l: &[f64],
+    u: &[f64],
+    full: bool,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let (mut rl, mut ru) = (l.to_vec(), u.to_vec());
+    let eps = row_tolerances(ctx.csc_rc, ctx.m_w, ctx.n_w, ctx.b_w, l, u);
+    let mut done = vec![false; ctx.m_w];
+    for j in ctx.ns..ctx.n_w {
+        let (rows, vals) = ctx.csc_rc.col(j);
+        if rows.len() != 1 || vals[0] == 0.0 || done[rows[0]] {
+            continue;
+        }
+        let i = rows[0];
+        done[i] = true;
+        let audit = crate::lp::simplex::primal::AUDIT_FEAS;
+        if rl[j] > -INF {
+            rl[j] -= if full {
+                eps[i] / vals[0].abs()
+            } else {
+                0.5 * audit * (1.0 + rl[j].abs())
+            };
+        }
+        if ru[j] < INF {
+            ru[j] += if full {
+                eps[i] / vals[0].abs()
+            } else {
+                0.5 * audit * (1.0 + ru[j].abs())
+            };
+        }
+    }
+    if full && done.iter().any(|d| !d) {
+        return None;
+    }
+    Some((rl, ru))
+}
+
 /// Evaluate a single B&B node: solve its LP relaxation (cold, or warm from the
 /// basis it inherited), then run the optional rounding heuristic, cover
 /// separation, and strong branching. Pure given `ctx` (the immutable working LP
@@ -4645,7 +4864,7 @@ fn solve_node(
             // the UNSCALED working CSC (`ctx.csc_rc`; the dense `prop_lp.a` was
             // `ctx.a_w`, unscaled), bit-identical to the dense `tighten_bounds`.
             let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
-            tighten_bounds_csc(
+            fbbt_rows(
                 ctx.csc_rc,
                 ctx.m_w,
                 ctx.n_w,
@@ -4769,6 +4988,49 @@ fn solve_node(
             }
         }
     };
+    // The box the node's NS bound is taken over: the node box, or (below) its full
+    // tolerance relaxation when the LP had to be re-solved there.
+    let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
+    // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
+    // no exact point yet may hold an acceptable one. Re-solve it over the rows
+    // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
+    // relaxation of the node over the accepted set, so whatever it returns (an
+    // optimum whose bound is valid there, or a ray tested below) replaces the exact
+    // verdict.
+    if tol_robust_enabled()
+        && sol.status == LpStatus::Infeasible
+        && !robust_infeasible(ctx, &sol.dual, &full_l, &full_u)
+    {
+        crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedSolves);
+        let solve = |l: &[f64], u: &[f64]| match ctx.tm.node_basis(id) {
+            Some(basis) => {
+                let basis = extend_basis(basis, ctx.n_w);
+                ctx.problem.solve_warm(l, u, &basis, ctx.simplex)
+            }
+            None => ctx.problem.solve_cold(l, u, ctx.simplex),
+        };
+        // The candidate LP (half the slack tolerance) first; if it is empty too, the
+        // full relaxation decides (its ray, if robust, fathoms; its optimum bounds
+        // the node). The node keeps its ORIGINAL box for everything else, the
+        // incumbent check above all; only the NS bound is taken over the full
+        // relaxation (`bound_box`), so it holds for every acceptable point.
+        if let Some((cl, cu)) = relax_row_slacks(ctx, &full_l, &full_u, false) {
+            let mut alt = solve(&cl, &cu);
+            let full_box = relax_row_slacks(ctx, &full_l, &full_u, true);
+            if alt.status == LpStatus::Infeasible {
+                if let Some((rl, ru)) = &full_box {
+                    alt = solve(rl, ru);
+                }
+            }
+            if alt.status == LpStatus::Optimal && full_box.is_some() {
+                crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedOptimal);
+                sol = alt;
+                bound_box = full_box;
+            } else if alt.status == LpStatus::Infeasible {
+                sol = alt;
+            }
+        }
+    }
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
         // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
@@ -4843,8 +5105,14 @@ fn solve_node(
             // node's own dual over its box (capped at the vertex value); the vertex
             // value alone is only as good as the simplex's optimality test, and a
             // vertex the test passed early sits ABOVE the node's LP minimum.
-            let node_lp_bound = if ns_node_bound_enabled() {
-                node_ns_bound(ctx, &rc_dual, &full_l, &full_u).map(|g| g.min(sol.obj))
+            // A relaxed re-solve's LP value is not a bound over the acceptable
+            // points, only its NS bound over `bound_box` is: require it.
+            let node_lp_bound = if ns_node_bound_enabled() || bound_box.is_some() {
+                match &bound_box {
+                    Some((bl, bu)) => node_ns_bound(ctx, &rc_dual, bl, bu),
+                    None => node_ns_bound(ctx, &rc_dual, &full_l, &full_u),
+                }
+                .map(|g| g.min(sol.obj))
             } else {
                 Some(sol.obj)
             };
@@ -5226,8 +5494,18 @@ fn solve_node(
             // correct fathom.
             // T3b5: farkas check on the SCALED working CSC (`ctx.csc`; the dual/ray
             // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
-            if verify_farkas_infeasible_csc(&sol.dual, ctx.csc, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w)
-            {
+            // DISCOPT_MILP_TOL_ROBUST: only a ray that survives every row's acceptance
+            // tolerance fathoms (an exact-only one left the node above re-solved).
+            let proved = if tol_robust_enabled() {
+                let r = robust_infeasible(ctx, &sol.dual, &full_l, &full_u);
+                if !r {
+                    crate::profile::incr(crate::profile::Ctr::TolRobustFarkasRefused);
+                }
+                r
+            } else {
+                verify_farkas_infeasible_csc(&sol.dual, ctx.csc, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w)
+            };
+            if proved {
                 // highs-parity P4.7 entry (counters only): how many LOCAL bound
                 // changes (node bound tighter than the root's, on the side the ray
                 // uses) this infeasibility proof rests on. Scaling is positive, so
@@ -6832,7 +7110,7 @@ fn try_dive_repair(
             // FBBT only removes points that violate a row, so the dive's box
             // still contains every feasible completion of the fixing.
             if improve {
-                let pr = tighten_bounds_csc(
+                let pr = fbbt_rows(
                     ctx.csc_rc,
                     ctx.m_w,
                     ctx.n_w,
@@ -8177,6 +8455,34 @@ mod tests {
             }
         }
         act.iter().zip(b).map(|(a, bb)| a - bb).collect()
+    }
+
+    /// highs-parity D3 (`DISCOPT_MILP_TOL_ROBUST`): a Farkas ray that proves a box
+    /// empty only by less than the rows' tolerance is refused; one with a real margin
+    /// is accepted. Row `x0 + x1 = b`, `x` in [0, 0.5]^2: empty for `b > 1`.
+    #[test]
+    fn robust_farkas_refuses_a_ray_inside_the_tolerance() {
+        let sp = SparseCols::from_dense(&[1.0, 1.0], 1, 2);
+        let (l, u) = (vec![0.0, 0.0], vec![0.5, 0.5]);
+        let y = [1.0];
+        let eps = [1e-6];
+        let mut checked = 0;
+        for (b, exact_empty, robust_empty) in [(1.0 + 3e-7, true, false), (1.1, true, true)] {
+            assert_eq!(
+                farkas_safe_bound_csc(&y, &sp, &[b], &l, &u, 1, 2),
+                exact_empty,
+                "b={b}"
+            );
+            assert_eq!(
+                farkas_robust_csc(&y, &sp, &[b], &eps, &l, &u, 1, 2),
+                robust_empty,
+                "b={b}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
+        assert!(parse_tol_robust("1").unwrap() && !parse_tol_robust("").unwrap());
+        assert!(parse_tol_robust("maybe").is_err());
     }
 
     #[test]
@@ -9589,7 +9895,12 @@ pub(crate) mod sparse_milp_diff {
             (true, true) => (11, GOLDEN_CUT_LP_ITERS),
         };
         assert_eq!(r.nodes, expect_nodes, "node-count drift (per-node engine)");
-        assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
+        // `DISCOPT_MILP_TOL_ROBUST` (bound-changing) propagates over the rows relaxed by
+        // their acceptance tolerance, so the node boxes differ by that much and the
+        // pivot count may drift (45 -> 46 measured); status, objective and tree pin it.
+        if !tol_robust_enabled() {
+            assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
+        }
     }
 
     /// Determinism: re-solving is bit-identical. This is exactly the property the

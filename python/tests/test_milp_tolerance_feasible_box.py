@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import itertools
 import os
+import subprocess
+import sys
 from fractions import Fraction
 
 import numpy as np
@@ -109,3 +111,20 @@ def test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy):
     assert resid_eq.max() <= ROW_TOL and resid_ub.max() <= ROW_TOL
     # The best tolerance-feasible point HiGHS reports is 0.0282907 (minimize).
     assert res.objective <= 0.0282907 + 1e-6
+
+
+def test_tol_robust_flag_keeps_the_acceptable_point():
+    """``DISCOPT_MILP_TOL_ROBUST=1`` (read once per process, so a subprocess): both
+    entry points return an accepted point of the tolerance-feasible box, never
+    ``INFEASIBLE``. Measured: 0.0282902 / 0.0282900, row residual 5e-7."""
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import test_milp_tolerance_feasible_box as T\n"
+        "for lazy in (False, True):\n"
+        "    T.test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy)\n"
+        "print('CHECKED', 2)\n"
+    ) % os.path.dirname(__file__)
+    env = {**os.environ, "DISCOPT_MILP_TOL_ROBUST": "1"}
+    p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr[-3000:]
+    assert "CHECKED 2" in p.stdout
