@@ -18887,33 +18887,22 @@ def solve_model(
                 _want_engine = _lpm_backend != "native" and (
                     nlp_solver == "simplex" or (_milp_engine_default_on() and not lagrangian_bound)
                 )
-                # #1243: the monolithic engine's RELATIVE arm is
+                # #1243: the monolithic engine's default RELATIVE arm is
                 # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
                 # near a zero optimum it converges on a gap the Python tree's
                 # unfloored relative test would still call open (the gear
                 # pathology). A caller asking for an absolute tolerance TIGHTER
-                # than the relative one is asking for exactly that regime, so the
-                # solve still routes to the Python MILP tree rather than return a
-                # result that claims a tolerance it did not meet. This is the same
-                # "stay on the Python path rather than mis-serve an explicit
-                # request" choice ``lagrangian_bound`` makes above.
+                # than the relative one is asking for exactly that regime. Such a
+                # solve used to route to the Python MILP tree (R4); since the
+                # Python-MILP-tree retirement the engine applies the tree's own
+                # denominator then (``MilpOptions::rel_gap_max_abs``, set in
+                # ``_solve_milp_simplex``), so it stays on the engine.
                 #
                 # #1315: the LOOSER case — which is every realistic use of the
                 # option — is now served in the engine itself: ``abs_gap_tol`` is
                 # passed through to ``MilpOptions`` and the driver stops on either
                 # criterion. It used to be dropped here entirely, making the
                 # documented parameter a no-op on this whole route.
-                if abs_gap_tolerance is not None and abs_gap_tol < gap_tolerance:
-                    if nlp_solver == "simplex":
-                        logger.info(
-                            "abs_gap_tolerance=%g is tighter than gap_tolerance=%g; the "
-                            "monolithic Rust MILP engine cannot certify to it (its gap "
-                            "denominator floors at 1.0), so this solve uses the Python "
-                            "MILP tree instead.",
-                            abs_gap_tol,
-                            gap_tolerance,
-                        )
-                    _want_engine = False
                 if _want_engine:
                     if lagrangian_bound:
                         logger.warning(
@@ -40243,6 +40232,12 @@ def _solve_milp_simplex(
     # the #291 stall slice enforced by the driver only while it has no incumbent.
     _run1_time = _milp_budget
     _run1_stall: dict = {}
+    # R4 (retirement step 6, #1243): an absolute tolerance tighter than the relative
+    # one asks for the Python tree's unfloored relative test,
+    # ``max(|ub|, |lb|, 1e-10)``; the driver applies it (``rel_gap_max_abs``).
+    _rel_gap_max_abs = abs_gap_tolerance is not None and float(abs_gap_tolerance) < float(
+        gap_tolerance
+    )
     _no_stall_tree = _milp_no_stall_tree_enabled() and not _tuning().deterministic
     if _no_stall_tree:
         # Run 1 is unchanged up to its slice; only with NO incumbent there does the
@@ -40301,6 +40296,7 @@ def _solve_milp_simplex(
         _run1_nodes,
         float(gap_tolerance),
         abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+        rel_gap_max_abs=_rel_gap_max_abs,
         initial_incumbent=_seed,
         time_limit_s=float(_run1_time),
         debug_hook=_hook(),
@@ -40494,6 +40490,7 @@ def _solve_milp_simplex(
                 # criterion had already closed, and returned `feasible` with
                 # |obj-bound| inside the requested tolerance.
                 abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                rel_gap_max_abs=_rel_gap_max_abs,
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_hook(),
@@ -40638,6 +40635,7 @@ def _solve_milp_simplex(
                 int(max_nodes),
                 float(gap_tolerance),
                 abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
+                rel_gap_max_abs=_rel_gap_max_abs,
                 time_limit_s=_rem_ct,
                 **_cut_opts,
             )
