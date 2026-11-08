@@ -69,7 +69,9 @@ def test_serial_miqp_node_bound_certifies_without_highs(monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(S, "_os_threads_available", lambda: False)
-    monkeypatch.setattr(S, "_highs_lp_verifier_available", lambda: False)
+    # No HiGHS at all (the Pyodide build): the verified LP route needs none since
+    # highs-parity P6.4, so blocking the module is the honest simulation.
+    monkeypatch.setitem(sys.modules, "highspy", None)
     monkeypatch.setattr(S, "_convex_qp_node_lower_bound", counting)
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.setenv("DISCOPT_CONVEX_MINLP_ROUTE", "0")
@@ -79,3 +81,26 @@ def test_serial_miqp_node_bound_certifies_without_highs(monkeypatch):
     assert r.gap_certified
     assert r.objective == pytest.approx(0.0366667, abs=1e-6)
     assert r.bound <= r.objective + 1e-9
+
+
+def test_linear_node_emptiness_is_proved_without_highs(monkeypatch):
+    """highs-parity #9: the #1537 emptiness proof behind a POUNCE ``primal_infeasible``
+    label runs on the verified LP route, which needs no HiGHS. With ``highspy``
+    blocked, an empty node system is proved empty and a feasible one is not (it used
+    to fall back to a weaker simplex corroboration)."""
+    import numpy as np
+
+    monkeypatch.setitem(sys.modules, "highspy", None)
+    checked = 0
+    # x + y <= -1 over [0, 1]^2: empty.
+    assert S._linear_node_verified_empty(
+        np.array([[1.0, 1.0]]), np.array([-1.0]), None, None, [0.0, 0.0], [1.0, 1.0]
+    )
+    checked += 1
+    # x + y <= 1 over [0, 1]^2: feasible, never proved empty.
+    assert not S._linear_node_verified_empty(
+        np.array([[1.0, 1.0]]), np.array([1.0]), None, None, [0.0, 0.0], [1.0, 1.0]
+    )
+    checked += 1
+    assert sys.modules["highspy"] is None
+    assert checked == 2

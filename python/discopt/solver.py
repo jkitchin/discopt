@@ -35900,19 +35900,6 @@ def _solve_milp_gurobi(
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
-def _highs_lp_verifier_available() -> bool:
-    """Whether the HiGHS LP route (the verified Farkas / NS-bound arbiter) can run.
-
-    ``highspy`` is a core dependency, but the WASM build has none. There a POUNCE
-    ``primal_infeasible`` label is acted on only when the in-house simplex
-    corroborates it, and the multiplier-free node bound falls back to the
-    box-only bound (#1537).
-    """
-    from discopt._optional_highs import highs_available
-
-    return highs_available()
-
-
 def _convex_qp_node_lower_bound(
     P,  # noqa: N803
     c,
@@ -36044,8 +36031,8 @@ def _convex_qp_node_lower_bound(
         )
 
     # Multiplier-free: f(x) + min over the node polyhedron of grad f(x) . (u - x).
-    if not _highs_lp_verifier_available():
-        return box_only
+    # The verified LP route runs on the in-house engine (highs-parity P6.4), so this
+    # no longer falls back to the box-only bound where HiGHS is not installed (#9).
     from discopt.solvers import SolveStatus
     from discopt.solvers.lp_milp_highs import solve_lp as _highs_solve_lp
 
@@ -36062,7 +36049,7 @@ def _convex_qp_node_lower_bound(
         return box_only
     lin = float(res.objective) - float(g0 @ x)
     m3 = float(np.abs(g0) @ (np.abs(np.asarray(res.x, dtype=np.float64)) + ax))
-    # The LP objective is HiGHS's, certified only to the route's own gap test.
+    # The LP objective is the verified route's, certified only to its own gap test.
     from discopt.solvers.lp_milp_highs import CERT_ABS, CERT_REL
 
     lp_slack = CERT_ABS + CERT_REL * abs(float(res.objective))
@@ -36079,34 +36066,15 @@ def _linear_node_verified_empty(A_ub, b_ub, A_eq, b_eq, node_lb, node_ub) -> boo
     the solve was published as certified ``infeasible``; on ``st_miqp3`` pruning a
     feasible subtree certified 0.0 against a true -6. A node's feasible set is the
     linear system alone (the objective, quadratic or not, plays no part), so the
-    label is now accepted only when the HiGHS LP route finds a Farkas ray for that
-    system and ``farkas_verified`` proves it against the node box in rounding-aware
-    arithmetic. Anything else leaves the node open, which is what every caller
-    already does with an unsettled node -- it costs a certificate, never soundness.
+    label is now accepted only when the verified LP route (the in-house engine since
+    highs-parity P6.4; no HiGHS needed) finds a Farkas ray for that system and
+    ``farkas_verified`` proves it against the node box in rounding-aware arithmetic.
+    Anything else leaves the node open, which is what every caller already does with an
+    unsettled node -- it costs a certificate, never soundness.
     """
     from discopt.solvers import SolveStatus
 
     lb = np.asarray(node_lb, dtype=np.float64)
-    if not _highs_lp_verifier_available():
-        # No Farkas verifier on this platform (WASM). Corroborate instead: the
-        # exact-vertex in-house simplex must independently find the system
-        # infeasible. Strictly more conservative than the POUNCE label alone,
-        # which is what this platform trusted before #1537.
-        from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
-        from discopt.solvers.lp_simplex import solve_lp as _simplex_solve_lp
-
-        if not SIMPLEX_AVAILABLE:
-            return False
-        ub0 = np.asarray(node_ub, dtype=np.float64)
-        res0 = _simplex_solve_lp(
-            np.zeros(lb.shape[0]),
-            A_ub=None if _matrix_rows(A_ub) == 0 else A_ub,
-            b_ub=None if _matrix_rows(A_ub) == 0 else b_ub,
-            A_eq=None if _matrix_rows(A_eq) == 0 else A_eq,
-            b_eq=None if _matrix_rows(A_eq) == 0 else b_eq,
-            bounds=list(zip(lb.tolist(), ub0.tolist())),
-        )
-        return bool(res0.status == SolveStatus.INFEASIBLE)
     from discopt.solvers.lp_milp_highs import solve_lp as _highs_solve_lp
 
     ub = np.asarray(node_ub, dtype=np.float64)
