@@ -129,6 +129,44 @@ def _as_csr(J, m: int, n: int) -> sp.csr_matrix:
     return out
 
 
+def _solve_row_equilibrated(highspy, new_highs, J, xl, xu, s_lo, s_hi, grad):
+    """Solve ``min gradᵀx  s.t.  s_lo <= J x <= s_hi, xl <= x <= xu`` with each row
+    divided by its largest coefficient; returns ``(highs, scale, status_name)``.
+
+    A row dual ``y_s`` of the scaled rows is the dual ``y_s / scale`` of the unscaled
+    ones, in the sign convention of the slack form ``J x - s = 0`` (a positive dual
+    prices the row's lower side in both).
+    """
+    from discopt.solvers.lp_milp_highs import _status_name
+    from discopt.solvers.milp_highs import _to_highs_inf
+
+    Jr = sp.csr_matrix(J, dtype=np.float64)
+    m, n = Jr.shape
+    scale = np.ones(m)
+    if Jr.nnz:
+        row_max = np.asarray(abs(Jr).max(axis=1).todense()).ravel()
+        scale = np.where(row_max > 0.0, row_max, 1.0)
+    Js = sp.csc_matrix(sp.diags(1.0 / scale) @ Jr)
+    lp = highspy.HighsLp()
+    lp.num_col_, lp.num_row_ = n, m
+    lp.col_cost_ = np.asarray(grad, dtype=np.float64)
+    lp.col_lower_ = _to_highs_inf(xl, highspy)
+    lp.col_upper_ = _to_highs_inf(xu, highspy)
+    lp.row_lower_ = _to_highs_inf(np.where(s_lo <= -1e20, s_lo, s_lo / scale), highspy)
+    lp.row_upper_ = _to_highs_inf(np.where(s_hi >= 1e20, s_hi, s_hi / scale), highspy)
+    lp.sense_ = highspy.ObjSense.kMinimize
+    lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+    lp.a_matrix_.num_col_, lp.a_matrix_.num_row_ = n, m
+    lp.a_matrix_.start_ = Js.indptr.astype(np.int32)
+    lp.a_matrix_.index_ = Js.indices.astype(np.int32)
+    lp.a_matrix_.value_ = Js.data
+    h = new_highs(highspy, [("presolve", "off")])
+    if h.passModel(lp) == highspy.HighsStatus.kError:
+        return h, scale, "refused by HiGHS passModel"
+    h.run()
+    return h, scale, _status_name(h)
+
+
 def _simplex_dual(J, xl, xu, s_lo, s_hi, grad):
     """The row dual of the linearised LP from the in-house Rust simplex, in the
     slack-form convention of :func:`_lp_dual`; ``(y, value)`` or ``(None, reason)``.
@@ -176,21 +214,51 @@ def _simplex_dual(J, xl, xu, s_lo, s_hi, grad):
 
 def _lp_dual(sf, J, xl, xu, s_lo, s_hi, grad):
     """A candidate row dual of the linearised node LP: ``(y, value, "")`` or
-    ``(None, None, reason)``, from the in-house Rust simplex.
+    ``(None, None, reason)``.
 
-    Any ``y`` is a valid input to the certificate (weak duality), so the source only
-    decides how tight the bound is, never whether it is valid. HiGHS used to be tried
-    first (then a row-equilibrated HiGHS copy, then this); highs-parity P6 measured the
-    Rust simplex alone on every call the in-repo tests make (252 linearised node LPs):
-    it returned a dual on all 252, with an LP value within 3.0e-9 relative of HiGHS's
-    (``docs/dev/data/highs-parity/p6-node-bound-lp/``). ``sf`` (the slack form the
-    certificate reads) is not needed to produce the dual.
+    Any ``y`` is a valid input to the certificate (weak duality), so the sources are
+    tried in order of how good a dual they usually give, and none can make the bound
+    wrong: HiGHS on the slack form ``sf``; HiGHS on a row-equilibrated copy, because
+    HiGHS refuses ``|a_ij| >= 1e15`` outright (#1955's ``1e16`` row left the only node
+    of a two-variable MINLP unbounded); then the in-house Rust simplex, which is also
+    the only source where ``highspy`` is not installed (the browser build).
     """
-    del sf
+    from discopt.solvers.lp_milp_highs import (
+        HighsUnavailable,
+        _new_highs,
+        _pass_model,
+        _status_name,
+        require_highspy,
+    )
+
+    reasons = []
+    try:
+        highspy = require_highspy()
+    except HighsUnavailable:
+        highspy = None
+        reasons.append("highspy is not installed")
+    if highspy is not None:
+        h = _new_highs(highspy, [("presolve", "off")])
+        st, why = _pass_model(h, highspy, sf, integer=False)
+        if st == highspy.HighsStatus.kError:
+            reasons.append(f"HiGHS refused the LP ({why})")
+        else:
+            h.run()
+            name = _status_name(h)
+            if name == "kOptimal":
+                y = np.asarray(h.getSolution().row_dual, dtype=np.float64)
+                return y, float(h.getInfo().objective_function_value), ""
+            reasons.append(f"HiGHS {name}")
+        h, scale, name = _solve_row_equilibrated(highspy, _new_highs, J, xl, xu, s_lo, s_hi, grad)
+        if name == "kOptimal":
+            y = np.asarray(h.getSolution().row_dual, dtype=np.float64) / scale
+            return y, float(h.getInfo().objective_function_value), ""
+        reasons.append(f"row-equilibrated HiGHS {name}")
     y, val = _simplex_dual(J, xl, xu, s_lo, s_hi, grad)
     if y is not None:
         return y, val, ""
-    return None, None, "linearised node LP: " + str(val)
+    reasons.append(str(val))
+    return None, None, "linearised node LP: " + "; ".join(reasons)
 
 
 def convex_node_safe_bound(
