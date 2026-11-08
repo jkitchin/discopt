@@ -1,7 +1,8 @@
 """MPS/LP -> discopt Model loader for the LP/MILP routing panel.
 
-Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md``. HiGHS reads the instance
-(``readModel`` -> ``getLp``); the arrays are written as a *text* AMPL ``.nl``
+Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md``. An MPS instance is read by
+discopt's own reader (``discopt._mps``, an exact reproduction of HiGHS's ``readModel``
+-> ``getLp``; other formats still by HiGHS); the arrays are written as a *text* AMPL ``.nl``
 (integer columns last, as the format requires) and loaded with
 ``discopt.modeling.core.from_nl`` -- the same parser user ``.nl`` files take.
 
@@ -41,6 +42,12 @@ class LinearInstance:
 
 
 def read_instance(path: str) -> LinearInstance:
+    """The instance in ``path``. MPS files (``.mps``, ``.mps.gz``) are read by
+    discopt's own reader (``discopt._mps``, an exact reproduction of HiGHS's, so
+    every panel sees the identical model); other formats (``.lp``) still go
+    through HiGHS."""
+    if path.endswith((".mps", ".mps.gz", ".MPS")):
+        return _read_mps_inhouse(path)
     import highspy
 
     h = highspy.Highs()
@@ -76,6 +83,30 @@ def read_instance(path: str) -> LinearInstance:
         col_lo=np.asarray(lp.col_lower_, float),
         col_hi=np.asarray(lp.col_upper_, float),
         is_int=is_int,
+    )
+
+
+def _read_mps_inhouse(path: str) -> LinearInstance:
+    from discopt._mps import read_mps
+
+    d = read_mps(path)
+    if d["has_hessian"]:
+        raise ValueError(f"{path}: quadratic objective is out of scope for the LP/MILP panel")
+    integ = d["integrality"]
+    if np.any((integ != 0) & (integ != 1)):
+        j = int(np.flatnonzero((integ != 0) & (integ != 1))[0])
+        raise ValueError(f"{path}: column {j} has unsupported type {int(integ[j])}")
+    return LinearInstance(
+        name=os.path.splitext(os.path.basename(path))[0],
+        c=d["c"],
+        offset=d["offset"],
+        maximize=d["maximize"],
+        A=d["A"].tocsr(),
+        row_lo=d["row_lo"],
+        row_hi=d["row_hi"],
+        col_lo=d["col_lb"],
+        col_hi=d["col_ub"],
+        is_int=integ == 1,
     )
 
 

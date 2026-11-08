@@ -15,6 +15,7 @@ mod decomp_bindings;
 mod expr_bindings;
 mod lp_bindings;
 mod milp_handle;
+mod mps_bindings;
 mod nl_bindings;
 mod sat_bindings;
 mod spatial_bindings;
@@ -39,6 +40,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
+    m.add_function(wrap_pyfunction!(mps_bindings::read_mps_text, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::crossover_to_vertex_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::recover_basis_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::gomory_cuts_py, m)?)?;

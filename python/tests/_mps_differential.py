@@ -84,7 +84,8 @@ def differences(ours: dict, ref: dict) -> list[str]:
         return out
     for k in ("c", "col_lb", "col_ub", "row_lo", "row_hi", "integrality"):
         a, b = np.asarray(ours[k]), np.asarray(ref[k])
-        if a.shape != b.shape or not np.array_equal(a, b):
+        # NaN survives a read on both sides (HiGHS keeps a NaN cost): equal there.
+        if a.shape != b.shape or not np.array_equal(a, b, equal_nan=a.dtype.kind == "f"):
             bad = np.flatnonzero(a != b) if a.shape == b.shape else []
             out.append(f"{k}: differs at {list(bad[:5])} (shape {a.shape} vs {b.shape})")
     for k in ("col_names", "row_names"):
@@ -92,6 +93,7 @@ def differences(ours: dict, ref: dict) -> list[str]:
             out.append(f"{k} differ")
     pa, ia, va = _canon_matrix(ours["A"])
     pb, ib, vb = _canon_matrix(ref["A"])
-    if not (np.array_equal(pa, pb) and np.array_equal(ia, ib) and np.array_equal(va, vb)):
+    same = np.array_equal(pa, pb) and np.array_equal(ia, ib)
+    if not (same and np.array_equal(va, vb, equal_nan=True)):
         out.append(f"A differs (nnz {va.size} vs {vb.size})")
     return out

@@ -43,13 +43,14 @@ HiGHS-less install gets today.
 | 8 | Convex **node bound** LP (`convex_node_bound`, #2067) | HiGHS, then the Rust simplex | Rust simplex, automatically (catches the error, records why) | none needed |
 | 9 | `solver._highs_available()` WASM fallbacks (POUNCE `primal_infeasible` corroboration, multiplier-free node bound) | HiGHS path | in-house simplex / box-only bound (#1537) | none needed |
 | 10 | **IIS** engine (`compute_iis(iis_engine=...)`, `DISCOPT_IIS_ENGINE`) | **Rust** (default since P6.4, 2026-11-07) | unaffected; `iis_engine="highs"` opt-in raises | done (P6.4). The P3.2 residual (big-M `INT_TOL`, pigeonhole) is accepted; tests whose budgets were tuned on HiGHS pin `=highs` |
-| 11 | `discopt.mipcc` (`read_mps`, the HiGHS checker) | HiGHS | `MissingHighsError` naming the feature | an in-house MPS reader; the checker is a HiGHS-specific tool by design |
+| 11 | `discopt.mipcc`: the MPS **reader** | in-house since P6 (`discopt._mps`, Rust `discopt_core::mps`, an exact reproduction of HiGHS's `readModel` -> `getLp`: 176/176 files identical, `docs/dev/data/highs-parity/mps_reader/`) | unaffected (the reader); the post-answer checker-settings re-solve, which imitates the competition's HiGHS checker, is skipped with a message and the doubly proven answer stands | done (reader). The checker is HiGHS-specific by design |
 | 12 | Opt-in `milp_solver="highs"` for MIP-NLP / OA (`lp_backend.get_milp_solver(backend="highs")`) | opt-in only | raises when asked | stays an opt-in |
 
 ## What a HiGHS-less install needs, today
 
 Set `DISCOPT_LP_MILP_BACKEND=rust`, `DISCOPT_LP_STD_ENGINE=rust` and
 `DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex` (or `DISCOPT_CONVEX_MINLP_ROUTE=0`), and pass
-`iis_engine="rust"`. Reaches 6–9 already work. #11 has no substitute. P6.2 adds the CI
+`iis_engine="rust"`. Reaches 6–9 already work. #11's reader is in-house (P6); only its
+HiGHS-imitating checker step is skipped. P6.2 adds the CI
 lane that runs the corpus and `pytest -m smoke` with `highspy` uninstalled, which turns
 this table into a measured one.

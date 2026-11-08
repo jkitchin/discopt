@@ -10,6 +10,7 @@ pub mod decomp;
 pub mod expand;
 pub mod expr;
 pub mod lp;
+pub mod mps;
 pub mod nl_parser;
 pub mod nl_writer;
 pub mod numeric;
