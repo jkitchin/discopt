@@ -303,39 +303,6 @@ def test_both_entry_points_produce_the_same_standard_form(row_logicals):
 # them across under a ``milp_driver/`` namespace.
 
 
-def test_merge_engine_stats_adds_the_drivers_counters():
-    from discopt.modeling.core import SolveResult
-    from discopt.solver import _merge_engine_stats
-
-    res = SolveResult(status="time_limit", node_count=5183)
-    out = _merge_engine_stats(res, {"milp_driver/iters": 106819.0, "milp_driver/nodes": 100021.0})
-    assert out.solver_stats == {"milp_driver/iters": 106819.0, "milp_driver/nodes": 100021.0}
-    # Instrumentation only -- nothing about the reported solution moves.
-    assert out.status == res.status
-    assert out.node_count == res.node_count
-    assert out.objective == res.objective
-    assert out.bound == res.bound
-
-
-def test_merge_engine_stats_never_overwrites_the_fallbacks_own_counters():
-    from discopt.modeling.core import SolveResult
-    from discopt.solver import _merge_engine_stats
-
-    res = SolveResult(status="time_limit", solver_stats={"cuts/gomory": 7.0})
-    out = _merge_engine_stats(res, {"cuts/gomory": 99.0, "milp_driver/iters": 12.0})
-    assert out.solver_stats["cuts/gomory"] == 7.0, "the fallback's own count must win"
-    assert out.solver_stats["milp_driver/iters"] == 12.0
-
-
-@pytest.mark.parametrize("empty", [None, {}])
-def test_merge_engine_stats_is_a_no_op_when_the_driver_never_ran(empty):
-    from discopt.modeling.core import SolveResult
-    from discopt.solver import _merge_engine_stats
-
-    res = SolveResult(status="optimal", objective=1.0)
-    assert _merge_engine_stats(res, empty) is res
-
-
 def test_lp_iters_sums_both_driver_invocations_when_the_reentry_is_adopted(monkeypatch):
     """``lp/iters`` must accumulate wherever ``node_count`` accumulates.
 

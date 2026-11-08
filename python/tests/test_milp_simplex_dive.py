@@ -107,10 +107,11 @@ def _int_idx_of(args):
 
 
 class TestFeasibilityGate:
-    def test_gate_defers_on_infeasible_result(self, monkeypatch):
+    def test_gate_refuses_an_infeasible_result(self, monkeypatch):
         """If the Rust whole-search returns a point that violates the model's
-        constraints, ``_solve_milp_simplex`` returns None (defers) rather than
-        reporting a wrong 'optimal'."""
+        constraints, ``_solve_milp_simplex`` reports ``unknown`` with no point and no
+        bound rather than a wrong 'optimal' (it used to defer to the retired Python
+        MILP tree)."""
         import time
 
         import discopt._rust as _rust
@@ -127,7 +128,8 @@ class TestFeasibilityGate:
 
         monkeypatch.setattr(_rust, "solve_milp_csc_py", _lying)
         res = S._solve_milp_simplex(m, 30.0, 1e-9, 1000, time.perf_counter())
-        assert res is None  # infeasible "optimal" rejected by the gate
+        assert res is not None and res.status == "unknown"  # rejected by the gate
+        assert res.x is None and res.bound is None and not res.gap_certified
 
     def test_gate_accepts_feasible_result(self):
         """A genuinely feasible/optimal simplex result passes the gate."""

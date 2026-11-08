@@ -46,13 +46,16 @@ def test_big_m_is_certified_on_the_rust_route_with_entry_tightening(monkeypatch,
 
 
 @pytest.mark.smoke
-def test_without_the_flag_the_case_still_reaches_the_tree(monkeypatch):
-    """The legacy path, until the flag graduates: the deferral is counted."""
+def test_without_the_flag_the_engine_reports_it_uncertified(monkeypatch):
+    """With the flag off the engine's certificate is withdrawn (#2163) and, since the
+    Python MILP tree was retired, that honest uncertified answer is what is returned:
+    no bound, never a false certificate."""
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.setenv("DISCOPT_MILP_RUST_COEF_ENTRY", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _bigm(1e12).solve(time_limit=30)
-    st = r.solver_stats or {}
-    assert r.status == "optimal" and r.objective == pytest.approx(-7.0, abs=1e-9)
-    assert st.get("route/python_milp_tree_entry") == 10.0, st  # withdrawn_bound_2163
+    assert r.algorithm_route.startswith("native-milp"), r.algorithm_route
+    assert r.status == "feasible" and not r.gap_certified, r.status
+    assert r.bound is None
+    assert r.objective >= -7.0 - 1e-9  # a feasible point, never below the optimum

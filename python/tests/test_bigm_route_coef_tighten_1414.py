@@ -232,43 +232,6 @@ FLAG_OFF_CASES = [
 ]
 
 
-def test_markers_present_for_the_three_flag_off_fixes():
-    """§8 load gate for the flag-OFF fixes, asserted on the SOURCE.
-
-    Without this, a run against a tree missing any of the three would exercise
-    the old code and the end-to-end assertions below would be the only signal.
-    """
-    src = SOLVER_SRC.read_text()
-    tree_src = (
-        Path(__file__).parents[2] / "crates" / "discopt-core" / "src" / "bnb" / "tree_manager.rs"
-    ).read_text()
-    assert "_off = [j for j in int_idx if float(x[j]) != float(round(x[j]))]" in src, (
-        "#1414 marker absent: the root dive still returns a tolerance-integral "
-        "point unrounded, with the relaxation objective."
-    )
-    assert "_integral_claim_branch_col" in src, (
-        "#1414 marker absent: the node-level unpromotable-claim guard."
-    )
-    assert "tree.set_branch_hints(" in src and "_unpromotable_hints" in src, (
-        "#1414 marker absent: the branch hint on the offending column."
-    )
-    assert "x[idx] = snapped" in src, (
-        "#1414 marker absent: `_pounce_snap_incumbent` still trusts the engine's "
-        "value for a column it pinned."
-    )
-    assert "let actionable = if frac > 1e-5 && frac < 1.0 - 1e-5 {" in tree_src, (
-        "#1414 marker absent: process_evaluated still discards an explicit branch "
-        "hint whose value sits inside the integrality tolerance."
-    )
-    assert "if _dev == 0.0:" in src, (
-        "#1414 marker absent: `_pounce_snap_incumbent`'s repair is no longer gated "
-        "on the engine having missed a pin. Ungated, it recomputes the objective on "
-        "EVERY snap, which perturbs the reported value in its last digits on the "
-        "default path (measured: -6.9999999994785931 vs the engine's "
-        "-6.9999999994786322) -- a bound-neutrality violation under CLAUDE.md §5."
-    )
-
-
 @pytest.mark.parametrize("M,ub", FLAG_OFF_CASES)
 def test_rust_route_certifies_the_true_optimum_with_the_flag_off(monkeypatch, M, ub):
     """The DEFAULT configuration certifies the optimum across the M range."""

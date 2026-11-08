@@ -14,9 +14,7 @@ from __future__ import annotations
 import itertools
 
 import discopt.modeling as dm
-import discopt.solver as S
 import numpy as np
-import pytest
 from discopt._relax.cover_cuts import separate_clique_cuts
 
 
@@ -60,22 +58,6 @@ class TestSeparation:
                     )  # never excludes a feasible point
 
 
-class TestExtraction:
-    def test_extract_clique_edges(self):
-        m = dm.Model("conf")
-        x = [m.binary(f"x{i}") for i in range(4)]
-        m.minimize(-(x[0] + x[1] + x[2] + x[3]))
-        m.subject_to(x[0] + x[1] <= 1)
-        m.subject_to(x[1] + x[2] <= 1)
-        m.subject_to(x[2] + x[3] <= 1)
-        edges = S._extract_clique_edges(m)
-        assert {frozenset(e) for e in edges} >= {
-            frozenset({0, 1}),
-            frozenset({1, 2}),
-            frozenset({2, 3}),
-        }
-
-
 def _triangle_set_packing():
     m = dm.Model("tri")
     x = [m.binary(f"x{i}") for i in range(3)]
@@ -84,16 +66,3 @@ def _triangle_set_packing():
     m.subject_to(x[0] + x[2] <= 1)
     m.subject_to(x[1] + x[2] <= 1)
     return m
-
-
-class TestEndToEnd:
-    def test_clique_cut_reduces_nodes_and_preserves_optimum(self, monkeypatch):
-        pytest.importorskip("pounce")
-        r_with = _triangle_set_packing().solve(time_limit=60)
-        monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
-        r_without = _triangle_set_packing().solve(time_limit=60)
-
-        assert r_with.status == "optimal" and r_without.status == "optimal"
-        assert abs(r_with.objective - r_without.objective) < 1e-4
-        assert abs(r_with.objective - (-1.0)) < 1e-4  # at most one of the three
-        assert r_with.node_count <= r_without.node_count

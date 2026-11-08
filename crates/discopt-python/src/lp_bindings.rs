@@ -1464,11 +1464,16 @@ thread_local! {
 /// gets that call's numbers (Python-MILP-tree retirement: the stats the Python tree
 /// reported as ``cuts/*`` and ``branching/strong_probe_lps``).
 #[pyfunction]
-#[pyo3(name = "milp_last_solve_stats")]
+///
+/// `take=True` also clears them, so a caller can clear before its call and be sure
+/// what it reads afterwards came from that call (a stubbed driver leaves `None`).
+#[pyo3(name = "milp_last_solve_stats", signature = (take=false))]
 pub fn milp_last_solve_stats_py(
     py: Python<'_>,
+    take: bool,
 ) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
-    let Some((rows, probes, bh_calls, bh_raised)) = LAST_MILP_STATS.with(|c| c.get()) else {
+    let got = LAST_MILP_STATS.with(|c| if take { c.take() } else { c.get() });
+    let Some((rows, probes, bh_calls, bh_raised)) = got else {
         return Ok(None);
     };
     let d = pyo3::types::PyDict::new(py);

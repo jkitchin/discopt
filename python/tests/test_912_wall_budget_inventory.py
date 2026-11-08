@@ -461,11 +461,6 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "min(4.0, max(_DEADLINE_NODE_FLOOR_S, _deadline - time.perf_counter()))",
         "residual",
     ),
-    (
-        "solver.py",
-        "min(30.0, max(0.5, time_limit - (time.perf_counter() - t_start)))",
-        "residual",
-    ),
     # AMP's #875 root-setup NBT share, and the surrogate driver's local refine.
     (
         "solvers/amp.py",
@@ -486,16 +481,6 @@ _SLICE_CATEGORY = {(p, s): c for p, s, c in KNOWN_SLICES}
 
 # (module-relative path, source line, category). See the module docstring.
 KNOWN: tuple[tuple[str, str, str], ...] = (
-    # highs-parity P0.7: ``_solve_milp_bb`` checks the caller's own ``time_limit``
-    # before each node of a batch (not once per batch), and requeues the nodes it did
-    # not evaluate with their pop-time bound -- 120 s ran 141-147 s before, 120-121 s
-    # after. The clock decides only WHEN to stop; which nodes a run that finishes
-    # evaluates, and in what order, does not depend on it. ``contract``, like #1624.
-    (
-        "solver.py",
-        "if i > 0 and time.perf_counter() - t_start >= time_limit:",
-        "contract",
-    ),
     # #1624: the convex-route probe classifies under the caller's own deadline,
     # so classification stops when the caller's time_limit is spent -- the
     # ``contract`` role. The probe's work is bounded by its own budget, not this.
@@ -679,11 +664,6 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     (
         "solver.py",
         "if not _root_incumbent and (time.perf_counter() - t_start) < time_limit:",
-        "contract",
-    ),
-    (
-        "solver.py",
-        "if time.perf_counter() - t_start >= time_limit:",
         "contract",
     ),
     (
@@ -1054,11 +1034,13 @@ def test_carved_slice_residual_count_is_visible():
     12 -> 10 (#1917): the two local-branching sub-MIP slices, spatial and NLP-BB,
     routed through ``_role2_slice`` after GDPlib ``positioning`` showed them
     deciding the tree of a certifying ``deterministic`` solve.
+    10 -> 9 (Python-MILP-tree retirement): the tree's 30 s node-recovery slice went
+    with ``_solve_milp_bb``.
     """
     residual = sorted(k for k, c in _SLICE_CATEGORY.items() if c == "residual")
-    assert len(residual) == 10, (
+    assert len(residual) == 9, (
         f"the carved-slice residual inventory changed ({len(residual)} entries, "
-        "expected 10). If you routed one through _role2_*, drop it from "
+        "expected 9). If you routed one through _role2_*, drop it from "
         "KNOWN_SLICES and lower this number; if you added one, route it "
         "instead.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
     )

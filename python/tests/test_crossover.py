@@ -12,7 +12,6 @@ interior point.
 from __future__ import annotations
 
 import discopt.modeling as dm
-import discopt.solver as S
 import numpy as np
 import pytest
 from discopt._relax.cover_cuts import separate_cover_cuts
@@ -108,52 +107,3 @@ class TestCrossoverProperties:
             assert np.allclose(A @ xv, b, atol=1e-5)
             assert np.all(xv >= -1e-6) and np.all(xv <= 1 + 1e-6)
             assert _is_vertex(xv, A, c, xl, xu)
-
-
-class TestEndToEnd:
-    def _sym_knapsack(self):
-        m = dm.Model("sym")
-        xs = [m.binary(f"x{i}") for i in range(4)]
-        m.minimize(-sum(16 * x for x in xs))
-        m.subject_to(sum(5 * x for x in xs) <= 9)
-        return m
-
-    def test_crossover_makes_cuts_bite_on_symmetric_problem(self, monkeypatch):
-        pytest.importorskip("pounce")
-        import time as _time
-
-        # This validates the Python self-hosted B&B crossover + cover-cut
-        # machinery (_solve_milp_bb with IPM nodes), where the interior relaxation
-        # point needs crossover for cover cuts to bite. That path is now only a
-        # *fallback* for the default MILP route (the Rust whole-search is
-        # primary), so call it directly to keep the _root_cover_cut_loop
-        # monkeypatch meaningful. With crossover + cuts the symmetric knapsack
-        # solves at/near the root; without cuts it needs more nodes.
-        def _run():
-            return S._solve_milp_bb(
-                self._sym_knapsack(),
-                60.0,
-                1e-4,
-                16,
-                "best_first",
-                100_000,
-                _time.perf_counter(),
-                prefer_pounce=True,
-                node_engine="pounce",
-            )
-
-        r_cut = _run()
-        monkeypatch.setattr(
-            S,
-            "_root_cover_cut_loop",
-            # #1514: the loop returns (lp_data, n_cuts, by_source). A 2-tuple stub
-            # used to raise ValueError inside a swallowing ``except``, so this arm
-            # silently ran with no cuts for a different reason than it claims.
-            lambda ld, *a, **k: (ld, 0, {"cover_clique": 0, "gomory": 0, "mir": 0}),
-        )
-        r_nocut = _run()
-
-        assert r_cut.status == "optimal" and r_nocut.status == "optimal"
-        assert abs(r_cut.objective - r_nocut.objective) < 1e-4
-        assert abs(r_cut.objective - (-16.0)) < 1e-3
-        assert r_cut.node_count < r_nocut.node_count  # strictly fewer: cuts now bite

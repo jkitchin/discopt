@@ -76,7 +76,6 @@ def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
 
     highs = _spy(monkeypatch, "_solve_milp_highs")
     engine = _spy(monkeypatch, "_solve_milp_simplex")
-    tree = _spy(monkeypatch, "_solve_milp_bb")
     drv: list = []
     real = _rust.solve_milp_csc_py
 
@@ -91,7 +90,7 @@ def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
         milp_cuts=False,
         branching_rule="most_fractional",
     )
-    assert highs == [] and tree == []
+    assert highs == []
     assert len(engine) == 1
     assert engine[0][1]["root_cuts"] is False
     assert engine[0][1]["branching_rule"] == "most_fractional"
@@ -107,9 +106,7 @@ def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
 
 def test_default_route_is_unchanged(monkeypatch):
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
-    tree = _spy(monkeypatch, "_solve_milp_bb")
     res = _knapsack().solve()
-    assert tree == []
     assert res.node_count == 0 or res.algorithm_route.startswith("highs-milp")
     assert (res.solver_stats or {}).get("route/lp_milp_backend") == 1.0
 
@@ -407,29 +404,3 @@ def test_tree_options_on_a_model_dispatched_as_an_lp_warn(monkeypatch):
         res = _lp().solve(milp_backend="native", branching_rule="strong")
     assert len(calls) > 1
     assert res.status == "optimal"
-
-
-def test_node_callback_reports_no_bound_for_a_batch_without_a_relaxation():
-    """Review 5: an all-sentinel batch used to report node_bound ~ +-1e30 and the
-    box midpoint as x_relaxation."""
-
-    class _Tree:
-        def stats(self):
-            return {"total_nodes": 3, "global_lower_bound": 1.0, "gap": 0.5}
-
-        def incumbent(self):
-            return None
-
-    seen = []
-    m = _knapsack(n=4)
-    lbs = np.full(2, S._INFEASIBILITY_SENTINEL)
-    sols = np.full((2, 6), 0.5)
-    S._fire_milp_node_callback(lambda c, mm: seen.append(c), m, _Tree(), lbs, sols, 4, True, 0.0)
-    assert len(seen) == 1
-    assert seen[0].node_bound is None and seen[0].x_relaxation is None
-    # A batch with one real bound still reports it (and its point), in user sense.
-    lbs[1] = -7.0
-    sols[1, :4] = [1.0, 0.0, 1.0, 0.0]
-    S._fire_milp_node_callback(lambda c, mm: seen.append(c), m, _Tree(), lbs, sols, 4, True, 0.0)
-    assert seen[1].node_bound == pytest.approx(7.0)  # maximize: internal -obj
-    assert seen[1].x_relaxation.tolist() == [1.0, 0.0, 1.0, 0.0]

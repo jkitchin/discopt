@@ -1,19 +1,16 @@
 """#1959: the lift race's lift slice ends when the MILP engine stalls with no incumbent.
 
-Inside the #1940 race's opening lift slice, the native MILP engine's #291 stall
-guard deferring with no incumbent used to hand the rest of the slice to the Python
-MILP tree on the lifted model. Measured, that tree never produced an incumbent or a
-certificate there (``scripts/panel_1959_race_stall_exit.py`` counts it), so on every
-instance where the lift loses the race the slice ran its full 5 s for nothing.
-``DISCOPT_IPX_RACE_STALL_EXIT`` (default ON, ``=0`` opt-out) ends the slice at the
-deferral and keeps the engine's valid bound. These tests pin:
+Inside the #1940 race's opening lift slice, the native MILP engine's #291 stall guard
+deferring with no incumbent used to hand the rest of the slice to the Python MILP tree
+on the lifted model, which never produced an incumbent or a certificate there
+(``scripts/panel_1959_race_stall_exit.py``). ``DISCOPT_IPX_RACE_STALL_EXIT`` ended the
+slice at the deferral. Since the Python MILP tree was retired, the engine itself returns
+its no-incumbent result with its valid bound at the end of its budget, so the flag and
+its branch are gone. These tests pin:
 
 * that only the two opening SLICES are marked as such, never the continuation;
-* that a stall inside a lift slice skips the Python tree and returns the engine's
-  bound, and that it does not under the opt-out, outside a slice, or in an
-  ordinary solve (an engine stub decides the stall, so no clock is involved);
-* on the #1940 dense integer QP, that the race still certifies the optimum and
-  the lift slice now ends on the stall.
+* on the #1940 dense integer QP, that the race still certifies the optimum and the
+  lift slice ends on the engine's own no-incumbent result.
 """
 
 from __future__ import annotations
@@ -30,7 +27,7 @@ from discopt.modeling.core import from_nl
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
-STALL_ROUTE = "ended on the engine's stall"
+STALL_ROUTE = "no incumbent; searched the whole budget"
 
 
 def _nl(name):
@@ -39,15 +36,6 @@ def _nl(name):
         if os.path.exists(p):
             return from_nl(p)
     raise AssertionError(f"{name}.nl not found")
-
-
-@pytest.mark.smoke
-def test_default_on_with_an_opt_out(monkeypatch):
-    monkeypatch.delenv("DISCOPT_IPX_RACE_STALL_EXIT", raising=False)
-    assert S._ipx_race_stall_exit_enabled() is True
-    for off in ("0", "false", "no", "off"):
-        monkeypatch.setenv("DISCOPT_IPX_RACE_STALL_EXIT", off)
-        assert S._ipx_race_stall_exit_enabled() is False, off
 
 
 def _fake(obj, bound, certified):
@@ -88,72 +76,6 @@ def test_only_the_opening_slices_are_marked_as_slices(monkeypatch):
     assert S._IPX_RACE_IN_SLICE.get() is False, "the mark leaked out of the race"
 
 
-def _stalling_engine(monkeypatch, bound):
-    """Make the MILP engine defer as its #291 stall guard does: no result, a bound."""
-    calls = {"engine": 0, "pytree": 0}
-    real_bb = S._solve_milp_bb
-
-    def engine(*a, deferred=None, **k):
-        calls["engine"] += 1
-        if deferred is not None:
-            deferred["bound"] = bound
-            deferred["stats"] = {"milp_driver/iters": 50.0, "milp_driver/nodes": 7.0}
-        return None
-
-    def pytree(*a, **k):
-        calls["pytree"] += 1
-        return real_bb(*a, **k)
-
-    monkeypatch.setattr(S, "_solve_milp_simplex", engine)
-    monkeypatch.setattr(S, "_solve_milp_bb", pytree)
-    return calls
-
-
-def _solve_as(arm, in_slice):
-    tok_arm = S._IPX_RACE_ARM.set(arm)
-    tok_slice = S._IPX_RACE_IN_SLICE.set(in_slice)
-    try:
-        return S.solve_model(_nl("prob03"), time_limit=60.0, incumbent_time_extension=0.0)
-    finally:
-        S._IPX_RACE_IN_SLICE.reset(tok_slice)
-        S._IPX_RACE_ARM.reset(tok_arm)
-
-
-@pytest.mark.smoke
-def test_a_stall_in_a_lift_slice_ends_the_slice_with_the_engine_bound(monkeypatch):
-    monkeypatch.delenv("DISCOPT_IPX_RACE_STALL_EXIT", raising=False)
-    calls = _stalling_engine(monkeypatch, bound=3.0)  # prob03's optimum is 10
-    r = _solve_as("lift", True)
-    assert calls == {"engine": 1, "pytree": 0}
-    assert r.status == "time_limit" and r.objective is None and not r.gap_certified
-    assert r.bound == pytest.approx(3.0)
-    assert r.node_count == 7
-    assert STALL_ROUTE in r.algorithm_route
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize(
-    "arm,in_slice,env",
-    [
-        ("lift", True, "0"),  # the opt-out keeps the legacy fallback
-        ("lift", False, None),  # the continuation keeps it too
-        (None, False, "0"),  # an ordinary solve (race off, so the lift is adopted)
-    ],
-    ids=["opt-out", "continuation", "ordinary-solve"],
-)
-def test_the_python_tree_still_runs_outside_a_lift_slice(monkeypatch, arm, in_slice, env):
-    monkeypatch.delenv("DISCOPT_IPX_RACE_STALL_EXIT", raising=False)
-    if env is not None:
-        monkeypatch.setenv("DISCOPT_IPX_RACE_STALL_EXIT", env)
-    if arm is None:
-        monkeypatch.setenv("DISCOPT_IPX_RACE", "0")
-    calls = _stalling_engine(monkeypatch, bound=3.0)
-    r = _solve_as(arm, in_slice)
-    assert calls == {"engine": 1, "pytree": 1}
-    assert STALL_ROUTE not in (r.algorithm_route or "")
-    assert r.status == "optimal" and r.objective == pytest.approx(10.0)
-
-
 def _dense_qp(n, seed):
     rng = np.random.default_rng(seed)
     m = dm.Model(f"dense_qp_n{n}_s{seed}")
@@ -173,7 +95,6 @@ def test_dense_qp_race_ends_its_lift_slice_on_the_stall_and_certifies(monkeypatc
     same optimum as before."""
     monkeypatch.delenv("DISCOPT_IPX_CHEAP_FIRST", raising=False)
     monkeypatch.delenv("DISCOPT_IPX_RACE", raising=False)
-    monkeypatch.delenv("DISCOPT_IPX_RACE_STALL_EXIT", raising=False)
     slices = []
     real = S.solve_model
 

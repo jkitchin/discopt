@@ -296,3 +296,19 @@ also go is **unverified**: the spatial path may use them.
   backend seeded the root LP bound even under a ~zero budget (#15); at `time_limit=1e-6`
   the engine returns no bound. `"auto"` has always been the engine, so AMP's default
   never had that seeding; it was `test_milp_bb_pounce_no_jax_ipm.py`, now removed.
+- **2026-11-08, step 12: the tree is deleted.** `_solve_milp_bb` (~1,200 lines) and every
+  helper only it used are gone from `solver.py` (net -2,620 lines there, -3,900 with tests):
+  the root cover/clique/MIR cut loop, `_root_dive`, Python reduced-cost fixing, the POUNCE
+  node-LP path, the branching-hint and node-callback adapters, `_merge_engine_bound` /
+  `_merge_engine_stats`, the GMI gate (`GOMORY_CUTS_ENABLED`). Every remaining hand-off
+  now returns the engine's own result: the #291 stall returns no incumbent with its valid
+  bound (the `DISCOPT_MILP_NO_STALL_TREE=0` opt-out and `DISCOPT_IPX_RACE_STALL_EXIT`, whose
+  only job was to skip the tree, are removed); a withdrawn certificate (#2163) returns the
+  verified incumbent `feasible` with no bound; a point that fails the model's rows returns
+  `unknown` with neither point nor bound (`route/milp_engine_point_refused`). A decline
+  for a missing binding or nonlinear terms on the MILP route raises (a routing defect).
+  `DISCOPT_MILP_ENGINE` (the opt-out to the tree) is removed. Tests of tree internals are
+  deleted; tests of user-visible properties are re-pointed at the engine. **Known gap until
+  `DISCOPT_MILP_RUST_COEF_ENTRY` is decided:** the #1414 witness at M >= 1e12 on the Rust
+  route returns the honest `feasible 0.0` uncertified where the tree certified -7
+  (`test_bigm_route_coef_tighten_1414.py`); with the entry flag on it certifies.

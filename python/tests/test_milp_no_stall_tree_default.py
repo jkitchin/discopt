@@ -42,7 +42,7 @@ def _model():
 def test_engine_gets_the_stall_extension_and_open_default_box(monkeypatch, flags_on):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     if not flags_on:
-        monkeypatch.setenv("DISCOPT_MILP_NO_STALL_TREE", "0")
+        # The no-stall continuation has no opt-out since the tree was deleted.
         monkeypatch.setenv("DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX", "0")
     calls = _spy(monkeypatch)
     r = _model().solve(time_limit=30)
@@ -56,7 +56,7 @@ def test_engine_gets_the_stall_extension_and_open_default_box(monkeypatch, flags
     assert r.objective == pytest.approx(5.5, abs=1e-6)  # x = 2, y = 1.5
     assert calls, "the Rust MILP engine never ran"
     a, kw = calls[0]
-    assert ("extend_no_incumbent_s" in kw) is flags_on, kw.keys()
+    assert "extend_no_incumbent_s" in kw, kw.keys()
     x_u = np.asarray(a[8])
     y_ub = float(x_u[1])
     if flags_on:

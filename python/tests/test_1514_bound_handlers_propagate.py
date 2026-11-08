@@ -215,21 +215,6 @@ def test_box_fbbt_abstains_only_on_missing_repr(monkeypatch):
     assert len(calls) == 2
 
 
-def test_clique_extraction_declines_only_on_missing_repr(monkeypatch):
-    import discopt._rust as rust
-
-    m = _bilinear()
-    calls: list[int] = []
-    monkeypatch.setattr(
-        rust, "model_to_repr", _counting_raiser(lambda: ValueError("no repr"), calls)
-    )
-    assert solver._extract_clique_edges(m) == []
-    monkeypatch.setattr(rust, "model_to_repr", _counting_raiser(lambda: _Boom("clq"), calls))
-    with pytest.raises(_Boom, match="clq"):
-        solver._extract_clique_edges(m)
-    assert len(calls) == 2
-
-
 # The solve-path structure-cut tests (a recognizer defect fails the solve; its
 # documented declines skip) went with the auto-engaged pass in #1965: the solver
 # no longer calls the recognizer.
@@ -391,34 +376,6 @@ def test_warn_fallback_once_is_once_per_site_per_solve(caplog):
     caplog.clear()
     _fake_solve()
     assert len(_warnings_from(caplog, "site A failed")) == 1
-
-
-def test_pounce_cut_loop_failure_warns_once(monkeypatch, caplog):
-    """A kept site end to end: the MILP cut loop's POUNCE seed solve."""
-    from discopt.solvers import lp_pounce
-
-    if not lp_pounce.POUNCE_AVAILABLE:
-        pytest.skip("POUNCE not installed")
-    caplog.set_level(logging.DEBUG, logger="discopt.solver")
-    calls: list[int] = []
-    monkeypatch.setattr(lp_pounce, "solve_lp", _counting_raiser(lambda: _Boom("ipm"), calls))
-
-    class _LP:
-        c = np.array([1.0, 1.0])
-        A_eq = np.array([[1.0, 1.0]])
-        b_eq = np.array([1.0])
-        x_l = np.array([0.0, 0.0])
-        x_u = np.array([1.0, 1.0])
-
-    @solver._scoped_fallback_warnings
-    def _run():
-        for _ in range(2):
-            assert solver._cut_loop_relaxation_x(_LP(), prefer_pounce=True) is None
-
-    _run()
-    assert len(calls) == 2
-    warned = _warnings_from(caplog, "root cut loop: POUNCE LP failed")
-    assert len(warned) == 1 and "_Boom" in warned[0].getMessage()
 
 
 def test_undifferentiable_model_falls_back_with_one_warning(caplog):
