@@ -19041,10 +19041,31 @@ def solve_model(
                         else f"milp_backend={_lpm_backend!r}"
                     )
                     _bb_res.algorithm_route = f"milp-tree: discopt MILP branch and bound ({_why})"
-                return _merge_engine_stats(
+                # Retirement step 1: why this MILP reached the Python tree.
+                if not _want_engine:
+                    _tree_why = (
+                        "native_backend"
+                        if _lpm_backend == "native"
+                        else "node_callback"
+                        if _observe_tree
+                        else "lagrangian_bound"
+                        if lagrangian_bound
+                        else "abs_gap_tighter_than_rel"
+                        if (abs_gap_tolerance is not None and abs_gap_tol < gap_tolerance)
+                        else "engine_off"
+                    )
+                else:
+                    _tree_why = str(_deferred.get("reason", "unknown"))
+                logger.info("MILP solved on the Python MILP tree: %s", _tree_why)
+                _bb_res = _merge_engine_stats(
                     _merge_engine_bound(_bb_res, _engine_bound, model),
                     _deferred.get("stats"),
                 )
+                _st = dict(_bb_res.solver_stats or {})
+                _st["route/python_milp_tree_entry"] = float(_PY_MILP_TREE_REASONS.get(_tree_why, 0))
+                _st["route/python_milp_tree_engine_had_incumbent"] = float("incumbent" in _deferred)
+                _bb_res.solver_stats = _st
+                return _bb_res
             # #2157: a ``cut_callback`` that is the Anderson ideal-ReLU separator
             # (``NNFormulation(..., ideal_cuts=True).cut_callback``) is separated
             # natively in Rust instead of moving the MILP to the Python spatial
@@ -38730,6 +38751,27 @@ def _lp_backend() -> str:
     return "rust"
 
 
+#: Why a MILP reached the Python MILP tree (``_solve_milp_bb``), recorded as
+#: ``solver_stats["route/python_milp_tree_entry"]`` (the code) so a panel can count the
+#: routes into the tree before it is retired (``docs/dev/python-milp-tree-retirement.md``
+#: step 1). Explicit requests first, then the Rust engine's deferrals.
+_PY_MILP_TREE_REASONS = {
+    "native_backend": 1,
+    "node_callback": 2,
+    "lagrangian_bound": 3,
+    "abs_gap_tighter_than_rel": 4,
+    "engine_off": 5,
+    "no_rust_binding": 6,
+    "nonlinear_terms": 7,
+    "no_constraints": 8,
+    "relu_engine_unavailable": 9,
+    "withdrawn_bound_2163": 10,
+    "infeasible_engine_point": 11,
+    "stall_no_incumbent_291": 12,
+    "unknown": 0,
+}
+
+
 #: Values the ``milp_backend=`` keyword of :func:`solve_model` accepts (#1535).
 _MILP_BACKEND_VALUES = ("highs", "native")
 
@@ -40009,6 +40051,8 @@ def _solve_milp_simplex(
     try:
         from discopt._rust import solve_milp_csc_py
     except ImportError:
+        if deferred is not None:
+            deferred["reason"] = "no_rust_binding"
         return None
 
     # ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
@@ -40020,6 +40064,8 @@ def _solve_milp_simplex(
     # ``unbounded`` at the root. Defer any model carrying nonlinear terms to the
     # spatial / NLP path (which keeps those constraints).
     if not _milp_is_exactly_linear(model):
+        if deferred is not None:
+            deferred["reason"] = "nonlinear_terms"
         return None
 
     lp_data = extract_lp_data(model)
@@ -40036,6 +40082,8 @@ def _solve_milp_simplex(
     _drv = _milp_aligned_lp(lp_data, n_orig) if _milp_aligned_slacks_enabled() else lp_data
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     if _A_m == 0:
+        if deferred is not None:
+            deferred["reason"] = "no_constraints"
         return None  # no constraints — let the default path handle it
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
@@ -40043,6 +40091,8 @@ def _solve_milp_simplex(
     if relu_cuts is not None:
         _relu_engine = _relu_native_engine(relu_cuts, lp_data, n_orig, int_idx, relu_counts)
         if _relu_engine is None:
+            if deferred is not None:
+                deferred["reason"] = "relu_engine_unavailable"
             return None
         solve_milp_csc_py = _relu_engine  # noqa: F811 -- same driver, hook attached
 
@@ -40420,6 +40470,7 @@ def _solve_milp_simplex(
             "withdrawn or unresolved); deferring to the Python MILP tree (#2163)"
         )
         if deferred is not None:
+            deferred["reason"] = "withdrawn_bound_2163"
             _xo_def = np.asarray(x_struct, dtype=np.float64)[:n_orig]
             if _point_feasible(_xo_def):
                 deferred["incumbent"] = _xo_def.copy()
@@ -40442,6 +40493,8 @@ def _solve_milp_simplex(
                 "deferring to a sound engine",
                 status,
             )
+            if deferred is not None:
+                deferred["reason"] = "infeasible_engine_point"
             return _debug_stopped_result()
         # #2163: report the point the gate just verified -- its integral
         # realisation (#1380) -- not the engine's raw vertex, whose binaries can sit
@@ -40643,6 +40696,7 @@ def _solve_milp_simplex(
                 "milp_driver/iters": _ds["lp/iters"],
                 "milp_driver/nodes": _ds["lp/driver_nodes"],
             }
+            deferred["reason"] = "stall_no_incumbent_291"
         return _debug_stopped_result()
     return SolveResult(
         status="infeasible",

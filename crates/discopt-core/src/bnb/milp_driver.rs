@@ -1455,6 +1455,9 @@ pub struct MilpOptions {
     /// `time_limit_s = s` run, and a run holding an incumbent keeps its tree, pool and
     /// pseudocosts instead of being restarted. `None` = no stall guard.
     pub stall_time_s: Option<f64>,
+    /// Node selection rule (`Model.solve(strategy=...)`; Python-MILP-tree retirement
+    /// step 3). `BestFirst` is the historical driver's rule and the default.
+    pub selection: SelectionStrategy,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -2903,7 +2906,7 @@ fn solve_milp_node_search(
 
     let glb = base_l[..ns].to_vec();
     let gub = base_u[..ns].to_vec();
-    let mut tm = TreeManager::new(ns, glb, gub, int_info, SelectionStrategy::BestFirst);
+    let mut tm = TreeManager::new(ns, glb, gub, int_info, opts.selection);
     // Objective-lattice fathoming. Derived from the ORIGINAL cost vector and
     // integrality pattern, before any cut adds a slack column to `c_w`: the
     // lattice is a property of the model, and appended slacks carry zero cost so
@@ -8002,6 +8005,7 @@ mod tests {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -8899,6 +8903,7 @@ mod tests {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 16,
@@ -9680,6 +9685,7 @@ mod tests {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -9816,6 +9822,7 @@ pub(crate) mod sparse_milp_diff {
                 max_open_nodes: None,
                 time_limit_s: None,
                 stall_time_s: None,
+                selection: SelectionStrategy::BestFirst,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10117,6 +10124,7 @@ pub(crate) mod sparse_milp_diff {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -10426,6 +10434,7 @@ mod lazy_separation {
                 max_open_nodes: None,
                 time_limit_s: None,
                 stall_time_s: None,
+                selection: SelectionStrategy::BestFirst,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 16,
@@ -10725,6 +10734,7 @@ mod node_separation {
                 max_open_nodes: None,
                 time_limit_s: None,
                 stall_time_s: None,
+                selection: SelectionStrategy::BestFirst,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
                 root_cuts: 0,
@@ -11007,6 +11017,7 @@ mod lazy_infeasible_node {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,
@@ -11145,6 +11156,7 @@ mod root_cut_budget_tests {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 200,
@@ -11927,6 +11939,7 @@ mod tiny_entry_tests {
             max_open_nodes: None,
             time_limit_s: None,
             stall_time_s: None,
+            selection: SelectionStrategy::BestFirst,
             gap_tol: 1e-9,
             abs_gap_tol: None,
             root_cuts: 0,

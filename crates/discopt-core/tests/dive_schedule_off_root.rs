@@ -54,6 +54,7 @@ fn options() -> MilpOptions {
         max_open_nodes: None,
         time_limit_s: Some(60.0),
         stall_time_s: None,
+        selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         gap_tol: 1e-9,
         abs_gap_tol: None,
         root_cuts: 0,

@@ -1189,7 +1189,7 @@ pub fn solve_milp_py<'py>(
         abs_gap_tol,
         None,
         None,
-        None,
+        MilpExtra::default(),
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1271,7 +1271,7 @@ pub fn ns_safe_bound_csc_py(
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
-                    stall_time_s=None))]
+                    stall_time_s=None, node_selection=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1312,7 +1312,9 @@ pub fn solve_milp_csc_py<'py>(
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
     stall_time_s: Option<f64>,
+    node_selection: Option<String>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
+    let selection = parse_node_selection(node_selection.as_deref())?;
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1383,7 +1385,10 @@ pub fn solve_milp_csc_py<'py>(
         abs_gap_tol,
         max_open_nodes,
         None,
-        stall_time_s,
+        MilpExtra {
+            stall_time_s,
+            selection,
+        },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1684,7 +1689,7 @@ pub fn solve_milp_relu_csc_py<'py>(
         abs_gap_tol,
         max_open_nodes,
         Some(&sep),
-        None,
+        MilpExtra::default(),
     )?;
     Ok((
         status,
@@ -1883,8 +1888,34 @@ pub fn solve_milp_lazy_csc_py<'py>(
         abs_gap_tol,
         None,
         None,
-        None,
+        MilpExtra::default(),
     )
+}
+
+/// Driver options a Python entry passes beyond [`milp_options`]'s arguments.
+#[derive(Default)]
+struct MilpExtra {
+    stall_time_s: Option<f64>,
+    selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
+}
+
+/// `Model.solve(strategy=...)`'s names, refused when unknown (never defaulted).
+fn parse_node_selection(
+    raw: Option<&str>,
+) -> PyResult<Option<discopt_core::bnb::pool::SelectionStrategy>> {
+    use discopt_core::bnb::pool::SelectionStrategy as S;
+    Ok(match raw {
+        None => None,
+        Some("best_first") => Some(S::BestFirst),
+        Some("depth_first") => Some(S::DepthFirst),
+        Some("best_estimate") => Some(S::BestEstimate),
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "node_selection={other:?}: expected 'best_first', 'depth_first' or \
+                 'best_estimate'"
+            )))
+        }
+    })
 }
 
 /// Shared MILP solve: builds `MilpOptions`, wraps an optional debug hook, runs the
@@ -1932,6 +1963,7 @@ pub(crate) fn milp_options(
         max_open_nodes,
         time_limit_s: parse_budget_secs(time_limit_s)?,
         stall_time_s: None,
+        selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
         // keeps the engine's historical behaviour exactly: no absolute arm.
@@ -2027,7 +2059,7 @@ fn run_milp_hooked<'py>(
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
     relu_separator: Option<&ReluIdealSeparator>,
-    stall_time_s: Option<f64>,
+    extra: MilpExtra,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -2078,7 +2110,8 @@ fn run_milp_hooked<'py>(
         root_cut_prune,
     )?;
     let opts = MilpOptions {
-        stall_time_s: parse_budget_secs(stall_time_s)?,
+        stall_time_s: parse_budget_secs(extra.stall_time_s)?,
+        selection: extra.selection.unwrap_or(opts.selection),
         ..opts
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created
