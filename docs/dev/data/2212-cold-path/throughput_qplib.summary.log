@@ -1,0 +1,17 @@
+
+# summary
+LPs built 26 / 26 (build errors 0)
+dual start refused (open costed bound): 2
+primal decided   19  undecided   7  WRONG 0
+dual   decided   23  undecided   1  WRONG 0
+cascade (dual, else primal) decided 23 / 26
+both decided: 19 LPs; wall dual/primal geomean 0.374, median 0.476, min 0.084, max 1.432
+  pivots dual/primal geomean 0.375
+  slowest-for-dual QPLIB_2712_rlt0              m=80402 primal     19.4 ms/5 piv  dual     15.5 ms/4 piv
+  slowest-for-dual QPLIB_1157_rlt0              m= 3273 primal    108.8 ms/1197 piv  dual     94.0 ms/1234 piv
+  slowest-for-dual QPLIB_1619_rlt0              m= 5135 primal    808.8 ms/3736 piv  dual    757.4 ms/2026 piv
+  slowest-for-dual QPLIB_2712_rlt1              m=80802 primal    517.2 ms/280 piv  dual    490.9 ms/202 piv
+  slowest-for-dual QPLIB_1745_rlt0              m= 5160 primal    505.9 ms/2327 piv  dual    724.3 ms/3371 piv
+total wall: primal 160.86 s, cascade 117.02 s (median of 3 reps per LP)
+# load at end: (3.75048828125, 3.76953125, 4.08544921875)
+EXECUTED CHECKS: 50  WRONG: 0

@@ -209,6 +209,22 @@ _FLAGS = {
         "leak": lambda off: off["ExpandResetRetries"],
         "show": ("ExpandResetRetries", "ExpandResetRescues"),
     },
+    # #2212: the cold LP path tries the dual simplex from a sign-matched logical
+    # basis before the cold primal (``DISCOPT_LP_LOGICAL_DUAL_COLD``,
+    # `lp/simplex/cold_dual.rs`). RETIRED by its panels (three in-repo corpus panels
+    # and the QPLIB whole-solve panel, docs/dev/data/2212-cold-path/panel/: cert-clean,
+    # not net-positive); the build no longer has the LogicalDualCold* counters. Kept so
+    # ``--rows`` re-derives the verdict. An attempt that is not certified falls back to the
+    # unchanged primal, so only a certified attempt (``OwnDecided`` + ``AugDecided``)
+    # can change the search; OFF, no attempt is ever made.
+    "DISCOPT_LP_LOGICAL_DUAL_COLD": {
+        "fired": lambda off, on: on["LogicalDualColdOwnDecided"] + on["LogicalDualColdAugDecided"],
+        "ran": lambda off, on: (
+            on["LogicalDualColdOwnDecided"] + on["LogicalDualColdAugDecided"] > 0
+        ),
+        "leak": lambda off: off["LogicalDualColdAttempts"],
+        "show": ("LogicalDualColdAttempts", "LogicalDualColdOwnDecided"),
+    },
 }
 _CTRS = (
     "NodeNsProjectTry",
@@ -243,6 +259,12 @@ _CTRS = (
     "ExpandResetArmed",
     "ExpandResetRetries",
     "ExpandResetRescues",
+    "LogicalDualColdAttempts",
+    "LogicalDualColdOwnDecided",
+    "LogicalDualColdAugDecided",
+    "LogicalDualColdRefused",
+    "LogicalDualColdFellBack",
+    "LogicalDualColdSkippedRepeat",
 )
 _FLAG = "DISCOPT_NS_PROJECT"  # set from --flag in main()
 
@@ -260,7 +282,12 @@ from discopt.modeling.core import ObjectiveSense
 path, tl, det = sys.argv[1], float(sys.argv[2]), sys.argv[3] == "1"
 max_nodes = int(sys.argv[5])
 kw = {"max_nodes": max_nodes} if max_nodes > 0 else {}
-model = dm.from_nl(path)
+if path.endswith(".qplib"):  # #2212: QPLIB instances, read natively
+    from discopt.interfaces import qplib as _qplib
+
+    model = _qplib.to_model(_qplib.read_qplib(path))
+else:
+    model = dm.from_nl(path)
 profile_reset_py()
 t0 = time.perf_counter()
 res = model.solve(time_limit=tl, deterministic=det, **kw)
@@ -348,6 +375,28 @@ def _solve_once(
     )
 
 
+def _qplib_paths(qdir: Path, n: int) -> list[Path]:
+    """QPLIB instances by FILTER, never by name (CLAUDE.md §2): the same selection as
+    `throughput_panel.py --corpus qplib`, so the whole-solve panel covers exactly the
+    class whose root LPs that panel measured."""
+    manifest = qdir / "qplib_manifest.csv"
+    if not manifest.exists():
+        return sorted(qdir.glob("*.qplib"))
+    import pandas as pd
+
+    df = pd.read_csv(manifest)
+    q = df[(df.usable_oracle) & (df.n_integral == 0) & (df.nonconvex)].copy()
+    q["lift"] = q.obj_quad_nnz + q.con_quad_nnz
+    q = q[(q.nvars <= 400) & (q.lift >= 300)].sort_values("lift", ascending=False)
+    names = list(q.name)[:n]
+    if "QPLIB_1157" in set(q.name) and "QPLIB_1157" not in names:
+        names.append("QPLIB_1157")  # #1008's gate probe
+    paths = [qdir / "qplib" / f"{nm}.qplib" for nm in names]
+    missing = [p for p in paths if not p.exists()]
+    assert not missing, f"selected QPLIB instances not found: {missing[:3]}"
+    return paths
+
+
 def _load_optima(solu: str | None) -> dict[str, float]:
     optima: dict[str, float] = {}
     if _OPTIMA.exists():
@@ -379,6 +428,20 @@ def main() -> int:
     ap.add_argument("--time-limit", type=float, default=30.0)
     ap.add_argument("--solu", default=None)
     ap.add_argument("--extra-dir", default=None)
+    ap.add_argument(
+        "--qplib-dir",
+        default=None,
+        help="#2212: add QPLIB instances. With DIR/qplib_manifest.csv, the selection of "
+        "docs/dev/data/2212-cold-path/throughput_panel.py (usable oracle, continuous, "
+        "nonconvex, nvars <= 400, the --qplib-n largest by lift, plus QPLIB_1157), read "
+        "from DIR/qplib/; without one, every DIR/*.qplib. Pass DIR/qplib.solu as --solu.",
+    )
+    ap.add_argument("--qplib-n", type=int, default=12)
+    ap.add_argument(
+        "--no-nl-corpus",
+        action="store_true",
+        help="skip the vendored minlplib_nl corpus (e.g. a QPLIB-only panel)",
+    )
     ap.add_argument("--instances", default="")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument(
@@ -423,7 +486,9 @@ def main() -> int:
 
     optima = _load_optima(args.solu)
     best = _load_best(args.solu)
-    paths = sorted(_NL_DIR.glob("*.nl"))
+    paths = [] if args.no_nl_corpus else sorted(_NL_DIR.glob("*.nl"))
+    if args.qplib_dir:
+        paths += _qplib_paths(Path(args.qplib_dir), args.qplib_n)
     if args.extra_dir:
         paths += sorted(Path(args.extra_dir).glob("*.nl"))
     if args.instances:

@@ -39,6 +39,54 @@ _BOXES = [
 _POWERS = [2, 3, 4, 5, 6]
 
 
+def _tree(p, lo, hi, pin, sense, max_nodes=200):
+    """The kernel's tree on `min sense * s` with `s = x**p` and `x` pinned (see below)."""
+    return _rust.solve_spatial_tree_py(
+        n_cols=2,
+        n_orig=1,
+        c=np.array([0.0, sense]),
+        integrality=np.zeros(2, dtype=_I64),
+        global_lo=np.array([lo, -_INF]),
+        global_hi=np.array([hi, _INF]),
+        fixed_row_ptr=np.array([0, 1, 2], dtype=_I64),
+        fixed_cols=np.array([0, 0], dtype=_I64),
+        fixed_coeffs=np.array([1.0, -1.0]),
+        fixed_rhs=np.array([pin, -pin]),
+        term_kind=np.array([1], dtype=_I64),
+        term_i=np.array([0], dtype=_I64),
+        term_j=np.array([-1], dtype=_I64),
+        term_out=np.array([1], dtype=_I64),
+        term_p=np.array([p], dtype=_I64),
+        term_coeff=np.array([0.0]),
+        term_cst=np.array([0.0]),
+        blf_w=np.zeros(0, dtype=_I64),
+        blf_a_ptr=np.zeros(1, dtype=_I64),
+        blf_a_cols=np.zeros(0, dtype=_I64),
+        blf_a_coeffs=np.zeros(0),
+        blf_a_const=np.zeros(0),
+        blf_b_ptr=np.zeros(1, dtype=_I64),
+        blf_b_cols=np.zeros(0, dtype=_I64),
+        blf_b_coeffs=np.zeros(0),
+        blf_b_const=np.zeros(0),
+        obbt_candidates=np.zeros(0, dtype=_I64),
+        max_nodes=max_nodes,
+        gap_tol=1e-6,
+        int_tol=1e-5,
+        mccormick_tol=1e-8,
+        min_box_width=1e-8,
+        # The envelope is what is under test: in-tree FBBT would shrink the box to
+        # the pinned point and the probe would measure nothing (CLAUDE.md §6).
+        run_obbt=False,
+        run_propagation=False,
+        propagation_rounds=0,
+        initial_incumbent=None,
+        time_limit_s=10.0,
+        incumbent_time_extension_s=None,
+        bound_time_extension_s=None,
+        cold_dual_start=False,
+    )
+
+
 def _admitted_range(p, lo, hi, pin):
     """Interval the kernel's node LP admits for ``s = x**p`` with ``x`` pinned.
 
@@ -48,50 +96,7 @@ def _admitted_range(p, lo, hi, pin):
     """
     out = []
     for sense in (1.0, -1.0):
-        res = _rust.solve_spatial_tree_py(
-            n_cols=2,
-            n_orig=1,
-            c=np.array([0.0, sense]),
-            integrality=np.zeros(2, dtype=_I64),
-            global_lo=np.array([lo, -_INF]),
-            global_hi=np.array([hi, _INF]),
-            fixed_row_ptr=np.array([0, 1, 2], dtype=_I64),
-            fixed_cols=np.array([0, 0], dtype=_I64),
-            fixed_coeffs=np.array([1.0, -1.0]),
-            fixed_rhs=np.array([pin, -pin]),
-            term_kind=np.array([1], dtype=_I64),
-            term_i=np.array([0], dtype=_I64),
-            term_j=np.array([-1], dtype=_I64),
-            term_out=np.array([1], dtype=_I64),
-            term_p=np.array([p], dtype=_I64),
-            term_coeff=np.array([0.0]),
-            term_cst=np.array([0.0]),
-            blf_w=np.zeros(0, dtype=_I64),
-            blf_a_ptr=np.zeros(1, dtype=_I64),
-            blf_a_cols=np.zeros(0, dtype=_I64),
-            blf_a_coeffs=np.zeros(0),
-            blf_a_const=np.zeros(0),
-            blf_b_ptr=np.zeros(1, dtype=_I64),
-            blf_b_cols=np.zeros(0, dtype=_I64),
-            blf_b_coeffs=np.zeros(0),
-            blf_b_const=np.zeros(0),
-            obbt_candidates=np.zeros(0, dtype=_I64),
-            max_nodes=200,
-            gap_tol=1e-6,
-            int_tol=1e-5,
-            mccormick_tol=1e-8,
-            min_box_width=1e-8,
-            # The envelope is what is under test: in-tree FBBT would shrink the box to
-            # the pinned point and the probe would measure nothing (CLAUDE.md §6).
-            run_obbt=False,
-            run_propagation=False,
-            propagation_rounds=0,
-            initial_incumbent=None,
-            time_limit_s=10.0,
-            incumbent_time_extension_s=None,
-            bound_time_extension_s=None,
-            cold_dual_start=False,
-        )
+        res = _tree(p, lo, hi, pin, sense)
         if res["status"] == "infeasible":
             return None
         out.append(sense * res["bound"])
@@ -153,3 +158,30 @@ def test_odd_power_on_a_straddling_root_never_reaches_the_kernel():
     assert build_spatial_kernel_spec(definite) is not None, (
         "sign-definite odd-power root must still reach the kernel"
     )
+
+
+@pytest.mark.smoke
+def test_a_width_exhausted_tree_without_an_incumbent_is_not_infeasible():
+    """#2212's smoke run found this: the tree claimed `infeasible` for a feasible problem.
+
+    With `x` pinned at an endpoint of a straddling box, branching narrows `x`'s box
+    around the feasible point until it is below `min_box_width`. That last box's LP is
+    feasible (bound 1e6 = the true `s`), but `s = 1e6` cannot pass the absolute
+    McCormick tolerance as an incumbent, so the region closes with only its bound.
+    The tree then emptied its worklist with no incumbent and answered `Infeasible`,
+    bound `+inf`: a false infeasibility certificate on the default path, hidden from
+    the test above only by its 200-node cap (5000 reaches it in ~260 nodes). A region
+    closed without a proof of emptiness now makes the result `exhausted`, with that
+    region's bound.
+    """
+    checks = 0
+    for p, lo, hi, pin in (
+        (6, -10.0, 10.0, 10.0),
+        (6, -10.0, 10.0, -10.0),
+        (6, -10.0, 9.272727272727275, -10.0),
+    ):
+        res = _tree(p, lo, hi, pin, 1.0, max_nodes=5000)
+        assert res["status"] != "infeasible", (p, lo, hi, pin, res["status"], res["bound"])
+        assert res["bound"] <= pin**p + 1e-6 * pin**p, (p, lo, hi, pin, res["bound"])
+        checks += 1
+    assert checks == 3

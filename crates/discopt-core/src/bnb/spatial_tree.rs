@@ -1057,6 +1057,11 @@ pub fn solve_spatial_tree_observed(
     // do). Open frontier nodes carry their `pb` as a valid region lower bound; under
     // best-bound the heap top is exactly that frontier minimum.
     let mut global_lb_closed = f64::INFINITY;
+    // #2212 (found by its smoke run): set when a region is closed WITHOUT a proof
+    // that it is empty, i.e. with only its rigorous bound. With no incumbent at the
+    // end, such a region may still hold feasible points, so the tree must not report
+    // `Infeasible` (see the end of this function).
+    let mut closed_unproven = false;
 
     while let Some(QNode {
         pb: parent_bound,
@@ -1472,7 +1477,10 @@ pub fn solve_spatial_tree_observed(
                         false,
                     );
                 }
-                None => global_lb_closed = global_lb_closed.min(parent_bound),
+                None => {
+                    global_lb_closed = global_lb_closed.min(parent_bound);
+                    closed_unproven = true;
+                }
             }
             continue;
         }
@@ -1898,8 +1906,10 @@ pub fn solve_spatial_tree_observed(
             fallback()
         };
         let Some((split_col, split_at)) = pick else {
-            // No branchable column: close with the honest rigorous bound.
+            // No branchable column: close with the honest rigorous bound. The region
+            // is NOT shown empty (its LP was feasible), only too narrow to split.
             global_lb_closed = global_lb_closed.min(bound);
+            closed_unproven = true;
             continue;
         };
 
@@ -1980,11 +1990,27 @@ pub fn solve_spatial_tree_observed(
                 dual_proof: dp_stats(&dp_pool, &dp_counts),
             }
         }
+        // No incumbent. `Infeasible` is a certificate that the feasible set is empty,
+        // so it is claimed only when every region was proven empty. A region closed
+        // with just its bound (too narrow to split, or undecided with nothing left to
+        // split) was not: measured on `x**6` with `x` pinned at an endpoint of a
+        // straddling box, the box narrows below `min_box_width` around the feasible
+        // point, whose `s = 1e6` cannot pass the absolute McCormick tolerance as an
+        // incumbent, and the tree used to answer `Infeasible` (bound +inf) for a
+        // feasible problem. That is `Exhausted`, with the honest closed bound.
         None => SpatialTreeResult {
-            status: TreeStatus::Infeasible,
+            status: if closed_unproven {
+                TreeStatus::Exhausted
+            } else {
+                TreeStatus::Infeasible
+            },
             incumbent: None,
             incumbent_x: Vec::new(),
-            bound: f64::INFINITY,
+            bound: if closed_unproven {
+                global_lb_closed
+            } else {
+                f64::INFINITY
+            },
             node_count,
             n_lp_solves,
             n_uncertified,
