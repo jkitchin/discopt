@@ -23,7 +23,6 @@ from fractions import Fraction
 import numpy as np
 import pytest
 import scipy.sparse as sp
-
 from discopt.solvers import milp_simplex as MS
 
 DATA = os.path.join(
