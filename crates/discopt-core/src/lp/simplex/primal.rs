@@ -298,6 +298,39 @@ pub fn solve_lp_cols_warm(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    // #2212: this entry has its OWN cold path (an unusable warm basis runs the
+    // two-phase primal directly, not through `solve_lp_cols`), so the cold cascade
+    // has to be offered here too. Measured on the re-captured nous1 node LPs: 13 of
+    // 40 inherited bases are singular, the dual refuses them, and this fallback ended
+    // `Numerical` without the cascade ever running. With the flag OFF nothing is
+    // cloned and the solve below is unchanged.
+    let keep = (super::cold_dual::logical_dual_cold_enabled() && !super::cold_dual::in_attempt())
+        .then(|| cols.clone());
+    let sol = solve_lp_cols_warm_primal(cols, m, n, c, l, u, b, start, opts);
+    if let Some(cols) = keep {
+        if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+            if let Some(alt) = super::cold_dual::logical_dual_cold(&cols, m, n, c, l, u, b, opts) {
+                return alt;
+            }
+        }
+    }
+    sol
+}
+
+/// [`solve_lp_cols_warm`] without the #2212 cold cascade: the warm primal, its
+/// two-phase cold fallback and the #85 dense retry, exactly as before.
+#[allow(clippy::too_many_arguments)]
+fn solve_lp_cols_warm_primal(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+) -> LpSolve {
     crate::profile::incr(crate::profile::Ctr::EntryColsWarm);
     // #85: cloned up front for a possible dense retry (see solve_lp_cols).
     let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());

@@ -532,6 +532,68 @@ mod tests {
         assert_eq!(checked, 2);
     }
 
+    /// A re-captured nous1 node LP (`capture_nous1.py`, seed 5, Linux) whose
+    /// INHERITED basis is singular: the dual refuses it, the warm entry falls to
+    /// `solve_lp_cols_warm`, and that routine's own two-phase fallback ended
+    /// `Numerical` without ever reaching `solve_lp_cols`, so the cascade did not run
+    /// (13 of the 40 captured LPs). Flag ON, `solve_lp_cols_warm` offers the cascade
+    /// too, and the LP is decided at HiGHS's optimum 1.1091184581.
+    #[test]
+    fn singular_inherited_basis_reaches_the_cascade_2212() {
+        let json = include_str!("testdata/nous1_singular_inherited_basis_lp.json");
+        let lp = parse(json);
+        let ints = |key: &str| -> Vec<f64> {
+            let k = format!("\"{key}\":");
+            let s = &json[json.find(&k).expect(key) + k.len()..];
+            let s = s.trim_start();
+            s[1..s.find(']').unwrap()]
+                .split(',')
+                .map(|t| t.trim().parse::<f64>().unwrap())
+                .collect()
+        };
+        let start = Basis {
+            col_status: ints("col_status").iter().map(|&v| v as i8).collect(),
+            basic_vars: ints("basic_vars").iter().map(|&v| v as usize).collect(),
+        };
+        let opts = SimplexOptions {
+            warm_flip_boxed: true, // the spatial kernel's warm mode
+            ..SimplexOptions::default()
+        };
+        let run = |on: bool| {
+            let _flag = test_override::Scoped::new(on);
+            let _guard = crate::profile::test_guard();
+            crate::profile::reset();
+            crate::profile::set_enabled(true);
+            let sol = solve_lp_warm_csc(
+                lp.sp.clone(),
+                lp.m,
+                lp.n,
+                &lp.c,
+                &lp.l,
+                &lp.u,
+                &lp.b,
+                Some(&start),
+                &opts,
+            );
+            let singular = crate::profile::counter(crate::profile::Ctr::DualPrepRejectSingular);
+            let attempts = crate::profile::counter(crate::profile::Ctr::LogicalDualColdAttempts);
+            crate::profile::set_enabled(false);
+            (sol, singular, attempts)
+        };
+        let (off, singular, attempts_off) = run(false);
+        assert!(singular >= 1, "the inherited basis is the singular one");
+        assert_eq!(
+            off.status,
+            LpStatus::Numerical,
+            "the captured defect (flag off)"
+        );
+        assert_eq!(attempts_off, 0);
+        let (on, _, attempts_on) = run(true);
+        assert!(attempts_on >= 1, "the cascade must be reached");
+        assert_eq!(on.status, LpStatus::Optimal);
+        assert!(near(on.obj, 1.1091184581416997), "obj {} vs HiGHS", on.obj);
+    }
+
     /// #2163's ReLU-with-Anderson-cuts LPs have equality rows with no logical
     /// column, so step 1 does not apply; step 2's augmented form decides them.
     #[test]
