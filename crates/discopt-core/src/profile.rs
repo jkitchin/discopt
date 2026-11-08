@@ -329,6 +329,9 @@ counters!(
     // Global GMI rows refused: a nonzero tableau entry on a node-local column or at an
     // infinite complementing global bound.
     SepGomoryGlobalRefused,
+    // Globally complemented GMI rows refused because `Σ|ᾱ_j x̃_j|` exceeded
+    // `GLOBAL_BETA_MAG_MAX`, so f0 was not resolved (PR #2196 review, item 3).
+    SepGomoryGlobalBetaUnresolved,
     // The global GMI pool: cuts admitted, dropped (age/cap), and appended at nodes.
     NodeGmiPoolAdded,
     NodeGmiPoolDropped,

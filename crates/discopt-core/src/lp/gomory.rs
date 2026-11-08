@@ -60,6 +60,14 @@ const SNAP_TOL: f64 = 1e-9;
 /// coefficients up to numerically unsafe magnitudes, so we skip it.
 const FRAC_MIN: f64 = 1e-3;
 
+/// Largest `Σ|ᾱ_j·x̃_j|` for which a globally complemented GMI row's β (and so
+/// its f0) is trusted (PR #2196 review, item 3). β is a cancelling sum whose absolute
+/// rounding error scales with this magnitude; with each `ᾱ_j` carrying a relative
+/// error of ~1e-15 after btran refinement, 1e6 keeps that error near 1e-9, six orders
+/// below `FRAC_MIN`, while 1e12 would put it at `FRAC_MIN` itself. A refusal drops a
+/// cut, which can only weaken a bound, never invalidate one.
+const GLOBAL_BETA_MAG_MAX: f64 = 1e6;
+
 /// Absolute cap on a cut coefficient. A cut with a larger coefficient comes
 /// from an ill-conditioned basis (or a near-integral pivot) and is dropped: it
 /// would dominate the relaxation numerically and is unsafe even when formally
@@ -633,6 +641,11 @@ fn gomory_rows(
             None => xb[i] - xb[i].floor(),
             Some((_, _, n_global)) => {
                 let mut beta = xb[i];
+                // Magnitude of the complementation terms: the absolute rounding error they
+                // add to β scales with it, so beyond `GLOBAL_BETA_MAG_MAX` the fractional
+                // part f0 is not resolved and the cut may be invalid (PR #2196 review,
+                // item 3). `x_B` itself is excluded, as on the local path.
+                let mut beta_mag = 0.0f64;
                 let mut refuse = false;
                 for j in 0..n {
                     if basis.col_status[j] == BASIC {
@@ -656,9 +669,14 @@ fn gomory_rows(
                     };
                     let alpha = if at_upper { -abar } else { abar };
                     beta += alpha * xt;
+                    beta_mag += (alpha * xt).abs();
                 }
                 if refuse || !beta.is_finite() {
                     crate::profile::incr(crate::profile::Ctr::SepGomoryGlobalRefused);
+                    continue;
+                }
+                if beta_mag > GLOBAL_BETA_MAG_MAX {
+                    crate::profile::incr(crate::profile::Ctr::SepGomoryGlobalBetaUnresolved);
                     continue;
                 }
                 beta - beta.floor()
@@ -1460,6 +1478,57 @@ mod tests {
             "{short_seen} {cuts_checked} {points_checked}"
         );
         eprintln!("short={short_seen} cuts={cuts_checked} points={points_checked}");
+    }
+
+    /// PR #2196 review item 3: a globally complemented row whose complementation terms
+    /// `Σ|ᾱ_j·x̃_j|` exceed `GLOBAL_BETA_MAG_MAX` is refused (f0 unresolved), while the
+    /// same row with a short local-to-global distance still yields a cut (control).
+    #[test]
+    fn global_gmi_refuses_a_row_complemented_over_a_huge_distance() {
+        use crate::lp::simplex::{solve_lp_cols_scaled, LpStatus, SimplexOptions};
+        // min x0  s.t.  2 x1 - x0 = 0.5,  x0, x1 integer, global box [0, 1e9].
+        // At a node with x0 >= L the LP vertex is x0 = L (nonbasic at its LOCAL
+        // lower bound, global lower 0, so x~ = L) and x1 = (L + 0.5) / 2 basic.
+        let dense = [-1.0, 2.0];
+        let sp = SparseCols::from_dense(&dense, 1, 2);
+        let (c, b) = ([1.0, 0.0], [0.5]);
+        let (gl, gu) = (vec![0.0, 0.0], vec![1e9, 1e9]);
+        let integrality = [true, true];
+        let cuts_at = |lower: f64| {
+            let (l, u) = (vec![lower, 0.0], gu.clone());
+            let sol =
+                solve_lp_cols_scaled(sp.clone(), 1, 2, &c, &l, &u, &b, &SimplexOptions::default());
+            assert_eq!(sol.status, LpStatus::Optimal);
+            assert!(
+                (sol.x[0] - lower).abs() < 1e-9,
+                "x0 not at its local lower bound"
+            );
+            separate_gomory_cols_global(
+                &sp,
+                1,
+                2,
+                &l,
+                &u,
+                &gl,
+                &gu,
+                2,
+                &b,
+                &sol.basis,
+                &integrality,
+                1e-7,
+                1e12,
+            )
+        };
+        let near = cuts_at(4.0); // x~ = 4: term 2, well inside the bound
+        assert!(
+            !near.is_empty(),
+            "control: the short-distance row produced no cut"
+        );
+        let far = cuts_at(5e8); // x~ = 5e8: term 2.5e8 > GLOBAL_BETA_MAG_MAX
+        assert!(
+            far.is_empty(),
+            "a row complemented over 5e8 was not refused: {far:?}"
+        );
     }
 
     /// `separate_gomory_cols_global` (highs-parity D2): cuts separated at a node with

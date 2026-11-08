@@ -449,7 +449,17 @@ pub(crate) fn logical_basis_dual_csc(
     let x: Vec<f64> = w.x.iter().take(n).copied().collect();
     let accepted = match w.status {
         LpStatus::Optimal => {
-            w.dual.len() == m && point_passes_original_audit(&x, original, m, n, b, l, u)
+            // Primal point AND value, both on the original data: the rescue turns a
+            // `Numerical` into `Optimal` for every caller of the generic LP entry
+            // points, some of which read `obj` as a bound without NS verification,
+            // so the inner solve's own dual claim is not taken on faith (PR #2196
+            // review, item 2).
+            let obj_x: f64 = x.iter().zip(c).map(|(xj, cj)| xj * cj).sum();
+            w.dual.len() == m
+                && point_passes_original_audit(&x, original, m, n, b, l, u)
+                && super::primal::dual_value_certifies_cols(
+                    &w.dual, original, n, m, c, b, l, u, obj_x, 1e-6,
+                )
         }
         LpStatus::Infeasible => farkas_ray_certifies_cols(&w.dual, original, n, m, b, l, u),
         _ => false,

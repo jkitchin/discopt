@@ -223,7 +223,9 @@ pub fn solve_lp_cols_scaled(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    // #2212: the engine's last-resort logical-basis dual (default OFF).
+    // #2212: the engine's last-resort logical-basis dual (default ON since its corpus
+    // panel; its Optimal is accepted only with a primal AND dual-value audit on the
+    // original data, see `logical_basis_dual_csc`).
     let rescue = super::dual::logical_dual_rescue_enabled().then(|| cols.clone());
     let sol = solve_lp_cols_scaled_inner(cols, m, n, c, l, u, b, opts);
     match rescue {
@@ -402,6 +404,81 @@ pub(super) fn point_passes_original_audit(
     u: &[f64],
 ) -> bool {
     x.len() == n && audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
+}
+
+/// PR #2196 review (`DISCOPT_LP_LOGICAL_DUAL_RESCUE`): whether row duals `y` certify
+/// the value `obj` of `min cᵀx, A x = b, l ≤ x ≤ u` on the ORIGINAL data, by weak
+/// duality: `L(y) = bᵀy + Σ_j min_{x_j ∈ [l_j, u_j]} (c_j − a_jᵀy)·x_j ≤ OPT` for every
+/// `y`, so `obj − L(y) ≤ rel_tol·(1 + |obj|)` with `obj` attained by a verified
+/// point proves `obj` optimal to that tolerance. Both signs of `y` are tried (any `y`
+/// gives a valid `L`, so no sign convention is assumed). The rounding of each
+/// `a_jᵀy` is carried as an interval `[d − e, d + e]` (`γ_{nnz+2}`, as the Farkas
+/// check does); an open side the interval can select makes `L = −∞` (no
+/// certificate) unless the interval is within rounding of zero there.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dual_value_certifies_cols(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    m: usize,
+    c: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    obj: f64,
+    rel_tol: f64,
+) -> bool {
+    use crate::numeric::gamma;
+    if y.len() != m || !obj.is_finite() || !y.iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let tol = rel_tol * (1.0 + obj.abs());
+    for sgn in [1.0f64, -1.0] {
+        let ys: Vec<f64> = y.iter().map(|v| sgn * v).collect();
+        let mut lval = 0.0f64;
+        let mut lerr = 0.0f64;
+        for (bi, yi) in b.iter().zip(&ys) {
+            lval += bi * yi;
+            lerr += (bi * yi).abs();
+        }
+        lerr *= gamma(m + 1);
+        let mut finite = true;
+        for j in 0..n {
+            let (aty, aty_abs, nnz) = cols.dot_with_magnitude(j, &ys);
+            let d = c[j] - aty;
+            let e = gamma(nnz + 2) * (aty_abs + c[j].abs());
+            // min over t in [d - e, d + e] of min over x_j in [l_j, u_j] of t*x_j
+            // (concave in t, so attained at an interval endpoint).
+            let mut worst = f64::INFINITY;
+            for t in [d - e, d + e] {
+                let v = if t > 0.0 {
+                    if l[j] <= -INF {
+                        f64::NEG_INFINITY
+                    } else {
+                        t * l[j]
+                    }
+                } else if t < 0.0 {
+                    if u[j] >= INF {
+                        f64::NEG_INFINITY
+                    } else {
+                        t * u[j]
+                    }
+                } else {
+                    0.0
+                };
+                worst = worst.min(v);
+            }
+            if worst == f64::NEG_INFINITY {
+                finite = false;
+                break;
+            }
+            lval += worst;
+        }
+        if finite && obj - (lval - lerr) <= tol {
+            return true;
+        }
+    }
+    false
 }
 
 /// #1945: [`optimal_fails_original_audit`] on a bare point `x` already mapped to the
@@ -3632,6 +3709,115 @@ impl<'a> Simplex<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// PR #2196 review item 2: the logical-dual rescue's value audit accepts a dual
+    /// that certifies the verified objective, and refuses one that does not, an open
+    /// side the dual needs, or a value below the dual bound's tolerance window.
+    #[test]
+    fn dual_value_audit_accepts_only_a_certifying_dual() {
+        // min x0 + 2 x1  s.t.  x0 + x1 = 1,  0 <= x <= 1.  OPT = 1 at x = (1, 0).
+        let a = [1.0, 1.0];
+        let cols = SparseCols::from_dense(&a, 1, 2);
+        let (c, b, l, u) = ([1.0, 2.0], [1.0], [0.0, 0.0], [1.0, 1.0]);
+        let mut checked = 0;
+        // y = 1: reduced costs (0, 1), L = 1 + 0 + 0 = 1 = OPT.
+        assert!(dual_value_certifies_cols(
+            &[1.0],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.0,
+            1e-9
+        ));
+        checked += 1;
+        // Either sign convention: y = -1 is read as +1 too.
+        assert!(dual_value_certifies_cols(
+            &[-1.0],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.0,
+            1e-9
+        ));
+        checked += 1;
+        // y = 0: L = 0, a gap of 1 -- not a certificate of 1.
+        assert!(!dual_value_certifies_cols(
+            &[0.0],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.0,
+            1e-9
+        ));
+        checked += 1;
+        // A claimed value above OPT (a suboptimal point) is not certified by y = 1.
+        assert!(!dual_value_certifies_cols(
+            &[1.0],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.5,
+            1e-9
+        ));
+        checked += 1;
+        // Open lower side on x1 with a positive reduced cost: L = -inf, no certificate.
+        let l_open = [0.0, -INF];
+        assert!(!dual_value_certifies_cols(
+            &[1.0],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l_open,
+            &u,
+            1.0,
+            1e-9
+        ));
+        checked += 1;
+        // Wrong length / non-finite duals are refused.
+        assert!(!dual_value_certifies_cols(
+            &[],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.0,
+            1e-9
+        ));
+        assert!(!dual_value_certifies_cols(
+            &[f64::NAN],
+            &cols,
+            2,
+            1,
+            &c,
+            &b,
+            &l,
+            &u,
+            1.0,
+            1e-9
+        ));
+        checked += 2;
+        assert_eq!(checked, 7);
+    }
 
     /// #2115: a reduced cost that is rounding residue of `y` must not pass the
     /// sub-`tol` noise test as real. Shape of the `m6` master's failure: an open
