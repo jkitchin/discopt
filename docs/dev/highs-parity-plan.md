@@ -1845,6 +1845,10 @@ and is re-written by P4.1.**
   `data/highs-parity/uc-timelimit-fix/`): no incumbent at 120 s, bound 448817.5, on the
   Python fallback tree (the native driver's #291 stall slice handed it off). The canary
   `test_1671_highs_presolve_cycle_canary.py` stays as the record of the upstream bug.
+  **Met 2026-11-08:** with `highspy` blocked, a plain `m.solve(time_limit=60)` of the
+  witness takes the native Rust MILP route and certifies `optimal` 450623.7692106857 in
+  29.1-29.6 s (3/3; HiGHS route 8.6 s). Pinned by `test_1671_witness_without_highs.py`
+  (slow, correctness). #1671 closed on that basis.
 - [ ] **P6.5 — M-1671 closure record** *(may run earlier, as soon as D0's route is met)*.
   Scope: §4's five checks; `test_1667_…`, `test_1671_…` re-scoped; closing comment
   drafted here (not posted): "Closed on discopt's side: no default path runs HiGHS
