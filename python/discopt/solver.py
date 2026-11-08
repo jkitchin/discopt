@@ -38430,9 +38430,9 @@ def _milp_run1_continue_enabled() -> bool:
 
 
 def _milp_rust_coef_entry_enabled() -> bool:
-    """``DISCOPT_MILP_RUST_COEF_ENTRY`` gate (Python-MILP-tree retirement, default OFF
-    until its panel): apply the #1654 coefficient tightening to the Rust MILP engine's
-    standard form before the search (the HiGHS route has done so by default since
+    """``DISCOPT_MILP_RUST_COEF_ENTRY`` gate (Python-MILP-tree retirement; **graduated,
+    default ON 2026-11-08**, ``=0`` opts out): apply the #1654 coefficient tightening to
+    the Rust MILP engine's standard form before the search (the HiGHS route has done so by default since
     #1654 graduated), rather than only as a rescue after an uncertified search
     (``DISCOPT_MILP_RUST_COEF_RESCUE``). Entry probe: the rescue misses a big-M model
     whose first search spends the budget (#1654 sequencing at M = 1e10) or never
@@ -38442,8 +38442,16 @@ def _milp_rust_coef_entry_enabled() -> bool:
     certified 9/9 with this flag, 5/9 with the rescue after an uncertified search, 0/9
     with the rescue's original withdrawn-certificate trigger and with neither. The
     rescue (``DISCOPT_MILP_RUST_COEF_RESCUE``) was retired on that measurement.
+
+    §5 panels (``docs/dev/data/python-milp-retirement/coef_entry_*``): the #1654 big-M
+    families (3 families x 4 seeds x M in 1e4..1e12, Rust route): 120 oracle checks, 0
+    soundness violations, 30 certificates gained, 0 lost. MIPLIB-38+M (62 x 3 x 20 s):
+    bar 1 clean (372 checks), solved 125 -> 129, nodes on both-certified rows 49,164 ->
+    43,279, 1 dual loss (cap 2), no incumbent lost, median primal gap 0.160 -> 0.103;
+    fired 60 ON / 0 OFF. Load reached ~8 on part of the MIPLIB run (the author's own test
+    runs); arms were interleaved.
     """
-    return os.environ.get("DISCOPT_MILP_RUST_COEF_ENTRY", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_RUST_COEF_ENTRY", "1") == "1"
 
 
 def _milp_rust_open_default_box_enabled() -> bool:

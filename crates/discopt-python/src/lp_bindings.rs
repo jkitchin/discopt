@@ -1998,7 +1998,6 @@ pub fn solve_milp_lazy_csc_py<'py>(
 }
 
 /// Driver options a Python entry passes beyond [`milp_options`]'s arguments.
-#[derive(Default)]
 struct MilpExtra {
     stall_time_s: Option<f64>,
     extend_no_incumbent_s: Option<f64>,
@@ -2008,6 +2007,22 @@ struct MilpExtra {
     /// Python `f(lb, ub) -> float | None` node lower-bound source.
     bound_hook: Option<Py<PyAny>>,
     bound_hook_every: usize,
+}
+
+impl Default for MilpExtra {
+    /// Every field "not requested", and the bound-hook cadence 1 (every batch) -- a
+    /// derived `Default` gave 0, which the cadence check rightly refuses.
+    fn default() -> Self {
+        MilpExtra {
+            stall_time_s: None,
+            extend_no_incumbent_s: None,
+            selection: None,
+            branch_rule: None,
+            rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
+        }
+    }
 }
 
 /// `Model.solve(branching_rule=...)`'s names, refused when unknown (never defaulted).

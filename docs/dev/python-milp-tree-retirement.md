@@ -308,7 +308,7 @@ also go is **unverified**: the spatial path may use them.
   `unknown` with neither point nor bound (`route/milp_engine_point_refused`). A decline
   for a missing binding or nonlinear terms on the MILP route raises (a routing defect).
   `DISCOPT_MILP_ENGINE` (the opt-out to the tree) is removed. Tests of tree internals are
-  deleted; tests of user-visible properties are re-pointed at the engine. **Known gap until
-  `DISCOPT_MILP_RUST_COEF_ENTRY` is decided:** the #1414 witness at M >= 1e12 on the Rust
-  route returns the honest `feasible 0.0` uncertified where the tree certified -7
-  (`test_bigm_route_coef_tighten_1414.py`); with the entry flag on it certifies.
+  deleted; tests of user-visible properties are re-pointed at the engine. The #1414 witness at M >= 1e12 on the
+  Rust route, which the tree used to certify, certifies on the engine because
+  `DISCOPT_MILP_RUST_COEF_ENTRY` graduated (two §5 panels, `data/python-milp-retirement/`);
+  with `=0` it returns the honest uncertified `feasible` instead.
