@@ -40174,7 +40174,7 @@ def _solve_milp_simplex(
         _xu_o = np.array(_drv.x_u, dtype=np.float64).ravel()
         _xl_o[:n_orig][_xl_o[:n_orig] <= -_dside] = -_CONSTRAINT_INF
         _xu_o[:n_orig][_xu_o[:n_orig] >= _dside] = _CONSTRAINT_INF
-        _drv = _drv._replace(x_l=_xl_o, x_u=_xu_o)
+        _drv = _drv._replace(x_l=cast(Any, _xl_o), x_u=cast(Any, _xu_o))
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     # A MILP with no constraints is solved by the driver itself (each column at the
     # bound its cost selects, integers rounded inward); it used to defer to the Python
@@ -40197,7 +40197,7 @@ def _solve_milp_simplex(
     _search_counts = {"root_cut_rows": 0, "strong_probe_lps": 0}
     _solve_uncounted = solve_milp_csc_py
 
-    def solve_milp_csc_py(*a, **kw):  # noqa: F811 -- the same driver, counted
+    def _solve_counted(*a: Any, **kw: Any) -> Any:
         out = _solve_uncounted(*a, **kw)
         if len(a) > 9 and len(a[9]) > 0:  # a search, not the integer-free LP probe
             from discopt._rust import milp_last_solve_stats
@@ -40208,6 +40208,8 @@ def _solve_milp_simplex(
             for k in _search_counts:
                 _search_counts[k] += int(st[k])
         return out
+
+    solve_milp_csc_py = _solve_counted  # the same driver, counted
 
     # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
     # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to None -> no
