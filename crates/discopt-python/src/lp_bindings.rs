@@ -1427,7 +1427,9 @@ thread_local! {
 /// reported as ``cuts/*`` and ``branching/strong_probe_lps``).
 #[pyfunction]
 #[pyo3(name = "milp_last_solve_stats")]
-pub fn milp_last_solve_stats_py(py: Python<'_>) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
+pub fn milp_last_solve_stats_py(
+    py: Python<'_>,
+) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
     let Some((rows, probes)) = LAST_MILP_STATS.with(|c| c.get()) else {
         return Ok(None);
     };
