@@ -478,7 +478,8 @@ fn parse_cut_lp(raw: &str) -> Result<bool, String> {
     }
 }
 
-/// `DISCOPT_MILP_TOL_ROBUST` (highs-parity D3, default OFF until its panel): every
+/// `DISCOPT_MILP_TOL_ROBUST` (highs-parity D3, **default ON** since 2026-11-08; `=0`
+/// restores the exact-only proofs): every
 /// emptiness proof the driver acts on holds for the set its incumbent check accepts,
 /// rows within `ROW_VERIFY_TOL * (1 + |b_i|)`, not only for the exact rows.
 ///
@@ -512,8 +513,8 @@ fn tol_robust_enabled() -> bool {
 /// The parse table behind [`tol_robust_enabled`]; garbage is refused.
 fn parse_tol_robust(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(false),
-        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        "" | "1" | "true" | "yes" => Ok(true),
         other => Err(format!(
             "DISCOPT_MILP_TOL_ROBUST={other:?} is not recognized (expected 1/true/yes or \
              0/false/no). Refusing rather than silently picking an arm."
@@ -8514,7 +8515,8 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 2);
-        assert!(parse_tol_robust("1").unwrap() && !parse_tol_robust("").unwrap());
+        assert!(parse_tol_robust("1").unwrap() && parse_tol_robust("").unwrap());
+        assert!(!parse_tol_robust("0").unwrap());
         assert!(parse_tol_robust("maybe").is_err());
     }
 
@@ -9928,12 +9930,7 @@ pub(crate) mod sparse_milp_diff {
             (true, true) => (11, GOLDEN_CUT_LP_ITERS),
         };
         assert_eq!(r.nodes, expect_nodes, "node-count drift (per-node engine)");
-        // `DISCOPT_MILP_TOL_ROBUST` (bound-changing) propagates over the rows relaxed by
-        // their acceptance tolerance, so the node boxes differ by that much and the
-        // pivot count may drift (45 -> 46 measured); status, objective and tree pin it.
-        if !tol_robust_enabled() {
-            assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
-        }
+        assert_eq!(r.lp_iters, expect_iters, "lp_iters drift (per-node engine)");
     }
 
     /// Determinism: re-solving is bit-identical. This is exactly the property the

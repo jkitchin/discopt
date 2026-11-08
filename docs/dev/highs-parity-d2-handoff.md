@@ -94,6 +94,23 @@ Open owner questions: INCR_PRICING opt-out vs retire; W4 bundle keep vs retire; 
 D3's exact-proof master should treat a box that is feasible only within tolerance (the
 red `test_nlpbb_unscaled_refine`).
 
+## D3 follow-up 2026-11-08: `DISCOPT_MILP_TOL_ROBUST` graduated (default ON)
+
+The red `test_nlpbb_unscaled_refine` (above) is fixed at its root. The MILP driver's
+emptiness verdicts now hold for the points its incumbent check accepts:
+- FBBT emptiness is confirmed over the tolerance-relaxed rows;
+- a Farkas fathom must survive `sum |y_i| eps_i`;
+- an LP infeasible but not robustly so is re-solved over relaxed slacks.
+
+Evidence (plan, W5 section):
+- the fixture goes INFEASIBLE -> OPTIMAL;
+- MILP panel v2: cert-clean and neutral (nodes -0.5 %, 0 dual losses; `p0548`
+  flipped once);
+- corpus v2: 0 problems, 104 -> 105.
+
+It was graduated as a correctness fix. The full not-slow suite was re-run on it
+(result in the commit after `TOL_ROBUST graduated`).
+
 ## First things to do
 
 1. **Run the full `-m "not slow"` suite.** `origin/main` was merged at `8c86eab9`; the

@@ -492,7 +492,19 @@ Evidence so far:
   - Entry, same file: `enlight8` and `nexp` match OFF (incumbent 27 / 41, nodes
     within noise); `2122` and `p0548` unchanged.
   - The fixture still returns OPTIMAL 0.02829, with 30 exact verdicts refused.
-  - Re-panel next.
+- Re-panel v2 (`tol_robust_panel_v2_r3.json.gz`): cert-clean (372 checks); certified
+  126 -> 125 (`p0548` 3/3 -> 2/3, the bimodal row that flipped the other way in v1);
+  nodes 47,973 -> 47,717; 0 dual losses; median primal gap equal.
+- Corpus v2 (`tol_robust_corpus_v2.jsonl.gz`): 0 problems, 246 feasibility checks,
+  104 -> 105 (gained `portfol_roundlot`, lost none).
+- **Graduated default ON (`=0` opt-out)** as a correctness fix on cert-clean and
+  neutral evidence. Without it the driver certifies `infeasible` a model feasible
+  within its own acceptance tolerance (CLAUDE.md §1), so bar 2's net-positive arm,
+  written for optional improvements, is not the gate here.
+- Still exact, flagged by the consult and not involved in this failure:
+  - cut rows' own validity over the tolerance set;
+  - reduced-cost fixing's gap;
+  - the NS bound of an ordinary node, taken over the exact rows.
 
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 

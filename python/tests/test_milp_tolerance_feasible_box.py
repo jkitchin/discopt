@@ -5,7 +5,7 @@ Fixture: the LP/NLP-BB OA master the convex route builds for MINLPLib
 ``portfol_roundlot`` (17 columns; rows ``c_i x_i - n_i = 0`` with ``c_i`` up to 1e5,
 integer ``n_i`` in one-unit boxes, and ``sum x = 1``). In exact arithmetic no integer
 point of its box satisfies the rows; the closest misses ``sum x = 1`` by 3.35e-7,
-inside the driver's incumbent tolerance (``ROW_VERIFY_TOL = 1e-6`` relative). HiGHS
+inside the driver's incumbent tolerance. HiGHS
 returns that point (0.0282907), and so does the driver on one trajectory. On another
 (the D3 lazy master with its root cut loop) the driver's exact proofs fathomed every
 node and the master came back ``INFEASIBLE``: node FBBT amplified the 3.35e-7
@@ -80,21 +80,7 @@ def test_fixture_box_is_exactly_infeasible_but_tolerance_feasible():
     assert float(best) < ROW_TOL, float(best)
 
 
-@pytest.mark.parametrize(
-    "lazy",
-    [
-        False,
-        pytest.param(
-            True,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="exact infeasibility proofs vs tolerance acceptance; fix in progress "
-                "on #2196 (highs-parity D3)",
-            ),
-        ),
-    ],
-    ids=["solve_milp", "lazy_master"],
-)
+@pytest.mark.parametrize("lazy", [False, True], ids=["solve_milp", "lazy_master"])
 def test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy):
     k = _load()
     if lazy:
@@ -113,18 +99,19 @@ def test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy):
     assert res.objective <= 0.0282907 + 1e-6
 
 
-def test_tol_robust_flag_keeps_the_acceptable_point():
-    """``DISCOPT_MILP_TOL_ROBUST=1`` (read once per process, so a subprocess): both
-    entry points return an accepted point of the tolerance-feasible box, never
-    ``INFEASIBLE``. Measured: 0.0282902 / 0.0282900, row residual 5e-7."""
+def test_tol_robust_opt_out_reproduces_the_defect():
+    """``DISCOPT_MILP_TOL_ROBUST=0`` (read once per process, so a subprocess) restores
+    the exact-only proofs, and the lazy master again proves the box empty: the
+    fixture still exercises the defect the default fixes."""
     code = (
         "import sys; sys.path.insert(0, %r)\n"
         "import test_milp_tolerance_feasible_box as T\n"
-        "for lazy in (False, True):\n"
-        "    T.test_driver_does_not_prove_a_tolerance_feasible_box_empty(lazy)\n"
-        "print('CHECKED', 2)\n"
+        "from discopt.solvers import milp_simplex as MS\n"
+        "r = MS.solve_milp_with_lazy_cuts(**T._load(), time_limit=60.0, gap_tolerance=1e-4,"
+        " lazy_callback=lambda x: [])\n"
+        "print('STATUS', r.status.name)\n"
     ) % os.path.dirname(__file__)
-    env = {**os.environ, "DISCOPT_MILP_TOL_ROBUST": "1"}
+    env = {**os.environ, "DISCOPT_MILP_TOL_ROBUST": "0"}
     p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-3000:]
-    assert "CHECKED 2" in p.stdout
+    assert "STATUS INFEASIBLE" in p.stdout, p.stdout
