@@ -186,3 +186,43 @@ more LPs (`Numerical` −20 %), makes the kernel's slack retry redundant, and sa
 instances (`ex8_5_3` −36 %), but certifies nothing the OFF arm does not, and wall is flat. The
 flag stays OFF. What could still show a benefit: the QPLIB run (#1008's large equality-rich LPs,
 where the cold primal ground to `max_iter`), and covering the LPs whose start is refused.
+
+### Third panel: the cascade offered from `solve_lp_cols_warm` too (`210f400`, `panel/corpus_warm_hook.*`)
+
+The 40-LP nous1 replay (`nous1_40/`, below) showed 13 of 40 undecided LPs never reaching the
+cascade: their inherited basis is singular, the dual refuses it, and `solve_lp_cols_warm` runs its
+own two-phase fallback directly. The hook there (flag ON only) took the replay from 27/40 to
+**39/40** (flag OFF: 0/40; no wrong verdict in either arm). The same panel protocol on that code:
+
+| | OFF | ON |
+|---|---|---|
+| violations | — | **0** (773 checks; 20 unfired instances bit-identical) |
+| certified | 59 | 59 |
+| bounds looser / tighter | — | **0 / 0** (`hda` back to 3 nodes and the OFF bound) |
+| nodes | 6,839 | 6,607 (−3.4 %) |
+| wall | 2,244.1 s | 2,237.7 s |
+| `LpVerdictNumerical` | 21,463 | **16,326 (−24 %)** |
+| kernel `NodeLpSlackRetry` | 1 | 0 |
+| attempts / own / augmented / refused / fell back / repeat skipped | — | 9,769 / 6,121 / 140 / 3,047 / 461 / 4,431 |
+
+**No regression anywhere on the corpus, no certificate gained.**
+
+### #2163's third `ScaledProblem` stage (`stage3_probe.*`)
+
+The four #2163 networks on the Rust MILP engine: flag OFF the stage fires on `scaled_numerical` and
+`cuts_b` (once each, deciding); flag ON it fires **0** times, the cascade's augmented start deciding
+those LPs first. All four certify the same optimum. With the kernel's slack retry also at 1 → 0,
+neither caller-side retry #2212 names has anything left to do on its own cases.
+
+### A false infeasibility certificate in the spatial tree, found by the flag-ON smoke run
+
+`test_monomial_straddle_kernel` failed with the flag ON: the native tree answered `infeasible` for
+`s = x**6` with `x` pinned at an endpoint of a straddling box, a feasible problem. The node LPs were
+all correct (checked against HiGHS). The tree itself was wrong: emptying its worklist with no
+incumbent, it returned `Infeasible` even after closing a region that was only too narrow to split
+(`min_box_width`), never proven empty. `s = 1e6` cannot pass the absolute McCormick tolerance as an
+incumbent there. With the flag OFF the same happens at 5,000 nodes (in ~260), so this is a
+pre-existing default-path defect; the flag only reached the narrow box inside the test's 200-node
+cap. Fixed in `4c04c6b` (`Exhausted` with the closed bound unless every region was proven empty),
+with a regression test. `Model.solve`'s kernel route already declined a kernel `infeasible`, so no
+published `Model.solve` result was affected; `solve_spatial_tree_py` returned it.
