@@ -130,8 +130,9 @@ with its piecewise, Taylor/Chebyshev and learned envelope variants was retired i
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for
 LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt, AMP, the MIP-NLP
 decomposition family, GDPopt-LOA, the DFO backends (`direct`, `surrogate`), and an
-optional Gurobi backend. highspy is a core dependency: it backs the pure LP/MILP
-entry route (`lp_milp_highs.py`) and the OA/GDP paths.
+optional Gurobi backend. HiGHS (`highspy`) is the optional `discopt[highs]` extra:
+with it a pure MILP takes the verified HiGHS route (`lp_milp_highs.py`); without it
+the in-house MILP engine solves it, and every other path is in-house either way.
 
 **Interfaces** (`python/discopt/interfaces`): PyCUTEst-based evaluator for NLP
 benchmarking against the CUTEst test set, and a native QPLIB reader.
@@ -191,8 +192,11 @@ See the benchmark notebooks for full scaling plots and details:
 
 Requires Python 3.12+; building from source additionally needs Rust 1.84+.
 POUNCE -- the default numerical engine -- is a pure-Rust Ipopt port installed as a
-core dependency, with no system libraries needed. `highspy` (the pure LP/MILP entry
-route) is also a core dependency. **JAX is optional** (the `discopt[jax]` extra, #1873):
+core dependency, with no system libraries needed. **HiGHS is optional** (the
+`discopt[highs]` extra): where it is installed a pure MILP defaults to the verified
+HiGHS route, which closes more hard MIPLIB instances within a time limit than the
+in-house MILP engine; without it that engine solves the MILP, with the same certificate
+checks. **JAX is optional** (the `discopt[jax]` extra, #1873):
 a default solve does not import it (see the NLP-evaluation note above). It is needed
 for a model with no tape opcode (`dm.custom`, a matrix 2-norm), `DISCOPT_NLP_EVAL=jax`,
 and the features that use JAX autodiff on purpose -- `discopt.estimate`,
@@ -207,6 +211,9 @@ pip install discopt
 
 # JAX-backed features (dm.custom, estimation, sensitivity, differentiable layers, ...)
 pip install "discopt[jax]"
+
+# HiGHS for pure MILPs (and the opt-ins milp_solver="highs", highs_options=...)
+pip install "discopt[highs]"
 
 # Optional cyipopt fallback (needs the Ipopt C library; macOS: brew install ipopt)
 pip install "discopt[ipopt]"

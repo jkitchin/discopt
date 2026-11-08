@@ -196,7 +196,10 @@ def build_convex_spec_ok(m) -> bool:
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("backend,route", [("rust", "rust-lp"), ("highs", "highs-lp")])
+@pytest.mark.parametrize(
+    "backend,route",
+    [("rust", "rust-lp"), pytest.param("highs", "highs-lp", marks=pytest.mark.requires_highs)],
+)
 def test_lp_solve_skips_convexity_classification(monkeypatch, backend, route):
     """An LP solve never classifies convexity, and its certificate is unchanged -- on
     either LP route (the Rust one is the default since highs-parity D1)."""

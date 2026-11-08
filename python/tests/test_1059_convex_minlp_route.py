@@ -238,6 +238,7 @@ class TestRouteDispatch:
         # #1614: every route now names itself; the auto-route must not be it.
         assert (result.algorithm_route or "").startswith("miqp-bb:"), result.algorithm_route
 
+    @pytest.mark.requires_highs
     def test_auto_route_is_recorded_on_the_result(self, monkeypatch):
         """The routing decision must be visible, not silent."""
         monkeypatch.setenv(ROUTE_ENV, "1")

@@ -1,21 +1,14 @@
-"""Which default paths still reach HiGHS (highs-parity P6.2)?
+"""No default path reaches HiGHS (highs-parity P6.2 / P6.3).
 
 Mirrors ``test_1873_jax_optional.py``. Each check runs in a fresh interpreter whose import
 system refuses ``highspy`` and *records the stack of every attempt*, so a path that
 catches the ``ImportError`` and quietly degrades is seen as well as one that crashes.
 
-``highspy`` is still a core dependency: decisions D2 (the pure-MILP route) and D3 (the
-convex-route OA master) were reopened, not closed (``docs/dev/highs-parity-plan.md``).
-So this guard does not demand zero attempts yet. It attributes every attempt to the
-discopt function that made it and pins the set of **remaining roles**
-(``KNOWN_ROLES``, each tied to a row of ``docs/dev/highs-optional-inventory.md``):
-
-* an attempt from ``highs_available()`` is an availability probe, not a reach;
-* an attempt from a known role is reported, never silently allowed to grow;
-* an attempt from anywhere else FAILS: a new HiGHS reach on a default path.
-
-When D2/D3 are bridged, the corresponding roles leave ``KNOWN_ROLES`` and this becomes
-the zero-attempt guard the plan's P6.2 asks for.
+Since P6.3 ``highspy`` is the optional ``discopt[highs]`` extra. Without it the pure-MILP
+route falls back to the in-house engine (``solver._lp_milp_backend``), and every other
+default path is in-house already (``docs/dev/highs-optional-inventory.md``). So the guard
+is the zero-attempt one: an attempt from ``highs_available()`` is an availability probe
+and allowed; any other attempt FAILS, and so does any corpus instance that errors.
 """
 
 from __future__ import annotations
@@ -30,21 +23,6 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
-
-#: function (innermost discopt frame below the blocker) -> inventory row it belongs to.
-KNOWN_ROLES = {
-    "require_highspy": "the caller's role is the next discopt frame (see ROLE_CALLERS)",
-}
-#: The discopt functions allowed to call ``require_highspy`` on a default path today,
-#: with the inventory row (and the decision) that keeps each one there.
-ROLE_CALLERS = {
-    "_solve_milp_highs": "#1 pure-MILP route (D2)",
-    "solve_milp_std": "#1 pure-MILP route (D2)",
-    "solve_lp_std": "#3 solve_lp_std seam default",
-    "solve": "#3 solve_lp_std seam default (lp_std_engine.HighsEngine.solve)",
-    "_convex_route_oa_master": "#4 convex-route OA master (D3)",
-    "_require_highspy": "#4 convex-route OA master (D3), milp_highs",
-}
 
 _BLOCK_HIGHS = r"""
 import sys, traceback
@@ -105,38 +83,25 @@ print("RESULT " + json.dumps({"solved": solved, "errors": errors, "roles": _role
 """
 
 
-def _classify(res: dict) -> tuple[list, list, list]:
-    probes, known, unknown = [], [], []
-    for row in res["roles"]:
-        if row[1] == "probe":
-            probes.append(row)
-        elif row[1] == "require_highspy" and row[2] in ROLE_CALLERS:
-            known.append(row)
-        elif row[1] in ROLE_CALLERS:
-            known.append(row)
-        else:
-            unknown.append(row)
-    return probes, known, unknown
+def _split(res: dict) -> tuple[list, list]:
+    probes = [r for r in res["roles"] if r[1] == "probe"]
+    reaches = [r for r in res["roles"] if r[1] != "probe"]
+    return probes, reaches
 
 
 @pytest.mark.slow
-def test_corpus_reaches_highs_only_through_known_roles():
+def test_corpus_never_reaches_highs():
     body = _SOLVE_ALL.replace("sys.argv[1]", repr(str(NL_DIR))).replace(
         "int(sys.argv[2])", "10_000"
     )
     body = body.replace("float(sys.argv[3])", "10.0")
     res = _run(body, timeout=3000)
-    probes, known, unknown = _classify(res)
-    assert res["solved"] or res["errors"], "nothing ran"
-    assert not unknown, f"new HiGHS reach on a default path: {unknown[:10]}"
-    # Reported, so a change in the remaining roles is visible in the log.
-    summary = {
-        "solved": len(res["solved"]),
-        "errors": len(res["errors"]),
-        "probe_attempts": len(probes),
-        "role_attempts": sorted({(r[1], r[2]) for r in known}),
-    }
-    print(json.dumps(summary, indent=1))
+    probes, reaches = _split(res)
+    n = len(res["solved"]) + len(res["errors"])
+    print(json.dumps({"instances": n, "solved": len(res["solved"]), "probes": len(probes)}))
+    assert n >= 60, f"only {n} corpus instances ran"
+    assert not reaches, f"a default path reached HiGHS: {reaches[:10]}"
+    assert not res["errors"], f"instances failed without highspy: {res['errors'][:10]}"
 
 
 @pytest.mark.smoke
@@ -157,3 +122,58 @@ print("RESULT " + json.dumps(out))
     )
     assert res["raised"] == "MissingHighsError" and res["name"] == "highspy", res
     assert "discopt[highs]" in res["msg"], res
+
+
+_MILP = r"""
+import discopt.modeling as dm
+m = dm.Model("knap")
+x = m.integer("x", shape=(3,), lb=0, ub=4)
+m.maximize(5 * x[0] + 4 * x[1] + 3 * x[2])
+m.subject_to(2 * x[0] + 3 * x[1] + x[2] <= 7)
+"""
+
+
+@pytest.mark.smoke
+def test_milp_default_falls_back_to_the_in_house_engine_and_says_why():
+    """P6.3: with no backend named and no highspy, a pure MILP runs on the in-house
+    engine (never raises), certifies, and its route records why."""
+    res = _run(
+        _MILP
+        + r"""
+import json, os
+os.environ.pop("DISCOPT_LP_MILP_BACKEND", None)
+from discopt.solver import _lp_milp_backend
+r = m.solve(time_limit=30)
+print("RESULT " + json.dumps({"backend": _lp_milp_backend(), "status": r.status,
+      "obj": r.objective, "cert": bool(r.gap_certified), "route": r.algorithm_route,
+      "roles": _roles()}))
+""",
+        timeout=300,
+    )
+    assert res["backend"] == "rust", res
+    assert res["status"] == "optimal" and res["cert"], res
+    assert res["obj"] == pytest.approx(19.0), res  # x = (2, 0, 3): 10 + 9
+    assert "highspy is not installed" in res["route"], res
+    assert all(r[1] == "probe" for r in res["roles"]), res["roles"]
+
+
+@pytest.mark.smoke
+def test_highs_options_without_highs_are_refused():
+    """P6.3: ``highs_options`` asks for HiGHS; without it the solve is refused with the
+    named error, never run on another engine with the options dropped."""
+    res = _run(
+        _MILP
+        + r"""
+import json
+from discopt._optional_highs import MissingHighsError
+try:
+    m.solve(time_limit=30, highs_options={"output_flag": True})
+    out = {"raised": None}
+except MissingHighsError as e:
+    out = {"raised": type(e).__name__, "msg": str(e)}
+print("RESULT " + json.dumps(out))
+""",
+        timeout=300,
+    )
+    assert res["raised"] == "MissingHighsError", res
+    assert "highs_options" in res["msg"] and "discopt[highs]" in res["msg"], res

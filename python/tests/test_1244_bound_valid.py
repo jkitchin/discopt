@@ -416,6 +416,7 @@ def test_a_round_trip_never_strengthens_a_stored_certificate():
 
 
 @pytest.mark.smoke
+@pytest.mark.requires_highs
 def test_the_highs_lp_route_names_its_safe_bound(monkeypatch):
     """That route's LP bound is a Neumaier-Shcherbina SAFE bound.
 
@@ -439,6 +440,7 @@ def test_the_highs_lp_route_names_its_safe_bound(monkeypatch):
 
 
 @pytest.mark.smoke
+@pytest.mark.requires_highs
 def test_the_highs_milp_route_names_its_tree_bound():
     """HiGHS's MIP dual bound is trusted as-is (``milp/bound_provenance=highs-fp``).
 

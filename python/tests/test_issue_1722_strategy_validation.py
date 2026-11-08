@@ -62,6 +62,7 @@ def test_unknown_strategy_raises_positionally_through_solve_model():
         solve_model(_knapsack(), 60.0, 1e-4, None, 1, False, 16, "breadth_first")
 
 
+@pytest.mark.requires_highs
 def test_highs_milp_route_warns_that_strategy_is_unused():
     result, ws = _strategy_warnings(lambda: _knapsack().solve(strategy="depth_first"))
     assert result.status == "optimal" and result.objective == pytest.approx(25.0)

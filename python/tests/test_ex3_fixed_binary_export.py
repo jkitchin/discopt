@@ -24,7 +24,6 @@ import tempfile
 from pathlib import Path
 
 import discopt.modeling as dm
-import highspy
 import numpy as np
 import pytest
 from discopt.export import to_gams, to_lp, to_mps, to_nl
@@ -49,6 +48,7 @@ def _pinned_model(value: float = 1.0) -> dm.Model:
 
 def _read_with_highs(text: str, suffix: str):
     """Parse an exported model with HiGHS; return (lower, upper, optimum)."""
+    highspy = pytest.importorskip("highspy")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / f"model{suffix}"
         p.write_text(text)

@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 from discopt.mo import epsilon_constraint
 
-pytestmark = pytest.mark.smoke
+# highs-parity P6.3: these tests exercise the HiGHS route (the discopt[highs] extra).
+pytestmark = [pytest.mark.smoke, pytest.mark.requires_highs]
 
 
 def _facility_location():

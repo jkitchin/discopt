@@ -131,7 +131,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist
-      - name: Install the wheel in a fresh venv and solve on the HiGHS route
+      - name: Install the wheel in a fresh venv and solve without, then with, HiGHS
         shell: bash
         run: |
           # The venv lives OUTSIDE the checkout and is named by an absolute
@@ -152,7 +152,12 @@ jobs:
           "$PY" -m pip install "${wheels[0]}"
           # Run from outside the checkout so `import discopt` cannot resolve to ./python.
           cd "$RUNNER_TEMP"
-          "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py"
+          # highs-parity P6.3: highspy is the optional `discopt[highs]` extra. The bare
+          # wheel must not pull it in and must solve on the in-house engines...
+          "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" --no-highs
+          # ...and with the extra, the MILP must take the verified HiGHS route.
+          "$PY" -m pip install "${wheels[0]}[highs]"
+          "$PY" "$GITHUB_WORKSPACE/.github/scripts/wheel_smoke.py" --highs
 
   publish:
     name: Publish to PyPI

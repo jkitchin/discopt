@@ -1,10 +1,12 @@
 # HiGHS as an optional dependency — inventory (highs-parity P6.1)
 
-Status: **inventory and mechanism done; `highspy` is still a core dependency.** Making it
-optional is P6.3, and that is gated on decisions D2 (the pure-MILP route) and D3 (the
-convex-route OA master), both reopened by the owner on 2026-11-06 ("carry the plan to the
-end, then bridge the gaps or accept them"). This document lists every path that still
-reaches HiGHS, what it would cost a HiGHS-less install, and what removes it. Modelled on
+Status: **done (P6.3, 2026-11-08): `highspy` is the optional `discopt[highs]` extra.**
+No default path needs it. Without it the pure-MILP route (#1 below) falls back to the
+in-house MILP engine, and the explicit HiGHS opt-ins raise `MissingHighsError` naming the
+extra. D2 (whether the in-house engine should be the MILP default *with* HiGHS installed)
+stays open: HiGHS remains the MILP default where it is present, because the in-house
+engine still closes fewer MIPLIB instances within a time limit (P4.9). This document lists
+every path that can reach HiGHS and what a HiGHS-less install gets. Modelled on
 `jax-optional-inventory.md`.
 
 The mechanism is `python/discopt/_optional_highs.py`:
@@ -33,7 +35,7 @@ HiGHS-less install gets today.
 
 | # | reach (entry point) | default | without highspy | removed by |
 |---|---|---|---|---|
-| 1 | Pure-**MILP** route (`solver` dispatch → `lp_milp_highs.solve_milp*`) | HiGHS (`DISCOPT_LP_MILP_BACKEND=highs`) | `=rust` is the opt-in; the dispatch default would raise `MissingHighsError` | **D2** (P4.9 gate missed: Rust 16/38 MIPLIB vs 36/38) |
+| 1 | Pure-**MILP** route (`solver` dispatch → `lp_milp_highs.solve_milp*`) | HiGHS when `highspy` is installed (`DISCOPT_LP_MILP_BACKEND` unset or `=highs`) | the in-house MILP engine (P6.3: `_lp_milp_backend` falls back when the variable is unset; the route label ends `(default; highspy is not installed)`); an explicit `=highs` raises | fallback done (P6.3); the default *with* HiGHS installed is **D2**, still open (P4.9 gate missed: Rust 16/38 MIPLIB vs 36/38) |
 | 2 | Pure-**LP** route | Rust (`DISCOPT_LP_BACKEND`, D1) | unaffected | done (D1) |
 | 3 | `solve_lp_std` engine seam (`lp_std_engine`; `DISCOPT_LP_STD_ENGINE`) — the verified LP solve under the MILP/LP routes and `mccormick_lp`'s exact LP certification | **Rust** (default since P6.4, 2026-11-07); HiGHS only when the user passes `highs_options` or selects the HiGHS LP route | unaffected | done (P6.4) |
 | 4 | Convex-MINLP route OA / LP-NLP-BB **master** (`solver._convex_route_oa_master`) | **Rust** (`simplex`, default since D3, 2026-11-07) | unaffected; `DISCOPT_CONVEX_ROUTE_OA_MASTER=highs` opt-in raises | done (D3, owner-accepted residual of 6 instances: plan D3 status) |
@@ -47,11 +49,24 @@ HiGHS-less install gets today.
 | 12 | Opt-in `milp_solver="highs"` for MIP-NLP / OA (`lp_backend.get_milp_solver(backend="highs")`) | opt-in only | raises when asked | stays an opt-in |
 | 13 | CPLEX-LP-format (`.lp`, `.lp.gz`) **reader**: `discopt._lpfile.read_lp` and the benchmark loader `lp_milp_loader.read_instance` (which reached HiGHS for every non-MPS file) | in-house since P6 (Rust `discopt_core::lp_file`, HiGHS's staged reader ported stage by stage, objective Hessian included: 294/294 files and synthetic cases identical, kError included, `docs/dev/data/highs-parity/lp_reader/`) | unaffected; the loader reads `.mps` and `.lp` without HiGHS (its `highs_reference` oracle stays HiGHS by design) | done |
 
-## What a HiGHS-less install needs, today
+## What a HiGHS-less install gets (measured, P6.3)
 
-Set `DISCOPT_LP_MILP_BACKEND=rust`, `DISCOPT_LP_STD_ENGINE=rust` and
-`DISCOPT_CONVEX_ROUTE_OA_MASTER=simplex` (or `DISCOPT_CONVEX_MINLP_ROUTE=0`), and pass
-`iis_engine="rust"`. Reaches 6–9 already work. #11's reader is in-house (P6); only its
-HiGHS-imitating checker step is skipped. #13 (the LP-format reader) is in-house too. P6.2 adds the CI
-lane that runs the corpus and `pytest -m smoke` with `highspy` uninstalled, which turns
-this table into a measured one.
+Nothing to configure: `pip install discopt` (no extra) solves every default path
+in-house. Measured 2026-11-08 with `highspy` blocked at import:
+
+- `test_highs_optional.py::test_corpus_never_reaches_highs`: the 74 in-repo `.nl`
+  instances at 10 s each, **74 solved, 0 errors, 0 attempts to import `highspy`**
+  other than the 77 `highs_available()` probes.
+- `pytest -m smoke`: green once the tests that exercise a HiGHS route skip
+  (`requires_highs` / `pytest.importorskip("highspy")`); before that marking it showed
+  23 failures and 3 collection errors, every one a test that asks for a HiGHS route
+  explicitly (`milp_solver="highs"`, `highs_options`, `DISCOPT_LP_BACKEND=highs`, a module
+  that pins `DISCOPT_CONVEX_ROUTE_OA_MASTER=highs`) or asserts the `highs-milp` route
+  label, plus `test_1619`, now engine-aware.
+- `.github/scripts/wheel_smoke.py --no-highs` (run by `release.yml` on the bare wheel,
+  then `--highs` after installing `wheel[highs]`).
+- `highs_options` without `highspy` is refused (`MissingHighsError`), not dropped with
+  the "was not used" warning: they are a request for HiGHS.
+
+CI's `Python without HiGHS` lane (`ci.yml` `python-nohighs`) runs the smoke tier and the
+corpus guard with `highspy` uninstalled.

@@ -1,11 +1,11 @@
 """HiGHS reach, in one place: whether it is installed, and the error when it is not.
 
-``highspy`` is still a core dependency today (the pure LP/MILP route, #1229; plan
-``docs/dev/highs-parity-plan.md`` decisions D2/D3 keep it there for now). This module is
+``highspy`` is the optional ``discopt[highs]`` extra (highs-parity P6.3). This module is
 the single place that imports it, so every reach can be inventoried
-(``docs/dev/highs-optional-inventory.md``) and, once the plan's Phase 6 makes the
-dependency optional, fail at the entry point with a message naming the feature and the
-extra instead of ``No module named 'highspy'`` from somewhere inside it.
+(``docs/dev/highs-optional-inventory.md``) and fails at the entry point with a message
+naming the feature and the extra instead of ``No module named 'highspy'`` from somewhere
+inside it. No default path needs it: without it the pure-MILP route falls back to the
+in-house engine (``solver._lp_milp_backend``); the explicit HiGHS opt-ins raise.
 
 :class:`MissingHighsError` subclasses ``ModuleNotFoundError`` (``name="highspy"``), so
 code that already handles a missing optional package through ``except ImportError``

@@ -271,7 +271,8 @@ def _cyipopt_available() -> bool:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip ``requires_cyipopt`` / ``requires_jax`` tests when the stack is absent.
+    """Auto-skip ``requires_cyipopt`` / ``requires_jax`` / ``requires_highs`` tests when
+    the stack is absent.
 
     The optional Ipopt system stack is installed via apt in CI, which can fail on
     a transient mirror outage. Marked tests should then SKIP (not ERROR) so a flaky
@@ -308,6 +309,17 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "requires_jax" in item.keywords:
                 item.add_marker(skip_no_jax)
+
+    # highs-parity P6.3: highspy is the optional `discopt[highs]` extra. A test that
+    # exercises a HiGHS route at run time carries ``requires_highs``; a module that
+    # imports highspy at collection time uses ``pytest.importorskip("highspy")``.
+    from discopt._optional_highs import highs_available
+
+    if not highs_available():
+        skip_no_highs = pytest.mark.skip(reason="HiGHS not installed (the discopt[highs] extra)")
+        for item in items:
+            if "requires_highs" in item.keywords:
+                item.add_marker(skip_no_highs)
 
     if _cyipopt_available():
         return

@@ -248,6 +248,7 @@ def test_master_layout_puts_the_block_last_with_start_values():
 
 
 @pytest.mark.smoke
+@pytest.mark.requires_highs
 def test_the_flag_is_wired_and_keeps_the_answer(monkeypatch):
     from discopt.solvers.oa import solve_lp_nlp_bb
 

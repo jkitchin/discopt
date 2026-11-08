@@ -127,6 +127,7 @@ POUNCE_WALL_GUARD = 100.0
 
 
 @pytest.mark.smoke
+@pytest.mark.requires_highs
 def test_all_milp_backends_agree_on_the_captured_master():
     """The in-house engine must not be the odd one out.
 

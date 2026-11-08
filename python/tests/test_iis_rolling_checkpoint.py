@@ -13,13 +13,12 @@ engine's own out-of-time signal, so the tests do not depend on timing.
 """
 
 import discopt.modeling as dm
-import highspy
 import numpy as np
 import pytest
 from discopt import _iis_milp
 from discopt._iis_milp import milp_iis
 
-pytest.importorskip("highspy")
+highspy = pytest.importorskip("highspy")
 
 
 def _model(n_noise=27):

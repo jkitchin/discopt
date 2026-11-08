@@ -13832,8 +13832,16 @@ def _scoped_highs_options(fn: _F) -> _F:
                 _HIGHS_OPTIONS_REQUEST.reset(token)
         from discopt.solvers.lp_milp_highs import validate_user_options
 
+        pairs = validate_user_options(opts)
+        if opts:
+            # highs-parity P6.3: highspy is optional. Options for HiGHS are a request
+            # for HiGHS; without it they are refused (after the allowlist check, so a
+            # bad key still names itself), never dropped with a warning.
+            from discopt._optional_highs import require_highspy
+
+            require_highspy("highs_options")
         state = {"used": False}
-        token = _HIGHS_OPTIONS_REQUEST.set((validate_user_options(opts), state))
+        token = _HIGHS_OPTIONS_REQUEST.set((pairs, state))
         try:
             result = fn(*args, **kwargs)
         finally:
@@ -18931,10 +18939,19 @@ def solve_model(
                         incumbent_time_extension=incumbent_time_extension,
                     )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
-                        # #1614 C1: the in-house engine answering a MILP must say so.
+                        # #1614 C1: the in-house engine answering a MILP must say so,
+                        # and (P6.3) say when it ran because highspy is not installed.
+                        from discopt._optional_highs import highs_available
+
+                        _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
+                        if (
+                            _why == "default"
+                            and os.environ.get("DISCOPT_LP_MILP_BACKEND") is None
+                            and not highs_available()
+                        ):
+                            _why = "default; highspy is not installed"
                         _simplex_res.algorithm_route = (
-                            "native-milp: discopt monolithic Rust MILP engine "
-                            f"({'nlp_solver=simplex' if nlp_solver == 'simplex' else 'default'})"
+                            f"native-milp: discopt monolithic Rust MILP engine ({_why})"
                         )
                     if _simplex_res is not None:
                         return _simplex_res
@@ -38662,15 +38679,27 @@ def _milp_engine_default_on() -> bool:
 
 
 def _lp_milp_backend() -> str:
-    """Which engine solves a pure LP / MILP: ``"highs"`` (default) or ``"rust"``.
+    """Which engine solves a pure LP / MILP: ``"highs"`` or ``"rust"``.
 
     Issue #1229; the contract is ``docs/dev/lp-milp-highs-routing-plan.md`` §3, and
     the graduation evidence is its §12 (P4). ``DISCOPT_LP_MILP_BACKEND=rust`` is the
-    opt-out to the legacy Rust route. Re-read each call so tests and panels can flip
+    opt-out to the in-house Rust route. Re-read each call so tests and panels can flip
     it in-process. Any other value is refused loudly: a typo must not silently run the
     default engine and be reported as a measurement of the other one.
+
+    Unset, the default is ``"highs"`` when ``highspy`` is installed and ``"rust"`` when
+    it is not (highs-parity P6.3: ``highspy`` is the optional ``discopt[highs]`` extra).
+    The in-house route certifies its answers with the same ladder; on MIPLIB it closes
+    fewer instances within a time limit than HiGHS does (D2, ``highs-parity-plan.md``),
+    which is why HiGHS stays the default where it is present. An explicit ``=highs``
+    without ``highspy`` still raises ``MissingHighsError`` at the solve.
     """
-    val = os.environ.get("DISCOPT_LP_MILP_BACKEND", "highs").strip().lower()
+    raw = os.environ.get("DISCOPT_LP_MILP_BACKEND")
+    if raw is None:
+        from discopt._optional_highs import highs_available
+
+        return "highs" if highs_available() else "rust"
+    val = raw.strip().lower()
     if val not in ("rust", "highs"):
         raise ValueError(f"DISCOPT_LP_MILP_BACKEND={val!r}: expected 'rust' or 'highs'")
     return val
@@ -38683,7 +38712,7 @@ def _lp_backend() -> str:
     Precedence: ``DISCOPT_LP_BACKEND`` if set; else ``DISCOPT_LP_MILP_BACKEND`` if set
     (so every A/B run and opt-out that named the joint variable keeps its meaning); else
     ``"rust"``. MILP is not affected -- it reads only ``DISCOPT_LP_MILP_BACKEND``
-    (:func:`_lp_milp_backend`, default ``"highs"``).
+    (:func:`_lp_milp_backend`; ``"highs"`` when ``highspy`` is installed).
 
     D1's evidence (``docs/dev/highs-parity-plan.md`` P2.6, ``p2.6/gate_L_INF.json``): 3
     rounds under a load gate, 480 solves, 0 incorrect; the Rust route certifies all 25 L
@@ -38709,8 +38738,9 @@ def _resolve_lp_milp_backend(milp_backend: Optional[str]) -> str:
     """The engine for a pure LP / MILP: ``"highs"``, ``"rust"`` or ``"native"``.
 
     ``milp_backend=None`` defers to :func:`_lp_milp_backend` (the
-    ``DISCOPT_LP_MILP_BACKEND`` env var, default ``"highs"``), so a solve that does
-    not name a backend is unchanged. An explicit keyword wins over the env var:
+    ``DISCOPT_LP_MILP_BACKEND`` env var; default ``"highs"`` when ``highspy`` is
+    installed, else ``"rust"``), so a solve that does not name a backend is unchanged.
+    An explicit keyword wins over the env var:
 
     * ``"highs"`` -- the #1229 HiGHS route, with discopt-verified certificates.
     * ``"native"`` (#1535) -- discopt's own branch and bound, for teaching and for

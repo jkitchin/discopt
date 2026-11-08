@@ -26,12 +26,13 @@ from __future__ import annotations
 import itertools
 
 import discopt.modeling as dm
-import highspy
 import numpy as np
 import pytest
 from discopt.solver import _highs_std_form
 from discopt.solvers import lp_milp_highs
 from discopt.solvers.lp_milp_highs import MILP_PRESOLVE_RULE_OFF
+
+highspy = pytest.importorskip("highspy")
 
 # (c, A, b, ub, enumerated optimum) -- verbatim from the issue.
 WITNESSES = {

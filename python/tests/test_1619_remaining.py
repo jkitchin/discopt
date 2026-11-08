@@ -41,7 +41,10 @@ def test_binary_qp_is_linearized_and_solved_on_the_milp_route():
     r = _dopants().solve(time_limit=60)
     assert r.status == "optimal" and r.gap_certified
     assert r.objective == pytest.approx(-1.16, abs=1e-6)  # exhaustive optimum
-    assert r.algorithm_route.startswith("highs-milp")
+    # highs-parity P6.3: the MILP route's engine is HiGHS when installed, else in-house.
+    from discopt._optional_highs import highs_available
+
+    assert r.algorithm_route.startswith("highs-milp" if highs_available() else "native-milp")
 
 
 def test_binary_qp_legacy_opt_out_keeps_spatial_bb(monkeypatch):

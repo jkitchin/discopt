@@ -1812,13 +1812,25 @@ and is re-written by P4.1.**
   construction until D2/D3 close, and a lane that is red by design measures nothing.
   The named-error check (`test_a_highs_only_call_raises_the_named_error`) is smoke and
   runs in every lane now; the corpus guard is `slow`.
-- [ ] **P6.3 — Packaging flip.** Scope: `pyproject.toml:44` (remove `highspy` from
+- [x] **P6.3 — Packaging flip. DONE 2026-11-08 under the owner's narrower acceptance (see result).** Scope: `pyproject.toml:44` (remove `highspy` from
   `dependencies`), `:73` (real `highs` extra; `dev` and `all` include it), `cli.py:76`,
   docs, `CLAUDE.md` Architecture note, the R7 docstrings. Done: `pip install .` without
   the extra → `pytest -m smoke` green; `wheel_smoke.py` passes without `highspy`; release
   workflow runs the no-highspy lane. Preconditions: D1 and D2 both resolved to a Rust
   default (or the owner's narrower acceptance), P1.2–P1.4, P3.2, P5.1–P5.2 landed. Kill:
   any precondition unmet → stop; this task cannot be partially done.
+  **Result (2026-11-08).** The owner accepted the narrower precondition the clause allows:
+  D3 resolved to the in-house master (2026-11-07); D2 stays open, so the pure-MILP route
+  keeps HiGHS as its default *where `highspy` is installed* and falls back to the in-house
+  engine where it is not (`solver._lp_milp_backend`; the route label says so). `highspy`
+  left `dependencies` for the `highs` extra (`dev` and `all` include it). Measured with
+  `highspy` blocked: the corpus guard solves 74/74 in-repo instances with 0 HiGHS imports
+  beyond `highs_available()` probes; the smoke tier is green after the HiGHS-route tests
+  were marked `requires_highs` (23 failures + 3 collection errors before, all tests that
+  ask for a HiGHS route); `wheel_smoke.py` now runs `--no-highs` on the bare wheel and
+  `--highs` on `wheel[highs]` in `release.yml` (its LP check had asserted the HiGHS route,
+  stale since D1); CI gained `python-nohighs`. `highs_options` without `highspy` is now
+  refused. Inventory: `docs/dev/highs-optional-inventory.md`.
 - [ ] **P6.4 — Retire HiGHS-only flags and dead paths (routing plan §8).** Scope: the
   nine route-only flags listed in §1.1, `_cross_check_presolve` (both files),
   `MILP_PRESOLVE_RULE_OFF`, `_root_cuts` HiGHS branch, `_lp_dual` HiGHS rungs,
@@ -1835,7 +1847,7 @@ and is re-written by P4.1.**
   release ≥ <version> and drop the bit there." Plus the #1634 disposition per §4. Done:
   the five checks pass in CI. Kill: none.
   **Status (2026-11-06): P6.3, P6.4 and P6.5 are BLOCKED, not done.**
-  - P6.3 (packaging flip): its precondition "D2 resolved to a Rust default" is unmet (P4.9
+  - P6.3 (packaging flip) [since done, 2026-11-08, result above]: its precondition "D2 resolved to a Rust default" is unmet (P4.9
     missed; D2 reopened) and P5.1 did not land as a default (D3 open); the kill clause
     says this task cannot be partially done -> stopped. The P6.2 guard names what still
     needs `highspy` on the default path.
