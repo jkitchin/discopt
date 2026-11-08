@@ -39782,8 +39782,9 @@ def _milp_run1_continue_enabled() -> bool:
 
 
 def _milp_no_stall_tree_enabled() -> bool:
-    """``DISCOPT_MILP_NO_STALL_TREE`` gate (Python-MILP-tree retirement, default OFF
-    until its panel).
+    """``DISCOPT_MILP_NO_STALL_TREE`` gate (Python-MILP-tree retirement; default OFF:
+    its §5 panel passed, but it graduates together with
+    ``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` -- see below).
 
     Run 1 of ``_solve_milp_simplex`` stops at the #291 stall slice (half the remaining
     time, at most ``_SIMPLEX_MILP_BUDGET_CAP_S``). Without an incumbent there, the MILP
@@ -39802,6 +39803,17 @@ def _milp_no_stall_tree_enabled() -> bool:
     (``nexp-50-20-4-2`` 68 -> 67); v2 restarted a fresh native run after the slice,
     which on ``issue-2446`` (2200 x 1963) never finished enough of a root to report any
     bound -- the stall instances need run 1's own tree continued.
+
+    **v3 §5 panel PASSED 2026-11-08** (MIPLIB-38+M, 62 instances x 3 reps x 20 s,
+    ``docs/dev/data/python-milp-retirement/no_stall_tree_v3_panel_r3.json``): 372 checks
+    cert-clean; certified 123 -> 126 (``p0548`` 0/3 -> 3/3, the coin flip gone); 0 dual
+    losses; no incumbent lost; median primal gap 0.185 -> 0.160; nodes on both-certified
+    rows 47,757 -> 47,515; bounds better on ``enlight_hard``, ``2122``, ``issue-2446``;
+    the extension fired 13 times, only on the stall instances. Not flipped yet: a MILP
+    with unbounded continuous columns (``test_1287``'s default-box model) had been
+    solved by the Python tree after the handoff; the engine needs #1678 (b) on its
+    columns (``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX``) to solve it, so the two graduate
+    together after that flag's own differential.
     """
     return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "0") == "1"
 
@@ -39823,6 +39835,15 @@ def _milp_rust_coef_rescue_enabled() -> bool:
     a tightened solve that is not certified changes nothing.
     """
     return os.environ.get("DISCOPT_MILP_RUST_COEF_RESCUE", "0") == "1"
+
+
+def _milp_rust_open_default_box_enabled() -> bool:
+    """``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` gate (default OFF until its panel): apply
+    #1678 (b) -- a default-box side is "no bound" -- to the Rust MILP engine's columns,
+    as the HiGHS route and the other engine entries already do. Found by the
+    Python-MILP-tree retirement: the stall handoff to the Python tree had been covering
+    for the engine on MILPs with unbounded continuous columns."""
+    return os.environ.get("DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX", "0") == "1"
 
 
 def _milp_reentry_cuts_enabled() -> bool:
@@ -40126,6 +40147,19 @@ def _solve_milp_simplex(
     # D2 (``DISCOPT_MILP_ALIGNED_SLACKS``): the driver's own copy; every check below
     # keeps reading the original ``lp_data``.
     _drv = _milp_aligned_lp(lp_data, n_orig) if _milp_aligned_slacks_enabled() else lp_data
+    if _milp_rust_open_default_box_enabled():
+        # #1678 (b) on the Rust engine route: a structural side at the default box
+        # magnitude means "no bound", handed on as the 1e20 infinity exactly as
+        # ``_highs_std_form`` does for the HiGHS route. Left at 9.999e19 it is a FINITE
+        # bound to the Rust LP layer (its infinity is 1e20), vertices land near it, and
+        # no point there can be verified (``test_1287`` default-box model: both
+        # children closed unresolved, no incumbent, no bound).
+        _dside = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+        _xl_o = np.array(_drv.x_l, dtype=np.float64).ravel()
+        _xu_o = np.array(_drv.x_u, dtype=np.float64).ravel()
+        _xl_o[:n_orig][_xl_o[:n_orig] <= -_dside] = -_CONSTRAINT_INF
+        _xu_o[:n_orig][_xu_o[:n_orig] >= _dside] = _CONSTRAINT_INF
+        _drv = _drv._replace(x_l=_xl_o, x_u=_xu_o)
     _A_m, _A_n, _A_ptr, _A_idx, _A_val = _csc_for_rust_milp(_drv.A_eq)
     # A MILP with no constraints is solved by the driver itself (each column at the
     # bound its cost selects, integers rounded inward); it used to defer to the Python

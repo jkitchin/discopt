@@ -1545,7 +1545,8 @@ impl PyReluIdealSeparator {
                     sb_max_cands=6, sb_node_budget=48,
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
-                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None))]
+                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
+                    node_selection=None, extend_no_incumbent_s=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_relu_csc_py<'py>(
     py: Python<'py>,
@@ -1596,6 +1597,8 @@ pub fn solve_milp_relu_csc_py<'py>(
     debug_hook: Option<Py<PyAny>>,
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
+    node_selection: Option<String>,
+    extend_no_incumbent_s: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1702,7 +1705,11 @@ pub fn solve_milp_relu_csc_py<'py>(
         abs_gap_tol,
         max_open_nodes,
         Some(&sep),
-        MilpExtra::default(),
+        MilpExtra {
+            stall_time_s: None,
+            extend_no_incumbent_s,
+            selection: parse_node_selection(node_selection.as_deref())?,
+        },
     )?;
     Ok((
         status,

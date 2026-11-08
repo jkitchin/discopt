@@ -748,6 +748,12 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
     return cuts
 
 
+#: Relative size below which a slack-substituted GMI coefficient is round-off: dropped
+#: with an rhs relaxation (``_separate_gmi_rust``). Far below any real coefficient the
+#: dynamism filter keeps (``GMI_DYNAMISM_MAX``).
+GMI_TINY_REL = 1e-12
+
+
 def _separate_gmi_rust(h: _RustRootBasis, x, a_all, b_all, max_cuts):
     """GMI cuts from the Rust root vertex, in the same x-space ``<=`` form and through the
     same filters as the HiGHS separator.
@@ -779,6 +785,22 @@ def _separate_gmi_rust(h: _RustRootBasis, x, a_all, b_all, max_cuts):
         c_x, c_s = coeffs[k, :n], coeffs[k, n:]
         alpha = -(c_x - c_s @ h.a_le)
         rhs = -(float(rhs_all[k]) - float(c_s @ h.b_le))
+        # Substituting the slacks back (``c_s A_le``) cancels: entries that are zero in
+        # exact arithmetic come back at round-off size next to O(1) ones, and the
+        # dynamism filter below then rejects a good cut (measured on the #1617 GDP-hull
+        # root: both GMI cuts at dynamism 2.2e18, violation 1.0, while the HiGHS
+        # separator, which works in x-space, kept them). Drop such an entry SAFELY: on a
+        # bounded column, relax the rhs by the term's largest value over the box, so the
+        # cut stays valid for every point of the box; an unbounded column keeps it.
+        amax = float(np.max(np.abs(alpha))) if alpha.size else 0.0
+        if amax > 0.0:
+            lo_x, hi_x = h.lo[:n], h.hi[:n]
+            for j in np.flatnonzero((alpha != 0.0) & (np.abs(alpha) <= GMI_TINY_REL * amax)):
+                reach = max(abs(float(lo_x[j])), abs(float(hi_x[j])))
+                if not np.isfinite(reach) or reach >= 1e19:
+                    continue
+                rhs += abs(float(alpha[j])) * reach
+                alpha[j] = 0.0
         nz = np.abs(alpha[alpha != 0.0])
         nrm = float(np.linalg.norm(alpha))
         if nrm < 1e-10 or not np.isfinite(rhs) or not np.all(np.isfinite(alpha)):

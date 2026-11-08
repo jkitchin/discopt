@@ -46,6 +46,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from conftest import rerun_with_lp_rescue_off
 
 _DATA = os.path.join(os.path.dirname(__file__), "data")
 _LP_NPZ = os.path.join(_DATA, "nvs05_node171_decline_lp.npz")
@@ -94,9 +95,13 @@ def test_decline_lp_flag_on_surfaces_ns_safe_bound(monkeypatch):
     assert res.safe_bound >= 5.0, f"NS bound unexpectedly loose: {res.safe_bound!r}"
 
 
-def test_decline_lp_flag_disabled_restores_legacy_baseline(monkeypatch):
+def test_decline_lp_flag_disabled_restores_legacy_baseline(monkeypatch, request):
     """Flag disabled (=0, the graduation escape hatch): the generic path reports
-    no certificate — the pre-#362 legacy search is reachable and unchanged."""
+    no certificate — the pre-#362 legacy search is reachable and unchanged. Run with
+    the #2212 engine stage off: that stage now decides this LP and certifies it, so the
+    legacy baseline is the engine without it."""
+    if rerun_with_lp_rescue_off(request):
+        return
     monkeypatch.setenv(_FLAG, "0")
     res = _solve_decline_lp()
     assert res.status == "optimal"
