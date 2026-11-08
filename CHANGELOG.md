@@ -22,6 +22,13 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`deterministic=True` no longer lets the wall-priced improver governor pick the
+  incumbent (#2216).** The #2176 governor (`DISCOPT_HEUR_WALL_COST`) admits RINS /
+  local branching / enumeration by comparing measured walls, so load changed which
+  improvers ran. `cvxnonsep_nsig30` returned 130.6287126437295 or
+  130.62871265397885 from run to run at the same nodes and bound. Under
+  `deterministic` the governor now uses the fixed-cost test (as with `=0`).
+
 - **macOS: cyipopt and torch in one process now raise instead of aborting it
   (#2205).** Each brings its own `libomp` (torch's wheel ships one; cyipopt's Ipopt
   often links Homebrew's), and the second to load called

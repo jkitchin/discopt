@@ -21,4 +21,9 @@ retries in both arms). In the control, replicates 1 and 3 are identical across a
 replicate 2 shows the same two values **in the opposite arms** to the corpus run. Each value
 occurs under each setting, so this is run-to-run non-determinism of the incumbent at
 `deterministic=True` and 1e-8 relative, independent of the flag (which, with 0 retries,
-executes the same pivots as OFF). Recorded here and in the PR; not investigated further.
+executes the same pivots as OFF). Recorded here and in the PR; investigated in #2216.
+
+**Resolved by #2216.** The cause was the #2176 wall-priced improver governor
+(`DISCOPT_HEUR_WALL_COST`, default ON), a role-2 gate `deterministic` did not cover. Its
+local-branching / RINS verdicts sat within 0.3 % of threshold on this instance, so load
+flipped which improvers ran. Under `deterministic` it now uses the fixed-cost test.
