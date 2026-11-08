@@ -39782,9 +39782,9 @@ def _milp_run1_continue_enabled() -> bool:
 
 
 def _milp_no_stall_tree_enabled() -> bool:
-    """``DISCOPT_MILP_NO_STALL_TREE`` gate (Python-MILP-tree retirement; default OFF:
-    its §5 panel passed, but it graduates together with
-    ``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` -- see below).
+    """``DISCOPT_MILP_NO_STALL_TREE`` gate (Python-MILP-tree retirement; **graduated,
+    default ON 2026-11-08**, together with ``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX``;
+    ``=0`` restores the handoff to the Python MILP tree).
 
     Run 1 of ``_solve_milp_simplex`` stops at the #291 stall slice (half the remaining
     time, at most ``_SIMPLEX_MILP_BUDGET_CAP_S``). Without an incumbent there, the MILP
@@ -39809,13 +39809,13 @@ def _milp_no_stall_tree_enabled() -> bool:
     cert-clean; certified 123 -> 126 (``p0548`` 0/3 -> 3/3, the coin flip gone); 0 dual
     losses; no incumbent lost; median primal gap 0.185 -> 0.160; nodes on both-certified
     rows 47,757 -> 47,515; bounds better on ``enlight_hard``, ``2122``, ``issue-2446``;
-    the extension fired 13 times, only on the stall instances. Not flipped yet: a MILP
-    with unbounded continuous columns (``test_1287``'s default-box model) had been
-    solved by the Python tree after the handoff; the engine needs #1678 (b) on its
-    columns (``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX``) to solve it, so the two graduate
-    together after that flag's own differential.
+    the extension fired 13 times, only on the stall instances. A MILP with unbounded
+    continuous columns (``test_1287``'s default-box model) had been solved by the
+    Python tree after the handoff; the engine needs #1678 (b) on its columns
+    (``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX``) to solve it, so the two graduated together
+    after that flag's differential passed (see its docstring).
     """
-    return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "0") == "1"
+    return os.environ.get("DISCOPT_MILP_NO_STALL_TREE", "1") == "1"
 
 
 def _milp_rust_coef_rescue_enabled() -> bool:
@@ -39838,12 +39838,21 @@ def _milp_rust_coef_rescue_enabled() -> bool:
 
 
 def _milp_rust_open_default_box_enabled() -> bool:
-    """``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` gate (default OFF until its panel): apply
-    #1678 (b) -- a default-box side is "no bound" -- to the Rust MILP engine's columns,
-    as the HiGHS route and the other engine entries already do. Found by the
-    Python-MILP-tree retirement: the stall handoff to the Python tree had been covering
-    for the engine on MILPs with unbounded continuous columns."""
-    return os.environ.get("DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX", "0") == "1"
+    """``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` gate (**graduated, default ON 2026-11-08**,
+    together with ``DISCOPT_MILP_NO_STALL_TREE``; ``=0`` opts out): apply #1678 (b) -- a
+    default-box side is "no bound" -- to the Rust MILP engine's columns, as the HiGHS
+    route and the other engine entries already do. Found by the Python-MILP-tree
+    retirement: the stall handoff to the Python tree had been covering for the engine
+    on MILPs with unbounded continuous columns.
+
+    Differential (``docs/dev/data/python-milp-retirement/open_default_box_diff.py``,
+    in-repo corpus, 74 instances x OFF/ON at 20 s, interleaved, both arms with
+    ``DISCOPT_MILP_NO_STALL_TREE=1``): 148 executed checks, 0 violations, no
+    certification lost (55 certified both arms). One objective moved:
+    ``cvxnonsep_nsig30`` 130.6287 -> 130.6413, both certified within the 1e-4 relative
+    gap (ON bound 130.62867 <= opt 130.62871).
+    """
+    return os.environ.get("DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX", "1") == "1"
 
 
 def _milp_reentry_cuts_enabled() -> bool:

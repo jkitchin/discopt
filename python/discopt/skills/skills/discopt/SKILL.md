@@ -65,11 +65,11 @@ y = m.continuous("y", lb=0, ub=5)
 z = m.binary("z")
 # also: m.integer("n", lb=0, ub=10), and shape=(n,) for arrays
 
-m.minimize(x**2 + y**2 + z)        # or m.maximize(...)
+m.minimize(x**2 + y**2 + z)  # or m.maximize(...)
 m.subject_to(x + y >= 1, name="cover")
 m.subject_to(x**2 + y <= 3, name="cap")
 
-m.validate()                       # catch modeling errors before solving
+m.validate()  # catch modeling errors before solving
 result = m.solve(time_limit=60, gap_tolerance=1e-4)
 ```
 
@@ -108,7 +108,7 @@ Interpretation rules:
 ## Files and other formats
 
 ```python
-m = dm.from_nl("problem.nl")   # AMPL .nl (MINLPLib, AMPL, Pyomo exports)
+m = dm.from_nl("problem.nl")  # AMPL .nl (MINLPLib, AMPL, Pyomo exports)
 ```
 
 discopt also reads GAMS `.gms` and QPLIB files and writes `.nl`, `.lp`, `.mps` and
