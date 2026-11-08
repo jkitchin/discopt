@@ -15,7 +15,6 @@ import sys
 
 import numpy as np
 import pytest
-
 from _mps_differential import differences, highs_arrays
 from discopt._mps import read_mps
 
