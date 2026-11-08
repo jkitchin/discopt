@@ -226,3 +226,12 @@ pre-existing default-path defect; the flag only reached the narrow box inside th
 cap. Fixed in `4c04c6b` (`Exhausted` with the closed bound unless every region was proven empty),
 with a regression test. `Model.solve`'s kernel route already declined a kernel `infeasible`, so no
 published `Model.solve` result was affected; `solve_spatial_tree_py` returned it.
+
+### `cstr`: accepted as pinned (owner decision, 2026-11-08)
+
+#2212's "done" list asked for `cstr_bigm_dual_rebuild` to be decided by the engine. Nothing decides
+it (inherited start, cold primal, own logical, augmented), and HiGHS's own verdict depends on its
+tolerance: infeasible at 1e-10, optimal 0.2397 at its defaults. The owner accepted the LP as
+tolerance-dependent and pinned undecided (`cstr_node_lp_stays_undecided_with_the_flag_on_2212` in
+`lp/simplex/cold_dual.rs`, and the existing `captured_cstr_bigm_node_lp_stays_undecided_2142`),
+rather than a criterion this issue must meet.
