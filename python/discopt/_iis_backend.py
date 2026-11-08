@@ -18,8 +18,8 @@ the same code whichever solver answers:
 
 :class:`HighsBackend` is the code ``_Engine`` ran before P3.2, moved here unchanged.
 :class:`RustBackend` is the in-house MILP driver through
-:class:`discopt.solvers.milp_handle.MilpHandle`, selected by ``iis_engine="rust"``;
-``"highs"`` is the default (P3.2).
+:class:`discopt.solvers.milp_handle.MilpHandle`, selected by ``iis_engine="rust"``,
+the default since P6.4; ``"highs"`` is the opt-in (the optional ``discopt[highs]`` extra).
 """
 
 from __future__ import annotations

@@ -170,7 +170,7 @@ class _Engine:
         confirm_each=True,
         deadline: Optional[float] = None,
         reserve_confirm: bool = False,
-        engine: str = "highs",
+        engine: str = "rust",
     ):
         from discopt._iis_backend import make_backend
 
@@ -1203,7 +1203,7 @@ def _milp_iis_arrays(
     order: str,
     total_time_limit: Optional[float],
     t_start: Optional[float] = None,
-    engine: str = "highs",
+    engine: str = "rust",
 ) -> MilpIIS:
     """:func:`milp_iis` on the extracted matrix, with one deletion order."""
     if t_start is None:
@@ -1487,6 +1487,10 @@ def _milp_iis_arrays(
             sat_candidate=sat_candidate,
             order=order,
             total_time_limit=left,
+            # The redo runs on the engine the caller chose; it used to fall back to the
+            # function default (then "highs") -- a silent engine switch, and a
+            # MissingHighsError without highspy (PR #2196 review).
+            engine=engine,
         )
         redo.n_solves += eng.n_solves
         redo.n_interrupted += eng.n_interrupted

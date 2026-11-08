@@ -40,6 +40,7 @@ def _engine(probe_tl=0.5, deadline=None):
         probe_tl,
         confirm_each=False,
         deadline=deadline,
+        engine="highs",  # these budgets were tuned on the HiGHS engine (the default is rust)
     )
 
 

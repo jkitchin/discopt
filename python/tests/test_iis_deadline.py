@@ -213,6 +213,7 @@ def test_lp_solves_still_run_after_the_engine_accumulates_runtime():
         np.ones(n, dtype=bool),
         {i: np.array([i]) for i in range(lin.m)},
         0.5,
+        engine="highs",  # pins HiGHS run-time/interrupt behaviour (the default is rust)
     )
     cons = set(range(lin.m))
     bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}
@@ -247,6 +248,7 @@ def test_runs_after_an_interrupt_are_not_left_interrupted():
         np.ones(n, dtype=bool),
         {i: np.array([i]) for i in range(lin.m)},
         0.3,
+        engine="highs",  # pins the HiGHS guard interrupt (the default engine is rust)
     )
     cons = set(range(lin.m))
     bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}

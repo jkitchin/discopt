@@ -501,7 +501,7 @@ REDUCE_CAP_S = 10.0
 
 
 def reduced_infeasible(
-    A, rlo, rhi, lb, ub, held, stop_at, guard=None, engine: str = "highs"
+    A, rlo, rhi, lb, ub, held, stop_at, guard=None, engine: str = "rust"
 ) -> bool | None:
     """True iff the exact reduction proves the system infeasible, by itself or
     with presolve-free HiGHS on the reduced model; None otherwise (no
