@@ -39840,7 +39840,6 @@ def _milp_rust_coef_entry_enabled() -> bool:
     return os.environ.get("DISCOPT_MILP_RUST_COEF_ENTRY", "0") == "1"
 
 
-
 def _milp_rust_open_default_box_enabled() -> bool:
     """``DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`` gate (**graduated, default ON 2026-11-08**,
     together with ``DISCOPT_MILP_NO_STALL_TREE``; ``=0`` opts out): apply #1678 (b) -- a
@@ -40372,7 +40371,6 @@ def _solve_milp_simplex(
         **_run1_stall,
         **_sel_kw,
     )
-
 
     def _driver_stats() -> dict[str, float]:
         """Total simplex iterations the driver spent over the whole tree.
