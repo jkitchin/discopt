@@ -44,7 +44,6 @@ ROLE_CALLERS = {
     "solve": "#3 solve_lp_std seam default (lp_std_engine.HighsEngine.solve)",
     "_convex_route_oa_master": "#4 convex-route OA master (D3)",
     "_require_highspy": "#4 convex-route OA master (D3), milp_highs",
-    "_highs_lp_dual": "#8 convex node bound (falls back to the Rust simplex)",
 }
 
 _BLOCK_HIGHS = r"""
