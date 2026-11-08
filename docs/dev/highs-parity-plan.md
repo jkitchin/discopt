@@ -1839,9 +1839,12 @@ and is re-written by P4.1.**
   `cargo test`, smoke, adversarial green; `flag_audit_scan.py` shows no default-OFF
   solver-math gate without a state. Kill: none.
 - **Owner decision 2026-11-08 on #1671:** no upstream HiGHS report and no wait for a
-  HiGHS release. #1671 is closed by making it obsolete: D2 makes the in-house engine the
-  pure-MILP default, so no default path runs HiGHS presolve (the canary
-  `test_1671_highs_presolve_cycle_canary.py` stays as the record of the upstream bug).
+  HiGHS release. #1671 closes when the in-house engine solves its witness (the #1667
+  unit-commitment MILP, optimum 450623.7692) to a certified optimum with HiGHS absent:
+  the problem is then irrelevant to discopt, independent of D2. Last measured (P0.7,
+  `data/highs-parity/uc-timelimit-fix/`): no incumbent at 120 s, bound 448817.5, on the
+  Python fallback tree (the native driver's #291 stall slice handed it off). The canary
+  `test_1671_highs_presolve_cycle_canary.py` stays as the record of the upstream bug.
 - [ ] **P6.5 — M-1671 closure record** *(may run earlier, as soon as D0's route is met)*.
   Scope: §4's five checks; `test_1667_…`, `test_1671_…` re-scoped; closing comment
   drafted here (not posted): "Closed on discopt's side: no default path runs HiGHS
