@@ -1450,13 +1450,29 @@ impl<'a> PreparedDual<'a> {
         }
         let tol = opts.tol;
         let basis = start.basic_vars.clone();
-        let mut slot_of = vec![-1i64; n];
-        for (slot, &j) in basis.iter().enumerate() {
-            slot_of[j] = slot as i64;
-        }
         let mut stat = start.col_status.clone();
         if stat.len() != n {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
+            return None;
+        }
+        // #2212: `basic_vars` and `col_status` must describe ONE basis: every listed
+        // column in range, listed once, and marked BASIC, and nothing else marked
+        // BASIC. A column marked BASIC but unlisted has no slot, and `assemble`
+        // indexed `xb` with its `-1` slot and panicked; reaching that from a public
+        // binding is an exception out of an LP solve. Refuse it like any other
+        // malformed start: the caller solves cold.
+        let mut slot_of = vec![-1i64; n];
+        for (slot, &j) in basis.iter().enumerate() {
+            if j >= n || slot_of[j] >= 0 || stat[j] != BASIC {
+                crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
+                crate::profile::incr(crate::profile::Ctr::DualPrepRejectInconsistent);
+                return None;
+            }
+            slot_of[j] = slot as i64;
+        }
+        if stat.iter().filter(|&&s| s == BASIC).count() != m {
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectInconsistent);
             return None;
         }
         // #1510: a nonbasic column must sit at a FINITE bound (or be free). One
@@ -3752,6 +3768,43 @@ mod tests {
                 cold.obj
             );
         }
+    }
+
+    /// #2212: a start whose `col_status` marks a column BASIC that `basic_vars`
+    /// does not list must be refused, not run. `ex1221`'s root relaxation from such
+    /// a start (column 4 marked basic, 20 "basic" columns for 19 rows) reached
+    /// `assemble` with `slot_of[4] == -1` and panicked on the index: through
+    /// `solve_lp_warm_csc_py`, a public binding that passes `col_status` through,
+    /// an exception out of an LP solve rather than a cold fallback. Found by a
+    /// harness that built the start with the basis constants swapped.
+    #[test]
+    fn inconsistent_start_basis_is_refused_not_run_2212() {
+        let json = include_str!("testdata/ex1221_inconsistent_start_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let extra: Vec<usize> = (0..n)
+            .filter(|&j| col_status[j] == BASIC && !basic_vars.contains(&j))
+            .collect();
+        assert_eq!(extra, vec![4], "the fixture is the inconsistent start");
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &opts());
+        let refused = crate::profile::counter(crate::profile::Ctr::DualPrepRejectInconsistent);
+        crate::profile::set_enabled(false);
+        assert!(refused >= 1, "the start must be refused at prepare");
+        // HiGHS (presolve off, 1e-10): optimal 3.0960498941511863.
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!(
+            (sol.obj - 3.0960498941511863).abs() <= 1e-9 * 4.1,
+            "obj {} vs HiGHS 3.0960498941511863",
+            sol.obj
+        );
     }
 
     /// #2142: a GDPlib cstr big-M node LP the warm dual cannot decide. From the

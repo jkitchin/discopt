@@ -723,6 +723,11 @@ counters!(
     DualPrepRejectDualInf,
     // #1510: a nonbasic column parked at an INFINITE bound (no vertex value).
     DualPrepRejectInfBound,
+    // #2212: a start whose `col_status` and `basic_vars` disagree (a column marked
+    // BASIC but unlisted, listed twice, or listed but not marked BASIC). Counted
+    // apart from `DualPrepRejectShape` (which it also bumps) so a panel can show the
+    // check never fires on a real caller.
+    DualPrepRejectInconsistent,
     // #1510: the primal warm entry (`run_warm`) refusing the same malformed start.
     PrimalWarmRejectInfBound,
     DualPrepAccept,
