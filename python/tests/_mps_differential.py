@@ -1,11 +1,14 @@
-"""Exact differential between discopt's MPS reader and HiGHS's (``readModel`` ->
-``getLp``), shared by ``test_mps_reader.py`` and the corpus sweep
-(``docs/dev/data/highs-parity/mps_reader/mps_reader_sweep.py``).
+"""Exact differential between discopt's MPS / LP readers and HiGHS's (``readModel``
+-> ``getLp`` and ``getModel().hessian_``), shared by ``test_mps_reader.py``,
+``test_lp_reader.py`` and the corpus sweeps
+(``docs/dev/data/highs-parity/{mps,lp}_reader/``).
 
 Both sides are normalized to the same canonical arrays: the matrix as CSC with
 duplicates summed and explicit zeros kept exactly as each reader reports them, and
-every infinite bound as ``+-inf``. Nothing is compared with a tolerance: a reader
-that agrees with HiGHS agrees bit for bit.
+every infinite bound as ``+-inf``. The objective Hessian (LP reader) is compared raw:
+the same column starts, row indices and values IN THE SAME ORDER (HiGHS's
+``normaliseHessian`` order is part of the contract). Nothing is compared with a
+tolerance: a reader that agrees with HiGHS agrees bit for bit.
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ def highs_arrays(path: str) -> dict:
     src = path
     if path.endswith(".gz"):
         tmpdir = tempfile.mkdtemp(prefix="mpsdiff_")
-        src = os.path.join(tmpdir, "model.mps")
+        # HiGHS picks its reader by extension: keep the one under the ".gz".
+        src = os.path.join(tmpdir, "model" + os.path.splitext(path[: -len(".gz")])[1])
         with gzip.open(path, "rb") as f, open(src, "wb") as g:
             shutil.copyfileobj(f, g)
     try:
@@ -36,6 +40,17 @@ def highs_arrays(path: str) -> dict:
         if h.readModel(src) == highspy.HighsStatus.kError:
             raise ValueError(f"HiGHS could not read {path!r}")
         lp = h.getLp()
+        hs = h.getModel().hessian_
+        hessian = None
+        if hs.dim_:
+            hessian = sp.csc_matrix(
+                (
+                    np.array(hs.value_, dtype=np.float64),
+                    np.array(hs.index_, dtype=np.int64),
+                    np.array(hs.start_, dtype=np.int64),
+                ),
+                shape=(hs.dim_, hs.dim_),
+            )
     finally:
         if tmpdir is not None:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -65,6 +80,7 @@ def highs_arrays(path: str) -> dict:
         integrality=integ,
         col_names=list(lp.col_names_),
         row_names=list(lp.row_names_),
+        hessian=hessian,
     )
 
 
@@ -78,7 +94,9 @@ def differences(ours: dict, ref: dict) -> list[str]:
     """Every field on which ``ours`` differs from ``ref`` (empty: identical)."""
     out = []
     for k in ("n", "m", "offset", "maximize"):
-        if ours[k] != ref[k]:
+        # A NaN offset survives a read on both sides (LP files): equal there.
+        both_nan = k == "offset" and np.isnan(ours[k]) and np.isnan(ref[k])
+        if ours[k] != ref[k] and not both_nan:
             out.append(f"{k}: {ours[k]!r} vs {ref[k]!r}")
     if out:
         return out
@@ -96,4 +114,18 @@ def differences(ours: dict, ref: dict) -> list[str]:
     same = np.array_equal(pa, pb) and np.array_equal(ia, ib)
     if not (same and np.array_equal(va, vb, equal_nan=True)):
         out.append(f"A differs (nnz {va.size} vs {vb.size})")
+    if "hessian" in ours:
+        out += _hessian_differences(ours["hessian"], ref["hessian"])
     return out
+
+
+def _hessian_differences(ha, hb) -> list[str]:
+    """Raw comparison of two HiGHS-normalised Hessians (order included)."""
+    if ha is None or hb is None:
+        return [] if ha is None and hb is None else [f"hessian: {ha is None} vs {hb is None}"]
+    if ha.shape != hb.shape:
+        return [f"hessian shape {ha.shape} vs {hb.shape}"]
+    same = np.array_equal(ha.indptr, hb.indptr) and np.array_equal(ha.indices, hb.indices)
+    if not (same and np.array_equal(ha.data, hb.data, equal_nan=True)):
+        return [f"hessian differs (nnz {ha.data.size} vs {hb.data.size})"]
+    return []

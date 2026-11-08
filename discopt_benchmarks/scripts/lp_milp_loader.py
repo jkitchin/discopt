@@ -1,9 +1,9 @@
 """MPS/LP -> discopt Model loader for the LP/MILP routing panel.
 
-Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md``. An MPS instance is read by
-discopt's own reader (``discopt._mps``, an exact reproduction of HiGHS's ``readModel``
--> ``getLp``; other formats still by HiGHS); the arrays are written as a *text* AMPL ``.nl``
-(integer columns last, as the format requires) and loaded with
+Stage 0 of ``docs/dev/lp-milp-highs-routing-plan.md``. An MPS or LP instance is read by
+discopt's own readers (``discopt._mps`` / ``discopt._lpfile``, exact reproductions of
+HiGHS's ``readModel`` -> ``getLp``; no HiGHS needed); the arrays are written as a *text*
+AMPL ``.nl`` (integer columns last, as the format requires) and loaded with
 ``discopt.modeling.core.from_nl`` -- the same parser user ``.nl`` files take.
 
 Everything here refuses loudly (CLAUDE.md §3, §7): an unsupported model feature
@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
-import scipy.sparse as sp
+
+if TYPE_CHECKING:
+    import scipy.sparse as sp
 
 
 @dataclass
@@ -42,54 +45,24 @@ class LinearInstance:
 
 
 def read_instance(path: str) -> LinearInstance:
-    """The instance in ``path``. MPS files (``.mps``, ``.mps.gz``) are read by
-    discopt's own reader (``discopt._mps``, an exact reproduction of HiGHS's, so
-    every panel sees the identical model); other formats (``.lp``) still go
-    through HiGHS."""
+    """The instance in ``path``, read by discopt's own readers -- exact reproductions
+    of HiGHS's ``readModel`` -> ``getLp``, so every panel sees the identical model and
+    this loader needs no HiGHS: MPS (``.mps``, ``.mps.gz``) by ``discopt._mps``, CPLEX
+    LP (``.lp``, ``.lp.gz``) by ``discopt._lpfile``. Any other format is refused."""
     if path.endswith((".mps", ".mps.gz", ".MPS")):
-        return _read_mps_inhouse(path)
-    import highspy
+        from discopt._mps import read_mps
 
-    h = highspy.Highs()
-    h.setOptionValue("output_flag", False)
-    st = h.readModel(path)
-    if st == highspy.HighsStatus.kError:
-        raise RuntimeError(f"HiGHS could not read {path}")
-    if h.getModel().hessian_.dim_ > 0:
-        raise ValueError(f"{path}: quadratic objective is out of scope for the LP/MILP panel")
-    lp = h.getLp()
-    n, m = lp.num_col_, lp.num_row_
-    a = lp.a_matrix_
-    if a.format_ != highspy.MatrixFormat.kColwise:
-        raise ValueError(f"{path}: expected a column-wise matrix, got {a.format_}")
-    A = sp.csc_matrix(  # noqa: N806
-        (np.asarray(a.value_, float), np.asarray(a.index_), np.asarray(a.start_)), shape=(m, n)
-    ).tocsr()
-    integ = list(lp.integrality_) if len(lp.integrality_) else []
-    is_int = np.zeros(n, dtype=bool)
-    for j, t in enumerate(integ):
-        if t == highspy.HighsVarType.kInteger:
-            is_int[j] = True
-        elif t != highspy.HighsVarType.kContinuous:
-            raise ValueError(f"{path}: column {j} has unsupported type {t}")
-    return LinearInstance(
-        name=os.path.splitext(os.path.basename(path))[0],
-        c=np.asarray(lp.col_cost_, float),
-        offset=float(lp.offset_),
-        maximize=lp.sense_ == highspy.ObjSense.kMaximize,
-        A=A,
-        row_lo=np.asarray(lp.row_lower_, float),
-        row_hi=np.asarray(lp.row_upper_, float),
-        col_lo=np.asarray(lp.col_lower_, float),
-        col_hi=np.asarray(lp.col_upper_, float),
-        is_int=is_int,
-    )
+        return _linear_instance(path, read_mps(path))
+    if path.endswith((".lp", ".lp.gz", ".LP")):
+        from discopt._lpfile import read_lp
+
+        return _linear_instance(path, read_lp(path))
+    raise ValueError(f"{path}: unsupported instance format (expected .mps or .lp, maybe .gz)")
 
 
-def _read_mps_inhouse(path: str) -> LinearInstance:
-    from discopt._mps import read_mps
-
-    d = read_mps(path)
+def _linear_instance(path: str, d: dict) -> LinearInstance:
+    """``d`` (a ``read_mps`` / ``read_lp`` dict) as a ``LinearInstance``; a quadratic
+    objective or a semi-continuous / semi-integer column is refused."""
     if d["has_hessian"]:
         raise ValueError(f"{path}: quadratic objective is out of scope for the LP/MILP panel")
     integ = d["integrality"]
