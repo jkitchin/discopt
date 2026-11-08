@@ -4,7 +4,8 @@ bars the P4.4 panel lacked).
 
 ``--flag NAME`` (or a comma-separated bundle, toggled together) is set to
 ``--on-value`` (default ``1``) in the ON arm and REMOVED in the
-OFF arm; ``--fired REGEX`` names the driver profile counters that prove the mechanism ran
+OFF arm; ``--fired REGEX`` names the driver profile counters (or ``solver_stats`` keys)
+that prove the mechanism ran
 (summed per solve; ON must be > 0, OFF must be 0). Population and arms as
 ``p44_gmi_repair_panel.py``: MIPLIB-38 + the M panel, Rust MILP route, fresh subprocess per
 solve, ``DISCOPT_PROFILE=1`` in both arms, arm order alternating, ``--reps`` 3,
@@ -50,6 +51,7 @@ import p42_rens_panel as R  # noqa: E402, N812  (population, gaps, cert checks)
 FLAG = ""
 ON_VALUE = "1"
 _CTR = re.compile(r"$^")
+_CTR_NAME = re.compile(r"$^")
 
 
 def solve(path: str, on: bool, a) -> dict:
@@ -72,6 +74,10 @@ def solve(path: str, on: bool, a) -> dict:
         mm = _CTR.match(ln)
         if mm:
             ctr[mm.group(1)] = ctr.get(mm.group(1), 0) + int(mm.group(2))
+    # A Python-side mechanism reports through solver_stats instead of a profile counter.
+    for k, v in (res.get("solver_stats") or {}).items():
+        if _CTR_NAME.fullmatch(k) and v:
+            ctr[k] = ctr.get(k, 0) + 1
     res["fired"] = ctr
     res["load"] = load
     return res
@@ -162,9 +168,10 @@ def main(argv=None) -> int:
         help="keep the (instance index, rep) rows already in --out and run the rest",
     )
     a = ap.parse_args(argv)
-    global FLAG, ON_VALUE, _CTR
+    global FLAG, ON_VALUE, _CTR, _CTR_NAME
     FLAG, ON_VALUE = a.flag, a.on_value
     _CTR = re.compile(rf"^\s+({a.fired})\s+(\d+)$")
+    _CTR_NAME = re.compile(a.fired)
 
     P._assert_discopt_under_test()
     hdr = P._header()

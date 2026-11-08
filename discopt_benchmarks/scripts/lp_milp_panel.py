@@ -418,6 +418,11 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
         "termination": None if r.termination is None else str(r.termination),
         "max_viol": viol,
         "env_backend": os.environ.get("DISCOPT_LP_MILP_BACKEND"),
+        # Numeric solver_stats, so a panel can prove a Python-side mechanism fired
+        # (``d2_flag_panel.py --fired`` matches these keys as well as profile counters).
+        "solver_stats": {
+            k: float(v) for k, v in stats.items() if isinstance(v, (int, float, bool))
+        },
         "env_std_engine": os.environ.get("DISCOPT_LP_STD_ENGINE"),
     }
 
