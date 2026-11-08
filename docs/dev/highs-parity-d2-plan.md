@@ -456,6 +456,28 @@ So the lazily relaxed rows are cheaper to carry than to remove this way. What wo
 change that is a tree that keeps bases only on the dive stack, as HiGHS does. That is
 W6's territory, not a W5 lever. Retired, flag and implementation.
 
+**D3 follow-up: `DISCOPT_MILP_TOL_ROBUST` (2026-11-08).** This is the fix for the red
+`test_nlpbb_unscaled_refine` under the D3 master default (handoff,
+"Full-suite result").
+
+The driver's emptiness proofs now hold for the set its incumbent check accepts:
+- FBBT runs over the tolerance-relaxed rows;
+- a Farkas ray fathoms only if its bound survives `sum |y_i| eps_i`;
+- an LP infeasible but not robustly so is re-solved over relaxed slacks.
+
+Design from the HiGHS-expert consult; HiGHS keeps the same consistency with feastol
+slacks at each test site.
+
+Evidence so far:
+- Entry, on the fixture `portfol_roundlot_oa_master_tolerance_feasible.npz`:
+  INFEASIBLE -> OPTIMAL 0.02829 (residual 5e-7) through both entry points.
+- Corpus differential (`d2-analysis/tol_robust_corpus.jsonl.gz`, 132 instances,
+  20 s): 0 incorrect, 244 incumbent feasibility checks, no bound past an oracle;
+  certified 105 -> 105, gaining `portfol_roundlot` and losing `nvs24`.
+- `nvs24` is a timing artifact. OFF certified at 18.5 s of 20 under load 7. Rerun
+  alone, 3 reps (`..._nvs24_rerun.jsonl.gz`), each arm certified 2/3: OFF lost
+  rep 0 and ON lost rep 2.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first
