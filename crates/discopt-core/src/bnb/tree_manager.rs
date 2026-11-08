@@ -1604,6 +1604,24 @@ impl TreeManager {
         raw.max(0.0)
     }
 
+    /// Relative gap with the Python MILP tree's denominator,
+    /// `(incumbent - global_lb) / max(|incumbent|, |global_lb|, 1e-10)`
+    /// (`solver._gap_values_converged`). Unlike [`Self::gap`] it does not floor the
+    /// denominator at 1, so a near-zero optimum is not declared converged on an
+    /// absolute difference (#1243). Infinite while either side is missing; clamped
+    /// at zero like [`Self::gap`].
+    pub fn gap_max_abs(&self) -> f64 {
+        if self.incumbent_value >= f64::INFINITY || self.global_lower_bound <= f64::NEG_INFINITY {
+            return f64::INFINITY;
+        }
+        let denom = self
+            .incumbent_value
+            .abs()
+            .max(self.global_lower_bound.abs())
+            .max(1e-10);
+        ((self.incumbent_value - self.global_lower_bound) / denom).max(0.0)
+    }
+
     /// Current **absolute** optimality gap, `incumbent - global_lb`.
     ///
     /// Infinite while either side is missing. Clamped at zero for the same
@@ -2761,6 +2779,37 @@ mod tests {
         tm.incumbent_value = 10.0;
         tm.global_lower_bound = 5.0;
         assert!((tm.gap() - 0.5).abs() < 1e-10);
+    }
+
+    /// R4 (Python-MILP-tree retirement step 6): the max-abs denominator does not
+    /// floor at 1, so a near-zero optimum's relative gap is not shrunk by it.
+    #[test]
+    fn gap_max_abs_does_not_floor_the_denominator_at_one() {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        assert_eq!(tm.gap_max_abs(), f64::INFINITY);
+        tm.incumbent_value = 1e-3;
+        tm.global_lower_bound = 0.0;
+        assert!((tm.gap() - 1e-3).abs() < 1e-15, "{}", tm.gap());
+        assert!(
+            (tm.gap_max_abs() - 1.0).abs() < 1e-12,
+            "{}",
+            tm.gap_max_abs()
+        );
+        // Large magnitudes: the bound's magnitude enters the denominator too.
+        tm.incumbent_value = -100.0;
+        tm.global_lower_bound = -200.0;
+        assert!((tm.gap() - 1.0).abs() < 1e-12);
+        assert!((tm.gap_max_abs() - 0.5).abs() < 1e-12);
     }
 
     #[test]

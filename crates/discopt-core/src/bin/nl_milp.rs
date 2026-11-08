@@ -332,6 +332,7 @@ fn run() -> Result<(), String> {
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
+        rel_gap_max_abs: false,
         extend_no_incumbent_s: None,
         gap_tol: args.gap_tol,
         // This CLI exposes only the relative tolerance, so there is no

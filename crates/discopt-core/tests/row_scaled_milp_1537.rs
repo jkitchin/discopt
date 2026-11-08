@@ -31,6 +31,7 @@ fn options() -> MilpOptions {
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
+        rel_gap_max_abs: false,
         extend_no_incumbent_s: None,
         gap_tol: 1e-9,
         abs_gap_tol: None,

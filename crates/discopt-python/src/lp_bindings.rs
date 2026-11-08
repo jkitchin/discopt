@@ -1282,7 +1282,8 @@ pub fn ns_safe_bound_csc_py(
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
                     stall_time_s=None, node_selection=None,
-                    extend_no_incumbent_s=None, branching_rule=None))]
+                    extend_no_incumbent_s=None, branching_rule=None,
+                    rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1326,6 +1327,7 @@ pub fn solve_milp_csc_py<'py>(
     node_selection: Option<String>,
     extend_no_incumbent_s: Option<f64>,
     branching_rule: Option<String>,
+    rel_gap_max_abs: bool,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let selection = parse_node_selection(node_selection.as_deref())?;
     let branch_rule = parse_branching_rule(branching_rule.as_deref())?;
@@ -1404,6 +1406,7 @@ pub fn solve_milp_csc_py<'py>(
             extend_no_incumbent_s,
             selection,
             branch_rule,
+            rel_gap_max_abs,
         },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
@@ -1550,7 +1553,7 @@ impl PyReluIdealSeparator {
                     root_cut_prune=true,
                     debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
                     node_selection=None, extend_no_incumbent_s=None,
-                    branching_rule=None))]
+                    branching_rule=None, rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_relu_csc_py<'py>(
     py: Python<'py>,
@@ -1604,6 +1607,7 @@ pub fn solve_milp_relu_csc_py<'py>(
     node_selection: Option<String>,
     extend_no_incumbent_s: Option<f64>,
     branching_rule: Option<String>,
+    rel_gap_max_abs: bool,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1715,6 +1719,7 @@ pub fn solve_milp_relu_csc_py<'py>(
             extend_no_incumbent_s,
             selection: parse_node_selection(node_selection.as_deref())?,
             branch_rule: parse_branching_rule(branching_rule.as_deref())?,
+            rel_gap_max_abs,
         },
     )?;
     Ok((
@@ -1925,6 +1930,7 @@ struct MilpExtra {
     extend_no_incumbent_s: Option<f64>,
     selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
     branch_rule: Option<discopt_core::bnb::branching::BranchRule>,
+    rel_gap_max_abs: bool,
 }
 
 /// `Model.solve(branching_rule=...)`'s names, refused when unknown (never defaulted).
@@ -2014,6 +2020,7 @@ pub(crate) fn milp_options(
         stall_time_s: None,
         selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
         branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
+        rel_gap_max_abs: false,
         extend_no_incumbent_s: None,
         gap_tol,
         // #1315: `None` -- what a caller who named no absolute tolerance sends --
@@ -2165,6 +2172,7 @@ fn run_milp_hooked<'py>(
         extend_no_incumbent_s: parse_budget_secs(extra.extend_no_incumbent_s)?,
         selection: extra.selection.unwrap_or(opts.selection),
         branch_rule: extra.branch_rule.unwrap_or(opts.branch_rule),
+        rel_gap_max_abs: extra.rel_gap_max_abs || opts.rel_gap_max_abs,
         ..opts
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created

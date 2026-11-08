@@ -1432,7 +1432,12 @@ fn batch_lineage(tm: &TreeManager, ids: &[NodeId]) -> Vec<NodeLineage> {
 }
 
 fn gap_closed(tm: &TreeManager, opts: &MilpOptions) -> bool {
-    tm.gap() <= opts.gap_tol || opts.abs_gap_tol.is_some_and(|t| tm.absolute_gap() <= t)
+    let rel = if opts.rel_gap_max_abs {
+        tm.gap_max_abs()
+    } else {
+        tm.gap()
+    };
+    rel <= opts.gap_tol || opts.abs_gap_tol.is_some_and(|t| tm.absolute_gap() <= t)
 }
 
 /// Options for the MILP driver.
@@ -1475,6 +1480,13 @@ pub struct MilpOptions {
     /// Branching-variable rule (`Model.solve(branching_rule=...)`; Python-MILP-tree
     /// retirement step 4). `Reliability` is the historical rule and the default.
     pub branch_rule: crate::bnb::branching::BranchRule,
+    /// Relative-gap denominator for the stopping test. `false` (the default):
+    /// `max(|incumbent|, 1)` ([`TreeManager::gap`]). `true`: the Python MILP tree's
+    /// `max(|incumbent|, |bound|, 1e-10)` ([`TreeManager::gap_max_abs`]), which the
+    /// caller selects when an absolute tolerance tighter than `gap_tol` is requested
+    /// (R4, Python-MILP-tree retirement step 6). Only the stopping test changes; no
+    /// node bound does.
+    pub rel_gap_max_abs: bool,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
@@ -8097,6 +8109,7 @@ mod tests {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -8997,6 +9010,7 @@ mod tests {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -9861,6 +9875,7 @@ mod tests {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -10000,6 +10015,7 @@ pub(crate) mod sparse_milp_diff {
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
+                rel_gap_max_abs: false,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10304,6 +10320,7 @@ pub(crate) mod sparse_milp_diff {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -10616,6 +10633,7 @@ mod lazy_separation {
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
+                rel_gap_max_abs: false,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -10918,6 +10936,7 @@ mod node_separation {
                 stall_time_s: None,
                 selection: SelectionStrategy::BestFirst,
                 branch_rule: crate::bnb::branching::BranchRule::Reliability,
+                rel_gap_max_abs: false,
                 extend_no_incumbent_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -11203,6 +11222,7 @@ mod lazy_infeasible_node {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -11344,6 +11364,7 @@ mod root_cut_budget_tests {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -12129,6 +12150,7 @@ mod tiny_entry_tests {
             stall_time_s: None,
             selection: SelectionStrategy::BestFirst,
             branch_rule: crate::bnb::branching::BranchRule::Reliability,
+            rel_gap_max_abs: false,
             extend_no_incumbent_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
