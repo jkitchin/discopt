@@ -1,0 +1,84 @@
+panel header: {'load': [2.8583984375, 4.162109375, 4.83154296875], 'commit': '5ab7b014', 'highspy': '1.15.1', 'highs_version': '1.15.1', 'python': '/usr/local/bin/python'} args: {'flag': 'DISCOPT_MILP_TOL_ROBUST', 'time_limit': 20.0, 'gap': 0.0001, 'reps': 3}
+
+executed ON solves: 186; instances: 62
+
+panel  instance                  ON OFF inc     pgap     dgap   nodes   wall  H  Hnodes  Hwall Rp66  class
+M      1451                       3   3   3   0.0000   0.0000       1    0.1  Y       0    0.1    Y  cert
+M      2171                       3   3   3   0.0000   0.0000      17    0.2  Y       1    0.2    Y  cert
+M      bell5                      3   3   3   0.0000   0.0001    6467    2.6  Y     416    0.7    Y  cert
+M      bound_implied              3   3   3   0.0000   0.0000       1    0.2  Y       1    0.1    Y  cert
+M      dcmulti                    3   3   3   0.0000   0.0000    1681    7.1  Y       3    2.6    Y  cert
+M      egout                      3   3   3   0.0000   0.0000       3    0.2  Y       1    0.3    Y  cert
+M      fixed-binary               3   3   3   0.0000   0.0000       1    0.1  Y       0    0.1    Y  cert
+M      flugpl                     3   3   3   0.0000   0.0000     237    0.1  Y      51    0.2    Y  cert
+M      gt2                        3   3   3   0.0000   0.0000       7    0.4  Y       1    0.3    N  cert
+M      issue-2095                 3   3   3   0.0000   0.0000       1    0.1  Y       1    0.1    Y  cert
+M      issue-2173                 3   3   3   0.0000   0.0000      83    0.5  Y      29    0.8    Y  cert
+M      issue-2204                 3   3   3   0.0000   0.0000       1    0.1  Y       1    0.1    Y  cert
+M      issue-2290                 3   3   3   0.0000   0.0000       1    0.1  Y       0    0.1    Y  cert
+M      issue-2388                 3   3   3   0.0000   0.0000       1    0.1  Y       1    0.1    Y  cert
+M      issue-2585                 3   3   3   0.0000   0.0000       1    0.1  Y       0    0.1    Y  cert
+M      lseu                       3   3   3   0.0000   0.0000    2861    0.9  Y       5    0.5    Y  cert
+M      p01                        3   3   3   0.0000   0.0000       1    0.1  Y       1    0.2    Y  cert
+M      rgn                        3   3   3   0.0000   0.0000    1299    1.3  Y       1    0.5    Y  cert
+M      small_mip                  3   3   3   0.0000   0.0000       1    0.1  Y       0    0.1    Y  cert
+MIPLIB 22433                      3   3   3   0.0000   0.0000     103    5.9  Y       4    3.3    Y  cert
+MIPLIB 23588                      3   3   3   0.0000   0.0000    3919    8.0  Y     997   15.1    Y  cert
+MIPLIB app2-2                     3   3   3   0.0000   0.0000      61    0.6  Y       1    1.6    Y  cert
+MIPLIB b-ball                     3   3   3   0.0000   0.0001    5753    1.3  Y     101    0.3    N  cert
+MIPLIB blend2                     3   3   3   0.0000   0.0000    8063    5.9  Y      72    3.7    Y  cert
+MIPLIB dcmulti                    3   3   3   0.0000   0.0000    1681    5.6  Y       3    2.6    Y  cert
+MIPLIB f2gap40400                 3   3   3   0.0000   0.0000       1    0.2  Y       1    0.3    Y  cert
+MIPLIB fiber                      3   3   3   0.0000   0.0000    8296   17.8  Y       7    1.9    N  cert
+MIPLIB flugpl                     3   3   3   0.0000   0.0000     237    0.1  Y      51    0.2    Y  cert
+MIPLIB gen                        3   3   3   0.0000   0.0001     343    3.6  Y       1    0.7    Y  cert
+MIPLIB gr4x6                      3   3   3   0.0000   0.0000      65    0.2  Y       1    0.2    Y  cert
+MIPLIB gt2                        3   3   3   0.0000   0.0000       7    0.3  Y       1    0.3    N  cert
+MIPLIB khb05250                   3   3   3   0.0000   0.0000      45    2.2  Y       1    2.1    N  cert
+MIPLIB neos-1425699               3   3   3   0.0000   0.0000       3    0.2  Y       1    0.3    N  cert
+MIPLIB neos-3610040-iskar         3   3   3   0.0000   0.0000    1431    3.1  Y     380    8.6    N  cert
+MIPLIB neos-3610051-istra         3   3   3   0.0000   0.0000     791    4.3  Y     288   10.6    N  cert
+MIPLIB neos-3611447-jijia         3   3   3   0.0000   0.0000    3545    4.4  Y     384    3.4    N  cert
+MIPLIB neos-3611689-kaihu         3   3   3   0.0000   0.0000    2179    7.2  Y     283    3.4    N  cert
+MIPLIB neos-5192052-neckar        3   3   3   0.0000   0.0000       9    0.2  Y       1    0.4    Y  cert
+MIPLIB p0201                      3   3   3   0.0000   0.0000     233    1.7  Y       5    1.2    Y  cert
+MIPLIB supportcase14              3   3   3   0.0000   0.0000     115    1.1  Y       1    0.4    Y  cert
+MIPLIB supportcase16              3   3   3   0.0000   0.0000      97    1.2  Y       1    0.4    Y  cert
+M      2122                       0   0   0        —   0.0000     173   20.1  Y       2    1.8    N  G2 no-incumbent
+M      gesa2                      0   0   3   0.0112   0.0003    3455   20.5  Y       1    3.1    N  G3/G4 both
+M      issue-2446                 0   0   0        —  25.1037       1   20.1  Y       1    5.1    N  G2 no-incumbent (LP-stall)
+M      p0548                      2   3   2   0.0000   0.0000    6884   13.1  Y       0    0.6    N  G1 near (both <=1%)
+M      sp150x300d                 0   0   3   0.2899   0.1014    7551   20.5  Y       1    1.2    N  G3/G4 both
+MIPLIB beavma                     0   0   3   0.3365   0.0821    4047   20.4  Y       1    0.7    N  G3/G4 both
+MIPLIB bppc8-02                   0   0   3   0.0118   0.0404    2051   20.2  Y     152    0.7    N  G3/G4 both
+MIPLIB enlight8                   0   0   3   0.0000   0.2593    9513   20.1  Y     412    3.0    Y  G4 dual-only (incumbent opt)
+MIPLIB enlight_hard               0   0   0        —   0.2973    2346   20.0  N    2044   13.1    N  G2 no-incumbent
+MIPLIB gsvm2rl3                   0   0   3   0.2498   0.0967    7836   20.2  Y    2547    9.9    N  G3/G4 both
+MIPLIB mik-250-20-75-1            0   0   3   0.0000   0.0307   18204   20.1  Y     453   12.0    N  G4 dual-only (incumbent opt)
+MIPLIB mik-250-20-75-2            0   0   3   0.0000   0.0332   15900   20.1  Y      91    5.0    N  G4 dual-only (incumbent opt)
+MIPLIB mik-250-20-75-3            0   0   3   0.0026   0.0283   17188   20.2  Y     433   12.2    N  G3/G4 both
+MIPLIB mik-250-20-75-5            0   0   3   0.0005   0.0306   17106   20.2  Y     159    8.9    N  G3/G4 both
+MIPLIB neos-2624317-amur          0   0   0        —   1.0000     467   20.0  N    2215   13.1    N  G2 no-incumbent
+MIPLIB neos-3118745-obra          0   0   3   0.1373   0.0000    3935   20.2  N    2203   20.1    N  G3 primal-only (bound at opt)
+MIPLIB neos-911970                0   0   3   0.8977   0.5752     973   20.1  Y    1077   14.2    N  G3/G4 both
+MIPLIB neos17                     0   0   3   0.2110   0.0489    5714   20.2  Y    1524   11.0    N  G3/G4 both
+MIPLIB nexp-50-20-1-1             0   0   3   0.4138   0.1379    3456   20.2  Y       1    0.4    N  G3/G4 both
+MIPLIB nexp-50-20-4-2             0   0   3   0.0704   0.0423    2774   20.5  Y       1    2.1    N  G3/G4 both
+MIPLIB sp150x300d                 0   0   3   0.2899   0.1014    8425   20.3  Y       1    1.2    N  G3/G4 both
+
+certified solves ON 125 / OFF 126 of 186
+
+class summary (instances not certified 3/3 in ON):
+  G1 near (both <=1%)               1  p0548(2/3)
+  G2 no-incumbent                   3  2122, enlight_hard, neos-2624317-amur
+  G2 no-incumbent (LP-stall)        1  issue-2446
+  G3 primal-only (bound at opt)     1  neos-3118745-obra
+  G3/G4 both                       12  beavma, bppc8-02, gesa2, gsvm2rl3, mik-250-20-75-3, mik-250-20-75-5, neos-911970, neos17, nexp-50-20-1-1, nexp-50-20-4-2, sp150x300d, sp150x300d
+  G4 dual-only (incumbent opt)      3  enlight8, mik-250-20-75-1, mik-250-20-75-2
+
+not-3/3 rows that H certifies: 18
+not-3/3 rows that H fails too: ['enlight_hard', 'neos-2624317-amur', 'neos-3118745-obra']
+
+MIPLIB-38: ON certified-all-reps 22, any-rep 22, mean/rep 22.0; H certified 35
+M-24:      ON certified-all-reps 19, any-rep 20, mean/rep 19.7; H certified 24
+ON total median wall MIPLIB 398 s vs H p6.6 189 s; M 109 vs 19

@@ -1,4 +1,9 @@
-# D2 handoff — where the next session starts (2026-11-07)
+# D2 handoff — where the next session starts (2026-11-07; review 2026-11-08)
+
+**Start with `highs-parity-d2-review.md` and its HiGHS-expert critique
+`highs-parity-d2-review-highs-expert.md`:** gap attribution (22/38 today, 12 target rows),
+the re-ranked plan (R1 CUT_LP fix, R0 re-entry restart, R2 panel hardening, R3 in-tree
+c-MIR, R4 path c-MIR + root rounding, ...) and the gate critique.
 
 Branch `claude/happy-hamilton-0vvo3b`, draft PR jkitchin/discopt#2196 (contributes to
 #1671). The owner's goal is to eliminate HiGHS. D2, the pure-MILP route default, is the
@@ -13,6 +18,9 @@ the short version: what is on, what is off, and what to do first.
 
 **Default ON since this session (graduated on §5 panel + corpus differential):**
 - `DISCOPT_MILP_CUT_LP`: HiGHS's persistent-LP cut policy for the node-GMI pool.
+  **Retracted as cert-clean (2026-11-08):** it took `enlight8` from 3/3 certified to 0/3
+  and dropped `bppc8-02`'s bound to its root LP; the panel's summed bar 2a hid it. Root
+  cause and the R1 fix: `highs-parity-d2-review.md` + `highs-parity-d2-review-highs-expert.md`.
 - `DISCOPT_MILP_SB_ARMED`: strong-branch probes on the degeneracy-armed warm path.
 
 **Fixed this session (correctness):**
