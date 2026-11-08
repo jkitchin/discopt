@@ -86,8 +86,13 @@ the short version: what is on, what is off, and what to do first.
 | W5(a) `DISCOPT_LP_DUAL_COLD` | entry failed (`neos-911970` 874 -> 45 nodes); retired |
 | W5(d) `DISCOPT_MILP_CUT_LP_EXCHANGE` | entry failed (`istra` loses its certificate, `enlight8` nodes /3); retired |
 
-Next: re-panel the W4 c-MIR bundle. The "faster engine" it was waiting for did not
-materialize as a default; steps 1+2 are available behind the opt-out flag.
+| W4 c-MIR bundle, re-panel with incremental pricing on both arms | fails again: 123 -> 123, 4 dual losses, 4 rows lose every incumbent (root-LP numerics); retire vs keep is the owner's call |
+
+Next, if the owner keeps W4: the plan's untried W4 steps (power-of-two cut scaling plus
+small-coefficient removal, then a validated panel), which target that numerics failure.
+Open owner questions: INCR_PRICING opt-out vs retire; W4 bundle keep vs retire; and how
+D3's exact-proof master should treat a box that is feasible only within tolerance (the
+red `test_nlpbb_unscaled_refine`).
 
 ## First things to do
 

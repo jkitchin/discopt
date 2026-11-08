@@ -269,7 +269,16 @@ The failure is LP numerics, not the cuts (`w4_cmir_followups.jsonl.gz`).
   (13 -> 3 s).
 - It moved other trajectories: `gesa2` open again, and `istra`/`kaihu` slower.
 
-Remaining W4 steps, after the W5 engine items (a) and (d):
+**Re-panel 2026-11-08, on the incremental-pricing engine (`LP_PRIMAL_INCR_PRICING=1`
+in both arms; `w4_cmir_bundle_incr_panel_r3.json.gz`): fails again, the same way.**
+- Cert-clean (372 checks); certified 123 -> 123 (gains `gesa2` and `p0548` 3/3; loses
+  `istra` and `kaihu` 3/3); nodes -19 % where both arms certify.
+- 4 dual losses (cap 2). No incumbent in any rep on `enlight8`, `nexp-50-20-1-1`,
+  `beavma`, `istra`.
+- The engine did not remove the root-LP numerics signature; W5 (a) and (d) were retired
+  on their entries.
+
+Remaining W4 steps (W5 (a) and (d) are retired, so these no longer wait on them):
 - small-coefficient removal plus scaling validated on a panel;
 - deeper path aggregation (expert step 4);
 - tableau rows through the c-MIR pipeline (step 5).
