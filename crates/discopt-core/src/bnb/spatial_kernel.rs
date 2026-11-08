@@ -1166,14 +1166,20 @@ mod tests {
                     retry,
                 )
             };
-            // Fails before: the inherited start leaves the LP undecided.
+            // #2212: the ENGINE now decides these from the inherited start (its
+            // logical-basis dual stage, `DISCOPT_LP_LOGICAL_DUAL_RESCUE`, default ON):
+            // one solve, and the kernel's slack retry never fires. The defect itself
+            // (the engine without that stage ends `Numerical`) stays pinned by
+            // `lp::simplex::dual::tests::logical_dual_rescue_decides_the_numerical_fixtures_2212`.
             let (before, solves_before, _, outcome_before) = run(false);
-            assert_eq!(before.status, LpStatus::Numerical, "the captured defect");
             assert_eq!((solves_before, outcome_before), (1, None));
-            // Passes after.
             let (after, solves_after, _, outcome_after) = run(true);
-            assert_eq!(solves_after, 2, "exactly one retry");
-            assert_eq!(outcome_after, Some(true), "the retry decided it");
+            assert_eq!(
+                solves_after, 1,
+                "decided by the engine: the retry never fires"
+            );
+            assert_eq!(outcome_after, None);
+            assert_eq!(before.status, after.status);
             match f.highs_obj {
                 Some(obj) => {
                     assert_eq!(after.status, LpStatus::Optimal);

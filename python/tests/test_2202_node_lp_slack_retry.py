@@ -23,6 +23,7 @@ import discopt.modeling as dm
 import discopt.transformations as dt
 import numpy as np
 import pytest
+from conftest import rerun_with_lp_rescue_off
 from discopt import _rust
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -60,10 +61,13 @@ def test_the_kernel_default_is_off():
 
 
 @pytest.mark.smoke
-def test_slack_retry_alone_decides_the_sliver_node(monkeypatch):
+def test_slack_retry_alone_decides_the_sliver_node(monkeypatch, request):
     """With #1995's pre-propagation re-solve OFF, the slack-basis re-solve on its own
     decides the sliver node LP and the lowering certifies; with both OFF the legacy
-    stall is intact and nothing is counted."""
+    stall is intact and nothing is counted. Run with the #2212 engine stage off: with
+    it on, the engine decides the node LP and neither retry fires."""
+    if rerun_with_lp_rescue_off(request):
+        return
     monkeypatch.setenv(PROP_FLAG, "0")
     monkeypatch.delenv(FLAG, raising=False)
     with warnings.catch_warnings():
@@ -113,7 +117,7 @@ def _permute_rows(kwargs: dict, seed: int) -> dict:
 
 @pytest.mark.slow
 @pytest.mark.correctness
-def test_permuted_nous1_has_no_undecided_nodes(monkeypatch):
+def test_permuted_nous1_has_no_undecided_nodes(monkeypatch, request):
     """nous1's kernel tree under several fixed-row orders, 500 nodes each: every run
     ends with 0 undecided nodes, and the retry decides at least one node LP somewhere.
 
@@ -126,6 +130,9 @@ def test_permuted_nous1_has_no_undecided_nodes(monkeypatch):
     called directly; the Python primal hook and pricer are dropped for speed (the
     seeded initial incumbent stays), since the retry lives in the node LP.
     """
+    # Also run with the #2212 engine stage off, where the retry is the safety net.
+    if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_RESCUE") != "0":
+        rerun_with_lp_rescue_off(request)
     monkeypatch.delenv(FLAG, raising=False)
     orig = _rust.solve_spatial_tree_py
     captured: dict = {}
@@ -150,5 +157,31 @@ def test_permuted_nous1_has_no_undecided_nodes(monkeypatch):
         res = orig(**k)
         runs.append((seed, res["n_undecided"], res["n_slack_retry_decided"], res["bound"]))
     assert all(u == 0 for _, u, _, _ in runs), runs
-    assert sum(d for _, _, d, _ in runs) >= 1, runs  # the retry fired somewhere (§6)
+    if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_RESCUE") == "0":
+        assert sum(d for _, _, d, _ in runs) >= 1, runs  # the retry fired somewhere (§6)
+    else:
+        # #2212: the LP engine decides these node LPs itself (its logical-basis dual
+        # stage, default ON), so 0 undecided holds with the kernel's retry never firing.
+        assert sum(d for _, _, d, _ in runs) == 0, runs
     assert all(b <= NOUS1_OPT + 1e-6 for _, _, _, b in runs), runs
+
+
+@pytest.mark.smoke
+def test_the_engine_decides_the_sliver_node_without_either_retry(monkeypatch):
+    """#2212: with both caller-side retries OFF, the LP engine's own logical-basis dual
+    stage (``DISCOPT_LP_LOGICAL_DUAL_RESCUE``, default ON) decides the sliver node LP
+    and the lowering certifies -- the stall the two retries were written for no longer
+    reaches them. (Skipped where the stage is switched off.)"""
+    import os
+
+    if os.environ.get("DISCOPT_LP_LOGICAL_DUAL_RESCUE") == "0":
+        pytest.skip("the #2212 engine stage is off in this process")
+    monkeypatch.setenv(PROP_FLAG, "0")
+    monkeypatch.setenv(FLAG, "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = _either_or().solve(time_limit=30)
+    stats = r.solver_stats or {}
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.node_count, r.bound)
+    assert abs(r.objective - 5.0) <= 1e-6
+    assert stats.get("tree/prop_retries") == 0.0 and stats.get("tree/slack_retries") == 0.0

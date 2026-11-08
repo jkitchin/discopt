@@ -352,7 +352,8 @@ pub fn solve_lp_warm_csc(
     }
 }
 
-/// `DISCOPT_LP_LOGICAL_DUAL_RESCUE` (#2212, default OFF until its panel): when a solve
+/// `DISCOPT_LP_LOGICAL_DUAL_RESCUE` (#2212, **default ON** since its panel; `=0` opts out):
+/// when a solve
 /// through a public engine entry ([`solve_lp_warm_csc`],
 /// [`super::primal::solve_lp_cols_scaled`]) ends `Numerical`, re-solve the ORIGINAL LP
 /// with the dual simplex from the all-logical basis (HiGHS's start; the #2163 stage,
@@ -364,6 +365,16 @@ pub fn solve_lp_warm_csc(
 /// engine decides 2 and this stage 6, all matching HiGHS (the `cstr` #2142 fixture
 /// stays undecided). Fires only on `Numerical`, so a decided LP takes exactly its old
 /// path; `IterLimit` is left alone (it can be the caller's deadline).
+///
+/// **Graduated 2026-11-08** (§5 panel, `issue2115_graduation_panel.py`, in-repo
+/// corpus, 74 instances, 30 s, arms interleaved; data
+/// `docs/dev/data/2212-logical-dual-rescue/`): 794 checks; certified 55 -> 55 with
+/// `ex14_1_7` gained (30.4 s uncertified -> 5.3 s certified); 2 bounds tighter, 0
+/// looser; nodes -5 %, wall -3 % (-5.5 % where it fired); the stage decided 609 LPs on
+/// 11 instances. The one violation (`cvxnonsep_nsig30` certified OFF, not ON) had 0
+/// attempts in both arms -- identical code -- and missed its 30 s limit at load 5.2;
+/// re-run 3x at low load it certifies in both arms every time. Failed attempts cost
+/// little (worst `nvs09`, 25 attempts, +1.5 s).
 pub(crate) fn logical_dual_rescue_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -375,8 +386,8 @@ pub(crate) fn logical_dual_rescue_enabled() -> bool {
 /// The parse table behind [`logical_dual_rescue_enabled`]; garbage is refused.
 fn parse_logical_dual_rescue(raw: &str) -> bool {
     match raw.trim() {
-        "" | "0" | "false" | "off" => false,
-        "1" | "true" | "on" => true,
+        "0" | "false" | "off" => false,
+        "" | "1" | "true" | "on" => true,
         other => panic!(
             "DISCOPT_LP_LOGICAL_DUAL_RESCUE={other:?} is not a recognized value; use 1/on or \
              0/off"
@@ -4079,7 +4090,13 @@ mod tests {
         let _guard = crate::profile::test_guard();
         crate::profile::reset();
         crate::profile::set_enabled(true);
-        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &opts());
+        // The engine WITHOUT its #2212 logical-basis dual stage: this test is about the
+        // drive-out pass on the engine's own path. With the stage (default ON) the LP is
+        // decided `Optimal` at a point feasible within discopt's 1e-6(1+|b|) audit (rows
+        // off by 3.5e-7, bounds by 3e-8, |x| up to 5.6e9); HiGHS, at its 1e-7 absolute
+        // primal tolerance, calls it infeasible. A tolerance disagreement, not a false
+        // answer: "feasible" can only keep a node open, never prune one.
+        let sol = solve_lp_warm_csc_counted(sp, m, n, &c, &l, &u, &b, Some(&start), &opts());
         let calls = crate::profile::counter(crate::profile::Ctr::DriveOutCalls);
         let pivots = crate::profile::counter(crate::profile::Ctr::DriveOutPivots);
         let exhausted = crate::profile::counter(crate::profile::Ctr::DriveOutBudgetExhausted);

@@ -1,0 +1,32 @@
+st_e38                 OFF optimal                b=7197.727148009189 n=3 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=7197.727148009189 n=3 LpLogicalRescueAttempts=1 LpLogicalRescueDecided=1 fired=1 undecided 0.0/0.0 wall 0.4/0.5 load 3.68
+st_miqp1               OFF optimal                b=280.9999999997175 n=5 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=280.9999999997175 n=5 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.3/0.3 load 3.68
+st_miqp2               OFF optimal                b=1.9999999999469644 n=5 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=1.9999999999469644 n=5 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.3/0.3 load 3.70
+st_miqp3               OFF optimal                b=-6.000000001887192 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=-6.000000001887192 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.3/0.3 load 3.70
+st_miqp4               OFF optimal                b=-4574.000000004578 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=-4574.000000004578 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.3/0.4 load 3.70
+st_miqp5               OFF optimal                b=-333.8888889815541 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=-333.8888889815541 n=1 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.4/0.3 load 3.73
+st_test1               OFF optimal                b=-1.0799360577730912e-12 n=15 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=-1.0799360577730912e-12 n=15 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.4/0.4 load 3.73
+prolog                 OFF feasible               b=None n=169 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON feasible               b=None n=169 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 30.1/29.1 load 3.59
+syn05hfsg              OFF optimal                b=837.7420768788216 n=2 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=837.7420768788216 n=2 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 0.1/0.1 load 3.59
+st_testgr3             OFF optimal                b=-20.590000000021814 n=489 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=-20.590000000021814 n=489 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 2.4/2.0 load 3.59
+tls2                   OFF optimal                b=5.2999999999999226 n=179 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=5.2999999999999226 n=179 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 1.2/1.3 load 4.10
+tanksize               OFF optimal                b=1.2685218386975698 n=461 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=1.2685218386975698 n=461 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided 0.0/0.0 wall 4.2/4.5 load 3.93
+tspn05                 OFF optimal                b=191.25513611344041 n=21 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON optimal                b=191.25513611344041 n=21 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 4.3/4.3 load 3.86
+tspn08                 OFF feasible               b=258.41487935386937 n=31 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON feasible               b=258.41487935386937 n=31 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 30.0/30.0 load 4.24
+tspn10                 OFF feasible               b=165.11989033102535 n=25 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON feasible               b=165.11989033102535 n=25 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 31.3/32.3 load 4.13
+tspn12                 OFF feasible               b=201.08038046451128 n=43 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON feasible               b=201.08038046451128 n=43 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 30.0/30.1 load 4.11
+wallfix                OFF feasible               b=0.0 n=779 LpLogicalRescueAttempts=0 LpLogicalRescueDecided=0 | ON feasible               b=0.0 n=787 LpLogicalRescueAttempts=45 LpLogicalRescueDecided=0 fired=0 undecided None/None wall 30.0/30.0 load 3.71
+
+instances           : 74
+executed checks     : 794
+violations          : 1
+  ! cvxnonsep_nsig30: certification lost with the flag ON
+mechanism fired     : 609 on 11 instance(s) ['bchoco06', 'bchoco07', 'bchoco08', 'clay0303hfsg', 'ex14_1_7', 'ex14_1_9', 'ex7_3_1', 'ex8_5_3', 'launch', 'nvs05', 'st_e38']
+certified           : OFF 55 -> ON 55  gained ['ex14_1_7']
+bounds tighter      : 2 ['ex14_1_7', 'nvs05']  (where it ran: ['ex14_1_7', 'nvs05'])
+bounds looser       : 0 []  (where it ran: [])
+nodes (all)         : OFF 8390 -> ON 7998
+wall  (all)         : OFF 770.6s -> ON 749.7s
+wall  (fired)       : OFF 393.6s -> ON 371.8s over 20 instance(s)
+report              : /tmp/claude-0/-home-user-discopt/622858fd-8692-539a-a137-f41f6cd43f5f/scratchpad/rescue_panel.json
+
+VERDICT: FAIL - cert-clean violated.
