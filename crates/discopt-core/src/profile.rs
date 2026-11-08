@@ -162,8 +162,6 @@ timed_phases!(
     NodeReduce,
     PriceBtran,
     PriceSweep,
-    // Pivot-row reduced-cost update of the primal incremental pricing (engine step 2).
-    PivotRowPrice,
     AlphaFtran,
     FtUpdate,
     Refactorize,
@@ -346,14 +344,6 @@ counters!(
     CutLpLenRejected,
     CutLpRelaxed,
     LazyNearIntegralBranch,
-    // Primal incremental pricing: exact re-price before an optimality claim.
-    PrimalIncrExactRecheck,
-    PrimalIncrDriftReprice,
-    // Row-wise (hyper-sparse) pivot row of the incremental pricing, its column-wise
-    // fallback, and the pivot row/column disagreement that forces a refactorization.
-    PrimalRowPriceSparse,
-    PrimalRowPriceDense,
-    PrimalRowPriceVerifyFail,
     // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
     // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
     // and Farkas rays refused as a fathom because they do not survive the tolerance.

@@ -506,6 +506,14 @@ Evidence so far:
   - reduced-cost fixing's gap;
   - the NS bound of an ordinary node, taken over the exact rows.
 
+**Retirements 2026-11-08 (owner decision; §5 applied strictly).**
+- `DISCOPT_LP_PRIMAL_INCR_PRICING` (engine steps 1+2) failed both panels on `p0548`.
+- The W4 c-MIR bundle failed both of its panels.
+- Both are retired, flag and implementation; their records above stand.
+- The D2 levers measured this session left the in-house route well short of HiGHS on
+  pure MILP. The plan now accepts that gap for HiGHS-less installs (P6.3, HiGHS as an
+  optional extra) instead of pursuing parity lever by lever.
+
 ### W6 — Plunging with a hot LP (expert R1)  *expected: the long tail*
 
 Only if W1-W5 leave the count below ~52/62. This is the largest build: depth-first

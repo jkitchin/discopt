@@ -1166,27 +1166,14 @@ mod tests {
                     retry,
                 )
             };
-            // Fails before: the inherited start leaves the LP undecided. Under
-            // `DISCOPT_LP_PRIMAL_INCR_PRICING=1` (engine step 1) the inherited start is
-            // decided on its own, so there the premise is that it is decided CORRECTLY
-            // (the checks below run on that solve); the default arm must still
-            // reproduce the captured defect.
+            // Fails before: the inherited start leaves the LP undecided.
             let (before, solves_before, _, outcome_before) = run(false);
-            let after = if before.status == LpStatus::Numerical {
-                assert_eq!((solves_before, outcome_before), (1, None));
-                // Passes after.
-                let (after, solves_after, _, outcome_after) = run(true);
-                assert_eq!(solves_after, 2, "exactly one retry");
-                assert_eq!(outcome_after, Some(true), "the retry decided it");
-                after
-            } else {
-                assert!(
-                    crate::lp::simplex::primal::incr_pricing_enabled(),
-                    "the captured defect: the default arm must end Numerical, got {:?}",
-                    before.status
-                );
-                before
-            };
+            assert_eq!(before.status, LpStatus::Numerical, "the captured defect");
+            assert_eq!((solves_before, outcome_before), (1, None));
+            // Passes after.
+            let (after, solves_after, _, outcome_after) = run(true);
+            assert_eq!(solves_after, 2, "exactly one retry");
+            assert_eq!(outcome_after, Some(true), "the retry decided it");
             match f.highs_obj {
                 Some(obj) => {
                     assert_eq!(after.status, LpStatus::Optimal);

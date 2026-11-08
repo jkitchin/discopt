@@ -94,6 +94,29 @@ Open owner questions: INCR_PRICING opt-out vs retire; W4 bundle keep vs retire; 
 D3's exact-proof master should treat a box that is feasible only within tolerance (the
 red `test_nlpbb_unscaled_refine`).
 
+## Owner decision 2026-11-08: retire the failed D2 levers; make HiGHS optional
+
+These follow §5 applied strictly. The earlier "kept as a documented opt-out" for
+incremental pricing is retracted: an opt-out is for a deliberately non-default route,
+not for a lever that failed its panels.
+
+Retired, flag and implementation (measurements in the flag audit and the plan):
+- `DISCOPT_LP_PRIMAL_INCR_PRICING`, engine steps 1+2;
+- the W4 c-MIR bundle: `MILP_D2_CMIR`, `MILP_CMIR_HIGHS`, `MILP_CMIR_FLIP`,
+  `MILP_LIFTED_MIC`.
+
+Kept:
+- main's #2107 c-MIR separator, which the default MILP escalation uses;
+- `DISCOPT_MILP_TOL_ROBUST`, graduated as a correctness fix.
+
+Next, after this PR merges: P6.3 on a fresh branch.
+- `highspy` moves from the core dependencies to the `highs` extra.
+- The pure-MILP route uses HiGHS when it is installed and the in-house driver
+  otherwise.
+- CI gets a lane with HiGHS uninstalled.
+- The D2 gap (in-house about 42/62 vs HiGHS 59 on the MIPLIB panel) is the measured
+  cost of a HiGHS-less install. It is accepted rather than closed lever by lever.
+
 ## D3 follow-up 2026-11-08: `DISCOPT_MILP_TOL_ROBUST` graduated (default ON)
 
 The red `test_nlpbb_unscaled_refine` (above) is fixed at its root. The MILP driver's
