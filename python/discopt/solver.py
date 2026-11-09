@@ -38235,8 +38235,8 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
         return None
     _cmir_mode = _milp_root_cmir_mode()
     return {
-        "root_cuts": 1500 if _cmir_mode != "off" else 500,
-        "cut_rounds": 150 if _cmir_mode != "off" else 50,
+        "root_cuts": 1500 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 500,
+        "cut_rounds": 150 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 50,
         "cut_select": True,
         # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default OFF): c-MIR in the root loop.
         "cmir_cuts": _cmir_mode != "off",
@@ -38244,7 +38244,9 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
         # Half the engine's slice, floored so a very short budget still gets one
         # useful pass. The loop stops early on tailing off, so on an instance
         # whose root closes in two rounds this ceiling is never reached.
-        "root_cut_time_s": max(0.5, 0.5 * float(engine_budget)),
+        "root_cut_time_s": max(
+            0.5, float(os.environ.get("P3_ROOT_SHARE", "0.5")) * float(engine_budget)
+        ),
     }
 
 

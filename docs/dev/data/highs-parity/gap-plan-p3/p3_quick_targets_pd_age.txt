@@ -1,0 +1,18 @@
+row                                      off                    pd_age
+neos-3610051-istra  OPT d=  0.00 p=  0.00  4.0s  OPT d=  0.00 p=  0.00  8.6s
+nexp-50-20-1-1     feas d= 10.34 p= 31.03 20.6s feas d=  3.45 p= 31.03 20.2s
+beavma             feas d=  8.07 p= 42.18 20.3s feas d=  0.14 p=  0.00 20.3s
+bppc8-02           feas d=  4.04 p=  1.18 20.2s feas d=  4.04 p=  6.51 20.2s
+sp150x300d         feas d= 10.14 p= 28.99 20.7s time d= 15.94 p=     - 20.0s
+nexp-50-20-4-2     feas d=  4.23 p=  7.04 20.5s time d=  9.86 p=     - 20.1s
+enlight8           feas d= 25.93 p=  0.00 20.0s time d= 29.63 p=     - 20.0s
+gesa2              feas d=  0.05 p=  1.74 20.6s  OPT d=  0.00 p=  0.00  5.9s
+issue-2446         time d=2112.83 p=     - 20.1s time d=2381.98 p=     - 20.1s
+mik-250-20-75-1    feas d=  3.10 p=  0.00 20.2s feas d=  2.29 p=  0.00 20.1s
+mik-250-20-75-2    feas d=  3.28 p=  0.00 20.2s feas d=  1.98 p=  0.00 20.2s
+mik-250-20-75-3    feas d=  2.96 p=  0.26 20.2s feas d=  2.66 p=  0.26 20.2s
+mik-250-20-75-5    feas d=  3.07 p=  0.05 20.1s feas d=  2.11 p=  0.05 20.2s
+gsvm2rl3           feas d=  9.67 p= 24.98 20.1s feas d=  9.86 p= 24.98 20.1s
+neos17             feas d=  4.61 p= 21.10 20.2s feas d=  3.82 p= 25.25 20.2s
+neos-911970        feas d= 57.52 p= 89.77 20.1s time d=  5.05 p=     - 20.0s
+certified: {'off': 1, 'pd_age': 2} solves: 32

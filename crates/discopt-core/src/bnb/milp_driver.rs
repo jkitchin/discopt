@@ -3551,7 +3551,10 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
                 }
                 let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
-                    ROOT_CMIR_STALL_ROUNDS
+                    std::env::var("P3_STALL")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(ROOT_CMIR_STALL_ROUNDS)
                 } else {
                     0
                 };
@@ -3695,6 +3698,120 @@ fn solve_milp_node_search(
             if prune_base.is_some() {
                 all_root_cuts.extend(new_cuts);
             }
+            // P3 experiment (`P3_AGE=1`): drop, every round, the cuts whose slack is
+            // BASIC at this round's optimal basis (zero dual: removing the row keeps
+            // this round's optimum), instead of carrying every generated cut to the
+            // post-loop cleanup. HiGHS ages inactive cuts out of the LP the same way.
+            if let (Some((csc_base, m_base, n_base)), Some((rb, rn)), true) = (
+                prune_base.as_ref(),
+                root_basis.as_ref(),
+                std::env::var("P3_AGE").as_deref() == Ok("1"),
+            ) {
+                let (m_base, n_base, rn) = (*m_base, *n_base, *rn);
+                let total = all_root_cuts.len();
+                debug_assert_eq!(n_w, n_base + total);
+                let n_old = rn.saturating_sub(n_base).min(total);
+                let mut keep = vec![true; total];
+                for (i, k) in keep.iter_mut().enumerate().take(n_old) {
+                    if rb.col_status.get(n_base + i) == Some(&BASIC) {
+                        *k = false;
+                    }
+                }
+                for ci in (0..total).rev() {
+                    if keep[ci] {
+                        for (j, &a) in all_root_cuts[ci].coeffs.iter().enumerate() {
+                            if a != 0.0 && j >= n_base && j - n_base < ci {
+                                keep[j - n_base] = true;
+                            }
+                        }
+                    }
+                }
+                let n_keep = keep.iter().filter(|&&k| k).count();
+                if n_keep < total {
+                    let mut newidx = vec![usize::MAX; total];
+                    let mut next = 0usize;
+                    for (c, &k) in keep.iter().enumerate() {
+                        if k {
+                            newidx[c] = next;
+                            next += 1;
+                        }
+                    }
+                    let kept: Vec<GomoryCut> = all_root_cuts
+                        .iter()
+                        .enumerate()
+                        .filter(|(c, _)| keep[*c])
+                        .map(|(_, cut)| {
+                            let mut coeffs = vec![0.0; n_base + n_keep];
+                            for (j, &a) in cut.coeffs.iter().enumerate() {
+                                if a == 0.0 {
+                                    continue;
+                                }
+                                if j < n_base {
+                                    coeffs[j] = a;
+                                } else {
+                                    coeffs[n_base + newidx[j - n_base]] = a;
+                                }
+                            }
+                            GomoryCut {
+                                coeffs,
+                                rhs: cut.rhs,
+                            }
+                        })
+                        .collect();
+                    // The basis over the kept columns: a dropped row's slack is basic,
+                    // so removing row and slack together leaves a square, nonsingular
+                    // basis with the same reduced costs.
+                    let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
+                    for i in 0..n_old {
+                        if keep[i] {
+                            col_status.push(rb.col_status[n_base + i]);
+                        }
+                    }
+                    let basic_vars: Vec<usize> = rb
+                        .basic_vars
+                        .iter()
+                        .filter_map(|&j| {
+                            if j < n_base {
+                                Some(j)
+                            } else if keep[j - n_base] {
+                                Some(n_base + newidx[j - n_base])
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let new_rn = col_status.len();
+                    root_basis = Some((
+                        Basis {
+                            col_status,
+                            basic_vars,
+                        },
+                        new_rn,
+                    ));
+                    b_w.truncate(m_base);
+                    c_w.truncate(n_base);
+                    l_w.truncate(n_base);
+                    u_w.truncate(n_base);
+                    is_int_full.truncate(n_base);
+                    for cut in &kept {
+                        b_w.push(cut.rhs);
+                        c_w.push(0.0);
+                        l_w.push(0.0);
+                        u_w.push(INF);
+                        is_int_full.push(false);
+                    }
+                    csc_w = rebuild_csc_with_cuts(csc_base, m_base, n_base, &kept);
+                    m_w = m_base + kept.len();
+                    n_w = n_base + kept.len();
+                    structural_cuts = kept.clone();
+                    all_root_cuts = kept;
+                    last_root_x = None;
+                    crate::profile::incr_by(
+                        crate::profile::Ctr::RootCutsSubstDropped,
+                        (total - n_keep) as u64,
+                    );
+                }
+            }
         }
     }
 
@@ -3717,6 +3834,7 @@ fn solve_milp_node_search(
     if let (Some((csc_base, m_base, n_base)), Some(x)) = (prune_base.as_ref(), last_root_x.as_ref())
     {
         let (m_base, n_base) = (*m_base, *n_base);
+        let p3_prune_dual = std::env::var("P3_PRUNE_DUAL").as_deref() == Ok("1");
         let mut keep = vec![false; all_root_cuts.len()];
         for ci in (0..all_root_cuts.len()).rev() {
             let cut = &all_root_cuts[ci];
@@ -3731,7 +3849,17 @@ fn solve_milp_node_search(
                 .take(x.len())
                 .map(|(j, &a)| a * x[j])
                 .sum();
-            let tight = act - cut.rhs <= 1e-6 * (1.0 + cut.rhs.abs());
+            let mut tight = act - cut.rhs <= 1e-6 * (1.0 + cut.rhs.abs());
+            if tight && p3_prune_dual {
+                // P3 experiment: a tight cut whose slack is BASIC at the final root
+                // basis has a zero dual -- dropping it is root-bound-neutral too.
+                if let Some((rb, rn)) = root_basis.as_ref() {
+                    let col = n_base + ci;
+                    if col < *rn && rb.col_status.get(col) == Some(&BASIC) {
+                        tight = false;
+                    }
+                }
+            }
             if tight || keep[ci] {
                 keep[ci] = true;
                 for (j, &a) in cut.coeffs.iter().enumerate() {
@@ -4114,7 +4242,17 @@ fn solve_milp_node_search(
                     Some(
                         std::time::Instant::now()
                             + std::time::Duration::from_secs_f64(
-                                (left * ROOT_DIVE_SHARE).min(ROOT_DIVE_MAX_S),
+                                (left
+                                    * std::env::var("P3_DIVE_SHARE")
+                                        .ok()
+                                        .and_then(|v| v.parse::<f64>().ok())
+                                        .unwrap_or(ROOT_DIVE_SHARE))
+                                .min(
+                                    std::env::var("P3_DIVE_MAX_S")
+                                        .ok()
+                                        .and_then(|v| v.parse::<f64>().ok())
+                                        .unwrap_or(ROOT_DIVE_MAX_S),
+                                ),
                             ),
                     )
                 } else {
@@ -7641,13 +7779,37 @@ fn try_dive_repair(
     let mut cur_basis = start_basis.clone();
     let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
     crate::profile::incr(crate::profile::Ctr::DiveRuns);
+    // Gap plan P3: the dive's own LP solves stop at the dive cap too; a cold
+    // fallback from a refused warm start otherwise ran 9.7 s against a 2 s cap.
+    // The cap is measured from the dive's own start: the batch-time deadline in
+    // `ctx.dive_deadline` was already spent by the root node's solve on neos-911970.
+    let dive_deadline: Option<std::time::Instant> = ctx.dive_deadline.map(|_| {
+        let now = std::time::Instant::now();
+        let left = ctx.deadline.map_or(ROOT_DIVE_MAX_S, |d| {
+            d.saturating_duration_since(now).as_secs_f64()
+        });
+        let share = std::env::var("P3_DIVE_SHARE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(ROOT_DIVE_SHARE);
+        let cap = std::env::var("P3_DIVE_MAX_S")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(ROOT_DIVE_MAX_S);
+        now + std::time::Duration::from_secs_f64((left * share).min(cap))
+    });
+    let dive_simplex = match dive_deadline {
+        Some(d) => {
+            let mut o = ctx.simplex.clone();
+            o.deadline = Some(o.deadline.map_or(d, |e| e.min(d)));
+            o
+        }
+        None => ctx.simplex.clone(),
+    };
     for _ in 0..max_steps {
         // Gap plan P3: the dive is a heuristic; past its wall cap it gives up (no
         // point, never a wrong one).
-        if ctx
-            .dive_deadline
-            .is_some_and(|d| std::time::Instant::now() >= d)
-        {
+        if dive_deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             crate::profile::incr(crate::profile::Ctr::DiveCapped);
             return None;
         }
@@ -7753,7 +7915,7 @@ fn try_dive_repair(
             // #1945: verified against the ORIGINAL data, like every node solve.
             let mut sol = ctx
                 .problem
-                .solve_warm(&full_l, &full_u, &cur_basis, ctx.simplex);
+                .solve_warm(&full_l, &full_u, &cur_basis, &dive_simplex);
             *pivots += sol.iters;
             if sol.status == LpStatus::Optimal {
                 if let Some(c) = cutoff {
