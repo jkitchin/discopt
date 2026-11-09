@@ -1866,6 +1866,16 @@ fn try_sub_mip(
         }
         let budget = (left.as_secs_f64() * 0.25).min(2.0);
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+        // P3 experiment (`P3_SUBCUT=<share>`): the sub-MIP inherited the parent's
+        // whole root-cut budget and spent its 2 s there (sp150x300d: 1 sub-node).
+        if let Some(sh) = std::env::var("P3_SUBCUT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            sub.root_cut_time_s = Some(budget * sh);
+            sub.root_cuts = sub.root_cuts.min(500);
+            sub.cut_rounds = sub.cut_rounds.min(50);
+        }
     }
     crate::profile::incr(match kind {
         SubMipKind::Rens => crate::profile::Ctr::SubMipRensRun,
@@ -3363,6 +3373,10 @@ fn solve_milp_node_search(
     let mut node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
+        // P3 experiment (`P3_EXPEL=1`): full bases from cold solves, so warm starts engage.
+        if std::env::var("P3_EXPEL").as_deref() == Ok("1") {
+            sx.expel_zero_artificials = true;
+        }
         sx
     };
     // `extend_no_incumbent_s`: the effective time limit, and whether it already moved.
@@ -3565,6 +3579,29 @@ fn solve_milp_node_search(
                 root_stalled = 0;
             }
             prev_obj = prev_obj.max(root.obj);
+            // HiGHS runs randomized rounding on every root round's LP point while
+            // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
+            // completion LP is over the uncut base rows, as in HiGHS.
+            if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
+                if tm
+                    .incumbent()
+                    .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
+                {
+                    if let Some((x, v)) = try_randomized_rounding(
+                        base,
+                        locks,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &root.x,
+                        0x5EED_0000 + _round as u64,
+                        opts,
+                        deadline,
+                    ) {
+                        tm.inject_incumbent(x, v);
+                    }
+                }
+            }
 
             // Knapsack cover cuts (sparse, strong on knapsack structure) plus
             // Gomory mixed-integer cuts off the native basis.
@@ -3805,7 +3842,15 @@ fn solve_milp_node_search(
                     n_w = n_base + kept.len();
                     structural_cuts = kept.clone();
                     all_root_cuts = kept;
-                    last_root_x = None;
+                    if let Some(x) = last_root_x.as_ref() {
+                        let mut nx: Vec<f64> = x[..n_base.min(x.len())].to_vec();
+                        for i in 0..n_old {
+                            if keep[i] {
+                                nx.push(x.get(n_base + i).copied().unwrap_or(0.0));
+                            }
+                        }
+                        last_root_x = Some(nx);
+                    }
                     crate::profile::incr_by(
                         crate::profile::Ctr::RootCutsSubstDropped,
                         (total - n_keep) as u64,
@@ -7933,8 +7978,15 @@ fn try_dive_repair(
                 }
                 l[j] = v;
                 u[j] = v;
-                // Carry this step's optimal basis into the next fix's warm start.
-                cur_basis = sol.basis;
+                // Carry this step's optimal basis into the next fix's warm start --
+                // only a well-formed one (`m` basic columns). A short basis came back
+                // from some solves (sp150x300d: 523 basic of 565 rows) and refused
+                // every later warm start, so each step paid a cold solve; the previous
+                // step's basis differs from this LP only in bounds, so it stays a valid,
+                // dual-feasible start.
+                if sol.basis.basic_vars.len() == ctx.m_w && sol.basis.col_status.len() == ctx.n_w {
+                    cur_basis = sol.basis;
+                }
                 next_x = Some(sol.x);
                 break;
             }

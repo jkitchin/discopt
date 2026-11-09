@@ -1,0 +1,3 @@
+# 20 s full solves, flag-on arm + P3_EXPEL=1 P3_SUBCUT=0.3 DISCOPT_MILP_RAND_ROUND=1 (root-round call added)
+# full_rr: certified 2 (istra, beavma); incumbents back on sp150x300d, nexp-50-20-4-2, enlight8, neos-911970.
+# full_rr_c (+DISCOPT_MILP_RUN1_CONTINUE=1): certified 3 (istra, beavma, gesa2); mik-250 primal worse (run 2 found those).
