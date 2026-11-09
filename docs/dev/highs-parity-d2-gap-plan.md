@@ -522,3 +522,32 @@ removing those rows always costs that node a real re-solve. HiGHS escapes this o
 because its queued nodes hold no basis. The remaining route is plan B (§3 P2): keep
 folding where it pays and fall back to the node-local lift (the `CUT_LP=0` path) when
 the folded LP stops paying, decided by a measured per-solve signal, not by instance.
+
+### 11.1 Plan B: cap the fold per solve, unfold on the trip (`DISCOPT_MILP_CUT_LP_CAP`)
+
+**Signal (measured, one 20 s solve each; live folded rows `CutLpFolded - CutLpDeleted`
+over the model's rows m):** the fold helps where it stays small — `fiber` 0.25, `kaihu`
+0.23, `gesa2` 0.40 — and hurts where it grows past the model — `bppc8-02` 4.7, `enlight8`
+21; `b-ball` 1.8 certifies either way. Rule: past 2·m live rows, the solve stops folding,
+unfolds every row the deletion pass can rewrite (cuts back to the pool; a stored basis
+holding a deleted slack nonbasic is dropped once, and the root is decided by depth so a
+basis-less node does not run the root-only dive), and returns to the node-local lift.
+
+**A cap without the unfold does nothing** (`enlight8` bound 22 at 20k nodes, 273 rows
+already folded when it trips and still in every LP).
+
+**Entry** (3 reps, 20 s, 2 jobs; `p2_entry_cap.json.gz`, `p2_entry_cap_e8.json.gz`):
+`fiber`, `kaihu`, `b-ball`, `gesa2` never trip and are unchanged. `enlight8`: OFF
+bound 19-21 at ~9k nodes; ON bound 23, 23, 26 at 36k, 36k, 125k nodes, 0/3 certified.
+Quiet machine, one solve: ON certifies 27 at 125k nodes; `CUT_LP=0` certifies at 36k.
+The split is structural: when run 1 stops at the frontier cap at ~13 s, run 2 has 7 s
+and must re-fold, trip and unfold from its own root. `bppc8-02` does not move (120 of
+308 rows unfoldable; the rest are used by non-folded rows).
+
+**Factor 1.0 falsified** (`p2_entry_cap1.json.gz`): `b-ball` 3/3 -> 0/3 (a trip
+discards a fold that was working), `enlight8` 22. The constant stays 2.0.
+
+The pre-registered "`enlight8` 3/3" bar is not met at 20 s under load; the §5 panel over
+MIPLIB-38 + M decides plan B (bars 1, 1b, 2a-2e). Open: the unfold cannot rewrite rows
+referenced by non-folded rows (`bppc8-02`), and the two-run route doubles the fold-trip
+cost (`RUN1_CONTINUE` would remove it; the combination is not yet measured on a panel).
