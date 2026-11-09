@@ -2153,6 +2153,11 @@ fn try_stall_redive(
     sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
     sub.cut_rounds = 1;
     sub.cut_select = false;
+    // P3 (`P3_PLAIN_REDIVE=1`): run 2's root had no c-MIR (the flag was off); a redive
+    // that inherits the flag's c-MIR/tableau root lands its dive elsewhere.
+    if std::env::var("P3_PLAIN_REDIVE").as_deref() == Ok("1") {
+        sub.cmir_cuts = false;
+    }
     sub.root_cut_time_s = None;
     sub.max_open_nodes = None;
     if let Some(d) = deadline {
@@ -2266,6 +2271,60 @@ fn rounding_locks(base: &SubMipBase, ns: usize) -> (Vec<u32>, Vec<u32>) {
             }
         }
     }
+    // A slack bound implied by the row's structural activity range can never be the
+    // one that stops a move, so it locks nothing (HiGHS takes locks from the row's
+    // sense). Without this, an `<=` row whose slack upper bound bound tightening
+    // derived from its own activity locked its integers both ways (mik-250-20-75-1: no
+    // LP point was ever roundable).
+    if std::env::var("P3_LOCKFIX").as_deref() == Ok("1") {
+        let (mut mn, mut mx) = (vec![0.0f64; base.m], vec![0.0f64; base.m]);
+        let (mut mn_inf, mut mx_inf) = (vec![false; base.m], vec![false; base.m]);
+        for j in 0..ns {
+            for idx in cp[j]..cp[j + 1] {
+                let (r, a) = (ri[idx], vals[idx]);
+                let (lo, hi) = if a > 0.0 {
+                    (a * base.l[j], a * base.u[j])
+                } else {
+                    (a * base.u[j], a * base.l[j])
+                };
+                if base.l[j] <= -INF || base.u[j] >= INF {
+                    if (a > 0.0 && base.l[j] <= -INF) || (a < 0.0 && base.u[j] >= INF) {
+                        mn_inf[r] = true;
+                    }
+                    if (a > 0.0 && base.u[j] >= INF) || (a < 0.0 && base.l[j] <= -INF) {
+                        mx_inf[r] = true;
+                    }
+                }
+                if lo.is_finite() {
+                    mn[r] += lo;
+                }
+                if hi.is_finite() {
+                    mx[r] += hi;
+                }
+            }
+        }
+        for r in 0..base.m {
+            if let Some((cs, sl, su)) = slack[r] {
+                // a.x + cs s = b  ->  s = (b - a.x) / cs, over a.x in [mn, mx].
+                let lo_ax = if mn_inf[r] { f64::NEG_INFINITY } else { mn[r] };
+                let hi_ax = if mx_inf[r] { f64::INFINITY } else { mx[r] };
+                let (e1, e2) = ((base.b[r] - hi_ax) / cs, (base.b[r] - lo_ax) / cs);
+                let (imp_lo, imp_hi) = (e1.min(e2), e1.max(e2));
+                let tol = |v: f64| 1e-6 * (1.0 + v.abs());
+                let sl2 = if sl > -INF && imp_lo.is_finite() && sl <= imp_lo + tol(sl) {
+                    -INF
+                } else {
+                    sl
+                };
+                let su2 = if su < INF && imp_hi.is_finite() && su >= imp_hi - tol(su) {
+                    INF
+                } else {
+                    su
+                };
+                slack[r] = Some((cs, sl2, su2));
+            }
+        }
+    }
     let (mut up, mut down) = (vec![0u32; ns], vec![0u32; ns]);
     for j in 0..ns {
         for idx in cp[j]..cp[j + 1] {
@@ -2293,6 +2352,80 @@ fn rounding_locks(base: &SubMipBase, ns: usize) -> (Vec<u32>, Vec<u32>) {
         }
     }
     (up, down)
+}
+
+/// Gap plan P3 (`P3_SIMPLEROUND=1`): HiGHS's rounding of a "roundable" LP point
+/// (`HighsLpRelaxation.cpp:1573-1620`), run on every LP point offered to it. When every
+/// fractional integer can move in a direction no original row locks, each is rounded
+/// that way -- up when nothing locks it up and the objective favours it (or it is
+/// locked down), else down -- and the point, continuous columns at their LP values, is
+/// offered as an incumbent. Sound as a heuristic: the point is re-verified on the
+/// original rows ([`validate_seed_incumbent`]) before injection.
+#[allow(clippy::too_many_arguments)]
+fn try_simple_rounding(
+    base: &SubMipBase,
+    locks: &(Vec<u32>, Vec<u32>),
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    x: &[f64],
+) -> Option<(Vec<f64>, f64)> {
+    const FT: f64 = 1e-6;
+    if x.len() < ns {
+        return None;
+    }
+    let mut xr: Vec<f64> = x[..ns].to_vec();
+    let mut any = false;
+    for j in 0..ns {
+        if !is_int[j] {
+            continue;
+        }
+        let v = xr[j];
+        if (v - v.round()).abs() <= FT {
+            xr[j] = v.round();
+            continue;
+        }
+        any = true;
+        let (up, dn) = (locks.0[j], locks.1[j]);
+        if up != 0 && dn != 0 && std::env::var("P3_DBG").is_ok() {
+            let (cp, ri, va) = base.csc.raw();
+            let mut desc = String::new();
+            for k in cp[j]..cp[j + 1] {
+                let r = ri[k];
+                // slack columns of row r: singleton non-int columns >= ns hitting r
+                let mut sl = String::new();
+                for q in ns..base.n {
+                    if cp[q + 1] - cp[q] == 1 && ri[cp[q]] == r {
+                        sl += &format!(
+                            "[s{q} a={} l={} u={} int={}]",
+                            va[cp[q]], base.l[q], base.u[q], base.is_int_full[q]
+                        );
+                    }
+                }
+                desc += &format!(" row{r}(a={} b={}){sl}", va[k], base.b[r]);
+            }
+            eprintln!(
+                "P3DBG sround locked j={j} x={v:.4} up={up} dn={dn} c={} l={} u={}{desc}",
+                base.c[j], base.l[j], base.u[j]
+            );
+        }
+        xr[j] = if up == 0 && (base.c[j] < 0.0 || dn != 0) {
+            (v - FT).ceil().min((base.u[j] + FT).floor())
+        } else if dn == 0 {
+            (v + FT).floor().max((base.l[j] - FT).ceil())
+        } else {
+            return None; // not roundable
+        };
+    }
+    if !any {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::SimpleRoundTries);
+    let (sx, sobj) = validate_seed_incumbent(
+        &xr, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
+    )?;
+    crate::profile::incr(crate::profile::Ctr::SimpleRoundFound);
+    Some((sx, sobj + obj_const))
 }
 
 /// Deterministic uniform draw in `[0, 1)` (splitmix64).
@@ -2754,10 +2887,19 @@ fn try_rens_highs(
         d.saturating_duration_since(std::time::Instant::now())
             .as_secs_f64()
     });
+    let nested = MILP_DEPTH.with(|c| c.get()) > 1; // the top-level driver reads 1
+    let share = if nested {
+        std::env::var("P3_NESTED_SHARE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.25)
+    } else {
+        0.25
+    };
     let budget = std::env::var("P3_RENS_SUB_S")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or((left * 0.25).min(2.0));
+        .unwrap_or((left * share).min(2.0));
     if budget <= 0.05 {
         return None;
     }
@@ -3955,6 +4097,11 @@ fn solve_milp_node_search(
         b: b_w.clone(),
         is_int_full: is_int_full.clone(),
     });
+    // P3 (`P3_SIMPLEROUND=1`): locks for HiGHS's roundable-LP-point rounding.
+    let simple_round_locks: Option<(Vec<u32>, Vec<u32>)> = sub_mip_base
+        .as_ref()
+        .filter(|_| std::env::var("P3_SIMPLEROUND").as_deref() == Ok("1"))
+        .map(|b| rounding_locks(b, ns));
     // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): rounding locks over the base problem.
     let rr_locks: Option<(Vec<u32>, Vec<u32>)> = sub_mip_base
         .as_ref()
@@ -4154,7 +4301,19 @@ fn solve_milp_node_search(
             (None, Some(rc)) => Some(t_start + std::time::Duration::from_secs_f64(rc.max(0.0))),
             (None, None) => None,
         };
-        for _round in 0..opts.cut_rounds {
+        // HiGHS's root round cap (`HighsMipSolverData.cpp:1990-1993, 1044-1046`):
+        // 2 sqrt(maxTreeSizeLog2), each unfixed integer adding ceil(log2(min(1024,
+        // 1 + u - l))) (`P3_MAXROUNDS=1`).
+        let hs_round_cap: usize = if std::env::var("P3_MAXROUNDS").as_deref() == Ok("1") {
+            let log2: f64 = (0..ns)
+                .filter(|&j| is_int[j] && u_w[j] > l_w[j])
+                .map(|j| (1.0 + (u_w[j] - l_w[j]).min(1023.0)).log2().ceil())
+                .sum();
+            ((2.0 * log2.sqrt()) as usize).max(1)
+        } else {
+            usize::MAX
+        };
+        for _round in 0..opts.cut_rounds.min(hs_round_cap) {
             if total_cuts >= opts.root_cuts {
                 break;
             }
@@ -4393,6 +4552,14 @@ fn solve_milp_node_search(
             // HiGHS runs randomized rounding on every root round's LP point while
             // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
             // completion LP is over the uncut base rows, as in HiGHS.
+            if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), simple_round_locks.as_ref())
+            {
+                if let Some((x, v)) =
+                    try_simple_rounding(base, locks, obj_const, ns, &is_int, &root.x)
+                {
+                    tm.inject_incumbent(x, v);
+                }
+            }
             if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
                 if tm
                     .incumbent()
@@ -4490,6 +4657,7 @@ fn solve_milp_node_search(
             // Gap plan P3 (`P3_TABLEAU`): HiGHS's tableau separator (c-MIR on tableau-row
             // aggregations) every round; `1` replaces GMI with it, `2` runs both.
             let p3_tableau = std::env::var("P3_TABLEAU").ok();
+            let p3_tableau = p3_tableau.filter(|_| opts.cmir_cuts);
             if opts.gmi_cuts && matches!(p3_tableau.as_deref(), Some("1") | Some("2")) {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
                 cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
@@ -5009,6 +5177,7 @@ fn solve_milp_node_search(
         is_int_full: is_int_full.clone(),
     });
     let mut rens_root_done = false;
+    let mut p3_heur_s = 0.0f64;
     let rens_root_x: Option<Vec<f64>> = last_root_x
         .as_ref()
         .filter(|x| x.len() >= ns)
@@ -5952,6 +6121,20 @@ fn solve_milp_node_search(
         // fractional node.
         // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): HiGHS randomized rounding on the batch's
         // best-bound fractional node, every batch while there is no incumbent.
+        // P3 (`P3_SIMPLEROUND=1`): HiGHS rounds every roundable node LP point.
+        if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), simple_round_locks.as_ref()) {
+            for r in results.iter() {
+                if r.is_feasible || r.lower_bound >= INFEAS_SENTINEL - 1.0 || r.solution.len() < ns
+                {
+                    continue;
+                }
+                if let Some((x, v)) =
+                    try_simple_rounding(base, locks, obj_const, ns, &is_int, &r.solution)
+                {
+                    tm.inject_incumbent(x, v);
+                }
+            }
+        }
         if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
             let no_inc = tm
                 .incumbent()
@@ -6025,7 +6208,17 @@ fn solve_milp_node_search(
                             && r.solution.len() >= ns
                     })
                     .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
-                if let Some(r) = cand {
+                // P3 (`P3_HEUR_EFFORT=<share>`): HiGHS bounds heuristic work by effort
+                // (`moreHeuristicsAllowed`, heuristic LP iterations <= 5% of the total
+                // plus an allowance); here, sub-MIP wall time <= share x elapsed + 1 s,
+                // the root call exempt.
+                let effort_ok = std::env::var("P3_HEUR_EFFORT")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .is_none_or(|sh| {
+                        !rens_root_done || p3_heur_s <= sh * t_start.elapsed().as_secs_f64() + 1.0
+                    });
+                if let (Some(r), true) = (cand, effort_ok) {
                     sub_mip_since = 0;
                     let kind = if inc.is_some() {
                         SubMipKind::Rins
@@ -6043,9 +6236,12 @@ fn solve_milp_node_search(
                                 .as_secs_f64())
                         );
                     }
+                    let t_heur = std::time::Instant::now();
                     let rens_now = kind == SubMipKind::Rens || !rens_root_done;
                     rens_root_done = true;
-                    let rens_highs = match rens_cut_base.as_ref() {
+                    let old_rins =
+                        !rens_now && std::env::var("P3_RENS_OLDRINS").as_deref() == Ok("1");
+                    let rens_highs = match rens_cut_base.as_ref().filter(|_| !old_rins) {
                         Some(cb) => Some(try_rens_highs(
                             cb,
                             base,
@@ -6090,6 +6286,7 @@ fn solve_milp_node_search(
                             sub_mip_fail_streak = sub_mip_fail_streak.saturating_add(1);
                         }
                     }
+                    p3_heur_s += t_heur.elapsed().as_secs_f64();
                 }
             }
         }

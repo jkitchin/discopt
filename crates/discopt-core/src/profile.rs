@@ -409,6 +409,8 @@ counters!(
     RandRoundLpFail,
     RandRoundFound,
     RandRoundRejected,
+    SimpleRoundTries,
+    SimpleRoundFound,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,

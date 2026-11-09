@@ -1,0 +1,20 @@
+# 20 s quick targets. p3 = previous arm + P3_PLAIN_REDIVE=1 P3_NESTED_SHARE=0.5 (P3_SIMPLEROUND/P3_LOCKFIX held back: they break nexp-50-20-4-2's nested RENS)
+row                                      off                        p3
+neos-3610051-istra  OPT d=  0.00 p=  0.00  4.4s  OPT d=  0.00 p=  0.00  4.5s
+nexp-50-20-1-1     feas d= 10.34 p= 31.03 20.2s feas d=  0.00 p= 24.14 20.2s
+beavma             feas d=  8.45 p= 42.18 20.2s feas d=  3.75 p=  1.64 20.3s
+bppc8-02           feas d=  4.04 p=  1.18 20.2s feas d=  4.04 p=  4.54 20.2s
+sp150x300d         feas d= 10.14 p= 28.99 20.5s feas d=  2.90 p=  0.00 20.3s
+nexp-50-20-4-2     feas d=  4.23 p=  7.04 20.4s  OPT d=  0.00 p=  0.00 14.7s
+enlight8           feas d= 25.93 p=  0.00 20.1s time d= 33.33 p=     - 20.0s
+gesa2              feas d=  0.05 p=  0.00 21.2s  OPT d=  0.00 p=  0.00  3.9s
+issue-2446         time d=2111.46 p=     - 20.1s feas d=2149.95 p= 10.24 23.6s
+mik-250-20-75-1    feas d=  3.05 p=  0.00 20.1s feas d=  1.54 p=  0.00 20.1s
+mik-250-20-75-2    feas d=  3.25 p=  0.00 20.1s feas d=  1.77 p=  0.00 20.1s
+mik-250-20-75-3    feas d=  2.74 p=  0.26 20.1s feas d=  1.21 p=  0.19 20.2s
+mik-250-20-75-5    feas d=  3.04 p=  0.05 20.1s feas d=  1.22 p=  0.05 20.1s
+gsvm2rl3           feas d=  9.55 p= 24.98 20.1s feas d=  8.74 p= 24.98 20.1s
+neos17             feas d=  4.81 p= 21.10 20.1s feas d=  4.81 p= 27.87 20.4s
+neos-911970        feas d= 57.52 p= 89.77 20.1s feas d= 13.70 p= 55.75 20.2s
+certified: {'off': 1, 'p3': 3} solves: 32
+# enlight8: HiGHS finds its incumbent by branching at node 114 (plunging search), keeping 207 cut rows; ours is tree luck (flag off ~12.5k nodes in 6.5 s; flag on 52 root rows, 2.85 vs 1.57 ms/node, no incumbent, so the 35% lp_spatial reserve is spent too). Not fixed: needs a plunging node search.
