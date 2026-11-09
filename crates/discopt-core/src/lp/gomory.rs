@@ -371,7 +371,7 @@ fn ftran_refined(
 /// Solve `Bᵀ w = rhs` with iterative refinement (row of `B⁻¹` when `rhs = e_i`).
 /// The residual `rhs − Bᵀ w` is `rhs[k] − w·A[:, basis[k]]`, a sparse column dot
 /// per basis slot. O(nnz) per refinement round; mirrors [`ftran_refined`].
-fn btran_refined(
+pub(crate) fn btran_refined(
     lu: &mut FeralLU,
     sp: &SparseCols,
     basis: &[usize],

@@ -1834,3 +1834,186 @@ mod tests {
         assert!(fired > 0, "c-MIR never separated a cut in the ON arm");
     }
 }
+
+/// Gap plan P3 (`P3_TABLEAU=1`, experiment): HiGHS's tableau separator
+/// (`HighsTableauSeparator.cpp`). For each fractional basic integer column, the LP rows
+/// are aggregated with the weights of its row of `B⁻¹` (the tableau row), and the same
+/// c-MIR generator the path separator uses ([`cmir_row`]: bound and variable-bound
+/// substitution, the HiGHS delta search, the lifted cover) is run on the aggregation and
+/// its negation -- instead of a plain GMI rounding of that row. Selection follows
+/// HiGHS: fractionality >= 1e-3; weights with `max|a_r| |w_r|` <= feastol dropped and a
+/// weight dynamism above 1e4 refused; score `f(1-f) / ||w||^2`; at most
+/// `200 + 0.1 min(m, #int)` tries; stop below `0.0025` (`0.01` after 50 cuts) of the
+/// first successful score; aggregations whose structural dynamism exceeds 1e6 skipped.
+///
+/// Sound: every aggregation is a nonnegative-or-signed combination of equality rows
+/// `A x = b`, hence valid for every feasible point, and [`cmir_row`] derives only valid
+/// MIR inequalities from a valid row (the path separator relies on the same).
+#[allow(clippy::too_many_arguments)]
+pub fn separate_tableau_cmir_csc(
+    csc: &SparseCols,
+    n: usize,
+    m: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    x: &[f64],
+    basis: &crate::lp::basis::Basis,
+    is_int: &[bool],
+    n_orig_rows: usize,
+    max_cuts: usize,
+    tol: f64,
+) -> Vec<GomoryCut> {
+    use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
+    const FEASTOL: f64 = 1e-6;
+    if m == 0 || basis.basic_vars.len() != m || x.len() < n {
+        return Vec::new();
+    }
+    // Context over the original rows (variable bounds), as the path separator builds it.
+    let rows_n = n_orig_rows.min(m);
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); rows_n];
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut row_max = vec![0.0f64; m];
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let i = row_idx[idx];
+            row_max[i] = row_max[i].max(vals[idx].abs());
+            if i < rows_n && vals[idx] != 0.0 {
+                rows[i].push((j, vals[idx]));
+            }
+        }
+    }
+    let (vlb, vub) = variable_bounds(&rows, b, l, u, is_int, n);
+    let ctx = Ctx {
+        l,
+        u,
+        x,
+        is_int,
+        tol,
+        vlb,
+        vub,
+    };
+    let mut lu = FeralLU::new();
+    let bcols: Vec<Vec<(usize, f64)>> = basis
+        .basic_vars
+        .iter()
+        .map(|&bv| {
+            let (r, v) = csc.col(bv);
+            r.iter().zip(v).map(|(&i, &a)| (i, a)).collect()
+        })
+        .collect();
+    if lu.factorize_sparse(m, &bcols).is_err() {
+        return Vec::new();
+    }
+    let frac = |v: f64| v - v.floor();
+    let mut cands: Vec<(usize, f64)> = Vec::new();
+    for (i, &bv) in basis.basic_vars.iter().enumerate() {
+        if bv >= n || !is_int[bv] {
+            continue;
+        }
+        let f = frac(x[bv]);
+        let f = f.min(1.0 - f);
+        if f >= 1000.0 * FEASTOL {
+            cands.push((i, frac(x[bv])));
+        }
+    }
+    let n_int = is_int.iter().take(n).filter(|&&b| b).count();
+    let max_tries = 200 + (0.1 * m.min(n_int) as f64) as usize;
+    if cands.len() > max_tries {
+        cands.sort_by(|a, b| {
+            (b.1 * (1.0 - b.1))
+                .total_cmp(&(a.1 * (1.0 - a.1)))
+                .then(a.0.cmp(&b.0))
+        });
+        cands.truncate(max_tries);
+    }
+    // Score each candidate by its tableau-row weights.
+    let mut scored: Vec<(f64, Vec<(usize, f64)>)> = Vec::new();
+    for &(i, f) in &cands {
+        let mut e = vec![0.0; m];
+        e[i] = 1.0;
+        let Some(w) = crate::lp::gomory::btran_refined(&mut lu, csc, &basis.basic_vars, &e, tol)
+        else {
+            continue;
+        };
+        let (mut norm2, mut wmin, mut wmax) = (0.0f64, f64::INFINITY, 0.0f64);
+        let mut ep: Vec<(usize, f64)> = Vec::new();
+        for (r, &wr) in w.iter().enumerate() {
+            let sw = row_max[r] * wr.abs();
+            if sw <= FEASTOL {
+                continue;
+            }
+            wmin = wmin.min(sw);
+            wmax = wmax.max(sw);
+            norm2 += sw * sw;
+            ep.push((r, wr));
+        }
+        if ep.len() <= 1 || wmax / wmin > 1e4 {
+            continue;
+        }
+        let score = f * (1.0 - f) / norm2;
+        if score > FEASTOL {
+            scored.push((score, ep));
+        }
+    }
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut found: Vec<Cut> = Vec::new();
+    let mut best_score = -1.0f64;
+    for (score, ep) in scored {
+        if found.len() >= 1000 {
+            break;
+        }
+        let fac = if found.len() >= 50 { 0.01 } else { 0.0025 };
+        if score < fac * best_score {
+            break;
+        }
+        // Aggregate: coef = w^T A over every column, rhs = w^T b.
+        let mut wfull = vec![0.0; m];
+        for &(r, wr) in &ep {
+            wfull[r] = wr;
+        }
+        let mut coef: BTreeMap<usize, f64> = BTreeMap::new();
+        let (mut amax, mut amin) = (0.0f64, f64::INFINITY);
+        for j in 0..n {
+            let mut s = 0.0;
+            for idx in col_ptr[j]..col_ptr[j + 1] {
+                s += wfull[row_idx[idx]] * vals[idx];
+            }
+            if s.abs() > 1e-9 {
+                coef.insert(j, s);
+                amax = amax.max(s.abs());
+                amin = amin.min(s.abs());
+            }
+        }
+        if coef.is_empty() || amax / amin > 1e6 {
+            continue;
+        }
+        let rhs: f64 = ep.iter().map(|&(r, wr)| wr * b[r]).sum();
+        let before = found.len();
+        for sign in [1.0f64, -1.0] {
+            let cur: BTreeMap<usize, f64> = coef.iter().map(|(&j, &v)| (j, sign * v)).collect();
+            if let Some(c) = cmir_row(&ctx, &cur, sign * rhs) {
+                found.push(c);
+            }
+        }
+        if best_score < 0.0 && found.len() > before {
+            best_score = score;
+        }
+    }
+    crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
+    found.sort_by(|a, b| b.efficacy.total_cmp(&a.efficacy));
+    found.truncate(max_cuts);
+    found
+        .into_iter()
+        .map(|c| {
+            let mut coeffs = vec![0.0; n];
+            for (j, v) in c.coef {
+                coeffs[j] = -v;
+            }
+            GomoryCut {
+                coeffs,
+                rhs: -c.rhs,
+            }
+        })
+        .collect()
+}

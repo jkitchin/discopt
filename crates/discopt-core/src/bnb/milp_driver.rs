@@ -3807,6 +3807,9 @@ fn solve_milp_node_search(
         };
     let mut all_root_cuts: Vec<GomoryCut> = Vec::new();
     let mut cut_ages: Vec<u32> = Vec::new();
+    // P3: cuts aged out of the root LP stay available (HiGHS keeps them in its cut pool
+    // and re-adds them when violated again, `HighsCutPool::separate`).
+    let mut aged_pool: Vec<GomoryCut> = Vec::new();
     let mut cut_epochs: u32 = 0;
     let mut root_duals: Vec<f64>;
     let mut last_root_x: Option<Vec<f64>> = None;
@@ -3910,18 +3913,31 @@ fn solve_milp_node_search(
                             &warm_root_opts(&root_simplex, m_w, n_w),
                             &csc_w,
                         );
-                        match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
-                                &csc_w,
-                                m_w,
-                                n_w,
-                                &c_w,
-                                &l_w,
-                                &u_w,
-                                &b_w,
-                                &root_simplex,
-                            ),
-                            _ => warm,
+                        if std::env::var("P3_DBG2").is_ok() {
+                            eprintln!("P3DBG rootwarm m={m_w} n={n_w} status={:?} iters={} cap={} basis_n={basis_n}", warm.status, warm.iters, warm_root_opts(&root_simplex, m_w, n_w).max_iter);
+                        }
+                        // P3 experiment (`P3_NOCOLD=1`): a failed warm re-solve ends the
+                        // round loop (HiGHS stops separating on an LP failure) instead of a
+                        // cold solve, which cost ~3 s each on the nexp neighbourhood.
+                        if matches!(warm.status, LpStatus::IterLimit | LpStatus::Numerical)
+                            && std::env::var("P3_NOCOLD").as_deref() == Ok("1")
+                        {
+                            crate::profile::incr(crate::profile::Ctr::RootCutsSubstDropped);
+                            warm
+                        } else {
+                            match warm.status {
+                                LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
+                                    &csc_w,
+                                    m_w,
+                                    n_w,
+                                    &c_w,
+                                    &l_w,
+                                    &u_w,
+                                    &b_w,
+                                    &root_simplex,
+                                ),
+                                _ => warm,
+                            }
                         }
                     }
                     None => {
@@ -3931,6 +3947,9 @@ fn solve_milp_node_search(
             };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
+                if std::env::var("P3_DBG").is_ok() {
+                    eprintln!("P3DBG loop end: lp {:?}", root.status);
+                }
                 break;
             }
             // Keep this round's optimal basis for the root B&B node. If the loop
@@ -3939,6 +3958,12 @@ fn solve_milp_node_search(
             // the loop. The clone is cheap next to the solve it came from.
             root_basis = Some((root.basis.clone(), n_w));
             root_duals = root.dual.clone();
+            if std::env::var("P3_DBG").is_ok() {
+                eprintln!(
+                    "P3DBG round obj={:.6} m={m_w} gmi_phase={gmi_phase}",
+                    root.obj + obj_const
+                );
+            }
             if prune_base.is_some() {
                 last_root_x = Some(root.x.clone());
             }
@@ -3969,6 +3994,9 @@ fn solve_milp_node_search(
                     0
                 };
                 if root_stalled > allow {
+                    if std::env::var("P3_DBG").is_ok() {
+                        eprintln!("P3DBG loop end: stalled");
+                    }
                     break;
                 }
             } else {
@@ -4041,6 +4069,24 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                 );
                 crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
+                if std::env::var("P3_DBG2").is_ok() {
+                    for c in &found {
+                        let nz: Vec<f64> = c
+                            .coeffs
+                            .iter()
+                            .filter(|v| **v != 0.0)
+                            .map(|v| v.abs())
+                            .collect();
+                        let mx = nz.iter().cloned().fold(0.0, f64::max);
+                        let mn = nz.iter().cloned().fold(f64::INFINITY, f64::min);
+                        eprintln!(
+                            "P3DBG cmircut nnz={} max={mx:.3e} min={mn:.3e} dyn={:.3e} rhs={:.3e}",
+                            nz.len(),
+                            mx / mn,
+                            c.rhs
+                        );
+                    }
+                }
                 if found.is_empty() && !gmi_phase {
                     // c-MIR has nothing left at this point: GMI joins this round.
                     gmi_phase = true;
@@ -4048,7 +4094,27 @@ fn solve_milp_node_search(
                 }
                 cuts.extend(found);
             }
-            if opts.gmi_cuts && gmi_phase {
+            // Gap plan P3 (`P3_TABLEAU`): HiGHS's tableau separator (c-MIR on tableau-row
+            // aggregations) every round; `1` replaces GMI with it, `2` runs both.
+            let p3_tableau = std::env::var("P3_TABLEAU").ok();
+            if opts.gmi_cuts && matches!(p3_tableau.as_deref(), Some("1") | Some("2")) {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
+                    &csc_w,
+                    n_w,
+                    m_w,
+                    &l_w,
+                    &u_w,
+                    &b_w,
+                    &root.x,
+                    &root.basis,
+                    &is_int_full,
+                    n_orig_rows,
+                    CMIR_MAX_CUTS,
+                    opts.simplex.tol,
+                ));
+            }
+            if opts.gmi_cuts && gmi_phase && p3_tableau.as_deref() != Some("1") {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory_cols(
                     &csc_w,
@@ -4096,6 +4162,20 @@ fn solve_milp_node_search(
                     (before - cuts.len()) as u64,
                 );
             }
+            if !aged_pool.is_empty() {
+                let mut back = 0u64;
+                aged_pool.retain(|pc| {
+                    let act: f64 = pc.coeffs.iter().zip(&root.x).map(|(a, x)| a * x).sum();
+                    if act < pc.rhs - 1e-6 * (1.0 + pc.rhs.abs()) {
+                        cuts.push(pc.clone());
+                        back += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                crate::profile::incr_by(crate::profile::Ctr::RootCutsGenerated, back);
+            }
             // Keep the strongest, most diverse few (efficacy + orthogonality)
             // up to the remaining root-cut budget; otherwise add first-come.
             let remaining = opts.root_cuts - total_cuts;
@@ -4107,6 +4187,9 @@ fn solve_milp_node_search(
             };
             let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
             if new_cuts.is_empty() {
+                if std::env::var("P3_DBG").is_ok() {
+                    eprintln!("P3DBG loop end: no new cuts");
+                }
                 break;
             }
             total_cuts += new_cuts.len();
@@ -4175,6 +4258,14 @@ fn solve_milp_node_search(
                 }
                 let n_keep = keep.iter().filter(|&&k| k).count();
                 if n_keep < total {
+                    for (c, cut) in all_root_cuts.iter().enumerate() {
+                        if !keep[c] && cut.coeffs.iter().skip(n_base).all(|&v| v == 0.0) {
+                            pool_sigs.remove(&cut_signature(cut));
+                            let mut pc = cut.clone();
+                            pc.coeffs.truncate(n_base);
+                            aged_pool.push(pc);
+                        }
+                    }
                     let mut newidx = vec![usize::MAX; total];
                     let mut next = 0usize;
                     for (c, &k) in keep.iter().enumerate() {
