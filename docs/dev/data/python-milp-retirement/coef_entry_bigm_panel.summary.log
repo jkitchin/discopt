@@ -1,0 +1,12 @@
+116 fixed_charge 3 1e+08 0 feasible 835.0378594137727 651.1177946605931 False 0.1s
+117 fixed_charge 3 1e+10 1 optimal 835.0378594137727 835.0366906106475 True 0.1s
+118 fixed_charge 3 1e+10 0 feasible 835.0378594137727 651.1177754124085 False 0.1s
+119 fixed_charge 3 1e+12 0 time_limit None None False 0.1s
+120 fixed_charge 3 1e+12 1 optimal 835.0378594137727 834.9835032118636 True 0.1s
+executed solves: 120
+flag=0: {'n': 60, 'optimal': 30, 'certified': 30, 'feasible': 22, 'time_limit': 8}  wall total 428.5s median 0.12s
+flag=1: {'n': 60, 'optimal': 60, 'certified': 60}  wall total 9.7s median 0.13s
+certification regressions (ON loses a cert): []
+certification gains: 30
+soundness violations: 0
+executed oracle checks: 120

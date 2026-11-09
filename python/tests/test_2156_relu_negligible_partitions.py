@@ -146,9 +146,18 @@ def _load_issue_net() -> NetworkDefinition:
         ("relu_extended", {}),
     ],
 )
-def test_issue_network_certifies_the_bigm_optimum(strategy, kw):
+def test_issue_network_certifies_the_bigm_optimum(strategy, kw, monkeypatch):
     """The #2156 reproducer: ``relu_extended`` was ``feasible`` with gap 0.69 and
-    relu_partition P = 4 drifted; all now certify the optimum (-6.3749 to 1e-4)."""
+    relu_partition P = 4 drifted; all now certify the optimum (-6.3749 to 1e-4).
+
+    The subject is the formulation, so the MILP is solved where it was written to be,
+    the HiGHS route (the optional ``discopt[highs]`` extra). On the Rust default
+    (PR #2196) the same models certify too, but slowly: ``relu_extended`` 62 s and
+    ``relu_partition`` P = 4 13 s on a dev machine (91 s / 37 s in CI) against 4 s and
+    3 s on HiGHS; recorded in ``docs/dev/highs-parity-d2-gap-plan.md`` §8.
+    """
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     net = _load_issue_net()
     _, r = _solve(net, strategy, **kw)
     n = 0
@@ -229,7 +238,11 @@ def test_rtol_zero_restores_one_partition_per_input(monkeypatch):
 @pytest.mark.parametrize(
     "strategy,kw", [("relu_extended", {}), ("relu_partition", {"n_partitions": 4})]
 )
-def test_tiny_weight_net_certifies_bigm_optimum(seed, hidden, strategy, kw):
+def test_tiny_weight_net_certifies_bigm_optimum(seed, hidden, strategy, kw, monkeypatch):
+    # HiGHS is the opt-in MILP engine since PR #2196; this test needs a certifying
+    # oracle engine. The Rust engine's shortfall here is a recorded MILP-gap target.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     """Before #2156, (0, 32) relu_extended returned a certified ``infeasible`` on a
     feasible model; (0, 16) returned ``feasible`` (uncertified)."""
     net = _tiny_weight_net(seed, hidden)

@@ -15,11 +15,22 @@ out-of-time signal) so the tests are deterministic, not timing-dependent.
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt import _iis_backend as _bk
 from discopt import _iis_milp
 from discopt._iis_milp import milp_iis
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_engine(monkeypatch):
+    """These tests' budgets and probe counts were tuned on the HiGHS IIS engine.
+    Since highs-parity P6.4 (2026-11-07) the default engine is the in-house
+    one, so these HiGHS-path tests pin ``DISCOPT_IIS_ENGINE=highs`` (a test that sets it still
+    overrides)."""
+    monkeypatch.setenv("DISCOPT_IIS_ENGINE", "highs")
+
+
 highspy = pytest.importorskip("highspy")
-MS = highspy.HighsModelStatus
+MS = _bk  # backend statuses (highs-parity P3.2)
 
 
 def _parity_model(n=30):
@@ -103,7 +114,7 @@ def test_base_set_refuted_presolve_off_reruns_with_per_probe_confirmation(monkey
         if presolve == "off" and not state["faked"]:
             state["faked"] = True
             state["at_call"] = len(calls)
-            return MS.kOptimal
+            return MS.OPTIMAL
         return real_solve(self, presolve, stop_at)
 
     def witness(self, stop_at=None):

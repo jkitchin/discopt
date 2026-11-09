@@ -22,6 +22,15 @@ pytest.importorskip("highspy")
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.milp_highs import _fit_rows_to_window, solve_milp  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_oa_master(monkeypatch):
+    """These tests cover the HiGHS OA master, an opt-out since highs-parity D3 flipped
+    the default to the in-house master (2026-11-07). Pin it, as a test that sets the
+    variable itself still overrides."""
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
+
+
 DATA = pathlib.Path(__file__).parent / "data"
 
 
@@ -95,7 +104,7 @@ def test_an_equality_row_is_exactly_rescaled_when_it_fits():
 def test_st_test1_runs_oa_on_the_highs_master_instead_of_falling_back(monkeypatch):
     from discopt.modeling.core import from_nl
 
-    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", raising=False)
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_OA_MASTER", "highs")
     path = next(DATA.glob("minlplib*/st_test1.nl"))
     r = from_nl(str(path)).solve(time_limit=20)
     route = r.algorithm_route or ""

@@ -14,6 +14,16 @@ import pytest
 from discopt import _iis_milp
 from discopt._iis_milp import _parse_order, milp_iis
 
+
+@pytest.fixture(autouse=True)
+def _pin_highs_engine(monkeypatch):
+    """These tests' budgets and probe counts were tuned on the HiGHS IIS engine.
+    Since highs-parity P6.4 (2026-11-07) the default engine is the in-house
+    one, so these HiGHS-path tests pin ``DISCOPT_IIS_ENGINE=highs`` (a test that sets it still
+    overrides)."""
+    monkeypatch.setenv("DISCOPT_IIS_ENGINE", "highs")
+
+
 highspy = pytest.importorskip("highspy")
 
 

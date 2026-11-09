@@ -18,6 +18,7 @@
 
 pub mod batch;
 pub mod dual;
+pub(crate) mod farkas_exact;
 pub mod linsolve;
 pub mod presolve;
 pub mod primal;
@@ -30,10 +31,11 @@ pub mod sparse;
 
 pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
 pub use dual::{
-    solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc,
-    PreparedDual,
+    solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc, PreparedDual,
 };
-pub use presolve::{tighten_bounds, tighten_bounds_csc, tighten_bounds_csc_with_row};
+pub use presolve::{
+    tighten_bounds, tighten_bounds_csc, tighten_bounds_csc_relaxed, tighten_bounds_csc_with_row,
+};
 pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
 pub use scaled_problem::ScaledProblem;
 pub use scaling::Scaling;

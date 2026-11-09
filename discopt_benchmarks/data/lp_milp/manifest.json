@@ -1,4 +1,11 @@
 {
+ "source": {
+  "repo": "https://github.com/ERGO-Code/HiGHS",
+  "tag": "v1.15.1",
+  "commit": "04024d701f79feb8e2f18bc3df0dffc04ef05088",
+  "path": "ref/HiGHS/check/instances",
+  "files": 100
+ },
  "members": [
   {
    "name": "i1183",
@@ -13,13 +20,339 @@
    "oracle_max_viol": 1.9095836023552692e-13
   },
   {
+   "name": "25fv47",
+   "path": "ref/HiGHS/check/instances/25fv47.mps",
+   "panel": "L",
+   "n": 1571,
+   "m": 821,
+   "nnz": 10400,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 5501.845888286757,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 2.0463630789890885e-12
+  },
+  {
+   "name": "adlittle",
+   "path": "ref/HiGHS/check/instances/adlittle.mps",
+   "panel": "L",
+   "n": 97,
+   "m": 56,
+   "nnz": 383,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 225494.9631623803,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.1368683772161603e-13
+  },
+  {
+   "name": "afiro",
+   "path": "ref/HiGHS/check/instances/afiro.mps",
+   "panel": "L",
+   "n": 32,
+   "m": 27,
+   "nnz": 83,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -464.75314285714285,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.4210854715202004e-14
+  },
+  {
+   "name": "avgas",
+   "path": "ref/HiGHS/check/instances/avgas.mps",
+   "panel": "L",
+   "n": 8,
+   "m": 10,
+   "nnz": 30,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -7.75,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 2.220446049250313e-16
+  },
+  {
+   "name": "blending",
+   "path": "ref/HiGHS/check/instances/blending.mps",
+   "panel": "L",
+   "n": 2,
+   "m": 2,
+   "nnz": 4,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -3200.0000000000005,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.4210854715202004e-14
+  },
+  {
+   "name": "chip",
+   "path": "ref/HiGHS/check/instances/chip.mps",
+   "panel": "L",
+   "n": 2,
+   "m": 2,
+   "nnz": 4,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -900.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "dD2e",
+   "path": "ref/HiGHS/check/instances/dD2e.mps",
+   "panel": "L",
+   "n": 2,
+   "m": 0,
+   "nnz": 0,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -3000.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "e226",
+   "path": "ref/HiGHS/check/instances/e226.mps",
+   "panel": "L",
+   "n": 282,
+   "m": 223,
+   "nnz": 2578,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -11.638929066370537,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 8.526512829121202e-14
+  },
+  {
+   "name": "egout-ac",
+   "path": "ref/HiGHS/check/instances/egout-ac.mps",
+   "panel": "L",
+   "n": 141,
+   "m": 98,
+   "nnz": 282,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 0.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.4210854715202004e-14
+  },
+  {
+   "name": "etamacro",
+   "path": "ref/HiGHS/check/instances/etamacro.mps",
+   "panel": "L",
+   "n": 688,
+   "m": 400,
+   "nnz": 2409,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -755.7152333005275,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.3644640972643174e-13
+  },
+  {
+   "name": "israel",
+   "path": "ref/HiGHS/check/instances/israel.mps",
+   "panel": "L",
+   "n": 142,
+   "m": 174,
+   "nnz": 2269,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -896644.8218630459,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.5711432155285365e-11
+  },
+  {
+   "name": "nan1",
+   "path": "ref/HiGHS/check/instances/nan1.mps",
+   "panel": "L",
+   "n": 2,
+   "m": 2,
+   "nnz": 3,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -1000.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "no-newline-eof",
+   "path": "ref/HiGHS/check/instances/no-newline-eof.lp",
+   "panel": "L",
+   "n": 2,
+   "m": 1,
+   "nnz": 2,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 0.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "perold",
+   "path": "ref/HiGHS/check/instances/perold.mps",
+   "panel": "L",
+   "n": 1376,
+   "m": 625,
+   "nnz": 6018,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -9380.755278235187,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 3.5452103475108743e-09
+  },
+  {
+   "name": "qap04",
+   "path": "ref/HiGHS/check/instances/qap04.mps",
+   "panel": "L",
+   "n": 88,
+   "m": 104,
+   "nnz": 416,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 32.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "scrs8",
+   "path": "ref/HiGHS/check/instances/scrs8.mps",
+   "panel": "L",
+   "n": 1169,
+   "m": 490,
+   "nnz": 3182,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 904.296953800792,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.4210854715202004e-14
+  },
+  {
+   "name": "sctest",
+   "path": "ref/HiGHS/check/instances/sctest.mps",
+   "panel": "L",
+   "n": 6,
+   "m": 10,
+   "nnz": 29,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 5.75,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "shell",
+   "path": "ref/HiGHS/check/instances/shell.mps",
+   "panel": "L",
+   "n": 1775,
+   "m": 536,
+   "nnz": 3556,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 1208825346.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "silly-names",
+   "path": "ref/HiGHS/check/instances/silly-names.mps",
+   "panel": "L",
+   "n": 1,
+   "m": 1,
+   "nnz": 1,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -1.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "smalllp",
+   "path": "ref/HiGHS/check/instances/smalllp.mps",
+   "panel": "L",
+   "n": 3,
+   "m": 3,
+   "nnz": 6,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 54.0,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
+   "name": "stair",
+   "path": "ref/HiGHS/check/instances/stair.mps",
+   "panel": "L",
+   "n": 467,
+   "m": 356,
+   "nnz": 3856,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -251.26695119296335,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 6.0822458181064576e-12
+  },
+  {
+   "name": "standata",
+   "path": "ref/HiGHS/check/instances/standata.mps",
+   "panel": "L",
+   "n": 1075,
+   "m": 359,
+   "nnz": 3031,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 1257.6995,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 2.842170943040401e-14
+  },
+  {
+   "name": "standgub",
+   "path": "ref/HiGHS/check/instances/standgub.mps",
+   "panel": "L",
+   "n": 1184,
+   "m": 361,
+   "nnz": 3139,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 1257.6995,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 2.842170943040401e-14
+  },
+  {
+   "name": "standmps",
+   "path": "ref/HiGHS/check/instances/standmps.mps",
+   "panel": "L",
+   "n": 1075,
+   "m": 467,
+   "nnz": 3679,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": 1406.0175,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 1.4519829782955184e-13
+  },
+  {
+   "name": "test",
+   "path": "ref/HiGHS/check/instances/test.mps",
+   "panel": "L",
+   "n": 7,
+   "m": 7,
+   "nnz": 16,
+   "n_int": 0,
+   "oracle_status": "Optimal",
+   "oracle_objective": -4.75,
+   "oracle_nodes": -1,
+   "oracle_max_viol": 0.0
+  },
+  {
    "name": "1451",
    "path": "ref/HiGHS/check/instances/1451.lp",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 1,
    "m": 1,
    "nnz": 1,
    "n_int": 1,
+   "oracle_status": "Optimal",
    "oracle_objective": 2.0,
    "oracle_nodes": 0,
    "oracle_max_viol": 0.0
@@ -27,59 +360,77 @@
   {
    "name": "2122",
    "path": "ref/HiGHS/check/instances/2122.lp",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 855,
    "m": 1060,
    "nnz": 2342,
    "n_int": 257,
-   "oracle_objective": -187616.1126029831,
+   "oracle_status": "Optimal",
+   "oracle_objective": -187612.94419439966,
    "oracle_nodes": 1,
    "oracle_max_viol": 3.3817286748671904e-09
   },
   {
    "name": "2171",
    "path": "ref/HiGHS/check/instances/2171.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 5,
    "m": 98,
    "nnz": 490,
    "n_int": 4,
-   "oracle_objective": -22375.758546075078,
+   "oracle_status": "Optimal",
+   "oracle_objective": -22375.75854607508,
    "oracle_nodes": 1,
    "oracle_max_viol": 0.0
   },
   {
    "name": "bell5",
    "path": "ref/HiGHS/check/instances/bell5.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 104,
    "m": 91,
    "nnz": 266,
    "n_int": 58,
-   "oracle_objective": 8966413.70538,
-   "oracle_nodes": 124,
-   "oracle_max_viol": 8.526512829121202e-14
+   "oracle_status": "Optimal",
+   "oracle_objective": 8966406.49152,
+   "oracle_nodes": 180,
+   "oracle_max_viol": 9.094947017729282e-13
+  },
+  {
+   "name": "bound_implied",
+   "path": "ref/HiGHS/check/instances/bound_implied.mps",
+   "panel": "M",
+   "n": 112,
+   "m": 73,
+   "nnz": 177,
+   "n_int": 96,
+   "oracle_status": "Optimal",
+   "oracle_objective": 0.0,
+   "oracle_nodes": 0,
+   "oracle_max_viol": 0.0
   },
   {
    "name": "dcmulti",
    "path": "ref/HiGHS/check/instances/dcmulti.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 548,
    "m": 290,
    "nnz": 1315,
    "n_int": 75,
-   "oracle_objective": 188181.99999999997,
+   "oracle_status": "Optimal",
+   "oracle_objective": 188182.0,
    "oracle_nodes": 5,
-   "oracle_max_viol": 7.105427357601002e-14
+   "oracle_max_viol": 6.827871601444713e-14
   },
   {
    "name": "egout",
    "path": "ref/HiGHS/check/instances/egout.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 141,
    "m": 98,
    "nnz": 282,
    "n_int": 55,
+   "oracle_status": "Optimal",
    "oracle_objective": 568.1007000000001,
    "oracle_nodes": 1,
    "oracle_max_viol": 2.842170943040401e-14
@@ -87,11 +438,12 @@
   {
    "name": "fixed-binary",
    "path": "ref/HiGHS/check/instances/fixed-binary.lp",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 1,
    "m": 0,
    "nnz": 0,
    "n_int": 1,
+   "oracle_status": "Optimal",
    "oracle_objective": 0.0,
    "oracle_nodes": 0,
    "oracle_max_viol": 0.0
@@ -99,11 +451,12 @@
   {
    "name": "flugpl",
    "path": "ref/HiGHS/check/instances/flugpl.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 18,
    "m": 18,
    "nnz": 46,
    "n_int": 11,
+   "oracle_status": "Optimal",
    "oracle_objective": 1201500.0,
    "oracle_nodes": 89,
    "oracle_max_viol": 3.552713678800501e-15
@@ -111,11 +464,12 @@
   {
    "name": "gesa2",
    "path": "ref/HiGHS/check/instances/gesa2.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 1224,
    "m": 1392,
    "nnz": 5064,
    "n_int": 408,
+   "oracle_status": "Optimal",
    "oracle_objective": 25779856.371697918,
    "oracle_nodes": 1,
    "oracle_max_viol": 5.684341886080802e-14
@@ -123,11 +477,12 @@
   {
    "name": "gt2",
    "path": "ref/HiGHS/check/instances/gt2.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 188,
    "m": 29,
    "nnz": 376,
    "n_int": 188,
+   "oracle_status": "Optimal",
    "oracle_objective": 21166.0,
    "oracle_nodes": 1,
    "oracle_max_viol": 0.0
@@ -135,11 +490,12 @@
   {
    "name": "issue-2095",
    "path": "ref/HiGHS/check/instances/issue-2095.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 66,
    "m": 29,
    "nnz": 637,
    "n_int": 66,
+   "oracle_status": "Optimal",
    "oracle_objective": 3.0,
    "oracle_nodes": 1,
    "oracle_max_viol": 0.0
@@ -147,23 +503,25 @@
   {
    "name": "issue-2173",
    "path": "ref/HiGHS/check/instances/issue-2173.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 15,
    "m": 192,
    "nnz": 2880,
    "n_int": 7,
-   "oracle_objective": -26770.80754885256,
+   "oracle_status": "Optimal",
+   "oracle_objective": -26770.80754885264,
    "oracle_nodes": 36,
-   "oracle_max_viol": 1.3287149158713873e-12
+   "oracle_max_viol": 2.701838752727781e-11
   },
   {
    "name": "issue-2204",
    "path": "ref/HiGHS/check/instances/issue-2204.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 37,
    "m": 12,
    "nnz": 52,
    "n_int": 37,
+   "oracle_status": "Optimal",
    "oracle_objective": 6.0,
    "oracle_nodes": 1,
    "oracle_max_viol": 0.0
@@ -171,11 +529,12 @@
   {
    "name": "issue-2290",
    "path": "ref/HiGHS/check/instances/issue-2290.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 30,
    "m": 35,
    "nnz": 81,
    "n_int": 2,
+   "oracle_status": "Optimal",
    "oracle_objective": -1.6666666666000012,
    "oracle_nodes": 0,
    "oracle_max_viol": 1.3322676295501878e-15
@@ -183,23 +542,25 @@
   {
    "name": "issue-2388",
    "path": "ref/HiGHS/check/instances/issue-2388.lp",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 42,
    "m": 34,
    "nnz": 85,
    "n_int": 2,
+   "oracle_status": "Optimal",
    "oracle_objective": 0.0,
    "oracle_nodes": 0,
-   "oracle_max_viol": 0.0
+   "oracle_max_viol": 6.617711111747014e-17
   },
   {
    "name": "issue-2446",
    "path": "ref/HiGHS/check/instances/issue-2446.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 2200,
    "m": 1963,
    "nnz": 5206,
    "n_int": 482,
+   "oracle_status": "Optimal",
    "oracle_objective": -785.3552363097108,
    "oracle_nodes": 1,
    "oracle_max_viol": 9.094947017729282e-13
@@ -207,35 +568,38 @@
   {
    "name": "issue-2585",
    "path": "ref/HiGHS/check/instances/issue-2585.lp",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 4,
    "m": 6,
    "nnz": 15,
    "n_int": 2,
-   "oracle_objective": -175.90999999999997,
+   "oracle_status": "Optimal",
+   "oracle_objective": -175.9100000000001,
    "oracle_nodes": 0,
-   "oracle_max_viol": 7.815970093361102e-14
+   "oracle_max_viol": 2.8421709430404007e-13
   },
   {
    "name": "lseu",
    "path": "ref/HiGHS/check/instances/lseu.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 89,
    "m": 28,
    "nnz": 309,
    "n_int": 89,
-   "oracle_objective": 1120.0,
-   "oracle_nodes": 5,
-   "oracle_max_viol": 0.0
+   "oracle_status": "Optimal",
+   "oracle_objective": 1120.0000000000002,
+   "oracle_nodes": 7,
+   "oracle_max_viol": 2.6749844169792007e-15
   },
   {
    "name": "p01",
    "path": "ref/HiGHS/check/instances/p01.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 210,
    "m": 30,
    "nnz": 420,
    "n_int": 210,
+   "oracle_status": "Optimal",
    "oracle_objective": 263.0,
    "oracle_nodes": 1,
    "oracle_max_viol": 0.0
@@ -243,417 +607,1439 @@
   {
    "name": "p0548",
    "path": "ref/HiGHS/check/instances/p0548.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 548,
    "m": 176,
    "nnz": 1711,
    "n_int": 548,
+   "oracle_status": "Optimal",
    "oracle_objective": 8691.0,
    "oracle_nodes": 0,
-   "oracle_max_viol": 1.1102230246251565e-15
+   "oracle_max_viol": 0.0
   },
   {
    "name": "rgn",
    "path": "ref/HiGHS/check/instances/rgn.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 180,
    "m": 24,
    "nnz": 460,
    "n_int": 100,
-   "oracle_objective": 82.19999923999372,
+   "oracle_status": "Optimal",
+   "oracle_objective": 82.19999923999991,
    "oracle_nodes": 1,
-   "oracle_max_viol": 6.039613253960852e-13
+   "oracle_max_viol": 9.325873406851315e-15
   },
   {
    "name": "small_mip",
    "path": "ref/HiGHS/check/instances/small_mip.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 8,
    "m": 5,
    "nnz": 14,
    "n_int": 2,
-   "oracle_objective": 3.2368421052631575,
+   "oracle_status": "Optimal",
+   "oracle_objective": 3.236842105263158,
    "oracle_nodes": 0,
    "oracle_max_viol": 0.0
   },
   {
    "name": "sp150x300d",
    "path": "ref/HiGHS/check/instances/sp150x300d.mps",
-   "panel": "M-HiGHS",
+   "panel": "M",
    "n": 600,
    "m": 450,
    "nnz": 1200,
    "n_int": 300,
+   "oracle_status": "Optimal",
    "oracle_objective": 69.0,
    "oracle_nodes": 1,
    "oracle_max_viol": 1.4210854715202004e-14
+  },
+  {
+   "name": "bgetam",
+   "path": "ref/HiGHS/check/instances/bgetam.mps",
+   "panel": "INF",
+   "n": 688,
+   "m": 400,
+   "nnz": 2409,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "box1",
+   "path": "ref/HiGHS/check/instances/box1.mps",
+   "panel": "INF",
+   "n": 261,
+   "m": 231,
+   "nnz": 651,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "cplex1",
+   "path": "ref/HiGHS/check/instances/cplex1.mps",
+   "panel": "INF",
+   "n": 3221,
+   "m": 3005,
+   "nnz": 8944,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "ex72a",
+   "path": "ref/HiGHS/check/instances/ex72a.mps",
+   "panel": "INF",
+   "n": 215,
+   "m": 197,
+   "nnz": 467,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "forest6",
+   "path": "ref/HiGHS/check/instances/forest6.mps",
+   "panel": "INF",
+   "n": 95,
+   "m": 66,
+   "nnz": 210,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "galenet",
+   "path": "ref/HiGHS/check/instances/galenet.mps",
+   "panel": "INF",
+   "n": 8,
+   "m": 8,
+   "nnz": 16,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "gams10am",
+   "path": "ref/HiGHS/check/instances/gams10am.mps",
+   "panel": "INF",
+   "n": 61,
+   "m": 114,
+   "nnz": 297,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "gas11",
+   "path": "ref/HiGHS/check/instances/gas11.mps",
+   "panel": "INF",
+   "n": 862,
+   "m": 459,
+   "nnz": 2154,
+   "n_int": 0,
+   "oracle_status": "Unbounded",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "infeasible-mip0",
+   "path": "ref/HiGHS/check/instances/infeasible-mip0.mps",
+   "panel": "INF",
+   "n": 9,
+   "m": 11,
+   "nnz": 84,
+   "n_int": 6,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": 7,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "infeasible-mip1",
+   "path": "ref/HiGHS/check/instances/infeasible-mip1.mps",
+   "panel": "INF",
+   "n": 22,
+   "m": 38,
+   "nnz": 281,
+   "n_int": 11,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": 0,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "issue-2402",
+   "path": "ref/HiGHS/check/instances/issue-2402.mps",
+   "panel": "INF",
+   "n": 36,
+   "m": 32,
+   "nnz": 344,
+   "n_int": 36,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": 0,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "issue-2874-3",
+   "path": "ref/HiGHS/check/instances/issue-2874-3.mps",
+   "panel": "INF",
+   "n": 4,
+   "m": 16,
+   "nnz": 39,
+   "n_int": 3,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": 0,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "klein1",
+   "path": "ref/HiGHS/check/instances/klein1.mps",
+   "panel": "INF",
+   "n": 54,
+   "m": 54,
+   "nnz": 696,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "refinery",
+   "path": "ref/HiGHS/check/instances/refinery.mps",
+   "panel": "INF",
+   "n": 464,
+   "m": 323,
+   "nnz": 1626,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "vol1",
+   "path": "ref/HiGHS/check/instances/vol1.mps",
+   "panel": "INF",
+   "n": 464,
+   "m": 323,
+   "nnz": 1646,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
+  },
+  {
+   "name": "woodinfe",
+   "path": "ref/HiGHS/check/instances/woodinfe.mps",
+   "panel": "INF",
+   "n": 89,
+   "m": 35,
+   "nnz": 140,
+   "n_int": 0,
+   "oracle_status": "Infeasible",
+   "oracle_objective": null,
+   "oracle_nodes": -1,
+   "oracle_max_viol": null
   }
  ],
  "excluded": [
   {
    "file": "ref/HiGHS/check/instances/1448.lp",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Empty",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/1449a.lp",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449a.lp",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/1449b.lp",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449b.lp",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/25fv47.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/1451.lp",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2122.lp",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2171.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2821-duplicate.mps",
    "reason": "loader: ref/HiGHS/check/instances/2821-duplicate.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2821-qmatrix.mps",
    "reason": "loader: ref/HiGHS/check/instances/2821-qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2821-quadobj.mps",
    "reason": "loader: ref/HiGHS/check/instances/2821-quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2821-summation.mps",
    "reason": "loader: ref/HiGHS/check/instances/2821-summation.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2821.mps",
    "reason": "loader: ref/HiGHS/check/instances/2821.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/2894.mps",
    "reason": "loader: ref/HiGHS/check/instances/2894.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/3015.mps",
+   "reason": "loader: ref/HiGHS/check/instances/3015.mps: column 486 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/80bau3b.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "nnz 21002 > 20000",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/adlittle.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/atwood0.mps",
+   "reason": "loader: ref/HiGHS/check/instances/atwood0.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/afiro.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/avgas.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/bell5.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/bgetam.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/blending.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/bound_implied.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/box1.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/chip.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/comment.mps",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/comment.mps",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/cplex1.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/dD2e.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/dcmulti.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/e226.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/egout-ac.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/etamacro.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/egout.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/ex72a.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/fixed-binary.lp",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/flugpl.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/forest6.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/galenet.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/gams10am.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/garbage.lp",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Empty",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/garbage.mps",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/garbage.mps",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/gas11.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Unbounded",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gesa2.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/greenbea.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "nnz 30877 > 20000",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gt2.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/infeasible-mip0.mps",
-   "reason": "oracle status Infeasible",
-   "panel": "M-HiGHS"
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/infeasible-mip1.mps",
-   "reason": "oracle status Infeasible",
-   "panel": "M-HiGHS"
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/israel.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/issue-2095.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2173.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2204.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2290.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2388.lp",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/issue-2402.mps",
-   "reason": "oracle status Infeasible",
-   "panel": "M-HiGHS"
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2446.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2585.lp",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/issue-2874-3.mps",
-   "reason": "oracle status Infeasible",
-   "panel": "M-HiGHS"
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/klein1.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/lseu.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/nan0.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/nan1.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "nl writer: non-finite value nan reached the .nl writer",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/nan2.mps",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/nan2.mps",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/no-newline-eof.lp",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/p01.mps",
+   "reason": "has integer columns",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/p0548.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/primal1.mps",
    "reason": "loader: ref/HiGHS/check/instances/primal1.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/qap04.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qcqp.lp",
    "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/qcqp.lp",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh.lp",
    "reason": "loader: ref/HiGHS/check/instances/qjh.lp: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh.mps",
    "reason": "loader: ref/HiGHS/check/instances/qjh.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh_qmatrix.mps",
    "reason": "loader: ref/HiGHS/check/instances/qjh_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh_quadobj.mps",
    "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps",
    "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh_uncon.lp",
    "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.lp: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qjh_uncon.mps",
    "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.mps: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qpinfeasible.lp",
    "reason": "loader: ref/HiGHS/check/instances/qpinfeasible.lp: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qptestnw.lp",
    "reason": "loader: ref/HiGHS/check/instances/qptestnw.lp: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/qpunbounded.lp",
    "reason": "loader: ref/HiGHS/check/instances/qpunbounded.lp: quadratic objective is out of scope for the LP/MILP panel",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/refinery.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/scrs8.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/sctest.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/rgn.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/semi-continuous.lp",
    "reason": "loader: ref/HiGHS/check/instances/semi-continuous.lp: column 2 has unsupported type HighsVarType.kSemiContinuous",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/semi-continuous.mps",
    "reason": "loader: ref/HiGHS/check/instances/semi-continuous.mps: column 2 has unsupported type HighsVarType.kSemiContinuous",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/semi-integer.lp",
    "reason": "loader: ref/HiGHS/check/instances/semi-integer.lp: column 2 has unsupported type HighsVarType.kSemiInteger",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/semi-integer.mps",
    "reason": "loader: ref/HiGHS/check/instances/semi-integer.mps: column 2 has unsupported type HighsVarType.kSemiInteger",
-   "panel": "M-HiGHS"
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/shell.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/small_mip.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
-   "file": "ref/HiGHS/check/instances/silly-names.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/smalllp.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/stair.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/standata.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/standgub.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/standmps.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
-  },
-  {
-   "file": "ref/HiGHS/check/instances/test.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "file": "ref/HiGHS/check/instances/sp150x300d.mps",
+   "reason": "has integer columns",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/vol1.mps",
-   "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "reason": "oracle status Infeasible",
+   "panel": "L"
   },
   {
    "file": "ref/HiGHS/check/instances/warnings.mps",
    "reason": "loader: ref/HiGHS/check/instances/warnings.mps: column 3 has unsupported type HighsVarType.kSemiInteger",
-   "panel": "M-HiGHS"
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/woodinfe.mps",
+   "reason": "oracle status Infeasible",
+   "panel": "L"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1448.lp",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1449a.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449a.lp",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1449b.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449b.lp",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/25fv47.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-duplicate.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-duplicate.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-quadobj.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-summation.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-summation.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2894.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2894.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/3015.mps",
+   "reason": "loader: ref/HiGHS/check/instances/3015.mps: column 486 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/80bau3b.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/adlittle.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/afiro.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/atwood0.mps",
+   "reason": "loader: ref/HiGHS/check/instances/atwood0.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/avgas.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/bgetam.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/blending.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/box1.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/chip.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/comment.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/comment.mps",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/cplex1.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/dD2e.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/e226.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/egout-ac.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/etamacro.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/ex72a.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/forest6.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/galenet.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gams10am.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/garbage.lp",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/garbage.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/garbage.mps",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gas11.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/greenbea.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/infeasible-mip0.mps",
+   "reason": "oracle status Infeasible",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/infeasible-mip1.mps",
+   "reason": "oracle status Infeasible",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/israel.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2402.mps",
+   "reason": "oracle status Infeasible",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2874-3.mps",
+   "reason": "oracle status Infeasible",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/klein1.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan0.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan1.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan2.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/nan2.mps",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/no-newline-eof.lp",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/perold.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/primal1.mps",
+   "reason": "loader: ref/HiGHS/check/instances/primal1.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qap04.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qcqp.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/qcqp.lp",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qjh.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_quadobj.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_uncon.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_uncon.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qpinfeasible.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qpinfeasible.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qptestnw.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qptestnw.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qpunbounded.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qpunbounded.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/refinery.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/scrs8.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/sctest.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-continuous.lp",
+   "reason": "loader: ref/HiGHS/check/instances/semi-continuous.lp: column 2 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-continuous.mps",
+   "reason": "loader: ref/HiGHS/check/instances/semi-continuous.mps: column 2 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-integer.lp",
+   "reason": "loader: ref/HiGHS/check/instances/semi-integer.lp: column 2 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-integer.mps",
+   "reason": "loader: ref/HiGHS/check/instances/semi-integer.mps: column 2 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/shell.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/silly-names.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/smalllp.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/stair.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standata.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standgub.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standmps.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/test.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/vol1.mps",
+   "reason": "no integer columns",
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/warnings.mps",
+   "reason": "loader: ref/HiGHS/check/instances/warnings.mps: column 3 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "M"
   },
   {
    "file": "ref/HiGHS/check/instances/woodinfe.mps",
    "reason": "no integer columns",
-   "panel": "M-HiGHS"
+   "panel": "M"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1448.lp",
+   "reason": "oracle status Empty",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1449a.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449a.lp",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1449b.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/1449b.lp",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/1451.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2122.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2171.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/25fv47.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-duplicate.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-duplicate.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-quadobj.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821-summation.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821-summation.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2821.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2821.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/2894.mps",
+   "reason": "loader: ref/HiGHS/check/instances/2894.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/3015.mps",
+   "reason": "loader: ref/HiGHS/check/instances/3015.mps: column 486 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/80bau3b.mps",
+   "reason": "nnz 21002 > 20000",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/adlittle.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/afiro.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/atwood0.mps",
+   "reason": "loader: ref/HiGHS/check/instances/atwood0.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/avgas.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/bell5.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/blending.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/bound_implied.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/chip.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/comment.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/comment.mps",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/dD2e.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/dcmulti.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/e226.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/egout-ac.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/egout.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/etamacro.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/fixed-binary.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/flugpl.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/garbage.lp",
+   "reason": "oracle status Empty",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/garbage.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/garbage.mps",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gesa2.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/greenbea.mps",
+   "reason": "nnz 30877 > 20000",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/gt2.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/israel.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2095.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2173.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2204.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2290.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2388.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2446.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/issue-2585.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/lseu.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan0.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan1.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/nan2.mps",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/nan2.mps",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/no-newline-eof.lp",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/p01.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/p0548.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/perold.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/primal1.mps",
+   "reason": "loader: ref/HiGHS/check/instances/primal1.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qap04.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qcqp.lp",
+   "reason": "loader: HiGHS could not read ref/HiGHS/check/instances/qcqp.lp",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qjh.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_quadobj.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_quadobj_qmatrix.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_uncon.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qjh_uncon.mps",
+   "reason": "loader: ref/HiGHS/check/instances/qjh_uncon.mps: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qpinfeasible.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qpinfeasible.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qptestnw.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qptestnw.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/qpunbounded.lp",
+   "reason": "loader: ref/HiGHS/check/instances/qpunbounded.lp: quadratic objective is out of scope for the LP/MILP panel",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/rgn.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/scrs8.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/sctest.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-continuous.lp",
+   "reason": "loader: ref/HiGHS/check/instances/semi-continuous.lp: column 2 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-continuous.mps",
+   "reason": "loader: ref/HiGHS/check/instances/semi-continuous.mps: column 2 has unsupported type HighsVarType.kSemiContinuous",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-integer.lp",
+   "reason": "loader: ref/HiGHS/check/instances/semi-integer.lp: column 2 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/semi-integer.mps",
+   "reason": "loader: ref/HiGHS/check/instances/semi-integer.mps: column 2 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/shell.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/silly-names.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/small_mip.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/smalllp.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/sp150x300d.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/stair.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standata.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standgub.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/standmps.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/test.mps",
+   "reason": "oracle status Optimal",
+   "panel": "INF"
+  },
+  {
+   "file": "ref/HiGHS/check/instances/warnings.mps",
+   "reason": "loader: ref/HiGHS/check/instances/warnings.mps: column 3 has unsupported type HighsVarType.kSemiInteger",
+   "panel": "INF"
   }
  ]
 }

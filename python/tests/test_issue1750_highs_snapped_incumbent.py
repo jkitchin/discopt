@@ -13,7 +13,18 @@ import numpy as np
 import pytest
 from discopt.mo import epsilon_constraint
 
-pytestmark = pytest.mark.smoke
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
+# highs-parity P6.3: these tests exercise the HiGHS route (the discopt[highs] extra).
+pytestmark = [pytest.mark.smoke, pytest.mark.requires_highs]
 
 
 def _facility_location():

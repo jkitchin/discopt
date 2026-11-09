@@ -341,10 +341,10 @@ def _solve_lp_like_default_route(
     """Solve a pure LP with the engine ``Model.solve()``'s default route uses.
 
     The same dispatch as the LP branch of ``solver._solve_impl``: the verified
-    HiGHS route by default, the Rust simplex (then POUNCE) under
-    ``DISCOPT_LP_MILP_BACKEND=rust``.
+    LP backend of :func:`discopt.solver._lp_backend` (the Rust simplex, then POUNCE, by
+    default since highs-parity D1; the verified HiGHS route under ``=highs``).
     """
-    if solver_module._lp_milp_backend() == "highs":
+    if solver_module._lp_backend() == "highs":
         return cast(SolveResult, solver_module._solve_lp_highs(model, t_start, time_limit))
     return cast(SolveResult, solver_module._solve_lp(model, t_start, time_limit))
 
@@ -387,7 +387,7 @@ def _try_integer_free_lp(
         shot_config=shot_config,
         selected_strategy="direct_lp",
         problem_class=ProblemClass.LP.value,
-        backend=solver_module._lp_milp_backend(),
+        backend=solver_module._lp_backend(),
     )
 
 
@@ -498,37 +498,17 @@ def _try_direct_milp(
     result = None
     if backend == "gurobi":
         result = solver_module._solve_milp_gurobi(model, t_start, time_limit, gap_tolerance)
-    elif backend == "simplex":
+    else:
+        # Python-MILP-tree retirement (R12): "auto", "simplex" and "pounce" (an alias
+        # since the matrix POUNCE MILP backend was retired) all run discopt's Rust
+        # MILP engine. An engine that defers returns ``None`` and the caller falls
+        # back to the SHOT loop, as an unavailable backend always did.
         result = solver_module._solve_milp_simplex(
             model,
             time_limit,
             gap_tolerance,
             max_iterations,
             t_start,
-        )
-    elif backend == "pounce":
-        result = solver_module._solve_milp_bb(
-            model,
-            time_limit,
-            gap_tolerance,
-            16,
-            "best_first",
-            max_iterations,
-            t_start,
-            prefer_pounce=True,
-            node_engine="simplex",
-        )
-    else:
-        result = solver_module._solve_milp_bb(
-            model,
-            time_limit,
-            gap_tolerance,
-            16,
-            "best_first",
-            max_iterations,
-            t_start,
-            prefer_pounce=nlp_solver == "pounce",
-            node_engine="simplex" if nlp_solver == "pounce" else "pounce",
         )
     if result is None:
         return None, _direct_attempt(

@@ -281,6 +281,8 @@ pub struct TreeManager {
     pseudocosts: Pseudocosts,
     /// Whether pseudocost-based branching is enabled (default: true).
     use_pseudocosts: bool,
+    /// Branching rule (`BranchRule::Reliability` = the historical selection below).
+    branch_rule: crate::bnb::branching::BranchRule,
     /// Minimum observations before a variable's pseudocost is considered reliable.
     reliability_threshold: u32,
     /// Records of branching decisions: maps child NodeId → parent's BranchRecord.
@@ -443,6 +445,7 @@ impl TreeManager {
             branch_hints: HashMap::new(),
             pseudocosts,
             use_pseudocosts: true,
+            branch_rule: crate::bnb::branching::BranchRule::Reliability,
             reliability_threshold: 8,
             branch_records: HashMap::new(),
             nonconvex: false,
@@ -1112,7 +1115,21 @@ impl TreeManager {
                     }
                 })
                 .unwrap_or_else(|| {
-                    if self.use_pseudocosts {
+                    use crate::bnb::branching::BranchRule;
+                    if self.branch_rule == BranchRule::MostFractional {
+                        (
+                            select_branch_variable(&result.solution, &self.integer_vars),
+                            Vec::new(),
+                        )
+                    } else if self.branch_rule == BranchRule::LeastFractional {
+                        (
+                            crate::bnb::branching::select_least_fractional_variable(
+                                &result.solution,
+                                &self.integer_vars,
+                            ),
+                            Vec::new(),
+                        )
+                    } else if self.use_pseudocosts {
                         select_branch_variable_pseudocost(
                             &result.solution,
                             &self.integer_vars,
@@ -1587,6 +1604,24 @@ impl TreeManager {
         raw.max(0.0)
     }
 
+    /// Relative gap with the Python MILP tree's denominator,
+    /// `(incumbent - global_lb) / max(|incumbent|, |global_lb|, 1e-10)`
+    /// (`solver._gap_values_converged`). Unlike [`Self::gap`] it does not floor the
+    /// denominator at 1, so a near-zero optimum is not declared converged on an
+    /// absolute difference (#1243). Infinite while either side is missing; clamped
+    /// at zero like [`Self::gap`].
+    pub fn gap_max_abs(&self) -> f64 {
+        if self.incumbent_value >= f64::INFINITY || self.global_lower_bound <= f64::NEG_INFINITY {
+            return f64::INFINITY;
+        }
+        let denom = self
+            .incumbent_value
+            .abs()
+            .max(self.global_lower_bound.abs())
+            .max(1e-10);
+        ((self.incumbent_value - self.global_lower_bound) / denom).max(0.0)
+    }
+
     /// Current **absolute** optimality gap, `incumbent - global_lb`.
     ///
     /// Infinite while either side is missing. Clamped at zero for the same
@@ -1785,6 +1820,19 @@ impl TreeManager {
         self.pool.get(id).basis.as_deref().cloned()
     }
 
+    /// Stored warm-start bases of the frontier nodes (D2 W1 cut-row deletion).
+    pub fn frontier_bases(&self) -> impl Iterator<Item = &crate::lp::basis::Basis> {
+        self.pool.frontier_bases()
+    }
+
+    /// Rewrite every stored basis (D2 W1 cut-row deletion); `None` drops it.
+    pub fn map_bases(
+        &mut self,
+        f: impl FnMut(&crate::lp::basis::Basis) -> Option<crate::lp::basis::Basis>,
+    ) {
+        self.pool.map_bases(f);
+    }
+
     /// Store a node's optimal basis before it is branched, so its children
     /// inherit it as their dual-simplex warm-start state.
     pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {
@@ -1969,6 +2017,17 @@ impl TreeManager {
             }
         }
         candidates
+    }
+
+    /// Set the branching rule (see [`crate::bnb::branching::BranchRule`]). Changes
+    /// only which column a node splits on, never a bound.
+    pub fn set_branch_rule(&mut self, rule: crate::bnb::branching::BranchRule) {
+        self.branch_rule = rule;
+    }
+
+    /// The branching rule in force.
+    pub fn branch_rule(&self) -> crate::bnb::branching::BranchRule {
+        self.branch_rule
     }
 
     /// Get the reliability threshold for pseudocost branching.
@@ -2720,6 +2779,37 @@ mod tests {
         tm.incumbent_value = 10.0;
         tm.global_lower_bound = 5.0;
         assert!((tm.gap() - 0.5).abs() < 1e-10);
+    }
+
+    /// R4 (Python-MILP-tree retirement step 6): the max-abs denominator does not
+    /// floor at 1, so a near-zero optimum's relative gap is not shrunk by it.
+    #[test]
+    fn gap_max_abs_does_not_floor_the_denominator_at_one() {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        assert_eq!(tm.gap_max_abs(), f64::INFINITY);
+        tm.incumbent_value = 1e-3;
+        tm.global_lower_bound = 0.0;
+        assert!((tm.gap() - 1e-3).abs() < 1e-15, "{}", tm.gap());
+        assert!(
+            (tm.gap_max_abs() - 1.0).abs() < 1e-12,
+            "{}",
+            tm.gap_max_abs()
+        );
+        // Large magnitudes: the bound's magnitude enters the denominator too.
+        tm.incumbent_value = -100.0;
+        tm.global_lower_bound = -200.0;
+        assert!((tm.gap() - 1.0).abs() < 1e-12);
+        assert!((tm.gap_max_abs() - 0.5).abs() < 1e-12);
     }
 
     #[test]

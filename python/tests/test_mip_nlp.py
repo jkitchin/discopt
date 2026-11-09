@@ -1,4 +1,7 @@
 import logging
+import os
+import subprocess
+import sys
 
 import discopt.modeling as dm
 import numpy as np
@@ -1053,7 +1056,7 @@ def test_mip_nlp_shot_nonconvex_objective_keeps_heuristic_bound_uncertified(monk
     assert trace["iterations"][0]["convex_bounding"]["reason"] == "objective_not_globally_boundable"
 
 
-def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
+def _shot_reduction_cut_repair_solve():
     import discopt.solvers.oa as oa_module
 
     m = dm.Model("shot_reduction_cut_repair_integration")
@@ -1061,7 +1064,7 @@ def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
     m.subject_to(x >= 1.0)
     m.minimize(1000.0 * x)
 
-    result = oa_module.solve_oa(
+    return oa_module.solve_oa(
         m,
         init_strategy="initial_binary",
         initial_point=np.array([1.0], dtype=float),
@@ -1077,6 +1080,8 @@ def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
         ),
     )
 
+
+def _assert_shot_reduction_cut_repaired(result):
     assert result.status == "optimal"
     assert result.bound == pytest.approx(1000.0)
     assert result.gap_certified is True
@@ -1088,6 +1093,34 @@ def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
     assert iteration["convex_bounding"]["status"] == "bound_updated"
     assert result.mip_nlp_trace["bound_validity"] == "global"
     assert result.mip_nlp_trace["termination_reason"] != "master_infeasible"
+
+
+def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
+    """The SHOT reduction cut puts the master's cutoff at 999.998999: it cuts the
+    incumbent ``x = 1`` by 1.001e-3, which is the MILP driver's own acceptance
+    tolerance there (``1e-6 * (1 + 1000)``). With exact-only emptiness proofs
+    (``DISCOPT_MILP_TOL_ROBUST=0``) the master is proved infeasible and the repair
+    drops the cut: that path is checked in a subprocess (the flag is read once per
+    process). Under the default (highs-parity D3) a sub-tolerance cut is never proved
+    empty, so the repair is not needed; the solve's answer must be the same."""
+    result = _shot_reduction_cut_repair_solve()
+    assert result.status == "optimal"
+    assert result.bound == pytest.approx(1000.0)
+    assert result.gap_certified is True
+    assert result.mip_nlp_trace["iterations"][0]["reduction_cuts"][0]["status"] == "added"
+    assert result.mip_nlp_trace["bound_validity"] == "global"
+    assert result.mip_nlp_trace["termination_reason"] != "master_infeasible"
+
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import test_mip_nlp as T\n"
+        "T._assert_shot_reduction_cut_repaired(T._shot_reduction_cut_repair_solve())\n"
+        "print('REPAIR_CHECKED')\n"
+    ) % os.path.dirname(__file__)
+    env = {**os.environ, "DISCOPT_MILP_TOL_ROBUST": "0"}
+    p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr[-3000:]
+    assert "REPAIR_CHECKED" in p.stdout
 
 
 def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):

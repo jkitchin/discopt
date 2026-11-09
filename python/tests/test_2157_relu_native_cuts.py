@@ -189,8 +189,12 @@ def _enumerated_min(net, k=201):
     return float(np.min(net.forward(pts)[:, 0]))
 
 
-def test_native_route_certifies_and_tightens_the_root():
+def test_native_route_certifies_and_tightens_the_root(monkeypatch):
     # big-M LP -0.300 vs MILP -0.083 on this instance: the cuts have work to do.
+    # The HiGHS route's root cut loop (HiGHS is opt-in since PR #2196); the Rust
+    # engine's native separator is covered below.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     net = _net([2, 6, 1], 0)
     ref, _ = _build(net, False)
     r0 = ref.solve(time_limit=60)
@@ -215,6 +219,16 @@ def test_native_route_certifies_and_tightens_the_root():
 
 def test_rust_engine_route_separates_at_nodes(monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    # This test is about the native separator firing AT NODES. Since
+    # `DISCOPT_MILP_ROOT_GMI_REPAIR` went default ON (highs-parity P4.4) the root's
+    # GMI cuts close this small network at the root, so no node -- and no separator
+    # call -- exists. Pin the legacy root so the node path is still exercised.
+    monkeypatch.setenv("DISCOPT_MILP_ROOT_GMI_REPAIR", "0")
+    # Likewise `DISCOPT_MILP_ALIGNED_SLACKS` (highs-parity D2, default ON 2026-11-07):
+    # with the slacks aligned the root cut loop closes this network before any
+    # fractional point reaches the separator (0 calls vs 3; both certify the same
+    # optimum in 1 node). Pin the legacy layout so the separator path is exercised.
+    monkeypatch.setenv("DISCOPT_MILP_ALIGNED_SLACKS", "0")
     net = _net([2, 6, 1], 0)
     ref, _ = _build(net, False)
     r0 = ref.solve(time_limit=60)

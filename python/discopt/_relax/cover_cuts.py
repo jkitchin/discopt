@@ -24,24 +24,6 @@ import numpy as np
 _COVER_INF = 1e20
 
 
-def has_binary_knapsack_rows(A_ub, b_ub, is_binary, tol: float = 1e-6, lb=None, ub=None) -> bool:
-    """Cheap precheck: does any inequality row admit a binary-knapsack cover?
-
-    Uses exactly the row test :func:`separate_cover_cuts` applies (same ``tol``
-    default, same bound accounting), so the precheck and the separator can never
-    disagree about which rows qualify.
-    """
-    if A_ub is None or b_ub is None:
-        return False
-    A = np.asarray(A_ub, dtype=np.float64)
-    b = np.asarray(b_ub, dtype=np.float64).ravel()
-    is_binary = np.asarray(is_binary, dtype=bool)
-    for i in range(A.shape[0]):
-        if _knapsack_support(A[i], b[i], is_binary, tol, lb, ub) is not None:
-            return True
-    return False
-
-
 def _column_box(j: int, is_binary: np.ndarray, lb, ub) -> tuple[float, float]:
     """The box of column ``j``: the caller's ``lb``/``ub`` when given, else
     ``[0, 1]`` for a binary and unbounded for anything else."""
@@ -169,45 +151,3 @@ def _separate_row(a, b, x, nz, tol):
     if sum(x[j] for j in cover) > rhs + tol:
         return frozenset(int(j) for j in cover), rhs
     return None
-
-
-def separate_clique_cuts(
-    edges, x_star: np.ndarray, tol: float = 1e-6
-) -> list[tuple[frozenset[int], float]]:
-    """Violated clique cuts ``sum_{j in C} x_j <= 1`` from conflict-graph edges.
-
-    Each edge ``(i, j)`` asserts binaries ``i`` and ``j`` cannot both be 1. The
-    edges are greedily *merged* into larger cliques (every pair in ``C``
-    conflicts), giving the valid cut ``sum_{j in C} x_j <= 1`` — much stronger
-    than the pairwise edges (a triangle yields ``x_i+x_j+x_k <= 1``) and, for
-    ``|C| >= 3``, separating even a symmetric interior point (``0.5*3 > 1``)
-    that the pairwise/cover cuts miss. Pairwise edges are usually redundant
-    with the constraints they came from; the merged cliques are where the
-    value is. Returns violated cuts in the shared ``(C, rhs)`` format.
-    """
-    x = np.asarray(x_star, dtype=np.float64)
-    adj: dict[int, set[int]] = {}
-    for i, j in edges:
-        i, j = int(i), int(j)
-        adj.setdefault(i, set()).add(j)
-        adj.setdefault(j, set()).add(i)
-
-    cuts: list[tuple[frozenset[int], float]] = []
-    seen: set[frozenset[int]] = set()
-    for i, j in edges:
-        i, j = int(i), int(j)
-        clique = {i, j}
-        # Grow into a (greedy maximal) clique: add common neighbours adjacent
-        # to every current member, preferring high-``x*`` items to maximize
-        # the chance of a violated cut.
-        candidates = sorted(adj[i] & adj[j], key=lambda k: -x[k])
-        for k in candidates:
-            if all(k in adj[c] for c in clique):
-                clique.add(k)
-        cf = frozenset(clique)
-        if cf in seen:
-            continue
-        seen.add(cf)
-        if sum(x[t] for t in clique) > 1.0 + tol:
-            cuts.append((cf, 1.0))
-    return cuts

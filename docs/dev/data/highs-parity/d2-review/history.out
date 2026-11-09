@@ -1,0 +1,69 @@
+rows read: 2976
+
+panel totals (OFF cert / ON cert / solves):
+  rins_panel.json                          DISCOPT_RINS                           b0b2af11   96   96  186
+  r1_improve_dive_panel.json.gz            DISCOPT_MILP_IMPROVE_DIVE              e9e5d1b9   96   96  186
+  reentry_cuts_panel.json.gz               DISCOPT_MILP_REENTRY_CUTS              5579067d   96  100  186
+  node_gmi_panel.json.gz                   DISCOPT_MILP_NODE_GMI                  e6a180de   96  107  186
+  aligned_slacks_panel.json.gz             DISCOPT_MILP_ALIGNED_SLACKS            8cbdb37d  101  107  186
+  bundle_aligned_submip_panel.json.gz      DISCOPT_MILP_ALIGNED_SLACKS,DISCOPT_MILP_SUBMIP 0a05d3c1  107  114  186
+  w1_cut_lp_panel_r3.json.gz               DISCOPT_MILP_CUT_LP                    b83aaff3  118  124  186
+  w1_cut_lp_sb_armed_panel_r3.json.gz      DISCOPT_MILP_CUT_LP,DISCOPT_MILP_SB_ARMED 739325ff  117  125  186
+  w2_rand_round_panel_r3.json.gz           DISCOPT_MILP_RAND_ROUND                49809de4  126  126  186
+  w5_expel_panel_r3.json.gz                DISCOPT_MILP_NODE_EXPEL_ARTIFICIALS    afc88e41  126  125  186
+  eng_incr_pricing_panel_r3.json.gz        DISCOPT_LP_PRIMAL_INCR_PRICING         d0c340e8  125  124  186
+  w4_cmir_bundle_panel_r3.json.gz          DISCOPT_MILP_D2_CMIR,DISCOPT_MILP_CMIR_HIGHS,DISCOPT_MILP_CMIR_FLIP 3ec35713  124  120  186
+  eng_incr_rowprice_panel_r3.json.gz       DISCOPT_LP_PRIMAL_INCR_PRICING         deb1b1f   125  123  186
+  w4_cmir_bundle_incr_panel_r3.json.gz     DISCOPT_MILP_D2_CMIR,DISCOPT_MILP_CMIR_HIGHS,DISCOPT_MILP_CMIR_FLIP,DISCOPT_MILP_LIFTED_MIC d8a0d87   123  123  186
+  tol_robust_panel_v1_r3.json.gz           DISCOPT_MILP_TOL_ROBUST                29aedab4  125  126  186
+  tol_robust_panel_v2_r3.json.gz           DISCOPT_MILP_TOL_ROBUST                5ab7b014  126  125  186
+
+OFF/ON certified reps per panel (3 reps; '-' = absent)
+instance                   rins r1_improv reentry_c  node_gmi aligned_s bundle_al w1_cut_lp w1_cut_lp w2_rand_r  w5_expel eng_incr_ w4_cmir_b eng_incr_ w4_cmir_b tol_robus tol_robus
+enlight8                    3/3       3/3       3/1       3/3       3/3       3/3       3/0       3/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+p0548                       0/0       0/0       0/0       0/0       0/0       0/0       0/1       0/2       3/3       3/2       2/1       1/3       2/0       0/3       2/3       3/2 
+mik-250-20-75-1             0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+mik-250-20-75-2             0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+mik-250-20-75-3             0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+mik-250-20-75-5             0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+b-ball                      0/0       0/0       0/0       0/0       0/0       0/0       0/3       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+fiber                       0/0       0/0       0/0       0/0       0/0       0/0       2/3       1/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+neos-3610051-istra          0/0       0/0       0/0       0/0       0/0       0/0       0/3       0/3       3/3       3/3       3/3       3/3       3/3       3/0       3/3       3/3 
+neos-3610040-iskar          0/0       0/0       0/0       0/0       0/0       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+neos-3611689-kaihu          0/0       0/0       0/0       0/3       0/1       3/0       2/3       2/3       3/3       3/3       3/3       3/3       3/3       3/0       3/3       3/3 
+neos-3611447-jijia          0/0       0/0       0/0       0/0       0/0       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+bppc8-02                    0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+gesa2                       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/3       0/0       0/3       0/0       0/0 
+beavma                      0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+sp150x300d                  0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+nexp-50-20-1-1              0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+nexp-50-20-4-2              0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+neos17                      0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+gsvm2rl3                    0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+neos-911970                 0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+2122                        0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+issue-2446                  0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0       0/0 
+gt2                         0/3       0/0       0/3       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+khb05250                    0/0       0/0       0/0       0/0       0/3       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+dcmulti                     3/0       3/3       3/3       3/3       2/3       2/3       3/3       3/3       3/3       3/3       3/3       3/0       3/3       3/3       3/3       3/3 
+neos-1425699                0/0       0/0       0/0       0/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+blend2                      3/3       3/3       3/3       3/3       3/1       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3 
+bell5                       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/3       3/0       3/3       3/3       3/3       3/3 
+
+nodes (ON, summed over reps) for mik-1 and enlight8 per panel:
+  rins_panel.json                          mik-1    72860 enlight8   226806 istra    26931
+  r1_improve_dive_panel.json.gz            mik-1    83018 enlight8   256494 istra    39681
+  reentry_cuts_panel.json.gz               mik-1    62547 enlight8   360454 istra    45231
+  node_gmi_panel.json.gz                   mik-1    64788 enlight8   158102 istra    16739
+  aligned_slacks_panel.json.gz             mik-1    44948 enlight8   124438 istra     9447
+  bundle_aligned_submip_panel.json.gz      mik-1    58462 enlight8   137346 istra    24414
+  w1_cut_lp_panel_r3.json.gz               mik-1    55420 enlight8    31021 istra     2373
+  w1_cut_lp_sb_armed_panel_r3.json.gz      mik-1    56326 enlight8    29557 istra     2373
+  w2_rand_round_panel_r3.json.gz           mik-1    54516 enlight8    29893 istra     2373
+  w5_expel_panel_r3.json.gz                mik-1    53134 enlight8    29395 istra     2373
+  eng_incr_pricing_panel_r3.json.gz        mik-1    55444 enlight8    29365 istra     2373
+  w4_cmir_bundle_panel_r3.json.gz          mik-1    45728 enlight8    15387 istra     5337
+  eng_incr_rowprice_panel_r3.json.gz       mik-1    54616 enlight8    30501 istra     2373
+  w4_cmir_bundle_incr_panel_r3.json.gz     mik-1    45402 enlight8    10003 istra      427
+  tol_robust_panel_v1_r3.json.gz           mik-1    52308 enlight8    10122 istra     7365
+  tol_robust_panel_v2_r3.json.gz           mik-1    53794 enlight8    28961 istra     2373

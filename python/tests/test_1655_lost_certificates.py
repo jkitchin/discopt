@@ -135,7 +135,11 @@ def _stn() -> dm.Model:
     return m
 
 
-def test_pure_binary_scheduling_milp_certifies_fast():
+def test_pure_binary_scheduling_milp_certifies_fast(monkeypatch):
+    # HiGHS is the opt-in MILP engine since PR #2196; this test needs a certifying
+    # oracle engine. The Rust engine's shortfall here is a recorded MILP-gap target.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     m = _stn()
     t0 = time.perf_counter()
     r = _quiet_solve(m, time_limit=60)

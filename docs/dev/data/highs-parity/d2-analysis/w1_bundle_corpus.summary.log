@@ -1,0 +1,9 @@
+
+rows 132 | instances with a problem: 1
+certified OFF 105 -> ON 104 | gained [] | lost ['nvs24']
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 245
+wall 983 s
+
+nvs24 follow-up (direct, 20 s, 5 interleaved reps per arm): both arms certify 5/5 via native-spatial; wall ON 17.8-19.1 s, OFF 17.2-19.3 s. A timing edge at the 20 s limit under corpus load (3.6-3.9), not a flag effect. ex1266 (lost by CUT_LP alone) certifies in both arms here.

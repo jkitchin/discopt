@@ -1826,6 +1826,17 @@ def subnlp(
                 outcome["refuted"] = "reduced"
                 return None
 
+        # #2143 (``DISCOPT_SUBNLP_REDUCED``, default OFF): pose the NLP with the
+        # columns that FBBT pins fixed and the rows over fixed columns only checked
+        # here and dropped. Under hull those are an off disjunct's copies and its
+        # eps-perspective rows at ``yhat ~ eps``. Verification below stays on the
+        # full ``evaluator``.
+        reduced = None
+        if implied is not None and _subnlp_reduced_enabled():
+            reduced = _reduce_subnlp(evaluator, implied, x0, feas_tol)
+            if isinstance(reduced, str):  # _REDUCED_REFUTED
+                return None
+
         opts = _heuristic_nlp_options(nlp_options)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))

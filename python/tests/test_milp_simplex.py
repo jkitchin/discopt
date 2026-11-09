@@ -50,12 +50,24 @@ def _solve_simplex(c, A_ub, b_ub, lb, ub, integer_cols):
     )
 
 
-class TestMilpSimplexVsPounce:
-    @pytest.mark.parametrize("seed", list(range(30)))
-    def test_matches_pounce(self, seed):
-        pytest.importorskip("pounce")
-        from discopt.solvers.milp_pounce import solve_milp as ref_milp
+def _enumerate_ip(c, A, b, ub):
+    """Exact optimum of ``min c x, A x <= b, x integer in [0, ub]`` by enumeration
+    (the oracle; the POUNCE matrix backend this used to compare against is retired
+    and now runs this same engine, so it could no longer disagree)."""
+    import itertools
 
+    best = None
+    for pt in itertools.product(*(range(int(u) + 1) for u in ub)):
+        x = np.asarray(pt, dtype=float)
+        if np.all(A @ x <= b + 1e-9):
+            v = float(c @ x)
+            best = v if best is None or v < best else best
+    return best
+
+
+class TestMilpSimplexVsEnumeration:
+    @pytest.mark.parametrize("seed", list(range(30)))
+    def test_matches_enumeration(self, seed):
         rng = np.random.default_rng(seed)
         n, m = 4, 3
         c = rng.integers(-5, 6, n).astype(float)
@@ -66,13 +78,10 @@ class TestMilpSimplexVsPounce:
         integer_cols = list(range(n))
 
         status, x, obj, _bound, _nodes, _it = _solve_simplex(c, A, b, lb, ub, integer_cols)
-        hi = ref_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
-        if hi.status != SolveStatus.OPTIMAL:
-            return
-        assert status in ("optimal", "feasible"), f"seed={seed}: {status}"
-        assert abs(obj - hi.objective) < 1e-4, (
-            f"seed={seed}: simplex {obj} vs POUNCE {hi.objective}"
-        )
+        want = _enumerate_ip(c, A, b, ub)
+        assert want is not None, f"seed={seed}: generator produced an infeasible IP"
+        assert status == "optimal", f"seed={seed}: {status}"
+        assert abs(obj - want) < 1e-6, f"seed={seed}: simplex {obj} vs enumeration {want}"
 
     def test_binary_knapsack(self):
         c = np.array([-10.0, -9.0, -8.0, -1.0])

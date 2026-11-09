@@ -1,0 +1,20 @@
+HiGHS master: bound 1.14774697866 lowered to 1.14774697627 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 1.14774697866 lowered to 1.14774697627 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 1.14774697866 lowered to 1.14774697627 by the presolve-free cross-solve (#1634)
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+  !!! CONTRADICTION simplex bound -1.618802154787407 above highs's verified incumbent -3.464101608897579
+  !!! CONTRADICTION both optimal, objectives -3.464101608897579 vs -1.6188021547810976
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+HiGHS master: bound -9.43067139049e-09 lowered to -3.4641016089 by the presolve-free cross-solve (#1634)
+  !!! CONTRADICTION simplex bound -1.618802154787407 above highs's verified incumbent -3.464101608897579
+  !!! CONTRADICTION both optimal, objectives -3.464101608897579 vs -1.6188021547810976
+HiGHS master: bound 359.213987622 lowered to 359.18197345 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 359.213987622 lowered to 359.18197345 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 359.213987622 lowered to 359.18197345 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 392.342381561 lowered to 392.342380561 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 392.342381561 lowered to 392.342380561 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 392.342381561 lowered to 392.342380561 by the presolve-free cross-solve (#1634)
+HiGHS master: bound 359.213987622 lowered to 359.18197345 by the presolve-free cross-solve (#1634)

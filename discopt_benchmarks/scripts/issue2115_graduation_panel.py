@@ -80,6 +80,15 @@ _TOL_ABS = 1e-6
 #: on an instance where it did not is time-limit noise), ``leak(off)`` must be 0
 #: (the OFF arm honoured the flag).
 _FLAGS = {
+    # #2212: the engine's last-resort logical-basis dual. It runs only on an engine
+    # entry's `Numerical` verdict, so `LpLogicalRescueAttempts` ON is where it ran and
+    # any attempt OFF is a leak; `LpLogicalRescueDecided` counts the LPs it decided.
+    "DISCOPT_LP_LOGICAL_DUAL_RESCUE": {
+        "fired": lambda off, on: on["LpLogicalRescueDecided"],
+        "ran": lambda off, on: on["LpLogicalRescueAttempts"] > 0,
+        "leak": lambda off: off["LpLogicalRescueAttempts"],
+        "show": ("LpLogicalRescueAttempts", "LpLogicalRescueDecided"),
+    },
     "DISCOPT_NS_PROJECT": {
         "fired": lambda off, on: on["NodeNsProjectRescue"],
         "ran": lambda off, on: on["NodeNsProjectTry"] > 0,
@@ -227,6 +236,10 @@ _FLAGS = {
     },
 }
 _CTRS = (
+    # #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE (and the spatial kernel's own retry).
+    "LpLogicalRescueAttempts",
+    "LpLogicalRescueDecided",
+    "NodeLpSlackRetry",
     "NodeNsProjectTry",
     "NodeNsProjectRescue",
     "NodeNsProjectSingular",

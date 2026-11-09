@@ -1,0 +1,17 @@
+{
+ "solved": 47,
+ "errors": 27,
+ "probe_attempts": 2,
+ "role_attempts": [
+  [
+   "require_highspy",
+   "_convex_route_oa_master"
+  ],
+  [
+   "require_highspy",
+   "solve"
+  ]
+ ]
+}
+..
+2 passed in 218.57s (0:03:38)

@@ -55,7 +55,7 @@ pub fn tighten_bounds(lp: &LpView<'_>, b: &[f64], is_int: &[bool], tol: f64) -> 
                     row_nz.push((j, v));
                 }
             }
-            match fbbt_row(&row_nz, b[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+            match fbbt_row(&row_nz, b[i], 0.0, &mut lo, &mut hi, is_int, tol, round_tol) {
                 None => {
                     return PresolveResult {
                         l: lo,
@@ -118,6 +118,33 @@ pub fn tighten_bounds_csc_with_row(
     tol: f64,
     extra: Option<(&[f64], f64)>,
 ) -> PresolveResult {
+    tighten_bounds_csc_relaxed(csc, m, n, l, u, b, is_int, tol, None, extra)
+}
+
+/// [`tighten_bounds_csc_with_row`] over the rows RELAXED by a per-row tolerance:
+/// row `i` is `|a_i x - b_i| <= row_eps[i]`, so every implied bound (and every
+/// emptiness verdict) holds for the set of points a tolerance-based feasibility
+/// check accepts, not only for the exact rows (highs-parity D3, the MILP driver's
+/// `DISCOPT_MILP_TOL_ROBUST`). Without it, a residual inside that tolerance can be
+/// amplified through a large-coefficient link and integer rounding into a "proof"
+/// that a box holding an acceptable point is empty. `None` is the exact system.
+/// The `extra` row (an objective cutoff, not a model row) is never relaxed.
+#[allow(clippy::too_many_arguments)]
+pub fn tighten_bounds_csc_relaxed(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+    row_eps: Option<&[f64]>,
+    extra: Option<(&[f64], f64)>,
+) -> PresolveResult {
+    if let Some(e) = row_eps {
+        assert_eq!(e.len(), m, "one tolerance per row");
+    }
     let mut lo = l.to_vec();
     let mut hi = u.to_vec();
     let max_rounds = 8;
@@ -155,7 +182,8 @@ pub fn tighten_bounds_csc_with_row(
     'rounds: for _round in 0..max_rounds {
         let mut changed = false;
         for (i, nz) in row_nz.iter().enumerate() {
-            match fbbt_row(nz, rhs[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+            let eps = row_eps.and_then(|e| e.get(i).copied()).unwrap_or(0.0);
+            match fbbt_row(nz, rhs[i], eps, &mut lo, &mut hi, is_int, tol, round_tol) {
                 None => {
                     infeasible = true;
                     break 'rounds;
@@ -223,9 +251,11 @@ fn prod_err(a: f64, p: f64, x: f64) -> f64 {
 /// `lo`/`hi` in place; returns `Some(changed)` or `None` if the box was proven empty.
 /// Matrix-representation-independent — the dense and CSC entries differ ONLY in how
 /// they gather `row_nz`, so both produce byte-identical tightenings.
+#[allow(clippy::too_many_arguments)]
 fn fbbt_row(
     row_nz: &[(usize, f64)],
     b_i: f64,
+    eps: f64,
     lo: &mut [f64],
     hi: &mut [f64],
     is_int: &[bool],
@@ -240,7 +270,14 @@ fn fbbt_row(
     let mut n_max_inf = 0usize;
     // Largest magnitude entering the running sums; sets the legacy error floor
     // `res_err` below.
-    let mut max_abs_term = b_i.abs();
+    // The row's two sides when it is relaxed by `eps` (rounded outward); both equal
+    // `b_i` for the exact row.
+    let (b_lo, b_hi) = if eps > 0.0 {
+        (-add_up(-b_i, eps), add_up(b_i, eps))
+    } else {
+        (b_i, b_i)
+    };
+    let mut max_abs_term = b_lo.abs().max(b_hi.abs());
     // Exact rounding errors of the running sums, accumulated upward: every product's
     // FMA remainder and every addition's `two_sum` remainder. The float sums alone
     // are not enough -- `x0 + z + sum_{2000} y_i == 2^40` with `y_i <= 2^-14` loses
@@ -291,14 +328,16 @@ fn fbbt_row(
         let mut term_ub = INF;
         if res_min_finite {
             let (res_min, e1) = two_sum(sum_min_finite, -if k_min_inf { 0.0 } else { ck_min });
-            let (t, e2) = two_sum(b_i, -res_min);
+            // Upper implications come from the row's upper side `b_i + eps`.
+            let (t, e2) = two_sum(b_hi, -res_min);
             let err = add_up(add_up(err_min, e1.abs()), e2.abs());
             term_ub = add_up(t, err.max(res_err));
         }
         let mut term_lb = -INF;
         if res_max_finite {
             let (res_max, e1) = two_sum(sum_max_finite, -if k_max_inf { 0.0 } else { ck_max });
-            let (t, e2) = two_sum(b_i, -res_max);
+            // Lower implications come from the row's lower side `b_i - eps`.
+            let (t, e2) = two_sum(b_lo, -res_max);
             let err = add_up(add_up(err_max, e1.abs()), e2.abs());
             term_lb = -add_up(-t, err.max(res_err));
         }
@@ -374,6 +413,51 @@ mod tests {
     /// #1953: the extra `<=` row bounds a column no row of `A` touches (an OA
     /// epigraph column under the incumbent cutoff), through a virtual slack that
     /// is not returned. `A`: `x1 = 0.5`; extra row `2 x0 + x1 <= 3.5` -> `x0 <= 1.5`.
+    /// highs-parity D3: `x0 + x1 = 1` with `x0` fixed at 0.6 and an integer `x1`
+    /// linked by `x2 = 1e5 * x1`, `x2` integer in [39999, 40000]: exactly, `x1` must be
+    /// 0.4, so `x2 = 40000` -- feasible. Shift the rhs so the best point misses by
+    /// 3e-7 (`b = 1 - 3e-7`): the exact rows prove the box EMPTY (the 3e-7 shortfall
+    /// times 1e5 crosses an integer), the rows relaxed by 1e-6 do not. Checks counted.
+    #[test]
+    fn relaxed_rows_do_not_empty_a_tolerance_feasible_box() {
+        use super::super::sparse::SparseCols;
+        // rows: x0 + x1 = b0 ; -1e5 x1 + x2 = 0
+        let sp = SparseCols::from_dense(&[1.0, 1.0, 0.0, 0.0, -1e5, 1.0], 2, 3);
+        let l = vec![0.6, 0.0, 39999.0];
+        let u = vec![0.6, 1.0, 40000.0];
+        let is_int = [false, false, true];
+        let mut checked = 0;
+        let exact_ok = tighten_bounds_csc(&sp, 2, 3, &l, &u, &[1.0, 0.0], &is_int, 1e-9);
+        assert!(
+            !exact_ok.infeasible,
+            "premise: the exact system is feasible at b = 1"
+        );
+        checked += 1;
+        let b = [1.0 - 3e-7, 0.0];
+        let exact = tighten_bounds_csc(&sp, 2, 3, &l, &u, &b, &is_int, 1e-9);
+        assert!(
+            exact.infeasible,
+            "premise: the exact rows prove the shifted box empty"
+        );
+        checked += 1;
+        let eps = [1e-6, 1e-6];
+        let relaxed =
+            tighten_bounds_csc_relaxed(&sp, 2, 3, &l, &u, &b, &is_int, 1e-9, Some(&eps), None);
+        assert!(
+            !relaxed.infeasible,
+            "the relaxed rows must keep the acceptable point"
+        );
+        assert!(relaxed.l[2] <= 40000.0 && relaxed.u[2] >= 40000.0);
+        checked += 1;
+        // A shift beyond the tolerance is still proved empty.
+        let far = [1.0 - 1e-4, 0.0];
+        let r =
+            tighten_bounds_csc_relaxed(&sp, 2, 3, &l, &u, &far, &is_int, 1e-9, Some(&eps), None);
+        assert!(r.infeasible);
+        checked += 1;
+        assert_eq!(checked, 4);
+    }
+
     #[test]
     fn extra_inequality_row_bounds_an_untouched_column() {
         use super::super::sparse::SparseCols;

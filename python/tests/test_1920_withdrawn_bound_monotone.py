@@ -29,6 +29,15 @@ from discopt.solver import _highs_std_form
 from discopt.solvers import lp_milp_highs
 
 
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 def _relu_model(seed: int = 0, width: int = 16) -> dm.Model:
     rng = np.random.default_rng(seed)
     lb, ub = np.array([-2.0, -1.0]), np.array([2.0, 1.0])

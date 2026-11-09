@@ -351,17 +351,30 @@ _LIFT_AT_THE_CLIFF = ("ex1264",)
 
 
 def _race_arms(monkeypatch):
-    """Record ``(arm, in_slice, status)`` for every ``solve_model`` call."""
+    """Record ``(arm, in_slice, status)`` for every ``solve_model`` call, and the
+    status of every native-MILP driver run made inside the race's ``lift`` arm."""
+    from discopt import _rust
+
     arms = []
+    lift_runs: list[str] = []
     real = S.solve_model
+    real_driver = _rust.solve_milp_csc_py
 
     def spy(*a, **k):
         r = real(*a, **k)
         arms.append((S._IPX_RACE_ARM.get(), S._IPX_RACE_IN_SLICE.get(), r.status))
         return r
 
+    def driver_spy(*a, **k):
+        out = real_driver(*a, **k)
+        # Auxiliary sub-MILPs (max_nodes <= 1000) are not the engine's own runs.
+        if S._IPX_RACE_ARM.get() == "lift" and int(a[12]) > 1000:
+            lift_runs.append(out[0])
+        return out
+
     monkeypatch.setattr(S, "solve_model", spy)
-    return arms
+    monkeypatch.setattr(_rust, "solve_milp_csc_py", driver_spy)
+    return arms, lift_runs
 
 
 @pytest.mark.smoke
@@ -382,12 +395,19 @@ def test_bound_neutral_where_the_lift_certifies_in_its_slice(name, premise_requi
     monkeypatch.setenv("DISCOPT_IPX_RACE", "0")
     legacy = _nl(name).solve(time_limit=60.0)
     monkeypatch.setenv("DISCOPT_IPX_RACE", "1")
-    arms = _race_arms(monkeypatch)
+    arms, lift_runs = _race_arms(monkeypatch)
     raced = _nl(name).solve(time_limit=60.0)
     assert legacy.status == "optimal" and legacy.gap_certified
     assert raced.status == "optimal" and raced.gap_certified
     assert arms and arms[0][:2] == ("lift", True), f"the race did not run: {arms}"
-    premise = arms[0][2] == "optimal"
+    assert lift_runs, "no native-MILP run was observed in the lift arm"
+    # The premise is that the lift's FIRST engine run certified inside the slice.
+    # `solve_model`'s status alone is not that: since highs-parity P4.0 the native
+    # engine re-enters on run 1's leftover (`DISCOPT_MILP_REENTRY_SPEND`), so a run 1
+    # that stopped `feasible` can still certify inside the slice through a second run,
+    # with a different tree. Measured under load on ex1264: run 1 feasible at 4411
+    # nodes, re-entry optimal at 1705, legacy 10377.
+    premise = arms[0][2] == "optimal" and lift_runs[0] == "optimal"
     if premise_required:
         assert premise, f"{name}: the lift no longer certifies inside its slice: {arms}"
     if premise:

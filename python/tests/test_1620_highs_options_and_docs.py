@@ -23,6 +23,16 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 pytestmark = pytest.mark.smoke
 
 
@@ -44,6 +54,7 @@ def test_highs_log_is_off_by_default(capfd):
     assert "HiGHS" not in out, out
 
 
+@pytest.mark.requires_highs
 def test_highs_options_output_flag_prints_the_highs_log(capfd):
     r = _small_milp().solve(highs_options={"output_flag": True})
     assert r.status == "optimal"
@@ -51,6 +62,7 @@ def test_highs_options_output_flag_prints_the_highs_log(capfd):
     assert "HiGHS" in out, "highs_options={'output_flag': True} printed no HiGHS log"
 
 
+@pytest.mark.requires_highs
 def test_highs_options_search_option_passes_through_and_keeps_the_answer():
     base = _small_milp().solve()
     opt = _small_milp().solve(highs_options={"mip_detect_symmetry": False, "presolve": "off"})
@@ -59,7 +71,10 @@ def test_highs_options_search_option_passes_through_and_keeps_the_answer():
     assert opt.gap_certified
 
 
-def test_highs_options_applies_to_the_lp_route(capfd):
+@pytest.mark.requires_highs
+def test_highs_options_applies_to_the_lp_route(capfd, monkeypatch):
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     m = dm.Model("lp1620")
     a = m.continuous("a", lb=0, ub=10)
     b = m.continuous("b", lb=0, ub=10)
@@ -100,11 +115,13 @@ def test_highs_options_outside_the_allowlist_is_refused(key):
         _small_milp().solve(highs_options={key: 1})
 
 
+@pytest.mark.requires_highs
 def test_highs_options_bad_value_for_an_allowed_option_is_refused_by_highs():
     with pytest.raises(RuntimeError, match="HiGHS rejected option"):
         _small_milp().solve(highs_options={"presolve": "no_such_value"})
 
 
+@pytest.mark.requires_highs
 def test_highs_options_allowlist_names_are_real_highs_options():
     import highspy
     from discopt.solvers.lp_milp_highs import ALLOWED_USER_OPTIONS
@@ -115,6 +132,7 @@ def test_highs_options_allowlist_names_are_real_highs_options():
         assert status == highspy.HighsStatus.kOk, name
 
 
+@pytest.mark.requires_highs
 def test_highs_options_on_a_non_highs_route_warns():
     m = dm.Model("nlp1620")
     x = m.continuous("x", lb=-2, ub=2)
@@ -124,6 +142,7 @@ def test_highs_options_on_a_non_highs_route_warns():
     assert r.status == "optimal"
 
 
+@pytest.mark.requires_highs
 def test_highs_options_used_does_not_warn():
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)

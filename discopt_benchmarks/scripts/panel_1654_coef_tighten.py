@@ -119,8 +119,16 @@ print(json.dumps(dict(status=r.status, obj=r.objective, bound=r.bound, cert=bool
 """.replace("HERE", repr(HERE))
 
 
+#: Reused for other big-M flags (Python-MILP-tree retirement): ``PANEL_FLAG`` names the
+#: flag the arms toggle (default the #1654 one), ``PANEL_ENV`` adds fixed ``K=V,K=V``
+#: settings to both arms (e.g. ``DISCOPT_LP_MILP_BACKEND=rust``), ``PANEL_MS`` the M
+#: values. Unset, the panel is exactly #1654's.
+_FLAG = os.environ.get("PANEL_FLAG", "DISCOPT_MILP_COEF_TIGHTEN")
+_EXTRA = dict(kv.split("=", 1) for kv in os.environ.get("PANEL_ENV", "").split(",") if kv)
+
+
 def run(fam, seed, M, flag):
-    env = dict(os.environ, DISCOPT_MILP_COEF_TIGHTEN=flag)
+    env = dict(os.environ, **_EXTRA, **{_FLAG: flag})
     p = subprocess.run(
         [sys.executable, "-c", CHILD, fam, str(seed), repr(M)],
         env=env,
@@ -200,7 +208,7 @@ def analyze(path):
 if __name__ == "__main__":
     out = sys.argv[1]
     seeds = range(int(sys.argv[2])) if len(sys.argv) > 2 else range(4)
-    Ms = [1e4, 1e6, 1e8, 1e10]
+    Ms = [float(v) for v in os.environ.get("PANEL_MS", "1e4,1e6,1e8,1e10").split(",")]
     rows = []
     n_done = 0
     with open(out, "w") as fh:

@@ -5,9 +5,9 @@ infeasible subsystem with integrality as an element (:func:`discopt._iis_milp.
 milp_iis_arrays`, the default deletion-order portfolio) and writes the
 competition's solution JSON (``SOLUTION_FORMAT.md`` of the MIPcc27 kit).
 
-The model goes from HiGHS's MPS reader straight into the engine's arrays: no
-:class:`~discopt.modeling.core.Model` and no Python expression per row, so the
-read costs what HiGHS's parser costs.
+The model goes from discopt's MPS reader (``discopt._mps``, Rust, an exact
+reproduction of HiGHS's) straight into the engine's arrays: no
+:class:`~discopt.modeling.core.Model` and no Python expression per row.
 
 The run contract (``PROGRAM_INTERFACE.md``): the budget is ``MIPCC_TIME_LIMIT``
 wall-clock seconds from launch, including start-up; a run still going at the
@@ -30,10 +30,8 @@ So:
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -73,40 +71,15 @@ def budget(limit: float) -> tuple[float, float]:
 
 
 def read_mps(path: str) -> dict:
-    """The model's arrays and names, via HiGHS's MPS reader."""
-    import highspy
-    import scipy.sparse as sp
+    """The model's arrays and names, via discopt's own MPS reader (``discopt._mps``,
+    an exact reproduction of HiGHS's ``readModel`` -> ``getLp``; highs-parity P6)."""
+    from discopt._mps import read_mps as _read
 
-    tmpdir = None
-    src = path
-    if path.endswith(".gz"):
-        # HiGHS's reader takes a plain file; /tmp is writable in the sandbox.
-        tmpdir = tempfile.mkdtemp(prefix="mipcc_")
-        src = os.path.join(tmpdir, "model.mps")
-        with gzip.open(path, "rb") as f, open(src, "wb") as g:
-            shutil.copyfileobj(f, g)
-    try:
-        h = highspy.Highs()
-        h.silent()
-        st = h.readModel(src)
-        if st == highspy.HighsStatus.kError:
-            raise ValueError(f"HiGHS could not read {path!r}")
-        lp = h.getLp()
-    finally:
-        if tmpdir is not None:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-    n, m = lp.num_col_, lp.num_row_
-    a = lp.a_matrix_
-    if a.format_ == highspy.MatrixFormat.kRowwise:
-        A = sp.csr_matrix((np.array(a.value_), np.array(a.index_), np.array(a.start_)), (m, n))
-    else:
-        A = sp.csc_matrix(
-            (np.array(a.value_), np.array(a.index_), np.array(a.start_)), (m, n)
-        ).tocsr()
+    d = _read(path)
+    n, m = d["n"], d["m"]
+    A = d["A"].tocsr()
     A.sum_duplicates()
-    integrality = np.array([int(t) for t in lp.integrality_], dtype=int)
-    if integrality.size == 0:
-        integrality = np.zeros(n, dtype=int)
+    integrality = d["integrality"]
     if np.any((integrality != 0) & (integrality != 1)):
         # Semi-continuous / semi-integer columns are not IIS elements this
         # engine models; refuse rather than silently treat them as something else.
@@ -118,14 +91,14 @@ def read_mps(path: str) -> dict:
         v[v >= _INF] = _INF
         return v
 
-    col_names = list(lp.col_names_) if len(lp.col_names_) == n else [f"C{j}" for j in range(n)]
-    row_names = list(lp.row_names_) if len(lp.row_names_) == m else [f"R{i}" for i in range(m)]
+    col_names = d["col_names"] if len(d["col_names"]) == n else [f"C{j}" for j in range(n)]
+    row_names = d["row_names"] if len(d["row_names"]) == m else [f"R{i}" for i in range(m)]
     return dict(
         A=A,
-        row_lo=sentinel(lp.row_lower_),
-        row_hi=sentinel(lp.row_upper_),
-        col_lb=sentinel(lp.col_lower_),
-        col_ub=sentinel(lp.col_upper_),
+        row_lo=sentinel(d["row_lo"]),
+        row_hi=sentinel(d["row_hi"]),
+        col_lb=sentinel(d["col_lb"]),
+        col_ub=sentinel(d["col_ub"]),
         is_int=integrality == 1,
         col_names=col_names,
         row_names=row_names,
@@ -315,8 +288,11 @@ def checker_rejects(data: dict, res, time_limit: float) -> bool:
     still reject (#2145 review: the borderline zone). Undecided within
     ``time_limit``, or a point that fails the 1e-5 rule (the checker then
     retries tighter): ``False`` -- the doubly proven answer stands."""
-    import highspy
+    from discopt._optional_highs import require_highspy
 
+    highspy = require_highspy(
+        "discopt.mipcc (the HiGHS re-solve that mirrors the official checker)"
+    )
     if time_limit <= 0.5:
         return False
     m, n = data["row_lo"].size, data["col_lb"].size
@@ -434,7 +410,21 @@ def _run(
     write_atomic(solution, doc)
     on_disk["answer"] = "the confirmed subsystem"
     left = min(CHECKER_SOLVE_CAP_S, hard_stop - (time.perf_counter() - t0) - 5.0)
-    if checker_rejects(data, res, left):
+    from discopt._optional_highs import MissingHighsError
+
+    try:
+        rejected = checker_rejects(data, res, left)
+    except MissingHighsError:
+        # The checker-settings re-solve imitates the competition's HiGHS-based
+        # checker, so it needs HiGHS (the reader does not, since P6). Without it the
+        # answer on disk -- infeasible by two proofs -- stands, and the run says so.
+        print(
+            "mipcc: highspy is not installed, so the checker-settings re-solve was "
+            "skipped; the doubly proven subsystem stands",
+            flush=True,
+        )
+        rejected = False
+    if rejected:
         # Infeasible in truth (two proofs), feasible within the checker's 1e-5:
         # submitting it would fail the run. The whole model replaces it.
         write_atomic(solution, {})

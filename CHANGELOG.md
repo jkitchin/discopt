@@ -20,6 +20,35 @@ The release procedure that produces these entries is documented in
   subprocess worker, so solver output cannot corrupt the stdio JSON-RPC stream and
   an overrunning solve is killed. See `docs/mcp.md`.
 
+### Changed
+
+- **HiGHS is an optional extra (`pip install 'discopt[highs]'`).** Without `highspy`
+  every default path runs on discopt's in-house Rust engine: pure LPs (Rust simplex by
+  default whether or not HiGHS is installed), pure MILPs (Rust MILP engine; with
+  `highspy` installed a pure MILP still defaults to HiGHS), IIS (`iis_engine="rust"`),
+  root cuts, the decomposition and OA masters. Explicit HiGHS opt-ins raise
+  `MissingHighsError` naming the extra.
+- **`highs_options=` on a pure LP is dropped with a `UserWarning`**, because pure LPs
+  now solve on the Rust simplex by default. Set `DISCOPT_LP_BACKEND=highs` to keep the
+  HiGHS route for LPs.
+- **`milp_backend="native"` runs the Rust MILP engine**, which now honours `strategy`,
+  `branching_rule`, `milp_cuts`, `node_callback` and `lagrangian_bound`.
+- **`milp_solver="pounce"` (AMP, OA, GDP, `milp_relaxation`) is a deprecated alias** for
+  the Rust simplex MILP engine and emits a `FutureWarning`.
+- **New defaults on the Rust MILP engine:** big-M coefficient tightening before the
+  search (`DISCOPT_MILP_RUST_COEF_ENTRY`), default-box sides passed as "no bound"
+  (`DISCOPT_MILP_RUST_OPEN_DEFAULT_BOX`), and no hand-off when the stall slice finds no
+  incumbent. Each graduated on recorded §5 panels; `=0` opts out of the first two.
+
+### Removed
+
+- **The Python MILP branch-and-bound tree (`solver._solve_milp_bb`).** Every pure MILP
+  runs on the Rust engine. Where the engine cannot certify, the result says so
+  (`feasible` with no bound, or `unknown` with no point and no bound) instead of
+  handing off. The opt-outs that only reached or skipped that tree are gone:
+  `DISCOPT_MILP_ENGINE`, `DISCOPT_MILP_NO_STALL_TREE=0`, `DISCOPT_IPX_RACE_STALL_EXIT`,
+  `DISCOPT_P3_FORCE_CUT_PATH`.
+
 ### Fixed
 
 - **`deterministic=True` no longer lets the wall-priced improver governor pick the

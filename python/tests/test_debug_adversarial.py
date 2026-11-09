@@ -14,8 +14,6 @@ Attacks the debugger the way a hostile (or merely clumsy) user/agent would:
 
 from __future__ import annotations
 
-import time as _time
-
 import discopt as do
 import numpy as np
 import pytest
@@ -23,7 +21,6 @@ from discopt import debug
 from discopt.debug.context import DebugContext
 from discopt.debug.engine import Control, DebugCommandEngine
 from discopt.debug.session import DebugSession
-from discopt.solver import _solve_milp_bb
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -570,11 +567,6 @@ def _miqp_model():
     return m
 
 
-def _run_milp_bb(model):
-    """Drive the fallback-only Python MILP-BB loop (loop 3) directly."""
-    return _solve_milp_bb(model, 20.0, 1e-6, 8, "best_first", 100_000, _time.perf_counter())
-
-
 def _milp_model():
     """Small MILP for driving the Python MILP-BB loop (loop 3) directly."""
     m = do.Model("adv2_milp")
@@ -658,19 +650,6 @@ def test_trace_invariants_rust_fast_path():
     _assert_trace_invariants(trace)
 
 
-@pytest.mark.smoke
-def test_trace_invariants_milp_bb_loop_direct():
-    """Loop 3 (_solve_milp_bb) is fallback-only, so drive it directly."""
-    fe = TraceFrontend()
-    debug.attach(DebugSession(fe))
-    try:
-        res = _run_milp_bb(_milp_model())
-    finally:
-        debug.detach()
-    assert res.status == "optimal"
-    _assert_trace_invariants(fe.trace)
-
-
 # ── per-loop: no-op neutrality, quit statuses, inject wiring ─────────────────
 
 
@@ -723,18 +702,6 @@ def test_quit_early_not_false_infeasible_miqp():
         debug.detach()
     assert res.status not in ("infeasible", "optimal"), (
         f"MIQP-BB quit produced a false '{res.status}'"
-    )
-
-
-@pytest.mark.smoke
-def test_quit_early_not_false_infeasible_milp_bb_direct():
-    debug.attach(DebugSession(QuitFrontend()))
-    try:
-        res = _run_milp_bb(_milp_model())
-    finally:
-        debug.detach()
-    assert res.status not in ("infeasible", "optimal"), (
-        f"MILP-BB quit produced a false '{res.status}'"
     )
 
 

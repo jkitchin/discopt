@@ -73,11 +73,13 @@ def _cmd_about(_args):
     print(f"  Platform:     {platform.platform()}")
     print(f"  Executable:   {sys.executable}")
 
-    deps = ["numpy", "scipy", "highspy", "pounce-solver"]
-    # jax/jaxlib are the `discopt[jax]` extra (#1873).
+    deps = ["numpy", "scipy", "pounce-solver"]
+    # jax/jaxlib are the `discopt[jax]` extra (#1873); highspy the `discopt[highs]` one
+    # (highs-parity P6.3).
     optional_deps = [
         "jax",
         "jaxlib",
+        "highspy",
         "cyipopt",
         "litellm",
         "mcp",

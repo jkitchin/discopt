@@ -416,7 +416,8 @@ def test_a_round_trip_never_strengthens_a_stored_certificate():
 
 
 @pytest.mark.smoke
-def test_the_highs_lp_route_names_its_safe_bound():
+@pytest.mark.requires_highs
+def test_the_highs_lp_route_names_its_safe_bound(monkeypatch):
     """That route's LP bound is a Neumaier-Shcherbina SAFE bound.
 
     Strictly stronger than the floating-point LP duals the other routes' bounds
@@ -428,6 +429,8 @@ def test_the_highs_lp_route_names_its_safe_bound():
     m.subject_to(dm.sum(x) <= 4.0)
     m.subject_to(x[0] + 2 * x[1] <= 5.0)
     m.maximize(3 * x[0] + 2 * x[1] + x[2])
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     res = m.solve(time_limit=30)
     assert res.algorithm_route and "highs-lp" in res.algorithm_route
     assert res.bound_valid is True
@@ -437,13 +440,15 @@ def test_the_highs_lp_route_names_its_safe_bound():
 
 
 @pytest.mark.smoke
-def test_the_highs_milp_route_names_its_tree_bound():
+@pytest.mark.requires_highs
+def test_the_highs_milp_route_names_its_tree_bound(monkeypatch):
     """HiGHS's MIP dual bound is trusted as-is (``milp/bound_provenance=highs-fp``).
 
     That is the same floating-point standard every other branch-and-bound route
     in this repo reports, so ``bnb_tree`` is the honest label -- deliberately
     NOT ``lp_dual``, which would claim the LP route's stronger guarantee.
     """
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")  # HiGHS is opt-in since PR #2196
     m = Model()
     x = m.integer("x", lb=0, ub=10)
     y = m.continuous("y", lb=0.0, ub=10.0)

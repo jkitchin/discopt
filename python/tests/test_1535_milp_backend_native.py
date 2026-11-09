@@ -69,25 +69,48 @@ def test_native_knapsack_branches_and_matches_highs():
     assert res.algorithm_route.startswith("native-milp")
 
 
-def test_native_milp_runs_the_python_tree_with_the_callers_options(monkeypatch):
+def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
+    """Python-MILP-tree retirement (R1): ``milp_backend="native"`` is the Rust MILP
+    engine, which takes the options the Python tree used to own."""
+    import discopt._rust as _rust
+
     highs = _spy(monkeypatch, "_solve_milp_highs")
     engine = _spy(monkeypatch, "_solve_milp_simplex")
-    tree = _spy(monkeypatch, "_solve_milp_bb")
-    _knapsack().solve(milp_backend="native", strategy="depth_first", milp_cuts=False)
-    assert highs == [] and engine == []
-    assert len(tree) == 1
-    args, kwargs = tree[0]
-    assert args[4] == "depth_first"  # ``strategy`` is _solve_milp_bb's 5th positional
-    assert kwargs["root_cuts"] is False
+    drv: list = []
+    real = _rust.solve_milp_csc_py
+
+    def drv_spy(*a, **kw):
+        drv.append(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(_rust, "solve_milp_csc_py", drv_spy)
+    res = _knapsack().solve(
+        milp_backend="native",
+        strategy="depth_first",
+        milp_cuts=False,
+        branching_rule="most_fractional",
+    )
+    assert highs == []
+    assert len(engine) == 1
+    assert engine[0][1]["root_cuts"] is False
+    assert engine[0][1]["branching_rule"] == "most_fractional"
+    searches = [kw for kw in drv if "abs_gap_tol" in kw]
+    assert searches, "the engine never searched"
+    for kw in searches:
+        assert kw["node_selection"] == "depth_first"
+        assert kw["branching_rule"] == "most_fractional"
+        assert kw["root_cuts"] == 0
+    assert res.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP engine")
+    assert "strategy='depth_first'" in res.algorithm_route
 
 
-def test_default_route_is_unchanged(monkeypatch):
+def test_default_route_is_the_rust_engine(monkeypatch):
+    """Since PR #2196 (owner decision) a pure MILP takes discopt's Rust engine by
+    default on every install; HiGHS is the opt-in."""
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
-    tree = _spy(monkeypatch, "_solve_milp_bb")
     res = _knapsack().solve()
-    assert tree == []
-    assert res.node_count == 0 or res.algorithm_route.startswith("highs-milp")
-    assert (res.solver_stats or {}).get("route/lp_milp_backend") == 1.0
+    assert res.algorithm_route.startswith("native-milp"), res.algorithm_route
+    assert (res.solver_stats or {}).get("route/lp_milp_backend") != 1.0
 
 
 def test_keyword_overrides_env_var_both_ways(monkeypatch):
@@ -133,6 +156,35 @@ def test_node_callback_fires_with_values_in_the_users_sense(maximize):
             assert c.best_bound >= res.objective - 1e-6
         else:
             assert c.best_bound <= res.objective + 1e-6
+
+
+@pytest.mark.parametrize("maximize", [True, False])
+def test_node_callback_on_the_engine_reports_the_same_payload(monkeypatch, maximize):
+    """Python-MILP-tree retirement: on the Rust engine the callback is fed from the
+    driver's batch checkpoint, with the tree's payload in the user's sense: the batch's
+    best relaxation (``node_bound`` / ``x_relaxation``) and a dual bound that never
+    crosses the optimum."""
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    seen = []
+    res = _knapsack(maximize=maximize).solve(node_callback=lambda ctx, m: seen.append(ctx))
+    assert res.status == "optimal" and res.algorithm_route.startswith("native-milp")
+    assert len(seen) > 0
+    counts = [c.node_count for c in seen]
+    assert counts == sorted(counts) and counts[-1] <= res.node_count
+    with_relax = [c for c in seen if c.x_relaxation is not None]
+    assert with_relax, "no batch reported a relaxation"
+    assert all(c.x_relaxation.shape == (20,) and c.node_bound is not None for c in with_relax)
+    for c in seen:
+        if c.best_bound is not None:
+            if maximize:
+                assert c.best_bound >= res.objective - 1e-6
+            else:
+                assert c.best_bound <= res.objective + 1e-6
+        if c.node_bound is not None:  # a node's relaxation bound also never crosses it
+            if maximize:
+                assert c.node_bound >= res.objective - 1e-6
+            else:
+                assert c.node_bound <= res.objective + 1e-6
 
 
 def test_native_lp_uses_the_discopt_simplex():
@@ -206,33 +258,23 @@ def _multi_knapsack(n: int = 20, k: int = 5, seed: int = 0) -> dm.Model:
     return m
 
 
-def test_branching_rules_change_the_search_but_not_the_answer(monkeypatch):
+def test_branching_rules_change_the_search_but_not_the_answer():
+    """On the Rust engine (retirement step 4): every rule certifies the same optimum;
+    the fractionality rules never probe, full strong branching probes more than the
+    default reliability rule (which probes only unreliable candidates, within a node
+    budget), and the rules do not all explore the same tree."""
     ref = _multi_knapsack().solve()
-    hinted = []
-    real = S._milp_branching_hints
-
-    def spy(*args, **kwargs):
-        out = real(*args, **kwargs)
-        hinted.append((args[0], len(out[0])))
-        return out
-
-    monkeypatch.setattr(S, "_milp_branching_hints", spy)
-    nodes = {}
+    nodes, probes = {}, {}
     for rule in S._MILP_BRANCHING_RULES:
-        res = _multi_knapsack().solve(
-            milp_backend="native", milp_cuts=False, branching_rule=rule, batch_size=1
-        )
+        res = _multi_knapsack().solve(milp_backend="native", milp_cuts=False, branching_rule=rule)
         assert res.status == "optimal" and res.gap_certified
         assert res.objective == pytest.approx(ref.objective, abs=1e-6)
         assert f"branching_rule={rule!r}" in res.algorithm_route
+        assert res.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP")
         nodes[rule] = res.node_count
-        probes = (res.solver_stats or {}).get("branching/strong_probe_lps", 0)
-        assert (probes > 0) == (rule == "strong")
-    # Every non-default rule handed the tree hints (the probe fired), and the
-    # rules did not all explore the same tree.
-    for rule in ("most_fractional", "least_fractional", "strong"):
-        assert sum(n for r, n in hinted if r == rule) > 0, rule
-    assert not any(r == "pseudocost" for r, _ in hinted)
+        probes[rule] = (res.solver_stats or {})["branching/strong_probe_lps"]
+    assert probes["most_fractional"] == probes["least_fractional"] == 0, probes
+    assert probes["strong"] > 0 and probes["strong"] >= probes["pseudocost"], probes
     assert len(set(nodes.values())) > 1, nodes
 
 
@@ -260,8 +302,10 @@ def test_branching_rule_refused_on_an_lp():
 # ── callbacks on a MILP without milp_backend ────────────────────────────
 
 
-def test_node_callback_on_a_default_milp_runs_the_tree(monkeypatch):
-    """Previously the HiGHS route returned with the callback never called."""
+def test_node_callback_on_a_default_milp_runs_the_engine(monkeypatch):
+    """Previously the HiGHS route returned with the callback never called. Since the
+    Python-MILP-tree retirement the callback is served by the Rust engine's batch
+    checkpoint (``_milp_node_callback_hook``), not by the Python tree."""
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
     highs = _spy(monkeypatch, "_solve_milp_highs")
     seen = []
@@ -270,7 +314,8 @@ def test_node_callback_on_a_default_milp_runs_the_tree(monkeypatch):
     res = _knapsack().solve(node_callback=lambda ctx, m: seen.append(ctx))
     assert highs == []
     assert seen and res.node_count > 0
-    assert res.algorithm_route.startswith("milp-tree")
+    assert res.algorithm_route.startswith("native-milp"), res.algorithm_route
+    assert "route/python_milp_tree_entry" not in (res.solver_stats or {})
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)
 
 
@@ -361,29 +406,3 @@ def test_tree_options_on_a_model_dispatched_as_an_lp_warn(monkeypatch):
         res = _lp().solve(milp_backend="native", branching_rule="strong")
     assert len(calls) > 1
     assert res.status == "optimal"
-
-
-def test_node_callback_reports_no_bound_for_a_batch_without_a_relaxation():
-    """Review 5: an all-sentinel batch used to report node_bound ~ +-1e30 and the
-    box midpoint as x_relaxation."""
-
-    class _Tree:
-        def stats(self):
-            return {"total_nodes": 3, "global_lower_bound": 1.0, "gap": 0.5}
-
-        def incumbent(self):
-            return None
-
-    seen = []
-    m = _knapsack(n=4)
-    lbs = np.full(2, S._INFEASIBILITY_SENTINEL)
-    sols = np.full((2, 6), 0.5)
-    S._fire_milp_node_callback(lambda c, mm: seen.append(c), m, _Tree(), lbs, sols, 4, True, 0.0)
-    assert len(seen) == 1
-    assert seen[0].node_bound is None and seen[0].x_relaxation is None
-    # A batch with one real bound still reports it (and its point), in user sense.
-    lbs[1] = -7.0
-    sols[1, :4] = [1.0, 0.0, 1.0, 0.0]
-    S._fire_milp_node_callback(lambda c, mm: seen.append(c), m, _Tree(), lbs, sols, 4, True, 0.0)
-    assert seen[1].node_bound == pytest.approx(7.0)  # maximize: internal -obj
-    assert seen[1].x_relaxation.tolist() == [1.0, 0.0, 1.0, 0.0]

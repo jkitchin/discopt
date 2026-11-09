@@ -143,9 +143,16 @@ timed_phases!(
     SepGomory,
     Augment,
     DiveRepair,
-    // A12/RINS: wall time inside the sub-MILP improvement heuristic.
-    Rins,
-    Rens,
+    // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`).
+    SubMip,
+    // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`).
+    RandRound,
+    // W1 (D2 plan): the node-GMI step's parts.
+    NodeGmiScan,
+    NodeGmiAugment,
+    NodeGmiLp,
+    NodeGmiNs,
+    NodeGmiSep,
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
@@ -235,42 +242,10 @@ counters!(
     NodeNsProjectTry,
     NodeNsProjectRescue,
     NodeNsProjectSingular,
-    // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
-    // >= run >= improved -- so an implausible ordering is an arithmetic error
-    // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`
-    // is the safety counter: a sub-MILP point that failed the driver's own
-    // feasibility re-verification. It must stay ZERO; a nonzero value means the
-    // heuristic tried to inject an infeasible incumbent and is a correctness
-    // bug, not a tuning signal.
-    RinsConsidered,
-    RinsGated,
-    RinsRun,
-    RinsImproved,
-    RinsRejected,
-    RinsSubNodes,
-    // A batch that reached the RINS call site but was skipped because the
-    // failure backoff had widened the stride past it. This is the counter that
-    // proves the backoff engaged: the first A12 panel ran RINS 1401 times for 35
-    // improvements (a 2.5 % hit rate) at a cost of +44.9 % wall on the
-    // both-solved set, and cutting the low-yield tail is what this exists for.
-    RinsBackoffSkips,
-    // A14 RENS (`DISCOPT_RENS`). Same funnel discipline as RINS above --
-    // considered >= gated >= run >= improved -- and `RensRejected` is the same
-    // safety counter that must stay ZERO. `RensSeeded` counts the attempts in
-    // which the incumbent happened to lie inside the RENS box and could be used
-    // as a cutoff; it is expected to be a small fraction, and a value equal to
-    // `RensRun` would mean the box is not actually moving off the incumbent,
-    // i.e. RENS has degenerated into RINS and the panel is comparing a mechanism
-    // against itself.
-    RensConsidered,
-    RensGated,
-    RensRun,
-    RensImproved,
-    RensRejected,
-    RensSubNodes,
-    RensSeeded,
-    RensBackoffSkips,
     Phase1Pivots,
+    // highs-parity P3.2: exact open-column Farkas checks run / that certified.
+    FarkasExactAttempt,
+    FarkasExactRescue,
     Phase2Pivots,
     DegeneratePivots,
     BoundFlips,
@@ -315,6 +290,119 @@ counters!(
     // audit that the reuse is actually happening (CLAUDE.md §6) — without it a
     // silently-always-refactoring path reads exactly like a working one.
     RcFixDualReuse,
+    // highs-parity P4.5 entry: free integer columns at the root node, and how many
+    // its FBBT + reduced-cost fixing pinned.
+    RootIntFree,
+    RootIntFixed,
+    // highs-parity P4.7 entry: verified-infeasible nodes, the local bound changes
+    // their Farkas proofs use (sum), and how many use <= 10.
+    ConflictInfeasNodes,
+    ConflictLocalBoundsSum,
+    ConflictSmall,
+    // D2 R1 entry (objective cutoff): warm/cold node-LP pivots on `Optimal` nodes,
+    // and the share spent on nodes whose bound reached the dispatch-time incumbent
+    // (pruned anyway; the pivots an objective limit in the dual simplex could save).
+    NodeLpOptimal,
+    NodeLpIters,
+    NodeLpOverInc,
+    NodeLpItersOverInc,
+    // D2 R1 prototype (`DISCOPT_MILP_IMPROVE_DIVE`): improving dives run, dives that
+    // returned a point, dives ended by the incumbent cutoff, fixings refused by FBBT.
+    ImproveDiveRuns,
+    ImproveDiveHits,
+    ImproveDiveCutoff,
+    ImproveDivePropInfeas,
+    // Node cuts (any separator) that passed dedup and the pool cap and were folded
+    // into the shared matrix.
+    NodeCutsFolded,
+    // D2 B1' (`DISCOPT_MILP_NODE_GMI`): nodes that ran local Gomory rounds, raw and kept
+    // cuts, rounds whose LP failed or whose NS check abstained, and nodes whose bound
+    // the rounds lifted.
+    NodeGmiNodes,
+    NodeGmiRaw,
+    NodeGmiCuts,
+    NodeGmiLpFail,
+    NodeGmiNsAbstain,
+    NodeGmiLifted,
+    // Nodes that re-solved with rows inherited from an ancestor.
+    NodeGmiInheritSolves,
+    // Global GMI rows refused: a nonzero tableau entry on a node-local column or at an
+    // infinite complementing global bound.
+    SepGomoryGlobalRefused,
+    // Globally complemented GMI rows refused because `Σ|ᾱ_j x̃_j|` exceeded
+    // `GLOBAL_BETA_MAG_MAX`, so f0 was not resolved (PR #2196 review, item 3).
+    SepGomoryGlobalBetaUnresolved,
+    // The global GMI pool: cuts admitted, dropped (age/cap), and appended at nodes.
+    NodeGmiPoolAdded,
+    NodeGmiPoolDropped,
+    NodeGmiPoolUsed,
+    NodeGmiFoldNnz,
+    NodeGmiFoldNnz0,
+    NodeGmiFoldRowsSeen,
+    NodeGmiFoldRowsBasic,
+    CutLpFolded,
+    CutLpDeleted,
+    CutLpDeleteBlocked,
+    CutLpDeleteBlockedRow,
+    CutLpLenRejected,
+    CutLpRelaxed,
+    // D2 review R1 entry (instrument only): lazily relaxed cut rows checked against a
+    // later node LP point, how many of those checks found the cut violated, and the
+    // nodes with at least one violated relaxed cut. A relaxed row neither binds nor
+    // returns to the pool, so a violated one is a lost cut.
+    CutLpRelaxedChecked,
+    CutLpRelaxedViolated,
+    CutLpRelaxedViolatedNodes,
+    // DISCOPT_MILP_CUT_LP_READMIT: relaxed folded rows re-admitted in place.
+    CutLpReadmitted,
+    // A cut-row deletion left a stored basis that no longer spans the LP (dropped).
+    // Deletion requires the row basic in every frontier basis, so this stays 0.
+    CutLpBasisDropped,
+    // D2 review R0: the driver's stall guard stopped a run with no incumbent.
+    MilpStallGuardStop,
+    // DISCOPT_MILP_NO_STALL_TREE: the deadline moved because there was no incumbent.
+    MilpNoIncumbentExtend,
+    // Gap plan P1 (DISCOPT_MILP_RUN1_CONTINUE): the stall-point root re-solve ran / its
+    // root heuristics returned a strictly better, re-validated incumbent / a point the
+    // driver could not re-validate (must stay 0).
+    StallRediveRun,
+    StallRediveImproved,
+    StallRediveRejected,
+    // A node evaluated with no stored basis below the root (was taken for the root).
+    NodeNoBasisOffRoot,
+    // #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE: engine entries' Numerical solves re-tried
+    // from the all-logical basis, and how many of those it decided (certified).
+    LpLogicalRescueAttempts,
+    LpLogicalRescueDecided,
+    LazyNearIntegralBranch,
+    // highs-parity D3 `DISCOPT_MILP_TOL_ROBUST`: node LPs infeasible but not robustly
+    // so, re-solved over the tolerance-relaxed rows; how many of those were optimal;
+    // and Farkas rays refused as a fathom because they do not survive the tolerance.
+    TolRobustRelaxedSolves,
+    TolRobustRelaxedOptimal,
+    TolRobustFarkasRefused,
+    // ...and FBBT emptiness verdicts confirmed over the relaxed rows / refused there.
+    TolRobustFbbtConfirm,
+    TolRobustFbbtRefused,
+    // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
+    P1ExpelPasses,
+    // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).
+    SubstFixedSlack,
+    // D2 sub-MIP heuristic (`DISCOPT_MILP_SUBMIP`): attempts considered, propagation
+    // refusals, RENS/RINS solves run, sub-solve nodes, improvements, and rejected
+    // points (must stay 0).
+    SubMipConsidered,
+    SubMipPropInfeas,
+    SubMipRensRun,
+    SubMipRinsRun,
+    SubMipSubNodes,
+    SubMipImproved,
+    SubMipRejected,
+    RandRoundRuns,
+    RandRoundPropInfeas,
+    RandRoundLpFail,
+    RandRoundFound,
+    RandRoundRejected,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,
@@ -732,6 +820,17 @@ counters!(
     // small against it.
     SepGomoryCalls,
     SepGomoryShortBasis,
+    // highs-parity P4.4: a short basis completed with unit columns of its
+    // structurally unmatched rows (`DISCOPT_MILP_ROOT_GMI_REPAIR`), then separated.
+    SepGomoryBasisCompleted,
+    // highs-parity P4.3 entry: GMI cuts refused by the separator's numerical gates.
+    SepGomoryRejectNonFinite,
+    SepGomoryRejectTiny,
+    SepGomoryRejectMagnitude,
+    SepGomoryRejectDynamism,
+    // highs-parity P4.4: a cut's slack coefficient rewritten through the row its
+    // slack column actually sits in, where `ns + r` is not row `r`'s own slack.
+    SubstSlackByColumn,
     SepGomorySingular,
     SepGomoryFtranFail,
     SepGomoryBtranFail,

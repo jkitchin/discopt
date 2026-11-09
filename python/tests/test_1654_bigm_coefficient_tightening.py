@@ -53,6 +53,17 @@ def _fixed_charge(big_m: float) -> dm.Model:
     return m
 
 
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """Both mechanisms under test live in ``lp_milp_highs`` (module docstring). Since
+    2026-11-09 the pure-MILP default is the Rust engine on every install (PR #2196),
+    so these tests name HiGHS explicitly, the optional ``discopt[highs]`` extra. On the
+    Rust default ``test_refused_incumbent_is_repaired_not_an_error`` spent its whole
+    120 s limit uncertified (CI: pytest timeout) where HiGHS takes 6.8 s."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 def _solve(m, **kw):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -99,7 +110,11 @@ def test_tightening_shrinks_the_big_m():
 
 
 @pytest.mark.parametrize("big_m", [1e7, 1e9])
-def test_sequencing_certifies_the_true_makespan(big_m):
+def test_sequencing_certifies_the_true_makespan(big_m, monkeypatch):
+    # HiGHS is the opt-in MILP engine since PR #2196; this test needs a certifying
+    # oracle engine. The Rust engine's shortfall here is a recorded MILP-gap target.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     r = _solve(_sequencing(big_m), time_limit=120)
     assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
     assert r.objective == pytest.approx(47.0, abs=1e-6)

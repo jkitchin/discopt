@@ -27,6 +27,7 @@ fallback — POUNCE is the QP engine.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, TypeVar, cast
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -138,17 +139,15 @@ def get_qp_solver(prefer_pounce: bool = False) -> Callable:
 
 
 def _milp_pounce() -> Callable | None:
-    # POUNCE "matrix MILP" is the self-hosted B&B; available iff POUNCE is.
-    try:
-        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-
-        if not POUNCE_AVAILABLE:
-            return None
-        from discopt.solvers.milp_pounce import solve_milp
-
-        return solve_milp
-    except ImportError:
+    # Retired (Python-MILP-tree retirement, R11): the matrix "POUNCE" MILP backend was
+    # the Python MILP tree with IPM node LPs. ``backend="pounce"`` now names the
+    # retirement alias, which runs the Rust simplex engine and warns that it does
+    # (``milp_pounce.solve_milp``). Available iff that engine is.
+    if _milp_simplex() is None:
         return None
+    from discopt.solvers.milp_pounce import solve_milp
+
+    return solve_milp
 
 
 def _milp_simplex() -> Callable | None:
@@ -187,9 +186,11 @@ def _milp_gurobi() -> Callable | None:
 def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Callable:
     """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
 
-    ``backend`` selects the preferred engine: ``"auto"`` (**simplex-first** — the
-    pure-Rust warm-started-simplex B&B — then POUNCE; or POUNCE-first under
-    ``prefer_pounce``), ``"pounce"``, ``"simplex"``, ``"gurobi"``, or ``"highs"``. The preferred
+    ``backend`` selects the preferred engine: ``"auto"`` (the pure-Rust
+    warm-started-simplex B&B), ``"pounce"`` (retired, R11: an alias that runs the same
+    Rust engine and warns), ``"simplex"``, ``"gurobi"``, or ``"highs"``.
+    ``prefer_pounce`` is accepted and ignored since the POUNCE matrix MILP backend was
+    retired. The preferred
     engine is tried first and the call falls back to the standard order if it is
     unavailable, so selection never fails when *any* backend is importable. An
     explicit Gurobi selection returns the optional wrapper; a missing ``gurobipy``
@@ -201,8 +202,6 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     reaches the exact B&B optimum (a rigorous bound, unlike the POUNCE IPM's
     analytic-center objective that can drift on ill-conditioned LPs — #145) and is
     fast on the lifted, ill-conditioned relaxations where the POUNCE IPM is slow.
-    POUNCE remains as the fallback (HiGHS removed, issue #356). ``prefer_pounce``
-    (the POUNCE-only mode) keeps its POUNCE-first order unchanged.
 
     ``"highs"`` (issue #1060) is the one backend with **no** fallback order: it is
     an explicit opt-in for the MIP-NLP *master*, never reachable from ``"auto"``,
@@ -216,7 +215,10 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     valid = {"auto", "pounce", "simplex", "gurobi", "highs"}
     if backend not in valid:
         raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
-    base = (_milp_pounce, _milp_simplex) if prefer_pounce else (_milp_simplex, _milp_pounce)
+    # ``prefer_pounce`` no longer changes the engine: the POUNCE matrix MILP backend is
+    # retired (R11), so every default order is the Rust simplex engine.
+    del prefer_pounce
+    base = (_milp_simplex,)
     if backend == "simplex":
         order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
     elif backend == "highs":
@@ -238,27 +240,35 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     )
 
 
-def _highspy_available() -> bool:
-    try:
-        import highspy  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 def get_decomposition_master_solver() -> tuple[Callable, str]:
     """``(solve_milp, engine_name)`` for a decomposition MASTER (#1614 D-26/D-27).
 
     The Benders / GBD / Lagrangian masters are linear MILPs whose objective is the
     reported dual bound, so they need an exact-vertex engine (#986: not the POUNCE
-    IPM B&B). HiGHS is one, and on MIP masters it is the measurably stronger one
-    (#1060: rsyn0840m's OA master closes 86.1% of the root gap on HiGHS vs 0% on
-    the in-house tree). It is a core dependency, so it is the default here;
-    the in-house simplex B&B remains the fallback for an install without
-    ``highspy`` and is then named in the route.
+    IPM B&B). Since highs-parity P5.2 (2026-11-06) the default is the in-house
+    simplex B&B, with HiGHS as the opt-in (``DISCOPT_DECOMP_MASTER=highs``). The
+    replay of every captured decomposition master and the vendored GDP masters
+    (``docs/dev/data/highs-parity/p5.2/``, 3 rounds, both engines on each master):
+    identical certified sets (3040/3040 decomposition, 52/52 GDP), SGM wall
+    simplex/HiGHS 0.085 and 0.305, totals 3.8 vs 44.8 s and 0.9 vs 3.1 s. The one
+    disagreement (``decomp__299_00642``, a two-variable big-M master) is HiGHS's:
+    it returned ``x = 4.4e-9`` -- integral within tolerance, but the 7.9e8 coefficient
+    turns that into 3.46 of slack -- while the simplex B&B returns the true optimum
+    ``x = 1`` (exact enumeration). HiGHS stays measurably stronger on large OA
+    masters (#1060), which this selector does not serve.
+
+    ``DISCOPT_DECOMP_MASTER`` (``simplex`` | ``highs``) forces one engine; unset is
+    the simplex B&B. ``highs`` without ``highspy`` raises at call time like any HiGHS
+    master; any other value raises here, so a typo cannot silently pick an engine.
     """
-    if _highspy_available():
-        return _milp_highs(), "HiGHS"  # type: ignore[return-value]
+    forced = os.environ.get("DISCOPT_DECOMP_MASTER")
+    if forced is not None:
+        val = forced.strip().lower()
+        if val == "highs":
+            return _milp_highs(), "HiGHS"  # type: ignore[return-value]
+        if val == "simplex":
+            return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
+        raise ValueError(f"DISCOPT_DECOMP_MASTER={forced!r}: expected 'highs' or 'simplex'")
     return get_milp_solver(backend="simplex"), "the discopt simplex B&B"
 
 

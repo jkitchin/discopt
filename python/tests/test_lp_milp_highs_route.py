@@ -300,10 +300,22 @@ def test_zero_cost_recession_lp_certifies_by_exact_dual_correction():
 @pytest.mark.parametrize(
     "name, provenance", [("klein1", "phase1-exact-dual-correction"), ("forest6", "farkas-fbbt-box")]
 )
-def test_infeasible_lp_without_a_declared_box_farkas_ray_is_proved(name, provenance):
+def test_infeasible_lp_without_a_declared_box_farkas_ray_is_proved(name, provenance, monkeypatch):
+    # The provenance labels are HiGHS's proof routes; since highs-parity P6.4 the
+    # `solve_lp_std` default engine is Rust, so pin HiGHS here (the Rust engine's
+    # verdict on the same instances is checked below).
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_STD_ENGINE", "highs")
     out = H.solve_lp_std(_certificate_instance(name))
     assert out.status == "infeasible" and out.gap_certified
     assert out.labels["lp/infeasible_provenance"] == provenance
+
+
+@pytest.mark.parametrize("name", ["klein1", "forest6"])
+def test_default_engine_also_certifies_these_lps_infeasible(name, monkeypatch):
+    monkeypatch.delenv("DISCOPT_LP_STD_ENGINE", raising=False)
+    out = H.solve_lp_std(_certificate_instance(name))
+    assert out.status == "infeasible" and out.gap_certified
 
 
 # ── LP route through Model.solve ────────────────────────────────────────
@@ -409,14 +421,15 @@ def test_highs_route_skips_discopt_root_presolve(monkeypatch, build):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(pp, "run_root_presolve", counting)
-    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    ref = build().solve()
-    rust_calls = len(calls)
-    assert rust_calls > 0  # the probe fires on the route that keeps presolve
+    # The control is the native route, which keeps presolve (the Rust route skips it
+    # too since highs-parity P2.0, so it can no longer show the probe firing).
+    ref = build().solve(milp_backend="native")
+    native_calls = len(calls)
+    assert native_calls > 0  # the probe fires on the route that keeps presolve
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     res = build().solve()
     assert _on_highs_route(res) and res.status == "optimal" and res.gap_certified
-    assert len(calls) == rust_calls
+    assert len(calls) == native_calls
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)
 
 
@@ -728,7 +741,8 @@ print("RESULT", r.status, route, "highspy" in sys.modules)
 
 @pytest.mark.parametrize("kind", ["minlp", "milp"])
 def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
-    """Plan §4: a default MINLP solve never imports highspy; a pure MILP takes HiGHS.
+    """Plan §4: a default MINLP solve never imports highspy. Since PR #2196 a default
+    pure MILP does not either: it takes the Rust engine on every install.
 
     A fresh interpreter with the flag unset, so the graduated default is what runs and
     nothing earlier in the test process has imported highspy.
@@ -746,7 +760,4 @@ def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
     assert len(lines) == 1, out.stdout + out.stderr
     _, status, route, imported = lines[0]
     assert status == "optimal"
-    if kind == "minlp":
-        assert (route, imported) == ("None", "False")
-    else:
-        assert (route, imported) == ("1.0", "True")
+    assert (route, imported) == ("None", "False"), (kind, route, imported)

@@ -1,0 +1,35 @@
+== panel.json
+clay0303hfsg@default         cert 3/3 bound_med 26669.10955 26669.10955 rel(r-h)=+0.0e+00 nodes [414, 414, 436] [414, 414, 478] wall_med 34.78 35.05 ratio 1.008
+cvxnonsep_nsig30@default     cert 3/3 bound_med 130.6184139 130.6184139 rel(r-h)=+0.0e+00 nodes [2480, 2716, 2716] [2840, 2716, 2716] wall_med 39.41 39.97 ratio 1.014
+cvxnonsep_psig30@default     cert 3/3 bound_med 78.99179857 78.99179857 rel(r-h)=+0.0e+00 nodes [1900, 2540, 3284] [1900, 1772, 3254] wall_med 39.59 38.86 ratio 0.982
+cvxnonsep_psig40r@default    cert 3/3 bound_med 86.54409703 86.54409703 rel(r-h)=+0.0e+00 nodes [1575, 1575, 1575] [1575, 1575, 1575] wall_med 21.09 20.62 ratio 0.978
+portfol_roundlot@default     cert 3/3 bound_med 0.02829021183 0.02829021183 rel(r-h)=+0.0e+00 nodes [294, 294, 294] [294, 294, 294] wall_med 3.71 3.80 ratio 1.026
+clay0303hfsg@nlpbb           cert 3/3 bound_med 26669.10955 26669.10955 rel(r-h)=+0.0e+00 nodes [287, 287, 287] [257, 287, 287] wall_med 31.11 30.75 ratio 0.988
+cvxnonsep_nsig30@nlpbb       cert 3/3 bound_med 130.6184139 130.6184139 rel(r-h)=+0.0e+00 nodes [165, 165, 165] [165, 165, 165] wall_med 4.91 5.13 ratio 1.046
+cvxnonsep_psig30@nlpbb       cert 3/3 bound_med 78.99701685 78.99701685 rel(r-h)=+0.0e+00 nodes [93, 93, 93] [93, 93, 93] wall_med 1.49 1.51 ratio 1.010
+cvxnonsep_psig40r@nlpbb      cert 3/3 bound_med 86.5391238 86.54195789 rel(r-h)=+3.3e-05 nodes [3, 3, 3] [3, 3, 3] wall_med 1.43 2.71 ratio 1.902
+fac2@nlpbb                   cert 3/3 bound_med 331837497.5 331837497.5 rel(r-h)=+0.0e+00 nodes [39, 39, 39] [39, 39, 39] wall_med 6.20 6.42 ratio 1.035
+flay02m@nlpbb                cert 3/3 bound_med 37.94733186 37.94733175 rel(r-h)=-2.9e-09 nodes [7, 7, 7] [7, 7, 7] wall_med 3.96 0.65 ratio 0.164
+flay03m@nlpbb                cert 3/3 bound_med 48.98979478 48.98979478 rel(r-h)=+0.0e+00 nodes [123, 123, 123] [123, 123, 123] wall_med 18.32 18.54 ratio 1.012
+m3@nlpbb                     cert 3/3 bound_med 37.79999967 37.79999967 rel(r-h)=+0.0e+00 nodes [47, 47, 47] [47, 47, 47] wall_med 12.31 13.32 ratio 1.082
+nvs03@nlpbb                  cert 3/3 bound_med 16 16 rel(r-h)=+0.0e+00 nodes [3, 3, 3] [3, 3, 3] wall_med 0.16 0.15 ratio 0.949
+tls2@nlpbb                   cert 1/2 bound_med 4.15714284 5.3 rel(r-h)=+2.7e-01 nodes [137, 221, 337] [189, 189, 181] wall_med 60.34 63.70 ratio 1.056
+ex1223a@nlpbb                cert 3/3 bound_med 4.579582402 4.579582402 rel(r-h)=+0.0e+00 nodes [3, 3, 3] [3, 3, 3] wall_med 0.37 0.35 ratio 0.944
+portfol_roundlot@nlpbb       cert 0/0 bound_med 0.0282902144 0.02829021417 rel(r-h)=-2.3e-10 nodes [4579, 4483, 4579] [4483, 4579, 4411] wall_med 60.65 60.62 ratio 0.999
+syn05m@nlpbb                 cert 3/3 bound_med 837.7324567 837.7324048 rel(r-h)=-6.2e-08 nodes [5, 5, 5] [9, 9, 9] wall_med 1.12 1.00 ratio 0.890
+rows 18 certified runs h/r {'highs': 49, 'rust': 50} nodes {'highs': 39168, 'rust': 38450} node ratio 0.982 wall sum h/r {'highs': 340.9, 'rust': 343.2} ratio 1.006
+checks 708 violations 0 errors 0
+== panel_rerun_lowload.json
+clay0303hfsg@default         cert 3/3 bound_med 26669.10955 26669.10955 rel(r-h)=+0.0e+00 nodes [414, 414, 414] [414, 414, 414] wall_med 31.26 31.78 ratio 1.017
+cvxnonsep_nsig30@default     cert 3/3 bound_med 130.6184139 130.6184139 rel(r-h)=+0.0e+00 nodes [3770, 3770, 3770] [3770, 3654, 3884] wall_med 39.12 39.87 ratio 1.019
+cvxnonsep_psig30@default     cert 3/3 bound_med 78.99179857 78.99179857 rel(r-h)=+0.0e+00 nodes [3284, 3254, 3284] [3284, 3254, 3254] wall_med 53.93 53.78 ratio 0.997
+cvxnonsep_psig40r@default    cert 3/3 bound_med 86.5391238 86.54409703 rel(r-h)=+5.7e-05 nodes [1575, 1518, 1390] [1575, 1575, 1575] wall_med 31.72 24.34 ratio 0.767
+cvxnonsep_psig40r@nlpbb      cert 3/3 bound_med 86.5391238 86.54195789 rel(r-h)=+3.3e-05 nodes [3, 3, 3] [3, 3, 3] wall_med 1.48 2.68 ratio 1.810
+m3@nlpbb                     cert 3/3 bound_med 37.79999967 37.79999967 rel(r-h)=+0.0e+00 nodes [47, 47, 47] [47, 47, 47] wall_med 11.48 13.00 ratio 1.132
+tls2@nlpbb                   cert 2/0 bound_med 5.299998533 2.899745498 rel(r-h)=-4.5e-01 nodes [137, 137, 221] [189, 189, 147] wall_med 54.79 61.23 ratio 1.118
+rows 7 certified runs h/r {'highs': 20, 'rust': 18} nodes {'highs': 27502, 'rust': 27742} node ratio 1.009 wall sum h/r {'highs': 223.8, 'rust': 226.7} ratio 1.013
+checks 294 violations 0 errors 0
+== panel_tls2_120s.json
+tls2@nlpbb                   cert 4/4 bound_med 5.3 5.299999364 rel(r-h)=-1.2e-07 nodes [257, 359, 257, 257] [189, 189, 159, 181] wall_med 77.65 66.45 ratio 0.856
+rows 1 certified runs h/r {'highs': 4, 'rust': 4} nodes {'highs': 1130, 'rust': 718} node ratio 0.635 wall sum h/r {'highs': 77.7, 'rust': 66.5} ratio 0.856
+checks 72 violations 0 errors 0

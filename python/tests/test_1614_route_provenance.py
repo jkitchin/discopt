@@ -37,13 +37,14 @@ def _param_times_sum(form: str, pval: float):
 
 @pytest.mark.parametrize("pval,expected", [(1.0, 6.0), (0.5, 12.0)])
 @pytest.mark.parametrize("form", ["factored", "distributed"])
-def test_c1_parameter_times_sum_goes_to_highs(form, pval, expected):
+def test_c1_parameter_times_sum_goes_to_the_milp_route(form, pval, expected):
     m = _param_times_sum(form, pval)
     assert classify_nonlinear_terms(m).general_nl == [], "p*(x+y) is linear in x, y"
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(expected, abs=1e-6)
-    assert r.algorithm_route is not None and r.algorithm_route.startswith("highs-milp"), (
+    # The pure-MILP route (its default engine is the Rust one since PR #2196).
+    assert r.algorithm_route is not None and r.algorithm_route.startswith("native-milp"), (
         r.algorithm_route
     )
 
@@ -230,7 +231,9 @@ def test_a21_zero_quadratic_coefficient_is_linear(form, where, integer):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(12.0, abs=1e-6)  # x=4, y=0
-    assert _route(r).startswith("highs-milp" if integer else "highs-lp"), r.algorithm_route
+    # A MILP goes to the MILP route (Rust engine by default since PR #2196); an LP to the
+    # default LP route (Rust since highs-parity D1).
+    assert _route(r).startswith("native-milp" if integer else "rust-lp"), r.algorithm_route
 
 
 @pytest.mark.parametrize("where", ["objective", "constraint"])
@@ -262,17 +265,28 @@ def test_d14_convex_nlp_default_solve_names_route():
     assert _route(r)
 
 
-# ── D-26/D-27: decomposition masters on HiGHS, and an LP master's bound ──
+# ── D-26/D-27: decomposition master engines (simplex default, P5.2); an LP master's bound ──
 
 
-def test_d26_benders_master_runs_on_highs():
+@pytest.mark.parametrize(
+    "forced,engine",
+    [(None, "the discopt simplex B&B"), ("highs", "HiGHS"), ("simplex", "the discopt simplex B&B")],
+)
+def test_d26_benders_master_engine_is_named(monkeypatch, forced, engine):
+    # highs-parity P5.2: the in-house simplex B&B is the default master; HiGHS is the
+    # opt-in. Either way the route names the engine that ran.
+    if forced is None:
+        monkeypatch.delenv("DISCOPT_DECOMP_MASTER", raising=False)
+    else:
+        monkeypatch.setenv("DISCOPT_DECOMP_MASTER", forced)
     r = _two_stage_milp().solve(decomposition="benders", time_limit=60)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(5.0, abs=1e-5)
-    assert _route(r).endswith("master MILP on HiGHS"), r.algorithm_route
+    assert _route(r).endswith(f"master MILP on {engine}"), r.algorithm_route
 
 
-def test_d26_lagrangian_master_runs_on_highs(monkeypatch):
+@pytest.mark.parametrize("forced,engine", [(None, "the discopt simplex B&B"), ("highs", "HiGHS")])
+def test_d26_lagrangian_master_engine(monkeypatch, forced, engine):
     import discopt.solvers.lp_backend as lpb
 
     engines = []
@@ -283,9 +297,13 @@ def test_d26_lagrangian_master_runs_on_highs(monkeypatch):
         engines.append(engine)
         return milp, engine
 
+    if forced is None:
+        monkeypatch.delenv("DISCOPT_DECOMP_MASTER", raising=False)
+    else:
+        monkeypatch.setenv("DISCOPT_DECOMP_MASTER", forced)
     monkeypatch.setattr(lpb, "get_decomposition_master_solver", spy)
     r = _coupled_knapsack().solve(decomposition="lagrangian", time_limit=60)
-    assert engines and set(engines) == {"HiGHS"}, engines
+    assert engines and set(engines) == {engine}, engines
     assert r.bound is not None and r.bound <= -9.0 + 1e-6
 
 

@@ -32,6 +32,16 @@ from discopt.solver import _highs_std_form
 from discopt.solvers import lp_milp_highs as L
 from scipy.optimize import linprog
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 F = [100, 120, 90]
 D = [20, 30, 25, 15]
 C = [[2, 4, 5, 3], [3, 1, 3, 4], [4, 3, 2, 2]]

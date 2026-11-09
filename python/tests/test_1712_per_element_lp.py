@@ -196,10 +196,16 @@ def build_convex_spec_ok(m) -> bool:
 
 
 @pytest.mark.smoke
-def test_lp_solve_skips_convexity_classification(monkeypatch):
-    """An LP solve never classifies convexity, and its certificate is unchanged."""
+@pytest.mark.parametrize(
+    "backend,route",
+    [("rust", "rust-lp"), pytest.param("highs", "highs-lp", marks=pytest.mark.requires_highs)],
+)
+def test_lp_solve_skips_convexity_classification(monkeypatch, backend, route):
+    """An LP solve never classifies convexity, and its certificate is unchanged -- on
+    either LP route (the Rust one is the default since highs-parity D1)."""
     import discopt.solver as S
 
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", backend)
     m = _per_element_lp(6)
     calls = []
     real = S._classify_model_convexity
@@ -209,7 +215,7 @@ def test_lp_solve_skips_convexity_classification(monkeypatch):
     r = m.solve()
     assert calls == []
     assert r.status == "optimal" and r.gap_certified
-    assert r.algorithm_route is not None and r.algorithm_route.startswith("highs-lp")
+    assert r.algorithm_route is not None and r.algorithm_route.startswith(route)
     # #1551 guard ran on the fast path and measured the error (not skipped).
     assert "certificate/objective_eval_error" in (r.solver_stats or {})
 

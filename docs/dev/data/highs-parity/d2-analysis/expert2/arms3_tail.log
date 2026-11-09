@@ -1,0 +1,3 @@
+iskar {"mode": "G-pool", "extra": {"separating/poolfreq": -1}} -> {'status': 'optimal', 'nodes': 19120, 't': 27.9, 'bound': 37.0, 'calls': 1120, 'cuts': 2681, 'nodes_sep': 325, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 2692}
+iskar {"mode": "G-pool", "extra": {"separating/poolfreq": 1}} -> {'status': 'optimal', 'nodes': 12636, 't': 19.6, 'bound': 37.0, 'calls': 790, 'cuts': 984, 'nodes_sep': 246, 'xb_mismatch': 0, 'opt_violated_global': 0, 'opt_violated_local_inbox': 0, 'checked': 1002}
+executed 2

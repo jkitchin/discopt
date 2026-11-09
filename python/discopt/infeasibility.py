@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import numpy as np
 
@@ -162,6 +162,14 @@ class IISResult:
         return self.summary()
 
 
+def _resolve_iis_engine(iis_engine: Optional[str]) -> str:
+    """:func:`discopt._iis_milp._resolve_iis_engine` (the one definition), imported
+    lazily as this module imports ``_iis_milp`` everywhere else."""
+    from discopt._iis_milp import _resolve_iis_engine as _resolve
+
+    return _resolve(iis_engine)
+
+
 def _bound_candidates(model: "Model") -> list[tuple[int, str]]:
     """Finite lower/upper bounds of non-binary variables, as (var_index, side).
 
@@ -260,6 +268,7 @@ def compute_iis(
     portfolio: Sequence[str] | bool | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
+    iis_engine: Optional[str] = None,
 ) -> IISResult:
     """Compute an Irreducible Infeasible Subsystem of an infeasible ``model``.
 
@@ -325,6 +334,13 @@ def compute_iis(
         member -- the smallest set, at up to the whole ``total_time_limit``.
         Measured on MIPcc27 at 600 s, ``"fast"`` returned 100-200 s earlier on
         the slow instances, with one set 4% larger (jjliu_clique 277 vs 266).
+    iis_engine : {"rust", "highs"}
+        Only with ``include_integrality=True``. The MILP solver behind every
+        probe of the matrix engine: discopt's own MILP driver (``"rust"``, the
+        default since 2026-11-07, highs-parity P6.4; see
+        :func:`discopt._iis_milp.milp_iis`) or HiGHS (``"highs"``, opt-out); ``None``
+        reads ``DISCOPT_IIS_ENGINE``. The filter, cross-checks and
+        confirmations are the same either way.
 
     Returns
     -------
@@ -342,6 +358,7 @@ def compute_iis(
     TimeoutError
         ``total_time_limit`` ran out before any subsystem was proven infeasible.
     """
+    iis_engine = _resolve_iis_engine(iis_engine)
     from discopt._iis_milp import _normalize_portfolio
 
     portfolio = _normalize_portfolio(portfolio)
@@ -354,6 +371,7 @@ def compute_iis(
             portfolio=portfolio,
             workers=workers,
             portfolio_wait=portfolio_wait,
+            iis_engine=iis_engine,
         )
     if portfolio is not None or workers is not None:
         raise ValueError("portfolio/workers require include_integrality=True")
@@ -497,8 +515,10 @@ def _compute_iis_with_integrality(
     portfolio: Sequence[str] | None = None,
     workers: int | None = None,
     portfolio_wait: str = "fast",
+    iis_engine: Optional[str] = None,
 ) -> IISResult:
     """:func:`compute_iis` with integrality elements, via the matrix engine."""
+    iis_engine = _resolve_iis_engine(iis_engine)
     from discopt._iis_milp import milp_iis
 
     res = milp_iis(
@@ -509,6 +529,7 @@ def _compute_iis_with_integrality(
         portfolio=portfolio,
         workers=workers,
         portfolio_wait=portfolio_wait,
+        iis_engine=iis_engine,
     )
 
     # Flat column -> (variable, multi-index).

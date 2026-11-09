@@ -35,7 +35,9 @@ def _model():
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("backend", ["rust", "highs"])
+@pytest.mark.parametrize(
+    "backend", ["rust", pytest.param("highs", marks=pytest.mark.requires_highs)]
+)
 def test_native_milp_bound_never_exceeds_exact_optimum(backend, monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", backend)
     r = _model().solve(time_limit=60, threads=1)

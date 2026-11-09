@@ -1,0 +1,294 @@
+{"file": "../../../ref/HiGHS/check/instances/1448.lp", "highs_s": 0.008, "ours_s": 0.001, "agree": true, "differences": [], "n": 0, "m": 0, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/1449a.lp", "highs_error": "HiGHS could not read '../../../ref/HiGHS/check/instances/1449a.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"file": "../../../ref/HiGHS/check/instances/1449b.lp", "highs_error": "HiGHS could not read '../../../ref/HiGHS/check/instances/1449b.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"file": "../../../ref/HiGHS/check/instances/1451.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/2122.lp", "highs_s": 0.004, "ours_s": 0.002, "agree": true, "differences": [], "n": 855, "m": 1060, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/fixed-binary.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 0, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/garbage.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 0, "m": 0, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/issue-2388.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 42, "m": 34, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/issue-2585.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 6, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/no-newline-eof.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/qcqp.lp", "highs_error": "HiGHS could not read '../../../ref/HiGHS/check/instances/qcqp.lp'", "ours_error": "LP file error: Quadratic constraints not supported by HiGHS (F:140)", "agree": true}
+{"file": "../../../ref/HiGHS/check/instances/qjh.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"file": "../../../ref/HiGHS/check/instances/qjh_uncon.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 0, "hessian_nnz": 4}
+{"file": "../../../ref/HiGHS/check/instances/qpinfeasible.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": 2}
+{"file": "../../../ref/HiGHS/check/instances/qptestnw.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 3, "hessian_nnz": 2}
+{"file": "../../../ref/HiGHS/check/instances/qpunbounded.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 0, "hessian_nnz": 2}
+{"file": "../../../ref/HiGHS/check/instances/semi-continuous.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 4, "hessian_nnz": null}
+{"file": "../../../ref/HiGHS/check/instances/semi-integer.lp", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 4, "hessian_nnz": null}
+{"file": "python/tests/data/qplib/lp/QPLIB_0031.lp", "highs_s": 0.001, "ours_s": 0.0, "agree": true, "differences": [], "n": 60, "m": 32, "hessian_nnz": 494}
+{"case": 0, "tag": "dup obj, lhs const, autoname", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 3, "hessian_nnz": null}
+{"case": 1, "tag": "ranged", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_1.lp'", "ours_error": "LP file error: right-hand side is not a constant (R:573)", "agree": true}
+{"case": 2, "tag": "rhs const sum", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_2.lp'", "ours_error": "LP file error: constraint without a comparison (R:566)", "agree": true}
+{"case": 3, "tag": "=<", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_3.lp'", "ours_error": "LP file error: right-hand side is not a constant (R:573)", "agree": true}
+{"case": 4, "tag": "=>", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_4.lp'", "ours_error": "LP file error: right-hand side is not a constant (R:573)", "agree": true}
+{"case": 5, "tag": "<", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_5.lp'", "ours_error": "LP file error: '<' or '>' in a constraint (R:585)", "agree": true}
+{"case": 6, "tag": ">", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_6.lp'", "ours_error": "LP file error: '<' or '>' in a constraint (R:585)", "agree": true}
+{"case": 7, "tag": "const lhs var rhs", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_7.lp'", "ours_error": "LP file error: right-hand side is not a constant (R:573)", "agree": true}
+{"case": 8, "tag": "lhs const", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 9, "tag": "caps", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 10, "tag": "Minimize:", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_10.lp'", "ours_error": "LP file error: unexpected ':' (R:1171)", "agree": true}
+{"case": 11, "tag": "min: name", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 12, "tag": "minimise", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 13, "tag": "maximise", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 14, "tag": "s.t.", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 15, "tag": "such that", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 16, "tag": "subject\\nto", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 17, "tag": "st.", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_17.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 18, "tag": "S.T.", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 19, "tag": "obj offset", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 20, "tag": "empty obj", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 21, "tag": "const-only obj", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 22, "tag": "juxtaposition", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 23, "tag": "3 * x linear", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_23.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 24, "tag": "double sign", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 25, "tag": "triple sign", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_25.lp'", "ours_error": "LP file error: sign followed by an operator (R:1075)", "agree": true}
+{"case": 26, "tag": "rhs signs", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_26.lp'", "ours_error": "LP file error: upper bound of -infinity (or NaN)", "agree": true}
+{"case": 27, "tag": "zero coef / cancel", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 2, "hessian_nnz": null}
+{"case": 28, "tag": "max and min", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 29, "tag": "st twice consecutive", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_29.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 30, "tag": "st twice nonconsecutive", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_30.lp'", "ours_error": "LP file error: repeated section (R:896)", "agree": true}
+{"case": 31, "tag": "pre-section junk", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 32, "tag": "after end", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_32.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"case": 33, "tag": "end end", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 34, "tag": "empty file", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 0, "m": 0, "hessian_nnz": null}
+{"case": 35, "tag": "no end", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_35.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"case": 36, "tag": "rhs - 2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 37, "tag": "rhs -inf", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_37.lp'", "ours_error": "LP file error: upper bound of -infinity (or NaN)", "agree": true}
+{"case": 38, "tag": "rhs - - 3", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 39, "tag": "rhs big", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_39.lp'", "ours_error": "LP file error: lower bound of +infinity (or NaN)", "agree": true}
+{"case": 40, "tag": "ends with empty bounds no end", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 41, "tag": "no newline eof", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 42, "tag": "ends with empty general", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 43, "tag": "empty general mid", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 44, "tag": "comment after end", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 45, "tag": "blank lines after end", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 46, "tag": "comments, semicolon, multiline", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 2, "hessian_nnz": null}
+{"case": 47, "tag": "dup row names", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 48, "tag": "HiGHS_R clash", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 49, "tag": "HiGHS_R name no auto", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 50, "tag": "numeric row names", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 3, "hessian_nnz": null}
+{"case": 51, "tag": "dup row + auto", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 3, "hessian_nnz": null}
+{"case": 52, "tag": "rhs big ok", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 3, "hessian_nnz": null}
+{"case": 53, "tag": "bound x <= 5", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 54, "tag": "bound x >= -3", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 55, "tag": "bound -3 <= x <= 5", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 56, "tag": "bound x = 4", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 57, "tag": "bound x free", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 58, "tag": "bound x FREE", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 59, "tag": "bound -inf <= x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 60, "tag": "bound x >= -infinity", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 61, "tag": "bound x >= -inf", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 62, "tag": "bound x <= -2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 63, "tag": "bound z <= 5", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 64, "tag": "bound x <= 5\n x <= 7", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 65, "tag": "bound -3 <= x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 66, "tag": "bound 5 >= x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 67, "tag": "bound x >= 1e30", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_67.lp'", "ours_error": "LP file error: lower bound of +infinity (or NaN)", "agree": true}
+{"case": 68, "tag": "bound x <= 1e30", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 69, "tag": "bound x <= -1e30", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_69.lp'", "ours_error": "LP file error: upper bound of -infinity (or NaN)", "agree": true}
+{"case": 70, "tag": "bound x >= 1e20", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_70.lp'", "ours_error": "LP file error: lower bound of +infinity (or NaN)", "agree": true}
+{"case": 71, "tag": "bound x <= 1e19", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 72, "tag": "bound x >= nan", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_72.lp'", "ours_error": "LP file error: lower bound of +infinity (or NaN)", "agree": true}
+{"case": 73, "tag": "bound x < 5", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_73.lp'", "ours_error": "LP file error: '<' or '>' in a bound (R:701)", "agree": true}
+{"case": 74, "tag": "bound x =< 5", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_74.lp'", "ours_error": "LP file error: unrecognised bound (R:710)", "agree": true}
+{"case": 75, "tag": "bound x => 5", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_75.lp'", "ours_error": "LP file error: unrecognised bound (R:710)", "agree": true}
+{"case": 76, "tag": "bound -3 <= x < 5", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_76.lp'", "ours_error": "LP file error: double bound must use '<=' (R:652)", "agree": true}
+{"case": 77, "tag": "bound 3 >= x >= 1", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_77.lp'", "ours_error": "LP file error: double bound must use '<=' (R:651)", "agree": true}
+{"case": 78, "tag": "bound x = -inf", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_78.lp'", "ours_error": "LP file error: upper bound of -infinity (or NaN)", "agree": true}
+{"case": 79, "tag": "bound x <= inf", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 80, "tag": "bound 2 x <= 5", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_80.lp'", "ours_error": "LP file error: unrecognised bound (R:710)", "agree": true}
+{"case": 81, "tag": "bound x - free", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_81.lp'", "ours_error": "LP file error: unrecognised bound (R:710)", "agree": true}
+{"case": 82, "tag": "bound x >= 3 x <= 9", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 83, "tag": "bound 5 <= x\n x free\n x <= 2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 84, "tag": "general\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 85, "tag": "integer\n x\nintegers\n y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 86, "tag": "gen\n x\nbin\n y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 87, "tag": "binary\n x\nbounds\n x <= 5", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 88, "tag": "bounds\n x >= -3\nbinary\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 89, "tag": "bounds\n x free\nbinaries\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 90, "tag": "binary\n z", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 91, "tag": "general\n z", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 92, "tag": "bounds\n x <= 9\nsemi-continuous\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 93, "tag": "semis\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 94, "tag": "semi\n x\ngeneral\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 95, "tag": "general\n x\nsemi\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 96, "tag": "semi-continuous\n z", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 97, "tag": "semicontinuous\n x", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_97.lp'", "ours_error": "LP file error: constraint without a comparison (R:566)", "agree": true}
+{"case": 98, "tag": "semi - continuous\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 99, "tag": "general\n x\nbinary\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 100, "tag": "binary\n x\ngeneral\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 101, "tag": "general\n x\ngeneral\n y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 102, "tag": "general\n x\nbounds\n x<=3\ngeneral\n y", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_102.lp'", "ours_error": "LP file error: repeated section (R:896)", "agree": true}
+{"case": 103, "tag": "general\n 3", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_103.lp'", "ours_error": "LP file error: non-variable in a type section (R:727)", "agree": true}
+{"case": 104, "tag": "general\n x: ", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_104.lp'", "ours_error": "LP file error: non-variable in a type section (R:727)", "agree": true}
+{"case": 105, "tag": "sos\n s1: S1 :: x:1 y:2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_105.lp'", "ours_error": "LP file error: SOS not supported by HiGHS (F:32)", "agree": true}
+{"case": 106, "tag": "sos1\n x", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_106.lp'", "ours_error": "LP file error: constraint without a comparison (R:566)", "agree": true}
+{"case": 107, "tag": "bin\n x\nbounds\n x <= 1e30", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 108, "tag": "bounds\n x <= 0.5\nbinary\n x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 109, "tag": "infeasible", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 110, "tag": "nancy", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 111, "tag": "x.1 + y(2) + z_3 + a!b + c#d + e$f + g&h + i{j} + k,l + m'n + o\"p + q~r + s|t + u@v + w?y + q.", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 17, "m": 1, "hessian_nnz": null}
+{"case": 112, "tag": "1x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 113, "tag": "2e3x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 114, "tag": "1e", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 115, "tag": "0x10 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 116, "tag": "3e+2 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 117, "tag": ".5 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 118, "tag": "5. y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 119, "tag": "1d2 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 120, "tag": "x;y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 121, "tag": "x\ty", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 122, "tag": "xx\r", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 123, "tag": "e1 + E2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 124, "tag": "INF x", "highs_s": 0.002, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 125, "tag": "x + inf", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 126, "tag": "y + nan", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 127, "tag": "x + 1e400 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 128, "tag": "x - 1e-400 y", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 129, "tag": "free", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_129.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 130, "tag": "st1 + bin1 + end1", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 1, "hessian_nnz": null}
+{"case": 131, "tag": "x + bin", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 132, "tag": "Max", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 133, "tag": " x\u000by", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 134, "tag": "x\fy", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 135, "tag": "\u00e9 + \u00fc", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 136, "tag": "empty max", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 137, "tag": "max with only name", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 138, "tag": "MIN: x", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_138.lp'", "ours_error": "LP file error: unexpected ':' (R:1171)", "agree": true}
+{"case": 139, "tag": "row named st", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 140, "tag": "row named ST", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_140.lp'", "ours_error": "LP file error: unexpected ':' (R:1171)", "agree": true}
+{"case": 141, "tag": "row named bounds", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 142, "tag": "[ x^2 ] / 2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 143, "tag": "[ 2 x ^ 2 + 3 x * y - y^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"case": 144, "tag": "[ x * y ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"case": 145, "tag": "[ x * y + y * x ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"case": 146, "tag": "[ 4 x * x ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 147, "tag": "[ x^2 + x^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 148, "tag": "[ y*z + x^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"case": 149, "tag": "[ x^2 ]", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_149.lp'", "ours_error": "LP file error: quadratic bracket without '/ 2'", "agree": true}
+{"case": 150, "tag": "[ x^2 ] / 4", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_150.lp'", "ours_error": "LP file error: quadratic bracket not divided by 2 (R:515-516)", "agree": true}
+{"case": 151, "tag": "[ - x^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 152, "tag": "[ x^2 - 2 x*y ]/2", "highs_s": 0.001, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 4}
+{"case": 153, "tag": "- [ x^2 ]/2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_153.lp'", "ours_error": "LP file error: '-[' (negated quadratic bracket, R:1058)", "agree": true}
+{"case": 154, "tag": "2 [ x^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 155, "tag": "[ 0 x^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 156, "tag": "[ x^3 ]/2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_156.lp'", "ours_error": "LP file error: exponent other than 2 (R:453)", "agree": true}
+{"case": 157, "tag": "[ x^2 y^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 158, "tag": "[ x^2 ]/2 + [ y^2 ]/2", "highs_s": 0.001, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 159, "tag": "[ w^2 ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 1, "hessian_nnz": 4}
+{"case": 160, "tag": "[ x ^ 2.0 ] / 2.0", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 161, "tag": "[ x^2 + 3 ]/2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_161.lp'", "ours_error": "LP file error: expected ']' (R:513)", "agree": true}
+{"case": 162, "tag": "[ 2 x ]/2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_162.lp'", "ours_error": "LP file error: expected ']' (R:513)", "agree": true}
+{"case": 163, "tag": "quad con", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_163.lp'", "ours_error": "LP file error: Quadratic constraints not supported by HiGHS (F:140)", "agree": true}
+{"case": 164, "tag": "quad con /2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_164.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 165, "tag": "[ x*z + x*y ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 5}
+{"case": 166, "tag": "[ z*x + y*x + x^2 ]/2", "highs_s": 0.001, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 5}
+{"case": 167, "tag": "[ x*z + x*y + 2 x*z ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 5}
+{"case": 168, "tag": "[ 1e-10 x*y + 3 x^2]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 169, "tag": "[ 1e16 x^2 ]/2", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_169.lp'", "ours_error": "LP file error: matrix entry too large", "agree": true}
+{"case": 170, "tag": "[ x*y - y*x ]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 171, "tag": "[ 1e-9 x^2 + y^2]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 172, "tag": "[ 2e-9 x*y + y^2]/2", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 3}
+{"case": 173, "tag": "small/large A", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_173.lp'", "ours_error": "LP file error: matrix entry too large", "agree": true}
+{"case": 174, "tag": "small/nan A", "highs_s": 0.001, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 1, "hessian_nnz": null}
+{"case": 175, "tag": "nan rhs", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_175.lp'", "ours_error": "LP file error: lower bound of +infinity (or NaN)", "agree": true}
+{"case": 176, "tag": "lb>ub", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 177, "tag": "bin+semi", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 178, "tag": "bin only", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 179, "tag": "sections out of order", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 4, "m": 1, "hessian_nnz": null}
+{"case": 180, "tag": "ignored max vars", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 181, "tag": "empty rows", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 182, "tag": "x^2 linear", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_182.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 183, "tag": "< = split", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 184, "tag": "indicator", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_184.lp'", "ours_error": "LP file error: sign followed by an operator (R:1075)", "agree": true}
+{"case": 185, "tag": "lazy", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_185.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 186, "tag": "slash name", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_186.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 187, "tag": "two cons one line", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 188, "tag": "lhs const after rhs", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 2, "hessian_nnz": null}
+{"case": 189, "tag": "sos", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_189.lp'", "ours_error": "LP file error: SOS not supported by HiGHS (F:32)", "agree": true}
+{"case": 190, "tag": "empty sos", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 191, "tag": "such that inside", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 192, "tag": "ref", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 193, "tag": "Maximum", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 194, "tag": "NUL", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_194.lp'", "ours_error": "LP file error: NUL character in the file (R:1336)", "agree": true}
+{"case": 195, "tag": "comment odd token count", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_195.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"case": 196, "tag": "comment even token count", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 197, "tag": "comment unclosed", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_197.lp'", "ours_error": "LP file error: last section not closed by a keyword (R:910)", "agree": true}
+{"case": 198, "tag": "comment across lines", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 199, "tag": "vtab number", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 200, "tag": "vtab space number", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 201, "tag": "hex and bare 0x", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 202, "tag": "nan(chars)", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 203, "tag": "general at eof", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 204, "tag": "general general general", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_204.lp'", "ours_error": "LP file error: empty section inside an open section (R:889)", "agree": true}
+{"case": 205, "tag": "bounds twice adjacent", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_205.lp'", "ours_error": "LP file error: unrecognised bound (R:710)", "agree": true}
+{"case": 206, "tag": "min twice adjacent", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_206.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 207, "tag": "keyword as var", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_207.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 208, "tag": "bound as name", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_208.lp'", "ours_error": "LP file error: constraint without a comparison (R:566)", "agree": true}
+{"case": 209, "tag": "end: row", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 210, "tag": "End: row", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_210.lp'", "ours_error": "LP file error: unexpected ':' (R:1171)", "agree": true}
+{"case": 211, "tag": "semi - Continuous", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 212, "tag": "gen then semi", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 213, "tag": "bin gen semi", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 214, "tag": "nan cost", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 215, "tag": "inf cost", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 216, "tag": "inf offset", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 217, "tag": "nan offset", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 218, "tag": "neg zero cost", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 219, "tag": "cost 1e-10", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 220, "tag": "A 1e15 error", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_220.lp'", "ours_error": "LP file error: matrix entry too large", "agree": true}
+{"case": 221, "tag": "A inf error", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_221.lp'", "ours_error": "LP file error: matrix entry too large", "agree": true}
+{"case": 222, "tag": "A sum cancels", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 223, "tag": "A sum to tiny", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 224, "tag": "rows but no cols", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 0, "m": 2, "hessian_nnz": null}
+{"case": 225, "tag": "cols only", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 0, "hessian_nnz": null}
+{"case": 226, "tag": "no keywords", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 0, "m": 0, "hessian_nnz": null}
+{"case": 227, "tag": "only end", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 0, "m": 0, "hessian_nnz": null}
+{"case": 228, "tag": "bounds only", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 0, "hessian_nnz": null}
+{"case": 229, "tag": "bin only section", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 0, "hessian_nnz": null}
+{"case": 230, "tag": "sos empty set", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_230.lp'", "ours_error": "LP file error: SOS not supported by HiGHS (F:32)", "agree": true}
+{"case": 231, "tag": "sos bad type", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_231.lp'", "ours_error": "LP file error: bad SOS type before '::'", "agree": true}
+{"case": 232, "tag": "hessian dup diag", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": 1}
+{"case": 233, "tag": "hessian three vars", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 6}
+{"case": 234, "tag": "hessian reversed", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 5}
+{"case": 235, "tag": "hessian diag last", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": 5}
+{"case": 236, "tag": "hessian negative diag", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": 2}
+{"case": 237, "tag": "hessian nan", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": 2}
+{"case": 238, "tag": "hessian inf", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_238.lp'", "ours_error": "LP file error: matrix entry too large", "agree": true}
+{"case": 239, "tag": "hessian new col", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": 2}
+{"case": 240, "tag": "hessian two brackets", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": 3}
+{"case": 241, "tag": "hessian exponent nan", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_241.lp'", "ours_error": "LP file error: exponent other than 2 (R:453)", "agree": true}
+{"case": 242, "tag": "hessian slash nan", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_242.lp'", "ours_error": "LP file error: quadratic bracket not divided by 2 (R:515-516)", "agree": true}
+{"case": 243, "tag": "bracket at section end", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_243.lp'", "ours_error": "LP file error: unparsed tokens in the objective (R:541)", "agree": true}
+{"case": 244, "tag": "unclosed bracket", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_244.lp'", "ours_error": "LP file error: unclosed quadratic bracket", "agree": true}
+{"case": 245, "tag": "CRLF lines", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 246, "tag": "CR CR", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 247, "tag": "tabs", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 248, "tag": "semicolon name", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 249, "tag": "row named HiGHS_R0 only", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 250, "tag": "row prefix HiGHS_ short", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 251, "tag": "objective name only min", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 252, "tag": "bound inf forms", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 253, "tag": "bound nan", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_253.lp'", "ours_error": "LP file error: upper bound of -infinity (or NaN)", "agree": true}
+{"case": 254, "tag": "bound new var", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 3, "m": 1, "hessian_nnz": null}
+{"case": 255, "tag": "several bounds one line", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 2, "m": 1, "hessian_nnz": null}
+{"case": 256, "tag": "bin after bounds 1e30", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 257, "tag": "bin after free", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 258, "tag": "semi crossed bounds", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 259, "tag": "subject\\nto split", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 260, "tag": "SUCH THAT caps", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 261, "tag": "lazy-constraints", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_261.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 262, "tag": "user cuts", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_262.lp'", "ours_error": "LP file error: constraint without a comparison (R:567)", "agree": true}
+{"case": 263, "tag": "names with dots", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_263.lp'", "ours_error": "LP file error: quadratic bracket without '/ 2'", "agree": true}
+{"case": 264, "tag": "constant then bracket", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_264.lp'", "ours_error": "LP file error: number followed by '[' (R:1081)", "agree": true}
+{"case": 265, "tag": "plus bracket", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": 1}
+{"case": 266, "tag": "plus plus bracket", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": 1}
+{"case": 267, "tag": "minus minus bracket", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": 1}
+{"case": 268, "tag": "plus minus bracket", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_268.lp'", "ours_error": "LP file error: '-[' (negated quadratic bracket, R:1058)", "agree": true}
+{"case": 269, "tag": "sign before colon", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_269.lp'", "ours_error": "LP file error: sign followed by an operator (R:1075)", "agree": true}
+{"case": 270, "tag": "bin in st section", "highs_error": "HiGHS could not read '/tmp/lpsweep_7gplsl04/case_270.lp'", "ours_error": "LP file error: constraint without a comparison (R:566)", "agree": true}
+{"case": 271, "tag": "st: as row name", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 2, "hessian_nnz": null}
+{"case": 272, "tag": "numeric name text", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 3, "hessian_nnz": null}
+{"case": 273, "tag": "utf8 bom", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}
+{"case": 274, "tag": "empty max then st", "highs_s": 0.0, "ours_s": 0.0, "agree": true, "differences": [], "n": 1, "m": 1, "hessian_nnz": null}

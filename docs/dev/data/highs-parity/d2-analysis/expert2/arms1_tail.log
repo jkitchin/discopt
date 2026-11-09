@@ -1,0 +1,9 @@
+istra gom+gmi default                    {'status': 'optimal', 'nodes': 5478, 't': 11.3, 'bound': 49.0, 'rows': {'other': 683, 'root_global': 37, 'tree_global': 34092, 'tree_local': 165}}
+istra tree-only                          {'status': 'optimal', 'nodes': 4240, 't': 9.7, 'bound': 49.0, 'rows': {'other': 683, 'tree_global': 28786}}
+istra tree-only localdist=1              {'status': 'optimal', 'nodes': 1597, 't': 4.8, 'bound': 49.0, 'rows': {'other': 683, 'tree_local': 231, 'tree_global': 14196}}
+istra tree-only nopool                   {'status': 'timelimit', 'nodes': 20596, 't': 30.0, 'bound': 46.9983, 'rows': {'other': 683, 'tree_local': 23}}
+iskar gom+gmi default                    {'status': 'optimal', 'nodes': 1526, 't': 2.3, 'bound': 37.0, 'rows': {'other': 323, 'root_global': 36, 'tree_global': 8591}}
+iskar tree-only                          {'status': 'optimal', 'nodes': 1575, 't': 2.2, 'bound': 37.0, 'rows': {'other': 323, 'tree_global': 10186}}
+iskar tree-only localdist=1              {'status': 'optimal', 'nodes': 4892, 't': 6.2, 'bound': 37.0, 'rows': {'other': 323, 'tree_global': 38438, 'tree_local': 521}}
+iskar tree-only nopool                   {'status': 'timelimit', 'nodes': 36854, 't': 30.0, 'bound': 35.4619, 'rows': {'other': 323, 'tree_local': 1270}}
+executed 8

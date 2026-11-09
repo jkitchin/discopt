@@ -41,7 +41,8 @@ def test_binary_qp_is_linearized_and_solved_on_the_milp_route():
     r = _dopants().solve(time_limit=60)
     assert r.status == "optimal" and r.gap_certified
     assert r.objective == pytest.approx(-1.16, abs=1e-6)  # exhaustive optimum
-    assert r.algorithm_route.startswith("highs-milp")
+    # PR #2196: the MILP route's default engine is the Rust one on every install.
+    assert r.algorithm_route.startswith("native-milp"), r.algorithm_route
 
 
 def test_binary_qp_legacy_opt_out_keeps_spatial_bb(monkeypatch):

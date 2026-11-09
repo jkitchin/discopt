@@ -329,6 +329,7 @@ def test_a_row_id_that_names_another_row_is_refused():
 
 
 @pytest.mark.smoke
+@pytest.mark.requires_highs
 def test_the_split_is_counted_in_solver_stats_and_keeps_the_answer(monkeypatch):
     from discopt.solvers.oa import solve_lp_nlp_bb
 

@@ -19,6 +19,9 @@ import numpy as np
 import pytest
 from discopt.solvers.milp_highs import solve_milp_with_lazy_cuts
 
+# highs-parity P6.3: these tests exercise a HiGHS route (the discopt[highs] extra).
+pytestmark = pytest.mark.requires_highs
+
 A, B = 1.3, 2.6
 OPT = (1 - A) ** 2 + (3 - B) ** 2  # x = 1, y = 3
 

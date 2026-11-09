@@ -41,7 +41,12 @@ CORPORA = (
 
 #: Instances the un-lifted path closes quickly, with the node count it closes in.
 #: The lift costs each of them nodes, so the gate must decline it.
-LIFT_DECLINED = {"nvs02": 3, "nvs14": 3, "prob03": 5}
+#: `prob03` left this list on 2026-11-07, when `DISCOPT_MILP_ALIGNED_SLACKS` graduated:
+#: the route's root cut loop now gets a full basis on the lifted model, which certifies
+#: at the root (1 node, against 5 un-lifted), so the gate no longer wins there. It was
+#: out once before for the same reason, while `DISCOPT_MILP_ROOT_GMI_REPAIR` was briefly
+#: default ON (2026-11-06).
+LIFT_DECLINED = {"nvs02": 3, "nvs14": 3}
 
 #: Instances that certify ONLY with the lift. The gate must keep it, and the
 #: probe it spends first must not cost them their certificate.

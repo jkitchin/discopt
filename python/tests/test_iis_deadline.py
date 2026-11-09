@@ -13,7 +13,18 @@ import time
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt import _iis_backend as _bk
 from discopt.infeasibility import compute_iis
+
+
+@pytest.fixture(autouse=True)
+def _pin_highs_engine(monkeypatch):
+    """These tests' budgets and probe counts were tuned on the HiGHS IIS engine.
+    Since highs-parity P6.4 (2026-11-07) the default engine is the in-house
+    one, so these HiGHS-path tests pin ``DISCOPT_IIS_ENGINE=highs`` (a test that sets it still
+    overrides)."""
+    monkeypatch.setenv("DISCOPT_IIS_ENGINE", "highs")
+
 
 highspy = pytest.importorskip("highspy")
 
@@ -173,7 +184,7 @@ def test_wall_guard_stops_highs_when_its_own_limit_is_ignored(monkeypatch):
     with pytest.raises((TimeoutError, ValueError)):
         _iis_milp.milp_iis(_market_split(), time_limit=600, total_time_limit=budget)
     elapsed = time.perf_counter() - t0
-    assert highspy.HighsModelStatus.kInterrupt in statuses, statuses  # the guard fired
+    assert _bk.INTERRUPTED in statuses, statuses  # the guard fired
     assert elapsed < budget + 2.0, elapsed
 
 
@@ -202,15 +213,16 @@ def test_lp_solves_still_run_after_the_engine_accumulates_runtime():
         np.ones(n, dtype=bool),
         {i: np.array([i]) for i in range(lin.m)},
         0.5,
+        engine="highs",  # pins HiGHS run-time/interrupt behaviour (the default is rust)
     )
     cons = set(range(lin.m))
     bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}
-    while eng.h.getRunTime() < 1.5:  # accumulate > 3x the 0.5 s per-solve budget
+    while eng.backend.h.getRunTime() < 1.5:  # accumulate > 3x the 0.5 s per-solve budget
         eng._configure(cons, bounds, set(range(n)))
         eng._solve("choose")
     eng._configure(cons, bounds, set())  # the LP relaxation: feasible, trivial
     st = eng._solve("off")
-    assert st == highspy.HighsModelStatus.kOptimal, (st, eng.h.getRunTime())
+    assert st == _bk.OPTIMAL, (st, eng.backend.h.getRunTime())
 
 
 @pytest.mark.smoke
@@ -236,22 +248,23 @@ def test_runs_after_an_interrupt_are_not_left_interrupted():
         np.ones(n, dtype=bool),
         {i: np.array([i]) for i in range(lin.m)},
         0.3,
+        engine="highs",  # pins the HiGHS guard interrupt (the default engine is rust)
     )
     cons = set(range(lin.m))
     bounds = {(j, s) for j in range(n) for s in ("lower", "upper")}
     real_set = highspy.Highs.setOptionValue
-    MS = highspy.HighsModelStatus
+    MS = _bk  # backend statuses (highs-parity P3.2)
     # Force a guard interrupt: HiGHS gets no usable time_limit of its own.
-    eng.h.setOptionValue = lambda name, value: real_set(
-        eng.h, name, highspy.kHighsInf if name == "time_limit" else value
+    eng.backend.h.setOptionValue = lambda name, value: real_set(
+        eng.backend.h, name, highspy.kHighsInf if name == "time_limit" else value
     )
     eng._configure(cons, bounds, set(range(n)))
-    assert eng._solve("choose") == MS.kInterrupt
-    del eng.h.setOptionValue
+    assert eng._solve("choose") == MS.INTERRUPTED
+    del eng.backend.h.setOptionValue
     # A trivial LP with every column fixed (what the exact-integer repair solves).
     eng._configure(set(), bounds, set())
-    eng.h.changeColsBounds(n, np.arange(n, dtype=np.int32), np.zeros(n), np.zeros(n))
-    assert eng._solve("off") == MS.kOptimal
+    eng.backend.h.changeColsBounds(n, np.arange(n, dtype=np.int32), np.zeros(n), np.zeros(n))
+    assert eng._solve("off") == MS.OPTIMAL
     # And an ordinary LP relaxation.
     eng._configure(cons, bounds, set())
-    assert eng._solve("off") == MS.kOptimal
+    assert eng._solve("off") == MS.OPTIMAL

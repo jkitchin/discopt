@@ -26,6 +26,7 @@ import warnings
 import discopt.transformations as dt
 import numpy as np
 import pytest
+from conftest import rerun_with_lp_rescue_off
 from discopt import _rust
 from discopt._relax.spatial_producer import build_spatial_kernel_spec
 from discopt.validation.feasibility import verify_point
@@ -85,7 +86,9 @@ def _root(model, box, incumbent, retry):
     )
 
 
-def test_the_lowered_either_or_certifies_with_the_retry(monkeypatch):
+def test_the_lowered_either_or_certifies_with_the_retry(monkeypatch, request):
+    if rerun_with_lp_rescue_off(request):  # #2212: the engine decides it by itself now
+        return
     monkeypatch.delenv(FLAG, raising=False)  # the default
     monkeypatch.setenv(SLACK_FLAG, "0")
     with warnings.catch_warnings():
@@ -107,8 +110,10 @@ def test_the_retry_is_on_by_default_and_zero_opts_out(monkeypatch):
     assert not _kernel_undecided_retry_enabled()
 
 
-def test_the_opt_out_is_the_tree_before_the_retry(monkeypatch):
+def test_the_opt_out_is_the_tree_before_the_retry(monkeypatch, request):
     """``=0`` reproduces the stall (the legacy path stays intact) and reports 0."""
+    if rerun_with_lp_rescue_off(request):
+        return
     monkeypatch.setenv(FLAG, "0")
     monkeypatch.setenv(SLACK_FLAG, "0")
     with warnings.catch_warnings():
@@ -118,10 +123,12 @@ def test_the_opt_out_is_the_tree_before_the_retry(monkeypatch):
     assert (r.solver_stats or {}).get("tree/prop_retries") == 0.0
 
 
-def test_differential_bound_on_fixed_boxes():
+def test_differential_bound_on_fixed_boxes(request):
     """ON bound >= OFF bound, and <= the true box optimum, at the root of fixed boxes
     with the incumbent at the box optimum (the trigger). Most roots must be undecided
     OFF, or the comparison would be vacuous."""
+    if rerun_with_lp_rescue_off(request):
+        return
     model = _lowered()
     compared = undecided_off = 0
     for box, opt in _boxes():

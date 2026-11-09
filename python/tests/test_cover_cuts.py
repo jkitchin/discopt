@@ -12,10 +12,8 @@ from __future__ import annotations
 import itertools
 
 import discopt.modeling as dm
-import discopt.solver as S
 import numpy as np
-import pytest
-from discopt._relax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+from discopt._relax.cover_cuts import separate_cover_cuts
 
 
 # ---------------------------------------------------------------------------
@@ -62,17 +60,6 @@ class TestSeparationSoundness:
         )
         assert cuts == []
 
-    def test_precheck_rejects_non_knapsack(self):
-        assert has_binary_knapsack_rows(np.array([[2.0, 3.0]]), np.array([6.0]), np.ones(2, bool))
-        # negative coefficient
-        assert not has_binary_knapsack_rows(
-            np.array([[2.0, -3.0]]), np.array([6.0]), np.ones(2, bool)
-        )
-        # continuous variable in the row
-        assert not has_binary_knapsack_rows(
-            np.array([[2.0, 3.0]]), np.array([6.0]), np.array([True, False])
-        )
-
 
 # ---------------------------------------------------------------------------
 # End-to-end: cuts reduce nodes and preserve the optimum
@@ -85,39 +72,3 @@ def _distinct_knapsack():
     m.minimize(-(10 * xs[0] + 9 * xs[1] + 8 * xs[2] + 1 * xs[3]))
     m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
     return m
-
-
-class TestEndToEnd:
-    def test_cuts_reduce_nodes_and_preserve_optimum(self, monkeypatch):
-        pytest.importorskip("pounce")
-        r_with = _distinct_knapsack().solve(time_limit=60)
-        nodes_with = r_with.node_count
-
-        monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
-        r_without = _distinct_knapsack().solve(time_limit=60)
-
-        assert r_with.status == "optimal" and r_without.status == "optimal"
-        assert abs(r_with.objective - r_without.objective) < 1e-4  # same optimum
-        assert abs(r_with.objective - (-10.0)) < 1e-4
-        # Cuts must not increase the node count (they tighten the relaxation).
-        assert nodes_with <= r_without.node_count
-
-    def test_noop_on_non_knapsack(self, monkeypatch):
-        pytest.importorskip("pounce")
-        seen = {"cuts": 0}
-        orig = S._root_cover_cut_loop
-
-        def spy(*a, **k):
-            ld, n = orig(*a, **k)
-            seen["cuts"] += n
-            return ld, n
-
-        monkeypatch.setattr(S, "_root_cover_cut_loop", spy)
-        m = dm.Model("eq")
-        a = m.integer("a", lb=0, ub=5)
-        b = m.integer("b", lb=0, ub=5)
-        m.minimize(a + b)
-        m.subject_to(a + b >= 3)
-        r = m.solve(time_limit=60)
-        assert r.status == "optimal"
-        assert seen["cuts"] == 0  # no binary-knapsack rows -> no cuts

@@ -382,6 +382,48 @@ def test_hook_stop_does_not_spend_the_budget_on_the_cross_check(monkeypatch):
     assert wall < 20.0, wall
 
 
+def _route_diagnosis(perspective: bool) -> dict:
+    """Why the route did not certify, for the failure message only: the route re-run
+    directly (same method and master as the auto-route, no progress guard), reduced to
+    its termination reason, bounds and per-solve counts. PR #2196 CI: this test fell
+    back after the route returned ``feasible`` at ~5.4 s on two CI runs and could not
+    be reproduced in the dev container (Python 3.13 vs CI's 3.12, POUNCE built from
+    ``main`` in CI)."""
+    from discopt.solver import _convex_route_oa_master
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rr = solve_mip_nlp(
+            _portfolio(n=20, perspective=perspective),
+            method="lp_nlp_bb",
+            milp_solver=_convex_route_oa_master(),
+            time_limit=60,
+        )
+    tr = rr.mip_nlp_trace or {}
+    keep = ("termination_reason", "final_lb", "final_ub", "final_gap", "gap_certified")
+    summ = tr.get("summary") or {}
+    return {
+        "status": rr.status,
+        **{k: tr.get(k) for k in keep},
+        **{
+            k: summ.get(k)
+            for k in (
+                "mip_count",
+                "node_count",
+                "nlp_subproblem_count",
+                "cut_count",
+                "restoration_outcomes",
+            )
+        },  # fmt: skip
+        "callback_stats": {
+            k: v
+            for k, v in (summ.get("callback_stats") or {}).items()
+            if not isinstance(v, (list, dict))
+        },
+    }
+
+
 @pytest.mark.parametrize("perspective", [False, True], ids=["big_m", "perspective"])
 def test_issue_portfolio_certifies_on_the_route(perspective):
     """The issue's reproducer: both formulations certify on the auto-route, with
@@ -390,9 +432,12 @@ def test_issue_portfolio_certifies_on_the_route(perspective):
         warnings.simplefilter("ignore")
         r = _portfolio(n=20, perspective=perspective).solve(time_limit=60)
     route = r.algorithm_route or ""
-    assert r.status == "optimal" and r.gap_certified, (r.status, route)
+    diag = None
+    if not (r.status == "optimal" and r.gap_certified) or "fell back" in route:
+        diag = _route_diagnosis(perspective)
+    assert r.status == "optimal" and r.gap_certified, (r.status, route, diag)
     assert route.startswith("mip-nlp/lp_nlp_bb:"), route
-    assert "fell back" not in route, route
+    assert "fell back" not in route, (route, diag)
     assert r.objective == pytest.approx(0.0104420249, rel=1e-6)
     assert r.bound <= r.objective
 

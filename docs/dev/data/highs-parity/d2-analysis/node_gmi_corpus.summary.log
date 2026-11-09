@@ -1,0 +1,8 @@
+[148/148] rep1 wallfix: OFF feasible cert=False bound=0.0 | ON feasible cert=False bound=0.0 nodes 207/207 load 3.51/3.48 
+
+rows 148 | instances with a problem: 0
+certified OFF 112 -> ON 112 | gained [] | lost []
+bound where OFF had none: []
+errors: []
+incumbent feasibility checks executed: 263
+wall 1030 s

@@ -1,4 +1,7 @@
-"""cert:P3.1c — cut-reachability entry experiment: force the cut-enabled path.
+"""RETIRED LEVER: ``DISCOPT_P3_FORCE_CUT_PATH`` was removed with the Python MILP tree
+(2026-11-08). Run this from a checkout before that retirement to reproduce cert:P3.1c.
+
+cert:P3.1c — cut-reachability entry experiment: force the cut-enabled path.
 
 Phase 3 follow-on 1c (``certification-gap-plan.md`` §7). The 1b measurement
 found the aggregation c-MIR / Gomory / cover separators fire **0 times** on the
@@ -46,7 +49,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -305,7 +308,7 @@ def main() -> int:
             f"{cuts_on:>7.0f} {path_key:>18}  {note}"
         )
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     out = _RESULTS_DIR / f"p3_1c_cut_reachability_{ts}.json"
     out.write_text(
         json.dumps(

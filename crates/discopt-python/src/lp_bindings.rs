@@ -12,9 +12,9 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use discopt_core::bnb::milp_driver::{
-    solve_milp_node_hooked as core_solve_milp_node_hooked, MilpCheckpoint, MilpDebugControl,
-    MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpNodeHook, MilpNodeVerdict,
-    MilpOptions, MilpStatus,
+    solve_milp_node_hooked as core_solve_milp_node_hooked, MilpBoundHook, MilpCheckpoint,
+    MilpDebugControl, MilpDebugHook, MilpDebugState, MilpLazyHook, MilpLazyVerdict, MilpNodeHook,
+    MilpNodeVerdict, MilpOptions, MilpStatus,
 };
 use discopt_core::bnb::relu_ideal::ReluIdealSeparator;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
@@ -23,8 +23,8 @@ use discopt_core::lp::gomory::{separate_gomory, GomoryCut};
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::refine::ns_safe_bound_csc;
 use discopt_core::lp::simplex::{
-    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc,
-    LpInstance, LpStatus, SimplexOptions, SparseCols,
+    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc, LpInstance,
+    LpStatus, SimplexOptions, SparseCols,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -857,6 +857,16 @@ impl MilpDebugHook for PyMilpHook {
                     Err(e) => e.print(py),
                 }
             }
+            // Python-MILP-tree retirement: the batch's best relaxation, for
+            // `node_callback` (`node_bound` / `x_relaxation`).
+            if let Some(nb) = state.batch_best_bound {
+                let _ = d.set_item("node_bound", nb);
+            }
+            if let Some(x) = state.batch_best_x {
+                if let Ok(lst) = PyList::new(py, x.iter().copied()) {
+                    let _ = d.set_item("x_relaxation", lst);
+                }
+            }
             if let Some(rows) = state.created {
                 match crate::bnb_bindings::lineage_to_dict(py, rows) {
                     Ok(v) => {
@@ -1004,6 +1014,40 @@ struct PyMilpNodeHook {
     /// spill into the driver's slack columns and mean something else entirely).
     n_struct: usize,
     pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+/// A Python per-node lower-bound callable `f(lb, ub) -> float | None` as a core
+/// [`MilpBoundHook`] (`Model.solve(lagrangian_bound=True)` on the Rust engine). A
+/// raising callable contributes nothing to the node (sound) and its first error is
+/// re-raised after the search (CLAUDE.md §7: never swallowed).
+struct PyBoundHook {
+    callback: Py<PyAny>,
+    pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl MilpBoundHook for PyBoundHook {
+    fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64> {
+        if self.pending.lock().unwrap().is_some() {
+            return None;
+        }
+        Python::with_gil(|py| {
+            let r = self
+                .callback
+                .bind(py)
+                .call1((PyArray1::from_slice(py, lb), PyArray1::from_slice(py, ub)))
+                .and_then(|v| v.extract::<Option<f64>>());
+            match r {
+                Ok(v) => v,
+                Err(e) => {
+                    let mut slot = self.pending.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
+                    None
+                }
+            }
+        })
+    }
 }
 
 impl PyMilpNodeHook {
@@ -1189,6 +1233,7 @@ pub fn solve_milp_py<'py>(
         abs_gap_tol,
         None,
         None,
+        MilpExtra::default(),
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1269,7 +1314,10 @@ pub fn ns_safe_bound_csc_py(
                     sb_max_cands=6, sb_node_budget=48,
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
-                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None))]
+                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
+                    stall_time_s=None, node_selection=None,
+                    extend_no_incumbent_s=None, branching_rule=None,
+                    rel_gap_max_abs=false, node_bound_hook=None, node_bound_every=1))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1309,7 +1357,16 @@ pub fn solve_milp_csc_py<'py>(
     debug_hook: Option<Py<PyAny>>,
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
+    stall_time_s: Option<f64>,
+    node_selection: Option<String>,
+    extend_no_incumbent_s: Option<f64>,
+    branching_rule: Option<String>,
+    rel_gap_max_abs: bool,
+    node_bound_hook: Option<Py<PyAny>>,
+    node_bound_every: usize,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
+    let selection = parse_node_selection(node_selection.as_deref())?;
+    let branch_rule = parse_branching_rule(branching_rule.as_deref())?;
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
     let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
@@ -1380,8 +1437,51 @@ pub fn solve_milp_csc_py<'py>(
         abs_gap_tol,
         max_open_nodes,
         None,
+        MilpExtra {
+            stall_time_s,
+            extend_no_incumbent_s,
+            selection,
+            branch_rule,
+            rel_gap_max_abs,
+            bound_hook: node_bound_hook,
+            bound_hook_every: node_bound_every,
+        },
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
+}
+
+thread_local! {
+    /// Per-solve counters of the last MILP-driver solve on this thread
+    /// (`run_milp_hooked`): `(root_cut_rows, strong_probe_lps)`.
+    static LAST_MILP_STATS: std::cell::Cell<Option<(usize, usize, usize, usize)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Counters of the last MILP-driver solve made on the calling thread
+/// (`solve_milp_csc_py` / `solve_milp_relu_csc_py`), as a dict
+/// `{"root_cut_rows", "strong_probe_lps"}`, or `None` before any solve. The solve
+/// runs on the calling thread, so a caller reading this right after its own call
+/// gets that call's numbers (Python-MILP-tree retirement: the stats the Python tree
+/// reported as ``cuts/*`` and ``branching/strong_probe_lps``).
+#[pyfunction]
+///
+/// `take=True` also clears them, so a caller can clear before its call and be sure
+/// what it reads afterwards came from that call (a stubbed driver leaves `None`).
+#[pyo3(name = "milp_last_solve_stats", signature = (take=false))]
+pub fn milp_last_solve_stats_py(
+    py: Python<'_>,
+    take: bool,
+) -> PyResult<Option<Bound<'_, pyo3::types::PyDict>>> {
+    let got = LAST_MILP_STATS.with(|c| if take { c.take() } else { c.get() });
+    let Some((rows, probes, bh_calls, bh_raised)) = got else {
+        return Ok(None);
+    };
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("root_cut_rows", rows)?;
+    d.set_item("strong_probe_lps", probes)?;
+    d.set_item("bound_hook_calls", bh_calls)?;
+    d.set_item("bound_hook_raised", bh_raised)?;
+    Ok(Some(d))
 }
 
 /// The native Anderson ideal-ReLU separator as a Python object (#2157).
@@ -1523,7 +1623,9 @@ impl PyReluIdealSeparator {
                     sb_max_cands=6, sb_node_budget=48,
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
-                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None))]
+                    debug_hook=None, abs_gap_tol=None, max_open_nodes=None,
+                    node_selection=None, extend_no_incumbent_s=None,
+                    branching_rule=None, rel_gap_max_abs=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_relu_csc_py<'py>(
     py: Python<'py>,
@@ -1574,6 +1676,10 @@ pub fn solve_milp_relu_csc_py<'py>(
     debug_hook: Option<Py<PyAny>>,
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
+    node_selection: Option<String>,
+    extend_no_incumbent_s: Option<f64>,
+    branching_rule: Option<String>,
+    rel_gap_max_abs: bool,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1680,6 +1786,15 @@ pub fn solve_milp_relu_csc_py<'py>(
         abs_gap_tol,
         max_open_nodes,
         Some(&sep),
+        MilpExtra {
+            stall_time_s: None,
+            extend_no_incumbent_s,
+            selection: parse_node_selection(node_selection.as_deref())?,
+            branch_rule: parse_branching_rule(branching_rule.as_deref())?,
+            rel_gap_max_abs,
+            bound_hook: None,
+            bound_hook_every: 1,
+        },
     )?;
     Ok((
         status,
@@ -1878,13 +1993,182 @@ pub fn solve_milp_lazy_csc_py<'py>(
         abs_gap_tol,
         None,
         None,
+        MilpExtra::default(),
     )
+}
+
+/// Driver options a Python entry passes beyond [`milp_options`]'s arguments.
+struct MilpExtra {
+    stall_time_s: Option<f64>,
+    extend_no_incumbent_s: Option<f64>,
+    selection: Option<discopt_core::bnb::pool::SelectionStrategy>,
+    branch_rule: Option<discopt_core::bnb::branching::BranchRule>,
+    rel_gap_max_abs: bool,
+    /// Python `f(lb, ub) -> float | None` node lower-bound source.
+    bound_hook: Option<Py<PyAny>>,
+    bound_hook_every: usize,
+}
+
+impl Default for MilpExtra {
+    /// Every field "not requested", and the bound-hook cadence 1 (every batch) -- a
+    /// derived `Default` gave 0, which the cadence check rightly refuses.
+    fn default() -> Self {
+        MilpExtra {
+            stall_time_s: None,
+            extend_no_incumbent_s: None,
+            selection: None,
+            branch_rule: None,
+            rel_gap_max_abs: false,
+            bound_hook: None,
+            bound_hook_every: 1,
+        }
+    }
+}
+
+/// `Model.solve(branching_rule=...)`'s names, refused when unknown (never defaulted).
+/// `"pseudocost"` is the driver's reliability branching.
+fn parse_branching_rule(
+    raw: Option<&str>,
+) -> PyResult<Option<discopt_core::bnb::branching::BranchRule>> {
+    use discopt_core::bnb::branching::BranchRule as R;
+    Ok(match raw {
+        None => None,
+        Some("pseudocost") => Some(R::Reliability),
+        Some("most_fractional") => Some(R::MostFractional),
+        Some("least_fractional") => Some(R::LeastFractional),
+        Some("strong") => Some(R::Strong),
+        Some(other) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "branching_rule={other:?}: expected 'pseudocost', 'most_fractional', \
+                 'least_fractional' or 'strong'"
+            )))
+        }
+    })
+}
+
+/// `Model.solve(strategy=...)`'s names, refused when unknown (never defaulted).
+fn parse_node_selection(
+    raw: Option<&str>,
+) -> PyResult<Option<discopt_core::bnb::pool::SelectionStrategy>> {
+    use discopt_core::bnb::pool::SelectionStrategy as S;
+    Ok(match raw {
+        None => None,
+        Some("best_first") => Some(S::BestFirst),
+        Some("depth_first") => Some(S::DepthFirst),
+        Some("best_estimate") => Some(S::BestEstimate),
+        Some(other) => {
+            return Err(PyValueError::new_err(format!(
+                "node_selection={other:?}: expected 'best_first', 'depth_first' or \
+                 'best_estimate'"
+            )))
+        }
+    })
 }
 
 /// Shared MILP solve: builds `MilpOptions`, wraps an optional debug hook, runs the
 /// fully sparse driver under `allow_threads`, and marshals the result back. Both the
 /// dense entry (`solve_milp_py`) and the CSC entry (`solve_milp_csc_py`) funnel here
 /// after producing the working `SparseCols`.
+/// The [`MilpOptions`] every Python MILP entry point builds from its keyword
+/// arguments: `solve_milp_csc_py` (through [`run_milp_hooked`]) and the
+/// `MilpHandle` pyclass (highs-parity P3.1), so a handle solve and a fresh solve
+/// with the same arguments run under the same options by construction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn milp_options(
+    n_struct: usize,
+    int_cols: Vec<usize>,
+    max_nodes: usize,
+    max_open_nodes: Option<usize>,
+    time_limit_s: Option<f64>,
+    gap_tol: f64,
+    abs_gap_tol: Option<f64>,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cmir_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    node_hook_rounds: usize,
+    node_hook_cut_cap: usize,
+    initial_incumbent: Option<Vec<f64>>,
+    root_cut_time_s: Option<f64>,
+    root_cut_prune: bool,
+) -> PyResult<MilpOptions> {
+    Ok(MilpOptions {
+        n_struct,
+        integer_cols: int_cols,
+        max_nodes,
+        max_open_nodes,
+        time_limit_s: parse_budget_secs(time_limit_s)?,
+        stall_time_s: None,
+        selection: discopt_core::bnb::pool::SelectionStrategy::BestFirst,
+        branch_rule: discopt_core::bnb::branching::BranchRule::Reliability,
+        rel_gap_max_abs: false,
+        bound_hook: None,
+        bound_hook_every: 1,
+        extend_no_incumbent_s: None,
+        gap_tol,
+        // #1315: `None` -- what a caller who named no absolute tolerance sends --
+        // keeps the engine's historical behaviour exactly: no absolute arm.
+        abs_gap_tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cmir_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        node_hook_rounds,
+        node_hook_cut_cap,
+        initial_incumbent,
+        root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
+        root_cut_prune,
+        simplex: SimplexOptions {
+            tol,
+            max_iter: 100_000,
+            // The MILP driver clones this and injects its own wall-clock deadline
+            // from `time_limit_s`, so the base options leave it unset.
+            deadline: None,
+            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
+            // P1.0 (measured OFF, deliberately): turning this on makes the primal
+            // emit a FULL length-`m` basis of real columns instead of dropping the
+            // slot a degenerate basic artificial occupies, which stops
+            // `PreparedDual::prepare` rejecting the node basis on shape (measured
+            // 619/620 rejections on the rsyn0840m OA master). But once the root cut
+            // loop stopped cold-solving every round, flipping it was *exactly*
+            // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
+            // (sound but not net-positive is not a graduation).
+            expel_zero_artificials: false,
+            bank_deadline_duals: false,
+            recover_unstable_pivot: false,
+            // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
+            // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
+            dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+            dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+            cold_dual_start: false,
+            warm_flip_boxed: false,
+        },
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_milp_hooked<'py>(
     py: Python<'py>,
@@ -1927,6 +2211,7 @@ fn run_milp_hooked<'py>(
     abs_gap_tol: Option<f64>,
     max_open_nodes: Option<usize>,
     relu_separator: Option<&ReluIdealSeparator>,
+    extra: MilpExtra,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1945,16 +2230,15 @@ fn run_milp_hooked<'py>(
              fractional-node hook; pass one of them",
         ));
     }
-    let opts = MilpOptions {
+    let opts = milp_options(
         n_struct,
-        integer_cols: int_cols,
+        int_cols,
         max_nodes,
         max_open_nodes,
-        time_limit_s: parse_budget_secs(time_limit_s)?,
+        time_limit_s,
         gap_tol,
-        // #1315: `None` -- what a caller who named no absolute tolerance sends --
-        // keeps the engine's historical behaviour exactly: no absolute arm.
         abs_gap_tol,
+        tol,
         root_cuts,
         cut_rounds,
         gmi_cuts,
@@ -1971,38 +2255,35 @@ fn run_milp_hooked<'py>(
         sb_node_budget,
         node_hook_rounds,
         node_hook_cut_cap,
-        initial_incumbent: initial_incumbent
+        initial_incumbent
             .map(|arr| arr.as_slice().map(|s| s.to_vec()))
             .transpose()?,
-        root_cut_time_s: parse_budget_secs(root_cut_time_s)?,
+        root_cut_time_s,
         root_cut_prune,
-        simplex: SimplexOptions {
-            tol,
-            max_iter: 100_000,
-            // The MILP driver clones this and injects its own wall-clock deadline
-            // from `time_limit_s`, so the base options leave it unset.
-            deadline: None,
-            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
-            warm_stall_guard: true,
-            warm_stall_cap_override: None,
-            // P1.0 (measured OFF, deliberately): turning this on makes the primal
-            // emit a FULL length-`m` basis of real columns instead of dropping the
-            // slot a degenerate basic artificial occupies, which stops
-            // `PreparedDual::prepare` rejecting the node basis on shape (measured
-            // 619/620 rejections on the rsyn0840m OA master). But once the root cut
-            // loop stopped cold-solving every round, flipping it was *exactly*
-            // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
-            // (sound but not net-positive is not a graduation).
-            expel_zero_artificials: false,
-            bank_deadline_duals: false,
-            recover_unstable_pivot: false,
-            // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
-            // `DISCOPT_LP_DUAL_STALL_BAIL`). Inert on the cold-only entry points.
-            dual_stall_patience: SimplexOptions::default().dual_stall_patience,
-            dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
-            cold_dual_start: false,
-            warm_flip_boxed: false,
-        },
+    )?;
+    let opts = MilpOptions {
+        stall_time_s: parse_budget_secs(extra.stall_time_s)?,
+        extend_no_incumbent_s: parse_budget_secs(extra.extend_no_incumbent_s)?,
+        selection: extra.selection.unwrap_or(opts.selection),
+        branch_rule: extra.branch_rule.unwrap_or(opts.branch_rule),
+        rel_gap_max_abs: extra.rel_gap_max_abs || opts.rel_gap_max_abs,
+        ..opts
+    };
+    if extra.bound_hook_every == 0 {
+        return Err(PyValueError::new_err("node_bound_every must be >= 1"));
+    }
+    let bound_hook: Option<std::sync::Arc<PyBoundHook>> = extra.bound_hook.map(|cb| {
+        std::sync::Arc::new(PyBoundHook {
+            callback: cb,
+            pending: std::sync::Mutex::new(None),
+        })
+    });
+    let opts = MilpOptions {
+        bound_hook: bound_hook
+            .clone()
+            .map(|h| h as std::sync::Arc<dyn MilpBoundHook>),
+        bound_hook_every: extra.bound_hook_every,
+        ..opts
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created
     // before releasing the GIL and re-acquires it per checkpoint; when absent,
@@ -2069,6 +2350,11 @@ fn run_milp_hooked<'py>(
             return Err(err);
         }
     }
+    if let Some(h) = bound_hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",
@@ -2076,6 +2362,14 @@ fn run_milp_hooked<'py>(
         MilpStatus::Unbounded => "unbounded",
         MilpStatus::NodeLimit => "node_limit",
     };
+    LAST_MILP_STATS.with(|c| {
+        c.set(Some((
+            res.root_cut_rows,
+            res.strong_probe_lps,
+            res.bound_hook_calls,
+            res.bound_hook_raised,
+        )));
+    });
     Ok((
         status.to_string(),
         PyArray1::from_vec(py, res.x),

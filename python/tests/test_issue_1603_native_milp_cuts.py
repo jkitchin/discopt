@@ -26,7 +26,7 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
-from discopt._relax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+from discopt._relax.cover_cuts import separate_cover_cuts
 
 pytest.importorskip("highspy")
 
@@ -84,64 +84,6 @@ def test_tiny_coefficient_cover_all_routes(kw):
     assert r.objective == pytest.approx(2.999995, abs=1e-5)
 
 
-def test_clique_edges_are_flat_binary_columns():
-    m = _issue_repro()
-    edges = S._extract_clique_edges(m)
-    # x: 0..3, d: 4..7, h: 8, z: 9, s0: 10, s1: 11.
-    assert (10, 11) in [tuple(sorted(e)) for e in edges], edges
-    is_bin = S._binary_mask(m, 12)
-    checked = 0
-    for i, j in edges:
-        assert is_bin[i] and is_bin[j], (i, j)
-        checked += 1
-    assert checked > 0
-
-
-def test_non_binary_clique_edge_is_refused_loudly(monkeypatch):
-    # The old block-index edge (4, 5) names continuous columns d[0], d[1].
-    monkeypatch.setattr(S, "_extract_clique_edges", lambda model: [(4, 5)])
-    with pytest.raises(RuntimeError, match="binary flat columns"):
-        _issue_repro().solve(time_limit=30, milp_backend="native")
-
-
-def test_backstop_rejects_cut_violated_by_verified_point(monkeypatch):
-    """A separator that emits the old invalid cut is caught by the incumbent screen."""
-    import discopt._relax.cover_cuts as CC
-
-    fired = [0]
-
-    def bogus(edges, x_star, tol=1e-6):
-        fired[0] += 1
-        return [(frozenset({4, 5}), 1.0)]  # d[0] + d[1] <= 1: the #1603 cut
-
-    monkeypatch.setattr(CC, "separate_clique_cuts", bogus)
-    # The known optimum as a warm start; the screen verifies it before using it.
-    m = _issue_repro()
-    v = m._variables  # x, d, h, z, s0, s1
-    start = {v[0]: [0, 0, 0, 0], v[1]: [75, 600, 175, 75], v[2]: 0, v[3]: 0, v[4]: 1, v[5]: 0}
-    r = m.solve(time_limit=60, milp_backend="native", initial_solution=start)
-    assert fired[0] > 0, "the bogus separator never ran -- the probe did not fire"
-    assert r.objective == pytest.approx(4.275, abs=1e-6)
-    assert (r.solver_stats or {}).get("cuts/rejected_by_incumbent", 0) > 0, r.solver_stats
-
-
-def test_verified_screen_points_refuse_infeasible_candidates():
-    m = _issue_repro()
-    n_vars, _lb, _ub, offs, sizes = S._extract_variable_info(m)
-    good = np.array([0, 0, 0, 0, 75, 600, 175, 75, 0, 0, 1, 0], dtype=float)
-    out_of_box = good.copy()
-    out_of_box[4] = 80.0
-    row_infeasible = good.copy()
-    row_infeasible[10] = 0.0  # s0 + s1 == 1 violated
-    fractional = good.copy()
-    fractional[0] = 0.5
-    pts = S._verified_cut_screen_points(
-        m, [None, good, out_of_box, row_infeasible, fractional], n_vars, 12, offs, sizes
-    )
-    assert len(pts) == 1
-    np.testing.assert_array_equal(pts[0], good)
-
-
 # ---------------------------------------------------------------------------
 # Cover separator: tiny nonzeros are charged to the capacity, not dropped
 # ---------------------------------------------------------------------------
@@ -153,7 +95,6 @@ class TestCoverTinyCoefficients:
 
     def test_unbounded_tiny_term_refuses_the_row(self):
         assert separate_cover_cuts(self.A, self.b, self.x, self.is_bin) == []
-        assert not has_binary_knapsack_rows(self.A, self.b, self.is_bin)
 
     def test_large_range_tiny_term_refuses_cover(self):
         lb, ub = np.array([0, 0, 0.0]), np.array([1, 1, 1e9])
@@ -354,61 +295,23 @@ def test_randomized_native_cut_panel():
 
 
 # ---------------------------------------------------------------------------
-# #1607 review: the cut screen judges the SNAPPED point
-# ---------------------------------------------------------------------------
-def _two_packing_rows():
-    m = dm.Model("screen_snap")
-    b = [m.binary(f"b{i}") for i in range(3)]
-    m.subject_to(2 * b[0] + 2 * b[1] <= 3)
-    m.subject_to(2 * b[1] + 2 * b[2] <= 3)
-    m.maximize(b[0] + b[1] + b[2])
-    return m, b
-
-
-def test_verified_screen_points_snap_integer_columns():
-    m, _ = _two_packing_rows()
-    n_vars, _lb, _ub, offs, sizes = S._extract_variable_info(m)
-    near = np.array([1.0, 9e-6, 1.0 - 4e-6])
-    pts = S._verified_cut_screen_points(m, [near], n_vars, 3, offs, sizes)
-    assert len(pts) == 1
-    np.testing.assert_array_equal(pts[0], [1.0, 0.0, 1.0])
-    assert near[1] == 9e-6, "the caller's candidate must not be modified in place"
-
-
-def test_near_integral_warm_start_does_not_reject_valid_cuts(caplog):
-    """``b1 = 9e-6`` passes the 1e-5 integrality test. Screened unsnapped, it
-    rejected 5 valid root cuts and logged a false "separator defect" WARNING."""
-    m, b = _two_packing_rows()
-    start = {b[0]: 1.0, b[1]: 9e-6, b[2]: 1.0}
-    with caplog.at_level("WARNING", logger="discopt.solver"):
-        r = m.solve(time_limit=30, milp_backend="native", initial_solution=start)
-    stats = r.solver_stats or {}
-    assert r.status == "optimal" and r.objective == pytest.approx(2.0, abs=1e-9)
-    installed = sum(v for k, v in stats.items() if k.startswith("cuts/") and "rejected" not in k)
-    assert installed > 0, f"no root cut was installed, so nothing was screened: {stats}"
-    assert stats.get("cuts/rejected_by_incumbent", 0) == 0, stats
-    assert not [rec for rec in caplog.records if "separator defect" in rec.getMessage()]
-
-
-# ---------------------------------------------------------------------------
 # #1606: an integral incumbent a node-LP residual off a declared row
 # ---------------------------------------------------------------------------
+
+
 @pytest.mark.parametrize("seed", [73, 195])
-def test_issue_1606_lp_residual_incumbent_is_repolished(seed):
-    """Native+cuts used to raise the #952 refusal here: the tree's integral
-    incumbent sat on a tight valid GMI face, 1.15e-6 (seed 73) / 1.29e-6 (seed 195)
-    off an original row. The exit now re-solves its continuous columns with the
-    integers fixed, over the declared rows, and the gate accepts the result."""
+def test_issue_1606_instances_certify_on_the_rust_engine(seed):
+    """The user-visible half of #1606 on today's ``milp_backend="native"`` route (the
+    Rust engine): the same instances certify the reference optimum, bound on the
+    right side of the objective."""
     ref = _random_milp(seed).solve(time_limit=30)
     r = _random_milp(seed).solve(time_limit=30, milp_backend="native")
-    assert (r.solver_stats or {}).get("incumbent/repolished") == 1.0, (
-        "the repolish arm did not fire -- this no longer exercises #1606",
-        r.solver_stats,
+    assert r.algorithm_route.startswith("native-milp: discopt monolithic Rust MILP"), (
+        r.algorithm_route
     )
-    assert r.status == "optimal", r.status
+    assert r.status == "optimal" and r.gap_certified, r.status
     assert _close(r.objective, ref.objective), (r.objective, ref.objective)
-    # The certificate: the bound never crosses the reported objective.
-    sense = 1.0 if seed == 73 else -1.0  # 73 minimises, 195 maximises
+    sense = 1.0 if seed == 73 else -1.0
     assert sense * (r.bound - r.objective) <= 1e-9, (r.bound, r.objective)
 
 

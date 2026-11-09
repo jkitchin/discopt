@@ -134,7 +134,7 @@ _SOLVER = Path(__file__).resolve().parents[1] / "discopt" / "solver.py"
 # and they receive ``time_limit``. Derived rather than hardcoded as a line
 # number so the region tracks edits to ``solve_model`` instead of silently
 # drifting to cover the wrong code.
-_TERMINAL_ENTRIES = ("_solve_continuous", "_solve_milp_bb", "_solve_spatial_bb")
+_TERMINAL_ENTRIES = ("_solve_continuous", "_solve_milp_simplex", "_solve_spatial_bb")
 
 
 def _called_name(call: ast.Call) -> str | None:

@@ -13,6 +13,16 @@ import numpy as np
 import pytest
 from discopt.solvers import lp_milp_highs
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 pytestmark = pytest.mark.smoke
 
 
@@ -55,12 +65,16 @@ def _presolve_settings(monkeypatch, model, **kw):
 
 
 @pytest.mark.parametrize("build", [_knapsack, _lp])
+@pytest.mark.requires_highs
 def test_presolve_false_reaches_highs(monkeypatch, build):
+    # highs-parity D1: an LP defaults to the Rust route; this pins the HiGHS route.
+    monkeypatch.setenv("DISCOPT_LP_BACKEND", "highs")
     r, seen = _presolve_settings(monkeypatch, build(), presolve=False)
     assert r.status == "optimal"
     assert set(seen) == {"off"}
 
 
+@pytest.mark.requires_highs
 def test_presolve_default_leaves_highs_presolve_on(monkeypatch):
     r, seen = _presolve_settings(monkeypatch, _knapsack())
     assert r.status == "optimal"
@@ -71,11 +85,13 @@ def test_same_answer_either_way():
     assert _knapsack().solve(presolve=False).objective == _knapsack().solve().objective
 
 
+@pytest.mark.requires_highs
 def test_contradicting_highs_option_is_refused():
     with pytest.raises(ValueError, match="contradict"):
         _knapsack().solve(presolve=False, highs_options={"presolve": "on"})
 
 
+@pytest.mark.requires_highs
 def test_agreeing_highs_option_is_accepted(monkeypatch):
     r, seen = _presolve_settings(
         monkeypatch, _knapsack(), presolve=False, highs_options={"presolve": "off"}

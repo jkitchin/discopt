@@ -34,14 +34,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "pounce-solver>=0.16",
-    # Pure LP/MILP is routed to HiGHS (issue #1229, docs/dev/lp-milp-highs-routing-plan.md).
-    # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
-    # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
-    # >=1.11: the lp_nlp_bb HiGHS master needs Highs.clearCallbacks, an ndarray
-    # mip_solution in its callback and the mip_heuristic_run_rins/_rens options,
-    # none of which 1.10.0 has. !=1.12.0: it alone returns kSolveError on
-    # test_1654's MILP. Measured 2026-10-28 (test_2021_highs_floor.py).
-    "highspy>=1.11,!=1.12.0",
+    # highspy is NOT here: it is the `highs` extra below (highs-parity P6.3).
 ]
 
 [project.urls]
@@ -67,10 +60,18 @@ pounce = ["pounce-solver>=0.16"]
 # macOS: cyipopt's Ipopt and torch each bring a libomp; one process cannot load
 # both (OMP Error #15 abort). discopt raises OpenMPRuntimeConflictError first (#2205).
 ipopt = ["cyipopt>=1.4"]
-# highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
-# extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
-# It also serves the opt-in MIP-NLP MILP master (`milp_solver="highs"`, issue
-# #1060). #356's removal of HiGHS from the per-node MINLP LP path still stands.
+# HiGHS (highs-parity P6.3): an optional extra, not a core dependency. Every default
+# path runs in-house without it (docs/dev/highs-optional-inventory.md); with it, a pure
+# MILP goes to the verified HiGHS route (DISCOPT_LP_MILP_BACKEND, which falls back to
+# the in-house engine when highspy is absent), and the opt-ins `milp_solver="highs"`,
+# `highs_options`, `DISCOPT_LP_BACKEND=highs` etc. become available; without it they
+# raise MissingHighsError naming this extra (`discopt._optional_highs`).
+# >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
+# which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
+# >=1.11: the lp_nlp_bb HiGHS master needs Highs.clearCallbacks, an ndarray
+# mip_solution in its callback and the mip_heuristic_run_rins/_rens options,
+# none of which 1.10.0 has. !=1.12.0: it alone returns kSolveError on
+# test_1654's MILP. Measured 2026-10-28 (test_2021_highs_floor.py).
 highs = ["highspy>=1.11,!=1.12.0"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
@@ -119,6 +120,9 @@ learned = ["discopt[jax]"]
 # solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
 dev = [
+    # The full test suite exercises the HiGHS routes too; a HiGHS-less tree runs with
+    # those tests skipped (`requires_highs` / `pytest.importorskip("highspy")`).
+    "highspy>=1.11,!=1.12.0",
     # The full test suite exercises the JAX-only features; a JAX-less tree runs
     # with those tests skipped (`requires_jax` / `pytest.importorskip("jax")`).
     "jax>=0.4",
@@ -160,7 +164,7 @@ dev = [
     # solver="scip" is covered by test_scip_backend.py (#1784).
     "pyscipopt>=5.2",
 ]
-all = ["discopt[jax,pounce,ipopt,cutest,llm,nn,ml,plot,sympy,pyomo,scip]"]
+all = ["discopt[jax,highs,pounce,ipopt,cutest,llm,nn,ml,plot,sympy,pyomo,scip]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
@@ -318,6 +322,7 @@ markers = [
     "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "requires_pounce: requires the optional POUNCE (pure-Rust Ipopt port) solver",
     "requires_jax: reaches JAX at run time; skipped without the discopt[jax] extra (#1873)",
+    "requires_highs: reaches HiGHS at run time; skipped without the discopt[highs] extra (highs-parity P6.3)",
     "gpu: requires GPU",
     "relaxation: theorem-style property tests for relaxation rules (containment, tightening); fast",
     "correctness: known-optima validation tests; usually also `slow`",

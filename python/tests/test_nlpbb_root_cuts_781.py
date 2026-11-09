@@ -346,13 +346,32 @@ def test_loop_never_runs_more_than_stall_rounds_past_its_last_gain(monkeypatch):
             np.array([False, False, True, True]),
             time_budget_s=30.0,
         )
-        if res.stop_reason == "stall":
-            assert res.rounds_run <= res.improving_rounds + rc.STALL_ROUNDS, (
-                f"{sense}: {res.rounds_run} rounds but only {res.improving_rounds} "
-                f"improving — more than {rc.STALL_ROUNDS} rounds were wasted"
-            )
-        # the trace always carries the baseline plus one entry per completed round
+        # The trace always carries the baseline plus one entry per completed round.
         assert len(res.bound_trace) <= res.rounds_run + 1
+        # The invariant itself, read off the trace with the loop's own tolerance: no
+        # more than STALL_ROUNDS consecutive non-improving rounds. (It used to be
+        # asserted as ``rounds_run <= improving_rounds + STALL_ROUNDS``, which also
+        # assumes every non-improving round comes after the last improving one. That
+        # held on the HiGHS basis; on the in-house simplex, the default engine since
+        # highs-parity P6, this model runs 66 rounds with 63 improving and one
+        # non-improving round mid-run, which the guard rightly does not stop on.)
+        trace = res.bound_trace
+        tol = 1e-6 * max(1.0, abs(trace[0]))
+        run = longest = 0
+        for prev, cur in zip(trace, trace[1:]):
+            gain = (prev - cur) if sense == "max" else (cur - prev)
+            run = 0 if gain > tol else run + 1
+            longest = max(longest, run)
+        assert longest <= rc.STALL_ROUNDS, (
+            f"{sense}: {longest} consecutive non-improving rounds; the guard stops "
+            f"at {rc.STALL_ROUNDS}"
+        )
+        if res.stop_reason == "stall":
+            assert len(trace) == res.rounds_run + 1, "a stall exit must trace every round"
+            assert run == rc.STALL_ROUNDS, (
+                f"{sense}: stopped on 'stall' after {run} trailing non-improving rounds, "
+                f"not {rc.STALL_ROUNDS}"
+            )
         checked += 1
     assert checked == 2, "invariant probe ran on nothing"
 
@@ -654,6 +673,9 @@ def test_the_deadline_reaches_highs_not_just_the_python_loop(monkeypatch):
     import highspy
     from discopt._relax.nlp_evaluator import NLPEvaluator
 
+    # The HiGHS arm is the ``=highs`` opt-out since highs-parity P6 (the Rust default's
+    # deadline is pinned in ``test_highs_parity_p14_root_cuts_engine.py``).
+    monkeypatch.setenv("DISCOPT_NLPBB_ROOT_CUTS_ENGINE", "highs")
     m = _build_convex_minlp("max")
     is_int = np.array([False, False, True, True])
     root = rc._RootLP(

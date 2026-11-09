@@ -1,0 +1,126 @@
+diff --git a/crates/discopt-core/src/lp/simplex/primal.rs b/crates/discopt-core/src/lp/simplex/primal.rs
+index caa0310d..1fe7c196 100644
+--- a/crates/discopt-core/src/lp/simplex/primal.rs
++++ b/crates/discopt-core/src/lp/simplex/primal.rs
+@@ -2949,6 +2949,44 @@ impl<'a> Simplex<'a> {
+         let incr = incr_pricing_enabled();
+         let mut dvec: Option<Vec<f64>> = None;
+         let mut force_exact = false;
++        // Row-wise copy of the real columns for the hyper-sparse pivot row (HiGHS's
++        // PRICE): α_r = ρᵀA touches only the rows in ρ's support. Built once per loop.
++        let (row_ptr, row_col, row_val, total_nnz) = if incr {
++            let (cp, ri, vv) = self.cols.raw();
++            let mut cnt = vec![0usize; m + 1];
++            for &i in &ri[..cp[self.n]] {
++                cnt[i + 1] += 1;
++            }
++            for i in 0..m {
++                cnt[i + 1] += cnt[i];
++            }
++            let mut pos = cnt.clone();
++            let nnz = cp[self.n];
++            let mut rc = vec![0usize; nnz];
++            let mut rv = vec![0.0f64; nnz];
++            for j in 0..self.n {
++                for k in cp[j]..cp[j + 1] {
++                    let i = ri[k];
++                    rc[pos[i]] = j;
++                    rv[pos[i]] = vv[k];
++                    pos[i] += 1;
++                }
++            }
++            (cnt, rc, rv, nnz)
++        } else {
++            (Vec::new(), Vec::new(), Vec::new(), 0)
++        };
++        let mut arow = if incr {
++            vec![0.0f64; self.na]
++        } else {
++            Vec::new()
++        };
++        let mut amark = if incr {
++            vec![false; self.na]
++        } else {
++            Vec::new()
++        };
++        let mut atouched: Vec<usize> = Vec::new();
+         for _iter in 0..self.max_iter {
+             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
+             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
+@@ -3364,10 +3402,37 @@ impl<'a> Simplex<'a> {
+                             let theta = d[q] / pivot;
+                             let do_devex = !bland && pivot.abs() > self.tol;
+                             let gamma_q = gamma[q];
+-                            for j in 0..self.na {
+-                                if self.stat[j] != BASIC && j != q {
+-                                    let arj = self.col_dot(j, &rho, art_sign);
+-                                    if arj != 0.0 {
++                            // Row-wise when ρ is sparse enough that its rows hold under
++                            // half the matrix; else the column-wise dot over all
++                            // nonbasic columns (identical α_r either way, up to the
++                            // order of the floating-point sums).
++                            let rows_nz: Vec<usize> = (0..m).filter(|&i| rho[i] != 0.0).collect();
++                            let row_work: usize =
++                                rows_nz.iter().map(|&i| row_ptr[i + 1] - row_ptr[i]).sum();
++                            if 2 * row_work < total_nnz {
++                                crate::profile::incr(crate::profile::Ctr::PrimalRowPriceSparse);
++                                for &i in &rows_nz {
++                                    let r = rho[i];
++                                    for k in row_ptr[i]..row_ptr[i + 1] {
++                                        let j = row_col[k];
++                                        if !amark[j] {
++                                            amark[j] = true;
++                                            atouched.push(j);
++                                        }
++                                        arow[j] += r * row_val[k];
++                                    }
++                                    let ja = self.n + i;
++                                    if !amark[ja] {
++                                        amark[ja] = true;
++                                        atouched.push(ja);
++                                    }
++                                    arow[ja] += r * art_sign[i];
++                                }
++                                for &j in &atouched {
++                                    let arj = arow[j];
++                                    arow[j] = 0.0;
++                                    amark[j] = false;
++                                    if arj != 0.0 && self.stat[j] != BASIC && j != q {
+                                         d[j] -= theta * arj;
+                                         if do_devex {
+                                             let cand = (arj / pivot) * (arj / pivot) * gamma_q;
+@@ -3377,6 +3442,22 @@ impl<'a> Simplex<'a> {
+                                         }
+                                     }
+                                 }
++                                atouched.clear();
++                            } else {
++                                for j in 0..self.na {
++                                    if self.stat[j] != BASIC && j != q {
++                                        let arj = self.col_dot(j, &rho, art_sign);
++                                        if arj != 0.0 {
++                                            d[j] -= theta * arj;
++                                            if do_devex {
++                                                let cand = (arj / pivot) * (arj / pivot) * gamma_q;
++                                                if cand > gamma[j] {
++                                                    gamma[j] = cand;
++                                                }
++                                            }
++                                        }
++                                    }
++                                }
+                             }
+                             let leaving0 = self.basis[slot];
+                             d[leaving0] = -theta;
+diff --git a/crates/discopt-core/src/profile.rs b/crates/discopt-core/src/profile.rs
+index f37bea33..bb2eaa2c 100644
+--- a/crates/discopt-core/src/profile.rs
++++ b/crates/discopt-core/src/profile.rs
+@@ -347,6 +347,7 @@ counters!(
+     // Primal incremental pricing: exact re-price before an optimality claim.
+     PrimalIncrExactRecheck,
+     PrimalIncrDriftReprice,
++    PrimalRowPriceSparse,
+     // The phase-1 zero-artificial expulsion pass ran (`expel_zero_artificials`).
+     P1ExpelPasses,
+     // Cut terms on a fixed slack column moved to the rhs (route aligned slacks, D2).

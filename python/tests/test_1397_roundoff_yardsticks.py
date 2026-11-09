@@ -497,21 +497,6 @@ RC_MAGNITUDES = (1e8, 1e9, 1e11, 1e14)
 
 
 @pytest.mark.parametrize("magnitude", RC_MAGNITUDES)
-def test_a_roundoff_reduced_cost_fixes_nothing_at_the_root(magnitude):
-    from discopt.solver import _reduced_cost_fixing
-
-    d = np.array([4.0 * U * magnitude])
-    lb, ub = np.array([0.0]), np.array([1e12])
-    _new_lb, new_ub, n = _reduced_cost_fixing(
-        lb, ub, [0], d, 0.0, 1.0, rc_absum=np.array([2.0 * magnitude])
-    )
-    assert n == 0 and new_ub[0] == ub[0], (
-        f"terms of magnitude {magnitude:.0e} differing by {d[0]:.3e} (a few ulps) "
-        f"fixed ub to {new_ub[0]:g}; gap/|d| was divided by pure noise"
-    )
-
-
-@pytest.mark.parametrize("magnitude", RC_MAGNITUDES)
 def test_a_roundoff_reduced_cost_fixes_nothing_at_a_node(magnitude):
     from discopt._relax.node_reduce import _dbbt_from_reduced_costs
 
@@ -526,43 +511,12 @@ def test_a_roundoff_reduced_cost_fixes_nothing_at_a_node(magnitude):
     )
 
 
-@pytest.mark.parametrize(
-    "d_val,absum_val,gap",
-    [(0.5, 1.5, 10.0), (2.0, 5.0, 7.0), (1.0, 3.0, 100.0), (0.25, 0.75, 4.0)],
-)
-def test_an_honest_reduced_cost_still_fixes_exactly_as_far(d_val, absum_val, gap):
-    """No-weakening arm: a well-scaled ``d_j`` must land on the same ``floor()``."""
-    from discopt.solver import _reduced_cost_fixing
-
-    lb, ub = np.array([0.0]), np.array([1e4])
-    _new_lb, new_ub, n = _reduced_cost_fixing(
-        lb, ub, [0], np.array([d_val]), 0.0, gap, rc_absum=np.array([absum_val])
-    )
-    inflated = gap + 1e-6 * (1.0 + abs(gap))
-    expected = float(np.floor(inflated / d_val + 1e-9))
-    assert n == 1 and new_ub[0] == expected, (
-        f"d={d_val} at scale {absum_val}: ub={new_ub[0]:g} but the undeflated formula "
-        f"gives {expected:g} -- a 1e-16-relative slack must not move a floor()"
-    )
-
-
-def test_reduced_cost_fixing_refuses_when_no_scale_is_reported():
-    """Refusing is sound; guessing with an absolute deadband is not (CLAUDE.md §3)."""
-    from discopt.solver import _reduced_cost_fixing
-
-    lb, ub = np.array([0.0]), np.array([1e4])
-    _new_lb, new_ub, n = _reduced_cost_fixing(
-        lb, ub, [0], np.array([1.0]), 0.0, 10.0, rc_absum=None
-    )
-    assert n == 0 and new_ub[0] == ub[0]
-
-
 def test_the_reduced_cost_deadbands_themselves_did_not_move():
     """#1397 non-goal, again: the yardstick changed, not the constants."""
     from discopt._relax.node_reduce import _RC_TOL
-    from discopt.solver import _RCF_RC_TOL
 
-    assert _RCF_RC_TOL == 1e-7
+    # (The Python MILP tree's ``_RCF_RC_TOL`` went with the tree; its reduced-cost
+    # fixing now runs only in the Rust driver.)
     assert _RC_TOL == 1e-7
 
 

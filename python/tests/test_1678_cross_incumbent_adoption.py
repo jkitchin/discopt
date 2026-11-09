@@ -21,6 +21,16 @@ import numpy as np
 import pytest
 from discopt import Model
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 OPT = -7.0
 PRIMARY_OBJ = -6.9996  # inside the 1e-4 relative gap of the true bound -7
 CROSS_BOUND = -7.0005  # closes against -7, reopens against -6.9996

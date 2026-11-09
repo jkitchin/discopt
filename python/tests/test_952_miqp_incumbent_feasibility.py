@@ -54,8 +54,6 @@ What is pinned here
    The MIQP funnel already checked this; the MILP one now does too.
 """
 
-import logging
-
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -243,54 +241,16 @@ def test_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
     assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
 
 
-def test_milp_exit_gate_refuses_an_off_row_incumbent(monkeypatch):
-    """The same gate on the MILP path, whose incumbent exit was structurally
-    identical (round, unpack, return) with nothing verifying the returned point.
-
-    ``x₀ + x₁ ≥ 3`` is active at the optimum, so nudging the larger ``x``
-    coordinate down puts the point off that row while leaving the binary integral.
-    """
-    m = dm.Model("milp952")
-    y = m.binary("y")
-    x = m.continuous("x", shape=(2,), lb=0, ub=4)
-    m.minimize(x[0] + 2 * x[1] + 3 * y)
-    m.subject_to(x[0] + x[1] >= 3)
-    m.subject_to(x[0] <= 4 * y)
-
-    # This test covers the gate on the *Python* ``_solve_milp_bb`` exit, which is
-    # what ``_patch_offrow_tree`` can reach: it proxies ``PyTreeManager``, and the
-    # Rust MILP engine runs its whole search inside Rust with no such tree. Since
-    # the routing change a pure MILP goes to that engine by default and would
-    # simply solve this model, never entering the loop under test — so pin the
-    # path explicitly rather than let the coverage evaporate. The routed engine's
-    # own exit gate is covered by ``test_routed_engine_gate_refuses_an_off_row_incumbent``.
-    # A pure MILP goes to the #1229 HiGHS route before either, so that is pinned off too.
-    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
-    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-
-    # Variable order is y (1 binary) then x (2 continuous).
-    state = _patch_offrow_tree(monkeypatch, slice(1, 3), -1e-3)
-
-    with pytest.raises(RuntimeError, match="MILP-BB returned an infeasible point labeled"):
-        m.solve(time_limit=60)
-
-    assert state["applied"], "the incumbent was never perturbed; the test proved nothing"
-
-
 def test_routed_engine_gate_refuses_an_off_row_incumbent(monkeypatch):
     """The same gate on the ROUTED path: the Rust MILP engine's returned point.
 
     Since a pure MILP routes to the monolithic Rust engine by default, that
     engine's exit is the one a user actually reaches — and it must not take the
     engine's ``optimal`` label on faith either. ``_solve_milp_simplex``'s gate
-    re-checks the point against the model's own rows/bounds/integrality and
-    DEFERS (returns ``None``) on violation, so the caller falls back to the
-    sound Python path rather than returning a wrong ``optimal``.
-
-    Deferral, not a raise, is the right response here: unlike the Python path
-    (which has already spent the whole budget when it reaches its exit), the
-    engine is a fast first attempt with a sound fallback behind it, so a bad
-    point costs a retry rather than the solve.
+    re-checks the point against the model's own rows/bounds/integrality and, on
+    violation, reports ``unknown`` with no point and no bound: the engine's claim is
+    contradicted, so nothing it produced is reported. (It used to defer to the
+    Python MILP tree, which is retired.)
     """
     import discopt._rust as _rust
 
@@ -330,10 +290,10 @@ def test_routed_engine_gate_refuses_an_off_row_incumbent(monkeypatch):
         t_start=_time.perf_counter(),
     )
     assert state["applied"], "the engine point was never perturbed; the test proved nothing"
-    assert res is None, (
-        f"the routed engine returned an off-row point as {getattr(res, 'status', res)!r} "
-        "instead of deferring to the sound path"
-    )
+    assert res is not None and res.status == "unknown", res
+    assert res.x is None and res.objective is None and res.bound is None, res
+    assert not res.gap_certified
+    assert (res.solver_stats or {}).get("route/milp_engine_point_refused") == 1.0
 
 
 def test_routed_engine_gate_control_accepts_the_real_incumbent():
@@ -376,113 +336,6 @@ def test_milp_baseline_solve_is_unaffected():
     assert r.objective == pytest.approx(6.0, abs=1e-6)
 
 
-def test_integer_snap_that_would_leave_the_rows_is_re_derived(monkeypatch):
-    """A snap that would leave the rows yields a RE-DERIVED point, not a raw one.
-
-    The exit gate found this: on `test_nn_equivalence::test_tree_ensemble_fixed_input`
-    the incumbent satisfies its equalities to 4.4e-16 and the *snapped* point misses
-    one by 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
-    The MILP call site's comment claimed the snap "cannot move a linear row by more
-    than the integrality tol"; a row takes one snap per term, so it can.
-
-    ``_round_incumbent_integers`` is documented to report ``feasible=False`` when
-    rounding breaks feasibility, but only when handed a checker — and this call site
-    passes none, so the flag was unconditionally True. Reproduced here in the small:
-    five integers each 3e-7 under an integer, on a row with coefficient 2, moves the
-    equality by 3e-6.
-
-    **Contract change, #1380.** This test used to assert that the *unrounded* point
-    is the one reported, on the grounds that it satisfies both declared tolerances
-    (rows exactly, integrality 3e-7 against 1e-5). That is what #1380 is about: a
-    point whose integer columns are not integers is not an answer to the declared
-    model, and on a big-M row the same fallback reported an objective 3 units below
-    the true optimum. Neither horn was necessary. The snap site now establishes that
-    the snap IS what leaves the rows and then re-derives the claim — the discrete
-    columns fixed at their integral realisation, the continuous ones re-solved over
-    the declared rows and box — so what comes back here is ``z = 1`` exactly with
-    ``x`` moved to satisfy the equality exactly, at the same objective.
-
-    Strictly better on every axis the old assertion cared about: exactly integral
-    AND exactly on the row, where the old answer was neither-quite-either.
-    """
-    eps = 3e-7
-    m = dm.Model("snap952")
-    z = m.integer("z", shape=(5,), lb=0, ub=3)
-    x = m.continuous("x", lb=-100, ub=100)
-    m.minimize(x + sum(z[j] for j in range(5)))
-    m.subject_to(2 * sum(z[j] for j in range(5)) + x == 10)
-
-    z_near = np.full(5, 1.0 + eps)
-    x_val = 10.0 - 2.0 * float(np.sum(z_near))  # equality holds exactly at z_near
-
-    # Sanity, before relying on it: snapping really does break the row here, by more
-    # than the declared abs tolerance. Without this the test could pass vacuously.
-    assert abs(2 * np.sum(np.round(z_near)) + x_val - 10.0) > DECLARED_ABS_TOL
-
-    real_tree_cls = S.PyTreeManager
-    state = {"applied": False}
-
-    class _NearIntegralTree:
-        def __init__(self, *args, **kwargs):
-            self._inner = real_tree_cls(*args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        def incumbent(self):
-            inc = self._inner.incumbent()
-            if inc is None:
-                return None
-            _sol, obj = inc
-            state["applied"] = True
-            # Variable order is z (5 integers) then x.
-            return np.concatenate([z_near, [x_val]]), obj
-
-    # Same reason as the test above: the snap call site under test lives in the
-    # Python ``_solve_milp_bb`` path, which the routed Rust engine bypasses.
-    monkeypatch.setenv("DISCOPT_MILP_ENGINE", "0")
-    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    # And recentring OFF (#1537, default ON): ``x`` in [-100, 100] meets the
-    # one-sided rule (|lb| >= 100, width >= |lb|), so the tree would run on the
-    # recentred model while ``_NearIntegralTree`` injects a point in the ORIGINAL
-    # coordinates -- an x outside the inner box, not the near-integral snap case.
-    monkeypatch.setenv("DISCOPT_RECENTRE", "0")
-    monkeypatch.setattr(S, "PyTreeManager", _NearIntegralTree)
-
-    r = m.solve(time_limit=60)  # must NOT raise: the unrounded point is feasible
-    assert state["applied"], "the incumbent was never replaced; the test proved nothing"
-    assert r.x is not None
-
-    got = np.asarray(r.x["z"], dtype=np.float64).flatten()
-    got_x = float(np.asarray(r.x["x"], dtype=np.float64).reshape(-1)[0])
-
-    # 1. The reported discrete columns are integral — the #1380 point. The bar is
-    #    the re-solve's own precision, not bit-exactness: the LP is handed the
-    #    integers as fixed bounds and returns them to ~1e-12, four orders inside
-    #    ``integrality_tol`` and four orders tighter than the 3e-7 this test feeds
-    #    in, so it still fails for the unrounded point it used to accept.
-    assert np.allclose(got, np.round(got), atol=1e-9, rtol=0), (
-        f"the reported integers are not integral: {got!r}"
-    )
-    # 2. ...and they are the integers the incumbent was claiming.
-    assert np.allclose(got, np.round(z_near), atol=1e-9, rtol=0), (
-        f"expected the integral realisation {np.round(z_near)} of {z_near}, got {got!r}"
-    )
-    # 3. The old answer is now specifically excluded: 3e-7 off an integer would
-    #    have passed the pre-#1380 contract and must not pass this one.
-    assert not np.allclose(got, z_near, atol=1e-9, rtol=0), (
-        f"the unrounded incumbent {z_near} was reported after all"
-    )
-    # 4. The re-derived point satisfies the equality EXACTLY, which is what the
-    #    raw snap could not do and what the re-solve of ``x`` buys.
-    residual = abs(2 * float(np.sum(got)) + got_x - 10.0)
-    assert residual <= DECLARED_ABS_TOL, (
-        f"the re-derived point misses the equality by {residual:.3e}"
-    )
-    # 5. Nothing was paid for it: the objective is the same to tolerance.
-    assert r.objective == pytest.approx(float(np.sum(z_near)) + x_val, abs=1e-5)
-
-
 def test_bounds_check_vectorisation_matches_the_original_loop():
     """``_matrix_solution_feasible``'s bounds check was vectorised so the MIQP node
     gate can call it once per node. Semantics must be unchanged, including the
@@ -510,88 +363,6 @@ def test_bounds_check_vectorisation_matches_the_original_loop():
         checked += 1
 
     assert checked == 200, f"only {checked} comparisons executed"
-
-
-@pytest.mark.parametrize("vub", [1e3, 1e6])
-def test_injection_funnel_declines_an_off_row_heuristic_incumbent(vub, caplog, monkeypatch):
-    """An exactly-integral candidate outside a declared row must be declined where
-    it is injected, not discovered at the exit gate.
-
-    The reproducer is a two-row big-M master handed straight to the POUNCE-IPM
-    matrix-MILP engine (``get_milp_solver(backend="pounce")`` ->
-    ``_solve_milp_bb(prefer_pounce=True)``)::
-
-        min  y + eta
-        s.t. -M*y - eta <= 0          (a big-M row, slack at the optimum)
-             -s*y - eta <= vub - s    (the binding row, rhs of order vub)
-             y in {0,1},  eta >= -1e12
-
-    The relaxation lands ``y`` a hair under 1, ``_pounce_snap_incumbent`` fixes
-    ``y = 1`` and re-solves for ``eta``, and the IPM returns ``eta`` about
-    ``1e-8*vub`` past the binding row — 1e-5 at ``vub = 1e3`` and 1e-2 at
-    ``vub = 1e6``, four orders of magnitude outside the declared ``abs=1e-6``.
-    Nothing downstream re-examines it (it is already integral), so it reached the
-    exit gate as the answer and the whole solve died with ``MILP-BB returned an
-    infeasible point labeled feasible/optimal``.
-
-    Declining at the funnel is free — injection is a heuristic accelerator, the
-    subtree stays open — so the solve completes and its answer is exact.
-
-    This used to drive the same funnel through ``solve_benders`` on a linear
-    model, i.e. through the classical-Benders master. #986 pinned that master to
-    the exact-vertex simplex (an interior master point is not a valid Benders
-    iterate and its objective is the reported dual bound), which removed the IPM
-    path this test exists to exercise. The guard it pins is still needed for the
-    ``_solve_milp_bb`` callers that do run on the IPM engine — the matrix-MILP
-    seam used here, OA masters, GDP-LOA, ``milp_relaxation`` — so the test is
-    re-pointed at one of those rather than deleted. The rows above are the shape
-    the Benders master actually produced, and reproduce the funnel's violation
-    magnitudes exactly (9.994994e-06 / 9.999995e-03).
-
-    Pinned to ``DISCOPT_STRUCTURED_NODE_RECOVERY=0``. #1085 graduated that flag
-    to default ON, and on this reproducer it routes the node through
-    ``pounce.solve_qp`` instead of the legacy callback TNLP, so the relaxation
-    no longer hands ``_pounce_snap_incumbent`` a point that snaps off-row --
-    the funnel is never reached and the guard below fires, exactly as it should
-    rather than passing vacuously. The guard is not obsolete: it still protects
-    every ``_solve_milp_bb`` caller on the legacy path, so the test keeps
-    exercising it instead of being weakened to accept "nothing was declined".
-    That the graduated default is not hiding a bad incumbent is a separate
-    claim, checked directly by the companion test below.
-    """
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.lp_backend import get_milp_solver
-
-    monkeypatch.setenv("DISCOPT_STRUCTURED_NODE_RECOVERY", "0")
-    milp = get_milp_solver(backend="pounce")
-    big_m, slope = 3.0 * vub, 0.25
-    A_ub = np.array([[-big_m, -1.0], [-slope, -1.0]])
-    b_ub = np.array([0.0, vub - slope])
-
-    with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
-        r = milp(
-            np.array([1.0, 1.0]),
-            A_ub=A_ub,
-            b_ub=b_ub,
-            bounds=[(0.0, 1.0), (-1e12, 1e20)],
-            integrality=np.array([1, 0], dtype=np.int32),
-            time_limit=60.0,
-            gap_tolerance=1e-4,
-        )
-
-    declined = [
-        rec.getMessage()
-        for rec in caplog.records
-        if "MILP-BB: rejected a snapped incumbent" in rec.getMessage()
-    ]
-    assert declined, (
-        "the funnel never declined anything; this test would pass for the wrong "
-        "reason (the off-row candidate is what it is meant to exercise)"
-    )
-
-    # And the solve still lands on the exact optimum (y=1, eta=-vub -> 1 - vub).
-    assert r.status == SolveStatus.OPTIMAL
-    assert r.objective == pytest.approx(1.0 - vub, rel=1e-9)
 
 
 @pytest.mark.parametrize("vub", [1e3, 1e6])
