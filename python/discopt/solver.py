@@ -38924,6 +38924,9 @@ def _solve_milp_simplex(
     if _sel_req is not None:
         _sel_kw["node_selection"] = _sel_req["strategy"]
         _sel_req["used"] = True
+    elif os.environ.get("P3_NODESEL"):
+        # Gap plan P3 experiment only: A/B the driver's node selection.
+        _sel_kw["node_selection"] = os.environ["P3_NODESEL"]
     # ``branching_rule`` (#1535, retirement step 4): the driver's branching-variable rule.
     if branching_rule is not None:
         _sel_kw["branching_rule"] = branching_rule

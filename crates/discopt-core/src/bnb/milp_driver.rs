@@ -5177,6 +5177,12 @@ fn solve_milp_node_search(
         is_int_full: is_int_full.clone(),
     });
     let mut rens_root_done = false;
+    let plunge_on = std::env::var("P3_PLUNGE").as_deref() == Ok("1");
+    let plunge_up = std::env::var("P3_PLUNGE_DIR").as_deref() == Ok("up");
+    let mut plunge_next: Option<crate::bnb::node::NodeId> = None;
+    let mut plunge_parent: Option<crate::bnb::node::NodeId> = None;
+    let mut plunge_stack: Vec<crate::bnb::node::NodeId> = Vec::new();
+    let plunge_bt = std::env::var("P3_PLUNGE_BT").as_deref() == Ok("1");
     let mut p3_heur_s = 0.0f64;
     let rens_root_x: Option<Vec<f64>> = last_root_x
         .as_ref()
@@ -5330,9 +5336,20 @@ fn solve_milp_node_search(
                 break;
             }
         }
-        let batch = tm.export_batch(64);
+        let batch = tm.export_batch_with_first(plunge_next.take(), 64);
         if batch.node_ids.is_empty() {
             break;
+        }
+        plunge_parent = batch.node_ids.first().copied();
+        if plunge_on && std::env::var("P3_DBG").is_ok() {
+            if let Some(ln) = plunge_parent.and_then(|p| tm.node_lineage(p)) {
+                eprintln!(
+                    "P3DBG plunge node depth={} branch={:?} batch={}",
+                    ln.depth,
+                    ln.branch.map(|b| (b.var, b.up, b.value)),
+                    batch.node_ids.len()
+                );
+            }
         }
 
         // Interactive debugger: nodes selected — expose the batch's boxes/ids so
@@ -5979,6 +5996,39 @@ fn solve_milp_node_search(
             tm.import_results_with_point_values(&results, &point_values)
                 .expect("one point value per node result");
             tm.process_evaluated();
+            // Gap plan P3 (`P3_PLUNGE=1`): continue the plunge into the slot-0 node's
+            // down child (HiGHS's main search dove down on enlight8's integer columns).
+            if plunge_on {
+                if let Some(pp) = plunge_parent {
+                    let kids: Vec<(crate::bnb::node::NodeId, bool)> = tm
+                        .last_created()
+                        .map(discopt_node_id)
+                        .filter_map(|c| {
+                            tm.node_lineage(c).and_then(|ln| {
+                                (ln.parent == Some(pp)
+                                    && ln.status == crate::bnb::node::NodeStatus::Pending)
+                                    .then(|| (c, ln.branch.is_some_and(|b| b.up)))
+                            })
+                        })
+                        .collect();
+                    plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
+                    // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
+                    for k in kids.iter().filter(|k| k.1 != plunge_up) {
+                        plunge_stack.push(k.0);
+                    }
+                }
+                if plunge_next.is_none() && plunge_bt {
+                    while let Some(sib) = plunge_stack.pop() {
+                        if tm
+                            .node_lineage(sib)
+                            .is_some_and(|ln| ln.status == crate::bnb::node::NodeStatus::Pending)
+                        {
+                            plunge_next = Some(sib);
+                            break;
+                        }
+                    }
+                }
+            }
             break 'search;
         }
         if hit_unbounded {
@@ -5988,6 +6038,39 @@ fn solve_milp_node_search(
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
+        // Gap plan P3 (`P3_PLUNGE=1`): continue the plunge into the slot-0 node's
+        // down child (HiGHS's main search dove down on enlight8's integer columns).
+        if plunge_on {
+            if let Some(pp) = plunge_parent {
+                let kids: Vec<(crate::bnb::node::NodeId, bool)> = tm
+                    .last_created()
+                    .map(discopt_node_id)
+                    .filter_map(|c| {
+                        tm.node_lineage(c).and_then(|ln| {
+                            (ln.parent == Some(pp)
+                                && ln.status == crate::bnb::node::NodeStatus::Pending)
+                                .then(|| (c, ln.branch.is_some_and(|b| b.up)))
+                        })
+                    })
+                    .collect();
+                plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
+                // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
+                for k in kids.iter().filter(|k| k.1 != plunge_up) {
+                    plunge_stack.push(k.0);
+                }
+            }
+            if plunge_next.is_none() && plunge_bt {
+                while let Some(sib) = plunge_stack.pop() {
+                    if tm
+                        .node_lineage(sib)
+                        .is_some_and(|ln| ln.status == crate::bnb::node::NodeStatus::Pending)
+                    {
+                        plunge_next = Some(sib);
+                        break;
+                    }
+                }
+            }
+        }
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.
@@ -9140,6 +9223,22 @@ fn try_dive_repair(
         }
         None => ctx.simplex.clone(),
     };
+    // Gap plan P3 (`P3_BTDIVE=<max backtracks>`): HiGHS's dive backtracks to the most
+    // recent untried alternative when a fixing leaves no feasible child
+    // (`HighsSearch::dive` + `backtrack`); ours used to abandon. Each successful fix
+    // records its alternative value with the box and basis it was taken from.
+    let bt_max: usize = std::env::var("P3_BTDIVE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut bt_stack: Vec<(usize, f64, Vec<f64>, Vec<f64>, Basis)> = Vec::new();
+    let mut bt_used = 0usize;
+    let improve = improve || bt_max > 0;
+    let max_steps = if bt_max > 0 {
+        max_steps * 4 + bt_max
+    } else {
+        max_steps
+    };
     for _ in 0..max_steps {
         // Gap plan P3: the dive is a heuristic; past its wall cap it gives up (no
         // point, never a wrong one).
@@ -9147,13 +9246,17 @@ fn try_dive_repair(
             crate::profile::incr(crate::profile::Ctr::DiveCapped);
             return None;
         }
-        // Most-fractional unfixed integer column.
+        // Most-fractional unfixed integer column (`P3_DIVE_VAR=least`: least fractional).
+        let least = std::env::var("P3_DIVE_VAR").as_deref() == Ok("least");
         let mut pick: Option<usize> = None;
-        let mut best = INT_TOL;
+        let mut best = if least { f64::INFINITY } else { INT_TOL };
         for j in 0..ns {
             if ctx.is_int[j] && l[j] != u[j] {
                 let f = frac(x[j]);
-                if f > best {
+                if f <= INT_TOL {
+                    continue;
+                }
+                if (!least && f > best) || (least && f < best) {
                     best = f;
                     pick = Some(j);
                 }
@@ -9196,7 +9299,13 @@ fn try_dive_repair(
         } else {
             (u[j], l[j])
         };
-        let nearest = x[j].round().clamp(lo, hi);
+        // P3 (`P3_DIVE_UP=1`): HiGHS's root-solution child rule; from the root point
+        // (rootsol == x) its tie goes up (`HighsSearch.cpp:1166-1206`).
+        let nearest = if std::env::var("P3_DIVE_UP").as_deref() == Ok("1") {
+            x[j].ceil().clamp(lo, hi)
+        } else {
+            x[j].round().clamp(lo, hi)
+        };
         let other = if x[j] >= nearest {
             (nearest + 1.0).min(hi)
         } else {
@@ -9204,6 +9313,7 @@ fn try_dive_repair(
         };
         let mut next_x: Option<Vec<f64>> = None;
         let mut tried = Vec::with_capacity(2);
+        let bt_pre = (l.clone(), u.clone(), cur_basis.clone());
         for &v in &[nearest, other] {
             if tried.contains(&v.to_bits()) {
                 continue;
@@ -9265,6 +9375,15 @@ fn try_dive_repair(
                     l.copy_from_slice(&full_l[..ns]);
                     u.copy_from_slice(&full_u[..ns]);
                 }
+                if bt_max > 0 && v != other && other != nearest {
+                    // The box/basis before this fix, for a later backtrack.
+                    let (mut sl, mut su) = (l.clone(), u.clone());
+                    if improve {
+                        sl.copy_from_slice(&bt_pre.0);
+                        su.copy_from_slice(&bt_pre.1);
+                    }
+                    bt_stack.push((j, other, sl, su, bt_pre.2.clone()));
+                }
                 l[j] = v;
                 u[j] = v;
                 // Carry this step's optimal basis into the next fix's warm start --
@@ -9281,6 +9400,58 @@ fn try_dive_repair(
             }
         }
         // `None` means both roundings were infeasible -> abandon the dive.
+        let mut next_x = next_x;
+        while next_x.is_none() && bt_used < bt_max {
+            let Some((bj, bv, bl, bu, bb)) = bt_stack.pop() else {
+                break;
+            };
+            bt_used += 1;
+            crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
+            let mut full_l = vec![0.0; ctx.n_w];
+            let mut full_u = vec![0.0; ctx.n_w];
+            full_l[..ns].copy_from_slice(&bl);
+            full_u[..ns].copy_from_slice(&bu);
+            full_l[bj] = bv;
+            full_u[bj] = bv;
+            full_l[ns..].copy_from_slice(ctx.slack_l);
+            full_u[ns..].copy_from_slice(ctx.slack_u);
+            let pr = fbbt_rows_exact(
+                ctx.csc_rc,
+                ctx.m_w,
+                ctx.n_w,
+                &full_l,
+                &full_u,
+                ctx.b_w,
+                ctx.is_int_full,
+                ctx.opts.simplex.tol,
+            );
+            if pr.infeasible {
+                continue;
+            }
+            let mut sol = ctx.problem.solve_warm(&pr.l, &pr.u, &bb, &dive_simplex);
+            *pivots += sol.iters;
+            if sol.status != LpStatus::Optimal {
+                continue;
+            }
+            if let Some(c) = cutoff {
+                if sol.obj + ctx.obj_const >= c {
+                    continue;
+                }
+            }
+            if let Some(sc) = ctx.scaling {
+                sc.unscale_x(&mut sol.x);
+            }
+            l.copy_from_slice(&pr.l[..ns]);
+            u.copy_from_slice(&pr.u[..ns]);
+            l[bj] = bv;
+            u[bj] = bv;
+            if sol.basis.basic_vars.len() == ctx.m_w && sol.basis.col_status.len() == ctx.n_w {
+                cur_basis = sol.basis;
+            } else {
+                cur_basis = bb;
+            }
+            next_x = Some(sol.x);
+        }
         x = match next_x {
             Some(v) => v,
             None => {
@@ -9292,6 +9463,10 @@ fn try_dive_repair(
     }
     crate::profile::incr(crate::profile::Ctr::DiveExhaustedSteps);
     None
+}
+
+fn discopt_node_id(i: usize) -> crate::bnb::node::NodeId {
+    crate::bnb::node::NodeId(i)
 }
 
 fn frac(v: f64) -> f64 {

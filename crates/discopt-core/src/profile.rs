@@ -411,6 +411,7 @@ counters!(
     RandRoundRejected,
     SimpleRoundTries,
     SimpleRoundFound,
+    DiveBacktracks,
     RcFixRefactor,
     DualWarmSolves,
     DualColdFallbacks,

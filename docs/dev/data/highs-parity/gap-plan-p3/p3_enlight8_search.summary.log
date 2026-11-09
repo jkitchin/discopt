@@ -1,0 +1,13 @@
+# enlight8: who finds the incumbent (HiGHS ablation build, 1 thread, 20 s)
+# default: B at node 114 (1.8 s) | no separators: B at node 14 (0.1 s)
+# presolve off + heuristics off + no separators: B at node 14 (0.1 s), root bound ~3
+# HiGHS main search (HS_TRACE, heur=0): plunge branches DOWN on the general-integer columns (64+):
+#   depth 1 col 64 ub 0, LP 1 -> 8 -> 11 -> 18; first leaf depth 10; backtrack to depth 6;
+#   incumbent 27 at depth 24 (LP 27).
+# discopt arms (20 s, all P3 settings): no incumbent with
+#   backtracking fix-and-resolve dive (P3_BTDIVE 50/200/500), ceil-first child (P3_DIVE_UP),
+#   least-fractional variable (P3_DIVE_VAR=least), node selection depth_first / best_estimate (P3_NODESEL),
+#   plunge in batch slot 0 down/up (P3_PLUNGE, reaches depth 26, branching DOWN on 64+ columns as HiGHS)
+#   and with sibling backtracking (P3_PLUNGE_BT).
+# => the plunge mechanics are not the missing piece; HiGHS's node evaluation (propagation + conflict
+#    analysis, 1352 conflicts by node 14) and reliability branching remain the candidates.
