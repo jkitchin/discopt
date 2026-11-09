@@ -959,3 +959,29 @@ cost is the §12.8 caveat: the root takes most of the 20 s, so the tree and its 
 heuristics starve. Default OFF. One rework is justified by the measurement (bound the
 root's share of the budget under the flag, then re-panel); if that panel fails too, the
 flag and its implementation are retired.
+
+### 12.10 Primal starvation fixed from HiGHS evidence; presolve hypothesis falsified (2026-11-09)
+
+The §12.9 starvation was chased in quick 20 s target solves (not panels), with every step
+taken from HiGHS's source or its logs rather than guessed:
+
+- **HiGHS's incumbent sources** on the rows the flag lost (`p3_highs_solution_sources.*`):
+  sub-MIP at the root (`L`) — sp150x300d 0.1 s, nexp-50-20-4-2 1.6 s, neos-911970 2.1 s.
+- **Ported** (`P3_*` experiment knobs, flag-on path only): per-round cut ageing as
+  `performAging` (`HighsLpRelaxation.cpp:629-675`), randomized rounding after every root
+  round with no incumbent (`HighsMipSolverData.cpp:1858`), RENS/RINS as
+  `HighsPrimalHeuristics.cpp` (fixing dive to 0.6 / RINS 0.25, sub-MIP on the cut LP with
+  ≤ 5 rounds, no strong branching, `200 + nodes/20`, one recursion level). Tree LPs expel
+  zero artificials (short bases had refused every warm start). Incumbents came back on every
+  row that had lost one; certified on the targets 0 -> 3 (istra guard, beavma, gesa2).
+- **Falsified: "presolve is why HiGHS solves our RENS neighbourhood".** HiGHS solves the
+  neighbourhood discopt builds (dumped, `P3_RENS_DUMP`) at 1 node with presolve OFF and
+  heuristics OFF alike (`p3_highs_on_rens_dump.py`). What does it is the root cut loop:
+  LP 64.0 -> 68.998 (sp150, opt 69) and 16.2 -> 29 (nexp-50-20-1-1, opt 29) in ≤ 0.3 s. On
+  the same MPS, discopt's root reaches 67 (1.4 s) and 26 (12 s with c-MIR on). Presolve was
+  not built.
+- **Bug found:** `lifted_mic_knapsack`'s cover sort used a tolerance comparator that is not a
+  total order; Rust's sort panicked on it (mik-250-20-75-1 in a sub-MIP). Fixed with buckets.
+
+Next is the separator itself — strength and speed on these neighbourhoods, where HiGHS's
+root is the measured reference (`nbhd_*.mps` can be regenerated with `P3_RENS_DUMP`).
