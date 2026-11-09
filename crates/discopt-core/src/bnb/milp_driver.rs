@@ -2214,6 +2214,397 @@ fn try_randomized_rounding(
     }
 }
 
+/// Gap plan P3 (`P3_RENS=1`, experiment): HiGHS's RENS (`HighsPrimalHeuristics.cpp:394-640`).
+///
+/// 1. Neighbourhood dive (`:430-570`): restrict every integer to `[floor, ceil]` of the
+///    LP point and propagate; when nothing is restricted, fix the fractional integers in
+///    order of `|fixval - x|` (`calcFixVal`, `:377`) until the cumulative change reaches
+///    0.5, propagate, re-solve the LP, repeat until the fixing rate reaches the target
+///    (0.6, `determineTargetFixingRate` with no observations, `:249`).
+/// 2. Sub-MIP (`solveSubMip`, `:77-140`) over the post-root LP **with its tight root cuts**
+///    (`heurlp.removeObsoleteRows`, `:616`; our root cleanup already keeps only those),
+///    with at most 5 root separation rounds (`HighsMipSolverData.cpp:1990-1993`), no
+///    strong branching (`mip_pscost_minreliable = 0`) and the node limit `200 + nodes/20`.
+///
+/// Sound: a returned point is re-verified against the ORIGINAL rows (`orig`) before it
+/// is injected, exactly as the existing sub-MIP's are.
+#[allow(clippy::too_many_arguments)]
+fn try_rens_highs(
+    cut: &SubMipBase,
+    orig: &SubMipBase,
+    order: &[usize],
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    node_x: &[f64],
+    root_x: Option<&[f64]>,
+    inc: Option<(&[f64], f64)>,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    parent_nodes: usize,
+) -> Option<(Vec<f64>, f64)> {
+    if node_x.len() < ns || inc.is_some_and(|(ix, _)| ix.len() < ns) {
+        return None;
+    }
+    let ft = 1e-6;
+    // RINS (`HighsPrimalHeuristics.cpp` RINS): fix towards the incumbent where the LP
+    // agrees with it; stop once the fixing rate reaches 0.25.
+    let mut fixtolpsol = inc.is_some();
+    let min_rate_rins = 0.25;
+    let target = 0.6;
+    let t0 = std::time::Instant::now();
+    let left = deadline.map_or(10.0, |d| d.saturating_duration_since(t0).as_secs_f64());
+    if left <= 0.0 {
+        return None;
+    }
+    let dive_cap: f64 = std::env::var("P3_RENS_DIVE_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let dive_deadline = t0 + std::time::Duration::from_secs_f64((0.1 * left).min(dive_cap));
+    crate::profile::incr(crate::profile::Ctr::SubMipRensRun);
+    let (mut l, mut u) = (cut.l.clone(), cut.u.clone());
+    let free_ints: Vec<usize> = order.iter().copied().filter(|&j| l[j] < u[j]).collect();
+    let n_total = free_ints.len();
+    if n_total == 0 {
+        return None;
+    }
+    let rate = |l: &[f64], u: &[f64]| {
+        free_ints.iter().filter(|&&j| l[j] >= u[j]).count() as f64 / n_total as f64
+    };
+    let prop = |l: &[f64], u: &[f64]| {
+        let pr = fbbt_rows_exact(
+            &cut.csc,
+            cut.m,
+            cut.n,
+            l,
+            u,
+            &cut.b,
+            &cut.is_int_full,
+            opts.simplex.tol,
+        );
+        (!pr.infeasible).then_some((pr.l, pr.u))
+    };
+    let mut simplex = opts.simplex.clone();
+    simplex.deadline = Some(dive_deadline);
+    let mut x: Vec<f64> = node_x[..ns].to_vec();
+    let mut basis: Option<Basis> = None;
+    let mut fixing: f64;
+    let mut why = "iters";
+    let mut n_lp = 0usize;
+    for _ in 0..200 {
+        if std::time::Instant::now() >= dive_deadline {
+            why = "deadline";
+            break;
+        }
+        fixing = rate(&l, &u);
+        if fixing >= target {
+            why = "target";
+            break;
+        }
+        let snap = (l.clone(), u.clone());
+        let mut branched = 0usize;
+        let stop_rate = (1.0 - (1.0 - fixing) * 0.9).min(target);
+        let mut infeasible = false;
+        if let (Some((ix, _)), true) = (inc, fixtolpsol) {
+            // RINS phase A: no fractional integer agrees with the incumbent at the node
+            // point -> fix the integers where the current LP equals the incumbent.
+            let any_frac_agree = order.iter().any(|&j| {
+                l[j] < u[j] && (x[j] - x[j].round()).abs() > ft && (node_x[j] - ix[j]).abs() <= ft
+            });
+            if !any_frac_agree {
+                for &j in order {
+                    if l[j] >= u[j] || (x[j] - ix[j]).abs() > ft {
+                        continue;
+                    }
+                    let v = x[j].round().min(u[j]).max(l[j]);
+                    if l[j] < v || u[j] > v {
+                        l[j] = v;
+                        u[j] = v;
+                        branched += 1;
+                        match prop(&l, &u) {
+                            Some((pl, pu)) => {
+                                l = pl;
+                                u = pu;
+                            }
+                            None => {
+                                infeasible = true;
+                                break;
+                            }
+                        }
+                        if rate(&l, &u) >= stop_rate {
+                            break;
+                        }
+                    }
+                }
+                if !infeasible && branched == 0 {
+                    if rate(&l, &u) >= min_rate_rins {
+                        why = "rins_rate";
+                        break;
+                    }
+                    fixtolpsol = false;
+                }
+            }
+        }
+        for &j in order {
+            if inc.is_some() {
+                break; // RINS has no RENS box phase
+            }
+            if l[j] >= u[j] {
+                continue;
+            }
+            let down = (x[j] + ft).floor().min(u[j]);
+            let up = (x[j] - ft).ceil().max(l[j]);
+            let mut changed = false;
+            if l[j] < down {
+                l[j] = down;
+                changed = true;
+            }
+            if u[j] > up {
+                u[j] = up;
+                changed = true;
+            }
+            if changed {
+                branched += 1;
+                match prop(&l, &u) {
+                    Some((pl, pu)) => {
+                        l = pl;
+                        u = pu;
+                    }
+                    None => {
+                        infeasible = true;
+                        break;
+                    }
+                }
+                if rate(&l, &u) >= stop_rate {
+                    break;
+                }
+            }
+        }
+        if !infeasible && branched == 0 {
+            // Fix the fractional integers, least change first (`:500-560`).
+            let rins_lp = fixtolpsol && inc.is_some();
+            let fixval = |j: usize, l: &[f64], u: &[f64]| {
+                if rins_lp {
+                    return (node_x[j] + 0.5).floor().min(u[j]).max(l[j]);
+                }
+                let xv = x[j];
+                let rc = root_x.map_or(0.0, |r| xv - r[j]);
+                let v = if rc >= 0.4 {
+                    xv.ceil()
+                } else if rc <= -0.4 {
+                    xv.floor()
+                } else if cut.c[j] > 0.0 {
+                    xv.ceil()
+                } else if cut.c[j] < 0.0 {
+                    xv.floor()
+                } else {
+                    (xv + 0.5).floor()
+                };
+                v.min(u[j]).max(l[j])
+            };
+            let mut frac: Vec<(f64, usize)> = order
+                .iter()
+                .copied()
+                .filter(|&j| l[j] < u[j] && (x[j] - x[j].round()).abs() > ft)
+                .filter(|&j| !rins_lp || inc.is_some_and(|(ix, _)| (node_x[j] - ix[j]).abs() <= ft))
+                .map(|j| ((fixval(j, &l, &u) - x[j]).abs(), j))
+                .collect();
+            frac.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut change = 0.0;
+            for (_, j) in frac {
+                if l[j] >= u[j] {
+                    continue;
+                }
+                let v = fixval(j, &l, &u);
+                l[j] = v;
+                u[j] = v;
+                branched += 1;
+                match prop(&l, &u) {
+                    Some((pl, pu)) => {
+                        l = pl;
+                        u = pu;
+                    }
+                    None => {
+                        infeasible = true;
+                        break;
+                    }
+                }
+                if rate(&l, &u) >= target {
+                    break;
+                }
+                change += (v - x[j]).abs();
+                if change >= 0.5 {
+                    break;
+                }
+            }
+        }
+        if infeasible {
+            why = "prop_infeasible";
+            (l, u) = snap;
+            break;
+        }
+        if branched == 0 {
+            why = "nothing_to_fix";
+            break;
+        }
+        n_lp += 1;
+        // Re-solve the LP over the restricted box (`heurlp.flushDomain` + evaluateNode).
+        let lp = LpView {
+            a: &[],
+            m: cut.m,
+            n: cut.n,
+            c: &cut.c,
+            l: &l,
+            u: &u,
+        };
+        let t_lp = std::time::Instant::now();
+        let warm = basis.is_some();
+        let mut sol = match basis.as_ref() {
+            Some(bs) => solve_lp_warm_scaled_csc(&lp, &cut.b, bs, &simplex, &cut.csc),
+            None => solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex),
+        };
+        if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
+            sol = solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex);
+        }
+        if std::env::var("P3_DBG").is_ok() {
+            eprintln!(
+                "P3DBG rens lp warm={warm} status={:?} iters={} s={:.3} bv={}",
+                sol.status,
+                sol.iters,
+                t_lp.elapsed().as_secs_f64(),
+                sol.basis.basic_vars.len()
+            );
+        }
+        if sol.status != LpStatus::Optimal || sol.x.len() < ns {
+            why = if sol.status == LpStatus::Infeasible {
+                "lp_infeasible"
+            } else {
+                "lp_other"
+            };
+            (l, u) = snap;
+            break;
+        }
+        x.copy_from_slice(&sol.x[..ns]);
+        if sol.basis.basic_vars.len() == cut.m && sol.basis.col_status.len() == cut.n {
+            basis = Some(sol.basis);
+        }
+    }
+    fixing = rate(&l, &u);
+    if fixing < 0.1 {
+        return None;
+    }
+    let left = deadline.map_or(10.0, |d| {
+        d.saturating_duration_since(std::time::Instant::now())
+            .as_secs_f64()
+    });
+    let budget = std::env::var("P3_RENS_SUB_S")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or((left * 0.25).min(2.0));
+    if budget <= 0.05 {
+        return None;
+    }
+    let sub_nodes = std::env::var("P3_RENS_NODES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200 + parent_nodes / 20);
+    if let Ok(path) = std::env::var("P3_RENS_DUMP") {
+        let (cp, ri, vals) = cut.csc.raw();
+        let js = |v: &[f64]| {
+            v.iter()
+                .map(|x| {
+                    if x.is_finite() && x.abs() < 1e19 {
+                        format!("{x:e}")
+                    } else if *x > 0.0 {
+                        "1e30".into()
+                    } else {
+                        "-1e30".into()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ji = |v: &[usize]| {
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ints: Vec<usize> = (0..cut.n).filter(|&j| cut.is_int_full[j]).collect();
+        let body = format!(
+            "{{\"m\":{},\"n\":{},\"colptr\":[{}],\"rowidx\":[{}],\"vals\":[{}],\"c\":[{}],\"b\":[{}],\"l\":[{}],\"u\":[{}],\"ints\":[{}]}}",
+            cut.m, cut.n, ji(cp), ji(ri), js(vals), js(&cut.c), js(&cut.b), js(&l), js(&u), ji(&ints)
+        );
+        let _ = std::fs::write(path, body);
+    }
+    let seed = inc.and_then(|(ix, _)| {
+        (0..ns)
+            .all(|j| ix[j] >= l[j] - 1e-9 && ix[j] <= u[j] + 1e-9)
+            .then(|| ix[..ns].to_vec())
+    });
+    let mut sub = sub_solve_options(opts, sub_nodes, seed);
+    sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+    sub.cut_rounds = sub.cut_rounds.min(5);
+    sub.root_cut_time_s = Some(budget * 0.3);
+    sub.strong_branch = false;
+    if std::env::var("P3_RENS_DFS").as_deref() == Ok("1") {
+        sub.selection = SelectionStrategy::DepthFirst;
+    }
+    let res = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        solve_milp_node_hooked(
+            cut.csc.clone(),
+            cut.m,
+            cut.n,
+            &cut.c,
+            &l,
+            &u,
+            &cut.b,
+            obj_const,
+            &sub,
+            None,
+            None,
+            None,
+        )
+    };
+    crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
+    if std::env::var("P3_DBG").is_ok() {
+        eprintln!(
+            "P3DBG rens why={why} n_lp={n_lp} fixing={fixing:.3} n_total={n_total} dive_s={:.2} sub_status={:?} obj={} nodes={} bound={} budget={budget:.2}",
+            (std::time::Instant::now() - t0).as_secs_f64(),
+            res.status, res.obj, res.nodes, res.bound
+        );
+    }
+    if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) || res.x.len() < ns {
+        return None;
+    }
+    if inc.is_some_and(|(_, v)| res.obj >= v - 1e-9 * (1.0 + v.abs())) {
+        return None;
+    }
+    match validate_seed_incumbent(
+        &res.x[..ns],
+        ns,
+        is_int,
+        &orig.csc,
+        &orig.b,
+        &orig.c,
+        &orig.l,
+        &orig.u,
+        orig.m,
+        orig.n,
+    ) {
+        Some((sx, sobj)) => {
+            crate::profile::incr(crate::profile::Ctr::SubMipImproved);
+            Some((sx, sobj + obj_const))
+        }
+        None => {
+            crate::profile::incr(crate::profile::Ctr::SubMipRejected);
+            None
+        }
+    }
+}
+
 thread_local! {
     /// Recursion depth of the MILP driver on this thread. A nested driver call
     /// (the retired A12 RINS sub-solve was one) must not call
@@ -3292,7 +3683,8 @@ fn solve_milp_node_search(
     let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
     let sub_mip_base: Option<SubMipBase> = (sub_mip_enabled()
         && opts.heuristics
-        && milp_depth == 0
+        && (milp_depth == 0
+            || (milp_depth == 1 && std::env::var("P3_RENS").as_deref() == Ok("1")))
         && lazy.is_none()
         && !opts.integer_cols.is_empty())
     .then(|| SubMipBase {
@@ -3414,6 +3806,9 @@ fn solve_milp_node_search(
             None
         };
     let mut all_root_cuts: Vec<GomoryCut> = Vec::new();
+    let mut cut_ages: Vec<u32> = Vec::new();
+    let mut cut_epochs: u32 = 0;
+    let mut root_duals: Vec<f64>;
     let mut last_root_x: Option<Vec<f64>> = None;
     // Row-major view of the pre-cut matrix, and the running list of cuts already
     // appended (each already rewritten into structural space). Together these let
@@ -3543,6 +3938,7 @@ fn solve_milp_node_search(
             // if more cuts are appended below it is extended to the new size after
             // the loop. The clone is cheap next to the solve it came from.
             root_basis = Some((root.basis.clone(), n_w));
+            root_duals = root.dual.clone();
             if prune_base.is_some() {
                 last_root_x = Some(root.x.clone());
             }
@@ -3748,10 +4144,24 @@ fn solve_milp_node_search(
                 let total = all_root_cuts.len();
                 debug_assert_eq!(n_w, n_base + total);
                 let n_old = rn.saturating_sub(n_base).min(total);
+                // HiGHS `performAging(true)` (`HighsLpRelaxation.cpp:629-675`): a cut
+                // whose slack is basic ages by one, one with a nonzero dual resets to 0;
+                // rows are deleted only every max(agelimit/2, 2) epochs, those with age
+                // above min(epochs, agelimit), agelimit = `mip_lp_age_limit` = 10.
+                cut_ages.resize(total, 0);
+                cut_epochs += 1;
+                const AGE_LIMIT: u32 = 10;
+                let delete_now = cut_epochs % (AGE_LIMIT / 2).max(2) == 0;
+                let limit = AGE_LIMIT.min(cut_epochs);
                 let mut keep = vec![true; total];
                 for (i, k) in keep.iter_mut().enumerate().take(n_old) {
                     if rb.col_status.get(n_base + i) == Some(&BASIC) {
-                        *k = false;
+                        cut_ages[i] += 1;
+                        if delete_now && cut_ages[i] > limit {
+                            *k = false;
+                        }
+                    } else if root_duals.get(m_base + i).is_some_and(|d| d.abs() > 1e-9) {
+                        cut_ages[i] = 0;
                     }
                 }
                 for ci in (0..total).rev() {
@@ -3842,6 +4252,12 @@ fn solve_milp_node_search(
                     n_w = n_base + kept.len();
                     structural_cuts = kept.clone();
                     all_root_cuts = kept;
+                    cut_ages = cut_ages
+                        .iter()
+                        .enumerate()
+                        .filter(|(c, _)| keep[*c])
+                        .map(|(_, &a)| a)
+                        .collect();
                     if let Some(x) = last_root_x.as_ref() {
                         let mut nx: Vec<f64> = x[..n_base.min(x.len())].to_vec();
                         for i in 0..n_old {
@@ -3984,6 +4400,35 @@ fn solve_milp_node_search(
 
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
+    // Gap plan P3 (`P3_RENS=1`): the post-root LP with its kept (tight) root cuts, for
+    // the HiGHS RENS port ([`try_rens_highs`]).
+    let p3_rens = sub_mip_base.is_some() && std::env::var("P3_RENS").as_deref() == Ok("1");
+    let rens_cut_base: Option<SubMipBase> = p3_rens.then(|| SubMipBase {
+        csc: csc_w.clone(),
+        m: m_w,
+        n: n_w,
+        c: c_w.clone(),
+        l: l_w.clone(),
+        u: u_w.clone(),
+        b: b_w.clone(),
+        is_int_full: is_int_full.clone(),
+    });
+    let mut rens_root_done = false;
+    let rens_root_x: Option<Vec<f64>> = last_root_x
+        .as_ref()
+        .filter(|x| x.len() >= ns)
+        .map(|x| x[..ns].to_vec());
+    // HiGHS's `intcols` order: lock score descending (`HighsPrimalHeuristics.cpp:43-73`).
+    let rens_order: Vec<usize> = match (p3_rens, sub_mip_base.as_ref()) {
+        (true, Some(b)) => {
+            let (up, dn) = rounding_locks(b, ns);
+            let mut o: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
+            o.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+            o
+        }
+        _ => Vec::new(),
+    };
 
     // Extend the kept root basis to the final matrix size: rounds after the last
     // solve appended cut rows/slacks, and `extend_basis` makes those new slacks
@@ -4986,19 +5431,46 @@ fn solve_milp_node_search(
                     } else {
                         SubMipKind::Rens
                     };
-                    match try_sub_mip(
-                        kind,
-                        base,
-                        obj_const,
-                        ns,
-                        &is_int,
-                        &r.solution,
-                        inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
-                        opts,
-                        deadline,
-                        budget,
-                        &mut sub_mip_spent,
-                    ) {
+                    // HiGHS runs RENS once at the end of the root whatever the incumbent
+                    // (`HighsMipSolverData.cpp:2398`), RENS in the tree only without one.
+                    let rens_now = kind == SubMipKind::Rens || !rens_root_done;
+                    rens_root_done = true;
+                    let rens_highs = match rens_cut_base.as_ref() {
+                        Some(cb) => Some(try_rens_highs(
+                            cb,
+                            base,
+                            &rens_order,
+                            obj_const,
+                            ns,
+                            &is_int,
+                            &r.solution,
+                            rens_root_x.as_deref(),
+                            if rens_now {
+                                None
+                            } else {
+                                inc.as_ref().map(|(x, v)| (x.as_slice(), *v))
+                            },
+                            opts,
+                            deadline,
+                            tm.stats().total_nodes,
+                        )),
+                        _ => None,
+                    };
+                    match rens_highs.unwrap_or_else(|| {
+                        try_sub_mip(
+                            kind,
+                            base,
+                            obj_const,
+                            ns,
+                            &is_int,
+                            &r.solution,
+                            inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
+                            opts,
+                            deadline,
+                            budget,
+                            &mut sub_mip_spent,
+                        )
+                    }) {
                         Some((sx, sobj)) => {
                             tm.inject_incumbent(sx, sobj);
                             sub_mip_fail_streak = 0;

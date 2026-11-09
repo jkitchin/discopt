@@ -478,14 +478,16 @@ fn lifted_mic_knapsack(
         if bi != bj {
             return bj.cmp(&bi);
         }
-        let (ca, cb) = (solval[i] * vals[i], solval[j] * vals[j]);
-        if ca > cb + feastol {
-            return std::cmp::Ordering::Less;
-        }
-        if ca < cb - feastol {
-            return std::cmp::Ordering::Greater;
-        }
-        vals[j].total_cmp(&vals[i]).then(i.cmp(&j))
+        // HiGHS compares `solval * val` with a `feastol` tolerance, which is not
+        // transitive (a ~ b, b ~ c, a > c); C++ pdqsort tolerates that, Rust's sort
+        // panics on it ("does not correctly implement a total order", hit on
+        // mik-250-20-75-1 inside a sub-MIP). Comparing `feastol`-wide buckets keeps the
+        // intent and is a total order.
+        let bucket = |k: usize| (solval[k] * vals[k] / feastol).round();
+        bucket(j)
+            .total_cmp(&bucket(i))
+            .then(vals[j].total_cmp(&vals[i]))
+            .then(i.cmp(&j))
     });
     let minlambda = (10.0 * feastol).max(feastol * rhs.abs());
     while coversize != max_cover {

@@ -1,0 +1,11 @@
+# HiGHS on discopt's own RENS neighbourhood (dumped via P3_RENS_DUMP), 1 thread
+== sp150
+MIP has 568 rows; 1168 cols; 4868 nonzeros; 300 integer variables (108 binary)
+Presolve reductions: rows 187(-381); columns 353(-815); nonzeros 1515(-3353) 
+ L       0       0         0   0.00%   69              69                 0.00%      783    138    193       599     0.1s
+== nexp
+MIP has 548 rows; 1038 cols; 1662 nonzeros; 245 integer variables (97 binary)
+Presolve reductions: rows 129(-419); columns 297(-741); nonzeros 526(-1136) 
+ R       0       0         0   0.00%   27.55027548     31                11.13%      183     38      6       159     0.0s
+ L       0       0         0   0.00%   29              29                 0.00%      538     74    101       225     0.0s
+# discopt nested sub-MIP on the same neighbourhood: sp150 no point in 255 nodes (30 s: 765 nodes, bound 69, no point); nexp 36 in 2 s
