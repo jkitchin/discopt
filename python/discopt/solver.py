@@ -38883,6 +38883,7 @@ def _solve_milp_simplex(
             float(_run1_time), float(time_limit) - (time.perf_counter() - t_start)
         )
     if _milp_run1_continue_enabled() and not _tuning().deterministic:
+        _split["milp/run1_continue"] = 1.0
         _run1_time = max(_milp_budget, float(time_limit) - (time.perf_counter() - t_start))
         _run1_stall["stall_time_s"] = float(_milp_budget)
 
