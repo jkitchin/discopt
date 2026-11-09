@@ -478,3 +478,47 @@ Next: the §5 panel (`d2_flag_panel.py --flag DISCOPT_MILP_RUN1_CONTINUE --fired
 milp/run1_continue`, MIPLIB-38 + M, 3 reps) plus `flag_onoff_corpus_panel.py`. The two
 dual losses are the open question: both are rows where a second root pass tightened the
 bound, which the one-tree design gives up.
+
+## 11. P2 results (2026-11-09): fix E fails its entry; `DROP_RELAXED` retired with it
+
+**Fix E as built** (`DISCOPT_MILP_CUT_LP_REPAIR`, not committed): an aged-out relaxed folded
+row is deleted as fix D does, and every stored basis that held its slack nonbasic is
+*kept* with `k` excess basic columns, then repaired when its node is popped. The repair is
+exact: the basic block `B'` (`m x (m+k)`) keeps full row rank through the slack
+substitution and row deletion, `null(B')` is read off `[B'; R] V = [0; I]` with `k`
+pseudo-random rows, and the `k` columns to drop come from threshold partial pivoting over
+`V` (dropping `D` leaves a nonsingular block iff `V_D` is nonsingular), preferring boxed
+columns and never a free one. Unit-tested; on `enlight8` 5,419 of 6,447 popped bases were
+repaired, and relaxed-cut violations at node points fell 355k -> 13k.
+
+**Why it does not pay.** Roughly half the repaired bases are dual-infeasible
+(`DualPrepRejectDualInf` 1,079 on one `enlight8` solve): a row's slack is nonbasic in a
+stored basis because the row was *binding* at that node when the basis was stored, so
+deleting it genuinely changes that node's LP optimum, and no choice of dropped columns
+restores dual feasibility in general (the bound flip covers boxed columns only). Those
+nodes go to the primal warm or cold path, at ~3.4 ms per node LP against ~2 ms for the
+default `CUT_LP` and ~0.18 ms for `CUT_LP=0`.
+
+**Entry** (`enlight8`, `bppc8-02`, `fiber`, `kaihu`, `b-ball`; `istra` is not in the
+panel population; `CUT_LP_READMIT=1` in both arms; 3 reps, 20 s;
+`docs/dev/data/highs-parity/d2-analysis/p2_entry_fixE.json.gz`):
+
+| row | A only | A + E |
+|---|---|---|
+| `enlight8` | 0/3, bound 21 | 0/3, bound 21 |
+| `fiber` | 3/3 | **0/3** (bound ~399.0k) |
+| `neos-3611689-kaihu` | 3/3 | **0/3** (bound 118) |
+| `b-ball` | 3/3, 1.6 s | 3/3, 6.3 s |
+| `bppc8-02` | bound 491-493 | bound 499.8 |
+
+The pre-registered kill ("any W1 winner loses a rep") fires. E is retired, and with it
+`DISCOPT_MILP_CUT_LP_DROP_RELAXED`, which the audit kept only as E's base (flag,
+deletion arm and depth-based root test deleted; the default path is bit-identical, since
+`is_root` reduced to `no_basis` there).
+
+**What this says about the class.** Physical deletion cannot be made cheap on this
+driver: every frontier node carries a basis in which the rows it needs are binding, so
+removing those rows always costs that node a real re-solve. HiGHS escapes this only
+because its queued nodes hold no basis. The remaining route is plan B (§3 P2): keep
+folding where it pays and fall back to the node-local lift (the `CUT_LP=0` path) when
+the folded LP stops paying, decided by a measured per-solve signal, not by instance.

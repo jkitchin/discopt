@@ -521,29 +521,6 @@ fn cut_lp_readmit_enabled() -> bool {
     })
 }
 
-/// `DISCOPT_MILP_CUT_LP_DROP_RELAXED` (D2 review R1 fix D, default OFF until its
-/// panel): a lazily relaxed folded row that ages out again is physically deleted
-/// (and returns to the pool at age 1) instead of staying in the matrix. A stored basis
-/// that has its slack nonbasic cannot survive the row's removal, so it is dropped and
-/// that node re-solves without a warm start (speed only; a node's bound never rests on
-/// its stored basis). Measured with CUT_LP on (`enlight8`, 20 s): node LPs carried 339
-/// folded rows on a 64-row model, 95.6 % basic, and the deletion pass was blocked
-/// 10,652 times; node throughput 9.2k vs 49.2k with CUT_LP off.
-fn cut_lp_drop_relaxed_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_MILP_CUT_LP_DROP_RELAXED").unwrap_or_default();
-        parse_cut_lp_readmit(&raw)
-            .map_err(|e| {
-                e.replace(
-                    "DISCOPT_MILP_CUT_LP_READMIT",
-                    "DISCOPT_MILP_CUT_LP_DROP_RELAXED",
-                )
-            })
-            .unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
 /// The parse table behind [`cut_lp_readmit_enabled`]; garbage is refused.
 fn parse_cut_lp_readmit(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -3342,7 +3319,6 @@ fn solve_milp_node_search(
     // state, and HiGHS's adaptive selection state.
     let cut_lp_on = node_gmi_on && cut_lp_enabled() && lazy.is_none();
     let cut_lp_readmit_on = cut_lp_on && cut_lp_readmit_enabled();
-    let cut_lp_drop_relaxed_on = cut_lp_on && cut_lp_drop_relaxed_enabled();
     let mut cut_lp_rows: Vec<CutLpRow> = Vec::new();
     let mut cut_lp_fold: Vec<GomoryCut> = Vec::new();
     let mut cut_lp_best_score: f64 = 0.0;
@@ -4059,7 +4035,6 @@ fn solve_milp_node_search(
                 cut_lp_rows: &cut_lp_ids,
                 cut_lp_relaxed: &cut_lp_relaxed,
                 cut_lp_readmit: cut_lp_readmit_on,
-                cut_lp_drop_relaxed: cut_lp_drop_relaxed_on,
                 reliability: if opts.branch_rule == crate::bnb::branching::BranchRule::Strong {
                     u32::MAX
                 } else {
@@ -4911,11 +4886,6 @@ fn solve_milp_node_search(
                     r.relaxed = true;
                     relaxed_any = true;
                     crate::profile::incr(crate::profile::Ctr::CutLpRelaxed);
-                } else if cut_lp_drop_relaxed_on {
-                    // DISCOPT_MILP_CUT_LP_DROP_RELAXED: delete it; bases that keep its
-                    // slack nonbasic are dropped by `remap_basis_after_delete`.
-                    del.push(i);
-                    crate::profile::incr(crate::profile::Ctr::CutLpRelaxedDropped);
                 } else {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlocked);
                 }
@@ -5160,8 +5130,6 @@ struct NodeCtx<'a> {
     cut_lp_relaxed: &'a [&'a GomoryCut],
     /// `DISCOPT_MILP_CUT_LP_READMIT`: report violated relaxed rows for re-admission.
     cut_lp_readmit: bool,
-    /// `DISCOPT_MILP_CUT_LP_DROP_RELAXED` (also gates the depth-based root test).
-    cut_lp_drop_relaxed: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -5445,17 +5413,15 @@ fn solve_node(
     // The root is the only node solved cold (no inherited basis); the diving
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
-    // A node with no stored basis was taken for the root. Off the root that happens
-    // when a stored basis was dropped (`remap_basis_after_delete` -> None, the
-    // DISCOPT_MILP_CUT_LP_DROP_RELAXED path) or the parent's LP returned none; the
-    // root-only dive then ran at every such node. Under DROP_RELAXED the test is the
-    // node's depth; the default keeps the historical test (counted, to measure it).
+    // A node with no stored basis is taken for the root. Off the root that happens only
+    // when the parent's LP returned no basis (counted: `NodeNoBasisOffRoot` measured 0 in
+    // every default arm; the retired DISCOPT_MILP_CUT_LP_DROP_RELAXED path, which
+    // dropped stored bases, was the case that needed a depth-based test).
     let no_basis = ctx.tm.node_basis(id).is_none();
-    let off_root = ctx.tm.node_depth(id).is_some_and(|d| d > 0);
-    if no_basis && off_root {
+    if no_basis && ctx.tm.node_depth(id).is_some_and(|d| d > 0) {
         crate::profile::incr(crate::profile::Ctr::NodeNoBasisOffRoot);
     }
-    let is_root = no_basis && !(off_root && ctx.cut_lp_drop_relaxed);
+    let is_root = no_basis;
     let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
