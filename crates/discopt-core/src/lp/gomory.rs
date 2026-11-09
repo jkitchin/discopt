@@ -65,7 +65,10 @@ const FRAC_MIN: f64 = 1e-3;
 /// rounding error scales with this magnitude; with each `ᾱ_j` carrying a relative
 /// error of ~1e-15 after btran refinement, 1e6 keeps that error near 1e-9, six orders
 /// below `FRAC_MIN`, while 1e12 would put it at `FRAC_MIN` itself. A refusal drops a
-/// cut, which can only weaken a bound, never invalidate one.
+/// cut, which can only weaken a bound, never invalidate one. Measured on MIPLIB-38+M
+/// (62 instances x 2 arms x 20 s, `d2-analysis/gmi_global_beta_guard_probe_r1.json.gz`):
+/// 0 refusals against 93,316 node-GMI pool admissions and 1.34M emitted cuts, so the
+/// guard is bound-neutral there; it exists for wide general-integer boxes.
 const GLOBAL_BETA_MAG_MAX: f64 = 1e6;
 
 /// Absolute cap on a cut coefficient. A cut with a larger coefficient comes
