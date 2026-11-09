@@ -1,0 +1,10 @@
+# HiGHS (ref/HiGHS + p3_highs_separator_ablation.patch), root only, presolve/heuristics off,
+# on discopt's dumped RENS neighbourhoods (nbhd_*.mps). Dual bound after the root:
+nexp  all=29  -tableau=29  -path=28  -modk=29  -implb=29  -clique=29  path_only=29  tableau_only=25  none=17
+sp150 all=69  -tableau=69  -path=66  -modk=69  -implb=69  -clique=69  path_only=69  tableau_only=64  none=64
+# => HiGHS's path separator alone carries the root. Per-round (path only, HS_TRACE):
+# nexp 16.67 16.92 21.46 22.57 25.88 26.60 ... 28.995 29.0 (4-31 cuts/round)
+# discopt path-only, original rows only: 16.20 18.27 19.03 20.16 20.41 20.98 (61 cuts/round), then LP failure
+# discopt path-only over ALL LP rows (P3_CMIR_ALLROWS) + continue on failed repair (P3_NOCOLD=2): 29.0 on nexp,
+#   68.20 on sp150 (HiGHS 68.85). Cut check vs HiGHS optimum of the dumped working problem:
+#   control nexp 248/0 violated, new nexp 1046/0, new sp150 528/0.

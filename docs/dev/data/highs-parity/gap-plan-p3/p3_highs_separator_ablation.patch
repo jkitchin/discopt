@@ -1,0 +1,59 @@
+--- /home/user/discopt/ref/HiGHS/highs/mip/HighsSeparation.cpp	2026-11-07 21:44:04.447414376 +0000
++++ highs/mip/HighsSeparation.cpp	2026-11-09 19:11:37.701414292 +0000
+@@ -6,6 +6,8 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsSeparation.h"
++#include <cstdlib>
++static bool hsOff(const char* k) { const char* v = std::getenv(k); return v && v[0] == '1'; }
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -35,9 +37,9 @@
+   implBoundClock = 990;
+   cliqueClock = 991;
+   const HighsMipSolver& mipsolver = mipworker.getMipSolver();
+-  separators.emplace_back(new HighsTableauSeparator(mipsolver));
+-  separators.emplace_back(new HighsPathSeparator(mipsolver));
+-  separators.emplace_back(new HighsModkSeparator(mipsolver));
++  if (!hsOff("HS_NO_TABLEAU")) separators.emplace_back(new HighsTableauSeparator(mipsolver));
++  if (!hsOff("HS_NO_PATH")) separators.emplace_back(new HighsPathSeparator(mipsolver));
++  if (!hsOff("HS_NO_MODK")) separators.emplace_back(new HighsModkSeparator(mipsolver));
+ }
+ 
+ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -91,7 +93,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
+-  mipdata.implications.separateImpliedBounds(
++  if (!hsOff("HS_NO_IMPLB")) mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+       mipdata.parallelLockActive());
+@@ -107,7 +109,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
+-  mipdata.cliquetable.separateCliques(
++  if (!hsOff("HS_NO_CLIQUE")) mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+       mipdata.parallelLockActive() ? mipworker_.randgen
+--- /home/user/discopt/ref/HiGHS/highs/mip/HighsMipSolverData.cpp	2026-11-07 21:44:04.447414376 +0000
++++ highs/mip/HighsMipSolverData.cpp	2026-11-09 19:14:32.197760562 +0000
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -2195,6 +2196,9 @@
+     const bool root_separation_round_result =
+         rootSeparationRound(worker, sepa, ncuts, status);
+     profiling->stop(kMipClockRootSeparationRound);
++    if (std::getenv("HS_TRACE"))
++      printf("HSTRACE round %d obj=%.6f ncuts=%d lprows=%d\n", (int)nseparounds,
++             getLp().getObjective(), (int)ncuts, (int)getLp().numRows());
+     if (root_separation_round_result) {
+       profiling->stop(kMipClockRootSeparation);
+       return clockOff(profiling);

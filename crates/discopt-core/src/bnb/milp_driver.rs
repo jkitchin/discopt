@@ -3810,6 +3810,12 @@ fn solve_milp_node_search(
     // P3: cuts aged out of the root LP stay available (HiGHS keeps them in its cut pool
     // and re-adds them when violated again, `HighsCutPool::separate`).
     let mut aged_pool: Vec<GomoryCut> = Vec::new();
+    let (mut root_sel_best, mut root_sel_factor) = (0.0f64, 0.9f64);
+    let hs_stall_on = std::env::var("P3_HSTALL").as_deref() == Ok("1");
+    let mut hs_first: Option<(Vec<f64>, f64)> = None;
+    let mut hs_avg: Vec<f64> = vec![0.0; ns];
+    let (mut hs_smooth, mut hs_prev_obj, mut hs_rounds, mut hs_stall) =
+        (0.0f64, 0.0f64, 0usize, 0usize);
     let mut cut_epochs: u32 = 0;
     let mut root_duals: Vec<f64>;
     let mut last_root_x: Option<Vec<f64>> = None;
@@ -3819,6 +3825,39 @@ fn solve_milp_node_search(
     // is what keeps each slack column a singleton and so keeps node warm starts
     // usable. See `substitute_slacks_to_structural`.
     let (m_base0, n_base0) = (m_w, n_w);
+    if milp_depth == 0 {
+        if let Ok(path) = std::env::var("P3_WORKDUMP") {
+            let (cp, ri, vals) = csc_w.raw();
+            let js = |v: &[f64]| {
+                v.iter()
+                    .map(|x| {
+                        if x.is_finite() && x.abs() < 1e19 {
+                            format!("{x:e}")
+                        } else if *x > 0.0 {
+                            "1e30".into()
+                        } else {
+                            "-1e30".into()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let ji = |v: &[usize]| {
+                v.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let ints: Vec<usize> = (0..n_w).filter(|&j| is_int_full[j]).collect();
+            let body = format!(
+                "{{\"m\":{m_w},\"n\":{n_w},\"colptr\":[{}],\"rowidx\":[{}],\"vals\":[{}],\"c\":[{}],\"b\":[{}],\"l\":[{}],\"u\":[{}],\"ints\":[{}]}}",
+                ji(cp), ji(ri), js(vals), js(&c_w), js(&b_w), js(&l_w), js(&u_w), ji(&ints)
+            );
+            if !ints.is_empty() && !std::path::Path::new(&path).exists() {
+                let _ = std::fs::write(path, body);
+            }
+        }
+    }
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
@@ -3919,10 +3958,42 @@ fn solve_milp_node_search(
                         // P3 experiment (`P3_NOCOLD=1`): a failed warm re-solve ends the
                         // round loop (HiGHS stops separating on an LP failure) instead of a
                         // cold solve, which cost ~3 s each on the nexp neighbourhood.
-                        if matches!(warm.status, LpStatus::IterLimit | LpStatus::Numerical)
-                            && std::env::var("P3_NOCOLD").as_deref() == Ok("1")
+                        let nocold = std::env::var("P3_NOCOLD").ok();
+                        if warm.status == LpStatus::Numerical
+                            && nocold.as_deref() == Some("2")
+                            && warm.basis.basic_vars.len() == m_w
+                            && warm.basis.col_status.len() == n_w
+                            && warm.x.len() == n_w
+                            && warm.obj.is_finite()
+                            && {
+                                // Only a vertex that satisfies `A x = b` and the box.
+                                let x = &warm.x;
+                                let mut r = b_w.clone();
+                                let (cp, ri, va) = csc_w.raw();
+                                for j in 0..n_w {
+                                    for k in cp[j]..cp[j + 1] {
+                                        r[ri[k]] -= va[k] * x[j];
+                                    }
+                                }
+                                r.iter()
+                                    .zip(&b_w)
+                                    .all(|(ri, bi)| ri.abs() <= 1e-6 * (1.0 + bi.abs()))
+                                    && (0..n_w).all(|j| {
+                                        x[j] >= l_w[j] - 1e-6 * (1.0 + l_w[j].abs().min(1e6))
+                                            && x[j] <= u_w[j] + 1e-6 * (1.0 + u_w[j].abs().min(1e6))
+                                    })
+                            }
                         {
-                            crate::profile::incr(crate::profile::Ctr::RootCutsSubstDropped);
+                            // `=2`: the dual reached its vertex and only the sub-tolerance
+                            // repair failed; separate from that vertex. A cut is valid
+                            // whatever point it separates, and this loop's LP value is
+                            // never a bound (the root node is re-solved in the tree).
+                            let mut w = warm;
+                            w.status = LpStatus::Optimal;
+                            w
+                        } else if matches!(warm.status, LpStatus::IterLimit | LpStatus::Numerical)
+                            && nocold.is_some()
+                        {
                             warm
                         } else {
                             match warm.status {
@@ -3960,15 +4031,70 @@ fn solve_milp_node_search(
             root_duals = root.dual.clone();
             if std::env::var("P3_DBG").is_ok() {
                 eprintln!(
-                    "P3DBG round obj={:.6} m={m_w} gmi_phase={gmi_phase}",
-                    root.obj + obj_const
+                    "P3DBG round obj={:.6} m={m_w} n={n_w} depth={milp_depth} lb_sum={:.3} gmi_phase={gmi_phase}",
+                    root.obj + obj_const,
+                    l_w[..ns].iter().filter(|v| v.is_finite()).sum::<f64>()
                 );
             }
             if prune_base.is_some() {
                 last_root_x = Some(root.x.clone());
             }
+            if hs_stall_on {
+                // HiGHS's root stall rule (`HighsMipSolverData.cpp:2215-2245`), ported
+                // literally: the LP point's movement from the first root LP point,
+                // smoothed; a round stalls when that progress grows < 1 % and the bound
+                // gain is <= 1.001 x the previous gain; 3 stalled rounds end the loop.
+                gmi_phase = true;
+                if hs_first.is_none() {
+                    hs_first = Some((root.x[..ns].to_vec(), root.obj));
+                    hs_prev_obj = root.obj;
+                } else if let Some((fx, fobj)) = hs_first.as_ref() {
+                    hs_rounds += 1;
+                    let cur: Vec<f64> = (0..ns).map(|j| fx[j] - root.x[j]).collect();
+                    let sq: f64 = cur.iter().map(|v| v * v).sum();
+                    let progress = if sq > 0.0 {
+                        let scale = 1.0 / sq.sqrt();
+                        let mut an = 0.0;
+                        let mut dot = 0.0;
+                        for j in 0..ns {
+                            hs_avg[j] = (scale * cur[j] - hs_avg[j]) / hs_rounds as f64;
+                            an += hs_avg[j] * hs_avg[j];
+                            dot += hs_avg[j] * cur[j];
+                        }
+                        if an > 0.0 {
+                            dot / an.sqrt()
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+                    if hs_rounds == 1 {
+                        hs_smooth = progress;
+                    } else {
+                        let next = (2.0 / 3.0) * hs_smooth + progress / 3.0;
+                        if next < hs_smooth * 1.01
+                            && (root.obj - fobj) <= (hs_prev_obj - fobj) * 1.001
+                        {
+                            hs_stall += 1;
+                        } else {
+                            hs_stall = 0;
+                        }
+                        hs_smooth = next;
+                    }
+                    hs_prev_obj = root.obj;
+                    if hs_stall >= 3 {
+                        if std::env::var("P3_DBG").is_ok() {
+                            eprintln!("P3DBG loop end: hs stall");
+                        }
+                        break;
+                    }
+                }
+                prev_obj = prev_obj.max(root.obj);
+            } else
             // Tailing off: stop once added cuts barely move the bound.
-            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
+            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs())
+                && prev_obj > f64::NEG_INFINITY
             {
                 // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): with c-MIR on, allow a few
                 // consecutive stalled rounds. A dual-degenerate root (assignment rows)
@@ -4059,7 +4185,13 @@ fn solve_milp_node_search(
                     &b_w,
                     &root.x,
                     &is_int_full,
-                    n_orig_rows,
+                    // P3 (`P3_CMIR_ALLROWS=1`): HiGHS's path separator walks every LP
+                    // row, the current cuts included (`HighsPathSeparator.cpp:30-50`).
+                    if std::env::var("P3_CMIR_ALLROWS").as_deref() == Ok("1") {
+                        m_w
+                    } else {
+                        n_orig_rows
+                    },
                     if crate::lp::cmir::root_cmir_mode().on() {
                         CMIR_MAX_AGGR_DESIGN
                     } else {
@@ -4179,13 +4311,79 @@ fn solve_milp_node_search(
             // Keep the strongest, most diverse few (efficacy + orthogonality)
             // up to the remaining root-cut budget; otherwise add first-come.
             let remaining = opts.root_cuts - total_cuts;
-            let selected = if opts.cut_select {
+            if std::env::var("P3_DBG").is_ok() {
+                eprintln!("P3DBG cand n={}", cuts.len());
+            }
+            let selected = if opts.cut_select && std::env::var("P3_SEL").as_deref() == Ok("1") {
+                // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
+                // viol / (active nnz * sqrt(active row norm)) over columns strictly inside
+                // their bounds, the adaptive min-score factor, parallelism <= 0.1.
+                let x = &root.x;
+                let mut cands: Vec<(f64, usize)> = Vec::new();
+                for (k, c) in cuts.iter().enumerate() {
+                    let act: f64 = c.coeffs.iter().zip(x).map(|(a, v)| a * v).sum();
+                    let viol = c.rhs - act;
+                    if viol <= 1e-6 * (1.0 + c.rhs.abs()) {
+                        continue;
+                    }
+                    let (mut nrm, mut nact) = (0.0f64, 0usize);
+                    for (j, &a) in c.coeffs.iter().enumerate() {
+                        if a != 0.0 && j < x.len() && x[j] > l_w[j] + 1e-6 && x[j] < u_w[j] - 1e-6 {
+                            nrm += a * a;
+                            nact += 1;
+                        }
+                    }
+                    if nact == 0 || nrm <= 0.0 {
+                        continue;
+                    }
+                    cands.push((viol / (nact as f64 * nrm.sqrt()), k));
+                }
+                let sel =
+                    cut_lp_select(cands, &cuts, &[], &mut root_sel_best, &mut root_sel_factor);
+                let mut keep = vec![false; cuts.len()];
+                for k in sel.into_iter().take(remaining) {
+                    keep[k] = true;
+                }
+                cuts.into_iter()
+                    .zip(keep)
+                    .filter(|(_, k)| *k)
+                    .map(|(c, _)| c)
+                    .collect()
+            } else if opts.cut_select {
                 select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
             } else {
                 cuts.truncate(remaining);
                 cuts
             };
+            let n_sel = selected.len();
             let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
+            if std::env::var("P3_DBG").is_ok() {
+                eprintln!("P3DBG sel selected={n_sel} new={}", new_cuts.len());
+            }
+            if let Ok(path) = std::env::var("P3_CUTDUMP") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    for c in &new_cuts {
+                        let nz: Vec<String> = c
+                            .coeffs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, v)| **v != 0.0)
+                            .map(|(j, v)| format!("[{j},{v:e}]"))
+                            .collect();
+                        let _ = writeln!(
+                            f,
+                            "{{\"depth\":{milp_depth},\"n\":{n_w},\"rhs\":{:e},\"nz\":[{}]}}",
+                            c.rhs,
+                            nz.join(",")
+                        );
+                    }
+                }
+            }
             if new_cuts.is_empty() {
                 if std::env::var("P3_DBG").is_ok() {
                     eprintln!("P3DBG loop end: no new cuts");
