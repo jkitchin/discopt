@@ -919,3 +919,29 @@ Profile (one driver call): root cut loop 10.2 s (inside its `root_cut_time_s`), 
 
 After all three: 19.2 s, inside the limit. The `=1` arm's root bound on `neos-911970`
 (30.9 %) is unchanged: that is the GMI / c-MIR split, still open.
+
+### 12.8 c-MIR first, GMI on stall: the entry bar is met (2026-11-09)
+
+HiGHS's length cap (100 + 0.15 n) already applies to every root cut (`CUT_LEN_BASE`,
+`CUT_LEN_FRAC`), so GMI density is not the issue. Under `DISCOPT_MILP_ROOT_CMIR=1` the root
+loop now separates c-MIR alone until the bound stalls (or c-MIR finds nothing), then GMI
+joins with a fresh stall allowance (`RootCmirGmiHandover`). A per-solve, measured rule:
+the rows `only` won (nexp-1-1, neos-911970) are closed by c-MIR before it stalls; GMI
+still runs where c-MIR runs dry. `p3_entry20_cmirfirst_1.json`, root gap %, 20 s:
+
+| row | today | c-MIR first, then GMI | HiGHS presolve off |
+|---|---|---|---|
+| beavma | 18.4 | **3.9** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | **0.0** | 3.8 |
+| nexp-50-20-4-2 | 9.9 | **7.0** | 0.6 |
+| sp150x300d | 15.9 | 21.7 | 2.6 |
+| neos-911970 | 57.5 | **6.4** | 4.8 |
+| mik-250-20-75-1 | 4.1 | 2.5 | 1.75 |
+
+**Pre-registered entry bar: met.** >= 2 pp on 4 of 6 (beavma, nexp-1-1, nexp-4-2,
+neos-911970); within 2 pp of HiGHS on 3 (nexp-1-1, neos-911970, mik-1); no root bound
+past an optimum (6 / 6). Caveats for the panel: `sp150x300d` is worse than today
+(GMI now arrives only after c-MIR stalls), and the root takes 17-20 s of 20 on three rows
+(nexp-1-1, nexp-4-2, neos-911970), which a full solve pays in tree time. Next: the §5
+panel (`d2_flag_panel.py --flag DISCOPT_MILP_ROOT_CMIR --fired RootCmirGmiHandover`,
+MIPLIB-38 + M, 3 reps, 20 s) and the corpus differential.

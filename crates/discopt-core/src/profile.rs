@@ -217,6 +217,8 @@ counters!(
     DiveCapped,
     // Strong branching stopped probing because the solve's deadline had passed.
     StrongBranchDeadlineStop,
+    // Gap plan P3: the root loop's c-MIR phase handed over to GMI.
+    RootCmirGmiHandover,
     DiveSteps,
     DiveHitIntegral,
     DiveAbandonedInfeasible,

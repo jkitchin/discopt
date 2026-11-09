@@ -3415,6 +3415,11 @@ fn solve_milp_node_search(
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
         let mut root_stalled = 0usize;
+        // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR=1`): rounds separate c-MIR alone until
+        // the bound stalls or c-MIR finds nothing, then GMI joins. Off that arm GMI
+        // runs from the first round, as before (`gmi_phase` starts true).
+        let cmir_first = opts.cmir_cuts && opts.gmi_cuts && crate::lp::cmir::root_cmir_mode().on();
+        let mut gmi_phase = !cmir_first;
         // Wall bound for the separation phase: the earlier of the caller's own
         // deadline and the (optional) root-cut sub-budget. Checked at the top of
         // each round -- a round in flight always finishes, so the loop never
@@ -3537,6 +3542,14 @@ fn solve_milp_node_search(
                 // stalled root rounds too. Off the flag the loop stops at the first
                 // stalled round, as before.
                 root_stalled += 1;
+                // Gap plan P3: c-MIR first, GMI once it stalls. The first stalled
+                // round of the c-MIR phase hands over to GMI (with a fresh stall
+                // allowance) instead of counting toward the stop.
+                if !gmi_phase {
+                    gmi_phase = true;
+                    root_stalled = 0;
+                    crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                }
                 let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
                     ROOT_CMIR_STALL_ROUNDS
                 } else {
@@ -3592,9 +3605,14 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                 );
                 crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
+                if found.is_empty() && !gmi_phase {
+                    // c-MIR has nothing left at this point: GMI joins this round.
+                    gmi_phase = true;
+                    crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                }
                 cuts.extend(found);
             }
-            if opts.gmi_cuts {
+            if opts.gmi_cuts && gmi_phase {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory_cols(
                     &csc_w,
