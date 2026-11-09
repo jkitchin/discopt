@@ -666,3 +666,64 @@ takes it from 57.5 % to 6 %. So the missing piece is not variable-bound handling
 `nexp-50-20-1-1` and `neos-911970` (pyscipopt, presolve off) and reconstruct which rows
 each one aggregates and which bound substitutions and delta it used. That turns "our
 separator is weaker" into a named difference, before any further code.
+
+### 12.2 P3 entry, step 3: SCIP's root cuts read, and the named differences
+
+**What SCIP applies** (`gap-plan-p3/p3_scip_root_cuts.{py,json.gz}`; aggregation
+separators only, presolve off, root): on `nexp-50-20-1-1` 440 cuts over 37 rounds (216
+c-MIR, 202 flow cover, 22 knapsack cover); of the 41 binding at the final root LP, 18 are
+lifted covers that are pure binary (`y_a + y_b >= 1`: "one of these arcs opens"), 17
+flow covers, 6 c-MIR. On `neos-911970` (an assignment model with knapsack-type cost rows
+`sum a_j y_j - x_k <= 6.5`, one continuous `x_k` per row carrying the objective) all
+97 binding cuts are single-row c-MIR over one cost row's binaries and its `x_k`.
+
+**Our separator on `neos-911970`, first root round** (temporary dump): 80 c-MIR cuts,
+all violated at the LP point (up to 0.93), 40 of them on an objective column, the same
+shape as SCIP's. The bound still did not move, because of the root loop's stop rule.
+
+**Named differences, each measured on the route's root (c-MIR-only arm unless stated;
+`p3_root_arms_stall.jsonl`, `p3_root_arms_3x.jsonl`):**
+
+1. **The root loop stops at the first stalled round.** `milp_driver.rs` breaks as soon as
+   one round fails to raise the bound by 1e-7 relative; a dual-degenerate LP (the
+   assignment rows) needs several rounds before the bound moves. SCIP allows stalled
+   rounds at the root. With 10 allowed: `neos-911970` 57.5 % -> 31.9 %.
+2. **The start-row filter requires a nearly tight row** (`MAX_BASE_SLACK` = 0.1 of the
+   row's largest coefficient). A knapsack-type row's cover / MIR cut is violated
+   exactly when the row is slack. Relaxing it, with W4's HiGHS delta selection, flip and
+   lifted MIC and the stall allowance: `neos-911970` 21.9 %, `beavma` 8.1 %, `nexp-1-1` 24.
+3. **The root cut budget.** With 3x the route's cut and round budget (1,500 / 150), c-MIR
+   alone reaches **`nexp-50-20-1-1` 0.0 % (29 = optimum)** and **`neos-911970` 5.4 %**,
+   matching SCIP's aggregation-only root (0.0 % and 6.0 %); `mik-1` 3.1 %, `beavma` 8.1 %.
+4. **GMI + c-MIR together lose to the wall-clock cap on the root loop, not to the cuts.**
+   On `nexp-1-1` the c-MIR-only arm runs 125 rounds to 29; the combined arm stops at 23
+   rounds and 19 (below GMI alone, 49 rounds, 21): dense GMI rows slow every re-solve and
+   the loop's time ceiling ends it. Which arm wins differs by row: combined is better on
+   `sp150x300d` (11.6 % vs 23.2 %), `nexp-50-20-4-2` (12.7 % vs 28.2 %) and `mik-1` (2.7 %
+   vs 3.1 %).
+
+Root gap %, combined table (route, root only):
+
+| row | today (GMI) | c-MIR 3x | GMI + c-MIR 3x | SCIP aggregation | HiGHS presolve off |
+|---|---|---|---|---|---|
+| beavma | 18.4 | 8.1 | 8.1 | 1.1 | 0.9 |
+| nexp-50-20-1-1 | 27.6 | **0.0** | 34.5 | 0.0 | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 28.2 | 12.7 | 0.8 | 0.6 |
+| sp150x300d | 15.9 | 23.2 | 11.6 | 4.6 | 2.6 |
+| neos-911970 | 57.5 | **5.4** | 30.9 | 6.0 | 4.8 |
+| mik-250-20-75-1 | 4.1 | 3.1 | 2.7 | 2.7 | 1.75 |
+
+No arm put a bound past its optimum (every comparison checked by the instrument).
+
+**Not yet explained:** the flow-cover and lifted-cover share of SCIP's binding cuts on
+`nexp` (we reach its optimum by c-MIR alone, so not needed there), and the rows where c-MIR
+alone is worse than today (`nexp-4-2`, `sp150x300d`: the GMI cuts it displaces were doing
+the work). All of the above ran with temporary environment knobs; nothing of it is
+committed code.
+
+**Design this points to (to build next, default OFF, one flag):** the W4 c-MIR core with
+HiGHS's delta / flip / lifted MIC folded in; root stall rounds; no tight-row start filter
+(rank start rows instead); and a root loop that budgets families by measured yield per
+LP second instead of one shared cap (so GMI stays where it pays and stops where its dense
+rows only slow the loop). Then the pre-registered entry on these six rows at the route's
+real budget, then the §5 panel.

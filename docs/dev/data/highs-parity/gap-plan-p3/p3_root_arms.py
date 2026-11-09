@@ -7,6 +7,7 @@ and reports the first driver call's bound. Arms mirror the SCIP root ablation:
   gmi  -- the route's default root loop (GMI + covers)
   cmir -- c-MIR only (gmi_cuts=False, cmir_cuts=True), same budget
   both -- GMI + c-MIR
+  cmir3x / both3x -- the same with 3x the root cut and round budget
 Prints an executed count; exits non-zero on 0 (CLAUDE.md §6).
 Usage: python p3_root_arms.py --instances a,b [--arms none,gmi,cmir,both] --out X.jsonl
 """
@@ -30,6 +31,10 @@ ARMS = {
     "gmi": {},
     "cmir": {"gmi_cuts": False, "cmir_cuts": True},
     "both": {"cmir_cuts": True},
+    # 3x the route's root cut budget (500 cuts / 50 rounds): is the combined arm's
+    # loss the shared budget?
+    "cmir3x": {"gmi_cuts": False, "cmir_cuts": True, "root_cuts": 1500, "cut_rounds": 150},
+    "both3x": {"cmir_cuts": True, "root_cuts": 1500, "cut_rounds": 150},
 }
 
 CHILD = r"""
