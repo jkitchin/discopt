@@ -38151,6 +38151,30 @@ def _solve_milp_highs(
     )
 
 
+def _milp_root_cmir_mode() -> str:
+    """``DISCOPT_MILP_ROOT_CMIR`` (gap plan P3, default OFF): ``"off"``, ``"with_gmi"``
+    (``1``) or ``"only"`` (c-MIR without GMI, an entry-experiment arm).
+
+    Armed, the pure-MILP route's root loop runs the aggregated c-MIR / lifted-cover
+    separator (``lp/cmir.rs``) at HiGHS's design, allows stalled root rounds, and gets
+    3x the root cut and round budget (1,500 / 150). The route's loop separated GMI and
+    covers only; SCIP's aggregation separator alone closes the P3 rows' root gap to
+    within 6 % with presolve off, and this configuration reaches it on
+    ``nexp-50-20-1-1`` (0.0 %) and ``neos-911970`` (5.4 %) from 27.6 % / 57.5 % (gap
+    plan §12-12.2). Bound-changing, so default OFF until its §5 panel; every cut is a
+    nonnegative combination of model rows rounded over global bounds (the ``cmir.rs``
+    soundness argument). The Rust side reads the same variable.
+    """
+    raw = os.environ.get("DISCOPT_MILP_ROOT_CMIR", "0").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return "with_gmi"
+    if raw == "only":
+        return "only"
+    if raw in ("", "0", "false", "no"):
+        return "off"
+    raise ValueError(f"DISCOPT_MILP_ROOT_CMIR={raw!r} is not recognized (expected 1, only or 0)")
+
+
 def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """Root cut options for the pure-MILP engine, or ``None`` to keep the
     binding's historical ``root_cuts=16, cut_rounds=1`` single pass.
@@ -38209,10 +38233,14 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     """
     if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
         return None
+    _cmir_mode = _milp_root_cmir_mode()
     return {
-        "root_cuts": 500,
-        "cut_rounds": 50,
+        "root_cuts": 1500 if _cmir_mode != "off" else 500,
+        "cut_rounds": 150 if _cmir_mode != "off" else 50,
         "cut_select": True,
+        # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default OFF): c-MIR in the root loop.
+        "cmir_cuts": _cmir_mode != "off",
+        "gmi_cuts": _cmir_mode != "only",
         # Half the engine's slice, floored so a very short budget still gets one
         # useful pass. The loop stops early on tailing off, so on an instance
         # whose root closes in two rounds this ceiling is never reached.

@@ -727,3 +727,41 @@ HiGHS's delta / flip / lifted MIC folded in; root stall rounds; no tight-row sta
 LP second instead of one shared cap (so GMI stays where it pays and stops where its dense
 rows only slow the loop). Then the pre-registered entry on these six rows at the route's
 real budget, then the §5 panel.
+
+### 12.3 P3: the consolidated flag and its entry (2026-11-09)
+
+`DISCOPT_MILP_ROOT_CMIR` (default OFF) replaces the experiment knobs: the W4 c-MIR core
+with HiGHS's delta selection, flip and lifted MIC, no tight-row start filter, 10 stalled
+root rounds, and a 1,500 / 150 root budget; `1` keeps GMI, `only` drops it. Rust tests:
+`textbook_flow_cover_is_separated_under_both_designs`,
+`design_cuts_hold_at_every_sampled_feasible_point` (40 seeds, every cut checked at every
+sampled integer-feasible point), `root_cmir_parse_refuses_garbage`. The aggregation-depth
+and variable-bound-row knobs were falsified (§12.1) and are gone.
+
+**Entry, as pre-registered** (route, root only, the panel's 20 s; `p3_entry20_*.json`):
+
+| row | today | `=1` | `=only` | HiGHS presolve off |
+|---|---|---|---|---|
+| beavma | 18.4 | **8.1** | **8.1** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | 34.5 | **0.0** | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 12.7 | 28.2 | 0.6 |
+| sp150x300d | 15.9 | **11.6** | 23.2 | 2.6 |
+| neos-911970 | 57.5 | **30.9** | **5.4** | 4.8 |
+| mik-250-20-75-1 | 4.1 | 2.7 | 3.1 | 1.75 |
+
+No bound past an optimum (6 / 6 comparisons per arm). **Neither arm meets the bar**
+(>= 2 pp on >= 4 of 6; each reaches 3). `only` also meets the kill clause as written
+(< 2 pp on >= 3 rows), but that clause encoded "the family is not the lever", which the
+SCIP ablation (§12) refutes directly, so the result is recorded as *not passed*, not as
+a kill. The best of the two arms per row would pass (>= 2 pp on 4; within 2 pp of
+HiGHS on 3), so what is missing is (a) budgeting the families per solve and (b) the
+separator strength on `nexp-50-20-4-2` and `sp150x300d`, where SCIP's aggregation alone
+reaches 0.8 % / 4.6 % and ours is worse than GMI. Half of SCIP's binding root cuts on
+`nexp-1-1` come from its flow-cover and lifted-cover generators (§12.2), which `cmir.rs`
+has no counterpart for. Also measured: the `=1` arm spends the whole 20 s at the root on
+`nexp-1-1` and `neos-911970`; the loop's time ceiling (checked at the top of a round)
+does not hold when a round's GMI re-solves are slow, which a full-solve arm would pay.
+
+**Next:** a flow-cover generator over the same aggregated rows (Marchand-Wolsey lifted
+flow cover, SCIP `cuts.c` / HiGHS `HighsCutGeneration` flow-cover path), then per-solve
+family budgeting by bound gain per root second, then this entry again.

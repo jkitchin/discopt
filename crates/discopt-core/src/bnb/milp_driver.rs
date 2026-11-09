@@ -47,6 +47,10 @@ const CUT_MIN_EFFICACY: f64 = 1e-4;
 /// leaves the root at -5519 / -3195 (claim -2647 / -1150), one step reaches
 /// -2657 / -1749 in SCIP; two steps were not better on syn and helped rsyn.
 const CMIR_MAX_AGGR: usize = 2;
+/// Gap plan P3: consecutive stalled root cut rounds allowed under
+/// `DISCOPT_MILP_ROOT_CMIR` (10 took `neos-911970`'s root from 57.5 % to 31.9 % with
+/// c-MIR alone; gap plan §12.2).
+const ROOT_CMIR_STALL_ROUNDS: usize = 10;
 /// #2107: c-MIR candidates kept per round before selection (most efficacious first).
 const CMIR_MAX_CUTS: usize = 200;
 /// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
@@ -3390,6 +3394,7 @@ fn solve_milp_node_search(
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
+        let mut root_stalled = 0usize;
         // Wall bound for the separation phase: the earlier of the caller's own
         // deadline and the (optional) root-cut sub-budget. Checked at the top of
         // each round -- a round in flight always finishes, so the loop never
@@ -3505,9 +3510,25 @@ fn solve_milp_node_search(
             // Tailing off: stop once added cuts barely move the bound.
             if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
             {
-                break;
+                // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): with c-MIR on, allow a few
+                // consecutive stalled rounds. A dual-degenerate root (assignment rows)
+                // moves to an equal-objective vertex for several rounds before the
+                // bound rises (`neos-911970`, gap plan §12.2 item 1); SCIP allows
+                // stalled root rounds too. Off the flag the loop stops at the first
+                // stalled round, as before.
+                root_stalled += 1;
+                let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
+                    ROOT_CMIR_STALL_ROUNDS
+                } else {
+                    0
+                };
+                if root_stalled > allow {
+                    break;
+                }
+            } else {
+                root_stalled = 0;
             }
-            prev_obj = root.obj;
+            prev_obj = prev_obj.max(root.obj);
 
             // Knapsack cover cuts (sparse, strong on knapsack structure) plus
             // Gomory mixed-integer cuts off the native basis.
