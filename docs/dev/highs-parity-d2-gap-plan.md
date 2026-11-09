@@ -891,3 +891,31 @@ gains on 3 and is within 2 pp of HiGHS on 3. Not passed; `1` is one row short on
 second clause. Still open: `sp150x300d` (SCIP's c-MIR alone 5.2 %), the `1` arm's root
 time overrun (21 s / 20 s on beavma / neos-911970), and the GMI / c-MIR split (`only`
 wins nexp-1-1 and neos-911970, `1` wins sp150x300d).
+
+### 12.7 The `=1` arm's time overrun, root-caused (2026-11-09)
+
+`neos-911970`, `DISCOPT_MILP_ROOT_CMIR=1`, root-only probe at 20 s returned at 39.5 s.
+Profile (one driver call): root cut loop 10.2 s (inside its `root_cut_time_s`), root dive
+9.4 s, then with the dive capped, a RENS sub-MIP 19.8 s and strong branching 33.7 s over
+8 calls. Three defects, fixed in that order:
+
+1. **The root dive is unbounded.** Over the cut-augmented LP (215 dense rows) each of
+   its up-to-840 fixings re-solves the LP. Under the flag a dive now stops at
+   `ROOT_DIVE_SHARE` = 10 % of the time left, at most 2 s (`DiveCapped`). HiGHS budgets
+   heuristics as a share of the search.
+2. **Strong branching checked the deadline once per node, before probing.** It now
+   stops probing past the deadline and branches on the best candidate so far
+   (`StrongBranchDeadlineStop`; only the branching variable can change). 33.7 -> 19.9 s.
+3. **A heuristic sub-solve inherited the parent's `extend_no_incumbent_s`** (the
+   NO_STALL_TREE rule: with no incumbent at the time limit, move the deadline to the
+   whole remaining budget). RENS runs exactly when there is no incumbent, so its 2 s
+   sub-budget became the parent's full budget, counted from the sub-solve's start:
+   19.8 s. `sub_solve_options` now drops the parent's deadline policies
+   (`extend_no_incumbent_s`, `stall_time_s`) for every sub-solve (RENS/RINS and the P1
+   stall re-solve); regression test `sub_solve_options_drop_the_parents_deadline_policies`.
+   **This one is a default-path bug** (it lives in #2196's code); on the last §5 panel's
+   default arm it shows as 1 overrun in 372 solves (`sp150x300d` 21.1 s at 20 s), because
+   the default root dive usually supplies an incumbent first. Ported to #2196.
+
+After all three: 19.2 s, inside the limit. The `=1` arm's root bound on `neos-911970`
+(30.9 %) is unchanged: that is the GMI / c-MIR split, still open.

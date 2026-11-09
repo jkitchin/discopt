@@ -207,12 +207,16 @@ counters!(
     // `DiveHitIntegral` (every integer integral -> an incumbent candidate),
     // `DiveAbandonedInfeasible` (both roundings of the picked integer made the LP
     // infeasible) and `DiveExhaustedSteps` (the step budget ran out with integers
-    // still fractional). `DiveRuns == hit + abandoned + exhausted` is the audit
-    // identity. Without these, "the dive fired and repaired nothing" (measured on
+    // still fractional). `DiveRuns == hit + abandoned + exhausted + capped` is the
+    // audit identity (`DiveCapped`, below, is 0 unless `DISCOPT_MILP_ROOT_CMIR` is on). Without these, "the dive fired and repaired nothing" (measured on
     // nvs02/nvs14: 5-6 off-root firings, 0 hits) is indistinguishable from "the
     // dive never reached the interesting decision", and a fix aimed at the wrong
     // arm would read as a plausible tuning change (CLAUDE.md §6).
     DiveRuns,
+    // Gap plan P3: a dive stopped at its wall cap (`DISCOPT_MILP_ROOT_CMIR`).
+    DiveCapped,
+    // Strong branching stopped probing because the solve's deadline had passed.
+    StrongBranchDeadlineStop,
     DiveSteps,
     DiveHitIntegral,
     DiveAbandonedInfeasible,

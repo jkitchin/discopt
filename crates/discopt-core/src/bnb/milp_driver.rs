@@ -50,6 +50,13 @@ const CMIR_MAX_AGGR: usize = 2;
 /// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): HiGHS's path length
 /// (`HighsPathSeparator.cpp:170`, `maxPathLen = 6`).
 const CMIR_MAX_AGGR_DESIGN: usize = 6;
+/// Gap plan P3: under `DISCOPT_MILP_ROOT_CMIR` one dive may take this share of the
+/// time left, at most [`ROOT_DIVE_MAX_S`]. Measured: on `neos-911970` the root dive
+/// over the cut-augmented LP (215 dense rows) took 9.4 s of a 20 s solve, one LP
+/// re-solve per fixed binary (gap plan §12.7); HiGHS budgets heuristics as a share of
+/// the search (`mip_heuristic_effort`).
+const ROOT_DIVE_SHARE: f64 = 0.1;
+const ROOT_DIVE_MAX_S: f64 = 2.0;
 /// Gap plan P3: consecutive stalled root cut rounds allowed under
 /// `DISCOPT_MILP_ROOT_CMIR` (10 took `neos-911970`'s root from 57.5 % to 31.9 % with
 /// c-MIR alone; gap plan §12.2).
@@ -1740,6 +1747,22 @@ enum SubMipKind {
     Rins,
 }
 
+/// The options of a heuristic sub-solve (sub-MIP, P3 stall re-solve) derived from the
+/// parent's: its own node budget and seed, and **none of the parent's deadline
+/// policies**. `extend_no_incumbent_s` moves a run's deadline to the parent's whole
+/// remaining budget when it holds no incumbent, which is exactly when RENS runs: a
+/// sub-solve that inherited it ran 19.8 s against its 2 s sub-budget and took a 20 s
+/// solve to 39.5 s (`neos-911970`, gap plan §12.7). `stall_time_s` is a parent-run
+/// policy too. The caller then caps `time_limit_s` to the sub-budget.
+fn sub_solve_options(opts: &MilpOptions, max_nodes: usize, seed: Option<Vec<f64>>) -> MilpOptions {
+    let mut sub = opts.clone();
+    sub.max_nodes = max_nodes;
+    sub.initial_incumbent = seed;
+    sub.extend_no_incumbent_s = None;
+    sub.stall_time_s = None;
+    sub
+}
+
 /// Build a neighbourhood sub-box (a contraction of `base.l`/`base.u`), propagate it,
 /// and solve it. `node_x` is a node relaxation point over the structural columns;
 /// `inc` is the incumbent `(x, objective incl. obj_const)` for RINS. Returns a
@@ -1833,11 +1856,9 @@ fn try_sub_mip(
         (SubMipKind::Rins, Some((ix, v))) => (Some(ix[..ns].to_vec()), Some(v)),
         _ => (None, inc.map(|(_, v)| v)),
     };
-    let mut sub = opts.clone();
-    sub.max_nodes = node_budget;
     // The RINS seed lies in the sub-box by construction (every fixed column is fixed
     // to its own value). FBBT only removes points violating a row, so it keeps it.
-    sub.initial_incumbent = seed;
+    let mut sub = sub_solve_options(opts, node_budget, seed);
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -1933,16 +1954,12 @@ fn try_stall_redive(
     deadline: Option<std::time::Instant>,
     spent: &mut usize,
 ) -> Option<(Vec<f64>, f64)> {
-    let mut sub = opts.clone();
-    sub.max_nodes = STALL_REDIVE_MAX_NODES;
+    let mut sub = sub_solve_options(opts, STALL_REDIVE_MAX_NODES, Some(inc_x[..ns].to_vec()));
     sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
     sub.cut_rounds = 1;
     sub.cut_select = false;
     sub.root_cut_time_s = None;
-    sub.stall_time_s = None;
-    sub.extend_no_incumbent_s = None;
     sub.max_open_nodes = None;
-    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -4071,6 +4088,20 @@ fn solve_milp_node_search(
                 pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
+                dive_deadline: if crate::lp::cmir::root_cmir_mode().on() {
+                    let left = deadline.map_or(ROOT_DIVE_MAX_S, |d| {
+                        d.saturating_duration_since(std::time::Instant::now())
+                            .as_secs_f64()
+                    });
+                    Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs_f64(
+                                (left * ROOT_DIVE_SHARE).min(ROOT_DIVE_MAX_S),
+                            ),
+                    )
+                } else {
+                    None
+                },
                 tm: &tm,
             };
             #[cfg(feature = "parallel")]
@@ -5172,6 +5203,9 @@ struct NodeCtx<'a> {
     /// separation, and strong branching — none of which affect bound validity
     /// or feasibility — so the in-flight batch drains quickly. `None` = no limit.
     deadline: Option<std::time::Instant>,
+    /// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): wall-clock cap on one dive, or `None`
+    /// (unbounded, the default path). See [`ROOT_DIVE_SHARE`].
+    dive_deadline: Option<std::time::Instant>,
     tm: &'a TreeManager,
 }
 
@@ -6403,6 +6437,15 @@ fn strong_branch(
     // a finite degradation sample, and feeding it would corrupt the average.
     let mut obs: Vec<SbObservation> = Vec::new();
     for (idx, _f) in cand {
+        // Past the solve's deadline, stop probing and branch on the best candidate so
+        // far: only the branching variable can change, never a bound. Measured (gap
+        // plan §12.7): with `DISCOPT_MILP_ROOT_CMIR`'s dense root rows, 8 strong-branch
+        // calls took 33.7 s and a 20 s solve returned at 39.5 s, because the deadline
+        // was only checked once per node, before probing began.
+        if ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            crate::profile::incr(crate::profile::Ctr::StrongBranchDeadlineStop);
+            break;
+        }
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
         let frac = xi - xi.floor();
@@ -7581,6 +7624,15 @@ fn try_dive_repair(
     let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
     crate::profile::incr(crate::profile::Ctr::DiveRuns);
     for _ in 0..max_steps {
+        // Gap plan P3: the dive is a heuristic; past its wall cap it gives up (no
+        // point, never a wrong one).
+        if ctx
+            .dive_deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            crate::profile::incr(crate::profile::Ctr::DiveCapped);
+            return None;
+        }
         // Most-fractional unfixed integer column.
         let mut pick: Option<usize> = None;
         let mut best = INT_TOL;
@@ -9467,6 +9519,23 @@ mod tests {
             least.nodes,
             least.lp_iters
         );
+    }
+
+    /// A heuristic sub-solve never inherits the parent's deadline policies: with
+    /// `extend_no_incumbent_s` it ran to the parent's whole budget (gap plan §12.7).
+    #[test]
+    fn sub_solve_options_drop_the_parents_deadline_policies() {
+        let mut o = opts(4, vec![0, 1]);
+        o.extend_no_incumbent_s = Some(60.0);
+        o.stall_time_s = Some(10.0);
+        o.time_limit_s = Some(60.0);
+        let sub = sub_solve_options(&o, 17, Some(vec![1.0, 0.0]));
+        assert_eq!(sub.extend_no_incumbent_s, None);
+        assert_eq!(sub.stall_time_s, None);
+        assert_eq!(sub.max_nodes, 17);
+        assert_eq!(sub.initial_incumbent, Some(vec![1.0, 0.0]));
+        // The caller caps the time limit; the parent's is the starting point.
+        assert_eq!(sub.time_limit_s, Some(60.0));
     }
 
     /// Gap plan P1: with `stall_time_s` set and an incumbent in hand, the stall-point
