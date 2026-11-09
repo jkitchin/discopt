@@ -347,6 +347,7 @@ pub fn solve_lp_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
@@ -487,6 +488,7 @@ pub fn solve_lp_warm_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
@@ -597,6 +599,7 @@ pub fn solve_lp_warm_csc_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         // #928: this is the one entry point whose deadline-cut solves bank the
         // dual loop's anytime floor (see `SimplexOptions::bank_deadline_duals`).
         // Engaged exactly when the caller bounded this LP in time; the MILP
@@ -749,6 +752,7 @@ pub fn solve_lp_batch_py<'py>(
         warm_stall_guard: true,
         warm_stall_cap_override: None,
         expel_zero_artificials: false,
+        subtol_repair: true,
         bank_deadline_duals: false,
         recover_unstable_pivot: false,
         // #1013: hand a STALLED warm dual re-solve to the cold solve (default from
@@ -2157,6 +2161,7 @@ pub(crate) fn milp_options(
             // neutral on node count and wall — so per CLAUDE.md §5 it stays OFF
             // (sound but not net-positive is not a graduation).
             expel_zero_artificials: false,
+            subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             // #1013: hand a STALLED warm dual re-solve to the cold solve (default from

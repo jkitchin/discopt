@@ -1094,6 +1094,9 @@ fn repair_subtol_dual_optimum(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
+    if !opts.subtol_repair {
+        return sol;
+    }
     if sol.status != LpStatus::Optimal
         || sol.dual.len() != m
         || sol.basis.col_status.len() != n
@@ -1130,6 +1133,12 @@ fn repair_subtol_dual_optimum(
         return fixed;
     }
     crate::profile::incr(crate::profile::Ctr::WarmSubtolRepairFailed);
+    if std::env::var("P3_DBG").is_ok() {
+        eprintln!(
+            "P3DBG subtol repair failed: status={:?} iters={} max_iter={} m={m} n={n}",
+            fixed.status, fixed.iters, opts.max_iter
+        );
+    }
     LpSolve {
         status: LpStatus::Numerical,
         dual: Vec::new(),

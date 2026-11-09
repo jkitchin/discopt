@@ -122,6 +122,12 @@ pub struct SimplexOptions {
     /// OFF and is opted into only by the branch-and-cut kernel path (which needs
     /// warm-start to succeed), pending the CLAUDE.md §5 graduation panel.
     pub expel_zero_artificials: bool,
+    /// Run the #1595 sub-tolerance repair after a warm dual `Optimal` (default `true`).
+    /// Gap plan P3 turns it off only for the MILP root cut loop's re-solves, whose LP
+    /// value is never a bound (the root node is re-solved in the tree with it on) and
+    /// whose point only feeds separation; there the repair ran up to ~11k primal pivots
+    /// and failed, ending the loop (`docs/dev/highs-parity-d2-gap-plan.md` §12.11).
+    pub subtol_repair: bool,
     /// Bank the warm dual loop's progress when [`deadline`](Self::deadline) cuts
     /// it short (#928). When `true`, a deadline exit from the dual pivot loop
     /// returns [`LpStatus::IterLimit`] carrying the current (dual-feasible)
@@ -315,6 +321,7 @@ impl Default for SimplexOptions {
             warm_stall_guard: true,
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
+            subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             dual_stall_patience: dual::stall_patience_default(),

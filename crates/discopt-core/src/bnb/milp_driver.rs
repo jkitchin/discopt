@@ -3780,6 +3780,9 @@ fn solve_milp_node_search(
         if root_full_basis_enabled() {
             sx.expel_zero_artificials = true;
         }
+        if std::env::var("P3_NOREPAIR").as_deref() == Ok("1") {
+            sx.subtol_repair = false;
+        }
         sx
     };
 
