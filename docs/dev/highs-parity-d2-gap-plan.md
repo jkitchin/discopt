@@ -762,6 +762,28 @@ has no counterpart for. Also measured: the `=1` arm spends the whole 20 s at the
 `nexp-1-1` and `neos-911970`; the loop's time ceiling (checked at the top of a round)
 does not hold when a round's GMI re-solves are slow, which a full-solve arm would pay.
 
-**Next:** a flow-cover generator over the same aggregated rows (Marchand-Wolsey lifted
-flow cover, SCIP `cuts.c` / HiGHS `HighsCutGeneration` flow-cover path), then per-solve
-family budgeting by bound gain per root second, then this entry again.
+**Next (as first written, retracted below):** a flow-cover generator over the same
+aggregated rows, then per-solve family budgeting, then this entry again.
+
+**Retracted before building (same day).** SCIP's aggregation separator with exactly one
+generator on (`p3_scip_root_ablation.py` arms `agg_cmir` / `agg_flow` / `agg_knap`;
+`p3_scip_generator_ablation.jsonl`), root gap %:
+
+| row | aggregation | c-MIR only | flow cover only | knapsack cover only |
+|---|---|---|---|---|
+| nexp-50-20-4-2 | 0.78 | **0.94** | 7.25 | 30.86 |
+| sp150x300d | 4.63 | **5.23** | 44.22 | 51.89 |
+| nexp-50-20-1-1 | 0.00 | **0.00** | 30.79 | 55.49 |
+| beavma | 1.07 | **0.84** | 48.17 | 55.52 |
+| neos-911970 | 5.96 | **5.96** | 57.52 | 57.52 |
+| mik-250-20-75-1 | 2.73 | **2.42** | 6.47 | 18.62 |
+
+SCIP's c-MIR generator alone does the work on every row; its flow-cover and lifted-cover
+rows in the final root LP (§12.2) were incidental. So the "half of SCIP's binding cuts
+are flow / lifted covers" reading of §12.2 does not identify the missing piece, and a
+flow-cover generator is not the next step. What remains is c-MIR strength on
+`nexp-50-20-4-2` (ours 28.2 % alone vs SCIP's c-MIR 0.94 %) and `sp150x300d` (23.2 % vs
+5.23 %): SCIP's aggregation path (row scoring, aggregation depth, which rows it walks
+to), its bound-substitution choice, or its delta / complementation. **Next:** the §12.2
+procedure on `nexp-50-20-4-2` with the `agg_cmir` arm (SCIP's c-MIR cuts against ours
+on the same rows), then per-solve family budgeting, then this entry again.

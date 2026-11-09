@@ -14,6 +14,7 @@ separation) per instance and arm. Arms switch separators by `separating/<name>/f
   mcf   -- `mcf` only (multi-commodity-flow network cuts)
   zh    -- `zerohalf` only
   noagg -- every default separator except the four aggregation entries
+  agg_cmir / agg_flow / agg_knap -- `aggregation` with exactly one generator on
 Root gap = |opt - bound| / max(1, |opt|) in %. Prints an executed count; exits
 non-zero on 0 (CLAUDE.md §6).
 Usage: python p3_scip_root_ablation.py --instances a,b --out X.jsonl
@@ -57,6 +58,9 @@ def run(path: str, arm: str, time_limit: float) -> dict:
         "impl": {"impliedbounds"},
         "mcf": {"mcf"},
         "zh": {"zerohalf"},
+        "agg_cmir": {"aggregation", "cmir"},
+        "agg_flow": {"aggregation", "flowcover"},
+        "agg_knap": {"aggregation", "knapsackcover"},
     }.get(arm)
     present = []
     for s in SEPAS:
