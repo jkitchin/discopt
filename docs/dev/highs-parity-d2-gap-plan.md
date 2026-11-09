@@ -595,3 +595,40 @@ branch graduated is responsible (`NODE_GMI`, `CUT_LP`, `SUBMIP`, `SB_ARMED`,
 subject of this plan. Default-path tests stay on the default (allowlisted at their CI
 times, so the default keeps its coverage); the allowlist entries leave when the engine
 closes the gap.
+
+## 12. P3 entry, step 1 (2026-11-09): the family is the lever; our separator is not
+
+**Rust root today** (`discopt_benchmarks/scripts/p3_root_gap.py`, route, `max_nodes=2`;
+`docs/dev/data/highs-parity/gap-plan-p3/p3_root_base.json`): beavma 18.4 %, nexp-1-1
+27.6 %, nexp-4-2 9.9 %, sp150x300d 15.9 %, neos-911970 57.5 %, mik-1 4.1 %.
+
+**The W4 core, restored for the entry only** (not committed; `cmir.rs` from
+`e5eac131^`, routed by a root-loop `cmir_cuts` switch): arm a (c-MIR alone) beavma
+14.6 %, sp150x300d 18.8 % (worse), the rest within 1.5 pp; arm b (+ HiGHS delta
+selection) mik-1 3.8 %, the rest unchanged or worse; arm c (+ flip, lifted MIC)
+sp150x300d 10.1 %, nexp-4-2 12.7 % (worse). Kill-level on its own (< 2 pp on 4 of 6).
+
+**SCIP root ablation, presolve off, node limit 1**
+(`gap-plan-p3/p3_scip_root_ablation.{py,jsonl}`): root gap %
+
+| row | none | all | aggregation only | gomory | implied bounds | mcf | zerohalf | all but aggregation |
+|---|---|---|---|---|---|---|---|---|
+| beavma | 58.66 | 0.02 | **1.07** | 28.53 | 58.66 | 11.11 | 58.66 | 2.74 |
+| nexp-50-20-1-1 | 55.49 | 0.00 | **0.00** | 16.48 | 55.49 | 0.00 | 55.49 | 0.00 |
+| nexp-50-20-4-2 | 30.86 | 0.91 | **0.78** | 13.02 | 30.86 | 4.84 | 30.86 | 2.11 |
+| sp150x300d | 51.89 | 3.18 | **4.63** | 21.69 | 51.89 | 41.91 | 51.89 | 18.81 |
+| neos-911970 | 57.52 | 2.75 | **5.96** | 57.52 | 57.52 | 57.52 | 57.52 | 57.52 |
+| mik-250-20-75-1 | 18.62 | 2.54 | **2.73** | 4.54 | 18.62 | 18.62 | 18.62 | 5.33 |
+
+(In SCIP 6 `aggregation` emits nothing unless the `cmir` / `flowcover` / `knapsackcover`
+dummy separators are on; a first run that missed this measured `agg` = `none` and is
+superseded.) SCIP's path-aggregated c-MIR / flow cover alone closes every row to within
+6 %, and is the only family that moves `neos-911970` at all. So P3's hypothesis
+survives the zero-code test: the root gap on these rows is an aggregation-separator gap.
+
+**Where ours falls short (one row, `nexp-50-20-1-1`, route + `cmir_cuts`).** The
+separator runs: 1,058 c-MIR cuts over 18 root rounds, 1,000 generated, 282 kept, and
+the root bound stays at 21 against SCIP's 29 from the same family. The defect is cut
+strength, not missing plumbing. Next: compare one round's cuts against SCIP's on a
+single flow-conservation row of this instance (aggregation path, bound substitution
+choice, delta / complementation), then fix the construction, then re-run this entry.

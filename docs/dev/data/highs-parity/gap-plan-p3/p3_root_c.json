@@ -1,0 +1,92 @@
+[
+ {
+  "name": "beavma",
+  "opt": 383285.0,
+  "bound": 318683.7291803057,
+  "root_gap_pct": 16.854630580297776,
+  "nodes": 3,
+  "wall": 39.963865053000006,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ },
+ {
+  "name": "nexp-50-20-1-1",
+  "opt": 28.99999999999999,
+  "bound": 21.0,
+  "root_gap_pct": 27.586206896551698,
+  "nodes": 3,
+  "wall": 45.602068487,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ },
+ {
+  "name": "nexp-50-20-4-2",
+  "opt": 70.99999999999999,
+  "bound": 62.0,
+  "root_gap_pct": 12.676056338028152,
+  "nodes": 3,
+  "wall": 21.331190843,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ },
+ {
+  "name": "sp150x300d",
+  "opt": 69.0,
+  "bound": 62.0,
+  "root_gap_pct": 10.144927536231885,
+  "nodes": 3,
+  "wall": 2.73945551099996,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ },
+ {
+  "name": "neos-911970",
+  "opt": 54.76,
+  "bound": 23.25999999997215,
+  "root_gap_pct": 57.523739956223245,
+  "nodes": 3,
+  "wall": 2.843625804999988,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ },
+ {
+  "name": "mik-250-20-75-1",
+  "opt": -49716.0,
+  "bound": -51600.58683504759,
+  "root_gap_pct": 3.7907048737782336,
+  "nodes": 3,
+  "wall": 1.4876844760000267,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "DISCOPT_MILP_CMIR_HIGHS": "1",
+   "DISCOPT_MILP_CMIR_FLIP": "1",
+   "DISCOPT_MILP_LIFTED_MIC": "1"
+  }
+ }
+]
