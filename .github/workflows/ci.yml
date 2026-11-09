@@ -167,7 +167,13 @@ jobs:
           allow='^(docs/|reports/|discopt_benchmarks/results/|\.crucible/|\.claude/|.*\.md$|.*\.org$|codecov\.yml$|LICENSE$|\.gitignore$)'
           if [ -z "$changed" ]; then
             code=true                                   # unknown/empty -> run
-          elif printf '%s\n' "$changed" | grep -qvE "$allow"; then
+          # Here-string, never `printf ... | grep -q`: under `set -o pipefail` grep -q
+          # exits at its first match, printf's next write takes SIGPIPE (141) and the
+          # pipeline reads as "no match" -> code=false -> every heavy job SKIPPED
+          # while CI shows green. A race on a 51 KiB list (PR #2196, run 42627409266:
+          # 858 changed files, 570 of them code, `code=false`), certain on a large one
+          # (1.5 MB: 20/20 wrong; the here-string 20/20 right).
+          elif grep -qvE "$allow" <<< "$changed"; then
             code=true                                   # >=1 non-allowlisted file -> run
           else
             code=false                                  # every change is docs/results -> skip
