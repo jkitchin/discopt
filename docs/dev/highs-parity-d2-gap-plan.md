@@ -945,3 +945,17 @@ past an optimum (6 / 6). Caveats for the panel: `sp150x300d` is worse than today
 (nexp-1-1, nexp-4-2, neos-911970), which a full solve pays in tree time. Next: the §5
 panel (`d2_flag_panel.py --flag DISCOPT_MILP_ROOT_CMIR --fired RootCmirGmiHandover`,
 MIPLIB-38 + M, 3 reps, 20 s) and the corpus differential.
+
+### 12.9 §5 panel (2026-11-09): not graduated; the root starves the tree
+
+`d2_flag_panel.py --flag DISCOPT_MILP_ROOT_CMIR --fired RootCmirGmiHandover` (MIPLIB-38 + M,
+3 reps, 20 s, 372 solves; `gap-plan-p3/p3_root_cmir_panel.json.gz`): bar 1 passes (no bound
+past an optimum); certified 126 -> 127 (`gesa2` 0 -> 3, `nexp-50-20-1-1` 0 -> 1,
+`neos-3610051-istra` 3 -> 0); nodes on the always-certified set 60,244 -> 34,685 (-42 %).
+Fails: bar 1b (`istra`), 2c (6 dual losses, cap 1), 2d (incumbent lost on 7: `enlight8`,
+`neos-911970`, `nexp-50-20-1-1`, `nexp-50-20-4-2`, `sp150x300d`, `istra`,
+`neos-3118745-obra`), 2e (median primal gap 0.137 -> 0.212). The bound side works; the
+cost is the §12.8 caveat: the root takes most of the 20 s, so the tree and its primal
+heuristics starve. Default OFF. One rework is justified by the measurement (bound the
+root's share of the budget under the flag, then re-panel); if that panel fails too, the
+flag and its implementation are retired.
