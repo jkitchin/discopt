@@ -1,0 +1,123 @@
+diff --git a/crates/discopt-core/src/bnb/milp_driver.rs b/crates/discopt-core/src/bnb/milp_driver.rs
+index 20edf744..a2afcc20 100644
+--- a/crates/discopt-core/src/bnb/milp_driver.rs
++++ b/crates/discopt-core/src/bnb/milp_driver.rs
+@@ -3563,7 +3563,7 @@ fn solve_milp_node_search(
+                     &root.x,
+                     &is_int_full,
+                     n_orig_rows,
+-                    CMIR_MAX_AGGR,
++                    std::env::var("P3_MAX_AGGR").ok().and_then(|v| v.parse().ok()).unwrap_or(CMIR_MAX_AGGR),
+                     CMIR_MAX_CUTS,
+                     opts.simplex.tol,
+                 );
+diff --git a/crates/discopt-core/src/lp/cmir.rs b/crates/discopt-core/src/lp/cmir.rs
+index ab77664d..f64b9baa 100644
+--- a/crates/discopt-core/src/lp/cmir.rs
++++ b/crates/discopt-core/src/lp/cmir.rs
+@@ -344,7 +344,12 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
+         if ctx.is_int[j] {
+             continue;
+         }
+-        let (_, sub) = ctx.closest(j)?;
++        let Some((_, sub)) = ctx.closest(j) else {
++            if std::env::var("P3_TRACE").is_ok() {
++                eprintln!("P3REFUSE no_bound_on_continuous");
++            }
++            return None;
++        };
+         match sub {
+             Sub::Lb => {
+                 rhs2 -= aj * l[j];
+@@ -372,6 +377,9 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
+             continue;
+         }
+         if l[k] <= -INF {
++            if std::env::var("P3_TRACE").is_ok() {
++                eprintln!("P3REFUSE int_lb_inf");
++            }
+             return None;
+         }
+         let comp = u[k] < INF && x[k] - l[k] > 0.5 * (u[k] - l[k]);
+@@ -396,8 +404,12 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
+         }
+     }
+     if ints.iter().all(|t| !t.int_ok) || !rhs2.is_finite() {
++        if std::env::var("P3_TRACE").is_ok() {
++            eprintln!("P3REFUSE no_int_structure ints={}", ints.len());
++        }
+         return None; // no integer structure to round
+     }
++    let ints_len = ints.len();
+     let lifted = if lifted_mic_enabled() {
+         lifted_mic_cut(ctx, &ints, &conts, rhs2)
+     } else {
+@@ -408,6 +420,9 @@ fn cmir_row(ctx: &Ctx<'_>, coef: &BTreeMap<usize, f64>, rhs: f64) -> Option<Cut>
+     } else {
+         cmir_row_legacy(ctx, &ints, &conts, rhs2)
+     };
++    if mir.is_none() && lifted.is_none() && std::env::var("P3_TRACE").is_ok() {
++        eprintln!("P3REFUSE no_violated_mir ints={} conts={}", ints_len, conts.len());
++    }
+     match (mir, lifted) {
+         (Some(a), Some(b)) => Some(if b.efficacy > a.efficacy { b } else { a }),
+         (a, b) => a.or(b),
+@@ -1132,7 +1147,7 @@ pub fn separate_cmir_csc(
+         let has_int_structure = nz
+             .iter()
+             .any(|&(j, _)| is_int[j] || !ctx.vlb[j].is_empty() || !ctx.vub[j].is_empty());
+-        if !has_int_structure {
++        if !has_int_structure && !std::env::var("P3_CONT_START").is_ok_and(|v| v == "1") {
+             continue;
+         }
+         let amax = nz.iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
+@@ -1171,6 +1186,13 @@ pub fn separate_cmir_csc(
+                     if used.contains(&r2) {
+                         continue;
+                     }
++                    // TEMP P3 knob (not committed): skip variable-bound rows.
++                    if std::env::var("P3_SKIP_VB_ROWS").is_ok_and(|v| v == "1")
++                        && rows[r2].len() <= 3
++                        && rows[r2].iter().any(|&(c, _)| is_int[c])
++                    {
++                        continue;
++                    }
+                     let Some(&(_, a2j)) = rows[r2].iter().find(|&&(c, _)| c == j) else {
+                         continue;
+                     };
+@@ -1178,7 +1200,13 @@ pub fn separate_cmir_csc(
+                     if !lam.is_finite() {
+                         continue;
+                     }
+-                    let score = row_slack(&ctx, &rows[r2], &col_rows, lam);
++                    let mut score = row_slack(&ctx, &rows[r2], &col_rows, lam);
++                    // TEMP P3 knob (not committed): rank by continuous count first
++                    // (SCIP's aggregateNextRow favours rows bringing integers in).
++                    if std::env::var("P3_PREFER_INT_ROW").is_ok_and(|v| v == "1") {
++                        let ncont = rows[r2].iter().filter(|&&(c, _)| !is_int[c]).count();
++                        score += 1e6 * ncont as f64;
++                    }
+                     if cand.is_none_or(|(s, _, _)| score < s) {
+                         cand = Some((score, r2, lam));
+                     }
+@@ -1195,7 +1223,20 @@ pub fn separate_cmir_csc(
+                 used.push(r2);
+             }
+             if let Some(c) = row_best {
++                // TEMP P3 trace (not committed): start row, rows used, cut support.
++                if std::env::var("P3_TRACE").is_ok() {
++                    let ni = c.coef.keys().filter(|&&j| is_int[j]).count();
++                    let nc = c.coef.len() - ni;
++                    eprintln!(
++                        "P3TRACE start={i} sign={sign} used={:?} levels={} int={ni} cont={nc} eff={:.4e}",
++                        used,
++                        used.len() - 1,
++                        c.efficacy
++                    );
++                }
+                 found.push(c);
++            } else if std::env::var("P3_TRACE").is_ok() {
++                eprintln!("P3TRACE start={i} sign={sign} used={:?} nocut", used);
+             }
+         }
+     }

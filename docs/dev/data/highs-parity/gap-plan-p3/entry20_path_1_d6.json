@@ -1,0 +1,92 @@
+[
+ {
+  "name": "beavma",
+  "opt": 383285.0,
+  "bound": 335464.1981146895,
+  "root_gap_pct": 12.476564928267608,
+  "nodes": 3,
+  "wall": 4.589071596999986,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ },
+ {
+  "name": "nexp-50-20-1-1",
+  "opt": 28.99999999999999,
+  "bound": 23.0,
+  "root_gap_pct": 20.689655172413765,
+  "nodes": 3,
+  "wall": 9.777514851999968,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ },
+ {
+  "name": "nexp-50-20-4-2",
+  "opt": 70.99999999999999,
+  "bound": 66.0,
+  "root_gap_pct": 7.042253521126742,
+  "nodes": 3,
+  "wall": 20.060735873,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ },
+ {
+  "name": "sp150x300d",
+  "opt": 69.0,
+  "bound": 59.0,
+  "root_gap_pct": 14.492753623188406,
+  "nodes": 3,
+  "wall": 1.0544206179999946,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ },
+ {
+  "name": "neos-911970",
+  "opt": 54.76,
+  "bound": 37.820661267427525,
+  "root_gap_pct": 30.933781469270407,
+  "nodes": 3,
+  "wall": 20.040901238000004,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ },
+ {
+  "name": "mik-250-20-75-1",
+  "opt": -49716.0,
+  "bound": -51304.185339813164,
+  "root_gap_pct": 3.194515527824371,
+  "nodes": 3,
+  "wall": 2.3993098239999995,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1",
+   "P3_PREFER_INT_ROW": "1",
+   "P3_CONT_START": "1",
+   "P3_MAX_AGGR": "6"
+  }
+ }
+]

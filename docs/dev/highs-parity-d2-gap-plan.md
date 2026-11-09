@@ -817,3 +817,44 @@ flow rows; ours eliminates the column farthest from its bound through the tighte
 containing it, so on a network it can keep re-selecting the same few rows. Next: log
 the rows our aggregation uses from one `nexp-4-2` start row against the support of a
 binding SCIP cut, and change the path rule only if that shows the divergence.
+
+### 12.5 The aggregation path, traced (2026-11-09)
+
+Temporary trace in `cmir.rs` (knobs saved as `gap-plan-p3/p3_path_trace_knobs.patch`, not
+on the solve path), `nexp-50-20-4-2`, `DISCOPT_MILP_ROOT_CMIR=only`, root:
+
+* **Our cuts are tiny.** 240 of 13,580 start-row attempts yield a cut; cut support is a
+  median 2 integer columns (max 8), against SCIP's binding c-MIR cuts at median 16
+  (max 48).
+* **Every refusal is "no violated MIR", on single-arc rows.** 15,112 of 15,461 refused
+  substituted rows carry exactly 4 integer columns: one arc's 4 capacity-module
+  binaries. The separator works almost only on capacity rows `flow <= sum_k cap_k y_ak`,
+  which alone yield nothing violated.
+* **Why it never builds cut sets.** (1) `has_int_structure` skips start rows with no
+  integer column and no detected variable bound, i.e. every flow-conservation row;
+  (2) the variable-bound reader takes 2-3-nonzero rows only, so a 4-module capacity row
+  is no variable bound and the flows have none; (3) when a flow is eliminated, the
+  candidate rows (the next node's conservation row, slack 0, and the flow's capacity
+  row, tight at the LP) tie on slack, so the path often walks into the next
+  conservation row, which adds flows and no integers. Skipping variable-bound rows
+  (§12.1's knob) changes nothing at all: they are never candidates.
+
+Measured with the three removed (continuous start rows, candidate rows ranked by their
+continuous count before slack, depth 6/10; `p3_entry20_path_*.json`, 24 comparisons, no
+bound past an optimum), root gap %:
+
+| row | `only` before | `only` + path, depth 10 | `1` + path, depth 10 |
+|---|---|---|---|
+| nexp-50-20-4-2 | 28.2 | **7.0** | 7.0 |
+| nexp-50-20-1-1 | 0.0 | 0.0 | 20.7 |
+| neos-911970 | 5.4 | 5.4 | 30.9 |
+| mik-250-20-75-1 | 3.1 | 3.7 | 3.2 |
+| sp150x300d | 23.2 | 29.0 | 14.5 |
+| beavma | 8.1 | **37.4** | 12.5 |
+
+The path is a real lever on the network row (`nexp-4-2` 28.2 -> 7.0 %, cut support
+median 7, max 31), but a lexicographic "fewest continuous first" rule breaks `beavma`
+(8.1 -> 37.4 %). SCIP's `aggregateNextRow` blends density, slack and integer content
+into one score per candidate row; that blend, not a lexicographic rule, is the next
+thing to port, then this table again. The `1` arm's 20 s root on `nexp-4-2` and
+`neos-911970` (the time-ceiling overrun of §12.3) is unchanged.
