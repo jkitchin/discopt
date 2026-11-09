@@ -1,0 +1,23 @@
+# 20 s full solves, quick target check (not a panel). p3 = DISCOPT_MILP_ROOT_CMIR=1 P3_STALL=3 P3_PRUNE_DUAL=1 P3_AGE=1
+# P3_EXPEL=1 DISCOPT_MILP_RAND_ROUND=1 DISCOPT_MILP_RUN1_CONTINUE=1 P3_RENS=1 P3_NOCOLD=2 P3_SEL=1 P3_CMIR_ALLROWS=1
+# P3_HSTALL=1 P3_NOREPAIR=1 P3_TABLEAU=1 P3_PRUNE_REMAP=1 P3_INCPROP=1
+row                                      off                        p3
+neos-3610051-istra  OPT d=  0.00 p=  0.00  4.7s  OPT d=  0.00 p=  0.00  4.4s
+nexp-50-20-1-1     feas d= 10.34 p= 31.03 20.2s feas d=  0.00 p= 24.14 20.2s
+beavma             feas d=  8.45 p= 42.18 20.3s feas d=  3.75 p=  1.64 20.3s
+bppc8-02           feas d=  4.04 p=  1.18 20.2s feas d=  4.04 p=  4.54 20.2s
+sp150x300d         feas d= 10.14 p= 28.99 20.3s feas d=  2.90 p=  0.00 20.2s
+nexp-50-20-4-2     feas d=  4.23 p=  7.04 20.4s  OPT d=  0.00 p=  0.00 14.1s
+enlight8           feas d= 25.93 p=  0.00 20.1s time d= 33.33 p=     - 20.0s
+gesa2              feas d=  0.05 p=  1.74 20.5s  OPT d=  0.00 p=  0.00  3.7s
+issue-2446         time d=2111.46 p=     - 20.1s feas d=2149.95 p= 10.24 25.7s
+mik-250-20-75-1    feas d=  3.06 p=  0.00 20.2s feas d=  1.52 p= 19.84 20.2s
+mik-250-20-75-2    feas d=  3.25 p=  0.00 20.2s feas d=  1.65 p=  1.18 20.2s
+mik-250-20-75-3    feas d=  2.99 p=  0.26 20.1s feas d=  1.20 p=  0.19 20.2s
+mik-250-20-75-5    feas d=  3.04 p=  0.05 20.1s feas d=  1.08 p= 49.05 20.3s
+gsvm2rl3           feas d=  9.71 p= 24.98 20.3s feas d=  8.70 p= 25.43 20.2s
+neos17             feas d=  4.89 p= 21.10 20.2s feas d=  4.86 p= 22.63 20.3s
+neos-911970        feas d= 57.52 p= 89.77 20.1s feas d= 13.70 p= 69.05 20.2s
+certified: {'off': 1, 'p3': 3} solves: 32
+# issue-2446 25.7 s: Python's post-solve _repair_published_incumbent (1.06 s under cProfile) runs outside the
+# time limit once an incumbent exists; flag-off finds none on this row. Existing behaviour, not the driver.

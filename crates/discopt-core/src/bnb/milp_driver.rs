@@ -650,6 +650,191 @@ fn fbbt_rows(
     fbbt_rows_with_row(csc, m, n, l, u, b, is_int, tol, None)
 }
 
+/// Gap plan P3 (`P3_INCPROP=1`): incremental bound propagation over `A x = b` for the
+/// primal heuristics, in the role of HiGHS's `HighsDomain::propagate` after each fix
+/// (`HighsPrimalHeuristics.cpp:1125-1150`). A bound change queues only that column's
+/// rows; a queued row is re-propagated from a freshly computed activity range (no
+/// incremental drift). Like [`fbbt_rows_exact`] it only steers which candidates the
+/// heuristic tries: every resulting point is re-verified on the original rows.
+struct IncProp {
+    rows: Vec<Vec<(usize, f64)>>,
+    cols: Vec<Vec<usize>>,
+    b: Vec<f64>,
+    is_int: Vec<bool>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    queue: Vec<usize>,
+    queued: Vec<bool>,
+    work: usize,
+}
+
+impl IncProp {
+    const WORK_CAP: usize = 50_000_000;
+
+    fn new(
+        csc: &SparseCols,
+        m: usize,
+        n: usize,
+        b: &[f64],
+        is_int: &[bool],
+        l: &[f64],
+        u: &[f64],
+    ) -> Self {
+        let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let (cp, ri, va) = csc.raw();
+        for j in 0..n {
+            for k in cp[j]..cp[j + 1] {
+                if va[k] != 0.0 {
+                    rows[ri[k]].push((j, va[k]));
+                    cols[j].push(ri[k]);
+                }
+            }
+        }
+        IncProp {
+            rows,
+            cols,
+            b: b.to_vec(),
+            is_int: is_int.to_vec(),
+            l: l.to_vec(),
+            u: u.to_vec(),
+            queue: Vec::new(),
+            queued: vec![false; m],
+            work: 0,
+        }
+    }
+
+    fn push_col(&mut self, j: usize) {
+        for &r in &self.cols[j] {
+            if !self.queued[r] {
+                self.queued[r] = true;
+                self.queue.push(r);
+            }
+        }
+    }
+
+    /// Set `j`'s bounds to `[lo, hi]` and propagate; `false` when the box is empty.
+    fn set(&mut self, j: usize, lo: f64, hi: f64) -> bool {
+        if lo > self.l[j] || hi < self.u[j] {
+            self.l[j] = self.l[j].max(lo);
+            self.u[j] = self.u[j].min(hi);
+            if self.l[j] > self.u[j] + 1e-9 {
+                return false;
+            }
+            self.push_col(j);
+        }
+        self.propagate()
+    }
+
+    fn propagate(&mut self) -> bool {
+        while let Some(r) = self.queue.pop() {
+            self.queued[r] = false;
+            if self.work > Self::WORK_CAP {
+                self.queue.clear();
+                return true; // budget spent: stop tightening (never a wrong verdict)
+            }
+            let row = std::mem::take(&mut self.rows[r]);
+            self.work += row.len();
+            let (mut mn, mut mx) = (0.0f64, 0.0f64);
+            let (mut mn_inf, mut mx_inf) = (0usize, 0usize);
+            for &(j, a) in &row {
+                let (lo, hi) = (self.l[j], self.u[j]);
+                let (cmin, cmax) = if a > 0.0 {
+                    (a * lo, a * hi)
+                } else {
+                    (a * hi, a * lo)
+                };
+                if !cmin.is_finite() || cmin.abs() >= INF {
+                    mn_inf += 1
+                } else {
+                    mn += cmin
+                }
+                if !cmax.is_finite() || cmax.abs() >= INF {
+                    mx_inf += 1
+                } else {
+                    mx += cmax
+                }
+            }
+            let br = self.b[r];
+            let scale = 1e-6 * (1.0 + br.abs());
+            if (mn_inf == 0 && mn > br + scale) || (mx_inf == 0 && mx < br - scale) {
+                self.rows[r] = row;
+                return false;
+            }
+            let mut changed: Vec<usize> = Vec::new();
+            for &(k, a) in &row {
+                let (lo, hi) = (self.l[k], self.u[k]);
+                let (cmin, cmax) = if a > 0.0 {
+                    (a * lo, a * hi)
+                } else {
+                    (a * hi, a * lo)
+                };
+                let cmin_inf = !cmin.is_finite() || cmin.abs() >= INF;
+                let cmax_inf = !cmax.is_finite() || cmax.abs() >= INF;
+                // rest = sum over the others: [rest_min, rest_max].
+                let rest_min = if mn_inf - usize::from(cmin_inf) > 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    mn - if cmin_inf { 0.0 } else { cmin }
+                };
+                let rest_max = if mx_inf - usize::from(cmax_inf) > 0 {
+                    f64::INFINITY
+                } else {
+                    mx - if cmax_inf { 0.0 } else { cmax }
+                };
+                // a x_k = br - rest  ->  a x_k in [br - rest_max, br - rest_min].
+                let (vlo, vhi) = (br - rest_max, br - rest_min);
+                let (mut nlo, mut nhi) = if a > 0.0 {
+                    (vlo / a, vhi / a)
+                } else {
+                    (vhi / a, vlo / a)
+                };
+                if self.is_int[k] {
+                    if nlo.is_finite() {
+                        nlo = (nlo - 1e-6).ceil();
+                    }
+                    if nhi.is_finite() {
+                        nhi = (nhi + 1e-6).floor();
+                    }
+                }
+                let mut hit = false;
+                let eps = 1e-7 * (1.0 + lo.abs().min(1e9));
+                let cont_gain = if self.is_int[k] {
+                    0.0
+                } else {
+                    1e-3 * (hi - lo).min(1e9).max(1e-9)
+                };
+                if nlo.is_finite() && nlo > lo + eps + cont_gain {
+                    self.l[k] = nlo;
+                    hit = true;
+                }
+                let eps = 1e-7 * (1.0 + hi.abs().min(1e9));
+                if nhi.is_finite() && nhi < hi - eps - cont_gain {
+                    self.u[k] = nhi;
+                    hit = true;
+                }
+                if hit {
+                    if self.l[k] > self.u[k] + 1e-6 * (1.0 + self.u[k].abs()) {
+                        self.rows[r] = row;
+                        return false;
+                    }
+                    if self.l[k] > self.u[k] {
+                        let m = 0.5 * (self.l[k] + self.u[k]);
+                        self.l[k] = m;
+                        self.u[k] = m;
+                    }
+                    changed.push(k);
+                }
+            }
+            self.rows[r] = row;
+            for k in changed {
+                self.push_col(k);
+            }
+        }
+        true
+    }
+}
+
 /// The exact-row FBBT, for the primal heuristics (sub-MIP, randomized rounding, the
 /// dive repair). Their propagation only chooses which candidates to try, and every
 /// candidate is verified, so it is not a proof and needs no confirmation under
@@ -2145,35 +2330,64 @@ fn try_randomized_rounding(
     let nnz = base.csc.raw().2.len().max(1);
     let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
     let (mut sl, mut su) = (base.l.clone(), base.u.clone());
-    for (k, &j) in ints.iter().enumerate() {
-        let x = node_x[j];
-        let v = if locks.0[j] == 0 {
-            (x - feastol).ceil()
-        } else if locks.1[j] == 0 {
-            (x + feastol).floor()
-        } else {
-            (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
-        };
-        let v = v.min(su[j]).max(sl[j]);
-        sl[j] = v;
-        su[j] = v;
-        if (k + 1) % stride == 0 || k + 1 == ints.len() {
-            let pr = fbbt_rows_exact(
-                &base.csc,
-                base.m,
-                base.n,
-                &sl,
-                &su,
-                &base.b,
-                &base.is_int_full,
-                opts.simplex.tol,
-            );
-            if pr.infeasible {
+    if std::env::var("P3_INCPROP").as_deref() == Ok("1") {
+        let mut prop = IncProp::new(
+            &base.csc,
+            base.m,
+            base.n,
+            &base.b,
+            &base.is_int_full,
+            &sl,
+            &su,
+        );
+        for &j in &ints {
+            let x = node_x[j];
+            let v = if locks.0[j] == 0 {
+                (x - feastol).ceil()
+            } else if locks.1[j] == 0 {
+                (x + feastol).floor()
+            } else {
+                (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
+            };
+            let v = v.min(prop.u[j]).max(prop.l[j]);
+            if !prop.set(j, v, v) {
                 crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
                 return None;
             }
-            sl = pr.l;
-            su = pr.u;
+        }
+        sl = prop.l;
+        su = prop.u;
+    } else {
+        for (k, &j) in ints.iter().enumerate() {
+            let x = node_x[j];
+            let v = if locks.0[j] == 0 {
+                (x - feastol).ceil()
+            } else if locks.1[j] == 0 {
+                (x + feastol).floor()
+            } else {
+                (x + 0.1 + 0.8 * rr_uniform(&mut rng)).floor()
+            };
+            let v = v.min(su[j]).max(sl[j]);
+            sl[j] = v;
+            su[j] = v;
+            if (k + 1) % stride == 0 || k + 1 == ints.len() {
+                let pr = fbbt_rows_exact(
+                    &base.csc,
+                    base.m,
+                    base.n,
+                    &sl,
+                    &su,
+                    &base.b,
+                    &base.is_int_full,
+                    opts.simplex.tol,
+                );
+                if pr.infeasible {
+                    crate::profile::incr(crate::profile::Ctr::RandRoundPropInfeas);
+                    return None;
+                }
+                sl = pr.l;
+                su = pr.u;
+            }
         }
     }
     let mut simplex = opts.simplex.clone();
@@ -2239,6 +2453,7 @@ fn try_rens_highs(
     node_x: &[f64],
     root_x: Option<&[f64]>,
     inc: Option<(&[f64], f64)>,
+    start_basis: Option<&Basis>,
     opts: &MilpOptions,
     deadline: Option<std::time::Instant>,
     parent_nodes: usize,
@@ -2261,7 +2476,11 @@ fn try_rens_highs(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1.0);
-    let dive_deadline = t0 + std::time::Duration::from_secs_f64((0.1 * left).min(dive_cap));
+    let dive_share: f64 = std::env::var("P3_RENS_DIVE_SHARE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.1);
+    let dive_deadline = t0 + std::time::Duration::from_secs_f64((dive_share * left).min(dive_cap));
     crate::profile::incr(crate::profile::Ctr::SubMipRensRun);
     let (mut l, mut u) = (cut.l.clone(), cut.u.clone());
     let free_ints: Vec<usize> = order.iter().copied().filter(|&j| l[j] < u[j]).collect();
@@ -2272,7 +2491,37 @@ fn try_rens_highs(
     let rate = |l: &[f64], u: &[f64]| {
         free_ints.iter().filter(|&&j| l[j] >= u[j]).count() as f64 / n_total as f64
     };
+    let inc_on = std::env::var("P3_INCPROP").as_deref() == Ok("1");
+    let incp = std::cell::RefCell::new(inc_on.then(|| {
+        IncProp::new(
+            &cut.csc,
+            cut.m,
+            cut.n,
+            &cut.b,
+            &cut.is_int_full,
+            &cut.l,
+            &cut.u,
+        )
+    }));
     let prop = |l: &[f64], u: &[f64]| {
+        if let Some(p) = incp.borrow_mut().as_mut() {
+            // Loosened anywhere (a restored snapshot): restart from this box.
+            if (0..l.len()).any(|j| l[j] < p.l[j] || u[j] > p.u[j]) {
+                *p = IncProp::new(&cut.csc, cut.m, cut.n, &cut.b, &cut.is_int_full, l, u);
+                for j in 0..l.len() {
+                    p.push_col(j);
+                }
+            } else {
+                for j in 0..l.len() {
+                    if l[j] > p.l[j] || u[j] < p.u[j] {
+                        p.l[j] = l[j];
+                        p.u[j] = u[j];
+                        p.push_col(j);
+                    }
+                }
+            }
+            return p.propagate().then(|| (p.l.clone(), p.u.clone()));
+        }
         let pr = fbbt_rows_exact(
             &cut.csc,
             cut.m,
@@ -2288,7 +2537,11 @@ fn try_rens_highs(
     let mut simplex = opts.simplex.clone();
     simplex.deadline = Some(dive_deadline);
     let mut x: Vec<f64> = node_x[..ns].to_vec();
-    let mut basis: Option<Basis> = None;
+    // Warm-start the dive from the node's optimal basis when it spans this LP (the
+    // node LP and the post-root LP are the same matrix unless rows were added since).
+    let mut basis: Option<Basis> = start_basis
+        .filter(|b| b.basic_vars.len() == cut.m && b.col_status.len() == cut.n)
+        .cloned();
     let mut fixing: f64;
     let mut why = "iters";
     let mut n_lp = 0usize;
@@ -2492,6 +2745,9 @@ fn try_rens_highs(
     }
     fixing = rate(&l, &u);
     if fixing < 0.1 {
+        if std::env::var("P3_DBG").is_ok() {
+            eprintln!("P3DBG rens early: fixing={fixing:.3} why={why} n_lp={n_lp} left={left:.2}");
+        }
         return None;
     }
     let left = deadline.map_or(10.0, |d| {
@@ -2536,7 +2792,9 @@ fn try_rens_highs(
             "{{\"m\":{},\"n\":{},\"colptr\":[{}],\"rowidx\":[{}],\"vals\":[{}],\"c\":[{}],\"b\":[{}],\"l\":[{}],\"u\":[{}],\"ints\":[{}]}}",
             cut.m, cut.n, ji(cp), ji(ri), js(vals), js(&cut.c), js(&cut.b), js(&l), js(&u), ji(&ints)
         );
-        let _ = std::fs::write(path, body);
+        if !std::path::Path::new(&path).exists() {
+            let _ = std::fs::write(path, body);
+        }
     }
     let seed = inc.and_then(|(ix, _)| {
         (0..ns)
@@ -4686,7 +4944,52 @@ fn solve_milp_node_search(
             // be extended onto the smaller one. The root node cold-solves the
             // reduced LP instead -- cheaper than the solve that produced the
             // basis, and far cheaper than carrying the dropped rows all tree.
-            root_basis = None;
+            //
+            // P3 (`P3_PRUNE_REMAP=1`): unless the basis can be remapped. A dropped
+            // cut whose slack is BASIC leaves with its row as a basic pair, so the
+            // remaining basis is square, nonsingular and keeps its reduced costs;
+            // that is exactly the in-loop ageing remap. On neos-911970 the cold
+            // solve this replaces took 2.4 s of a 20 s budget.
+            let remapped = (std::env::var("P3_PRUNE_REMAP").as_deref() == Ok("1"))
+                .then_some(())
+                .and(root_basis.as_ref())
+                .and_then(|(rb, rn)| {
+                    let n_old = rn.saturating_sub(n_base).min(keep.len());
+                    let all_basic = (0..n_old)
+                        .all(|i| keep[i] || rb.col_status.get(n_base + i) == Some(&BASIC));
+                    if !all_basic || rb.col_status.len() != *rn {
+                        return None;
+                    }
+                    let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
+                    for i in 0..n_old {
+                        if keep[i] {
+                            col_status.push(rb.col_status[n_base + i]);
+                        }
+                    }
+                    let basic_vars: Vec<usize> = rb
+                        .basic_vars
+                        .iter()
+                        .filter_map(|&j| {
+                            if j < n_base {
+                                Some(j)
+                            } else if j - n_base < n_old && keep[j - n_base] {
+                                Some(n_base + newidx[j - n_base])
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let n_new = col_status.len();
+                    let basic_count = col_status.iter().filter(|&&s| s == BASIC).count();
+                    (basic_count == basic_vars.len()).then_some((
+                        Basis {
+                            col_status,
+                            basic_vars,
+                        },
+                        n_new,
+                    ))
+                });
+            root_basis = remapped;
         }
     }
 
@@ -4733,6 +5036,12 @@ fn solve_milp_node_search(
             b
         }
     });
+    // P3: the post-root LP's basis, for the RENS/RINS dive's first LP (same matrix).
+    let rens_root_basis: Option<Basis> = if rens_cut_base.is_some() {
+        root_warm_basis.clone()
+    } else {
+        None
+    };
 
     // `deadline` (computed above, before the root cuts) drives two layers of
     // budget enforcement: the loop-top check below stops *dispatching* new
@@ -5725,6 +6034,15 @@ fn solve_milp_node_search(
                     };
                     // HiGHS runs RENS once at the end of the root whatever the incumbent
                     // (`HighsMipSolverData.cpp:2398`), RENS in the tree only without one.
+                    if std::env::var("P3_DBG").is_ok() {
+                        eprintln!(
+                            "P3DBG submip start t={:.2} depth={milp_depth} left={:.2}",
+                            t_start.elapsed().as_secs_f64(),
+                            deadline.map_or(-1.0, |d| d
+                                .saturating_duration_since(std::time::Instant::now())
+                                .as_secs_f64())
+                        );
+                    }
                     let rens_now = kind == SubMipKind::Rens || !rens_root_done;
                     rens_root_done = true;
                     let rens_highs = match rens_cut_base.as_ref() {
@@ -5742,6 +6060,7 @@ fn solve_milp_node_search(
                             } else {
                                 inc.as_ref().map(|(x, v)| (x.as_slice(), *v))
                             },
+                            rens_root_basis.as_ref(),
                             opts,
                             deadline,
                             tm.stats().total_nodes,
@@ -5989,6 +6308,15 @@ fn solve_milp_node_search(
         }
     }
 
+    if milp_depth == 0 && std::env::var("P3_DBG").is_ok() {
+        eprintln!(
+            "P3DBG search end t={:.2} past_deadline={:.2}",
+            t_start.elapsed().as_secs_f64(),
+            deadline.map_or(0.0, |d| std::time::Instant::now()
+                .saturating_duration_since(d)
+                .as_secs_f64())
+        );
+    }
     // Interactive debugger: terminal checkpoint (return value is advisory only —
     // the solve is already over, so its control is ignored).
     let _ = fire_dbg!(MilpCheckpoint::Terminated);
