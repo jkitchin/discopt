@@ -189,8 +189,12 @@ def _enumerated_min(net, k=201):
     return float(np.min(net.forward(pts)[:, 0]))
 
 
-def test_native_route_certifies_and_tightens_the_root():
+def test_native_route_certifies_and_tightens_the_root(monkeypatch):
     # big-M LP -0.300 vs MILP -0.083 on this instance: the cuts have work to do.
+    # The HiGHS route's root cut loop (HiGHS is opt-in since PR #2196); the Rust
+    # engine's native separator is covered below.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     net = _net([2, 6, 1], 0)
     ref, _ = _build(net, False)
     r0 = ref.solve(time_limit=60)

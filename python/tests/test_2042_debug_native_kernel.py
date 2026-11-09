@@ -94,8 +94,10 @@ def _market_split():
 
 
 def test_attached_debugger_skips_highs_on_a_pure_milp(monkeypatch):
-    """HiGHS fires no checkpoint either; the Rust MILP engine does (#2042)."""
-    monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
+    """HiGHS fires no checkpoint either; the Rust MILP engine does (#2042). HiGHS is
+    the opt-in MILP engine since PR #2196, so it is selected here explicitly."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     plain = _market_split().solve()
     assert "highs-milp" in (plain.algorithm_route or ""), plain.algorithm_route
     c = _Count()

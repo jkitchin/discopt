@@ -136,7 +136,8 @@ m.subject_to(2 * x[0] + 3 * x[1] + x[2] <= 7)
 @pytest.mark.smoke
 def test_milp_default_falls_back_to_the_in_house_engine_and_says_why():
     """P6.3: with no backend named and no highspy, a pure MILP runs on the in-house
-    engine (never raises), certifies, and its route records why."""
+    engine (never raises) and certifies. Since PR #2196 that engine is the default
+    whether or not highspy is installed."""
     res = _run(
         _MILP
         + r"""
@@ -153,7 +154,7 @@ print("RESULT " + json.dumps({"backend": _lp_milp_backend(), "status": r.status,
     assert res["backend"] == "rust", res
     assert res["status"] == "optimal" and res["cert"], res
     assert res["obj"] == pytest.approx(19.0), res  # x = (2, 0, 3): 10 + 9
-    assert "highspy is not installed" in res["route"], res
+    assert res["route"].startswith("native-milp"), res  # the default on every install
     assert all(r[1] == "probe" for r in res["roles"]), res["roles"]
 
 

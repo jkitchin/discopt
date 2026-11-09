@@ -26,6 +26,16 @@ from discopt.ml.formulations.tree_ensemble import TreeEnsembleFormulation
 from discopt.ml.predictor import add_predictor
 from discopt.ml.tree import DecisionTree, TreeEnsembleDefinition
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 #: The tree the defect was found on. Its optimum sits on a threshold, which is
 #: where a piecewise-constant function's optima live, so the encoding is pushed
 #: straight onto the boundary it was mishandling.

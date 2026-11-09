@@ -741,7 +741,8 @@ print("RESULT", r.status, route, "highspy" in sys.modules)
 
 @pytest.mark.parametrize("kind", ["minlp", "milp"])
 def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
-    """Plan §4: a default MINLP solve never imports highspy; a pure MILP takes HiGHS.
+    """Plan §4: a default MINLP solve never imports highspy. Since PR #2196 a default
+    pure MILP does not either: it takes the Rust engine on every install.
 
     A fresh interpreter with the flag unset, so the graduated default is what runs and
     nothing earlier in the test process has imported highspy.
@@ -759,7 +760,4 @@ def test_default_route_imports_highspy_only_for_pure_lp_milp(kind):
     assert len(lines) == 1, out.stdout + out.stderr
     _, status, route, imported = lines[0]
     assert status == "optimal"
-    if kind == "minlp":
-        assert (route, imported) == ("None", "False")
-    else:
-        assert (route, imported) == ("1.0", "True")
+    assert (route, imported) == ("None", "False"), (kind, route, imported)

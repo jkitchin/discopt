@@ -27,6 +27,16 @@ import discopt.solvers.lp_milp_highs as L  # noqa: N812
 import numpy as np
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 BLEND_OPT = 473958.43121396995  # plain HiGHS on the to_mps() export, every M
 FC_OPT = 105.0  # y = 1, xA = 5
 

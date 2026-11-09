@@ -441,13 +441,14 @@ def test_the_highs_lp_route_names_its_safe_bound(monkeypatch):
 
 @pytest.mark.smoke
 @pytest.mark.requires_highs
-def test_the_highs_milp_route_names_its_tree_bound():
+def test_the_highs_milp_route_names_its_tree_bound(monkeypatch):
     """HiGHS's MIP dual bound is trusted as-is (``milp/bound_provenance=highs-fp``).
 
     That is the same floating-point standard every other branch-and-bound route
     in this repo reports, so ``bnb_tree`` is the honest label -- deliberately
     NOT ``lp_dual``, which would claim the LP route's stronger guarantee.
     """
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")  # HiGHS is opt-in since PR #2196
     m = Model()
     x = m.integer("x", lb=0, ub=10)
     y = m.continuous("y", lb=0.0, ub=10.0)

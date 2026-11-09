@@ -72,8 +72,10 @@ def _solve(name: str, cuts: bool = False):
     ],
 )
 def test_rust_engine_certifies_the_highs_optimum(name, cuts, monkeypatch):
-    monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
-    # The oracle is the plain big-M model on HiGHS: cuts never change the optimum.
+    # The oracle is the plain big-M model on HiGHS (the opt-in engine since PR #2196):
+    # cuts never change the optimum.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     ref = _solve(name)
     assert ref.status == "optimal", f"oracle (HiGHS route) did not certify: {ref.status}"
     assert "highs" in str(ref.algorithm_route).lower(), ref.algorithm_route

@@ -31,6 +31,16 @@ from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 from discopt.solvers import lp_milp_highs
 from discopt.solvers.lp_milp_highs import HighsOutcome, StdForm
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 DATA = Path(__file__).parent / "data" / "issue_2151" / "net.json"
 FLAG = "DISCOPT_MILP_REFUTED_TIGHT_RESOLVE"
 

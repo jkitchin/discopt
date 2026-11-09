@@ -104,11 +104,13 @@ def test_native_milp_runs_the_engine_with_the_callers_options(monkeypatch):
     assert "strategy='depth_first'" in res.algorithm_route
 
 
-def test_default_route_is_unchanged(monkeypatch):
+def test_default_route_is_the_rust_engine(monkeypatch):
+    """Since PR #2196 (owner decision) a pure MILP takes discopt's Rust engine by
+    default on every install; HiGHS is the opt-in."""
     monkeypatch.delenv("DISCOPT_LP_MILP_BACKEND", raising=False)
     res = _knapsack().solve()
-    assert res.node_count == 0 or res.algorithm_route.startswith("highs-milp")
-    assert (res.solver_stats or {}).get("route/lp_milp_backend") == 1.0
+    assert res.algorithm_route.startswith("native-milp"), res.algorithm_route
+    assert (res.solver_stats or {}).get("route/lp_milp_backend") != 1.0
 
 
 def test_keyword_overrides_env_var_both_ways(monkeypatch):

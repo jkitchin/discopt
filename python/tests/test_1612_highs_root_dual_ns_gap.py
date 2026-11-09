@@ -23,6 +23,15 @@ import scipy.sparse as sp
 
 
 @pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
+@pytest.fixture(autouse=True)
 def _pin_highs_engine(monkeypatch):
     """These tests exercise the HiGHS engine behind ``solve_lp_std``.
     Since highs-parity P6.4 (2026-11-07) the default engine is the in-house

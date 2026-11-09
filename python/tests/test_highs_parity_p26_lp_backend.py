@@ -64,9 +64,10 @@ def test_joint_variable_still_decides_an_lp_when_lp_backend_is_unset(monkeypatch
     assert S._lp_backend() == "rust"
 
 
-def test_milp_default_is_unchanged():
+def test_milp_default_is_the_rust_engine():
+    """Since PR #2196 the pure-MILP default is the Rust engine on every install."""
     r = _milp().solve(time_limit=30)
-    assert r.status == "optimal" and r.gap_certified and _on_highs(r)
+    assert r.status == "optimal" and r.gap_certified and not _on_highs(r)
 
 
 def test_explicit_keyword_decides_the_lp(monkeypatch):

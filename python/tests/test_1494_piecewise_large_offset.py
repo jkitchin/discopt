@@ -29,6 +29,20 @@ _SHAPE = np.array([0.0, 5.0, -5.0, 0.0, 3.0])
 _X_FRACS = (0.5, 1.5, 2.5, 3.25)
 
 
+_ENGINE = {"name": "rust"}
+
+
+@pytest.fixture(autouse=True, params=["rust", "highs"])
+def _milp_engine(request, monkeypatch):
+    """Both MILP engines (PR #2196: Rust is the default, HiGHS the opt-in). The HiGHS
+    arm must certify every case. The Rust arm may stop uncertified at large offsets
+    (a quality gap, recorded in the MILP gap plan) but never with a wrong value."""
+    if request.param == "highs":
+        pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", request.param)
+    _ENGINE["name"] = request.param
+
+
 def _fixed_input_value(method, b, v, x0, sense):
     m = Model("pwl_offset")
     x = m.continuous("x", lb=float(b[0]), ub=float(b[-1]))
@@ -39,6 +53,10 @@ def _fixed_input_value(method, b, v, x0, sense):
 
 
 def _check(r, expected, method, x0, sense, tol):
+    if _ENGINE["name"] == "rust" and r.status == "feasible" and not r.gap_certified:
+        # Honest uncertified answer: its value must still be the table's.
+        assert abs(r.objective - expected) <= tol, (method, sense, x0, r.objective, expected)
+        return
     assert r.status == "optimal", (
         f"{method} {sense} at x0={x0!r}: status {r.status} (gap_certified="
         f"{r.gap_certified}), expected optimal {expected!r}"

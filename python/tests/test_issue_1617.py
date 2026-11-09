@@ -71,7 +71,10 @@ def test_tiny_coefficient_is_not_proved_infeasible_by_bound_tightening():
     m.subject_to(1e-13 * y >= 5.0)
     m.minimize(y)
     r = m.solve(time_limit=30)
-    assert r.status == "optimal", (r.status, r.error)
+    # Never claimed infeasible. HiGHS (opt-in since PR #2196) certifies it; the
+    # default Rust engine may stop uncertified (a recorded MILP-gap target), but
+    # then with the correct point.
+    assert r.status in ("optimal", "feasible"), (r.status, r.error)
     assert r.objective == pytest.approx(5e13, rel=1e-6)
 
     m = dm.Model("tiny_cont")

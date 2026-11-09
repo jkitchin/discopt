@@ -18,6 +18,16 @@ from discopt.solvers.lp_milp_highs import (
     open_column_coefficient_ratio,
 )
 
+
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """These tests pin the HiGHS MILP route's own mechanics. Since 2026-11-09 the
+    pure-MILP default is the Rust engine on every install (PR #2196), so they name
+    HiGHS explicitly, the optional ``discopt[highs]`` extra."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 W = [
     [5, 6, 3, 14, 19, 18, 18, 13, 15, 10],
     [11, 4, 20, 17, 10, 7, 3, 6, 10, 17],

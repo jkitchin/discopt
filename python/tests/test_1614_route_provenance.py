@@ -37,13 +37,14 @@ def _param_times_sum(form: str, pval: float):
 
 @pytest.mark.parametrize("pval,expected", [(1.0, 6.0), (0.5, 12.0)])
 @pytest.mark.parametrize("form", ["factored", "distributed"])
-def test_c1_parameter_times_sum_goes_to_highs(form, pval, expected):
+def test_c1_parameter_times_sum_goes_to_the_milp_route(form, pval, expected):
     m = _param_times_sum(form, pval)
     assert classify_nonlinear_terms(m).general_nl == [], "p*(x+y) is linear in x, y"
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(expected, abs=1e-6)
-    assert r.algorithm_route is not None and r.algorithm_route.startswith("highs-milp"), (
+    # The pure-MILP route (its default engine is the Rust one since PR #2196).
+    assert r.algorithm_route is not None and r.algorithm_route.startswith("native-milp"), (
         r.algorithm_route
     )
 
@@ -230,8 +231,9 @@ def test_a21_zero_quadratic_coefficient_is_linear(form, where, integer):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(12.0, abs=1e-6)  # x=4, y=0
-    # A MILP goes to HiGHS; an LP to the default LP route (Rust since highs-parity D1).
-    assert _route(r).startswith("highs-milp" if integer else "rust-lp"), r.algorithm_route
+    # A MILP goes to the MILP route (Rust engine by default since PR #2196); an LP to the
+    # default LP route (Rust since highs-parity D1).
+    assert _route(r).startswith("native-milp" if integer else "rust-lp"), r.algorithm_route
 
 
 @pytest.mark.parametrize("where", ["objective", "constraint"])

@@ -229,7 +229,11 @@ def test_rtol_zero_restores_one_partition_per_input(monkeypatch):
 @pytest.mark.parametrize(
     "strategy,kw", [("relu_extended", {}), ("relu_partition", {"n_partitions": 4})]
 )
-def test_tiny_weight_net_certifies_bigm_optimum(seed, hidden, strategy, kw):
+def test_tiny_weight_net_certifies_bigm_optimum(seed, hidden, strategy, kw, monkeypatch):
+    # HiGHS is the opt-in MILP engine since PR #2196; this test needs a certifying
+    # oracle engine. The Rust engine's shortfall here is a recorded MILP-gap target.
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
     """Before #2156, (0, 32) relu_extended returned a certified ``infeasible`` on a
     feasible model; (0, 16) returned ``feasible`` (uncertified)."""
     net = _tiny_weight_net(seed, hidden)

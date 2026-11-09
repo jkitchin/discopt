@@ -63,7 +63,8 @@ def test_unknown_strategy_raises_positionally_through_solve_model():
 
 
 @pytest.mark.requires_highs
-def test_highs_milp_route_warns_that_strategy_is_unused():
+def test_highs_milp_route_warns_that_strategy_is_unused(monkeypatch):
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")  # HiGHS is opt-in since PR #2196
     result, ws = _strategy_warnings(lambda: _knapsack().solve(strategy="depth_first"))
     assert result.status == "optimal" and result.objective == pytest.approx(25.0)
     assert result.algorithm_route.startswith("highs-milp")

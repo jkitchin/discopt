@@ -166,7 +166,9 @@ def test_bigm_on_add_disjunction_is_unchanged(monkeypatch):
     monkeypatch.setenv("DISCOPT_GDP_BOUND_PRETRANSFORM", "0")
     r = _twobox("make_disjunct").solve(gdp_method="big-m")
     assert r.objective == pytest.approx(9.0, abs=1e-6)
-    assert r.root_bound == pytest.approx(6.3, abs=1e-4)
+    # Big-M's root bound stays strictly weaker than the hull's 9.00. Its exact value is
+    # the engine's (HiGHS's LP root: 6.30; the Rust engine's root after its cuts: 6.36).
+    assert r.root_bound is not None and 6.3 - 1e-4 <= r.root_bound < 9.0 - 1e-3
 
 
 def test_bigm_with_the_bound_pretransform_closes_the_root_gap(monkeypatch):
