@@ -5163,6 +5163,40 @@ fn solve_milp_node_search(
 
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
+    if let Some(col) = std::env::var("P3_PROPTEST")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if milp_depth == 0 && col < ns {
+            let csc_rc_t = csc_w.clone();
+            for (tag, lo, hi) in [
+                ("ub0", l_w[col], 0.0f64.max(l_w[col])),
+                ("lb1", 1.0f64.min(u_w[col]), u_w[col]),
+            ] {
+                let mut fl = l_w.clone();
+                let mut fu = u_w.clone();
+                fl[col] = lo;
+                fu[col] = hi;
+                let pr = fbbt_rows_exact(
+                    &csc_rc_t,
+                    m_w,
+                    n_w,
+                    &fl,
+                    &fu,
+                    &b_w,
+                    &is_int_full,
+                    opts.simplex.tol,
+                );
+                let nfix = (0..ns).filter(|&j| is_int[j] && pr.l[j] >= pr.u[j]).count();
+                let mut inc = IncProp::new(&csc_rc_t, m_w, n_w, &b_w, &is_int_full, &l_w, &u_w);
+                let ok = inc.set(col, lo, hi);
+                let nfix2 = (0..ns)
+                    .filter(|&j| is_int[j] && inc.l[j] >= inc.u[j])
+                    .count();
+                eprintln!("P3DBG proptest col={col} {tag} box=[{},{}] fbbt_fix={nfix} fbbt_infeas={} incprop_fix={nfix2} incprop_ok={ok} ns={ns} m={m_w}", l_w[col], u_w[col], pr.infeasible);
+            }
+        }
+    }
     // Gap plan P3 (`P3_RENS=1`): the post-root LP with its kept (tight) root cuts, for
     // the HiGHS RENS port ([`try_rens_highs`]).
     let p3_rens = sub_mip_base.is_some() && std::env::var("P3_RENS").as_deref() == Ok("1");
@@ -6012,6 +6046,27 @@ fn solve_milp_node_search(
                         })
                         .collect();
                     plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
+                    // HiGHS rejects a child its propagation empties inside `branch()` and takes the
+                    // other one; check the preferred child the same way before plunging into it.
+                    if let Some(c) = plunge_next {
+                        if let Some((cl, cu)) = tm.node_box(c) {
+                            let mut fl = vec![0.0; n_w];
+                            let mut fu = vec![0.0; n_w];
+                            fl[..ns].copy_from_slice(&cl[..ns]);
+                            fu[..ns].copy_from_slice(&cu[..ns]);
+                            fl[ns..].copy_from_slice(&slack_l);
+                            fu[ns..].copy_from_slice(&slack_u);
+                            let mut ip =
+                                IncProp::new(&csc_rc, m_w, n_w, &b_w, &is_int_full, &fl, &fu);
+                            for j in 0..n_w {
+                                ip.push_col(j);
+                            }
+                            if !ip.propagate() {
+                                crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
+                                plunge_next = kids.iter().find(|k| k.1 != plunge_up).map(|k| k.0);
+                            }
+                        }
+                    }
                     // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
                     for k in kids.iter().filter(|k| k.1 != plunge_up) {
                         plunge_stack.push(k.0);
@@ -6035,6 +6090,51 @@ fn solve_milp_node_search(
             unbounded = true;
             break 'search;
         }
+        if plunge_on && std::env::var("P3_DBG").is_ok() && !results.is_empty() {
+            // Per-node comparison with HiGHS's trace: the slot-0 (plunge) node's
+            // integers fixed in its box, fixed after propagation, and its LP bound.
+            let (bl, bu) = (&batch.lb[0], &batch.ub[0]);
+            let nfix_box = (0..ns).filter(|&j| is_int[j] && bl[j] == bu[j]).count();
+            let mut fl = vec![0.0; n_w];
+            let mut fu = vec![0.0; n_w];
+            fl[..ns].copy_from_slice(&bl[..ns]);
+            fu[..ns].copy_from_slice(&bu[..ns]);
+            fl[ns..].copy_from_slice(&slack_l);
+            fu[ns..].copy_from_slice(&slack_u);
+            let pr = fbbt_rows_exact(
+                &csc_rc,
+                m_w,
+                n_w,
+                &fl,
+                &fu,
+                &b_w,
+                &is_int_full,
+                opts.simplex.tol,
+            );
+            let nfix_prop = (0..ns).filter(|&j| is_int[j] && pr.l[j] >= pr.u[j]).count();
+            let nfrac = results[0]
+                .solution
+                .iter()
+                .take(ns)
+                .enumerate()
+                .filter(|(j, v)| is_int[*j] && frac(**v) > INT_TOL)
+                .count();
+            let ln = tm.node_lineage(results[0].node_id);
+            let fr: Vec<String> = results[0]
+                .solution
+                .iter()
+                .take(ns)
+                .enumerate()
+                .filter(|(j, v)| is_int[*j] && frac(**v) > INT_TOL)
+                .map(|(j, v)| format!("{j}:{v:.3}"))
+                .collect();
+            eprintln!("P3DBG pnode_fr {}", fr.join(","));
+            eprintln!(
+                "P3DBG pnode depth={} branch={:?} lp={:.4} nfix_box={nfix_box} nfix_prop={nfix_prop} prop_infeas={} nfrac={nfrac} feas={}",
+                ln.map_or(0, |l| l.depth), ln.and_then(|l| l.branch).map(|b| (b.var, b.up, b.value)),
+                results[0].lower_bound, pr.infeasible, results[0].is_feasible
+            );
+        }
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
@@ -6054,6 +6154,26 @@ fn solve_milp_node_search(
                     })
                     .collect();
                 plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
+                // HiGHS rejects a child its propagation empties inside `branch()` and takes the
+                // other one; check the preferred child the same way before plunging into it.
+                if let Some(c) = plunge_next {
+                    if let Some((cl, cu)) = tm.node_box(c) {
+                        let mut fl = vec![0.0; n_w];
+                        let mut fu = vec![0.0; n_w];
+                        fl[..ns].copy_from_slice(&cl[..ns]);
+                        fu[..ns].copy_from_slice(&cu[..ns]);
+                        fl[ns..].copy_from_slice(&slack_l);
+                        fu[ns..].copy_from_slice(&slack_u);
+                        let mut ip = IncProp::new(&csc_rc, m_w, n_w, &b_w, &is_int_full, &fl, &fu);
+                        for j in 0..n_w {
+                            ip.push_col(j);
+                        }
+                        if !ip.propagate() {
+                            crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
+                            plunge_next = kids.iter().find(|k| k.1 != plunge_up).map(|k| k.0);
+                        }
+                    }
+                }
                 // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
                 for k in kids.iter().filter(|k| k.1 != plunge_up) {
                     plunge_stack.push(k.0);

@@ -11,3 +11,14 @@
 #   and with sibling backtracking (P3_PLUNGE_BT).
 # => the plunge mechanics are not the missing piece; HiGHS's node evaluation (propagation + conflict
 #    analysis, 1352 conflicts by node 14) and reliability branching remain the candidates.
+# --- per-node comparison (HS_TRACE nfix/fr vs discopt P3DBG pnode) ---
+# HiGHS (no presolve/heur/seps) root LP 1.0, fractional {113,112,64}; branch 64<=0 -> 18 ints fixed, LP 1 -> 8;
+#   next 67<=0 -> 54 fixed, LP 15; 96<=0 -> 34 fixed, LP 22 ... incumbent 27 at depth 24.
+# discopt (flag off, 16 root cuts) root LP 3.0, fractional {101,113}; branch 101<=0 -> 6 fixed, LP 3 -> 3;
+#   ~half of the plunge children infeasible after propagation (each a wasted batch).
+# Propagation is NOT the gap: applying HiGHS's branch 64<=0 at discopt's root, fbbt_rows_exact and IncProp
+#   both fix 18 integers (67/96/101 <=0: 6 each), exactly HiGHS's count.
+# The gap is the candidate set: column 64 is integral at discopt's (cut, degenerate) root vertex, so it is
+#   never a candidate. Without root cuts (P3_NOROOTCUTS) discopt finds 27 (bound 21) in 20 s.
+# Fix kept (P3_PLUNGE): reject a plunge child that propagation empties (HiGHS does in branch()):
+#   infeasible plunge steps ~50% -> 10/102. enlight8 still no incumbent under the P3 root.

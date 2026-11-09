@@ -38234,6 +38234,14 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
         return None
     _cmir_mode = _milp_root_cmir_mode()
+    if os.environ.get("P3_NOROOTCUTS") == "1":  # gap plan P3 experiment only
+        return {
+            "root_cuts": 0,
+            "cut_rounds": 0,
+            "cut_select": True,
+            "cmir_cuts": False,
+            "root_cut_time_s": 0.0,
+        }
     return {
         "root_cuts": 1500 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 500,
         "cut_rounds": 150 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 50,

@@ -1,20 +1,27 @@
 --- /home/user/discopt/ref/HiGHS/highs/mip/HighsSearch.cpp	2026-11-07 21:44:04.447414376 +0000
-+++ highs/mip/HighsSearch.cpp	2026-11-09 22:38:53.608143092 +0000
++++ highs/mip/HighsSearch.cpp	2026-11-09 23:06:30.963392101 +0000
 @@ -1,3 +1,4 @@
 +#include <cstdlib>
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  /*                                                                       */
  /*    This file is part of the HiGHS linear optimization suite           */
-@@ -1093,6 +1094,8 @@
+@@ -1093,6 +1094,15 @@
      }
    }
  
 +  if (std::getenv("HS_TRACE"))
-+    printf("HSTRACE eval depth=%d result=%d lp=%.4f heur=%d\n", (int)nodestack.size(), (int)result, lp->getObjective(), (int)inheuristic);
++  {
++    int nfix = 0;
++    for (HighsInt c : mipsolver.mipdata_->integral_cols)
++      nfix += localdom.col_lower_[c] == localdom.col_upper_[c];
++    printf("HSTRACE eval depth=%d result=%d lp=%.4f heur=%d nfix=%d nfrac=%d fr=", (int)nodestack.size(), (int)result, lp->getObjective(), (int)inheuristic, nfix, (int)lp->getFractionalIntegers().size());
++    for (auto& f : lp->getFractionalIntegers()) printf("%d:%.3f,", (int)f.first, f.second);
++    printf("\n");
++  }
    return result;
  }
  
-@@ -1489,6 +1492,12 @@
+@@ -1489,6 +1499,12 @@
  
    bool passStabilizerToChildNode =
        orbitsValidInChildNode(currnode.branchingdecision);
