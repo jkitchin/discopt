@@ -362,6 +362,12 @@ counters!(
     MilpStallGuardStop,
     // DISCOPT_MILP_NO_STALL_TREE: the deadline moved because there was no incumbent.
     MilpNoIncumbentExtend,
+    // Gap plan P1 (DISCOPT_MILP_RUN1_CONTINUE): the stall-point root re-solve ran / its
+    // root heuristics returned a strictly better, re-validated incumbent / a point the
+    // driver could not re-validate (must stay 0).
+    StallRediveRun,
+    StallRediveImproved,
+    StallRediveRejected,
     // A node evaluated with no stored basis below the root (was taken for the root).
     NodeNoBasisOffRoot,
     // #2212 DISCOPT_LP_LOGICAL_DUAL_RESCUE: engine entries' Numerical solves re-tried

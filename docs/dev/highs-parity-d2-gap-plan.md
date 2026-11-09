@@ -433,3 +433,48 @@ Two owner decisions follow from this, neither taken here: `CUT_LP` is default ON
 that fails the corrected bar (the audit already retracted its cert-clean claim and kept it ON
 pending the P2 fix); and the incremental-pricing engine (steps 1+2) was retired on a coin
 flip, so it is a candidate to restore from history and re-panel.
+
+## 10. P1 results (2026-11-09): one tree, with run 2's primal job moved inside it
+
+**Entry 1 — `RUN1_CONTINUE` as it stood** (13 rows, 3 reps, 20 s;
+`docs/dev/data/highs-parity/d2-analysis/p1_entry_run1_continue.json.gz`). Certified 6 = 6,
+bar 1b clean. Bound better on 7 of 11 open rows (`beavma`, `enlight8` 20 -> 21, `gesa2`,
+`gsvm2rl3`, `mik-1/2`, `nexp-4-2`), worse on 2 (`neos17` 0.101 -> 0.065, `nexp-1-1` 26 -> 25).
+Primal half **failed**: median primal gap 0.069 -> 0.286 (`mik-1` -49,716 -> -5,529, `mik-2`
+-50,768 -> -29,921, `nexp-4-2` 76 -> 92). The OFF arm's run split (`milp/run2_better_primal`)
+named run 2 as the source of the better incumbent on `beavma`, `fiber`, `gesa2`, `mik-1/2`
+and `nexp-4-2`.
+
+**Where run 2's incumbents come from (measured, not assumed).** A per-batch incumbent
+timeline (`node_callback`) on `mik-1`, `mik-2`, `nexp-4-2`, `beavma`, `gesa2`: in every
+case the improvement arrives in run 2's **first batch** (node count 3, i.e. its root),
+before any tree search. It is not the #280 swap reseed (`DISCOPT_MILP_SWAP_RESEED=0`:
+same -49,716 at the same point) and not RINS (`SubMipImproved` = 0 over the whole OFF
+solve). Run 2's root LP differs from run 1's: it gets the binding's single 16-cut pass,
+not the 500-cut / 50-round root budget, so its root heuristics start from a different
+vertex. The existing improving dive (`DISCOPT_MILP_IMPROVE_DIVE` 4 / 16) under the flag
+recovers part of it (`mik-1` -40,523 / -47,410; `nexp-4-2` 77 / 82), not all.
+
+**The change.** Under `stall_time_s` (only set by `DISCOPT_MILP_RUN1_CONTINUE`), at the
+first batch boundary past the #291 slice with an incumbent in hand, the driver runs
+`try_stall_redive` **once**: a root-batch-only solve (`max_nodes = 3`) of the base problem
+with run 2's root cut options, seeded with the incumbent, capped at min(2 s, 25 % of the
+time left). Primal only: its bound is discarded, its point must be strictly better and is
+re-validated on the base rows (`StallRediveRejected` must stay 0). Counters
+`StallRediveRun` / `StallRediveImproved` / `StallRediveRejected`; Rust regression test
+`stall_redive_runs_once_and_keeps_the_optimum`.
+
+**Entry 2 — with the re-solve** (same 13 rows, 3 reps, 20 s;
+`.../p1_entry_redive.json.gz`). Certified 6 = 6; bar 1b clean; no incumbent lost.
+Median primal gap 0.069 = 0.069 (`mik-1/2`, `nexp-4-2`, `beavma` back to OFF's values,
+`gesa2` better: 25,902,720 -> 25,788,343). Bound ≥ OFF on 9 of 11 open rows (better on
+`beavma`, `enlight8`, `gesa2`, `gsvm2rl3`, `mik-1/2`, `nexp-4-2`), worse on `neos17` and
+`nexp-1-1` as before (run 2's fresh root lifted those two). **The pre-registered entry bar
+passes** (bound ≥ OFF on ≥ 9 of the open rows and median primal not higher). The panel's
+own bars 2b (nodes) and 2c (dual losses 2 > cap 1) fail on 13 rows, as expected of an
+entry sample; they are for the §5 panel.
+
+Next: the §5 panel (`d2_flag_panel.py --flag DISCOPT_MILP_RUN1_CONTINUE --fired
+milp/run1_continue`, MIPLIB-38 + M, 3 reps) plus `flag_onoff_corpus_panel.py`. The two
+dual losses are the open question: both are rows where a second root pass tightened the
+bound, which the one-tree design gives up.

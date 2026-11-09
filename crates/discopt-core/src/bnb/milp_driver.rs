@@ -1911,6 +1911,108 @@ fn try_sub_mip(
     }
 }
 
+/// Root cut options of the stall-point re-solve: the binding's historical single pass
+/// (`root_cuts=16, cut_rounds=1`), which is what run 2 of the Python route ran with.
+const STALL_REDIVE_ROOT_CUTS: usize = 16;
+/// Nodes the re-solve may create: the root and its two children, i.e. one batch.
+const STALL_REDIVE_MAX_NODES: usize = 3;
+/// Cap on the re-solve's wall time, and the share of the time left it may take.
+const STALL_REDIVE_MAX_S: f64 = 2.0;
+const STALL_REDIVE_SHARE: f64 = 0.25;
+
+/// Gap plan P1: the primal job of the Python route's run 2, inside run 1.
+///
+/// Under `DISCOPT_MILP_RUN1_CONTINUE` run 1 keeps its tree for the whole budget and
+/// run 2 (a root restart seeded with run 1's incumbent) no longer happens. Its bound
+/// was measured as worth giving up (`p1_entry_run1_continue.json.gz`: bound better on
+/// 7 of 11 open rows with one tree) but its incumbents were not: on `mik-250-20-75-1/2`,
+/// `nexp-50-20-4-2`, `beavma` and `gesa2` run 2 found the better point, and in every
+/// case in its *first batch* (the root), from a root LP that differs from run 1's
+/// (the single 16-cut pass instead of run 1's large root cut budget) -- so the dive and
+/// rounding at that root land elsewhere. This re-creates exactly that: one solve of the
+/// base problem limited to the root batch, seeded with the incumbent (so the
+/// sub-driver's root heuristics run against it), with run 2's root cut options.
+///
+/// Primal only. The sub-solve's bound is discarded; its point must be strictly better
+/// than the incumbent and is re-validated on the base rows (`validate_seed_incumbent`)
+/// before injection, and `inject_incumbent` re-checks it. A failure costs search time
+/// only.
+#[allow(clippy::too_many_arguments)]
+fn try_stall_redive(
+    base: &SubMipBase,
+    obj_const: f64,
+    ns: usize,
+    is_int: &[bool],
+    inc_x: &[f64],
+    inc_obj: f64,
+    opts: &MilpOptions,
+    deadline: Option<std::time::Instant>,
+    spent: &mut usize,
+) -> Option<(Vec<f64>, f64)> {
+    let mut sub = opts.clone();
+    sub.max_nodes = STALL_REDIVE_MAX_NODES;
+    sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
+    sub.cut_rounds = 1;
+    sub.cut_select = false;
+    sub.root_cut_time_s = None;
+    sub.stall_time_s = None;
+    sub.extend_no_incumbent_s = None;
+    sub.max_open_nodes = None;
+    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
+    if let Some(d) = deadline {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let budget = (left.as_secs_f64() * STALL_REDIVE_SHARE).min(STALL_REDIVE_MAX_S);
+        sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
+    } else {
+        sub.time_limit_s = Some(
+            sub.time_limit_s
+                .map_or(STALL_REDIVE_MAX_S, |t| t.min(STALL_REDIVE_MAX_S)),
+        );
+    }
+    crate::profile::incr(crate::profile::Ctr::StallRediveRun);
+    let res = {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        solve_milp_node_hooked(
+            base.csc.clone(),
+            base.m,
+            base.n,
+            &base.c,
+            &base.l,
+            &base.u,
+            &base.b,
+            obj_const,
+            &sub,
+            None,
+            None,
+            None,
+        )
+    };
+    *spent += res.nodes;
+    if !matches!(
+        res.status,
+        MilpStatus::Optimal | MilpStatus::Feasible | MilpStatus::NodeLimit
+    ) || !res.obj.is_finite()
+        || res.obj >= inc_obj - 1e-9 * (1.0 + inc_obj.abs())
+    {
+        return None;
+    }
+    match validate_seed_incumbent(
+        &res.x, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
+    ) {
+        Some((sx, sobj)) => {
+            crate::profile::incr(crate::profile::Ctr::StallRediveImproved);
+            Some((sx, sobj + obj_const))
+        }
+        None => {
+            crate::profile::incr(crate::profile::Ctr::StallRediveRejected);
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // D2 W2 randomized rounding (`DISCOPT_MILP_RAND_ROUND`, default OFF)
 // ---------------------------------------------------------------------------
@@ -3174,6 +3276,8 @@ fn solve_milp_node_search(
     // and not inside a sub-solve (no recursion).
     let mut sub_mip_spent: usize = 0;
     let mut sub_mip_fail_streak: u32 = 0;
+    // Gap plan P1: the stall-point root re-solve runs at most once per solve.
+    let mut stall_redive_done = false;
     let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
     let sub_mip_base: Option<SubMipBase> = (sub_mip_enabled()
         && opts.heuristics
@@ -4593,6 +4697,32 @@ fn solve_milp_node_search(
                         deadline,
                     ) {
                         tm.inject_incumbent(x, v);
+                    }
+                }
+            }
+        }
+        // Gap plan P1 (`DISCOPT_MILP_RUN1_CONTINUE`): at the first batch boundary past
+        // the #291 stall slice with an incumbent in hand, the root re-solve that run 2
+        // used to supply -- once, primal only. See [`try_stall_redive`].
+        if let (Some(st), Some(base)) = (opts.stall_time_s, sub_mip_base.as_ref()) {
+            if !stall_redive_done && t_start.elapsed().as_secs_f64() >= st {
+                let inc = tm.incumbent().and_then(|(x, v)| {
+                    (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))
+                });
+                if let Some((ix, iv)) = inc {
+                    stall_redive_done = true;
+                    if let Some((sx, sobj)) = try_stall_redive(
+                        base,
+                        obj_const,
+                        ns,
+                        &is_int,
+                        &ix,
+                        iv,
+                        opts,
+                        deadline,
+                        &mut sub_mip_spent,
+                    ) {
+                        tm.inject_incumbent(sx, sobj);
                     }
                 }
             }
@@ -9342,6 +9472,70 @@ mod tests {
             most.lp_iters,
             least.nodes,
             least.lp_iters
+        );
+    }
+
+    /// Gap plan P1: with `stall_time_s` set and an incumbent in hand, the stall-point
+    /// root re-solve runs exactly once (not once per batch), never injects a point the
+    /// driver cannot re-validate, and leaves the certified optimum unchanged against
+    /// the same search without it. The seed is a poor feasible point so the re-solve
+    /// has something to improve on; the root machinery is off so the tree branches.
+    #[test]
+    fn stall_redive_runs_once_and_keeps_the_optimum() {
+        let _guard = crate::profile::test_guard();
+        crate::profile::set_enabled(true);
+        crate::profile::reset();
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w.iter().map(|v| -(v + 0.5)).collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |stall: Option<f64>| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.initial_incumbent = Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            o.stall_time_s = stall;
+            solve_milp(&lp, &[20.5], 0.0, &o)
+        };
+        let plain = run(None);
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::StallRediveRun),
+            0,
+            "no stall guard, no re-solve"
+        );
+        let redive = run(Some(0.0));
+        let runs = crate::profile::counter(crate::profile::Ctr::StallRediveRun);
+        let rejected = crate::profile::counter(crate::profile::Ctr::StallRediveRejected);
+        crate::profile::set_enabled(false);
+        assert_eq!(runs, 1, "the re-solve must run exactly once");
+        assert_eq!(rejected, 0, "a re-solve point failed re-validation");
+        assert_eq!(plain.status, MilpStatus::Optimal);
+        assert_eq!(redive.status, MilpStatus::Optimal);
+        assert!(
+            (plain.obj - redive.obj).abs() <= 1e-9,
+            "{} vs {}",
+            plain.obj,
+            redive.obj
+        );
+        assert!(
+            redive.bound <= redive.obj + 1e-9,
+            "bound past the incumbent"
         );
     }
 
