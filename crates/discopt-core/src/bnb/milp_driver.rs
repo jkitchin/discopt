@@ -47,6 +47,9 @@ const CUT_MIN_EFFICACY: f64 = 1e-4;
 /// leaves the root at -5519 / -3195 (claim -2647 / -1150), one step reaches
 /// -2657 / -1749 in SCIP; two steps were not better on syn and helped rsyn.
 const CMIR_MAX_AGGR: usize = 2;
+/// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): HiGHS's path length
+/// (`HighsPathSeparator.cpp:170`, `maxPathLen = 6`).
+const CMIR_MAX_AGGR_DESIGN: usize = 6;
 /// Gap plan P3: consecutive stalled root cut rounds allowed under
 /// `DISCOPT_MILP_ROOT_CMIR` (10 took `neos-911970`'s root from 57.5 % to 31.9 % with
 /// c-MIR alone; gap plan §12.2).
@@ -3563,7 +3566,11 @@ fn solve_milp_node_search(
                     &root.x,
                     &is_int_full,
                     n_orig_rows,
-                    CMIR_MAX_AGGR,
+                    if crate::lp::cmir::root_cmir_mode().on() {
+                        CMIR_MAX_AGGR_DESIGN
+                    } else {
+                        CMIR_MAX_AGGR
+                    },
                     CMIR_MAX_CUTS,
                     opts.simplex.tol,
                 );

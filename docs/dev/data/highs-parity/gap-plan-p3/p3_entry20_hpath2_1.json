@@ -1,0 +1,74 @@
+[
+ {
+  "name": "beavma",
+  "opt": 383285.0,
+  "bound": 367013.83260903275,
+  "root_gap_pct": 4.2451876256486045,
+  "nodes": 3,
+  "wall": 21.169866521000017,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ },
+ {
+  "name": "nexp-50-20-1-1",
+  "opt": 28.99999999999999,
+  "bound": 22.0,
+  "root_gap_pct": 24.137931034482733,
+  "nodes": 3,
+  "wall": 13.62451962900002,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ },
+ {
+  "name": "nexp-50-20-4-2",
+  "opt": 70.99999999999999,
+  "bound": 66.0,
+  "root_gap_pct": 7.042253521126742,
+  "nodes": 3,
+  "wall": 8.685411876999979,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ },
+ {
+  "name": "sp150x300d",
+  "opt": 69.0,
+  "bound": 59.0,
+  "root_gap_pct": 14.492753623188406,
+  "nodes": 3,
+  "wall": 1.4463588229999687,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ },
+ {
+  "name": "neos-911970",
+  "opt": 54.76,
+  "bound": 37.820661267427525,
+  "root_gap_pct": 30.933781469270407,
+  "nodes": 3,
+  "wall": 20.08761366300007,
+  "status": "time_limit",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ },
+ {
+  "name": "mik-250-20-75-1",
+  "opt": -49716.0,
+  "bound": -50976.68026220023,
+  "root_gap_pct": 2.535763662000621,
+  "nodes": 3,
+  "wall": 2.9390654350000887,
+  "status": "feasible",
+  "env": {
+   "DISCOPT_MILP_ROOT_CMIR": "1"
+  }
+ }
+]

@@ -1080,6 +1080,69 @@ fn row_slack(ctx: &Ctx<'_>, nz: &[(usize, f64)], col_rows: &[Vec<usize>], scale:
     s
 }
 
+/// HiGHS's path-aggregation weight window (`HighsPathSeparator.cpp:213-219`).
+const PATH_MIN_WEIGHT: f64 = 1e-6;
+const PATH_MAX_WEIGHT: f64 = 1e6;
+
+/// Gap plan P3 design: the row that eliminates continuous column `j` (coefficient
+/// `aj` in the current aggregation) from the path started at `start`, at `level`.
+/// Its substitution row if it has one; otherwise a tight row containing `j`, chosen
+/// pseudo-randomly (deterministic in `(start, level, j)`) among the candidates whose
+/// multiplier lies in HiGHS's weight window, rotating from the drawn index
+/// (`findRow`, `HighsPathSeparator.cpp:257-293`). HiGHS's random choice, not a
+/// tightest-row score, is what keeps a path from always walking into one row type
+/// (gap plan §12.5: a slack-first tie-break never built cut sets on `nexp-50-20-4-2`,
+/// a continuous-count-first rule broke `beavma`). Any choice is sound: every row is an
+/// equality of the standard form.
+#[allow(clippy::too_many_arguments)]
+fn design_next_row(
+    ctx: &Ctx<'_>,
+    rows: &[Vec<(usize, f64)>],
+    col_rows: &[Vec<usize>],
+    subst: &[Option<usize>],
+    used: &[usize],
+    j: usize,
+    aj: f64,
+    start: usize,
+    level: usize,
+) -> Option<(usize, f64)> {
+    let weight = |r: usize| -> Option<f64> {
+        let &(_, a2j) = rows[r].iter().find(|&&(c, _)| c == j)?;
+        let lam = -aj / a2j;
+        (lam.is_finite() && (PATH_MIN_WEIGHT..=PATH_MAX_WEIGHT).contains(&lam.abs())).then_some(lam)
+    };
+    if let Some(r) = subst[j] {
+        if !used.contains(&r) {
+            if let Some(lam) = weight(r) {
+                return Some((r, lam));
+            }
+        }
+    }
+    let cands: Vec<usize> = col_rows[j]
+        .iter()
+        .copied()
+        .filter(|&r| {
+            if used.contains(&r) {
+                return false;
+            }
+            let amax = rows[r].iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
+            row_slack(ctx, &rows[r], col_rows, 1.0) <= 1e-6 * (1.0 + amax)
+        })
+        .collect();
+    if cands.is_empty() {
+        return None;
+    }
+    let mut h = (start as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((level as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+        .wrapping_add((j as u64).wrapping_mul(0x1656_67B1_9E37_79F9));
+    h ^= h >> 31;
+    let first = (h % cands.len() as u64) as usize;
+    (0..cands.len())
+        .map(|t| cands[(first + t) % cands.len()])
+        .find_map(|r| weight(r).map(|lam| (r, lam)))
+}
+
 /// Separate aggregated c-MIR cuts at the LP point `x` from the first `n_orig_rows`
 /// rows of the standard-form matrix (`csc`, `m` rows by `n` columns, `A z = b`).
 ///
@@ -1125,14 +1188,57 @@ pub fn separate_cmir_csc(
         vlb,
         vub,
     };
+    let design = design_on();
+    // Gap plan P3 design (HiGHS `HighsPathSeparator.cpp:62-112`): a row in which
+    // exactly one continuous column is off its bound at the LP point is that column's
+    // substitution row. It is applied whenever that column appears on a path, and it is
+    // not used as a start row.
+    let mut subst: Vec<Option<usize>> = vec![None; n];
+    let mut is_subst_row = vec![false; rows_n];
+    if design {
+        for (r, nz) in rows.iter().enumerate() {
+            // HiGHS takes substitution rows from EQUALITY rows only (`kEq`). In this
+            // standard form an inequality carries its own slack: a continuous column
+            // with a unit coefficient that appears in no other row. Measured: without
+            // this, `neos-911970`'s cost rows (`sum a_j y_j - x_k <= 6.5`, one
+            // continuous column each) were blocked as start rows, 5.4 % -> 44.6 %.
+            let has_slack = nz.iter().any(|&(j, v)| {
+                !is_int[j] && col_rows[j].len() == 1 && (v.abs() - 1.0).abs() <= 1e-12
+            });
+            if has_slack {
+                continue;
+            }
+            let mut only: Option<usize> = None;
+            let mut count = 0usize;
+            for &(j, _) in nz {
+                if !is_int[j] && ctx.dist(j) > 1e-6 {
+                    count += 1;
+                    only = Some(j);
+                }
+            }
+            if count == 1 {
+                let j = only.expect("count == 1");
+                if subst[j].is_none() {
+                    subst[j] = Some(r);
+                    is_subst_row[r] = true;
+                }
+            }
+        }
+    }
     let mut found: Vec<Cut> = Vec::new();
     for (i, nz) in rows.iter().enumerate() {
         // A starting row needs integer structure: an integer column, or a continuous
-        // one whose variable bound will bring an integer in.
+        // one whose variable bound will bring an integer in. Under the P3 design every
+        // row but a substitution row starts a path (HiGHS starts from every usable
+        // row; a continuous-only flow row is where a cut-set aggregation begins).
         let has_int_structure = nz
             .iter()
             .any(|&(j, _)| is_int[j] || !ctx.vlb[j].is_empty() || !ctx.vub[j].is_empty());
-        if !has_int_structure {
+        if design {
+            if is_subst_row[i] {
+                continue;
+            }
+        } else if !has_int_structure {
             continue;
         }
         let amax = nz.iter().fold(0.0f64, |a, &(_, v)| a.max(v.abs()));
@@ -1166,24 +1272,29 @@ pub fn separate_cmir_csc(
                 }
                 let Some((j, _)) = bad else { break };
                 let aj = cur[&j];
-                let mut cand: Option<(f64, usize, f64)> = None;
-                for &r2 in &col_rows[j] {
-                    if used.contains(&r2) {
-                        continue;
+                let pick = if design {
+                    design_next_row(&ctx, &rows, &col_rows, &subst, &used, j, aj, i, level)
+                } else {
+                    let mut cand: Option<(f64, usize, f64)> = None;
+                    for &r2 in &col_rows[j] {
+                        if used.contains(&r2) {
+                            continue;
+                        }
+                        let Some(&(_, a2j)) = rows[r2].iter().find(|&&(c, _)| c == j) else {
+                            continue;
+                        };
+                        let lam = -aj / a2j;
+                        if !lam.is_finite() {
+                            continue;
+                        }
+                        let score = row_slack(&ctx, &rows[r2], &col_rows, lam);
+                        if cand.is_none_or(|(s, _, _)| score < s) {
+                            cand = Some((score, r2, lam));
+                        }
                     }
-                    let Some(&(_, a2j)) = rows[r2].iter().find(|&&(c, _)| c == j) else {
-                        continue;
-                    };
-                    let lam = -aj / a2j;
-                    if !lam.is_finite() {
-                        continue;
-                    }
-                    let score = row_slack(&ctx, &rows[r2], &col_rows, lam);
-                    if cand.is_none_or(|(s, _, _)| score < s) {
-                        cand = Some((score, r2, lam));
-                    }
-                }
-                let Some((_, r2, lam)) = cand else { break };
+                    cand.map(|(_, r2, lam)| (r2, lam))
+                };
+                let Some((r2, lam)) = pick else { break };
                 for &(c, v) in &rows[r2] {
                     *cur.entry(c).or_insert(0.0) += lam * v;
                 }

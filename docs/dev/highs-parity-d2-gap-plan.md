@@ -858,3 +858,36 @@ median 7, max 31), but a lexicographic "fewest continuous first" rule breaks `be
 into one score per candidate row; that blend, not a lexicographic rule, is the next
 thing to port, then this table again. The `1` arm's 20 s root on `nexp-4-2` and
 `neos-911970` (the time-ceiling overrun of §12.3) is unchanged.
+
+### 12.6 HiGHS's path rules, ported under the flag (2026-11-09)
+
+Under `DISCOPT_MILP_ROOT_CMIR`, `cmir.rs` now aggregates the way `HighsPathSeparator.cpp`
+does (lines 30-420): every row starts a path except a substitution row; an *equality* row
+in which exactly one continuous column is off its bound is that column's substitution
+row and is applied whenever the column appears; the next row for the eliminated column
+is drawn pseudo-randomly (deterministic in start row, level and column) among the tight
+rows containing it whose multiplier lies in [1e-6, 1e6], rotating from the draw
+(`findRow`); path length 6 (`maxPathLen`). Off the flag the separator is unchanged.
+Soundness does not depend on these choices (every row of the standard form is an
+equality); the design sampling test covers the new path (40 seeds).
+
+First cut of the port blocked inequality rows with one continuous column as start rows,
+which HiGHS does not (`kEq` only): `neos-911970` 5.4 -> 44.6 %. With substitution rows
+restricted to rows without a slack column (`p3_entry20_hpath2_*.json`; the first cut is
+`p3_entry20_hpath_*.json`), root gap %, 20 s, no bound past an optimum (12 / 12):
+
+| row | today | `only` §12.3 | `only` + path | `1` §12.3 | `1` + path | HiGHS presolve off |
+|---|---|---|---|---|---|---|
+| beavma | 18.4 | 8.1 | **4.8** | 8.1 | **4.2** | 0.9 |
+| nexp-50-20-1-1 | 27.6 | 0.0 | 0.0 | 34.5 | 24.1 | 3.8 |
+| nexp-50-20-4-2 | 9.9 | 28.2 | **8.5** | 12.7 | **7.0** | 0.6 |
+| sp150x300d | 15.9 | 23.2 | 21.7 | 11.6 | 14.5 | 2.6 |
+| neos-911970 | 57.5 | 5.4 | 5.4 | 30.9 | 30.9 | 4.8 |
+| mik-250-20-75-1 | 4.1 | 3.1 | 3.1 | 2.7 | 2.5 | 1.75 |
+
+Against the pre-registered bar: `1` gains >= 2 pp on **4 of 6** (beavma, nexp-1-1,
+nexp-4-2, neos-911970) but ends within 2 pp of HiGHS on 1 (mik-1; 2 needed); `only`
+gains on 3 and is within 2 pp of HiGHS on 3. Not passed; `1` is one row short on the
+second clause. Still open: `sp150x300d` (SCIP's c-MIR alone 5.2 %), the `1` arm's root
+time overrun (21 s / 20 s on beavma / neos-911970), and the GMI / c-MIR split (`only`
+wins nexp-1-1 and neos-911970, `1` wins sp150x300d).
