@@ -18829,19 +18829,10 @@ def solve_model(
                             f"{', lagrangian_bound node hook' if lagrangian_bound else ''})"
                         )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
-                        # #1614 C1: the in-house engine answering a MILP must say so,
-                        # and (P6.3) say when it ran because highspy is not installed.
-                        from discopt._optional_highs import highs_available
-
+                        # #1614 C1: the in-house engine answering a MILP must say so.
                         _why = "nlp_solver=simplex" if nlp_solver == "simplex" else "default"
                         if lagrangian_bound:
                             _why += "; lagrangian_bound node hook"
-                        if (
-                            _why == "default"
-                            and os.environ.get("DISCOPT_LP_MILP_BACKEND") is None
-                            and not highs_available()
-                        ):
-                            _why = "default; highspy is not installed"
                         _simplex_res.algorithm_route = (
                             f"native-milp: discopt monolithic Rust MILP engine ({_why})"
                         )
@@ -37325,23 +37316,22 @@ def _lp_milp_backend() -> str:
     """Which engine solves a pure LP / MILP: ``"highs"`` or ``"rust"``.
 
     Issue #1229; the contract is ``docs/dev/lp-milp-highs-routing-plan.md`` §3, and
-    the graduation evidence is its §12 (P4). ``DISCOPT_LP_MILP_BACKEND=rust`` is the
-    opt-out to the in-house Rust route. Re-read each call so tests and panels can flip
+    the graduation evidence is its §12 (P4). ``DISCOPT_LP_MILP_BACKEND`` selects the
+    engine (``rust`` or ``highs``). Re-read each call so tests and panels can flip
     it in-process. Any other value is refused loudly: a typo must not silently run the
     default engine and be reported as a measurement of the other one.
 
-    Unset, the default is ``"highs"`` when ``highspy`` is installed and ``"rust"`` when
-    it is not (highs-parity P6.3: ``highspy`` is the optional ``discopt[highs]`` extra).
-    The in-house route certifies its answers with the same ladder; on MIPLIB it closes
-    fewer instances within a time limit than HiGHS does (D2, ``highs-parity-plan.md``),
-    which is why HiGHS stays the default where it is present. An explicit ``=highs``
-    without ``highspy`` still raises ``MissingHighsError`` at the solve.
+    Unset, the default is ``"rust"`` -- discopt's own MILP engine -- whether or not
+    ``highspy`` is installed (owner decision, 2026-11-09, PR #2196 review item 4: the
+    same model and code take the same engine on every install). HiGHS is the opt-in:
+    ``DISCOPT_LP_MILP_BACKEND=highs`` or ``Model.solve(milp_backend="highs")``, which
+    needs the optional ``discopt[highs]`` extra and raises ``MissingHighsError``
+    without it. Before this, an unset variable meant HiGHS wherever ``highspy`` was
+    present (#1229, highs-parity P6.3).
     """
     raw = os.environ.get("DISCOPT_LP_MILP_BACKEND")
     if raw is None:
-        from discopt._optional_highs import highs_available
-
-        return "highs" if highs_available() else "rust"
+        return "rust"
     val = raw.strip().lower()
     if val not in ("rust", "highs"):
         raise ValueError(f"DISCOPT_LP_MILP_BACKEND={val!r}: expected 'rust' or 'highs'")
@@ -37354,8 +37344,8 @@ def _lp_backend() -> str:
 
     Precedence: ``DISCOPT_LP_BACKEND`` if set; else ``DISCOPT_LP_MILP_BACKEND`` if set
     (so every A/B run and opt-out that named the joint variable keeps its meaning); else
-    ``"rust"``. MILP is not affected -- it reads only ``DISCOPT_LP_MILP_BACKEND``
-    (:func:`_lp_milp_backend`; ``"highs"`` when ``highspy`` is installed).
+    ``"rust"``. MILP reads only ``DISCOPT_LP_MILP_BACKEND`` (:func:`_lp_milp_backend`;
+    ``"rust"`` unless set).
 
     D1's evidence (``docs/dev/highs-parity-plan.md`` P2.6, ``p2.6/gate_L_INF.json``): 3
     rounds under a load gate, 480 solves, 0 incorrect; the Rust route certifies all 25 L
