@@ -1733,6 +1733,24 @@ enum SubMipKind {
     Rins,
 }
 
+/// The options of a heuristic sub-solve (sub-MIP, stall re-solve) derived from the
+/// parent's: its own node budget and seed, and **none of the parent's deadline
+/// policies**. `extend_no_incumbent_s` moves a run's deadline to the parent's whole
+/// remaining budget when it holds no incumbent, which is exactly when RENS runs: a
+/// sub-solve that inherited it ran 19.8 s against its 2 s sub-budget and took a 20 s
+/// solve to 39.5 s (`neos-911970` under the gap plan P3 root-cut flag, measured
+/// 2026-11-09; on the default path 1 of 372 panel solves overran its 20 s limit, by
+/// 1.1 s). `stall_time_s` is a parent-run policy too. The caller then caps
+/// `time_limit_s` to the sub-budget.
+fn sub_solve_options(opts: &MilpOptions, max_nodes: usize, seed: Option<Vec<f64>>) -> MilpOptions {
+    let mut sub = opts.clone();
+    sub.max_nodes = max_nodes;
+    sub.initial_incumbent = seed;
+    sub.extend_no_incumbent_s = None;
+    sub.stall_time_s = None;
+    sub
+}
+
 /// Build a neighbourhood sub-box (a contraction of `base.l`/`base.u`), propagate it,
 /// and solve it. `node_x` is a node relaxation point over the structural columns;
 /// `inc` is the incumbent `(x, objective incl. obj_const)` for RINS. Returns a
@@ -1826,11 +1844,9 @@ fn try_sub_mip(
         (SubMipKind::Rins, Some((ix, v))) => (Some(ix[..ns].to_vec()), Some(v)),
         _ => (None, inc.map(|(_, v)| v)),
     };
-    let mut sub = opts.clone();
-    sub.max_nodes = node_budget;
     // The RINS seed lies in the sub-box by construction (every fixed column is fixed
     // to its own value). FBBT only removes points violating a row, so it keeps it.
-    sub.initial_incumbent = seed;
+    let mut sub = sub_solve_options(opts, node_budget, seed);
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -1926,16 +1942,12 @@ fn try_stall_redive(
     deadline: Option<std::time::Instant>,
     spent: &mut usize,
 ) -> Option<(Vec<f64>, f64)> {
-    let mut sub = opts.clone();
-    sub.max_nodes = STALL_REDIVE_MAX_NODES;
+    let mut sub = sub_solve_options(opts, STALL_REDIVE_MAX_NODES, Some(inc_x[..ns].to_vec()));
     sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
     sub.cut_rounds = 1;
     sub.cut_select = false;
     sub.root_cut_time_s = None;
-    sub.stall_time_s = None;
-    sub.extend_no_incumbent_s = None;
     sub.max_open_nodes = None;
-    sub.initial_incumbent = Some(inc_x[..ns].to_vec());
     if let Some(d) = deadline {
         let left = d.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -9439,6 +9451,23 @@ mod tests {
             least.nodes,
             least.lp_iters
         );
+    }
+
+    /// A heuristic sub-solve never inherits the parent's deadline policies: with
+    /// `extend_no_incumbent_s` it ran to the parent's whole budget.
+    #[test]
+    fn sub_solve_options_drop_the_parents_deadline_policies() {
+        let mut o = opts(4, vec![0, 1]);
+        o.extend_no_incumbent_s = Some(60.0);
+        o.stall_time_s = Some(10.0);
+        o.time_limit_s = Some(60.0);
+        let sub = sub_solve_options(&o, 17, Some(vec![1.0, 0.0]));
+        assert_eq!(sub.extend_no_incumbent_s, None);
+        assert_eq!(sub.stall_time_s, None);
+        assert_eq!(sub.max_nodes, 17);
+        assert_eq!(sub.initial_incumbent, Some(vec![1.0, 0.0]));
+        // The caller caps the time limit; the parent's is the starting point.
+        assert_eq!(sub.time_limit_s, Some(60.0));
     }
 
     /// Gap plan P1: with `stall_time_s` set and an incumbent in hand, the stall-point
