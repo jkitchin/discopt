@@ -521,38 +521,6 @@ fn cut_lp_readmit_enabled() -> bool {
     })
 }
 
-/// `DISCOPT_MILP_CUT_LP_CAP` (gap plan P2 plan B, default OFF until its panel): once a
-/// solve's live folded rows exceed [`CUT_LP_CAP_FACTOR`] times the model's own row
-/// count, stop folding for the rest of that solve and return to the node-local lift
-/// (the `CUT_LP=0` path: each node re-solves over its top violated pool cuts). Rows
-/// already folded stay and age out through the ordinary deletion pass.
-///
-/// Measured (20 s, one solve each, `CutLpFolded - CutLpDeleted` / m): the rows the fold
-/// helps keep it small -- `fiber` 0.25, `kaihu` 0.23, `gesa2` 0.40 -- and the rows it
-/// hurts let it grow far past the model -- `bppc8-02` 4.7 (bound held at its root LP),
-/// `enlight8` 21 (3/3 certified with `CUT_LP=0`, 0/3 with it); `b-ball` 1.8, certified
-/// either way. Fix E (physical deletion with basis repair) failed its entry because a
-/// deleted row is binding in the bases that hold it (gap plan §11), so the remedy is to
-/// stop growing the LP rather than to shrink it. Speed/bound-tightness only: the lift
-/// and the fold use the same globally valid pool cuts.
-fn cut_lp_cap_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let raw = std::env::var("DISCOPT_MILP_CUT_LP_CAP").unwrap_or_default();
-        parse_cut_lp_readmit(&raw)
-            .map_err(|e| e.replace("DISCOPT_MILP_CUT_LP_READMIT", "DISCOPT_MILP_CUT_LP_CAP"))
-            .unwrap_or_else(|e| panic!("{e}"))
-    })
-}
-
-/// Live folded rows allowed per original model row under `DISCOPT_MILP_CUT_LP_CAP`.
-const CUT_LP_CAP_FACTOR: f64 = 2.0;
-
-/// Does the fold stop? Pure, so the rule is asserted directly.
-fn cut_lp_cap_tripped(live_folded_rows: usize, n_orig_rows: usize) -> bool {
-    live_folded_rows as f64 > CUT_LP_CAP_FACTOR * n_orig_rows.max(1) as f64
-}
-
 /// The parse table behind [`cut_lp_readmit_enabled`]; garbage is refused.
 fn parse_cut_lp_readmit(raw: &str) -> Result<bool, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -3356,9 +3324,6 @@ fn solve_milp_node_search(
     let mut cut_lp_best_score: f64 = 0.0;
     let mut cut_lp_min_factor: f64 = CUT_LP_MIN_SCORE_FACTOR0;
     let mut cut_lp_epoch: usize = 0;
-    // Plan B (`DISCOPT_MILP_CUT_LP_CAP`): set once, for the rest of the solve.
-    let cut_lp_cap_on = cut_lp_on && cut_lp_cap_enabled();
-    let mut cut_lp_capped = false;
     let cut_lp_max_len = 100 + (0.15 * ns as f64) as usize;
 
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
@@ -4066,11 +4031,10 @@ fn solve_milp_node_search(
                 improve_dive: improve_batch,
                 node_gmi: node_gmi_on,
                 gmi_pool: &gmi_pool,
-                cut_lp: cut_lp_on && !cut_lp_capped,
+                cut_lp: cut_lp_on,
                 cut_lp_rows: &cut_lp_ids,
                 cut_lp_relaxed: &cut_lp_relaxed,
                 cut_lp_readmit: cut_lp_readmit_on,
-                depth_root_test: cut_lp_cap_on,
                 reliability: if opts.branch_rule == crate::bnb::branching::BranchRule::Strong {
                     u32::MAX
                 } else {
@@ -4561,9 +4525,8 @@ fn solve_milp_node_search(
                     *a = 0;
                 }
             }
-            let cut_lp_active = cut_lp_on && !cut_lp_capped;
             for cut in batch_new_gmi {
-                if cut_lp_active {
+                if cut_lp_on {
                     // HiGHS length cap (`HighsCutGeneration.cpp:974`).
                     let nz = cut.coeffs.iter().filter(|v| **v != 0.0).count();
                     if nz > cut_lp_max_len {
@@ -4573,7 +4536,7 @@ fn solve_milp_node_search(
                 }
                 if gmi_pool_sigs.insert(cut_signature(&cut)) {
                     gmi_pool.push(cut);
-                    gmi_pool_age.push(if cut_lp_active {
+                    gmi_pool_age.push(if cut_lp_on {
                         NODE_GMI_POOL_AGE - CUT_LP_POOL_NEW_AGE_HEADROOM
                     } else {
                         0
@@ -4585,7 +4548,7 @@ fn solve_milp_node_search(
             // leave the pool (their signature stays, so a re-separated copy is not
             // re-admitted while the row is in the LP).
             let mut fold = vec![false; gmi_pool.len()];
-            if cut_lp_active && (!batch_cut_score.is_empty() || !batch_relaxed_score.is_empty()) {
+            if cut_lp_on && (!batch_cut_score.is_empty() || !batch_relaxed_score.is_empty()) {
                 // Relaxed rows compete with pool cuts in one selection, indexed after
                 // the pool, as HiGHS's removed LP cuts compete in its pool.
                 let np = gmi_pool.len();
@@ -4894,34 +4857,17 @@ fn solve_milp_node_search(
         // used by a matrix row that is not a folded cut is kept (that row could not be
         // rewritten); folded rows that use it are rewritten by substitution.
         cut_lp_epoch += 1;
-        // Plan B: on the trip, this pass unfolds every folded row it can rewrite.
-        let mut unfold_now = false;
-        if cut_lp_cap_on && !cut_lp_capped && cut_lp_cap_tripped(cut_lp_rows.len(), n_orig_rows) {
-            cut_lp_capped = true;
-            unfold_now = true;
-            crate::profile::incr(crate::profile::Ctr::CutLpCapTripped);
-        }
-        if cut_lp_on
-            && (unfold_now || cut_lp_epoch % CUT_LP_DELETE_EVERY == 0)
-            && !cut_lp_rows.is_empty()
-        {
+        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
             let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
             let mut del: Vec<usize> = Vec::new();
             let mut relaxed_any = false;
             for (i, r) in cut_lp_rows.iter_mut().enumerate() {
-                if !unfold_now && r.age <= CUT_LP_AGE_LIMIT {
+                if r.age <= CUT_LP_AGE_LIMIT {
                     continue;
                 }
                 let (rows, _) = csc_w.col(r.col);
                 if rows.iter().any(|q| !managed.contains(q)) {
                     crate::profile::incr(crate::profile::Ctr::CutLpDeleteBlockedRow);
-                    continue;
-                }
-                if unfold_now {
-                    // Plan B unfold: delete regardless of age; a stored basis holding
-                    // the slack nonbasic is dropped below (its node re-solves cold once).
-                    del.push(i);
-                    crate::profile::incr(crate::profile::Ctr::CutLpUnfolded);
                     continue;
                 }
                 let basic_everywhere = tm
@@ -5184,8 +5130,6 @@ struct NodeCtx<'a> {
     cut_lp_relaxed: &'a [&'a GomoryCut],
     /// `DISCOPT_MILP_CUT_LP_READMIT`: report violated relaxed rows for re-admission.
     cut_lp_readmit: bool,
-    /// `DISCOPT_MILP_CUT_LP_CAP`: decide "is the root" by depth (bases can be dropped).
-    depth_root_test: bool,
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
@@ -5477,10 +5421,7 @@ fn solve_node(
     if no_basis && ctx.tm.node_depth(id).is_some_and(|d| d > 0) {
         crate::profile::incr(crate::profile::Ctr::NodeNoBasisOffRoot);
     }
-    // Under DISCOPT_MILP_CUT_LP_CAP the unfold drops stored bases, so a node without
-    // one is not the root; the depth decides there (the root-only dive must not run).
-    let is_root =
-        no_basis && !(ctx.depth_root_test && ctx.tm.node_depth(id).is_some_and(|d| d > 0));
+    let is_root = no_basis;
     let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
@@ -9498,18 +9439,6 @@ mod tests {
             least.nodes,
             least.lp_iters
         );
-    }
-
-    /// Plan B (`DISCOPT_MILP_CUT_LP_CAP`): the fold stops strictly past
-    /// `CUT_LP_CAP_FACTOR` live rows per model row, and a 0-row model is treated as one.
-    #[test]
-    fn cut_lp_cap_trips_strictly_past_the_factor() {
-        assert!(!cut_lp_cap_tripped(128, 64));
-        assert!(cut_lp_cap_tripped(129, 64));
-        assert!(!cut_lp_cap_tripped(0, 64));
-        assert!(!cut_lp_cap_tripped(2, 0));
-        assert!(cut_lp_cap_tripped(3, 0));
-        assert!(parse_cut_lp_readmit("garbage").is_err());
     }
 
     /// Gap plan P1: with `stall_time_s` set and an incumbent in hand, the stall-point

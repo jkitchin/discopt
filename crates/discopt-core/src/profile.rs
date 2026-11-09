@@ -358,9 +358,6 @@ counters!(
     // A cut-row deletion left a stored basis that no longer spans the LP (dropped).
     // Deletion requires the row basic in every frontier basis, so this stays 0.
     CutLpBasisDropped,
-    // DISCOPT_MILP_CUT_LP_CAP (gap plan P2 plan B): the fold stopped for the solve.
-    CutLpCapTripped,
-    CutLpUnfolded,
     // D2 review R0: the driver's stall guard stopped a run with no incumbent.
     MilpStallGuardStop,
     // DISCOPT_MILP_NO_STALL_TREE: the deadline moved because there was no incumbent.

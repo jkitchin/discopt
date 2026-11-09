@@ -551,3 +551,18 @@ The pre-registered "`enlight8` 3/3" bar is not met at 20 s under load; the §5 p
 MIPLIB-38 + M decides plan B (bars 1, 1b, 2a-2e). Open: the unfold cannot rewrite rows
 referenced by non-folded rows (`bppc8-02`), and the two-run route doubles the fold-trip
 cost (`RUN1_CONTINUE` would remove it; the combination is not yet measured on a panel).
+
+**§5 panel and retirement (2026-11-09).** `d2_flag_panel.py --flag DISCOPT_MILP_CUT_LP_CAP`
+(MIPLIB-38 + M, 3 reps, 20 s, 372 solves; `p2_cut_lp_cap_panel.json.gz`): cert-clean,
+certified 126 = 126, no incumbent lost, median primal gap unchanged. The cap trips on 2
+of 62 instances: `enlight8` (dual gap 0.25 -> 0.11, still uncertified) and
+`enlight_hard` (bound 27 -> 26, the one dual loss). Neutral, so bar 2b fails, and the
+flag and its implementation are retired (last version `d85480bc`).
+
+**Where P2 stands.** Both repairs of the fold were measured and neither restores
+`enlight8`: deleting rows costs the nodes whose bases hold them (E), and capping the fold
+only reaches the two instances whose LP grows past the model, one better and one worse
+(plan B). `CUT_LP` stays default ON (owner decision 2026-11-09) with the `enlight8`
+regression recorded against it. The plan's remaining P2 option, the per-node lift for
+"small-m models", is a size-keyed special case of the plan B rule this panel just
+measured as neutral, so it is not pursued. Next is P3 (root c-MIR / lifted cover).
