@@ -23,7 +23,7 @@ import p42_rens_panel as R  # noqa: E402, N812
 AGG4 = {"aggregation", "cmir", "flowcover", "knapsackcover"}
 
 
-def dump(path: str) -> dict:
+def dump(path: str, gens: set[str] = AGG4) -> dict:
     import pyscipopt as P
 
     m = P.Model()
@@ -36,7 +36,7 @@ def dump(path: str) -> dict:
     for k, v in m.getParams().items():
         if k.startswith("separating/") and k.endswith("/freq"):
             name = k.split("/")[1]
-            m.setParam(k, 0 if name in AGG4 else -1)
+            m.setParam(k, 0 if name in gens else -1)
     cons_names = {c.name for c in m.getConss()}
     out: dict = {}
 
@@ -93,11 +93,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--gens", default=",".join(sorted(AGG4)),
+                    help="separators to leave on (default: aggregation and its generators)")  # fmt: skip
     a = ap.parse_args()
     pop = {m["name"]: m for m in R.population()}
     res, executed = {}, 0
     for nm in a.instances.split(","):
-        d = dump(str(REPO / pop[nm]["path"]))
+        d = dump(str(REPO / pop[nm]["path"]), set(a.gens.split(",")))
         d["opt"] = pop[nm]["oracle_objective"]
         res[nm] = d
         executed += 1

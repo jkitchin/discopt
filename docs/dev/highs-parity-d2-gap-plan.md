@@ -787,3 +787,33 @@ flow-cover generator is not the next step. What remains is c-MIR strength on
 to), its bound-substitution choice, or its delta / complementation. **Next:** the §12.2
 procedure on `nexp-50-20-4-2` with the `agg_cmir` arm (SCIP's c-MIR cuts against ours
 on the same rows), then per-solve family budgeting, then this entry again.
+
+### 12.4 SCIP's c-MIR on `nexp-50-20-4-2`, and aggregation depth re-measured
+
+SCIP with only `aggregation` + `cmir` on (`p3_scip_nexp42_cmir_cuts.json.gz`): root bound
+70.34 (optimum 71) from 283 cuts in the final root LP, 157 binding, cut names up to
+round 48. Binding cuts are large: median 16 integer columns (max 48), median 1
+continuous column, 47 of them pure-integer; the top ones read as cut-set inequalities
+over several arcs' capacity modules (`t_x.<arc>.<module>`), i.e. aggregations of several
+flow-conservation rows.
+
+Aggregation depth 2 -> 6 under the full P3 design (temporary constant change, reverted;
+`p3_entry20_aggr6_*.json`), root gap %, 20 s:
+
+| row | `only`, depth 2 | `only`, depth 6 | `1`, depth 2 | `1`, depth 6 |
+|---|---|---|---|---|
+| nexp-50-20-4-2 | 28.2 | 23.9 | 12.7 | 11.3 |
+| sp150x300d | 23.2 | 26.1 | 11.6 | 7.2 |
+| nexp-50-20-1-1 | 0.0 | 3.4 | 34.5 | 17.2 |
+| neos-911970 | 5.4 | 5.4 | 30.9 | 30.9 |
+| beavma | 8.1 | 6.9 | 8.1 | 6.4 |
+| mik-250-20-75-1 | 3.1 | 3.1 | 2.7 | 2.7 |
+
+Mixed, and `nexp-50-20-4-2` stays near 24 % against SCIP's c-MIR 0.94 %: depth is not
+the missing piece either. What SCIP builds there (16-48-column cut-set rows from many
+rounds) points at *which* rows the path walks: SCIP scores aggregation candidates by
+the continuous column's bound distance and the row's density and slack, and walks along
+flow rows; ours eliminates the column farthest from its bound through the tightest row
+containing it, so on a network it can keep re-selecting the same few rows. Next: log
+the rows our aggregation uses from one `nexp-4-2` start row against the support of a
+binding SCIP cut, and change the path rule only if that shows the divergence.
