@@ -690,34 +690,13 @@ impl TreeManager {
     /// Selected nodes are moved to `Evaluated` status (so they won't be
     /// re-selected). Returns an empty batch if no open nodes remain.
     pub fn export_batch(&mut self, batch_size: usize) -> ExportBatch {
-        self.export_batch_with_first(None, batch_size)
-    }
-
-    /// [`Self::export_batch`] with `first` (when it is still pending) exported in slot
-    /// 0 ahead of the selection order: gap plan P3's plunge (HiGHS dives into one child
-    /// of the node it just evaluated). Its heap entry stays behind and is skipped by
-    /// lazy deletion once the node leaves `Pending`.
-    pub fn export_batch_with_first(
-        &mut self,
-        first: Option<NodeId>,
-        batch_size: usize,
-    ) -> ExportBatch {
         let mut lb = Vec::with_capacity(batch_size);
         let mut ub = Vec::with_capacity(batch_size);
         let mut node_ids = Vec::with_capacity(batch_size);
         let mut parent_solutions = Vec::with_capacity(batch_size);
-        let mut forced = first.filter(|id| {
-            id.0 < self.pool.total_count()
-                && self.pool.get(*id).status == NodeStatus::Pending
-                && !self.pool.is_released(*id)
-        });
 
         for _ in 0..batch_size {
-            let pick = match forced.take() {
-                Some(id) => Some(id),
-                None => self.pool.select_next(),
-            };
-            match pick {
+            match self.pool.select_next() {
                 Some(nid) => {
                     // #2092: the node leaves the frontier, so its shared box
                     // becomes its own (every later reader sees `lb`/`ub`).

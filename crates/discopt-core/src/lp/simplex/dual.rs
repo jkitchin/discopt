@@ -1133,12 +1133,6 @@ fn repair_subtol_dual_optimum(
         return fixed;
     }
     crate::profile::incr(crate::profile::Ctr::WarmSubtolRepairFailed);
-    if std::env::var("P3_DBG").is_ok() {
-        eprintln!(
-            "P3DBG subtol repair failed: status={:?} iters={} max_iter={} m={m} n={n}",
-            fixed.status, fixed.iters, opts.max_iter
-        );
-    }
     LpSolve {
         status: LpStatus::Numerical,
         dual: Vec::new(),
@@ -5112,6 +5106,48 @@ mod tests {
             "the warm post-check must have fired, got {repairs}"
         );
         assert_eq!(failed, 0);
+    }
+
+    /// Gap plan P3: `SimplexOptions::subtol_repair = false` (used only by the MILP root
+    /// cut loop, whose LP value is never a bound) skips the #1595 hand-off and returns
+    /// the dual's own vertex; the default keeps it. Same witnesses as above.
+    #[test]
+    fn subtol_repair_off_returns_the_duals_vertex_and_on_is_the_default() {
+        assert!(
+            SimplexOptions::default().subtol_repair,
+            "the repair must stay on by default"
+        );
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        let mut checked = 0;
+        for &(a, e) in &SUBTOL_WITNESSES {
+            let (sp, c, l, u, b) = subtol_witness(a, e);
+            let start = Basis {
+                col_status: vec![BASIC, AT_LOWER, AT_LOWER],
+                basic_vars: vec![0],
+            };
+            let off = SimplexOptions {
+                subtol_repair: false,
+                ..SimplexOptions::default()
+            };
+            let sol = solve_lp_warm_csc(sp, 1, 3, &c, &l, &u, &b, Some(&start), &off);
+            // The dual stops at its start (x basic, obj 0): the -1 optimum needs the
+            // repair, so its absence shows the hand-off was skipped.
+            assert!(
+                sol.obj > -0.5,
+                "a={a} e={e}: repair ran anyway (obj {})",
+                sol.obj
+            );
+            checked += 1;
+        }
+        let repairs = crate::profile::counter(crate::profile::Ctr::WarmSubtolRepair);
+        crate::profile::set_enabled(false);
+        assert_eq!(checked, SUBTOL_WITNESSES.len());
+        assert_eq!(
+            repairs, 0,
+            "subtol_repair = false still handed off {repairs} times"
+        );
     }
 
     /// #1597 review (B1) mixed-cost witness in standard form: the #1595 row plus an

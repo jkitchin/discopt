@@ -650,7 +650,7 @@ fn fbbt_rows(
     fbbt_rows_with_row(csc, m, n, l, u, b, is_int, tol, None)
 }
 
-/// Gap plan P3 (`P3_INCPROP=1`): incremental bound propagation over `A x = b` for the
+/// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): incremental bound propagation over `A x = b` for the
 /// primal heuristics, in the role of HiGHS's `HighsDomain::propagate` after each fix
 /// (`HighsPrimalHeuristics.cpp:1125-1150`). A bound change queues only that column's
 /// rows; a queued row is re-propagated from a freshly computed activity range (no
@@ -1868,6 +1868,8 @@ pub struct MilpOptions {
 
 /// Minimum share of integer columns a neighbourhood must fix (before propagation).
 const SUB_MIP_MIN_FIXING_RATE: f64 = 0.30;
+/// Gap plan P3: time share of a NESTED sub-MIP (`try_rens_highs` inside a sub-solve).
+const NESTED_SUB_MIP_SHARE: f64 = 0.5;
 /// Node budget for one sub-MIP.
 const SUB_MIP_NODE_CAP: usize = 500;
 /// Share of the parent search all sub-solves may spend, plus a flat allowance
@@ -2051,16 +2053,6 @@ fn try_sub_mip(
         }
         let budget = (left.as_secs_f64() * 0.25).min(2.0);
         sub.time_limit_s = Some(sub.time_limit_s.map_or(budget, |t| t.min(budget)));
-        // P3 experiment (`P3_SUBCUT=<share>`): the sub-MIP inherited the parent's
-        // whole root-cut budget and spent its 2 s there (sp150x300d: 1 sub-node).
-        if let Some(sh) = std::env::var("P3_SUBCUT")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-        {
-            sub.root_cut_time_s = Some(budget * sh);
-            sub.root_cuts = sub.root_cuts.min(500);
-            sub.cut_rounds = sub.cut_rounds.min(50);
-        }
     }
     crate::profile::incr(match kind {
         SubMipKind::Rens => crate::profile::Ctr::SubMipRensRun,
@@ -2153,9 +2145,9 @@ fn try_stall_redive(
     sub.root_cuts = STALL_REDIVE_ROOT_CUTS;
     sub.cut_rounds = 1;
     sub.cut_select = false;
-    // P3 (`P3_PLAIN_REDIVE=1`): run 2's root had no c-MIR (the flag was off); a redive
+    // P3 (under `DISCOPT_MILP_ROOT_CMIR`): run 2's root had no c-MIR (the flag was off); a redive
     // that inherits the flag's c-MIR/tableau root lands its dive elsewhere.
-    if std::env::var("P3_PLAIN_REDIVE").as_deref() == Ok("1") {
+    if crate::lp::cmir::root_cmir_mode().on() {
         sub.cmir_cuts = false;
     }
     sub.root_cut_time_s = None;
@@ -2271,60 +2263,6 @@ fn rounding_locks(base: &SubMipBase, ns: usize) -> (Vec<u32>, Vec<u32>) {
             }
         }
     }
-    // A slack bound implied by the row's structural activity range can never be the
-    // one that stops a move, so it locks nothing (HiGHS takes locks from the row's
-    // sense). Without this, an `<=` row whose slack upper bound bound tightening
-    // derived from its own activity locked its integers both ways (mik-250-20-75-1: no
-    // LP point was ever roundable).
-    if std::env::var("P3_LOCKFIX").as_deref() == Ok("1") {
-        let (mut mn, mut mx) = (vec![0.0f64; base.m], vec![0.0f64; base.m]);
-        let (mut mn_inf, mut mx_inf) = (vec![false; base.m], vec![false; base.m]);
-        for j in 0..ns {
-            for idx in cp[j]..cp[j + 1] {
-                let (r, a) = (ri[idx], vals[idx]);
-                let (lo, hi) = if a > 0.0 {
-                    (a * base.l[j], a * base.u[j])
-                } else {
-                    (a * base.u[j], a * base.l[j])
-                };
-                if base.l[j] <= -INF || base.u[j] >= INF {
-                    if (a > 0.0 && base.l[j] <= -INF) || (a < 0.0 && base.u[j] >= INF) {
-                        mn_inf[r] = true;
-                    }
-                    if (a > 0.0 && base.u[j] >= INF) || (a < 0.0 && base.l[j] <= -INF) {
-                        mx_inf[r] = true;
-                    }
-                }
-                if lo.is_finite() {
-                    mn[r] += lo;
-                }
-                if hi.is_finite() {
-                    mx[r] += hi;
-                }
-            }
-        }
-        for r in 0..base.m {
-            if let Some((cs, sl, su)) = slack[r] {
-                // a.x + cs s = b  ->  s = (b - a.x) / cs, over a.x in [mn, mx].
-                let lo_ax = if mn_inf[r] { f64::NEG_INFINITY } else { mn[r] };
-                let hi_ax = if mx_inf[r] { f64::INFINITY } else { mx[r] };
-                let (e1, e2) = ((base.b[r] - hi_ax) / cs, (base.b[r] - lo_ax) / cs);
-                let (imp_lo, imp_hi) = (e1.min(e2), e1.max(e2));
-                let tol = |v: f64| 1e-6 * (1.0 + v.abs());
-                let sl2 = if sl > -INF && imp_lo.is_finite() && sl <= imp_lo + tol(sl) {
-                    -INF
-                } else {
-                    sl
-                };
-                let su2 = if su < INF && imp_hi.is_finite() && su >= imp_hi - tol(su) {
-                    INF
-                } else {
-                    su
-                };
-                slack[r] = Some((cs, sl2, su2));
-            }
-        }
-    }
     let (mut up, mut down) = (vec![0u32; ns], vec![0u32; ns]);
     for j in 0..ns {
         for idx in cp[j]..cp[j + 1] {
@@ -2352,80 +2290,6 @@ fn rounding_locks(base: &SubMipBase, ns: usize) -> (Vec<u32>, Vec<u32>) {
         }
     }
     (up, down)
-}
-
-/// Gap plan P3 (`P3_SIMPLEROUND=1`): HiGHS's rounding of a "roundable" LP point
-/// (`HighsLpRelaxation.cpp:1573-1620`), run on every LP point offered to it. When every
-/// fractional integer can move in a direction no original row locks, each is rounded
-/// that way -- up when nothing locks it up and the objective favours it (or it is
-/// locked down), else down -- and the point, continuous columns at their LP values, is
-/// offered as an incumbent. Sound as a heuristic: the point is re-verified on the
-/// original rows ([`validate_seed_incumbent`]) before injection.
-#[allow(clippy::too_many_arguments)]
-fn try_simple_rounding(
-    base: &SubMipBase,
-    locks: &(Vec<u32>, Vec<u32>),
-    obj_const: f64,
-    ns: usize,
-    is_int: &[bool],
-    x: &[f64],
-) -> Option<(Vec<f64>, f64)> {
-    const FT: f64 = 1e-6;
-    if x.len() < ns {
-        return None;
-    }
-    let mut xr: Vec<f64> = x[..ns].to_vec();
-    let mut any = false;
-    for j in 0..ns {
-        if !is_int[j] {
-            continue;
-        }
-        let v = xr[j];
-        if (v - v.round()).abs() <= FT {
-            xr[j] = v.round();
-            continue;
-        }
-        any = true;
-        let (up, dn) = (locks.0[j], locks.1[j]);
-        if up != 0 && dn != 0 && std::env::var("P3_DBG").is_ok() {
-            let (cp, ri, va) = base.csc.raw();
-            let mut desc = String::new();
-            for k in cp[j]..cp[j + 1] {
-                let r = ri[k];
-                // slack columns of row r: singleton non-int columns >= ns hitting r
-                let mut sl = String::new();
-                for q in ns..base.n {
-                    if cp[q + 1] - cp[q] == 1 && ri[cp[q]] == r {
-                        sl += &format!(
-                            "[s{q} a={} l={} u={} int={}]",
-                            va[cp[q]], base.l[q], base.u[q], base.is_int_full[q]
-                        );
-                    }
-                }
-                desc += &format!(" row{r}(a={} b={}){sl}", va[k], base.b[r]);
-            }
-            eprintln!(
-                "P3DBG sround locked j={j} x={v:.4} up={up} dn={dn} c={} l={} u={}{desc}",
-                base.c[j], base.l[j], base.u[j]
-            );
-        }
-        xr[j] = if up == 0 && (base.c[j] < 0.0 || dn != 0) {
-            (v - FT).ceil().min((base.u[j] + FT).floor())
-        } else if dn == 0 {
-            (v + FT).floor().max((base.l[j] - FT).ceil())
-        } else {
-            return None; // not roundable
-        };
-    }
-    if !any {
-        return None;
-    }
-    crate::profile::incr(crate::profile::Ctr::SimpleRoundTries);
-    let (sx, sobj) = validate_seed_incumbent(
-        &xr, ns, is_int, &base.csc, &base.b, &base.c, &base.l, &base.u, base.m, base.n,
-    )?;
-    crate::profile::incr(crate::profile::Ctr::SimpleRoundFound);
-    Some((sx, sobj + obj_const))
 }
 
 /// Deterministic uniform draw in `[0, 1)` (splitmix64).
@@ -2463,7 +2327,7 @@ fn try_randomized_rounding(
     let nnz = base.csc.raw().2.len().max(1);
     let stride = (ints.len() * nnz).div_ceil(RAND_ROUND_WORK).max(1);
     let (mut sl, mut su) = (base.l.clone(), base.u.clone());
-    if std::env::var("P3_INCPROP").as_deref() == Ok("1") {
+    if crate::lp::cmir::root_cmir_mode().on() {
         let mut prop = IncProp::new(
             &base.csc,
             base.m,
@@ -2561,7 +2425,7 @@ fn try_randomized_rounding(
     }
 }
 
-/// Gap plan P3 (`P3_RENS=1`, experiment): HiGHS's RENS (`HighsPrimalHeuristics.cpp:394-640`).
+/// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's RENS (`HighsPrimalHeuristics.cpp:394-640`).
 ///
 /// 1. Neighbourhood dive (`:430-570`): restrict every integer to `[floor, ceil]` of the
 ///    LP point and propagate; when nothing is restricted, fix the fractional integers in
@@ -2605,15 +2469,7 @@ fn try_rens_highs(
     if left <= 0.0 {
         return None;
     }
-    let dive_cap: f64 = std::env::var("P3_RENS_DIVE_S")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1.0);
-    let dive_share: f64 = std::env::var("P3_RENS_DIVE_SHARE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.1);
-    let dive_deadline = t0 + std::time::Duration::from_secs_f64((dive_share * left).min(dive_cap));
+    let dive_deadline = t0 + std::time::Duration::from_secs_f64((0.1 * left).min(1.0));
     crate::profile::incr(crate::profile::Ctr::SubMipRensRun);
     let (mut l, mut u) = (cut.l.clone(), cut.u.clone());
     let free_ints: Vec<usize> = order.iter().copied().filter(|&j| l[j] < u[j]).collect();
@@ -2624,7 +2480,7 @@ fn try_rens_highs(
     let rate = |l: &[f64], u: &[f64]| {
         free_ints.iter().filter(|&&j| l[j] >= u[j]).count() as f64 / n_total as f64
     };
-    let inc_on = std::env::var("P3_INCPROP").as_deref() == Ok("1");
+    let inc_on = crate::lp::cmir::root_cmir_mode().on();
     let incp = std::cell::RefCell::new(inc_on.then(|| {
         IncProp::new(
             &cut.csc,
@@ -2676,16 +2532,12 @@ fn try_rens_highs(
         .filter(|b| b.basic_vars.len() == cut.m && b.col_status.len() == cut.n)
         .cloned();
     let mut fixing: f64;
-    let mut why = "iters";
-    let mut n_lp = 0usize;
     for _ in 0..200 {
         if std::time::Instant::now() >= dive_deadline {
-            why = "deadline";
             break;
         }
         fixing = rate(&l, &u);
         if fixing >= target {
-            why = "target";
             break;
         }
         let snap = (l.clone(), u.clone());
@@ -2725,7 +2577,6 @@ fn try_rens_highs(
                 }
                 if !infeasible && branched == 0 {
                     if rate(&l, &u) >= min_rate_rins {
-                        why = "rins_rate";
                         break;
                     }
                     fixtolpsol = false;
@@ -2826,15 +2677,12 @@ fn try_rens_highs(
             }
         }
         if infeasible {
-            why = "prop_infeasible";
             (l, u) = snap;
             break;
         }
         if branched == 0 {
-            why = "nothing_to_fix";
             break;
         }
-        n_lp += 1;
         // Re-solve the LP over the restricted box (`heurlp.flushDomain` + evaluateNode).
         let lp = LpView {
             a: &[],
@@ -2844,7 +2692,6 @@ fn try_rens_highs(
             l: &l,
             u: &u,
         };
-        let t_lp = std::time::Instant::now();
         let warm = basis.is_some();
         let mut sol = match basis.as_ref() {
             Some(bs) => solve_lp_warm_scaled_csc(&lp, &cut.b, bs, &simplex, &cut.csc),
@@ -2853,21 +2700,7 @@ fn try_rens_highs(
         if warm && !matches!(sol.status, LpStatus::Optimal | LpStatus::Infeasible) {
             sol = solve_lp_root_csc(&cut.csc, cut.m, cut.n, &cut.c, &l, &u, &cut.b, &simplex);
         }
-        if std::env::var("P3_DBG").is_ok() {
-            eprintln!(
-                "P3DBG rens lp warm={warm} status={:?} iters={} s={:.3} bv={}",
-                sol.status,
-                sol.iters,
-                t_lp.elapsed().as_secs_f64(),
-                sol.basis.basic_vars.len()
-            );
-        }
         if sol.status != LpStatus::Optimal || sol.x.len() < ns {
-            why = if sol.status == LpStatus::Infeasible {
-                "lp_infeasible"
-            } else {
-                "lp_other"
-            };
             (l, u) = snap;
             break;
         }
@@ -2878,9 +2711,6 @@ fn try_rens_highs(
     }
     fixing = rate(&l, &u);
     if fixing < 0.1 {
-        if std::env::var("P3_DBG").is_ok() {
-            eprintln!("P3DBG rens early: fixing={fixing:.3} why={why} n_lp={n_lp} left={left:.2}");
-        }
         return None;
     }
     let left = deadline.map_or(10.0, |d| {
@@ -2889,55 +2719,17 @@ fn try_rens_highs(
     });
     let nested = MILP_DEPTH.with(|c| c.get()) > 1; // the top-level driver reads 1
     let share = if nested {
-        std::env::var("P3_NESTED_SHARE")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.25)
+        // A nested sub-MIP gets half the time left, not a quarter: at a quarter the
+        // depth-2 solve of nexp-50-20-4-2's neighbourhood ran out before its root LP.
+        NESTED_SUB_MIP_SHARE
     } else {
         0.25
     };
-    let budget = std::env::var("P3_RENS_SUB_S")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or((left * share).min(2.0));
+    let budget = (left * share).min(2.0);
     if budget <= 0.05 {
         return None;
     }
-    let sub_nodes = std::env::var("P3_RENS_NODES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(200 + parent_nodes / 20);
-    if let Ok(path) = std::env::var("P3_RENS_DUMP") {
-        let (cp, ri, vals) = cut.csc.raw();
-        let js = |v: &[f64]| {
-            v.iter()
-                .map(|x| {
-                    if x.is_finite() && x.abs() < 1e19 {
-                        format!("{x:e}")
-                    } else if *x > 0.0 {
-                        "1e30".into()
-                    } else {
-                        "-1e30".into()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let ji = |v: &[usize]| {
-            v.iter()
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let ints: Vec<usize> = (0..cut.n).filter(|&j| cut.is_int_full[j]).collect();
-        let body = format!(
-            "{{\"m\":{},\"n\":{},\"colptr\":[{}],\"rowidx\":[{}],\"vals\":[{}],\"c\":[{}],\"b\":[{}],\"l\":[{}],\"u\":[{}],\"ints\":[{}]}}",
-            cut.m, cut.n, ji(cp), ji(ri), js(vals), js(&cut.c), js(&cut.b), js(&l), js(&u), ji(&ints)
-        );
-        if !std::path::Path::new(&path).exists() {
-            let _ = std::fs::write(path, body);
-        }
-    }
+    let sub_nodes = 200 + parent_nodes / 20;
     let seed = inc.and_then(|(ix, _)| {
         (0..ns)
             .all(|j| ix[j] >= l[j] - 1e-9 && ix[j] <= u[j] + 1e-9)
@@ -2948,9 +2740,6 @@ fn try_rens_highs(
     sub.cut_rounds = sub.cut_rounds.min(5);
     sub.root_cut_time_s = Some(budget * 0.3);
     sub.strong_branch = false;
-    if std::env::var("P3_RENS_DFS").as_deref() == Ok("1") {
-        sub.selection = SelectionStrategy::DepthFirst;
-    }
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
         solve_milp_node_hooked(
@@ -2969,13 +2758,6 @@ fn try_rens_highs(
         )
     };
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
-    if std::env::var("P3_DBG").is_ok() {
-        eprintln!(
-            "P3DBG rens why={why} n_lp={n_lp} fixing={fixing:.3} n_total={n_total} dive_s={:.2} sub_status={:?} obj={} nodes={} bound={} budget={budget:.2}",
-            (std::time::Instant::now() - t0).as_secs_f64(),
-            res.status, res.obj, res.nodes, res.bound
-        );
-    }
     if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) || res.x.len() < ns {
         return None;
     }
@@ -4083,8 +3865,7 @@ fn solve_milp_node_search(
     let mut sub_mip_since: usize = SUB_MIP_BATCH_STRIDE;
     let sub_mip_base: Option<SubMipBase> = (sub_mip_enabled()
         && opts.heuristics
-        && (milp_depth == 0
-            || (milp_depth == 1 && std::env::var("P3_RENS").as_deref() == Ok("1")))
+        && (milp_depth == 0 || (milp_depth == 1 && crate::lp::cmir::root_cmir_mode().on()))
         && lazy.is_none()
         && !opts.integer_cols.is_empty())
     .then(|| SubMipBase {
@@ -4097,11 +3878,6 @@ fn solve_milp_node_search(
         b: b_w.clone(),
         is_int_full: is_int_full.clone(),
     });
-    // P3 (`P3_SIMPLEROUND=1`): locks for HiGHS's roundable-LP-point rounding.
-    let simple_round_locks: Option<(Vec<u32>, Vec<u32>)> = sub_mip_base
-        .as_ref()
-        .filter(|_| std::env::var("P3_SIMPLEROUND").as_deref() == Ok("1"))
-        .map(|b| rounding_locks(b, ns));
     // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): rounding locks over the base problem.
     let rr_locks: Option<(Vec<u32>, Vec<u32>)> = sub_mip_base
         .as_ref()
@@ -4170,8 +3946,8 @@ fn solve_milp_node_search(
     let mut node_simplex = {
         let mut sx = opts.simplex.clone();
         sx.deadline = deadline;
-        // P3 experiment (`P3_EXPEL=1`): full bases from cold solves, so warm starts engage.
-        if std::env::var("P3_EXPEL").as_deref() == Ok("1") {
+        // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): full bases from cold solves, so warm starts engage.
+        if crate::lp::cmir::root_cmir_mode().on() {
             sx.expel_zero_artificials = true;
         }
         sx
@@ -4185,7 +3961,7 @@ fn solve_milp_node_search(
         if root_full_basis_enabled() {
             sx.expel_zero_artificials = true;
         }
-        if std::env::var("P3_NOREPAIR").as_deref() == Ok("1") {
+        if crate::lp::cmir::root_cmir_mode().on() {
             sx.subtol_repair = false;
         }
         sx
@@ -4219,7 +3995,7 @@ fn solve_milp_node_search(
     // and re-adds them when violated again, `HighsCutPool::separate`).
     let mut aged_pool: Vec<GomoryCut> = Vec::new();
     let (mut root_sel_best, mut root_sel_factor) = (0.0f64, 0.9f64);
-    let hs_stall_on = std::env::var("P3_HSTALL").as_deref() == Ok("1");
+    let hs_stall_on = crate::lp::cmir::root_cmir_mode().on();
     let mut hs_first: Option<(Vec<f64>, f64)> = None;
     let mut hs_avg: Vec<f64> = vec![0.0; ns];
     let (mut hs_smooth, mut hs_prev_obj, mut hs_rounds, mut hs_stall) =
@@ -4233,39 +4009,7 @@ fn solve_milp_node_search(
     // is what keeps each slack column a singleton and so keeps node warm starts
     // usable. See `substitute_slacks_to_structural`.
     let (m_base0, n_base0) = (m_w, n_w);
-    if milp_depth == 0 {
-        if let Ok(path) = std::env::var("P3_WORKDUMP") {
-            let (cp, ri, vals) = csc_w.raw();
-            let js = |v: &[f64]| {
-                v.iter()
-                    .map(|x| {
-                        if x.is_finite() && x.abs() < 1e19 {
-                            format!("{x:e}")
-                        } else if *x > 0.0 {
-                            "1e30".into()
-                        } else {
-                            "-1e30".into()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let ji = |v: &[usize]| {
-                v.iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let ints: Vec<usize> = (0..n_w).filter(|&j| is_int_full[j]).collect();
-            let body = format!(
-                "{{\"m\":{m_w},\"n\":{n_w},\"colptr\":[{}],\"rowidx\":[{}],\"vals\":[{}],\"c\":[{}],\"b\":[{}],\"l\":[{}],\"u\":[{}],\"ints\":[{}]}}",
-                ji(cp), ji(ri), js(vals), js(&c_w), js(&b_w), js(&l_w), js(&u_w), ji(&ints)
-            );
-            if !ints.is_empty() && !std::path::Path::new(&path).exists() {
-                let _ = std::fs::write(path, body);
-            }
-        }
-    }
+    if milp_depth == 0 {}
     let base_rows = BaseRows::build(&csc_w, m_base0, n_base0, ns, &b_w);
     let cut_max_len = CUT_LEN_BASE + (CUT_LEN_FRAC * ns as f64) as usize;
     let mut structural_cuts: Vec<GomoryCut> = Vec::new();
@@ -4303,17 +4047,8 @@ fn solve_milp_node_search(
         };
         // HiGHS's root round cap (`HighsMipSolverData.cpp:1990-1993, 1044-1046`):
         // 2 sqrt(maxTreeSizeLog2), each unfixed integer adding ceil(log2(min(1024,
-        // 1 + u - l))) (`P3_MAXROUNDS=1`).
-        let hs_round_cap: usize = if std::env::var("P3_MAXROUNDS").as_deref() == Ok("1") {
-            let log2: f64 = (0..ns)
-                .filter(|&j| is_int[j] && u_w[j] > l_w[j])
-                .map(|j| (1.0 + (u_w[j] - l_w[j]).min(1023.0)).log2().ceil())
-                .sum();
-            ((2.0 * log2.sqrt()) as usize).max(1)
-        } else {
-            usize::MAX
-        };
-        for _round in 0..opts.cut_rounds.min(hs_round_cap) {
+        // 1 + u - l))) (under `DISCOPT_MILP_ROOT_CMIR`).
+        for _round in 0..opts.cut_rounds {
             if total_cuts >= opts.root_cuts {
                 break;
             }
@@ -4372,15 +4107,12 @@ fn solve_milp_node_search(
                             &warm_root_opts(&root_simplex, m_w, n_w),
                             &csc_w,
                         );
-                        if std::env::var("P3_DBG2").is_ok() {
-                            eprintln!("P3DBG rootwarm m={m_w} n={n_w} status={:?} iters={} cap={} basis_n={basis_n}", warm.status, warm.iters, warm_root_opts(&root_simplex, m_w, n_w).max_iter);
-                        }
-                        // P3 experiment (`P3_NOCOLD=1`): a failed warm re-solve ends the
+                        // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): a failed warm re-solve ends the
                         // round loop (HiGHS stops separating on an LP failure) instead of a
                         // cold solve, which cost ~3 s each on the nexp neighbourhood.
-                        let nocold = std::env::var("P3_NOCOLD").ok();
+                        let nocold = crate::lp::cmir::root_cmir_mode().on();
                         if warm.status == LpStatus::Numerical
-                            && nocold.as_deref() == Some("2")
+                            && nocold
                             && warm.basis.basic_vars.len() == m_w
                             && warm.basis.col_status.len() == n_w
                             && warm.x.len() == n_w
@@ -4412,7 +4144,7 @@ fn solve_milp_node_search(
                             w.status = LpStatus::Optimal;
                             w
                         } else if matches!(warm.status, LpStatus::IterLimit | LpStatus::Numerical)
-                            && nocold.is_some()
+                            && nocold
                         {
                             warm
                         } else {
@@ -4438,9 +4170,6 @@ fn solve_milp_node_search(
             };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
-                if std::env::var("P3_DBG").is_ok() {
-                    eprintln!("P3DBG loop end: lp {:?}", root.status);
-                }
                 break;
             }
             // Keep this round's optimal basis for the root B&B node. If the loop
@@ -4449,13 +4178,6 @@ fn solve_milp_node_search(
             // the loop. The clone is cheap next to the solve it came from.
             root_basis = Some((root.basis.clone(), n_w));
             root_duals = root.dual.clone();
-            if std::env::var("P3_DBG").is_ok() {
-                eprintln!(
-                    "P3DBG round obj={:.6} m={m_w} n={n_w} depth={milp_depth} lb_sum={:.3} gmi_phase={gmi_phase}",
-                    root.obj + obj_const,
-                    l_w[..ns].iter().filter(|v| v.is_finite()).sum::<f64>()
-                );
-            }
             if prune_base.is_some() {
                 last_root_x = Some(root.x.clone());
             }
@@ -4504,9 +4226,6 @@ fn solve_milp_node_search(
                     }
                     hs_prev_obj = root.obj;
                     if hs_stall >= 3 {
-                        if std::env::var("P3_DBG").is_ok() {
-                            eprintln!("P3DBG loop end: hs stall");
-                        }
                         break;
                     }
                 }
@@ -4532,17 +4251,11 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
                 }
                 let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
-                    std::env::var("P3_STALL")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(ROOT_CMIR_STALL_ROUNDS)
+                    ROOT_CMIR_STALL_ROUNDS
                 } else {
                     0
                 };
                 if root_stalled > allow {
-                    if std::env::var("P3_DBG").is_ok() {
-                        eprintln!("P3DBG loop end: stalled");
-                    }
                     break;
                 }
             } else {
@@ -4552,14 +4265,6 @@ fn solve_milp_node_search(
             // HiGHS runs randomized rounding on every root round's LP point while
             // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
             // completion LP is over the uncut base rows, as in HiGHS.
-            if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), simple_round_locks.as_ref())
-            {
-                if let Some((x, v)) =
-                    try_simple_rounding(base, locks, obj_const, ns, &is_int, &root.x)
-                {
-                    tm.inject_incumbent(x, v);
-                }
-            }
             if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
                 if tm
                     .incumbent()
@@ -4613,9 +4318,9 @@ fn solve_milp_node_search(
                     &b_w,
                     &root.x,
                     &is_int_full,
-                    // P3 (`P3_CMIR_ALLROWS=1`): HiGHS's path separator walks every LP
+                    // P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's path separator walks every LP
                     // row, the current cuts included (`HighsPathSeparator.cpp:30-50`).
-                    if std::env::var("P3_CMIR_ALLROWS").as_deref() == Ok("1") {
+                    if crate::lp::cmir::root_cmir_mode().on() {
                         m_w
                     } else {
                         n_orig_rows
@@ -4629,24 +4334,6 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                 );
                 crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
-                if std::env::var("P3_DBG2").is_ok() {
-                    for c in &found {
-                        let nz: Vec<f64> = c
-                            .coeffs
-                            .iter()
-                            .filter(|v| **v != 0.0)
-                            .map(|v| v.abs())
-                            .collect();
-                        let mx = nz.iter().cloned().fold(0.0, f64::max);
-                        let mn = nz.iter().cloned().fold(f64::INFINITY, f64::min);
-                        eprintln!(
-                            "P3DBG cmircut nnz={} max={mx:.3e} min={mn:.3e} dyn={:.3e} rhs={:.3e}",
-                            nz.len(),
-                            mx / mn,
-                            c.rhs
-                        );
-                    }
-                }
                 if found.is_empty() && !gmi_phase {
                     // c-MIR has nothing left at this point: GMI joins this round.
                     gmi_phase = true;
@@ -4654,11 +4341,10 @@ fn solve_milp_node_search(
                 }
                 cuts.extend(found);
             }
-            // Gap plan P3 (`P3_TABLEAU`): HiGHS's tableau separator (c-MIR on tableau-row
+            // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator (c-MIR on tableau-row
             // aggregations) every round; `1` replaces GMI with it, `2` runs both.
-            let p3_tableau = std::env::var("P3_TABLEAU").ok();
-            let p3_tableau = p3_tableau.filter(|_| opts.cmir_cuts);
-            if opts.gmi_cuts && matches!(p3_tableau.as_deref(), Some("1") | Some("2")) {
+            let tableau_on = opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on();
+            if opts.gmi_cuts && tableau_on {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
                 cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
                     &csc_w,
@@ -4675,7 +4361,7 @@ fn solve_milp_node_search(
                     opts.simplex.tol,
                 ));
             }
-            if opts.gmi_cuts && gmi_phase && p3_tableau.as_deref() != Some("1") {
+            if opts.gmi_cuts && gmi_phase && !tableau_on {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory_cols(
                     &csc_w,
@@ -4740,10 +4426,7 @@ fn solve_milp_node_search(
             // Keep the strongest, most diverse few (efficacy + orthogonality)
             // up to the remaining root-cut budget; otherwise add first-come.
             let remaining = opts.root_cuts - total_cuts;
-            if std::env::var("P3_DBG").is_ok() {
-                eprintln!("P3DBG cand n={}", cuts.len());
-            }
-            let selected = if opts.cut_select && std::env::var("P3_SEL").as_deref() == Ok("1") {
+            let selected = if opts.cut_select && crate::lp::cmir::root_cmir_mode().on() {
                 // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
                 // viol / (active nnz * sqrt(active row norm)) over columns strictly inside
                 // their bounds, the adaptive min-score factor, parallelism <= 0.1.
@@ -4784,39 +4467,8 @@ fn solve_milp_node_search(
                 cuts.truncate(remaining);
                 cuts
             };
-            let n_sel = selected.len();
             let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
-            if std::env::var("P3_DBG").is_ok() {
-                eprintln!("P3DBG sel selected={n_sel} new={}", new_cuts.len());
-            }
-            if let Ok(path) = std::env::var("P3_CUTDUMP") {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    for c in &new_cuts {
-                        let nz: Vec<String> = c
-                            .coeffs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, v)| **v != 0.0)
-                            .map(|(j, v)| format!("[{j},{v:e}]"))
-                            .collect();
-                        let _ = writeln!(
-                            f,
-                            "{{\"depth\":{milp_depth},\"n\":{n_w},\"rhs\":{:e},\"nz\":[{}]}}",
-                            c.rhs,
-                            nz.join(",")
-                        );
-                    }
-                }
-            }
             if new_cuts.is_empty() {
-                if std::env::var("P3_DBG").is_ok() {
-                    eprintln!("P3DBG loop end: no new cuts");
-                }
                 break;
             }
             total_cuts += new_cuts.len();
@@ -4841,14 +4493,14 @@ fn solve_milp_node_search(
             if prune_base.is_some() {
                 all_root_cuts.extend(new_cuts);
             }
-            // P3 experiment (`P3_AGE=1`): drop, every round, the cuts whose slack is
+            // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): drop, every round, the cuts whose slack is
             // BASIC at this round's optimal basis (zero dual: removing the row keeps
             // this round's optimum), instead of carrying every generated cut to the
             // post-loop cleanup. HiGHS ages inactive cuts out of the LP the same way.
             if let (Some((csc_base, m_base, n_base)), Some((rb, rn)), true) = (
                 prune_base.as_ref(),
                 root_basis.as_ref(),
-                std::env::var("P3_AGE").as_deref() == Ok("1"),
+                crate::lp::cmir::root_cmir_mode().on(),
             ) {
                 let (m_base, n_base, rn) = (*m_base, *n_base, *rn);
                 let total = all_root_cuts.len();
@@ -5013,7 +4665,7 @@ fn solve_milp_node_search(
     if let (Some((csc_base, m_base, n_base)), Some(x)) = (prune_base.as_ref(), last_root_x.as_ref())
     {
         let (m_base, n_base) = (*m_base, *n_base);
-        let p3_prune_dual = std::env::var("P3_PRUNE_DUAL").as_deref() == Ok("1");
+        let p3_prune_dual = crate::lp::cmir::root_cmir_mode().on();
         let mut keep = vec![false; all_root_cuts.len()];
         for ci in (0..all_root_cuts.len()).rev() {
             let cut = &all_root_cuts[ci];
@@ -5113,12 +4765,12 @@ fn solve_milp_node_search(
             // reduced LP instead -- cheaper than the solve that produced the
             // basis, and far cheaper than carrying the dropped rows all tree.
             //
-            // P3 (`P3_PRUNE_REMAP=1`): unless the basis can be remapped. A dropped
+            // P3 (under `DISCOPT_MILP_ROOT_CMIR`): unless the basis can be remapped. A dropped
             // cut whose slack is BASIC leaves with its row as a basic pair, so the
             // remaining basis is square, nonsingular and keeps its reduced costs;
             // that is exactly the in-loop ageing remap. On neos-911970 the cold
             // solve this replaces took 2.4 s of a 20 s budget.
-            let remapped = (std::env::var("P3_PRUNE_REMAP").as_deref() == Ok("1"))
+            let remapped = (crate::lp::cmir::root_cmir_mode().on())
                 .then_some(())
                 .and(root_basis.as_ref())
                 .and_then(|(rb, rn)| {
@@ -5163,43 +4815,9 @@ fn solve_milp_node_search(
 
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
-    if let Some(col) = std::env::var("P3_PROPTEST")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        if milp_depth == 0 && col < ns {
-            let csc_rc_t = csc_w.clone();
-            for (tag, lo, hi) in [
-                ("ub0", l_w[col], 0.0f64.max(l_w[col])),
-                ("lb1", 1.0f64.min(u_w[col]), u_w[col]),
-            ] {
-                let mut fl = l_w.clone();
-                let mut fu = u_w.clone();
-                fl[col] = lo;
-                fu[col] = hi;
-                let pr = fbbt_rows_exact(
-                    &csc_rc_t,
-                    m_w,
-                    n_w,
-                    &fl,
-                    &fu,
-                    &b_w,
-                    &is_int_full,
-                    opts.simplex.tol,
-                );
-                let nfix = (0..ns).filter(|&j| is_int[j] && pr.l[j] >= pr.u[j]).count();
-                let mut inc = IncProp::new(&csc_rc_t, m_w, n_w, &b_w, &is_int_full, &l_w, &u_w);
-                let ok = inc.set(col, lo, hi);
-                let nfix2 = (0..ns)
-                    .filter(|&j| is_int[j] && inc.l[j] >= inc.u[j])
-                    .count();
-                eprintln!("P3DBG proptest col={col} {tag} box=[{},{}] fbbt_fix={nfix} fbbt_infeas={} incprop_fix={nfix2} incprop_ok={ok} ns={ns} m={m_w}", l_w[col], u_w[col], pr.infeasible);
-            }
-        }
-    }
-    // Gap plan P3 (`P3_RENS=1`): the post-root LP with its kept (tight) root cuts, for
+    // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): the post-root LP with its kept (tight) root cuts, for
     // the HiGHS RENS port ([`try_rens_highs`]).
-    let p3_rens = sub_mip_base.is_some() && std::env::var("P3_RENS").as_deref() == Ok("1");
+    let p3_rens = sub_mip_base.is_some() && crate::lp::cmir::root_cmir_mode().on();
     let rens_cut_base: Option<SubMipBase> = p3_rens.then(|| SubMipBase {
         csc: csc_w.clone(),
         m: m_w,
@@ -5211,13 +4829,6 @@ fn solve_milp_node_search(
         is_int_full: is_int_full.clone(),
     });
     let mut rens_root_done = false;
-    let plunge_on = std::env::var("P3_PLUNGE").as_deref() == Ok("1");
-    let plunge_up = std::env::var("P3_PLUNGE_DIR").as_deref() == Ok("up");
-    let mut plunge_next: Option<crate::bnb::node::NodeId> = None;
-    let mut plunge_parent: Option<crate::bnb::node::NodeId> = None;
-    let mut plunge_stack: Vec<crate::bnb::node::NodeId> = Vec::new();
-    let plunge_bt = std::env::var("P3_PLUNGE_BT").as_deref() == Ok("1");
-    let mut p3_heur_s = 0.0f64;
     let rens_root_x: Option<Vec<f64>> = last_root_x
         .as_ref()
         .filter(|x| x.len() >= ns)
@@ -5370,20 +4981,9 @@ fn solve_milp_node_search(
                 break;
             }
         }
-        let batch = tm.export_batch_with_first(plunge_next.take(), 64);
+        let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
             break;
-        }
-        plunge_parent = batch.node_ids.first().copied();
-        if plunge_on && std::env::var("P3_DBG").is_ok() {
-            if let Some(ln) = plunge_parent.and_then(|p| tm.node_lineage(p)) {
-                eprintln!(
-                    "P3DBG plunge node depth={} branch={:?} batch={}",
-                    ln.depth,
-                    ln.branch.map(|b| (b.var, b.up, b.value)),
-                    batch.node_ids.len()
-                );
-            }
         }
 
         // Interactive debugger: nodes selected — expose the batch's boxes/ids so
@@ -5553,17 +5153,7 @@ fn solve_milp_node_search(
                     Some(
                         std::time::Instant::now()
                             + std::time::Duration::from_secs_f64(
-                                (left
-                                    * std::env::var("P3_DIVE_SHARE")
-                                        .ok()
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                        .unwrap_or(ROOT_DIVE_SHARE))
-                                .min(
-                                    std::env::var("P3_DIVE_MAX_S")
-                                        .ok()
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                        .unwrap_or(ROOT_DIVE_MAX_S),
-                                ),
+                                (left * ROOT_DIVE_SHARE).min(ROOT_DIVE_MAX_S),
                             ),
                     )
                 } else {
@@ -6030,167 +5620,15 @@ fn solve_milp_node_search(
             tm.import_results_with_point_values(&results, &point_values)
                 .expect("one point value per node result");
             tm.process_evaluated();
-            // Gap plan P3 (`P3_PLUNGE=1`): continue the plunge into the slot-0 node's
-            // down child (HiGHS's main search dove down on enlight8's integer columns).
-            if plunge_on {
-                if let Some(pp) = plunge_parent {
-                    let kids: Vec<(crate::bnb::node::NodeId, bool)> = tm
-                        .last_created()
-                        .map(discopt_node_id)
-                        .filter_map(|c| {
-                            tm.node_lineage(c).and_then(|ln| {
-                                (ln.parent == Some(pp)
-                                    && ln.status == crate::bnb::node::NodeStatus::Pending)
-                                    .then(|| (c, ln.branch.is_some_and(|b| b.up)))
-                            })
-                        })
-                        .collect();
-                    plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
-                    // HiGHS rejects a child its propagation empties inside `branch()` and takes the
-                    // other one; check the preferred child the same way before plunging into it.
-                    if let Some(c) = plunge_next {
-                        if let Some((cl, cu)) = tm.node_box(c) {
-                            let mut fl = vec![0.0; n_w];
-                            let mut fu = vec![0.0; n_w];
-                            fl[..ns].copy_from_slice(&cl[..ns]);
-                            fu[..ns].copy_from_slice(&cu[..ns]);
-                            fl[ns..].copy_from_slice(&slack_l);
-                            fu[ns..].copy_from_slice(&slack_u);
-                            let mut ip =
-                                IncProp::new(&csc_rc, m_w, n_w, &b_w, &is_int_full, &fl, &fu);
-                            for j in 0..n_w {
-                                ip.push_col(j);
-                            }
-                            if !ip.propagate() {
-                                crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
-                                plunge_next = kids.iter().find(|k| k.1 != plunge_up).map(|k| k.0);
-                            }
-                        }
-                    }
-                    // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
-                    for k in kids.iter().filter(|k| k.1 != plunge_up) {
-                        plunge_stack.push(k.0);
-                    }
-                }
-                if plunge_next.is_none() && plunge_bt {
-                    while let Some(sib) = plunge_stack.pop() {
-                        if tm
-                            .node_lineage(sib)
-                            .is_some_and(|ln| ln.status == crate::bnb::node::NodeStatus::Pending)
-                        {
-                            plunge_next = Some(sib);
-                            break;
-                        }
-                    }
-                }
-            }
             break 'search;
         }
         if hit_unbounded {
             unbounded = true;
             break 'search;
         }
-        if plunge_on && std::env::var("P3_DBG").is_ok() && !results.is_empty() {
-            // Per-node comparison with HiGHS's trace: the slot-0 (plunge) node's
-            // integers fixed in its box, fixed after propagation, and its LP bound.
-            let (bl, bu) = (&batch.lb[0], &batch.ub[0]);
-            let nfix_box = (0..ns).filter(|&j| is_int[j] && bl[j] == bu[j]).count();
-            let mut fl = vec![0.0; n_w];
-            let mut fu = vec![0.0; n_w];
-            fl[..ns].copy_from_slice(&bl[..ns]);
-            fu[..ns].copy_from_slice(&bu[..ns]);
-            fl[ns..].copy_from_slice(&slack_l);
-            fu[ns..].copy_from_slice(&slack_u);
-            let pr = fbbt_rows_exact(
-                &csc_rc,
-                m_w,
-                n_w,
-                &fl,
-                &fu,
-                &b_w,
-                &is_int_full,
-                opts.simplex.tol,
-            );
-            let nfix_prop = (0..ns).filter(|&j| is_int[j] && pr.l[j] >= pr.u[j]).count();
-            let nfrac = results[0]
-                .solution
-                .iter()
-                .take(ns)
-                .enumerate()
-                .filter(|(j, v)| is_int[*j] && frac(**v) > INT_TOL)
-                .count();
-            let ln = tm.node_lineage(results[0].node_id);
-            let fr: Vec<String> = results[0]
-                .solution
-                .iter()
-                .take(ns)
-                .enumerate()
-                .filter(|(j, v)| is_int[*j] && frac(**v) > INT_TOL)
-                .map(|(j, v)| format!("{j}:{v:.3}"))
-                .collect();
-            eprintln!("P3DBG pnode_fr {}", fr.join(","));
-            eprintln!(
-                "P3DBG pnode depth={} branch={:?} lp={:.4} nfix_box={nfix_box} nfix_prop={nfix_prop} prop_infeas={} nfrac={nfrac} feas={}",
-                ln.map_or(0, |l| l.depth), ln.and_then(|l| l.branch).map(|b| (b.var, b.up, b.value)),
-                results[0].lower_bound, pr.infeasible, results[0].is_feasible
-            );
-        }
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
-        // Gap plan P3 (`P3_PLUNGE=1`): continue the plunge into the slot-0 node's
-        // down child (HiGHS's main search dove down on enlight8's integer columns).
-        if plunge_on {
-            if let Some(pp) = plunge_parent {
-                let kids: Vec<(crate::bnb::node::NodeId, bool)> = tm
-                    .last_created()
-                    .map(discopt_node_id)
-                    .filter_map(|c| {
-                        tm.node_lineage(c).and_then(|ln| {
-                            (ln.parent == Some(pp)
-                                && ln.status == crate::bnb::node::NodeStatus::Pending)
-                                .then(|| (c, ln.branch.is_some_and(|b| b.up)))
-                        })
-                    })
-                    .collect();
-                plunge_next = kids.iter().find(|k| k.1 == plunge_up).map(|k| k.0);
-                // HiGHS rejects a child its propagation empties inside `branch()` and takes the
-                // other one; check the preferred child the same way before plunging into it.
-                if let Some(c) = plunge_next {
-                    if let Some((cl, cu)) = tm.node_box(c) {
-                        let mut fl = vec![0.0; n_w];
-                        let mut fu = vec![0.0; n_w];
-                        fl[..ns].copy_from_slice(&cl[..ns]);
-                        fu[..ns].copy_from_slice(&cu[..ns]);
-                        fl[ns..].copy_from_slice(&slack_l);
-                        fu[ns..].copy_from_slice(&slack_u);
-                        let mut ip = IncProp::new(&csc_rc, m_w, n_w, &b_w, &is_int_full, &fl, &fu);
-                        for j in 0..n_w {
-                            ip.push_col(j);
-                        }
-                        if !ip.propagate() {
-                            crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
-                            plunge_next = kids.iter().find(|k| k.1 != plunge_up).map(|k| k.0);
-                        }
-                    }
-                }
-                // The sibling waits on the plunge stack (HiGHS `backtrackPlunge`).
-                for k in kids.iter().filter(|k| k.1 != plunge_up) {
-                    plunge_stack.push(k.0);
-                }
-            }
-            if plunge_next.is_none() && plunge_bt {
-                while let Some(sib) = plunge_stack.pop() {
-                    if tm
-                        .node_lineage(sib)
-                        .is_some_and(|ln| ln.status == crate::bnb::node::NodeStatus::Pending)
-                    {
-                        plunge_next = Some(sib);
-                        break;
-                    }
-                }
-            }
-        }
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.
@@ -6324,20 +5762,6 @@ fn solve_milp_node_search(
         // fractional node.
         // D2 W2 (`DISCOPT_MILP_RAND_ROUND`): HiGHS randomized rounding on the batch's
         // best-bound fractional node, every batch while there is no incumbent.
-        // P3 (`P3_SIMPLEROUND=1`): HiGHS rounds every roundable node LP point.
-        if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), simple_round_locks.as_ref()) {
-            for r in results.iter() {
-                if r.is_feasible || r.lower_bound >= INFEAS_SENTINEL - 1.0 || r.solution.len() < ns
-                {
-                    continue;
-                }
-                if let Some((x, v)) =
-                    try_simple_rounding(base, locks, obj_const, ns, &is_int, &r.solution)
-                {
-                    tm.inject_incumbent(x, v);
-                }
-            }
-        }
         if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
             let no_inc = tm
                 .incumbent()
@@ -6411,17 +5835,7 @@ fn solve_milp_node_search(
                             && r.solution.len() >= ns
                     })
                     .min_by(|a, b| a.lower_bound.total_cmp(&b.lower_bound));
-                // P3 (`P3_HEUR_EFFORT=<share>`): HiGHS bounds heuristic work by effort
-                // (`moreHeuristicsAllowed`, heuristic LP iterations <= 5% of the total
-                // plus an allowance); here, sub-MIP wall time <= share x elapsed + 1 s,
-                // the root call exempt.
-                let effort_ok = std::env::var("P3_HEUR_EFFORT")
-                    .ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .is_none_or(|sh| {
-                        !rens_root_done || p3_heur_s <= sh * t_start.elapsed().as_secs_f64() + 1.0
-                    });
-                if let (Some(r), true) = (cand, effort_ok) {
+                if let Some(r) = cand {
                     sub_mip_since = 0;
                     let kind = if inc.is_some() {
                         SubMipKind::Rins
@@ -6430,21 +5844,9 @@ fn solve_milp_node_search(
                     };
                     // HiGHS runs RENS once at the end of the root whatever the incumbent
                     // (`HighsMipSolverData.cpp:2398`), RENS in the tree only without one.
-                    if std::env::var("P3_DBG").is_ok() {
-                        eprintln!(
-                            "P3DBG submip start t={:.2} depth={milp_depth} left={:.2}",
-                            t_start.elapsed().as_secs_f64(),
-                            deadline.map_or(-1.0, |d| d
-                                .saturating_duration_since(std::time::Instant::now())
-                                .as_secs_f64())
-                        );
-                    }
-                    let t_heur = std::time::Instant::now();
                     let rens_now = kind == SubMipKind::Rens || !rens_root_done;
                     rens_root_done = true;
-                    let old_rins =
-                        !rens_now && std::env::var("P3_RENS_OLDRINS").as_deref() == Ok("1");
-                    let rens_highs = match rens_cut_base.as_ref().filter(|_| !old_rins) {
+                    let rens_highs = match rens_cut_base.as_ref() {
                         Some(cb) => Some(try_rens_highs(
                             cb,
                             base,
@@ -6489,7 +5891,6 @@ fn solve_milp_node_search(
                             sub_mip_fail_streak = sub_mip_fail_streak.saturating_add(1);
                         }
                     }
-                    p3_heur_s += t_heur.elapsed().as_secs_f64();
                 }
             }
         }
@@ -6708,15 +6109,6 @@ fn solve_milp_node_search(
         }
     }
 
-    if milp_depth == 0 && std::env::var("P3_DBG").is_ok() {
-        eprintln!(
-            "P3DBG search end t={:.2} past_deadline={:.2}",
-            t_start.elapsed().as_secs_f64(),
-            deadline.map_or(0.0, |d| std::time::Instant::now()
-                .saturating_duration_since(d)
-                .as_secs_f64())
-        );
-    }
     // Interactive debugger: terminal checkpoint (return value is advisory only —
     // the solve is already over, so its control is ignored).
     let _ = fire_dbg!(MilpCheckpoint::Terminated);
@@ -9325,14 +8717,8 @@ fn try_dive_repair(
         let left = ctx.deadline.map_or(ROOT_DIVE_MAX_S, |d| {
             d.saturating_duration_since(now).as_secs_f64()
         });
-        let share = std::env::var("P3_DIVE_SHARE")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(ROOT_DIVE_SHARE);
-        let cap = std::env::var("P3_DIVE_MAX_S")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(ROOT_DIVE_MAX_S);
+        let share = ROOT_DIVE_SHARE;
+        let cap = ROOT_DIVE_MAX_S;
         now + std::time::Duration::from_secs_f64((left * share).min(cap))
     });
     let dive_simplex = match dive_deadline {
@@ -9343,22 +8729,6 @@ fn try_dive_repair(
         }
         None => ctx.simplex.clone(),
     };
-    // Gap plan P3 (`P3_BTDIVE=<max backtracks>`): HiGHS's dive backtracks to the most
-    // recent untried alternative when a fixing leaves no feasible child
-    // (`HighsSearch::dive` + `backtrack`); ours used to abandon. Each successful fix
-    // records its alternative value with the box and basis it was taken from.
-    let bt_max: usize = std::env::var("P3_BTDIVE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let mut bt_stack: Vec<(usize, f64, Vec<f64>, Vec<f64>, Basis)> = Vec::new();
-    let mut bt_used = 0usize;
-    let improve = improve || bt_max > 0;
-    let max_steps = if bt_max > 0 {
-        max_steps * 4 + bt_max
-    } else {
-        max_steps
-    };
     for _ in 0..max_steps {
         // Gap plan P3: the dive is a heuristic; past its wall cap it gives up (no
         // point, never a wrong one).
@@ -9366,17 +8736,13 @@ fn try_dive_repair(
             crate::profile::incr(crate::profile::Ctr::DiveCapped);
             return None;
         }
-        // Most-fractional unfixed integer column (`P3_DIVE_VAR=least`: least fractional).
-        let least = std::env::var("P3_DIVE_VAR").as_deref() == Ok("least");
+        // Most-fractional unfixed integer column.
         let mut pick: Option<usize> = None;
-        let mut best = if least { f64::INFINITY } else { INT_TOL };
+        let mut best = INT_TOL;
         for j in 0..ns {
             if ctx.is_int[j] && l[j] != u[j] {
                 let f = frac(x[j]);
-                if f <= INT_TOL {
-                    continue;
-                }
-                if (!least && f > best) || (least && f < best) {
+                if f > best {
                     best = f;
                     pick = Some(j);
                 }
@@ -9419,13 +8785,7 @@ fn try_dive_repair(
         } else {
             (u[j], l[j])
         };
-        // P3 (`P3_DIVE_UP=1`): HiGHS's root-solution child rule; from the root point
-        // (rootsol == x) its tie goes up (`HighsSearch.cpp:1166-1206`).
-        let nearest = if std::env::var("P3_DIVE_UP").as_deref() == Ok("1") {
-            x[j].ceil().clamp(lo, hi)
-        } else {
-            x[j].round().clamp(lo, hi)
-        };
+        let nearest = x[j].round().clamp(lo, hi);
         let other = if x[j] >= nearest {
             (nearest + 1.0).min(hi)
         } else {
@@ -9433,7 +8793,6 @@ fn try_dive_repair(
         };
         let mut next_x: Option<Vec<f64>> = None;
         let mut tried = Vec::with_capacity(2);
-        let bt_pre = (l.clone(), u.clone(), cur_basis.clone());
         for &v in &[nearest, other] {
             if tried.contains(&v.to_bits()) {
                 continue;
@@ -9495,15 +8854,6 @@ fn try_dive_repair(
                     l.copy_from_slice(&full_l[..ns]);
                     u.copy_from_slice(&full_u[..ns]);
                 }
-                if bt_max > 0 && v != other && other != nearest {
-                    // The box/basis before this fix, for a later backtrack.
-                    let (mut sl, mut su) = (l.clone(), u.clone());
-                    if improve {
-                        sl.copy_from_slice(&bt_pre.0);
-                        su.copy_from_slice(&bt_pre.1);
-                    }
-                    bt_stack.push((j, other, sl, su, bt_pre.2.clone()));
-                }
                 l[j] = v;
                 u[j] = v;
                 // Carry this step's optimal basis into the next fix's warm start --
@@ -9520,58 +8870,6 @@ fn try_dive_repair(
             }
         }
         // `None` means both roundings were infeasible -> abandon the dive.
-        let mut next_x = next_x;
-        while next_x.is_none() && bt_used < bt_max {
-            let Some((bj, bv, bl, bu, bb)) = bt_stack.pop() else {
-                break;
-            };
-            bt_used += 1;
-            crate::profile::incr(crate::profile::Ctr::DiveBacktracks);
-            let mut full_l = vec![0.0; ctx.n_w];
-            let mut full_u = vec![0.0; ctx.n_w];
-            full_l[..ns].copy_from_slice(&bl);
-            full_u[..ns].copy_from_slice(&bu);
-            full_l[bj] = bv;
-            full_u[bj] = bv;
-            full_l[ns..].copy_from_slice(ctx.slack_l);
-            full_u[ns..].copy_from_slice(ctx.slack_u);
-            let pr = fbbt_rows_exact(
-                ctx.csc_rc,
-                ctx.m_w,
-                ctx.n_w,
-                &full_l,
-                &full_u,
-                ctx.b_w,
-                ctx.is_int_full,
-                ctx.opts.simplex.tol,
-            );
-            if pr.infeasible {
-                continue;
-            }
-            let mut sol = ctx.problem.solve_warm(&pr.l, &pr.u, &bb, &dive_simplex);
-            *pivots += sol.iters;
-            if sol.status != LpStatus::Optimal {
-                continue;
-            }
-            if let Some(c) = cutoff {
-                if sol.obj + ctx.obj_const >= c {
-                    continue;
-                }
-            }
-            if let Some(sc) = ctx.scaling {
-                sc.unscale_x(&mut sol.x);
-            }
-            l.copy_from_slice(&pr.l[..ns]);
-            u.copy_from_slice(&pr.u[..ns]);
-            l[bj] = bv;
-            u[bj] = bv;
-            if sol.basis.basic_vars.len() == ctx.m_w && sol.basis.col_status.len() == ctx.n_w {
-                cur_basis = sol.basis;
-            } else {
-                cur_basis = bb;
-            }
-            next_x = Some(sol.x);
-        }
         x = match next_x {
             Some(v) => v,
             None => {
@@ -9583,10 +8881,6 @@ fn try_dive_repair(
     }
     crate::profile::incr(crate::profile::Ctr::DiveExhaustedSteps);
     None
-}
-
-fn discopt_node_id(i: usize) -> crate::bnb::node::NodeId {
-    crate::bnb::node::NodeId(i)
 }
 
 fn frac(v: f64) -> f64 {
@@ -14598,5 +13892,122 @@ mod tiny_entry_tests {
         let (gl, gu) = tiny_entry_gate_box(&csc, 2, 5, &l, &u, &b, &o);
         let c = [-1.0, 0.0, 0.1, 0.0, 0.0];
         assert!(relax_noise_entries(&csc, 2, 5, &c, &l, &u, &b, &gl, &gu, &o).is_none());
+    }
+}
+
+#[cfg(test)]
+mod p3_incprop_tests {
+    //! Gap plan P3: `IncProp` (incremental propagation for the primal heuristics) is a
+    //! restriction, never a cut: after any sequence of fixings, every integer point of
+    //! the original box that satisfies the rows and the fixings stays inside the
+    //! propagated box, and an "empty" verdict means there is no such point.
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn incprop_keeps_every_feasible_integer_point() {
+        let mut r = Lcg(0x1c9);
+        let (mut checked_points, mut empty_verdicts, mut tightenings) = (0usize, 0usize, 0usize);
+        for _case in 0..800 {
+            // Rows a.x + s = b over 4 integer columns in [0, 3] and one slack per row in
+            // [0, S] (S finite or INF), so each row is a ranged inequality.
+            let (nx, m) = (4usize, 3usize);
+            let n = nx + m;
+            let mut a = vec![0.0; m * n];
+            let mut b = vec![0.0; m];
+            for i in 0..m {
+                for j in 0..nx {
+                    if r.next() < 0.7 {
+                        a[i * n + j] = (r.next() * 7.0).floor() - 3.0;
+                    }
+                }
+                a[i * n + nx + i] = 1.0;
+                b[i] = (r.next() * 10.0).floor() - 2.0;
+            }
+            let mut l = vec![0.0; n];
+            let mut u = vec![3.0; n];
+            for i in 0..m {
+                l[nx + i] = 0.0;
+                u[nx + i] = if r.next() < 0.5 {
+                    INF
+                } else {
+                    (r.next() * 8.0).floor()
+                };
+            }
+            let is_int: Vec<bool> = (0..n).map(|j| j < nx).collect();
+            let csc = SparseCols::from_dense(&a, m, n);
+            // Enumerate the feasible integer points (slack determined by the row).
+            let mut feas: Vec<Vec<f64>> = Vec::new();
+            for code in 0..(4u32.pow(nx as u32)) {
+                let x: Vec<f64> = (0..nx)
+                    .map(|j| ((code / 4u32.pow(j as u32)) % 4) as f64)
+                    .collect();
+                let ok = (0..m).all(|i| {
+                    let act: f64 = (0..nx).map(|j| a[i * n + j] * x[j]).sum();
+                    let s = b[i] - act;
+                    s >= l[nx + i] - 1e-9 && s <= u[nx + i] + 1e-9
+                });
+                if ok {
+                    feas.push(x);
+                }
+            }
+            let mut p = IncProp::new(&csc, m, n, &b, &is_int, &l, &u);
+            let mut ok = true;
+            let mut fixed: Vec<(usize, f64)> = Vec::new();
+            for _ in 0..2 {
+                let j = (r.next() * nx as f64) as usize % nx;
+                let v = (r.next() * 4.0).floor();
+                fixed.push((j, v));
+                ok = p.set(j, v, v);
+                if !ok {
+                    break;
+                }
+            }
+            let consistent: Vec<&Vec<f64>> = feas
+                .iter()
+                .filter(|x| fixed.iter().all(|&(j, v)| x[j] == v))
+                .collect();
+            if !ok {
+                empty_verdicts += 1;
+                assert!(
+                    consistent.is_empty(),
+                    "empty verdict, but {} feasible points remain",
+                    consistent.len()
+                );
+                continue;
+            }
+            for j in 0..nx {
+                if p.l[j] > 0.0 || p.u[j] < 3.0 {
+                    tightenings += 1;
+                }
+            }
+            for x in consistent {
+                checked_points += 1;
+                for j in 0..nx {
+                    assert!(
+                        x[j] >= p.l[j] - 1e-9 && x[j] <= p.u[j] + 1e-9,
+                        "feasible point {x:?} cut by propagated box [{:?}, {:?}]",
+                        &p.l[..nx],
+                        &p.u[..nx]
+                    );
+                }
+            }
+        }
+        eprintln!("IncProp: {checked_points} points, {empty_verdicts} empty verdicts, {tightenings} tightenings");
+        assert!(checked_points > 500, "only {checked_points} points checked");
+        assert!(
+            empty_verdicts > 5 && tightenings > 50,
+            "propagation never fired"
+        );
     }
 }

@@ -366,6 +366,7 @@ fn run() -> Result<(), String> {
             warm_stall_guard: true,
             warm_stall_cap_override: None,
             expel_zero_artificials: false,
+            subtol_repair: true,
             bank_deadline_duals: false,
             recover_unstable_pivot: false,
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,

@@ -38157,7 +38157,18 @@ def _milp_root_cmir_mode() -> str:
 
     Armed, the pure-MILP route's root loop runs the aggregated c-MIR / lifted-cover
     separator (``lp/cmir.rs``) at HiGHS's design, allows stalled root rounds, and gets
-    3x the root cut and round budget (1,500 / 150). The route's loop separated GMI and
+    3x the root cut and round budget (1,500 / 150).
+
+    Since gap plan §12.10-12.12 the flag also carries the HiGHS-derived root and primal
+    machinery measured on the P3 targets, all in the Rust driver: path c-MIR over every
+    LP row (cuts included), HiGHS's tableau separator in place of GMI, HiGHS's root cut
+    selection (score, adaptive threshold, parallelism 0.1) and stall rule, per-round cut
+    ageing, zero-dual pruning with a basis remap, a cut loop that separates from the
+    dual's vertex when only the sub-tolerance repair failed, full bases in the tree
+    (zero artificials expelled), the HiGHS RENS/RINS port (neighbourhood dive + sub-MIP
+    on the cut LP, one nesting level), incremental propagation in the heuristics, and a
+    plain-root stall redive. It is panelled as a bundle with ``DISCOPT_MILP_RAND_ROUND``
+    and ``DISCOPT_MILP_RUN1_CONTINUE``. The route's loop separated GMI and
     covers only; SCIP's aggregation separator alone closes the P3 rows' root gap to
     within 6 % with presolve off, and this configuration reaches it on
     ``nexp-50-20-1-1`` (0.0 %) and ``neos-911970`` (5.4 %) from 27.6 % / 57.5 % (gap
@@ -38234,17 +38245,9 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
     if os.environ.get("DISCOPT_MILP_ROOT_CUTS", "1").lower() in ("0", "false", "no"):
         return None
     _cmir_mode = _milp_root_cmir_mode()
-    if os.environ.get("P3_NOROOTCUTS") == "1":  # gap plan P3 experiment only
-        return {
-            "root_cuts": 0,
-            "cut_rounds": 0,
-            "cut_select": True,
-            "cmir_cuts": False,
-            "root_cut_time_s": 0.0,
-        }
     return {
-        "root_cuts": 1500 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 500,
-        "cut_rounds": 150 if _cmir_mode != "off" and os.environ.get("P3_BIG", "1") == "1" else 50,
+        "root_cuts": 1500 if _cmir_mode != "off" else 500,
+        "cut_rounds": 150 if _cmir_mode != "off" else 50,
         "cut_select": True,
         # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default OFF): c-MIR in the root loop.
         "cmir_cuts": _cmir_mode != "off",
@@ -38252,9 +38255,7 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
         # Half the engine's slice, floored so a very short budget still gets one
         # useful pass. The loop stops early on tailing off, so on an instance
         # whose root closes in two rounds this ceiling is never reached.
-        "root_cut_time_s": max(
-            0.5, float(os.environ.get("P3_ROOT_SHARE", "0.5")) * float(engine_budget)
-        ),
+        "root_cut_time_s": max(0.5, 0.5 * float(engine_budget)),
     }
 
 
@@ -38932,9 +38933,6 @@ def _solve_milp_simplex(
     if _sel_req is not None:
         _sel_kw["node_selection"] = _sel_req["strategy"]
         _sel_req["used"] = True
-    elif os.environ.get("P3_NODESEL"):
-        # Gap plan P3 experiment only: A/B the driver's node selection.
-        _sel_kw["node_selection"] = os.environ["P3_NODESEL"]
     # ``branching_rule`` (#1535, retirement step 4): the driver's branching-variable rule.
     if branching_rule is not None:
         _sel_kw["branching_rule"] = branching_rule

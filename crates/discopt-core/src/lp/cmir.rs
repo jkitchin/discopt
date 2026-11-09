@@ -1833,9 +1833,113 @@ mod tests {
         assert!(compared >= 15, "only {compared} instances compared");
         assert!(fired > 0, "c-MIR never separated a cut in the ON arm");
     }
+
+    /// Regression (P3): `lifted_mic_knapsack` sorted its cover with a `feastol`-tolerant
+    /// comparator, which is not a total order (a ~ b, b ~ c, a > c); Rust's sort panics
+    /// on that ("user-provided comparison function does not correctly implement a total
+    /// order", hit on mik-250-20-75-1 inside a sub-MIP). Chains of near-ties in
+    /// `solval * val`, spaced below `feastol`, over many random orders must sort.
+    #[test]
+    fn lifted_mic_cover_sort_survives_near_tie_chains() {
+        let mut r = Rng(0x7a11);
+        let mut calls = 0usize;
+        for _ in 0..200 {
+            let n = 60;
+            let vals: Vec<f64> = (0..n).map(|_| 1.0 + (r.next() * 3.0).floor()).collect();
+            let upper = vec![10.0; n];
+            // Activities v_j x_j step by 0.4 * feastol: every neighbour pair is a tie,
+            // pairs two apart are not.
+            let solval: Vec<f64> = (0..n)
+                .map(|k| (1e-3 + (k as f64) * 0.4 * HIGHS_FEASTOL + 1e-9 * r.next()) / vals[k])
+                .collect();
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = (r.next() * (i + 1) as f64) as usize % (i + 1);
+                order.swap(i, j);
+            }
+            let v: Vec<f64> = order.iter().map(|&k| vals[k]).collect();
+            let s: Vec<f64> = order.iter().map(|&k| solval[k]).collect();
+            let _ = lifted_mic_knapsack(&v, &upper, &s, &vec![true; n], 0.5);
+            calls += 1;
+        }
+        assert_eq!(calls, 200);
+    }
+
+    /// P3 tableau separator soundness: every cut separated from LP vertices of random
+    /// fixed-charge models (random objectives, so varied bases) holds at every sampled
+    /// integer-feasible point.
+    #[test]
+    fn tableau_cuts_hold_at_every_sampled_feasible_point() {
+        let mut checks = 0usize;
+        let mut cuts_seen = 0usize;
+        for seed in 1..=30u64 {
+            let md = model(seed, 5, 2);
+            let csc = SparseCols::from_dense(&md.a, md.m, md.n);
+            let mut r = Rng(seed ^ 0x7ab1e);
+            let mut pts: Vec<Vec<f64>> = Vec::new();
+            for mask in 0..(1u32 << md.ny) {
+                for t in 0..20 {
+                    let mut xs = vec![0.0; 2 * md.ny];
+                    for j in 0..md.ny {
+                        let on = (mask >> j) & 1 == 1;
+                        xs[j] = if on { 1.0 } else { 0.0 };
+                        let cap = if on { md.big_m[j] } else { 0.0 };
+                        xs[md.ny + j] = match t {
+                            0 => cap,
+                            1 => 0.0,
+                            _ => cap * r.next(),
+                        };
+                    }
+                    let z = with_slacks(&md, &xs);
+                    if feasible(&md, &z) {
+                        pts.push(z);
+                    }
+                }
+            }
+            assert!(!pts.is_empty(), "seed {seed}: no feasible point sampled");
+            for _ in 0..8 {
+                let c: Vec<f64> = md.c.iter().map(|&v| v * (0.5 + r.next())).collect();
+                let sol = crate::lp::simplex::solve_lp_cols(
+                    csc.clone(),
+                    md.m,
+                    md.n,
+                    &c,
+                    &md.l,
+                    &md.u,
+                    &md.b,
+                    &SimplexOptions::default(),
+                );
+                if sol.status != crate::lp::simplex::LpStatus::Optimal
+                    || sol.basis.basic_vars.len() != md.m
+                {
+                    continue;
+                }
+                let cuts = separate_tableau_cmir_csc(
+                    &csc, md.n, md.m, &md.l, &md.u, &md.b, &sol.x, &sol.basis, &md.is_int, md.m,
+                    1000, 1e-9,
+                );
+                cuts_seen += cuts.len();
+                for cut in &cuts {
+                    for p in &pts {
+                        let act: f64 = cut.coeffs.iter().zip(p).map(|(a, v)| a * v).sum();
+                        checks += 1;
+                        assert!(
+                            act >= cut.rhs - 1e-9 * (1.0 + cut.rhs.abs()),
+                            "seed {seed}: tableau cut {:?} >= {} violated at {p:?} ({act})",
+                            cut.coeffs,
+                            cut.rhs
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("P3 tableau sampling: {cuts_seen} cuts, {checks} point checks");
+        assert!(cuts_seen > 20, "only {cuts_seen} tableau cuts separated");
+        assert!(checks > 2_000, "only {checks} checks");
+    }
 }
 
-/// Gap plan P3 (`P3_TABLEAU=1`, experiment): HiGHS's tableau separator
+/// Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator
 /// (`HighsTableauSeparator.cpp`). For each fractional basic integer column, the LP rows
 /// are aggregated with the weights of its row of `B⁻¹` (the tableau row), and the same
 /// c-MIR generator the path separator uses ([`cmir_row`]: bound and variable-bound
