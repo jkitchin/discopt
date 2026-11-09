@@ -53,6 +53,17 @@ def _fixed_charge(big_m: float) -> dm.Model:
     return m
 
 
+@pytest.fixture(autouse=True)
+def _highs_milp_route(monkeypatch):
+    """Both mechanisms under test live in ``lp_milp_highs`` (module docstring). Since
+    2026-11-09 the pure-MILP default is the Rust engine on every install (PR #2196),
+    so these tests name HiGHS explicitly, the optional ``discopt[highs]`` extra. On the
+    Rust default ``test_refused_incumbent_is_repaired_not_an_error`` spent its whole
+    120 s limit uncertified (CI: pytest timeout) where HiGHS takes 6.8 s."""
+    pytest.importorskip("highspy")
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "highs")
+
+
 def _solve(m, **kw):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

@@ -566,3 +566,32 @@ only reaches the two instances whose LP grows past the model, one better and one
 regression recorded against it. The plan's remaining P2 option, the per-node lift for
 "small-m models", is a size-keyed special case of the plan B rule this panel just
 measured as neutral, so it is not pursued. Next is P3 (root c-MIR / lifted cover).
+
+### 8.1 Fast-lane time budget after the default flips (2026-11-09, first full CI matrix)
+
+The full test matrix first ran when PR #2196 left draft; 10 tests broke the 15 s fast-lane
+budget (none failed an assertion). Measured locally, branch head vs the PR's base
+`976b583f` (a worktree build, loaded module verified), and on the branch with HiGHS named:
+
+| test | `main` | branch (Rust default) | branch, HiGHS named | cause | remedy |
+|---|---|---|---|---|---|
+| `test_1654::test_refused_incumbent_is_repaired_not_an_error` | — | 120.5 s (its whole `time_limit`) | 6.8 s | MILP default | HiGHS-route fixture: the module tests `lp_milp_highs` mechanisms |
+| `test_2156::...[relu_extended-kw3]` | — | 62.2 s | 4.2 s | MILP default | names HiGHS: the subject is the formulation |
+| `test_2156::...[relu_partition-kw2]` | 2.9 s | 13.4 s | — | MILP default | as above |
+| `test_1595::...psig40r...[2]` | 2.2 s | 25.5 s | 24.6 s (MILP knob only) | OA master default | allowlisted (default path) |
+| `test_1595::psig40r_still_certifies_through_the_default_path` | 1.8 s | 21.9 s | 19.9 s (MILP knob only) | OA master default | allowlisted (default path) |
+| `test_1624::routed_kernel_eligible_model_goes_to_the_route` | 5.2 s | 27.7 s | 28.7 s (MILP knob only) | route defaults | allowlisted |
+| `test_issue1729::...[shape1]` | 1.8 s | 12.4 s | — | route defaults | allowlisted |
+| `test_1917::...cstr...[True]` | 6.8 s | 12.6 s | — | route defaults | allowlisted |
+| `test_1940::...[ex1264-False]` | 2.1 s | 5.0 s | — | route defaults | allowlisted |
+| `test_milp_simplex_dive::...matches_highs` | 1.2 s | 5.4 s | — | route defaults | allowlisted |
+
+Root cause of the `psig40r` pair, traced: on `main` the model goes LP/NLP-BB with
+`master=highs` and certifies in 8 nodes (1.4 s); on the branch the master is the Rust
+lazy-cut driver (D3 default), whose first call ends at `node_limit` after 1,321 nodes
+(16.3 s) and a second call certifies at 491 nodes. None of the five driver flags this
+branch graduated is responsible (`NODE_GMI`, `CUT_LP`, `SUBMIP`, `SB_ARMED`,
+`ALIGNED_SLACKS` each `=0`: 19.4-21.2 s). It is the Rust engine's tree-size gap, the
+subject of this plan. Default-path tests stay on the default (allowlisted at their CI
+times, so the default keeps its coverage); the allowlist entries leave when the engine
+closes the gap.
