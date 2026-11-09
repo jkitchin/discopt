@@ -384,7 +384,10 @@ def worker(path: str, arm: str, time_limit: float, gap: float, max_nodes: int) -
     if names != [f"x{k}" for k in range(inst.n)]:
         raise RuntimeError(f"{inst.name}: unexpected from_nl variable layout {names[:5]}...")
     t0 = time.perf_counter()
-    r = mdl.solve(time_limit=time_limit, gap_tolerance=gap, max_nodes=max_nodes)
+    # Gap plan P0: a deterministic arm bounds the search by work (max_nodes), so ON vs OFF
+    # compares the same search, not two loads of the machine.
+    det = os.environ.get("DISCOPT_PANEL_DETERMINISTIC") == "1"
+    r = mdl.solve(time_limit=time_limit, gap_tolerance=gap, max_nodes=max_nodes, deterministic=det)
     wall = time.perf_counter() - t0
     viol = None
     if r.x is not None:

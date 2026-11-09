@@ -15,8 +15,16 @@ Pre-registered bars:
 
 BAR 1, cert-clean (every solve): certified objective = reference within 1e-4 (1+|opt|); no
   bound past it by > 1e-6 (1+|opt|); no incumbent better than it; every point max_viol <= 1e-6.
+BAR 1b (gap plan P0, CLAUDE.md §5 "no gap_certified=True instance regresses"): no instance
+  certified in EVERY OFF rep and in NO ON rep. A summed 2a let ``DISCOPT_MILP_CUT_LP``
+  graduate while ``enlight8`` went 3/3 -> 0/3. Partial losses (every OFF rep certified,
+  some ON reps not) are reported as ``cert_wobble``, not a bar on 3 reps.
+BIMODAL rows: an instance certified in some but not all OFF reps is a coin flip, and so is
+  one in ``KNOWN_BIMODAL`` (bimodal across panels, with the record). Such rows are excluded
+  from 2a's sums and from 2d, and reported separately; bar 1b still applies to them.
 BAR 2, net-positive:
-  (2a) certified ON >= certified OFF (summed over instances x reps);
+  (2a) certified ON >= certified OFF (summed over instances x reps, bimodal-OFF rows
+       excluded);
   (2b) nodes over the instances certified in every solve of both arms at least 15 % lower ON,
        OR certified ON >= OFF + 2 with that node total not higher ON;
   (2c) dual-bound losses <= 10 % of the open population (median over reps; a loss is > 0.01
@@ -83,6 +91,15 @@ def solve(path: str, on: bool, a) -> dict:
     return res
 
 
+#: Instances recorded as bimodal across panels (gap plan P0). Evidence per entry.
+KNOWN_BIMODAL = {
+    # OFF certified-rep counts across 16 MIPLIB-38+M panels on the same code paths
+    # (docs/dev/data/highs-parity/d2-review/history.out): 0/0 ... 0/1 0/2 3/3 3/2 2/1 1/3
+    # 2/0 0/3 2/3 3/2. It alone decided the INCR_PRICING x2 and TOL_ROBUST verdicts.
+    "p0548": "history.out: OFF certification ranges 0/3..3/3 across panels",
+}
+
+
 def cert_problems(res: dict, opt: float, maximize: bool) -> list[str]:
     res = {**res, "rens": {}}  # R.cert_problems' RENS check is inert without counters
     return R.cert_problems(res, opt, maximize, "off")
@@ -94,7 +111,17 @@ def evaluate(rows: list[dict]) -> dict:
         by.setdefault(r["name"], []).append(r)
     problems = [(r["name"], r["rep"], arm, p) for r in rows for arm, ps in r["problems"].items()
                 for p in ps]  # fmt: skip
-    solved = {arm: sum(bool(r[arm]["gap_certified"]) for r in rows) for arm in ("off", "on")}
+    cert = {nm: {arm: sum(bool(r[arm]["gap_certified"]) for r in rs) for arm in ("off", "on")}
+            for nm, rs in by.items()}  # fmt: skip
+    nrep = {nm: len(rs) for nm, rs in by.items()}
+    bimodal = sorted(nm for nm in by if 0 < cert[nm]["off"] < nrep[nm] or nm in KNOWN_BIMODAL)
+    lost_all = sorted(nm for nm in by if cert[nm]["off"] == nrep[nm] and cert[nm]["on"] == 0)
+    wobble = sorted(
+        nm for nm in by if cert[nm]["off"] == nrep[nm] and 0 < cert[nm]["on"] < nrep[nm]
+    )
+    stable = [nm for nm in by if nm not in bimodal]
+    solved = {arm: sum(cert[nm][arm] for nm in stable) for arm in ("off", "on")}
+    solved_all = {arm: sum(bool(r[arm]["gap_certified"]) for r in rows) for arm in ("off", "on")}
     both = [nm for nm, rs in by.items()
             if all(r[arm]["gap_certified"] for r in rs for arm in ("off", "on"))]  # fmt: skip
     nodes = {arm: sum(statistics.median([r[arm]["nodes"] for r in by[nm]]) for nm in both)
@@ -114,7 +141,7 @@ def evaluate(rows: list[dict]) -> dict:
         detail[nm] = {"dual_off": med["off"], "dual_on": med["on"], "off_spread": spread,
                       "dual_loss": loss, "primal_off": pg["off"], "primal_on": pg["on"],
                       "incumbents_off": inc["off"], "incumbents_on": inc["on"]}  # fmt: skip
-    lost_inc = [nm for nm in by
+    lost_inc = [nm for nm in stable
                 if sum(r["off"]["objective"] is not None for r in by[nm])
                 > sum(r["on"]["objective"] is not None for r in by[nm])]  # fmt: skip
     med_primal = {arm: (statistics.median([detail[nm][f"primal_{arm}"] for nm in pop])
@@ -133,6 +160,11 @@ def evaluate(rows: list[dict]) -> dict:
     return {
         "bar1_problems": problems,
         "bar1_pass": not problems,
+        "bar1b_cert_lost_every_rep": lost_all,
+        "bar1b_pass": not lost_all,
+        "cert_wobble": {nm: cert[nm] for nm in wobble},
+        "bimodal_off": {nm: cert[nm] for nm in bimodal},
+        "solved_including_bimodal": solved_all,
         "bar1_checks": 2 * len(rows),
         "solved": solved,
         "both_certified": len(both),
@@ -144,7 +176,7 @@ def evaluate(rows: list[dict]) -> dict:
         "median_primal_gap": med_primal,
         "bar2": bar2,
         "bar2_pass": all(bar2.values()),
-        "graduate": not problems and all(bar2.values()),
+        "graduate": not problems and not lost_all and all(bar2.values()),
         "fired": fired,
         "per_instance": detail,
     }
@@ -152,22 +184,52 @@ def evaluate(rows: list[dict]) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--flag", required=True)
+    ap.add_argument("--flag", default="")
     ap.add_argument("--on-value", default="1")
-    ap.add_argument("--fired", required=True, help="regex over profile counter names")
+    ap.add_argument("--fired", default="", help="regex over profile counter names")
     ap.add_argument("--time-limit", type=float, default=20.0)
     ap.add_argument("--gap", type=float, default=P.GAP)
     ap.add_argument("--max-nodes", type=int, default=100_000_000)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--instances", default="")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default="")
+    ap.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="solve with deterministic=True in both arms (bound the search with --max-nodes)",
+    )
+    ap.add_argument(
+        "--rescore",
+        default="",
+        help="re-evaluate the rows of an existing panel file (.json or .json.gz) and exit",
+    )
     ap.add_argument(
         "--resume",
         action="store_true",
         help="keep the (instance index, rep) rows already in --out and run the rest",
     )
     a = ap.parse_args(argv)
+    if a.rescore:
+        import gzip
+
+        src = Path(a.rescore)
+        if src.suffix == ".gz":
+            with gzip.open(src, "rt") as fh:
+                data = json.loads(fh.read())
+        else:
+            data = json.loads(src.read_text())
+        new = evaluate(data["rows"])
+        old = data.get("verdict") or {}
+        keys = ("graduate", "bar1b_cert_lost_every_rep", "bimodal_off", "cert_wobble",
+                "solved", "solved_including_bimodal", "bar2")  # fmt: skip
+        print(json.dumps({"file": str(src), "stored_graduate": old.get("graduate"),
+                          **{k: new[k] for k in keys}}, indent=1))  # fmt: skip
+        return 0
+    if not a.flag or not a.fired or not a.out:
+        ap.error("--flag, --fired and --out are required unless --rescore is given")
+    if a.deterministic:
+        os.environ["DISCOPT_PANEL_DETERMINISTIC"] = "1"
     global FLAG, ON_VALUE, _CTR, _CTR_NAME
     FLAG, ON_VALUE = a.flag, a.on_value
     _CTR = re.compile(rf"^\s+({a.fired})\s+(\d+)$")

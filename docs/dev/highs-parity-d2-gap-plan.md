@@ -408,3 +408,28 @@ visible rather than hidden:
 
 A fix that closes a class above should flip the corresponding test back to the default
 route.
+
+## 9. P0 results (2026-11-09): the instrument, corrected and re-applied
+
+`d2_flag_panel.py` now has bar 1b (no instance certified in every OFF rep and in no ON
+rep), sets bimodal rows aside (OFF certified in some but not all reps, or listed in
+`KNOWN_BIMODAL` with its cross-panel record: `p0548`), takes `--deterministic`
+(`deterministic=True`, bounded by `--max-nodes`) and `--rescore FILE`. The route now records
+the run-1 / run-2 split per solve (`milp/run1_*`, `milp/run2_*` in `solver_stats`), which P1
+needs. Regression tests: `discopt_benchmarks/tests/test_d2_flag_panel_bars.py`.
+
+Re-scoring the recorded panels with the corrected bars:
+
+| Panel | Stored verdict | Corrected | Deciding row |
+|---|---|---|---|
+| `CUT_LP` (W1) | graduated | **fails bar 1b** | `enlight8` 3/3 OFF -> 0/3 ON |
+| `CUT_LP` + `SB_ARMED` bundle (default ON) | graduated | **fails bar 1b** | `enlight8` |
+| `LP_PRIMAL_INCR_PRICING` (steps 1+2, retired) | failed | **passes every bar** | its only failure was `p0548` (2a, 2d); stable rows: certified 123 = 123, nodes 47,723 -> 40,050 (-16 %), median primal gap 0.160 -> 0.160 |
+| `LP_PRIMAL_INCR_PRICING` + row-wise pricing (retired) | failed | fails 2e | median primal gap 0.160 -> 0.168 |
+| `TOL_ROBUST` v2 | failed | fails 2b | (independent of `p0548`) |
+| `MILP_RUST_COEF_ENTRY` (graduated today) | graduated | graduates | no instance lost; stable rows 123 -> 126 |
+
+Two owner decisions follow from this, neither taken here: `CUT_LP` is default ON on a panel
+that fails the corrected bar (the audit already retracted its cert-clean claim and kept it ON
+pending the P2 fix); and the incremental-pricing engine (steps 1+2) was retired on a coin
+flip, so it is a candidate to restore from history and re-panel.

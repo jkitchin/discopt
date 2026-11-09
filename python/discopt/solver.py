@@ -38783,6 +38783,8 @@ def _solve_milp_simplex(
     # Retirement step 4: the driver's per-solve counters (root cut rows, strong-branch
     # probe LPs), summed over this function's searches -- the ``cuts/*`` and
     # ``branching/strong_probe_lps`` stats the Python MILP tree reported.
+    # Gap plan P0: where the budget went, run 1 vs the #698 re-entry (run 2), per solve.
+    _split: dict[str, float] = {}
     _search_counts = {
         "root_cut_rows": 0,
         "strong_probe_lps": 0,
@@ -38975,6 +38977,7 @@ def _solve_milp_simplex(
         instrumentation: the driver returns the number either way.
         """
         _d = {"lp/iters": float(_lp_iters), "lp/driver_nodes": float(nodes)}
+        _d.update(_split)
         _d["branching/strong_probe_lps"] = float(_search_counts["strong_probe_lps"])
         if _search_counts["root_cut_rows"] > 0:
             _d["cuts/root_rows"] = float(_search_counts["root_cut_rows"])
@@ -39072,6 +39075,10 @@ def _solve_milp_simplex(
         status = "feasible"
         _stopped_on_nodes = True
     _effective_time_limit = float(time_limit)
+    _split["milp/run1_wall"] = time.perf_counter() - t_start
+    _split["milp/run1_nodes"] = float(nodes)
+    _split["milp/run1_certified"] = float(status == "optimal")
+    _split["milp/run2_ran"] = 0.0
     if status == "feasible" and not _debug_stop_pending:
         _elapsed_run1 = time.perf_counter() - t_start
         if _full_budget and incumbent_time_extension > 0.0:
@@ -39125,6 +39132,7 @@ def _solve_milp_simplex(
                 )
                 if _swap_seed is not None and _swap_seed.size == n_orig:
                     _seed2 = np.ascontiguousarray(_swap_seed.astype(np.float64).ravel())
+            _t_run2 = time.perf_counter()
             (
                 _status2,
                 _x2,
@@ -39163,6 +39171,17 @@ def _solve_milp_simplex(
                     else {}
                 ),
                 **_frontier_opts,
+            )
+            _split["milp/run2_ran"] = 1.0
+            _split["milp/run2_wall"] = time.perf_counter() - _t_run2
+            _split["milp/run2_nodes"] = float(_nodes2)
+            _split["milp/run2_certified"] = float(_status2 == "optimal")
+            _split["milp/run2_better_primal"] = float(
+                bool(np.isfinite(_obj2)) and _obj2 < obj - 1e-9 * (1.0 + abs(obj))
+            )
+            _split["milp/run2_better_dual"] = float(
+                bool(np.isfinite(_bound2))
+                and (not np.isfinite(bound) or _bound2 > bound + 1e-9 * (1.0 + abs(bound)))
             )
             # #1874: a node- or frontier-capped run 2 stopped on a node budget.
             _stopped_on_nodes = _status2 == "node_limit"
