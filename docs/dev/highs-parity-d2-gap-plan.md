@@ -632,3 +632,37 @@ the root bound stays at 21 against SCIP's 29 from the same family. The defect is
 strength, not missing plumbing. Next: compare one round's cuts against SCIP's on a
 single flow-conservation row of this instance (aggregation path, bound substitution
 choice, delta / complementation), then fix the construction, then re-run this entry.
+
+### 12.1 P3 entry, step 2: isolating the separator (`gap-plan-p3/p3_root_arms.py`)
+
+The route's root with the cut families switched per arm (driver kwargs patched, root
+only; W4 core restored for the entry, not committed; `p3_root_arms_w4.jsonl`):
+
+| row | no cuts | GMI (default) | c-MIR only | GMI + c-MIR | SCIP none -> aggregation |
+|---|---|---|---|---|---|
+| nexp-50-20-1-1 | 14 | 21 | 23 | 21 | 12.9 -> 29 |
+| beavma | 172,135 | 312,687 | 309,683 | 327,186 | 158,460 -> 379,184 |
+| mik-250-20-75-1 | -57,326 | -51,757 | -52,544 | -51,762 | -58,972 -> -51,076 |
+
+Two defects, separately: our c-MIR alone is far weaker than SCIP's aggregation alone,
+and GMI + c-MIR can be worse than c-MIR alone (`nexp-1-1` 21 vs 23: the shared budget
+and selection crowd c-MIR cuts out). With W4's HiGHS delta selection + flip + lifted MIC
+on the c-MIR-only arm: `beavma` 10.2 %, `mik-1` 3.6 %; `nexp-1-1` stays 23 and
+`neos-911970` 57.5 %.
+
+**Ruled out:**
+- the base construction: the textbook flow cover (`x1 + x2 >= 7`, `x_i <= 5 y_i`, LP
+  `y = 0.7`) comes out exactly, `y1 + y2 >= 2`.
+- aggregation depth: `CMIR_MAX_AGGR` 2 -> 6 leaves `nexp-1-1` at 22, `neos-911970`
+  unchanged, `beavma` 20.8 % and `sp150x300d` 29.0 % (worse).
+- walking into variable-bound rows: skipping them as aggregation candidates changes
+  nothing measurable.
+
+`neos-911970` has no variable bounds at all (48 free continuous columns carrying the
+whole objective, 48 mixed rows, 59 integer-only rows), and SCIP's aggregation still
+takes it from 57.5 % to 6 %. So the missing piece is not variable-bound handling either.
+
+**Next (not yet run):** read SCIP's applied aggregation cuts at the root of
+`nexp-50-20-1-1` and `neos-911970` (pyscipopt, presolve off) and reconstruct which rows
+each one aggregates and which bound substitutions and delta it used. That turns "our
+separator is weaker" into a named difference, before any further code.
