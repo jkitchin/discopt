@@ -16,9 +16,9 @@
 //! no cut leans on a range this module could not read. The tableau separator is
 //! skipped in a round whose basis holds such a column.
 //!
-//! Not ported (measured deferrals, §12.16-§12.19): variable bounds (HiGHS's clique
-//! table/implications), the implied-bound, clique and mod-k separators, and
-//! propagation of pool cuts into the global domain.
+//! Not ported (measured deferrals, §12.16-§12.19): the implied-bound and clique
+//! separators. Variable bounds (§12.21), root propagation (§12.20), node separation
+//! (§12.23) and mod-k (§12.24) are ported behind their levers.
 
 use super::pool::{CutPool, NoObserver};
 use super::separators::{
@@ -534,6 +534,23 @@ pub fn vbounds_enabled() -> bool {
     }
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the ported mod-k separator
+/// (`HighsModkSeparator`, gap plan §12.24) runs after the path separator, at the
+/// root and (with [`node_sepa_enabled`]) at nodes. Default OFF;
+/// `DISCOPT_HIGHS_SEPA_MODK=1` opts in. Read per call, refusing garbage.
+pub fn modk_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_MODK") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_MODK={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// One round's outcome.
 pub struct RoundCuts {
     /// Selected cuts as `coeffs . x >= rhs` over the structural columns, each with
@@ -726,6 +743,24 @@ impl RootSeparation {
                 );
             }
         }
+        if modk_enabled() {
+            let seed = self.random_seed as i64 + self.lp_iterations + self.pool.num_cuts();
+            let mut sink = PoolSink {
+                pool: &mut self.pool,
+                source: "modk",
+                probe,
+                checked: 0,
+                violated: 0,
+                vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
+            };
+            super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed);
+            if probe.is_some() {
+                eprintln!(
+                    "HIGHS_SEPA_CHECK modk checked={} violated={}",
+                    sink.checked, sink.violated
+                );
+            }
+        }
         self.vbounds = vstore;
         crate::profile::record_max(
             crate::profile::Ctr::HighsSepaVarBounds,
@@ -760,4 +795,166 @@ impl RootSeparation {
             .collect();
         RoundCuts { cuts, generated }
     }
+}
+
+impl RootSeparation {
+    /// Hand over the variable-bound store after the root (for node separation, which
+    /// reads it shared and never adds to it).
+    pub fn take_vbounds(&mut self) -> Option<VarBoundStore> {
+        self.vbounds.take()
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether tree nodes run the ported tableau
+/// and path separators (gap plan §12.23) in place of discopt's node GMI. Default
+/// OFF; `DISCOPT_HIGHS_SEPA_NODE=1` opts in. Read per call, refusing garbage.
+pub fn node_sepa_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_NODE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_NODE={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// The inputs of one node separation call beyond its LP.
+pub struct NodeSepa<'a> {
+    /// The node's structural column bounds (the pool scores efficacy in the node's
+    /// box; validity never reads them).
+    pub node_l: &'a [f64],
+    /// Upper counterpart of `node_l`.
+    pub node_u: &'a [f64],
+    /// Original model rows and their nonzeros (the pool's density limits).
+    pub model_rows: usize,
+    /// Nonzeros of the original rows over the structural columns.
+    pub model_nnz: usize,
+    /// The root's variable bounds, read only.
+    pub vbounds: Option<&'a VarBoundStore>,
+    /// Seeds the cut generators (deterministic per node).
+    pub seed: i64,
+    /// The top-level solve: enables `DISCOPT_HIGHS_SEPA_CHECK_POINT`.
+    pub top_level: bool,
+    /// Cuts returned at most.
+    pub max_cuts: usize,
+}
+
+/// One node separation round: HiGHS's tableau and path separators on the node LP
+/// `r`, whose `l`/`u` must be the **global** box for every column (structural and
+/// slack). The node's own bounds can be tighter (branching, node FBBT on slacks), and
+/// a cut derived from them would be valid only in the subtree; deriving every cut
+/// over the global box keeps it valid everywhere, as HiGHS's transformed LP does by
+/// reading the global domain. Stateless: a fresh pool and fresh separators per call,
+/// so nodes evaluated in parallel share nothing. Returns `>=` cuts over the structural
+/// columns, in the pool's selection order.
+pub fn separate_node(r: &StdFormRound<'_>, p: &NodeSepa<'_>) -> Vec<GomoryCut> {
+    let mut view = View::build(r);
+    let empty = Vec::new();
+    let vubs = |c: i32| p.vbounds.map_or_else(|| empty.clone(), |v| v.vubs(c));
+    let vlbs = |c: i32| p.vbounds.map_or_else(|| empty.clone(), |v| v.vlbs(c));
+    let intcols: Vec<i32> = (0..r.ns)
+        .filter(|&j| r.is_int[j])
+        .map(|j| j as i32)
+        .collect();
+    let colval = view.colval.clone();
+    let rowval = view.rowval.clone();
+    let contcols = view.contcols.clone();
+    let coldual = vec![0.0; r.ns];
+    let setup = TlSetup {
+        col_value: &colval,
+        col_dual: &coldual,
+        row_value: &rowval,
+        continuous_cols: &contcols,
+        integral_cols: &intcols,
+        vubs: &vubs,
+        vlbs: &vlbs,
+    };
+    let probe = if p.top_level { check_point() } else { None };
+    let mut pool = CutPool::new(
+        r.ns,
+        POOL_AGE_LIMIT,
+        POOL_SOFT_LIMIT,
+        p.model_nnz as i64,
+        p.model_rows.max(1) as i64,
+    );
+    let mut tl = TransformedLp::new(&view, &setup);
+    let mut agg = LpAggregator::new(&view);
+    let (mut checked, mut violated) = (0usize, 0usize);
+    {
+        let mut tableau = TableauSeparator {
+            num_calls: 1,
+            ..Default::default()
+        };
+        let mut sink = PoolSink {
+            pool: &mut pool,
+            source: "node-tableau",
+            probe,
+            checked: 0,
+            violated: 0,
+            vb: None,
+        };
+        tableau.separate(&mut view, &mut agg, &mut tl, &mut sink, p.seed);
+        checked += sink.checked;
+        violated += sink.violated;
+    }
+    {
+        let mut path = PathSeparator::new(0);
+        path.num_calls += 1;
+        let seed = p.seed + pool.num_cuts();
+        let mut sink = PoolSink {
+            pool: &mut pool,
+            source: "node-path",
+            probe,
+            checked: 0,
+            violated: 0,
+            vb: None,
+        };
+        path.separate(&view, &mut agg, &mut tl, &mut sink, seed);
+        checked += sink.checked;
+        violated += sink.violated;
+    }
+    if modk_enabled() {
+        let seed = p.seed + pool.num_cuts();
+        let mut sink = PoolSink {
+            pool: &mut pool,
+            source: "node-modk",
+            probe,
+            checked: 0,
+            violated: 0,
+            vb: None,
+        };
+        super::modk::separate_modk(&view, &mut agg, &mut tl, &mut sink, seed);
+        checked += sink.checked;
+        violated += sink.violated;
+    }
+    if probe.is_some() {
+        eprintln!("HIGHS_SEPA_NODE_CHECK checked={checked} violated={violated}");
+    }
+    let nl: Vec<f64> = p.node_l[..r.ns].iter().map(|&v| lo_bound(v)).collect();
+    let nu: Vec<f64> = p.node_u[..r.ns].iter().map(|&v| up_bound(v)).collect();
+    let mut cutset = Vec::new();
+    let sel = pool.separate(
+        &mut NoObserver,
+        &view.colval,
+        &nl,
+        &nu,
+        FEASTOL,
+        &mut cutset,
+    );
+    sel.into_iter()
+        .take(p.max_cuts)
+        .map(|c| {
+            let mut coeffs = vec![0.0; r.ns];
+            for (&j, &v) in c.inds.iter().zip(&c.vals) {
+                coeffs[j as usize] = -v;
+            }
+            GomoryCut {
+                coeffs,
+                rhs: -c.rhs,
+            }
+        })
+        .collect()
 }

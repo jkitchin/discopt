@@ -507,6 +507,25 @@ pub fn pdqsort_f64(v: &mut [f64]) {
 
 // ---- libstdc++ heap algorithms (bits/stl_heap.h) ----
 
+/// `std::push_heap(v.begin(), v.end(), comp)`: the new element is `v`'s last.
+pub(crate) fn push_heap<T: Copy, F: FnMut(&T, &T) -> bool>(v: &mut [T], comp: &mut F) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    let value = v[n - 1];
+    push_heap_impl(v, 0, n - 1, 0, value, comp);
+}
+
+/// `std::pop_heap(v.begin(), v.end(), comp)`: moves the top to `v`'s last slot.
+pub(crate) fn pop_heap<T: Copy, F: FnMut(&T, &T) -> bool>(v: &mut [T], comp: &mut F) {
+    let n = v.len();
+    if n < 2 {
+        return;
+    }
+    pop_heap_to(v, 0, n - 1, n - 1, comp);
+}
+
 fn push_heap_impl<T: Copy, F: FnMut(&T, &T) -> bool>(
     v: &mut [T],
     first: usize,

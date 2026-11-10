@@ -1439,6 +1439,8 @@ struct LocalLp {
     m: usize,
     n: usize,
     x: Vec<f64>,
+    /// Row duals of the last optimal solve (the HiGHS path separator reads them).
+    y: Vec<f64>,
     basis: Basis,
     best: Option<f64>,
     pivots: usize,
@@ -1495,6 +1497,7 @@ impl LocalLp {
             self.best = Some(g);
         }
         self.x = sol.x;
+        self.y = sol.dual;
         self.basis = sol.basis;
         Some(g > prev + 1e-9 * prev.abs().max(1.0))
     }
@@ -1511,14 +1514,17 @@ impl LocalLp {
 /// Every solve is warm from the node's plain optimal basis extended over the new rows,
 /// and every bound is NS-verified over the augmented matrix. The shared LP is never
 /// touched; the pool is updated by the caller between batches.
+#[allow(clippy::too_many_arguments)]
 fn node_local_gmi_bound(
     ctx: &NodeCtx<'_>,
     full_l: &[f64],
     full_u: &[f64],
     x0: &[f64],
+    y0: &[f64],
     basis0: &Basis,
     pool_rows: &[GomoryCut],
     rounds: usize,
+    seed: i64,
 ) -> LocalGmi {
     let tol = ctx.opts.simplex.tol;
     let mut lp = LocalLp {
@@ -1531,6 +1537,7 @@ fn node_local_gmi_bound(
         m: ctx.m_w,
         n: ctx.n_w,
         x: x0.to_vec(),
+        y: y0.to_vec(),
         basis: basis0.clone(),
         best: None,
         pivots: 0,
@@ -1557,20 +1564,58 @@ fn node_local_gmi_bound(
         gl.resize(lp.n, 0.0);
         gu.resize(lp.n, INF);
         let t_sep = crate::profile::Timer::new(crate::profile::Phase::NodeGmiSep);
-        let cuts = crate::lp::gomory::separate_gomory_cols_global(
-            &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
-            tol, 1e7,
-        );
-        drop(t_sep);
-        crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
-        // The cuts are truncated to the working columns; select on the point there.
-        let sel = select_cuts(
-            cuts,
-            &lp.x[..ctx.n_w],
-            NODE_GMI_MAX_CUTS,
-            CUT_MIN_EFFICACY,
-            CUT_MAX_PARALLEL,
-        );
+        let sel = if let Some(h) = ctx.highs_node.as_ref() {
+            // Gap plan §12.23: HiGHS's tableau and path separators over the global
+            // box (`gl`/`gu`, slacks included), selected by a fresh ported pool.
+            let cuts = crate::lp::highs_cutgen::bridge::separate_node(
+                &crate::lp::highs_cutgen::bridge::StdFormRound {
+                    csc: &lp.csc,
+                    m: lp.m,
+                    n: lp.n,
+                    ns: ctx.ns,
+                    b: &lp.b,
+                    l: &gl,
+                    u: &gu,
+                    is_int: &lp.is_int,
+                    x: &lp.x,
+                    y: &lp.y,
+                    basic_vars: &lp.basis.basic_vars,
+                },
+                &crate::lp::highs_cutgen::bridge::NodeSepa {
+                    node_l: &lp.l[..ctx.ns],
+                    node_u: &lp.u[..ctx.ns],
+                    model_rows: h.model_rows,
+                    model_nnz: h.model_nnz,
+                    vbounds: h.vbounds,
+                    seed: seed + lp.pivots as i64,
+                    top_level: h.top_level,
+                    max_cuts: NODE_GMI_MAX_CUTS,
+                },
+            );
+            drop(t_sep);
+            crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
+            cuts.into_iter()
+                .map(|mut k| {
+                    k.coeffs.resize(ctx.n_w, 0.0);
+                    k
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let cuts = crate::lp::gomory::separate_gomory_cols_global(
+                &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
+                tol, 1e7,
+            );
+            drop(t_sep);
+            crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
+            // The cuts are truncated to the working columns; select on the point there.
+            select_cuts(
+                cuts,
+                &lp.x[..ctx.n_w],
+                NODE_GMI_MAX_CUTS,
+                CUT_MIN_EFFICACY,
+                CUT_MAX_PARALLEL,
+            )
+        };
         if sel.is_empty() {
             break;
         }
@@ -5051,6 +5096,23 @@ fn solve_milp_node_search(
     // from inside the simplex loop. Soundness is untouched: those steps only
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
+    // Gap plan §12.23: node separation under the HiGHS port reads the root's
+    // variable bounds (shared, read only) and the model's density limits.
+    let highs_node_vb: Option<crate::lp::highs_cutgen::vbound::VarBoundStore> =
+        match highs_sep.as_mut() {
+            Some(hs) if crate::lp::highs_cutgen::bridge::node_sepa_enabled() => hs.take_vbounds(),
+            _ => None,
+        };
+    let highs_node: Option<HighsNodeCtx<'_>> = (highs_sep.is_some()
+        && crate::lp::highs_cutgen::bridge::node_sepa_enabled())
+    .then(|| HighsNodeCtx {
+        vbounds: highs_node_vb.as_ref(),
+        model_rows: n_orig_rows,
+        model_nnz: (0..ns)
+            .map(|j| csc_w.col(j).0.iter().filter(|&&r| r < n_orig_rows).count())
+            .sum(),
+        top_level: milp_depth == 0,
+    });
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
     let mut strong_probe_lps: usize = 0;
@@ -5338,6 +5400,7 @@ fn solve_milp_node_search(
                     None
                 },
                 tm: &tm,
+                highs_node,
             };
             #[cfg(feature = "parallel")]
             {
@@ -6486,6 +6549,18 @@ struct NodeCtx<'a> {
     /// (unbounded, the default path). See [`ROOT_DIVE_SHARE`].
     dive_deadline: Option<std::time::Instant>,
     tm: &'a TreeManager,
+    /// Gap plan §12.23 (`DISCOPT_HIGHS_SEPA_NODE` under `DISCOPT_MILP_ROOT_CMIR=highs`):
+    /// node rounds run the ported HiGHS separators instead of discopt's node GMI.
+    highs_node: Option<HighsNodeCtx<'a>>,
+}
+
+/// What node separation under the HiGHS port reads beyond the node LP.
+#[derive(Clone, Copy)]
+struct HighsNodeCtx<'a> {
+    vbounds: Option<&'a crate::lp::highs_cutgen::vbound::VarBoundStore>,
+    model_rows: usize,
+    model_nnz: usize,
+    top_level: bool,
 }
 
 /// One strong-branch pseudocost sample harvested from a probe:
@@ -7314,9 +7389,11 @@ fn solve_node(
                     &full_l,
                     &full_u,
                     &sol.x,
+                    &sol.dual,
                     &sol.basis,
                     &rows,
                     if gmi_slot { NODE_GMI_ROUNDS } else { 0 },
+                    id.0 as i64,
                 );
                 out.iters += lg.pivots;
                 if let Some(g) = lg.bound {
