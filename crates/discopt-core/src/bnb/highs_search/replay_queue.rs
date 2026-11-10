@@ -30,6 +30,8 @@ fn hx(t: &str) -> f64 {
 #[derive(Debug, Default)]
 pub(crate) struct QueueStats {
     pub ops: usize,
+    pub bounding_removals: usize,
+    pub global_prunes: usize,
     pub states: usize,
     pub pops: usize,
     pub queues: usize,
@@ -99,7 +101,11 @@ pub(crate) fn replay(text: &str, s: &mut QueueStats) {
             "QB" => {
                 let q = qs.get_mut(&tag).expect("bounding on an unknown queue");
                 q.set_optimality_limit(hx(t[3]));
+                let before = q.num_nodes();
                 q.perform_bounding(hx(t[2]));
+                if q.num_nodes() < before {
+                    s.bounding_removals += 1;
+                }
                 s.ops += 1;
             }
             "QG" => {
@@ -108,6 +114,7 @@ pub(crate) fn replay(text: &str, s: &mut QueueStats) {
                 for v in &t[3..3 + n] {
                     q.prune_node(v.parse().unwrap());
                 }
+                s.global_prunes += 1;
                 s.ops += 1;
             }
             "QC" => {
@@ -159,4 +166,22 @@ fn full_queue_replay() {
         "the replay checked nothing: {s:?}"
     );
     assert!(s.mismatches.is_empty());
+}
+
+#[test]
+fn node_queue_fixture_replays_exactly() {
+    // HiGHS 1.15.1 at threads=1 (presolve, restarts, symmetry off) on mik-250-20-75-1,
+    // p0201, flugpl, fiber, sp150x300d and dcmulti: every queue operation of the main
+    // search and its sub-MIPs, with the queue state after each.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/highs_nodequeue_replay.txt"
+    );
+    let text = std::fs::read_to_string(path).expect("node-queue fixture");
+    let mut s = QueueStats::default();
+    replay(&text, &mut s);
+    // §6: the replay must exercise pops, bounding that removes nodes, and global pruning.
+    assert!(s.queues >= 100 && s.pops >= 200 && s.states >= 700, "{s:?}");
+    assert!(s.bounding_removals >= 3 && s.global_prunes >= 3, "{s:?}");
+    assert!(s.mismatches.is_empty(), "{:#?}", s.mismatches);
 }

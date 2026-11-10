@@ -180,3 +180,25 @@ choice); the port, fed the dumped evaluations through mock `NodeLp`/`Branching`,
 same decisions. (c) Soundness panel clean. (d) Deleted in the same change: batched node
 evaluation, the reduce, plunge emulation (`DISCOPT_HIGHS_SEARCH`, `_SEARCH_DOMAIN`, `_DIVE`,
 `_DIVE_BATCH`), and the MILP driver's use of `TreeManager` (which the spatial B&B keeps).
+
+## 7. Progress log
+
+**Stage 0 (2026-11-10), done.**
+- Baseline (`data/highs-parity/search/stage0_baseline.{py,jsonl}`, 62 rows, 20 s,
+  `RAYON_NUM_THREADS=1`, three arms interleaved, idle machine): **default 40 certified**
+  (total wall 547.1 s), **bundle + search 48** (398.1 s), **bundle + search + presolve 50**
+  (376.0 s); sense-aware soundness (`score_ab.py`) 505 checks, 0 violations. HiGHS at one
+  thread: 59. (The "default 47" quoted in earlier notes was the base settings with randomized
+  rounding and run-1 continuation on, not the shipped default.)
+- Retired with their implementations: `DISCOPT_HIGHS_SEP_FIRST`, `DISCOPT_HIGHS_TREE_RCFIX`,
+  `DISCOPT_HIGHS_ROOT_POOL=all` (`500f03f4`).
+- `HighsNodeQueue` translated (`bnb/highs_search/node_queue.rs`). HiGHS queue dump
+  (`data/highs-parity/search/hs_dump_queue.patch`, `HS_DUMP_QUEUE`) over mik-250-20-75-1,
+  p0201, flugpl, fiber, sp150x300d and dcmulti: 145 queues (main search and sub-MIPs), 665
+  operations, 226 pops, 776 recorded states, bounding that removes nodes (4 calls, 27 nodes),
+  global pruning (3), suboptimal nodes: **0 mismatches**. Committed as the fixture
+  `tests/data/highs_nodequeue_replay.txt` with `node_queue_fixture_replays_exactly`.
+
+**Next: stage 1** (§6): the `HS_DUMP_SEARCH` dump of HiGHS's search control, the
+`HighsSearch` node stack and control translation with its replay, then the switch-over of the
+driver's search loop.
