@@ -826,9 +826,9 @@ pub fn node_sepa_mode() -> NodeSepaMode {
             "1" | "true" | "yes" | "on" | "replace" => NodeSepaMode::Replace,
             "add" => NodeSepaMode::Add,
             "0" | "false" | "no" | "off" | "" => NodeSepaMode::Off,
-            other => panic!(
-                "DISCOPT_HIGHS_SEPA_NODE={other:?} is not recognized (expected 0, 1 or add)"
-            ),
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_NODE={other:?} is not recognized (expected 0, 1 or add)")
+            }
         },
     }
 }
