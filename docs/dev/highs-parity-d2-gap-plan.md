@@ -1212,3 +1212,46 @@ Committed sample: `tests/data/highs_transformedlp_replay.txt` (first transformed
 of egout, gr4x6, bell5, flugpl, beavma). It is replayed at the transformed-LP level
 (`transformed_lp_fixture_replays_bit_identically`) and at the separator level
 (`separators_fixture_replay_bit_identically`).
+
+### 12.19 Option A, phase 4a: `HighsCutPool` ported and replayed (2026-11-10)
+
+`pool.rs` ports the single-threaded `HighsCutPool`. That covers storage in reusable
+row slots (`HighsDynamicRowMatrix`: deleted row indices are reused last-in
+first-out, which fixes the index every selection tiebreak hashes) and duplicate
+rejection through `compute_cut_hash` (`vector_hash` + `double_hash_code`, pinned by
+reference values from HiGHS's headers in `p3_highs_vector_hash_reference.cpp`). It
+also covers `separate` (active-norm score, adaptive `minScoreFactor`, the 0.1
+parallelism filter), `performAging`, `lpCutRemoved`, `resetAge`, and the
+propagation-row density limits. Propagation itself stays outside the pool: a
+`PoolObserver` hears about added and deleted cuts.
+
+**Instrument.** `p3_highs_pool_dump.patch` (`HS_DUMP_POOL=<file>`) logs every
+operation on the main solve's global pool, in order: `addCut` inputs and the
+returned index; `separate`'s solution and domain, the selected indices and the
+score state after; `performAging`; `lpCutRemoved`; and `resetAge` (called by
+propagation when a cut tightens a bound).
+
+**Result.** Root, presolve off, MIPLIB-38+M: 199,956 `addCut` calls (116,733
+accepted, 83,223 duplicates), 1,147 selection calls choosing 8,333 cuts, 225
+agings, 5,151 LP removals, 11,970 age resets. **0 mismatches** in returned indices,
+selections and score state.
+
+**First run:** a mismatch at the 629th `addCut` on egout. The port's
+`vector_hash` lacked HiGHS's final `* fibonacci_muliplier()`. More cuts collided, so
+the port rejected a cut HiGHS kept. Caught by the replay, fixed, and pinned by the
+reference test.
+
+**Is the probe live (§6)?** On a 5-instance subset:
+- maxpar 0.1 -> 0.2: 92 mismatches;
+- initial `minScoreFactor` 0.9 -> 0.8: 46 mismatches;
+- duplicate threshold `1 - 1e-6` -> `1 - 1e-3`: 0 mismatches. No pair with the same
+  hash and support has parallelism in that band.
+
+Committed sample: `tests/data/highs_cutpool_replay.txt` (egout, gr4x6, flugpl,
+bell5, issue-2173; `cut_pool_fixture_replays_bit_identically`).
+
+**Remaining for the wiring (phase 4b):** the root separation loop
+(`HighsMipSolverData::evaluateRootNode`: at most `2*sqrt(maxTreeSizeLog2)` rounds
+and the smoothed-progress stall rule); `HighsSeparation::separationRound` (separate,
+propagate, resolve, add the pool's selection to the LP, LP ageing via
+`HighsLpRelaxation::performAging`); and cut propagation into the global domain.

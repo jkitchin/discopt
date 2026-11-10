@@ -1,0 +1,136 @@
+diff --git a/highs/mip/HighsCutPool.cpp b/highs/mip/HighsCutPool.cpp
+index b9011e8..1391aca 100644
+--- a/highs/mip/HighsCutPool.cpp
++++ b/highs/mip/HighsCutPool.cpp
+@@ -18,6 +18,43 @@
+ #include "util/HighsCDouble.h"
+ #include "util/HighsHash.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++// ---- cut pool replay dump (HS_DUMP_POOL=<path>): the main solve's global pool ----
++static const void* poolDumpTarget = nullptr;
++static FILE* poolDumpF = nullptr;
++static long poolDumpCount = 0;
++static void poolDumpInit(const HighsMipSolver& mip, const HighsCutPool* pool) {
++  static bool init = false;
++  if (mip.submip || pool != &mip.mipdata_->getCutPool()) return;
++  if (!init) {
++    init = true;
++    const char* p = std::getenv("HS_DUMP_POOL");
++    if (p) poolDumpF = std::fopen(p, "w");
++    poolDumpTarget = pool;
++    if (poolDumpF)
++      std::fprintf(poolDumpF, "POOL ncols %d agelim %d softlimit %d modelnnz %lld modelrows %d\n",
++                   (int)mip.numCol(), (int)mip.options_mip_->mip_pool_age_limit,
++                   (int)mip.options_mip_->mip_pool_soft_limit, (long long)mip.numNonzero(), (int)mip.numRow());
++  }
++}
++FILE* hsPoolDump(const void* pool) {
++  static long maxc = -1;
++  if (maxc < 0) { const char* m = std::getenv("HS_DUMP_POOL_MAX"); maxc = m ? std::atol(m) : 20000; }
++  if (!poolDumpF || pool != poolDumpTarget || poolDumpCount >= maxc) return nullptr;
++  return poolDumpF;
++}
++static void pdD(FILE* f, const char* tag, const double* v, size_t n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (size_t i = 0; i < n; ++i) std::fprintf(f, " %a", v[i]);
++  std::fprintf(f, "\n");
++}
++static void pdI(FILE* f, const char* tag, const HighsInt* v, size_t n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (size_t i = 0; i < n; ++i) std::fprintf(f, " %d", (int)v[i]);
++  std::fprintf(f, "\n");
++}
++
+ static uint64_t compute_cut_hash(const HighsInt* Rindex, const double* Rvalue,
+                                  double maxabscoef, const HighsInt Rlen) {
+   std::vector<uint32_t> valueHashCodes(Rlen);
+@@ -148,6 +185,7 @@ double HighsCutPool::getParallelism(HighsInt row1, HighsInt row2,
+ }
+ 
+ void HighsCutPool::lpCutRemoved(HighsInt cut, bool thread_safe) {
++  if (FILE* pf = hsPoolDump(this)) { ++poolDumpCount; std::fprintf(pf, "PR %d %d\n", (int)cut, (int)thread_safe); }
+   const HighsInt n = numLps_[cut].fetch_add(-1, std::memory_order_relaxed);
+   if (thread_safe || n > 1) return;
+   if (matrix_.columnsLinked(cut)) {
+@@ -160,6 +198,7 @@ void HighsCutPool::lpCutRemoved(HighsInt cut, bool thread_safe) {
+ }
+ 
+ void HighsCutPool::performAging() {
++  if (FILE* pf = hsPoolDump(this)) { ++poolDumpCount; std::fprintf(pf, "PG\n"); }
+   HighsInt cutIndexEnd = matrix_.getNumRows();
+ 
+   HighsInt agelim = agelim_;
+@@ -234,6 +273,24 @@ void HighsCutPool::separate(const std::vector<double>& sol,
+   HighsInt nrows = matrix_.getNumRows();
+   const HighsInt* ARindex = matrix_.getARindex();
+   const double* ARvalue = matrix_.getARvalue();
++  FILE* pf = hsPoolDump(this);
++  if (pf) {
++    ++poolDumpCount;
++    std::fprintf(pf, "PS feastol %a threadsafe %d cutset %d\n", feastol, (int)thread_safe, (int)cutset.numCuts());
++    pdD(pf, "sol", sol.data(), sol.size());
++    pdD(pf, "lb", domain.col_lower_.data(), domain.col_lower_.size());
++    pdD(pf, "ub", domain.col_upper_.data(), domain.col_upper_.size());
++  }
++  HighsInt dumpCut0 = cutset.numCuts();
++  struct PsOut {
++    FILE* f; const HighsCutSet& cs; HighsInt c0; const double& best; const double& fac;
++    ~PsOut() {
++      if (!f) return;
++      std::fprintf(f, "PS_OUT best %a fac %a sel %d", best, fac, (int)(cs.numCuts() - c0));
++      for (HighsInt k = c0; k < cs.numCuts(); ++k) std::fprintf(f, " %d", (int)cs.cutindices[k]);
++      std::fprintf(f, "\n");
++    }
++  } psout{pf, cutset, dumpCut0, bestObservedScore, minScoreFactor};
+ 
+   std::vector<std::pair<double, HighsInt>> efficacious_cuts;
+ 
+@@ -505,6 +562,16 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+                               bool integral, bool propagate,
+                               bool extractCliques, bool isConflict) {
+   mipsolver.mipdata_->debugSolution.checkCut(Rindex, Rvalue, Rlen, rhs);
++  poolDumpInit(mipsolver, this);
++  FILE* pf = hsPoolDump(this);
++  if (pf) {
++    ++poolDumpCount;
++    std::fprintf(pf, "PA rhs %a integral %d propagate %d extract %d conflict %d\n", rhs, (int)integral,
++                 (int)propagate, (int)extractCliques, (int)isConflict);
++    pdI(pf, "inds", Rindex, Rlen);
++    pdD(pf, "vals", Rvalue, Rlen);
++  }
++  struct PaRet { FILE* f; HighsInt r; ~PaRet() { if (f) std::fprintf(f, "PA_RET %d\n", (int)r); } } paret{pf, -1};
+ 
+   sortBuffer.resize(Rlen);
+ 
+@@ -634,6 +701,7 @@ HighsInt HighsCutPool::addCut(const HighsMipSolver& mipsolver, HighsInt* Rindex,
+                                                             Rvalue, Rlen, rhs);
+   }
+ 
++  paret.r = rowindex;
+   return rowindex;
+ }
+ 
+diff --git a/highs/mip/HighsCutPool.h b/highs/mip/HighsCutPool.h
+index 72068cc..77ffe8b 100644
+--- a/highs/mip/HighsCutPool.h
++++ b/highs/mip/HighsCutPool.h
+@@ -18,6 +18,9 @@
+ #include "mip/HighsDynamicRowMatrix.h"
+ 
+ class HighsLpRelaxation;
++#include <cstdio>
++/// pool replay dump stream for the given pool (HS_DUMP_POOL), else nullptr
++FILE* hsPoolDump(const void* pool);
+ 
+ struct HighsCutSet {
+   std::vector<HighsInt> cutindices;
+@@ -104,6 +107,7 @@ class HighsCutPool {
+                    const double* Rvalue, HighsInt Rlen, double rhs);
+ 
+   void resetAge(HighsInt cut, bool thread_safe = false) {
++    if (FILE* pf = hsPoolDump(this)) std::fprintf(pf, "PZ %d %d\n", (int)cut, (int)thread_safe);
+     if (ages_[cut] > 0) {
+       if (thread_safe) {
+         ageResetWhileLocked_[cut].store(1, std::memory_order_relaxed);

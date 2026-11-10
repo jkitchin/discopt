@@ -43,6 +43,7 @@
 pub mod cdouble;
 pub mod core;
 pub mod integers;
+pub mod pool;
 pub mod random;
 pub mod separators;
 pub mod sparse_vec;
@@ -51,5 +52,7 @@ pub mod transformed_lp;
 
 #[cfg(test)]
 mod replay;
+#[cfg(test)]
+mod replay_pool;
 #[cfg(test)]
 mod replay_tl;
