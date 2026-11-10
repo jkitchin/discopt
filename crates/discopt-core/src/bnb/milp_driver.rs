@@ -1594,12 +1594,28 @@ fn node_local_gmi_bound(
             );
             drop(t_sep);
             crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, cuts.len() as u64);
-            cuts.into_iter()
+            let mut out: Vec<GomoryCut> = cuts
+                .into_iter()
                 .map(|mut k| {
                     k.coeffs.resize(ctx.n_w, 0.0);
                     k
                 })
-                .collect::<Vec<_>>()
+                .collect();
+            if h.add_gmi {
+                let gmi = crate::lp::gomory::separate_gomory_cols_global(
+                    &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis,
+                    &lp.is_int, tol, 1e7,
+                );
+                crate::profile::incr_by(crate::profile::Ctr::NodeGmiRaw, gmi.len() as u64);
+                out.extend(select_cuts(
+                    gmi,
+                    &lp.x[..ctx.n_w],
+                    NODE_GMI_MAX_CUTS,
+                    CUT_MIN_EFFICACY,
+                    CUT_MAX_PARALLEL,
+                ));
+            }
+            out
         } else {
             let cuts = crate::lp::gomory::separate_gomory_cols_global(
                 &lp.csc, lp.m, lp.n, &lp.l, &lp.u, &gl, &gu, ctx.n_w, &lp.b, &lp.basis, &lp.is_int,
@@ -5106,6 +5122,8 @@ fn solve_milp_node_search(
     let highs_node: Option<HighsNodeCtx<'_>> = (highs_sep.is_some()
         && crate::lp::highs_cutgen::bridge::node_sepa_enabled())
     .then(|| HighsNodeCtx {
+        add_gmi: crate::lp::highs_cutgen::bridge::node_sepa_mode()
+            == crate::lp::highs_cutgen::bridge::NodeSepaMode::Add,
         vbounds: highs_node_vb.as_ref(),
         model_rows: n_orig_rows,
         model_nnz: (0..ns)
@@ -6557,6 +6575,8 @@ struct NodeCtx<'a> {
 /// What node separation under the HiGHS port reads beyond the node LP.
 #[derive(Clone, Copy)]
 struct HighsNodeCtx<'a> {
+    /// Also run node GMI and keep its selection alongside the ported cuts.
+    add_gmi: bool,
     vbounds: Option<&'a crate::lp::highs_cutgen::vbound::VarBoundStore>,
     model_rows: usize,
     model_nnz: usize,

@@ -805,20 +805,37 @@ impl RootSeparation {
     }
 }
 
-/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether tree nodes run the ported tableau
-/// and path separators (gap plan §12.23) in place of discopt's node GMI. Default
-/// OFF; `DISCOPT_HIGHS_SEPA_NODE=1` opts in. Read per call, refusing garbage.
-pub fn node_sepa_enabled() -> bool {
+/// How tree nodes use the ported separators under `DISCOPT_MILP_ROOT_CMIR=highs`
+/// (gap plan §12.23, §12.26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeSepaMode {
+    /// discopt's node GMI only (default).
+    Off,
+    /// The ported tableau/path separators in place of node GMI (`=1`).
+    Replace,
+    /// Both: the ported cuts plus node GMI's selection (`=add`).
+    Add,
+}
+
+/// `DISCOPT_HIGHS_SEPA_NODE`: unset/`0` Off, `1` Replace, `add` Add. Read per call,
+/// refusing garbage.
+pub fn node_sepa_mode() -> NodeSepaMode {
     match std::env::var("DISCOPT_HIGHS_SEPA_NODE") {
-        Err(_) => false,
+        Err(_) => NodeSepaMode::Off,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => {
-                panic!("DISCOPT_HIGHS_SEPA_NODE={other:?} is not recognized (expected 1 or 0)")
-            }
+            "1" | "true" | "yes" | "on" | "replace" => NodeSepaMode::Replace,
+            "add" => NodeSepaMode::Add,
+            "0" | "false" | "no" | "off" | "" => NodeSepaMode::Off,
+            other => panic!(
+                "DISCOPT_HIGHS_SEPA_NODE={other:?} is not recognized (expected 0, 1 or add)"
+            ),
         },
     }
+}
+
+/// Whether node separation under the port is on in either mode.
+pub fn node_sepa_enabled() -> bool {
+    node_sepa_mode() != NodeSepaMode::Off
 }
 
 /// The inputs of one node separation call beyond its LP.
