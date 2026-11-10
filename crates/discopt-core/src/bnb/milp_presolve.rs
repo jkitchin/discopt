@@ -37,6 +37,8 @@
 //!   HiGHS `dominatedColumns`): fixings and integer bound tightenings; see
 //!   `Work::dominated_pairs`.
 //!
+//! - parallel columns with proportional costs merged (`PostOp::Split` undoes it).
+//!
 //! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
 //! Every step is exact up to `feastol` on the row activity, and the caller re-verifies
@@ -98,6 +100,8 @@ pub struct PresolveStats {
     pub dominated_by_derived: usize,
     /// Dominated column pairs that fixed or tightened a column.
     pub dominated_pairs: usize,
+    /// Parallel columns merged.
+    pub parallel_cols: usize,
     /// Passes over the rule set.
     pub passes: usize,
 }
@@ -131,6 +135,64 @@ pub enum PostOp {
         /// The row's other entries.
         terms: Vec<(usize, f64)>,
     },
+    /// Parallel columns merged: column `j` carried `x' = x_j + s x_k`; split it back
+    /// within the original bounds (`x_k` integral when `k_int`, `x_j` when `j_int`).
+    Split {
+        /// Kept column (holds `x'`).
+        j: usize,
+        /// Removed column.
+        k: usize,
+        /// Scale: column `k` = `s` times column `j`.
+        s: f64,
+        /// Bounds of `x_j` before the merge.
+        lj: f64,
+        /// Upper bound of `x_j` before the merge.
+        uj: f64,
+        /// Bounds of `x_k`.
+        lk: f64,
+        /// Upper bound of `x_k`.
+        uk: f64,
+        /// Integrality of `x_j`.
+        j_int: bool,
+        /// Integrality of `x_k`.
+        k_int: bool,
+    },
+}
+
+/// Split `x'` into `(x_j, x_k)` with `x_j + s x_k = x'` inside the bounds (see
+/// `PostOp::Split`); the merge conditions make such a split exist.
+#[allow(clippy::too_many_arguments)]
+fn split_parallel(
+    xp: f64,
+    s: f64,
+    lj: f64,
+    uj: f64,
+    lk: f64,
+    uk: f64,
+    j_int: bool,
+    k_int: bool,
+) -> (f64, f64) {
+    // x_k in [(x' - u_j)/s, (x' - l_j)/s] (ordered by the sign of s), within [l_k, u_k].
+    let (a, b) = ((xp - uj) / s, (xp - lj) / s);
+    let (mut lo, mut hi) = if s > 0.0 { (a, b) } else { (b, a) };
+    lo = if lo.is_nan() { -INF } else { lo.max(lk) };
+    hi = if hi.is_nan() { INF } else { hi.min(uk) };
+    if k_int {
+        lo = (lo - 1e-9).ceil();
+        hi = (hi + 1e-9).floor();
+    }
+    let xk = if lo.is_finite() {
+        lo
+    } else if hi.is_finite() {
+        hi
+    } else {
+        0.0f64.max(lk).min(uk)
+    };
+    let mut xj = xp - s * xk;
+    if j_int {
+        xj = xj.round();
+    }
+    (xj, xk)
 }
 
 /// The presolved problem and how to map its solutions back.
@@ -174,6 +236,21 @@ impl Presolved {
                     ref terms,
                 } => {
                     x[s] = (rhs - terms.iter().map(|&(k, v)| v * x[k]).sum::<f64>()) / a;
+                }
+                PostOp::Split {
+                    j,
+                    k,
+                    s,
+                    lj,
+                    uj,
+                    lk,
+                    uk,
+                    j_int,
+                    k_int,
+                } => {
+                    let (xj, xk) = split_parallel(x[j], s, lj, uj, lk, uk, j_int, k_int);
+                    x[j] = xj;
+                    x[k] = xk;
                 }
             }
         }
@@ -897,6 +974,14 @@ impl Work {
                     if sj * self.c[j] <= 0.0 {
                         let (wl, wu) = self.col_range(j, Some((k, kstar)), true);
                         let w = if sj > 0.0 { wu } else { -wl };
+                        // The value x_j can be raised to: for an integer column the
+                        // integer at or below it (rounding the other way would claim a
+                        // value the rows forbid).
+                        let w = if self.is_int[j] && w.is_finite() {
+                            (w + INT_SLACK * (1.0 + w.abs())).floor()
+                        } else {
+                            w
+                        };
                         if w > nb {
                             nb = w;
                         }
@@ -909,6 +994,11 @@ impl Work {
                     if sk * self.c[k] >= 0.0 {
                         let (wl, wu) = self.col_range(k, Some((j, jstar)), true);
                         let w = if sk > 0.0 { wl } else { -wu };
+                        let w = if self.is_int[k] && w.is_finite() {
+                            (w - INT_SLACK * (1.0 + w.abs())).ceil()
+                        } else {
+                            w
+                        };
                         if w < nb {
                             nb = w;
                         }
@@ -964,6 +1054,114 @@ impl Work {
     /// `s x_k <= nb`: the mirror of `set_side_bound`.
     fn set_side_bound_upper(&mut self, k: usize, s: f64, nb: f64, slack: f64) -> bool {
         self.set_side_bound(k, -s, -nb, slack)
+    }
+
+    /// Parallel columns (HiGHS `detectParallelRowsAndCols`, column part): when column
+    /// `k` is `s` times column `j` and `c_k = s c_j`, only `x' = x_j + s x_k` matters, so
+    /// `k` is removed and `j` carries `x'` with the summed bounds. Postsolve must split
+    /// `x'` back inside the bounds, which is always possible when: both are continuous;
+    /// `j` is continuous and `u_j - l_j >= |s|` (an interval of `x_k` of length `>= 1`);
+    /// both are integer, `s` integral and `u_j - l_j >= |s| - 1`. The roles are swapped
+    /// when that admits the pair. Unequal costs are a domination, left to
+    /// `dominated_pairs`.
+    #[allow(clippy::needless_range_loop)]
+    fn parallel_cols(&mut self) -> bool {
+        let mut groups: HashMap<Vec<(usize, i64)>, Vec<usize>> = HashMap::new();
+        let mut entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.n];
+        for (r, (ri, rv)) in self.rows.iter().enumerate() {
+            if !self.row_alive[r] {
+                continue;
+            }
+            for (&j, &a) in ri.iter().zip(rv) {
+                entries[j].push((r, a));
+            }
+        }
+        for j in 0..self.n {
+            if !self.col_alive[j] || entries[j].is_empty() {
+                continue;
+            }
+            entries[j].sort_by_key(|e| e.0);
+            let s0 = entries[j][0].1;
+            let key: Vec<(usize, i64)> = entries[j]
+                .iter()
+                .map(|&(r, a)| (r, ((a / s0) * 1e9).round() as i64))
+                .collect();
+            groups.entry(key).or_default().push(j);
+        }
+        let mut changed = false;
+        let mut keys: Vec<_> = groups.into_iter().filter(|g| g.1.len() > 1).collect();
+        keys.sort_by_key(|g| g.1[0]);
+        for (_, cols) in keys {
+            let j0 = cols[0];
+            for &k0 in &cols[1..] {
+                if !self.col_alive[j0] || !self.col_alive[k0] {
+                    continue;
+                }
+                let lam = entries[k0][0].1 / entries[j0][0].1;
+                let exact = entries[j0].len() == entries[k0].len()
+                    && entries[j0]
+                        .iter()
+                        .zip(&entries[k0])
+                        .all(|(&(r0, a0), &(r1, a1))| {
+                            r0 == r1 && (a1 - lam * a0).abs() <= 1e-12 * a1.abs().max(1.0)
+                        });
+                if !exact
+                    || (self.c[k0] - lam * self.c[j0]).abs() > 1e-12 * self.c[k0].abs().max(1.0)
+                {
+                    continue;
+                }
+                // Choose which column carries x' (j) and which is split off (k).
+                let admits = |w: &Work, j: usize, k: usize, s: f64| -> bool {
+                    let width = w.u[j] - w.l[j];
+                    match (w.is_int[j], w.is_int[k]) {
+                        (false, false) => true,
+                        (false, true) => width >= s.abs(),
+                        (true, true) => (s - s.round()).abs() <= 1e-12 && width >= s.abs() - 1.0,
+                        (true, false) => false,
+                    }
+                };
+                let (j, k, s) = if admits(self, j0, k0, lam) {
+                    (j0, k0, lam)
+                } else if admits(self, k0, j0, 1.0 / lam) {
+                    (k0, j0, 1.0 / lam)
+                } else {
+                    continue;
+                };
+                self.ops.push(PostOp::Split {
+                    j,
+                    k,
+                    s,
+                    lj: self.l[j],
+                    uj: self.u[j],
+                    lk: self.l[k],
+                    uk: self.u[k],
+                    j_int: self.is_int[j],
+                    k_int: self.is_int[k],
+                });
+                let (lo_k, up_k) = if s > 0.0 {
+                    (s * self.l[k], s * self.u[k])
+                } else {
+                    (s * self.u[k], s * self.l[k])
+                };
+                let nl = self.l[j] + lo_k;
+                let nu = self.u[j] + up_k;
+                self.l[j] = if nl.is_nan() { -INF } else { nl };
+                self.u[j] = if nu.is_nan() { INF } else { nu };
+                // x' is integral only when both are.
+                self.is_int[j] = self.is_int[j] && self.is_int[k];
+                self.col_alive[k] = false;
+                for &r in &self.col_rows[k] {
+                    let (ri, rv) = &mut self.rows[r];
+                    if let Some(p) = ri.iter().position(|&q| q == k) {
+                        ri.swap_remove(p);
+                        rv.swap_remove(p);
+                    }
+                }
+                self.stats.parallel_cols += 1;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Row-dual bounds from the row sense alone (minimization, reduced cost
@@ -1307,6 +1505,9 @@ impl Work {
         if self.dominated_pairs() {
             changed = true;
         }
+        if self.parallel_cols() {
+            changed = true;
+        }
         if self.infeasible {
             return false;
         }
@@ -1612,18 +1813,48 @@ mod tests {
             f.lo.push(rhs);
             f.up.push(rhs);
         }
+        if r.int(0, 2) == 0 {
+            // A parallel column: s times an existing column, with s times its cost (and
+            // sometimes an unrelated cost, a domination instead).
+            let j = r.int(0, f.n as i64 - 1) as usize;
+            let sc = [1.0, 2.0, -1.0, -2.0][r.int(0, 3) as usize];
+            let k = f.n;
+            f.n += 1;
+            for (ri, rv) in f.rows.iter_mut() {
+                if let Some(p) = ri.iter().position(|&q| q == j) {
+                    let v = rv[p] * sc;
+                    ri.push(k);
+                    rv.push(v);
+                }
+            }
+            let ck = if r.int(0, 3) == 0 {
+                r.int(-4, 4) as f64
+            } else {
+                sc * f.c[j]
+            };
+            f.c.push(ck);
+            let lk = r.int(-2, 1) as f64;
+            f.l.push(lk);
+            f.u.push(lk + r.int(0, 3) as f64);
+            f.is_int.push(true);
+        }
         f
     }
 
     #[test]
     fn presolve_preserves_the_optimum_and_postsolve_is_feasible() {
-        let mut r = Lcg(2024);
+        // `XSEED=<u64>` reruns the 3,000 cases from another seed (test-only).
+        let mut r = Lcg(std::env::var("XSEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2024));
         let (mut cases, mut reduced, mut infeasible, mut feasible) =
             (0usize, 0usize, 0usize, 0usize);
         let mut doubletons = 0usize;
         let mut aggregated = 0usize;
         let mut propagated = 0usize;
         let mut pairs = 0usize;
+        let mut par_cols = 0usize;
         for _ in 0..3000 {
             let f = random_ip(&mut r);
             let want = brute_min(&f);
@@ -1633,6 +1864,7 @@ mod tests {
             aggregated += p.stats.aggregated;
             propagated += p.stats.propagated;
             pairs += p.stats.dominated_pairs;
+            par_cols += p.stats.parallel_cols;
             if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
                 reduced += 1;
             }
@@ -1673,8 +1905,9 @@ mod tests {
                 && doubletons > 50
                 && aggregated > 20
                 && propagated > 100
-                && pairs > 100,
-            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated} dominated pairs {pairs}"
+                && pairs > 100
+                && par_cols > 20,
+            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated} dominated pairs {pairs} parallel cols {par_cols}"
         );
     }
 }
