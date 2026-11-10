@@ -75,6 +75,10 @@ pub trait TlContext {
     fn is_col_integral(&self, col: i32) -> bool;
     /// `lprelaxation.getRow(row)`.
     fn row(&self, row: i32) -> (&[i32], &[f64]);
+    /// Called at the start of every `transform`/`untransform`. A no-op by default;
+    /// the replay tests use it to load the global bounds HiGHS read at that call,
+    /// since the cut pool can tighten the global domain between calls.
+    fn begin_call(&self) {}
 }
 
 /// LP-solution data and variable-bound lists read only by the constructor.
@@ -503,6 +507,7 @@ impl TransformedLp {
         mut integers_positive: bool,
         prefer_vbds: bool,
     ) -> Option<TransformedRow> {
+        ctx.begin_call();
         let feastol = ctx.feastol();
         let smv = ctx.small_matrix_value();
         let slack_offset = ctx.num_cols() as i32;
@@ -762,6 +767,7 @@ impl TransformedLp {
         rhs: f64,
         integral: bool,
     ) -> Option<(Vec<i32>, Vec<f64>, f64)> {
+        ctx.begin_call();
         let mut tmp_rhs = CDouble::new(rhs);
         let slack_offset = ctx.num_cols() as i32;
         let mut vals = vals_in.to_vec();

@@ -18,9 +18,13 @@
 //! UT_OUT 0 | UT_OUT 1 rhs F  inds.. vals..
 //! ```
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 
 use super::replay::parse_hex_f64 as hx;
+use super::separators::{
+    CutSink, LpAggregator, PathSeparator, SepContext, TableauContext, TableauSeparator,
+};
 use super::transformed_lp::{TlContext, TlSetup, TransformedLp, VarBound, VbEntry};
 
 /// `mipdata_->epsilon` (1e-9 in every dump: the GC dumps record it).
@@ -31,12 +35,168 @@ struct Ctx {
     nrows: usize,
     feastol: f64,
     smv: f64,
-    glb: Vec<f64>,
-    gub: Vec<f64>,
-    slb: Vec<f64>,
-    sub: Vec<f64>,
+    glb: RefCell<Vec<f64>>,
+    gub: RefCell<Vec<f64>>,
+    slb: RefCell<Vec<f64>>,
+    sub: RefCell<Vec<f64>>,
     isint: Vec<bool>,
+    /// Bound snapshots HiGHS read at each transform/untransform of a separator
+    /// section, applied in order by `begin_call`.
+    pending: RefCell<VecDeque<Vec<(i32, f64, f64)>>>,
     rows: HashMap<i32, (Vec<i32>, Vec<f64>)>,
+    lp: Option<LpData>,
+    tab: Option<TabData>,
+}
+
+/// LP data dumped by the separator-era TL dump.
+struct LpData {
+    colval: Vec<f64>,
+    rowval: Vec<f64>,
+    rowdual: Vec<f64>,
+    rowlo: Vec<f64>,
+    rowup: Vec<f64>,
+    maxabs: Vec<f64>,
+    astart: Vec<i32>,
+    aindex: Vec<i32>,
+    avalue: Vec<f64>,
+    contcols: Vec<i32>,
+    nintcols: usize,
+}
+
+/// Per-call tableau-separator inputs.
+struct TabData {
+    has_invert: bool,
+    basis: Vec<i32>,
+    edgewt: Option<Vec<f64>>,
+    rowep: HashMap<i32, Option<Vec<(i32, f64)>>>,
+    lpiters: i64,
+    softlimit: i64,
+    requested: Vec<i32>,
+}
+
+impl SepContext for Ctx {
+    fn epsilon(&self) -> f64 {
+        EPSILON
+    }
+    fn col_value(&self) -> &[f64] {
+        &self.lp.as_ref().unwrap().colval
+    }
+    fn row_value(&self) -> &[f64] {
+        &self.lp.as_ref().unwrap().rowval
+    }
+    fn row_dual(&self) -> &[f64] {
+        &self.lp.as_ref().unwrap().rowdual
+    }
+    fn row_lower(&self, row: i32) -> f64 {
+        self.lp.as_ref().unwrap().rowlo[row as usize]
+    }
+    fn row_upper(&self, row: i32) -> f64 {
+        self.lp.as_ref().unwrap().rowup[row as usize]
+    }
+    fn col_matrix(&self) -> (&[i32], &[i32], &[f64]) {
+        let l = self.lp.as_ref().unwrap();
+        (&l.astart, &l.aindex, &l.avalue)
+    }
+    fn continuous_cols(&self) -> &[i32] {
+        &self.lp.as_ref().unwrap().contcols
+    }
+    fn num_integral_cols(&self) -> usize {
+        self.lp.as_ref().unwrap().nintcols
+    }
+    fn max_abs_row_val(&self, row: i32) -> f64 {
+        self.lp.as_ref().unwrap().maxabs[row as usize]
+    }
+}
+
+impl TableauContext for Ctx {
+    fn has_invert(&self) -> bool {
+        self.tab.as_ref().unwrap().has_invert
+    }
+    fn basic_variables(&self) -> &[i32] {
+        &self.tab.as_ref().unwrap().basis
+    }
+    fn dual_edge_weights(&self) -> Option<&[f64]> {
+        self.tab.as_ref().unwrap().edgewt.as_deref()
+    }
+    fn basis_inverse_row(&mut self, basis_index: i32) -> Option<Vec<(i32, f64)>> {
+        let t = self.tab.as_mut().unwrap();
+        t.requested.push(basis_index);
+        t.rowep.get(&basis_index).cloned().flatten()
+    }
+    fn sepa_lp_iterations(&self) -> i64 {
+        self.tab.as_ref().unwrap().lpiters
+    }
+    fn pool_soft_limit(&self) -> i64 {
+        self.tab.as_ref().unwrap().softlimit
+    }
+}
+
+/// A cut HiGHS submitted to its pool, and the pool's answer.
+struct WantAdd {
+    inds: Vec<i32>,
+    vals: Vec<f64>,
+    rhs: f64,
+    integral: bool,
+    ret: i32,
+    numcuts_after: i64,
+}
+
+/// The pool mocked from HiGHS's recorded `addCut` sequence.
+struct MockPool {
+    want: Vec<WantAdd>,
+    next: usize,
+    numcuts: i64,
+    numavail: i64,
+    bad: Vec<String>,
+}
+
+impl CutSink for MockPool {
+    fn add_cut(&mut self, inds: &[i32], vals: &[f64], rhs: f64, integral: bool) -> i32 {
+        let k = self.next;
+        self.next += 1;
+        let Some(w) = self.want.get(k) else {
+            self.bad
+                .push(format!("extra cut #{k} (len {})", inds.len()));
+            return -1;
+        };
+        if w.inds != inds
+            || bits(&w.vals) != bits(vals)
+            || w.rhs.to_bits() != rhs.to_bits()
+            || w.integral != integral
+        {
+            self.bad.push(format!(
+                "cut #{k} differs: len {} vs {}, rhs {rhs:e} vs {:e}, integral {integral} vs {}",
+                inds.len(),
+                w.inds.len(),
+                w.rhs,
+                w.integral
+            ));
+        }
+        self.numcuts = w.numcuts_after;
+        w.ret
+    }
+    fn num_cuts(&self) -> i64 {
+        self.numcuts
+    }
+    fn num_available_cuts(&self) -> i64 {
+        self.numavail
+    }
+}
+
+impl Ctx {
+    /// Apply (transformed column, lb, ub) entries; slack columns set slack bounds.
+    fn set_bounds(&self, b: &[(i32, f64, f64)]) {
+        for &(c, l, u) in b {
+            let c = c as usize;
+            if c < self.ncols {
+                self.glb.borrow_mut()[c] = l;
+                self.gub.borrow_mut()[c] = u;
+            } else {
+                self.slb.borrow_mut()[c - self.ncols] = l;
+                self.sub.borrow_mut()[c - self.ncols] = u;
+            }
+        }
+    }
 }
 
 impl TlContext for Ctx {
@@ -53,16 +213,22 @@ impl TlContext for Ctx {
         self.smv
     }
     fn col_lower(&self, col: i32) -> f64 {
-        self.glb[col as usize]
+        self.glb.borrow()[col as usize]
     }
     fn col_upper(&self, col: i32) -> f64 {
-        self.gub[col as usize]
+        self.gub.borrow()[col as usize]
     }
     fn slack_lower(&self, row: i32) -> f64 {
-        self.slb[row as usize]
+        self.slb.borrow()[row as usize]
     }
     fn slack_upper(&self, row: i32) -> f64 {
-        self.sub[row as usize]
+        self.sub.borrow()[row as usize]
+    }
+    fn begin_call(&self) {
+        let next = self.pending.borrow_mut().pop_front();
+        if let Some(b) = next {
+            self.set_bounds(&b);
+        }
     }
     fn is_col_integral(&self, col: i32) -> bool {
         self.isint[col as usize]
@@ -127,6 +293,11 @@ pub(crate) struct TlStats {
     pub ut: usize,
     pub ut_rows: usize,
     pub mismatches: Vec<String>,
+    /// Replay the path and tableau separators against their dumped sections.
+    pub sep_mode: bool,
+    pub sep_path: usize,
+    pub sep_tab: usize,
+    pub sep_cuts: usize,
 }
 
 struct Live {
@@ -137,6 +308,8 @@ struct Live {
 pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
     let lines: Vec<&str> = text.lines().collect();
     let mut live: HashMap<i64, Live> = HashMap::new();
+    let mut path_sep: Option<PathSeparator> = None;
+    let mut tab_sep: Option<TableauSeparator> = None;
     let mut i = 0;
     let n = lines.len();
     while i < n {
@@ -149,6 +322,11 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
         match t[0] {
             "TL_NEW" => {
                 let id: i64 = t[1].parse().unwrap();
+                if id == 0 {
+                    // A new solve (fixtures concatenate several): separator state restarts.
+                    path_sep = None;
+                    tab_sep = None;
+                }
                 let ncols: usize = kv(&t, "ncols").parse().unwrap();
                 let nrows: usize = kv(&t, "nrows").parse().unwrap();
                 let feastol = hx(kv(&t, "feastol"));
@@ -167,6 +345,38 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                 let contcols = ia(lines[i + 9], "contcols");
                 let intcols = ia(lines[i + 10], "intcols");
                 i += 11;
+                let mut lp = None;
+                if lines[i].starts_with("rowlo ") {
+                    let rowlo = fa(lines[i], "rowlo");
+                    let rowup = fa(lines[i + 1], "rowup");
+                    let rowdual = fa(lines[i + 2], "rowdual");
+                    let maxabs = fa(lines[i + 3], "maxabsrow");
+                    let astart = ia(lines[i + 4], "astart");
+                    let aindex = ia(lines[i + 5], "aindex");
+                    let avalue = fa(lines[i + 6], "avalue");
+                    i += 7;
+                    let mut rows = HashMap::new();
+                    for r in 0..nrows {
+                        rows.insert(r as i32, (ia(lines[i], "lri"), fa(lines[i + 1], "lrv")));
+                        i += 2;
+                    }
+                    lp = Some((
+                        LpData {
+                            colval: colval.clone(),
+                            rowval: rowval.clone(),
+                            rowdual,
+                            rowlo,
+                            rowup,
+                            maxabs,
+                            astart,
+                            aindex,
+                            avalue,
+                            contcols: contcols.clone(),
+                            nintcols: intcols.len(),
+                        },
+                        rows,
+                    ));
+                }
                 let mut vubs: HashMap<i32, Vec<VbEntry>> = HashMap::new();
                 let mut vlbs: HashMap<i32, Vec<VbEntry>> = HashMap::new();
                 while lines[i].starts_with("VB ") {
@@ -228,13 +438,21 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                     nrows,
                     feastol,
                     smv,
-                    glb,
-                    gub,
-                    slb,
-                    sub,
+                    glb: RefCell::new(glb),
+                    gub: RefCell::new(gub),
+                    slb: RefCell::new(slb),
+                    sub: RefCell::new(sub),
                     isint,
+                    pending: RefCell::new(VecDeque::new()),
                     rows: HashMap::new(),
+                    lp: None,
+                    tab: None,
                 };
+                let mut ctx = ctx;
+                if let Some((d, rows)) = lp {
+                    ctx.lp = Some(d);
+                    ctx.rows = rows;
+                }
                 let empty: Vec<VbEntry> = Vec::new();
                 let fvu = |c: i32| vubs.get(&c).cloned().unwrap_or_else(|| empty.clone());
                 let fvl = |c: i32| vlbs.get(&c).cloned().unwrap_or_else(|| empty.clone());
@@ -288,6 +506,175 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                 }
                 live.insert(id, Live { ctx, tl });
             }
+            "SEP_PATH" | "SEP_TAB" if s.sep_mode => {
+                let end = (i..n)
+                    .find(|&k| lines[k] == "SEP_END")
+                    .expect("unterminated SEP");
+                let id: i64 = t[1].parse().unwrap();
+                let Some(lv) = live.get_mut(&id) else {
+                    i = end + 1;
+                    continue;
+                };
+                // Bounds read during the section, and HiGHS's addCut sequence.
+                let mut want = Vec::new();
+                let mut rowep: HashMap<i32, Option<Vec<(i32, f64)>>> = HashMap::new();
+                let mut snaps: Vec<Vec<(i32, f64, f64)>> = Vec::new();
+                let mut k = i + 1;
+                while k < end {
+                    let lt: Vec<&str> = lines[k].split_ascii_whitespace().collect();
+                    match lt.first().copied() {
+                        Some("TF") => {
+                            snaps.push(triples(lines[k + 3], "bnd"));
+                            k += 3;
+                        }
+                        Some("UT") => {
+                            let mut b = triples(lines[k + 3], "bnd");
+                            let nr: usize = lines[k + 4]
+                                .split_ascii_whitespace()
+                                .nth(1)
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            for r in 0..nr {
+                                let h: Vec<&str> =
+                                    lines[k + 5 + 2 * r].split_ascii_whitespace().collect();
+                                let row: i32 = h[1].parse().unwrap();
+                                b.push((lv.ctx.ncols as i32 + row, hx(h[2]), hx(h[3])));
+                            }
+                            snaps.push(b);
+                            k += 4 + 2 * nr;
+                        }
+                        Some("GC_ADD") | Some("FC_ADD") if lt[1] == "1" => {
+                            let p: Vec<&str> = lines[k + 3].split_ascii_whitespace().collect();
+                            assert_eq!(p[0], "GC_POOL");
+                            want.push(WantAdd {
+                                inds: ia(lines[k + 1], "inds"),
+                                vals: fa(lines[k + 2], "vals"),
+                                rhs: hx(kv(&lt, "rhs")),
+                                integral: kv(&lt, "integral") == "1",
+                                ret: p[1].parse().unwrap(),
+                                numcuts_after: kv(&p, "numcuts").parse().unwrap(),
+                            });
+                            k += 3;
+                        }
+                        Some("ROWEP") => {
+                            let bi: i32 = lt[1].parse().unwrap();
+                            let ok = lt[2] == "1";
+                            let cnt: usize = lt[3].parse().unwrap();
+                            let v = if ok {
+                                Some(
+                                    (0..cnt)
+                                        .map(|j| {
+                                            (lt[4 + 2 * j].parse().unwrap(), hx(lt[5 + 2 * j]))
+                                        })
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            };
+                            rowep.insert(bi, v);
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                let n_want = want.len();
+                let n_snaps = snaps.len();
+                *lv.ctx.pending.borrow_mut() = snaps.into();
+                let mut agg = LpAggregator::new(&lv.ctx);
+                let mut bad = Vec::new();
+                if t[0] == "SEP_PATH" {
+                    let rng: u64 = kv(&t, "rng").parse().unwrap();
+                    let seed: i64 = kv(&t, "cgseed").parse().unwrap();
+                    let numcuts: i64 = kv(&t, "numcuts").parse().unwrap();
+                    let sep = path_sep.get_or_insert_with(|| PathSeparator::with_state(rng));
+                    if sep.rng_state() != rng {
+                        bad.push(format!("path rng {} vs {rng}", sep.rng_state()));
+                    }
+                    let mut pool = MockPool {
+                        want,
+                        next: 0,
+                        numcuts,
+                        numavail: 0,
+                        bad: Vec::new(),
+                    };
+                    sep.separate(&lv.ctx, &mut agg, &mut lv.tl, &mut pool, seed);
+                    if pool.next != n_want {
+                        bad.push(format!("submitted {} cuts, HiGHS {n_want}", pool.next));
+                    }
+                    bad.extend(pool.bad);
+                    s.sep_path += 1;
+                } else {
+                    let has_invert = kv(&t, "hasinvert") == "1";
+                    let tabsep = tab_sep.get_or_insert_with(TableauSeparator::default);
+                    tabsep.num_calls += 1;
+                    if has_invert {
+                        let h: Vec<&str> = lines[i + 1].split_ascii_whitespace().collect();
+                        assert_eq!(h[0], "TAB");
+                        let numtries: i64 = kv(&h, "numtries").parse().unwrap();
+                        let numcalls: i64 = kv(&h, "numcalls").parse().unwrap();
+                        if tabsep.num_tries != numtries && s.sep_tab > 0 {
+                            bad.push(format!("numtries {} vs {numtries}", tabsep.num_tries));
+                        }
+                        tabsep.num_tries = numtries;
+                        tabsep.num_calls = numcalls;
+                        let basis = ia(lines[i + 2], "basis");
+                        let edgewt = if kv(&h, "edgewt") == "1" {
+                            Some(fa(lines[i + 3], "edgewt"))
+                        } else {
+                            None
+                        };
+                        lv.ctx.tab = Some(TabData {
+                            has_invert,
+                            basis,
+                            edgewt,
+                            rowep,
+                            lpiters: kv(&h, "lpiters").parse().unwrap(),
+                            softlimit: kv(&h, "softlimit").parse().unwrap(),
+                            requested: Vec::new(),
+                        });
+                        let mut pool = MockPool {
+                            want,
+                            next: 0,
+                            numcuts: kv(&h, "numcuts").parse().unwrap(),
+                            numavail: kv(&h, "numavail").parse().unwrap(),
+                            bad: Vec::new(),
+                        };
+                        let seed: i64 = kv(&h, "cgseed").parse().unwrap();
+                        tabsep.separate(&mut lv.ctx, &mut agg, &mut lv.tl, &mut pool, seed);
+                        let tab = lv.ctx.tab.take().unwrap();
+                        let mut req = tab.requested.clone();
+                        req.sort();
+                        let mut have: Vec<i32> = tab.rowep.keys().copied().collect();
+                        have.sort();
+                        if req != have {
+                            bad.push(format!(
+                                "requested {} B^-1 rows, HiGHS {}",
+                                req.len(),
+                                have.len()
+                            ));
+                        }
+                        if pool.next != n_want {
+                            bad.push(format!("submitted {} cuts, HiGHS {n_want}", pool.next));
+                        }
+                        bad.extend(pool.bad);
+                    }
+                    s.sep_tab += 1;
+                }
+                let left = std::mem::take(&mut *lv.ctx.pending.borrow_mut()).len();
+                if left != 0 {
+                    bad.push(format!(
+                        "made {} transform/untransform calls, HiGHS {n_snaps}",
+                        n_snaps - left
+                    ));
+                }
+                s.sep_cuts += n_want;
+                if !bad.is_empty() {
+                    s.mismatches
+                        .push(format!("{tag} {}@TL{id}: {}", t[0], bad.join("; ")));
+                }
+                i = end + 1;
+            }
             "TF" => {
                 let id: i64 = t[1].parse().unwrap();
                 let prefer = kv(&t, "prefervbds") == "1";
@@ -302,11 +689,11 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                 for &(c, l, u) in &bnd {
                     let c = c as usize;
                     if c < lv.ctx.ncols {
-                        lv.ctx.glb[c] = l;
-                        lv.ctx.gub[c] = u;
+                        lv.ctx.glb.borrow_mut()[c] = l;
+                        lv.ctx.gub.borrow_mut()[c] = u;
                     } else {
-                        lv.ctx.slb[c - lv.ctx.ncols] = l;
-                        lv.ctx.sub[c - lv.ctx.ncols] = u;
+                        lv.ctx.slb.borrow_mut()[c - lv.ctx.ncols] = l;
+                        lv.ctx.sub.borrow_mut()[c - lv.ctx.ncols] = u;
                     }
                 }
                 s.tf += 1;
@@ -376,8 +763,8 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                     let h: Vec<&str> = lines[k].split_ascii_whitespace().collect();
                     assert_eq!(h[0], "row");
                     let r: i32 = h[1].parse().unwrap();
-                    lv.ctx.slb[r as usize] = hx(h[2]);
-                    lv.ctx.sub[r as usize] = hx(h[3]);
+                    lv.ctx.slb.borrow_mut()[r as usize] = hx(h[2]);
+                    lv.ctx.sub.borrow_mut()[r as usize] = hx(h[3]);
                     assert_eq!(h[4], "ri");
                     let m: usize = h[5].parse().unwrap();
                     let ri: Vec<i32> = h[6..6 + m].iter().map(|x| x.parse().unwrap()).collect();
@@ -386,8 +773,8 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                     k += 2;
                 }
                 for &(c, l, u) in &bnd {
-                    lv.ctx.glb[c as usize] = l;
-                    lv.ctx.gub[c as usize] = u;
+                    lv.ctx.glb.borrow_mut()[c as usize] = l;
+                    lv.ctx.gub.borrow_mut()[c as usize] = u;
                 }
                 let out: Vec<&str> = lines[k].split_ascii_whitespace().collect();
                 assert_eq!(out[0], "UT_OUT");
@@ -445,7 +832,10 @@ fn full_transformed_lp_replay() {
     } else {
         vec![p.into()]
     };
-    let mut s = TlStats::default();
+    let mut s = TlStats {
+        sep_mode: std::env::var("DISCOPT_HIGHS_SEP_REPLAY").is_ok(),
+        ..Default::default()
+    };
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
         let before = s.mismatches.len();
@@ -463,13 +853,16 @@ fn full_transformed_lp_replay() {
         eprintln!("  {m}");
     }
     eprintln!(
-        "TOTAL tls {} vbd_cols {} tf {} tf_rows {} ut {} ut_rows {} mismatches {}",
+        "TOTAL tls {} vbd_cols {} tf {} tf_rows {} ut {} ut_rows {} sep_path {} sep_tab {} sep_cuts {} mismatches {}",
         s.tls,
         s.tl_vbd_cols,
         s.tf,
         s.tf_rows,
         s.ut,
         s.ut_rows,
+        s.sep_path,
+        s.sep_tab,
+        s.sep_cuts,
         s.mismatches.len()
     );
     assert!(s.tf > 0 && s.ut > 0);
@@ -479,7 +872,7 @@ fn full_transformed_lp_replay() {
 #[test]
 fn transformed_lp_fixture_replays_bit_identically() {
     // First transformed LP of the root (presolve off) of egout, gr4x6, bell5,
-    // enlight8 and lseu, with every call made on it.
+    // flugpl and beavma, with every call made on it.
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/data/highs_transformedlp_replay.txt"
@@ -489,7 +882,26 @@ fn transformed_lp_fixture_replays_bit_identically() {
     replay(&text, "fixture", &mut s);
     // §6: the replay must exercise variable bounds, transforms and untransforms.
     assert_eq!(s.tls, 5, "{s:?}");
-    assert!(s.tl_vbd_cols >= 40, "{s:?}");
-    assert!(s.tf_rows >= 1000 && s.ut_rows >= 200, "{s:?}");
+    assert!(s.tl_vbd_cols >= 200, "{s:?}");
+    assert!(s.tf_rows >= 1800 && s.ut_rows >= 400, "{s:?}");
+    assert!(s.mismatches.is_empty(), "{:#?}", s.mismatches);
+}
+
+#[test]
+fn separators_fixture_replay_bit_identically() {
+    // The same five transformed LPs, now driven by the ported path and tableau
+    // separators: every cut submitted to the pool must equal HiGHS's, in order.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/highs_transformedlp_replay.txt"
+    );
+    let text = std::fs::read_to_string(path).expect("transformed-LP fixture");
+    let mut s = TlStats {
+        sep_mode: true,
+        ..Default::default()
+    };
+    replay(&text, "fixture", &mut s);
+    assert_eq!((s.sep_path, s.sep_tab), (5, 5), "{s:?}");
+    assert!(s.sep_cuts >= 300, "{s:?}");
     assert!(s.mismatches.is_empty(), "{:#?}", s.mismatches);
 }

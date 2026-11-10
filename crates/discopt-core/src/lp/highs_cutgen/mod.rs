@@ -16,7 +16,9 @@
 //! - [`integers`] `HighsIntegers` (integral scales, continued fractions);
 //! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`;
 //! - [`sparse_vec`] `HighsSparseVectorSum`;
-//! - [`transformed_lp`] `HighsTransformedLp` and the variable-bound choice it uses.
+//! - [`transformed_lp`] `HighsTransformedLp` and the variable-bound choice it uses;
+//! - [`separators`] `HighsLpAggregator`, the cut-generation wrappers, and the path
+//!   and tableau separators.
 //!
 //! The replay fixture `tests/data/highs_cutgen_replay.txt` holds records dumped by
 //! a HiGHS build patched to print every `generateCut` call's inputs and outputs
@@ -33,13 +35,16 @@
     clippy::if_same_then_else,
     clippy::too_many_arguments,
     clippy::excessive_precision,
-    clippy::type_complexity
+    clippy::type_complexity,
+    // `!(a < b)` is HiGHS's NaN behaviour (std::pair / remove_if); keep it.
+    clippy::neg_cmp_op_on_partial_ord
 )]
 
 pub mod cdouble;
 pub mod core;
 pub mod integers;
 pub mod random;
+pub mod separators;
 pub mod sparse_vec;
 pub mod stdalgo;
 pub mod transformed_lp;

@@ -1168,3 +1168,47 @@ Committed sample: `crates/discopt-core/tests/data/highs_transformedlp_replay.txt
 the first transformed LP of egout, gr4x6, bell5, enlight8 and lseu
 (`transformed_lp_fixture_replays_bit_identically`). The full replay is
 `full_transformed_lp_replay` with `DISCOPT_HIGHS_TL_REPLAY=<dir>`.
+
+### 12.18 Option A, phase 3: path and tableau separators ported and replayed (2026-11-10)
+
+`separators.rs` ports `HighsLpAggregator`, the `generateCut` and `finalizeAndAddCut`
+wrappers (transform, core, untransform, postprocess, violation check,
+`HighsDomain::tightenCoefficients`, pool submission), `HighsPathSeparator` (path
+aggregation and the path-mixing cut) and `HighsTableauSeparator`. They read the LP
+through `SepContext`/`TableauContext` and the pool through `CutSink`, so the same code
+runs on discopt's LP and pool once it is wired in.
+
+**Instrument.** `p3_highs_separator_dump.patch` supersedes the phase 1 and 2
+patches (it contains them). It adds the LP to each transformed-LP dump: row bounds and
+duals, the column-wise matrix, every row, and max row coefficients. It brackets each
+path and tableau call in a section with the separator's state: the path generator's
+random state, the tableau separator's `numTries`/`numCalls`, the cut generator's seed,
+the basis, the DSE weights, and every B^-1 row HiGHS fetched, in HiGHS's index order.
+Every pool submission is recorded with the pool's answer and its cut count. The replay
+runs the ported separator on the replayed transformed LP, answers its pool submissions
+from that record, and requires the same cuts in the same order. It also requires the
+same number of transform/untransform calls and the same set of B^-1 rows requested.
+
+**Result.** At most 6 transformed LPs per instance, root, presolve off: 272 path
+calls, 272 tableau calls, **41,117 cuts, 0 mismatches**.
+
+**The first run had 7 mismatched calls, and the cause was the replay, not the port.**
+HiGHS's pool propagates each accepted cut into the global domain, so bounds tighten
+in the middle of a separator call. The first replay loaded bounds once per call,
+which gave beavma (path) a different aggregation path and flugpl/p0548 (tableau)
+last-bit rhs differences. `TlContext::begin_call` now applies the bounds HiGHS read
+at each transform/untransform; after that fix, all calls match. **For the wiring:**
+HiGHS's cuts see bounds tightened by earlier cuts of the same round. Pool
+propagation into the global domain is part of the subsystem, not a detail.
+
+**Is the probe live (§6)?** On a 4-instance subset (2,435 cuts):
+- path length 6 -> 5: 10 mismatches;
+- tableau tries cap 200 -> 20: 12 mismatches;
+- tableau weight ratio 1e4 -> 1e2: 19 mismatches;
+- the tableau's second score factor 0.01 -> 0.02: 0 mismatches. It applies only after
+  50 cuts in one call and is never decisive in that subset.
+
+Committed sample: `tests/data/highs_transformedlp_replay.txt` (first transformed LP
+of egout, gr4x6, bell5, flugpl, beavma). It is replayed at the transformed-LP level
+(`transformed_lp_fixture_replays_bit_identically`) and at the separator level
+(`separators_fixture_replay_bit_identically`).

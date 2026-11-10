@@ -10,7 +10,7 @@ for m in mems:
     seen.add(m['name']); uniq.append(m)
 def run(m):
     out=f"{S}/{outdir}/{m['name']}.txt"
-    env=dict(os.environ, HS_DUMP_TL=out, HS_DUMP_TL_MAX="12")
+    env=dict(os.environ, HS_DUMP_TL=out, HS_DUMP_TL_MAX=os.environ.get("TLMAX","6"))
     try:
         subprocess.run([f"{S}/hsab/build/bin/highs","--options_file",opt,f"{REPO}/{m['path']}"],capture_output=True,env=env,timeout=90)
     except subprocess.TimeoutExpired: pass
