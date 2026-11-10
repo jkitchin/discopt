@@ -1918,3 +1918,54 @@ bundle. Graduating it for the default MILP route needs the same A/B on the defau
 configuration (§5); until then the flag stays default OFF. Closing the remaining size gap
 (restructuring into HiGHS's queue-driven loop) is deferred: +2 certificates came from the rules,
 and the next measured lever is the plunge-start pool separation of §12.36.
+
+### 12.38 Separation at plunge starts before branching (`DISCOPT_HIGHS_SEP_FIRST`) (2026-11-10)
+
+Built: a plunge start's first visit skips strong branching, reports its violated pool cuts and
+its new cuts scored at its point, and is re-queued with its proven bound; the batch boundary
+folds the selected cuts into the shared LP and the node re-solves there, repeating under HiGHS's
+progress rule (`HighsSeparation::separate`), then a final visit branches and the dive keeps the
+rows (HiGHS's `separateAndStoreBasis` placement).
+
+Measured on mik-250-20-75-1 (20 s, 1 thread, bundle + search): ~318 plunge starts, ~1 round
+each; the re-solve moves the shared LP by a median 1.1 (mean 9.2) against HiGHS's median 97 per
+node separation (HiGHS: 64 node separations over 672 nodes, median 3 rounds, 21 cuts). Panel
+(`p3_ab_sepfirst.py`, 62 rows, 20 s, 1 thread): **48 -> 45 certified**, total wall 408.5 ->
+451.6 s; cert-clean (339 sense-aware checks). Sound but harmful alone: the placement is
+right, the cuts it re-solves with are weak.
+
+Correction to §12.36: HiGHS puts **0** pure-integer cuts into the LP at mik's root and 23 of
+2,664 over the whole solve; its mod-k adds 2 root cuts. The "108 of 112 pure-integer root cuts
+from mod-k" figure there is **retracted**. discopt's mod-k cuts on mik are rejected as exact
+duplicates of the path separator's single-row cuts, correctly.
+
+### 12.39 Same-node comparison: the port is exact, the node inputs differ (2026-11-10)
+
+**Experiment.** HiGHS's transformed-LP dump (`HS_DUMP_TL`) over a full mik-250-20-75-1 solve
+(270 separation rounds, root and nodes, 157,011 transform calls) replayed through the ported
+path and tableau separators (`replay_tl.rs`, `DISCOPT_HIGHS_SEP_REPLAY`). Without resync the
+path separator's RNG diverges once at TL46 and everything after inherits it; with the one-off
+resync (`DISCOPT_HIGHS_SEP_REPLAY_RESYNC`, diagnostic) **all 16,117 cuts equal HiGHS's, in
+order, node rounds included**. Given HiGHS's node inputs, the port produces HiGHS's node cuts.
+Weak discopt node cuts therefore come from the inputs.
+
+**Inputs tried.**
+- *Pool content* (`DISCOPT_HIGHS_ROOT_POOL=all`: every live cut of the ported root pool, 5,686
+  on mik, seeds the node pool, sized at HiGHS's soft limit): worse on mik (817 nodes,
+  -50,287 with sep-first; 1,489 nodes, -50,266 without) as the LP grows (1,774 rows folded vs
+  ~690).
+- *Global domain.* HiGHS's dumped global bounds tighten through the tree: 53 fixed columns at
+  root start, 115 at the end of the root, 145 mid-tree, 171 late (integer width 7,622 ->
+  6,077 -> 3,317); discopt's global box is fixed after the root. `DISCOPT_HIGHS_TREE_RCFIX`
+  ports two of HiGHS's sources: root reduced-cost fixing re-applied on each incumbent
+  improvement (`HighsRedcostFixing`; inert on mik: discopt's incumbent does not improve in the
+  tree, 1 bound) and the open-node hull with propagation (`HighsNodeQueue::
+  pruneInfeasibleNodes` + `propagate`; 60 + 14 bounds on mik). Measured: bound **worse**
+  (-50,280 vs -50,232, outside the ±15 run-to-run spread), slightly fewer nodes. Unexplained;
+  a tighter global box should not weaken the bound. Suspect warm-start cost from bases with
+  nonbasic columns at bounds now outside the box; not yet tested.
+
+**Status.** Three default-OFF levers (`SEP_FIRST`, `ROOT_POOL=all`, `TREE_RCFIX`), none
+net-positive alone on mik. The open question is which node input makes HiGHS's node cuts strong
+(LP rows, LP point, global domain); the next experiment is to feed discopt's separators
+HiGHS's dumped node inputs with one input swapped at a time for discopt's own.

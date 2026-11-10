@@ -1869,6 +1869,53 @@ impl TreeManager {
         }
     }
 
+    /// The hull of every pending node's box over the first `ncols` columns: per column,
+    /// the smallest lower and the largest upper bound among open nodes (HiGHS
+    /// `HighsNodeQueue::pruneInfeasibleNodes`, the `colLowerNodes`/`colUpperNodes`
+    /// test). Every improving solution lies in some open node, so it lies in this
+    /// hull. `None` when no node is pending.
+    pub fn pending_box_hull(&self, ncols: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+        let mut lo = vec![f64::INFINITY; ncols];
+        let mut hi = vec![f64::NEG_INFINITY; ncols];
+        let mut any = false;
+        for i in 0..self.pool.total_count() {
+            let id = NodeId(i);
+            if self.pool.is_released(id) {
+                continue;
+            }
+            let node = self.pool.get(id);
+            if !matches!(node.status, NodeStatus::Pending) {
+                continue;
+            }
+            any = true;
+            // (column, sets the upper bound, value) of a not-yet-materialized branch.
+            type Over = Option<(usize, bool, f64)>;
+            let (lb, ub, over): (&[f64], &[f64], Over) = match &node.pending_box {
+                None => (&node.lb, &node.ub, None),
+                Some(pb) => (&pb.base.lb, &pb.base.ub, Some((pb.var, pb.upper, pb.value))),
+            };
+            for j in 0..ncols.min(lb.len()) {
+                let (mut l, mut u) = (lb[j], ub[j]);
+                if let Some((v, upper, val)) = over {
+                    if v == j {
+                        if upper {
+                            u = val;
+                        } else {
+                            l = val;
+                        }
+                    }
+                }
+                if l < lo[j] {
+                    lo[j] = l;
+                }
+                if u > hi[j] {
+                    hi[j] = u;
+                }
+            }
+        }
+        any.then_some((lo, hi))
+    }
+
     /// A node's box `(lb, ub)`, or `None` for an id never allocated.
     ///
     /// Panics on a node whose box was released when it left the frontier

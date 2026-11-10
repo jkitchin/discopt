@@ -790,6 +790,43 @@ fn highs_sep_first() -> bool {
     }
 }
 
+/// Gap plan §12.39 (`DISCOPT_HIGHS_TREE_RCFIX`, under the HiGHS arm): re-apply root
+/// reduced-cost fixing to the *global* box whenever the incumbent improves during the
+/// tree, as HiGHS's `HighsRedcostFixing::propagateRootRedcost` does, and clip exported
+/// node boxes to it. The global box is what node separation's transformed LP reads,
+/// so cuts generated later see the tighter bounds. Measured on mik-250-20-75-1: HiGHS's
+/// global domain goes from 115 fixed columns at the end of the root to 171 late in the
+/// tree (integer width 6,077 -> 3,317); discopt's stayed at its root value. Default OFF
+/// until its panel.
+fn highs_tree_rcfix() -> bool {
+    match std::env::var("DISCOPT_HIGHS_TREE_RCFIX") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_TREE_RCFIX={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// The last root LP, kept for reduced-cost fixing in the tree (`DISCOPT_HIGHS_TREE_RCFIX`):
+/// matrix, costs, basis, duals, its (margin-reduced) objective and the box it was solved
+/// over. It stays a relaxation of every node (the global box only shrinks, rows added
+/// later are valid cuts), so its reduced costs bound every improving solution.
+struct RootRcSnapshot {
+    csc: SparseCols,
+    m: usize,
+    c: Vec<f64>,
+    basis: Basis,
+    dual: Vec<f64>,
+    obj: f64,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    is_int: Vec<bool>,
+}
+
 /// Safety cap on separation visits per plunge start under `DISCOPT_HIGHS_SEP_FIRST`
 /// (HiGHS has only its 1 % progress rule; the cap bounds a pathological tail).
 const SEP_FIRST_MAX_ROUNDS: usize = 20;
@@ -4350,6 +4387,7 @@ fn solve_milp_node_search(
     let mut b_w = b.to_vec();
     let mut c_w = c.to_vec();
     let mut l_w = base_l;
+    let mut root_rc_snap: Option<RootRcSnapshot> = None;
     let mut u_w = base_u;
     let mut m_w = m;
     let mut n_w = n;
@@ -5060,6 +5098,19 @@ fn solve_milp_node_search(
                     // good as the incumbent (with a margin on the LP value), FBBT keeps
                     // every point satisfying globally valid rows.
                     let _t = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                    if highs_tree_rcfix() {
+                        root_rc_snap = Some(RootRcSnapshot {
+                            csc: csc_w.clone(),
+                            m: m_w,
+                            c: c_w.clone(),
+                            basis: root.basis.clone(),
+                            dual: root.dual.clone(),
+                            obj: root.obj + obj_const - 1e-6 * (1.0 + root.obj.abs()),
+                            l: l_w.clone(),
+                            u: u_w.clone(),
+                            is_int: is_int_full.clone(),
+                        });
+                    }
                     let mut changed = false;
                     if let Some((_, inc)) = tm
                         .incumbent()
@@ -5875,6 +5926,7 @@ fn solve_milp_node_search(
     let mut sep_rounds: HashMap<NodeId, (usize, f64)> = HashMap::new();
     let mut sep_final: HashSet<NodeId> = HashSet::new();
     let mut sep_next: Vec<NodeId> = Vec::new();
+    let mut tree_rcfix_inc = f64::INFINITY;
     let sep_root_obj = tm.stats().global_lower_bound;
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
@@ -5984,6 +6036,45 @@ fn solve_milp_node_search(
                 break;
             }
         }
+        // DISCOPT_HIGHS_TREE_RCFIX: an improved incumbent re-fixes the global box from
+        // the root LP's reduced costs (in the sequential driver, so deterministic).
+        if let Some(snap) = root_rc_snap.as_ref() {
+            if let Some((_, inc)) = tm
+                .incumbent()
+                .filter(|(_, v)| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)
+            {
+                if inc < tree_rcfix_inc - 1e-9 * (1.0 + inc.abs()) {
+                    tree_rcfix_inc = inc;
+                    if let Some((rl, ru)) = reduced_cost_fix(
+                        &snap.csc,
+                        snap.m,
+                        &snap.c,
+                        &snap.basis,
+                        &snap.dual,
+                        snap.obj,
+                        inc,
+                        &snap.l,
+                        &snap.u,
+                        ns,
+                        &snap.is_int,
+                        opts.simplex.tol,
+                    ) {
+                        let mut k = 0u64;
+                        for j in 0..ns {
+                            if rl[j] > l_w[j] && rl[j] <= u_w[j] {
+                                l_w[j] = rl[j];
+                                k += 1;
+                            }
+                            if ru[j] < u_w[j] && ru[j] >= l_w[j] {
+                                u_w[j] = ru[j];
+                                k += 1;
+                            }
+                        }
+                        crate::profile::incr_by(crate::profile::Ctr::TreeRcFixBounds, k);
+                    }
+                }
+            }
+        }
         let preferred: Vec<NodeId> = if sep_first_on && !sep_next.is_empty() {
             sep_next.iter().chain(plunge_next.iter()).copied().collect()
         } else {
@@ -5994,6 +6085,22 @@ fn solve_milp_node_search(
         } else {
             (tm.export_batch(64), 0)
         };
+        // DISCOPT_HIGHS_TREE_RCFIX: clip each node box to the global box (a clip that
+        // would empty a box is skipped; the node's LP decides it).
+        let mut batch = batch;
+        if root_rc_snap.is_some() {
+            for k in 0..batch.node_ids.len() {
+                let (bl, bu) = (&mut batch.lb[k], &mut batch.ub[k]);
+                for j in 0..ns.min(bl.len()) {
+                    let nl = bl[j].max(l_w[j]);
+                    let nu = bu[j].min(u_w[j]);
+                    if nl <= nu {
+                        bl[j] = nl;
+                        bu[j] = nu;
+                    }
+                }
+            }
+        }
         // Per batch slot: plunge length so far (0 = a plunge start).
         let slot_plunge_len: Vec<usize> = batch
             .node_ids
@@ -6899,6 +7006,52 @@ fn solve_milp_node_search(
         // while every slot is mid-dive, as in HiGHS (pool cuts enter its LP only in
         // `separate` at the node from the queue).
         sep_next = std::mem::take(&mut sep_requeued);
+        // DISCOPT_HIGHS_TREE_RCFIX: the global box shrinks to the hull of the open
+        // nodes' boxes, then FBBT over the working rows propagates it (HiGHS
+        // `pruneInfeasibleNodes` + `globaldomain.propagate()`). Sound for the search:
+        // every improving solution lies in an open node. Structural columns only.
+        if root_rc_snap.is_some() {
+            if let Some((hl, hu)) = tm.pending_box_hull(ns) {
+                let mut changed = 0u64;
+                for j in 0..ns {
+                    if hl[j] > l_w[j] && hl[j] <= u_w[j] {
+                        l_w[j] = hl[j];
+                        changed += 1;
+                    }
+                    if hu[j] < u_w[j] && hu[j] >= l_w[j] {
+                        u_w[j] = hu[j];
+                        changed += 1;
+                    }
+                }
+                if changed > 0 {
+                    crate::profile::incr_by(crate::profile::Ctr::TreeHullBounds, changed);
+                    let pr = fbbt_rows(
+                        &csc_w,
+                        m_w,
+                        n_w,
+                        &l_w,
+                        &u_w,
+                        &b_w,
+                        &is_int_full,
+                        opts.simplex.tol,
+                    );
+                    if !pr.infeasible {
+                        let mut k = 0u64;
+                        for j in 0..ns {
+                            if pr.l[j] > l_w[j] && pr.l[j] <= u_w[j] {
+                                l_w[j] = pr.l[j];
+                                k += 1;
+                            }
+                            if pr.u[j] < u_w[j] && pr.u[j] >= l_w[j] {
+                                u_w[j] = pr.u[j];
+                                k += 1;
+                            }
+                        }
+                        crate::profile::incr_by(crate::profile::Ctr::TreeHullPropagated, k);
+                    }
+                }
+            }
+        }
         if node_gmi_on
             && (!search_on || n_plunge_cont < batch.node_ids.len() || sep_visits.iter().any(|&v| v))
         {
