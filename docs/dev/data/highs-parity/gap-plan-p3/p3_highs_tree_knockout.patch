@@ -1,0 +1,175 @@
+diff --git a/highs/mip/HighsDomain.cpp b/highs/mip/HighsDomain.cpp
+index f09d0f5..6a43d4d 100644
+--- a/highs/mip/HighsDomain.cpp
++++ b/highs/mip/HighsDomain.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -1122,6 +1123,7 @@ void HighsDomain::ObjectivePropagation::debugCheckObjectiveLower() const {
+ }
+ 
+ void HighsDomain::ObjectivePropagation::propagate() {
++  if (std::getenv("HS_NO_OBJPROP")) return;
+   if (!shouldBePropagated()) return;
+ 
+   debugCheckObjectiveLower();
+@@ -2364,12 +2366,13 @@ HighsDomainChange HighsDomain::backtrack() {
+ }
+ 
+ bool HighsDomain::propagate() {
++  if (std::getenv("HS_NO_NODEPROP") && !mipsolver->mipdata_->workers.empty() && this != &mipsolver->mipdata_->workers[0].getGlobalDomain()) return false;
+   std::vector<HighsInt> propagateinds;
+ 
+   auto havePropagationRows = [&]() {
+     if (!propagateinds_.empty()) return true;
+ 
+-    if (objProp_.isActive() && objProp_.shouldBePropagated()) return true;
++    if (objProp_.isActive() && objProp_.shouldBePropagated() && !std::getenv("HS_NO_OBJPROP")) return true;
+ 
+     for (const auto& cutpoolprop : cutpoolpropagation) {
+       if (!cutpoolprop.propagatecutinds_.empty()) return true;
+@@ -2585,6 +2588,7 @@ double HighsDomain::getColUpperPos(HighsInt col, HighsInt stackpos,
+ void HighsDomain::conflictAnalysis(HighsConflictPool& conflictPool,
+                                    HighsDomain& globaldom,
+                                    HighsPseudocost& pseudocost) {
++  if (std::getenv("HS_NO_CONFLICT")) return;
+   if (&globaldom == this) return;
+   if (globaldom.infeasible() || !infeasible_) return;
+ 
+@@ -2603,6 +2607,7 @@ void HighsDomain::conflictAnalysis(const HighsInt* proofinds,
+                                    HighsConflictPool& conflictPool,
+                                    HighsDomain& globaldom,
+                                    HighsPseudocost& pseudocost) {
++  if (std::getenv("HS_NO_CONFLICT")) return;
+   if (&globaldom == this) return;
+ 
+   if (globaldom.infeasible()) return;
+diff --git a/highs/mip/HighsMipSolver.cpp b/highs/mip/HighsMipSolver.cpp
+index 01630b6..da25679 100644
+--- a/highs/mip/HighsMipSolver.cpp
++++ b/highs/mip/HighsMipSolver.cpp
+@@ -888,6 +888,7 @@ restart:
+                                               RestartVote::kNoCheck);
+   bool root_node = true;  // Don't separate the root node again
+   HighsInt nodeLim = max_num_workers > 1 ? 1 : kHighsIInf;  // for ramp up
++  if (const char* nl = std::getenv("HS_NODE_LIM")) nodeLim = std::atoi(nl);
+   while (!mipdata_->nodequeue.empty()) {
+     // Possibly query existence of an external solution
+     if (!submip)
+@@ -913,7 +914,7 @@ restart:
+     }
+     if (limit_reached) break;
+ 
+-    if (nodeLim != kHighsIInf) {
++    if (nodeLim != kHighsIInf && !std::getenv("HS_NODE_LIM")) {
+       if (num_workers >= max_num_workers) {
+         nodeLim = std::max(HighsInt{20}, 2 * nodeLim);
+       }
+diff --git a/highs/mip/HighsPseudocost.h b/highs/mip/HighsPseudocost.h
+index 52591c4..a54ac18 100644
+--- a/highs/mip/HighsPseudocost.h
++++ b/highs/mip/HighsPseudocost.h
+@@ -14,6 +14,7 @@
+ #include <cmath>
+ #include <limits>
+ #include <vector>
++#include <cstdlib>
+ 
+ #include "util/HighsInt.h"
+ 
+@@ -343,6 +344,7 @@ class HighsPseudocost {
+         std::max(minThreshold, conflictScoreAvg * conflictScoreAvg);
+ 
+     auto mapScore = [](double score) { return 1.0 - 1.0 / (1.0 + score); };
++    if (std::getenv("HS_PSCOST_ONLY")) return mapScore(costScore);
+     return mapScore(costScore) / degeneracyFactor +
+            degeneracyFactor *
+                (1e-2 * mapScore(conflictScore) +
+diff --git a/highs/mip/HighsRedcostFixing.cpp b/highs/mip/HighsRedcostFixing.cpp
+index 6f3e627..8804f91 100644
+--- a/highs/mip/HighsRedcostFixing.cpp
++++ b/highs/mip/HighsRedcostFixing.cpp
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -85,6 +87,12 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+   double tolerance = std::max(10 * mipsolver.mipdata_->feastol,
+                               mipsolver.mipdata_->epsilon * double(gap));
+ 
++  static long rcCalls = 0, rcCols = 0, rcNodesHit = 0;
++  struct RcReport { ~RcReport() { if (std::getenv("HS_RC_COUNT")) std::fprintf(stderr, "HS_RC calls %ld nodes_hit %ld cols %ld\n", rcCalls, rcNodesHit, rcCols); } };
++  static RcReport rcReport;
++  ++rcCalls;
++  long colsBefore = rcCols;
++  struct RcHit { long& a; long& b; long before; ~RcHit() { if (a > before) ++b; } } rcHit{rcCols, rcNodesHit, colsBefore};
+   assert(!localdomain.infeasible());
+   std::vector<HighsDomainChange> boundChanges;
+   boundChanges.reserve(mipsolver.mipdata_->integral_cols.size());
+@@ -110,6 +118,7 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+           double(floor(gap / lpredcost[col] + localdomain.col_lower_[col] +
+                        mipsolver.mipdata_->feastol));
+       if (newub >= localdomain.col_upper_[col]) continue;
++      ++rcCols;
+       assert(newub < localdomain.col_upper_[col]);
+ 
+       if (globaldom.isBinary(col)) {
+@@ -128,6 +137,7 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+                       mipsolver.mipdata_->feastol));
+ 
+       if (newlb <= localdomain.col_lower_[col]) continue;
++      ++rcCols;
+       assert(newlb > localdomain.col_lower_[col]);
+ 
+       if (globaldom.isBinary(col)) {
+diff --git a/highs/mip/HighsSearch.cpp b/highs/mip/HighsSearch.cpp
+index 5db0ca0..42b3e20 100644
+--- a/highs/mip/HighsSearch.cpp
++++ b/highs/mip/HighsSearch.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -1005,7 +1006,7 @@ HighsSearch::NodeResult HighsSearch::evaluateNode() {
+                   localdom, getDomain(), getConflictPool(),
+                   mipworker.getPseudocost(), true);
+             }
+-            HighsRedcostFixing::propagateRedCost(
++            if (!std::getenv("HS_NO_REDCOST")) HighsRedcostFixing::propagateRedCost(
+                 mipsolver, localdom, mipworker.getGlobalDomain(), *lp,
+                 getConflictPool(), mipworker.getPseudocost(), getUpperLimit());
+             localdom.propagate();
+@@ -1093,6 +1094,15 @@ HighsSearch::NodeResult HighsSearch::evaluateNode() {
+     }
+   }
+ 
++  if (std::getenv("HS_TRACE"))
++  {
++    int nfix = 0;
++    for (HighsInt c : mipsolver.mipdata_->integral_cols)
++      nfix += localdom.col_lower_[c] == localdom.col_upper_[c];
++    printf("HSTRACE eval depth=%d result=%d lp=%.4f heur=%d nfix=%d nfrac=%d fr=", (int)nodestack.size(), (int)result, lp->getObjective(), (int)inheuristic, nfix, (int)lp->getFractionalIntegers().size());
++    for (auto& f : lp->getFractionalIntegers()) printf("%d:%.3f,", (int)f.first, f.second);
++    printf("\n");
++  }
+   return result;
+ }
+ 
+@@ -1489,6 +1499,12 @@ HighsSearch::NodeResult HighsSearch::branch() {
+ 
+   bool passStabilizerToChildNode =
+       orbitsValidInChildNode(currnode.branchingdecision);
++  if (std::getenv("HS_TRACE"))
++    printf("HSTRACE branch depth=%d col=%d val=%g type=%s lp=%.4f nfrac=%d heur=%d\n",
++           (int)nodestack.size(), (int)currnode.branchingdecision.column,
++           currnode.branchingdecision.boundval,
++           currnode.branchingdecision.boundtype == HighsBoundType::kLower ? "lb" : "ub",
++           lp->getObjective(), (int)lp->getFractionalIntegers().size(), (int)inheuristic);
+   localdom.changeBound(currnode.branchingdecision);
+   currnode.opensubtrees = 1;
+   nodestack.emplace_back(

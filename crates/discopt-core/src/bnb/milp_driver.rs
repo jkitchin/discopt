@@ -7147,6 +7147,7 @@ fn solve_node(
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
                 let _t_rcf = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                crate::profile::incr(crate::profile::Ctr::RcFixCalls);
                 // #1953: the node's bound, not the vertex value: fixing argues
                 // `cᵀx >= z + |r_j| (x_j - bound_j)`, true for the safe bound `z`.
                 if let Some((rl, ru)) = reduced_cost_fix(
@@ -7163,6 +7164,11 @@ fn solve_node(
                     ctx.is_int_full,
                     ctx.opts.simplex.tol,
                 ) {
+                    let k = (0..ctx.ns)
+                        .filter(|&j| rl[j] > full_l[j] || ru[j] < full_u[j])
+                        .count();
+                    crate::profile::incr(crate::profile::Ctr::RcFixNodesHit);
+                    crate::profile::incr_by(crate::profile::Ctr::RcFixCols, k as u64);
                     out.tightened = Some(match out.tightened.take() {
                         Some((mut tl, mut tu)) => {
                             for j in 0..ctx.ns {

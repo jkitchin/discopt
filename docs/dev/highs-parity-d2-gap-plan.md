@@ -1464,3 +1464,35 @@ certifies 11 of the 12, so none of presolve, restarts, symmetry or conflict expl
 
 The tree class is the largest and the most surprising: on bell5 the roots match and HiGHS
 needs 325 nodes, discopt 76,405 without closing. Node propagation is already on in discopt.
+
+### 12.25 bell5: the tree gap is plunging, measured (2026-11-10)
+
+bell5 is the cleanest tree row in §12.24: equal roots (HiGHS 3.41 %, discopt 3.38 %), and HiGHS
+needs 325 nodes where discopt is still open after 76k. `p3_highs_tree_knockout.py` runs HiGHS on
+bell5 stripped to a bare tree (presolve, restarts, symmetry, conflict, every separator, strong
+branching and every heuristic off), then knocks out one more component per arm through env
+switches added to the patched build (`p3_highs_tree_knockout.patch`; the diff also carries the
+earlier dump/ablation hooks in those files).
+
+| HiGHS arm (bare tree) | nodes | 20 s result |
+|---|---|---|
+| bare | 5,893 | certified, 1.5 s |
+| no objective propagation | 7,745 | certified |
+| branching score = pseudocost only | 7,941 | certified |
+| no node reduced-cost fixing | 101,471 | open, bound 8,961,242 |
+| no node propagation | 107,291 | open |
+| plunge <= 20 nodes (`HS_NODE_LIM=20`) | 10,199 | certified |
+| plunge <= 5 nodes | 14,243 | certified |
+| no plunging (`HS_NODE_LIM=1`) | 36,364 | open |
+
+discopt on bell5 (default highs arm): ~89k node LPs in 20 s, bound ~8,963,600, open. New
+counters (`RcFixCalls`, `RcFixNodesHit`, `RcFixCols`): 92,321 calls, 76 % tighten something,
+291,843 bounds tightened; HiGHS (`p3_highs_rc_count.sh`): 7,586 calls, 46 %, 15,542. So
+discopt's reduced-cost fixing is present and fires; the tightenings reach the children
+(`set_node_bounds`). What discopt lacks is the search order that makes them compound: it
+evaluates batches of 64 best-first nodes and never plunges, and HiGHS without plunging fails
+bell5 as discopt does. `strategy="depth_first"` is not a substitute (bound 8,957,769, the
+incumbent degrades): it takes the 64 deepest nodes, not a single dive.
+
+Next: `p3_highs_plunge_population.py` (HiGHS with vs without plunging over all 62 rows) decides
+whether plunging is worth building beyond bell5.

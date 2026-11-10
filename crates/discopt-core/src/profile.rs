@@ -416,6 +416,11 @@ counters!(
     RandRoundFound,
     RandRoundRejected,
     RcFixRefactor,
+    // Node reduced-cost fixing (gap plan §12.25): calls, nodes where it tightened
+    // at least one integer column, and integer bounds tightened.
+    RcFixCalls,
+    RcFixNodesHit,
+    RcFixCols,
     DualWarmSolves,
     DualColdFallbacks,
     // Warm dual-simplex stall-guard trips (discopt F2): a warm re-solve that hit
