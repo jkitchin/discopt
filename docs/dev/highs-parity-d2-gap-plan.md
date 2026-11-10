@@ -1969,3 +1969,8 @@ Weak discopt node cuts therefore come from the inputs.
 net-positive alone on mik. The open question is which node input makes HiGHS's node cuts strong
 (LP rows, LP point, global domain); the next experiment is to feed discopt's separators
 HiGHS's dumped node inputs with one input swapped at a time for discopt's own.
+
+**Retired (2026-11-10).** `DISCOPT_HIGHS_SEP_FIRST`, `DISCOPT_HIGHS_TREE_RCFIX` and
+`DISCOPT_HIGHS_ROOT_POOL=all` were removed with their implementations (measurements above);
+their HiGHS behaviours return inside the search-core replacement
+(`highs-mip-replacement-plan.md`, stages 3-4). The replay resync diagnostic stays.

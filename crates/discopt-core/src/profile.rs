@@ -437,15 +437,6 @@ counters!(
     MilpPresolveVerifyFallback,
     PlungeContinued,
     PlungeStarts,
-    // DISCOPT_HIGHS_SEP_FIRST (gap plan §12.38): separation re-solves at plunge starts,
-    // and final (branching) visits after them.
-    SepFirstRounds,
-    SepFirstFinal,
-    // DISCOPT_HIGHS_TREE_RCFIX (gap plan §12.39): global bounds tightened in the tree.
-    TreeRcFixBounds,
-    // ... and by the open-node hull, and FBBT after it.
-    TreeHullBounds,
-    TreeHullPropagated,
     RootRensRuns,
     RootRensImproved,
     RcFixCalls,
