@@ -1,12 +1,12 @@
 //! Provenance: the pdqsort part is an altered Rust translation of Orson Peters' pdqsort
 //! (zlib License, as vendored by HiGHS); see `THIRD_PARTY_NOTICES.md` at the repository root.
-//! The libstdc++ algorithm ports below (`partition`, `partial_sort`, heap, `upper_bound`) are
-//! slated for replacement by independent implementations (gap plan §12.31, licensing).
+//! `partition`, `partial_sort`, `upper_bound` and pdqsort's heapsort fallback are
+//! independent implementations (Rust std and textbook algorithms), not translations.
 //!
-//! Exact ports of the ordering algorithms the HiGHS cut generator calls: Orson
-//! Peters' `pdqsort` / `pdqsort_branchless` (`extern/pdqsort/pdqsort.h`, zlib
-//! license, as vendored by HiGHS) and the libstdc++ `std::partition`,
-//! `std::partial_sort`, `std::make_heap`/`std::sort_heap` and `std::upper_bound`.
+//! The ordering algorithms the HiGHS cut generator calls: Orson Peters' `pdqsort` /
+//! `pdqsort_branchless` (`extern/pdqsort/pdqsort.h`, zlib license, as vendored by
+//! HiGHS), translated so its comparison sequence matches, and independent versions of
+//! the C++ standard algorithms HiGHS uses.
 //!
 //! Why exact copies rather than Rust's `sort_unstable_by`: HiGHS's cover comparator
 //! compares with a `feastol` slack, so it is not a strict weak order, and its result
@@ -450,8 +450,7 @@ fn pdqsort_loop<T: Copy, F: FnMut(&T, &T) -> bool>(
         if highly_unbalanced {
             bad_allowed -= 1;
             if bad_allowed == 0 {
-                make_heap(v, begin, end, comp);
-                sort_heap(v, begin, end, comp);
+                heap_sort_range(v, begin, end, comp);
                 return;
             }
             if l_size >= INSERTION_SORT_THRESHOLD {
@@ -510,176 +509,88 @@ pub fn pdqsort_f64(v: &mut [f64]) {
     pdqsort_branchless(v, |a: &f64, b: &f64| a < b);
 }
 
-// ---- libstdc++ heap algorithms (bits/stl_heap.h) ----
+// ---- independent implementations (Rust std and textbook algorithms) ----
+//
+// These used to be translations of libstdc++ (`std::partition`, `std::partial_sort`,
+// `std::make_heap`/`std::sort_heap`, `std::upper_bound`). They are replaced by
+// implementations written independently (gap plan §12.31, licensing): the results are
+// the same sets/values, but the order of tied elements may differ from libstdc++'s.
+// Cut validity never depends on that order; only which of equally valid cuts is
+// produced on a tie.
 
-/// `std::push_heap(v.begin(), v.end(), comp)`: the new element is `v`'s last.
-pub(crate) fn push_heap<T: Copy, F: FnMut(&T, &T) -> bool>(v: &mut [T], comp: &mut F) {
-    let n = v.len();
-    if n < 2 {
-        return;
+fn ord_of<T, F: FnMut(&T, &T) -> bool>(comp: &mut F, a: &T, b: &T) -> std::cmp::Ordering {
+    if comp(a, b) {
+        std::cmp::Ordering::Less
+    } else if comp(b, a) {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
     }
-    let value = v[n - 1];
-    push_heap_impl(v, 0, n - 1, 0, value, comp);
 }
 
-/// `std::pop_heap(v.begin(), v.end(), comp)`: moves the top to `v`'s last slot.
-pub(crate) fn pop_heap<T: Copy, F: FnMut(&T, &T) -> bool>(v: &mut [T], comp: &mut F) {
-    let n = v.len();
-    if n < 2 {
-        return;
-    }
-    pop_heap_to(v, 0, n - 1, n - 1, comp);
-}
-
-fn push_heap_impl<T: Copy, F: FnMut(&T, &T) -> bool>(
+/// Heapsort of `v[begin..end]` (textbook sift-down heap), pdqsort's fallback for
+/// inputs that keep producing unbalanced partitions.
+fn heap_sort_range<T: Copy, F: FnMut(&T, &T) -> bool>(
     v: &mut [T],
-    first: usize,
-    mut hole: usize,
-    top: usize,
-    value: T,
+    begin: usize,
+    end: usize,
     comp: &mut F,
 ) {
-    let mut parent = if hole == 0 { 0 } else { (hole - 1) / 2 };
-    while hole > top && comp(&v[first + parent], &value) {
-        v[first + hole] = v[first + parent];
-        hole = parent;
-        parent = if hole == 0 { 0 } else { (hole - 1) / 2 };
-    }
-    v[first + hole] = value;
-}
-
-fn adjust_heap<T: Copy, F: FnMut(&T, &T) -> bool>(
-    v: &mut [T],
-    first: usize,
-    mut hole: usize,
-    len: usize,
-    value: T,
-    comp: &mut F,
-) {
-    let top = hole;
-    let mut second = hole;
-    // `(len - 1) / 2` with signed ptrdiff in C++; len >= 1 here.
-    while second < (len - 1) / 2 {
-        second = 2 * (second + 1);
-        if comp(&v[first + second], &v[first + second - 1]) {
-            second -= 1;
+    let s = &mut v[begin..end];
+    let n = s.len();
+    let sift_down = |s: &mut [T], mut root: usize, len: usize, comp: &mut F| loop {
+        let mut child = 2 * root + 1;
+        if child >= len {
+            break;
         }
-        v[first + hole] = v[first + second];
-        hole = second;
-    }
-    if (len & 1) == 0 && second == (len - 2) / 2 {
-        second = 2 * (second + 1);
-        v[first + hole] = v[first + second - 1];
-        hole = second - 1;
-    }
-    push_heap_impl(v, first, hole, top, value, comp);
-}
-
-pub(crate) fn make_heap<T: Copy, F: FnMut(&T, &T) -> bool>(
-    v: &mut [T],
-    first: usize,
-    last: usize,
-    comp: &mut F,
-) {
-    let len = last - first;
-    if len < 2 {
-        return;
-    }
-    let mut parent = (len - 2) / 2;
-    loop {
-        let value = v[first + parent];
-        adjust_heap(v, first, parent, len, value, comp);
-        if parent == 0 {
-            return;
+        if child + 1 < len && comp(&s[child], &s[child + 1]) {
+            child += 1;
         }
-        parent -= 1;
+        if !comp(&s[root], &s[child]) {
+            break;
+        }
+        s.swap(root, child);
+        root = child;
+    };
+    for i in (0..n / 2).rev() {
+        sift_down(s, i, n, comp);
+    }
+    for last in (1..n).rev() {
+        s.swap(0, last);
+        sift_down(s, 0, last, comp);
     }
 }
 
-fn pop_heap_to<T: Copy, F: FnMut(&T, &T) -> bool>(
-    v: &mut [T],
-    first: usize,
-    last: usize,
-    result: usize,
-    comp: &mut F,
-) {
-    let value = v[result];
-    v[result] = v[first];
-    adjust_heap(v, first, 0, last - first, value, comp);
-}
-
-pub(crate) fn sort_heap<T: Copy, F: FnMut(&T, &T) -> bool>(
-    v: &mut [T],
-    first: usize,
-    mut last: usize,
-    comp: &mut F,
-) {
-    while last - first > 1 {
-        last -= 1;
-        pop_heap_to(v, first, last, last, comp);
-    }
-}
-
-/// `std::partial_sort(first, middle, last, comp)` (libstdc++: heap select + sort heap).
+/// `partial_sort(v, middle, comp)`: the `middle` smallest elements, sorted, in
+/// `v[..middle]` (`select_nth_unstable_by` + `sort_unstable_by`).
 pub fn partial_sort<T: Copy, F: FnMut(&T, &T) -> bool>(v: &mut [T], middle: usize, mut comp: F) {
-    let last = v.len();
     if middle == 0 {
         return;
     }
-    make_heap(v, 0, middle, &mut comp);
-    for i in middle..last {
-        if comp(&v[i], &v[0]) {
-            pop_heap_to(v, 0, middle, i, &mut comp);
-        }
+    if middle < v.len() {
+        v.select_nth_unstable_by(middle - 1, |a, b| ord_of(&mut comp, a, b));
     }
-    sort_heap(v, 0, middle, &mut comp);
+    let k = middle.min(v.len());
+    v[..k].sort_unstable_by(|a, b| ord_of(&mut comp, a, b));
 }
 
-/// `std::partition(first, last, pred)` (libstdc++ bidirectional version); returns
-/// the partition point.
+/// `partition(v, pred)`: moves the elements satisfying `pred` to the front and returns
+/// their count (textbook in-place partition; order within each side unspecified).
 pub fn partition<T, P: FnMut(&T) -> bool>(v: &mut [T], mut pred: P) -> usize {
-    let mut first = 0usize;
-    let mut last = v.len();
-    loop {
-        loop {
-            if first == last {
-                return first;
-            } else if pred(&v[first]) {
-                first += 1;
-            } else {
-                break;
-            }
+    let mut k = 0;
+    for j in 0..v.len() {
+        if pred(&v[j]) {
+            v.swap(k, j);
+            k += 1;
         }
-        last -= 1;
-        loop {
-            if first == last {
-                return first;
-            } else if !pred(&v[last]) {
-                last -= 1;
-            } else {
-                break;
-            }
-        }
-        v.swap(first, last);
-        first += 1;
     }
+    k
 }
 
-/// `std::upper_bound(first, last, value, comp)` with `comp(value, elem)`.
+/// `upper_bound(v, value, comp)`: the first position whose element `e` has
+/// `comp(value, e)` (`slice::partition_point`).
 pub fn upper_bound<T, V, F: FnMut(&V, &T) -> bool>(v: &[T], value: &V, mut comp: F) -> usize {
-    let mut first = 0usize;
-    let mut len = v.len();
-    while len > 0 {
-        let half = len >> 1;
-        let middle = first + half;
-        if comp(value, &v[middle]) {
-            len = half;
-        } else {
-            first = middle + 1;
-            len = len - half - 1;
-        }
-    }
-    first
+    v.partition_point(|e| !comp(value, e))
 }
 
 #[cfg(test)]
@@ -723,26 +634,38 @@ mod tests {
         want.sort();
         pdqsort(&mut k, |x: &u64, y: &u64| x < y);
         assert_eq!(k, want);
-        // The heap algorithms on their own.
+        // The heapsort fallback on its own.
         let mut h: Vec<u64> = (0..777).map(|_| lcg(&mut s) % 50).collect();
         let mut want = h.clone();
         want.sort();
         let n = h.len();
         let mut lt = |x: &u64, y: &u64| x < y;
-        make_heap(&mut h, 0, n, &mut lt);
-        sort_heap(&mut h, 0, n, &mut lt);
+        heap_sort_range(&mut h, 0, n, &mut lt);
         assert_eq!(h, want);
         checks += 2;
         assert!(checks > 100);
     }
 
     #[test]
-    fn partition_matches_libstdcxx_swap_order() {
-        // libstdc++ swaps the first misplaced element from the left with the last
-        // misplaced one from the right; the order of each side is thus fixed.
-        let mut v = vec![1, 8, 3, 9, 5, 6, 7, 2];
-        let p = partition(&mut v, |x| *x >= 5);
-        assert_eq!(p, 5);
-        assert_eq!(v, vec![7, 8, 6, 9, 5, 3, 1, 2]);
+    fn partition_and_upper_bound_are_correct() {
+        let mut s = 11u64;
+        let mut checks = 0usize;
+        for n in [0usize, 1, 7, 64, 500] {
+            let base: Vec<u64> = (0..n).map(|_| lcg(&mut s) % 20).collect();
+            let mut v = base.clone();
+            let p = partition(&mut v, |x| *x >= 10);
+            assert!(v[..p].iter().all(|x| *x >= 10) && v[p..].iter().all(|x| *x < 10));
+            let mut a = v.clone();
+            a.sort();
+            let mut b = base.clone();
+            b.sort();
+            assert_eq!(a, b);
+            for t in 0..21u64 {
+                let ub = upper_bound(&b, &t, |t: &u64, e: &u64| t < e);
+                assert_eq!(ub, b.iter().filter(|e| **e <= t).count());
+                checks += 1;
+            }
+        }
+        assert!(checks > 50);
     }
 }

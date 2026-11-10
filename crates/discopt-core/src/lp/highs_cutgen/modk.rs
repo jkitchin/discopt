@@ -13,15 +13,17 @@
 //! `(w (k-1) mod k) / k` and negated, then `w / k`. Validity is `generateCut`'s, as
 //! for the path separator: the GF(k) solve only chooses the aggregation weights.
 //!
-//! Faithful to HiGHS v1.x including its tie-breaking: the elimination order comes
-//! from a `std::priority_queue` comparing only column sizes (ported with the
-//! libstdc++ heap), and the row iteration order from the splay trees.
+//! The elimination order takes the smallest column first with ties broken by column
+//! index (HiGHS's `std::priority_queue` compares sizes only, so its tie order is
+//! libstdc++'s; this one is independent), and the row iteration order comes from the
+//! splay trees.
 
 use std::collections::HashSet;
 
 use super::separators::{CutGenerator, CutSink, LpAggregator, SepContext};
-use super::stdalgo::{pop_heap, push_heap};
 use super::transformed_lp::TransformedLp;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 // ------------------------------------------------------------------- splay
 
@@ -361,11 +363,10 @@ impl GfkSolve {
     /// `solve<k>(reportSolution)`.
     pub fn solve<F: FnMut(&mut Vec<SolutionEntry>)>(&mut self, k: u32, mut report: F) {
         // std::priority_queue with `a.first > b.first`.
-        let mut pq: Vec<(i32, i32)> = Vec::new();
-        let mut cmp = |a: &(i32, i32), b: &(i32, i32)| a.0 > b.0;
+        // Min-heap on (column size, column): smallest column first, ties by index.
+        let mut pq: BinaryHeap<Reverse<(i32, i32)>> = BinaryHeap::new();
         for i in 0..self.num_col {
-            pq.push((self.colsize[i], i as i32));
-            push_heap(&mut pq, &mut cmp);
+            pq.push(Reverse((self.colsize[i], i as i32)));
         }
         let max_pivot = self.num_row.min(self.num_col);
         self.factor_col_perm.clear();
@@ -374,18 +375,14 @@ impl GfkSolve {
         self.row_used = vec![0; self.num_row];
         let mut num_pivot = 0usize;
 
-        while !pq.is_empty() {
-            let (old_col_size, pivot_col) = pq[0];
-            pop_heap(&mut pq, &mut cmp);
-            pq.pop();
+        while let Some(Reverse((old_col_size, pivot_col))) = pq.pop() {
             let pc = pivot_col as usize;
             if self.colsize[pc] == 0 {
                 continue;
             }
             debug_assert!(self.col_basis_status[pc] == 0);
             if self.colsize[pc] != old_col_size {
-                pq.push((self.colsize[pc], pivot_col));
-                push_heap(&mut pq, &mut cmp);
+                pq.push(Reverse((self.colsize[pc], pivot_col)));
                 continue;
             }
             let mut pivot = -1i32;
@@ -454,8 +451,7 @@ impl GfkSolve {
                     continue;
                 }
                 if self.colsize[col] < oldsize {
-                    pq.push((self.colsize[col], col as i32));
-                    push_heap(&mut pq, &mut cmp);
+                    pq.push(Reverse((self.colsize[col], col as i32)));
                 }
             }
         }
