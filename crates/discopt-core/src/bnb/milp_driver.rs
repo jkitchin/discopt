@@ -11581,6 +11581,176 @@ mod tests {
         }
     }
 
+    /// Gap plan §12.35: the MILP presolve path (`solve_presolved`) must reach the same
+    /// certified optimum as the unpresolved search on random mixed-integer problems, with a
+    /// postsolved point feasible on the original rows. Covers the continuous columns the
+    /// enumeration test in `milp_presolve` cannot (aggregator, doubleton substitutions).
+    #[test]
+    fn milp_presolve_keeps_the_certified_optimum_on_mixed_problems() {
+        use crate::bnb::milp_presolve::{presolve, RowForm};
+        let mut seed = 99u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut compared, mut optimal, mut aggregations) = (0usize, 0usize, 0usize);
+        for _ in 0..150 {
+            let ns = rnd(3, 7) as usize;
+            let m = rnd(2, 6) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| rnd(0, 1) == 0).collect();
+            let mut l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let mut u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 5) as f64).collect();
+            let mut c: Vec<f64> = (0..ns).map(|_| rnd(-4, 4) as f64).collect();
+            let mut rows: Vec<(Vec<usize>, Vec<f64>, bool, f64)> = Vec::new(); // (cols, vals, eq, b)
+            for _ in 0..m {
+                let mut ri = Vec::new();
+                let mut rv = Vec::new();
+                for j in 0..ns {
+                    if rnd(0, 1) == 0 {
+                        let v = rnd(-3, 3);
+                        if v != 0 {
+                            ri.push(j);
+                            rv.push(v as f64);
+                        }
+                    }
+                }
+                if ri.is_empty() {
+                    continue;
+                }
+                rows.push((ri, rv, rnd(0, 3) == 0, rnd(-4, 6) as f64));
+            }
+            // An aggregation row on a wide continuous column.
+            if let Some(sj) = (0..ns).find(|&j| !is_int[j]) {
+                l[sj] = -50.0;
+                u[sj] = 50.0;
+                let others: Vec<usize> = (0..ns).filter(|&j| j != sj).take(3).collect();
+                let mut ri = others.clone();
+                let mut rv: Vec<f64> = others.iter().map(|_| rnd(1, 2) as f64).collect();
+                ri.push(sj);
+                rv.push(1.0);
+                rows.push((ri, rv, true, rnd(-2, 2) as f64));
+                c[sj] = rnd(-2, 2) as f64;
+            }
+            let m = rows.len();
+            // Standard form: inequality rows get a slack `a x + s = b`, s >= 0.
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, (ri, rv, _, _)) in rows.iter().enumerate() {
+                for (&j, &v) in ri.iter().zip(rv) {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for (i, (_, _, eq, _)) in rows.iter().enumerate() {
+                if !eq {
+                    cols.push(vec![(i, 1.0)]);
+                    cf.push(0.0);
+                    lf.push(0.0);
+                    uf.push(INF);
+                }
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let b: Vec<f64> = rows.iter().map(|r| r.3).collect();
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            // Count aggregations on the same problem in row form.
+            let rf = RowForm {
+                n: ns,
+                rows: rows.iter().map(|r| (r.0.clone(), r.1.clone())).collect(),
+                lo: rows
+                    .iter()
+                    .map(|r| if r.2 { r.3 } else { f64::NEG_INFINITY })
+                    .collect(),
+                up: rows.iter().map(|r| r.3).collect(),
+                c: c.clone(),
+                l: l.clone(),
+                u: u.clone(),
+                is_int: is_int.clone(),
+            };
+            aggregations += presolve(&rf, 1e-9, 20).stats.aggregated;
+            let base = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &o,
+                None,
+                None,
+                None,
+            );
+            let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o) else {
+                continue;
+            };
+            compared += 1;
+            match base.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    assert_eq!(
+                        pre.status,
+                        MilpStatus::Optimal,
+                        "presolve lost the certificate"
+                    );
+                    assert!(
+                        (pre.obj - base.obj).abs() <= 1e-6 * (1.0 + base.obj.abs()),
+                        "optimum changed: {} vs {}",
+                        pre.obj,
+                        base.obj
+                    );
+                    // The postsolved point satisfies the original rows and integrality.
+                    for (ri, rv, eq, bi) in &rows {
+                        let act: f64 = ri.iter().zip(rv).map(|(&j, &v)| v * pre.x[j]).sum();
+                        let t = 1e-6 * (1.0 + bi.abs());
+                        assert!(
+                            if *eq {
+                                (act - bi).abs() <= t
+                            } else {
+                                act <= bi + t
+                            },
+                            "row violated"
+                        );
+                    }
+                    for j in 0..ns {
+                        assert!(
+                            pre.x[j] >= l[j] - 1e-6 && pre.x[j] <= u[j] + 1e-6,
+                            "bound violated"
+                        );
+                        if is_int[j] {
+                            assert!(
+                                (pre.x[j] - pre.x[j].round()).abs() <= 1e-6,
+                                "integrality violated"
+                            );
+                        }
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    assert_ne!(
+                        pre.status,
+                        MilpStatus::Optimal,
+                        "presolve found a point in an infeasible problem"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(compared > 50 && optimal > 30 && aggregations > 20,
+            "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations}");
+    }
+
     /// #2163 / #2165 review: #1380's witness `min -x + 3z, x <= M z, x in [0, 10]`,
     /// `z` binary, at `M = 1e6`. The root vertex is `z = 1e-5` (inside `INT_TOL`)
     /// with `x = 10`; its integral realisation `z = 0` misses the row by 10, so the

@@ -20,6 +20,11 @@
 //! - doubleton equations `a x_s + b x_t = rhs` substitute `x_s` out (HiGHS
 //!   `doubletonEq`: a continuous `x_s` preferred; two integers only when `b/a` and
 //!   `rhs/a` are integral), `x_s`'s bounds becoming implied bounds on `x_t`.
+//! - the aggregator (HiGHS `aggregator`): an implied-free column of an equality row
+//!   (the row alone keeps it within its bounds) is substituted out, subject to
+//!   HiGHS's pivot threshold (0.01 of the row's largest coefficient) and fill-in limit
+//!   (10); an integer column only when every other column of the row is integer and
+//!   every ratio and the right-hand side divided by its coefficient are integral.
 //!
 //! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
@@ -72,6 +77,8 @@ pub struct PresolveStats {
     pub parallel_rows: usize,
     /// Doubleton equations substituted out.
     pub doubleton_eqs: usize,
+    /// Implied-free columns aggregated out of equality rows.
+    pub aggregated: usize,
     /// Passes over the rule set.
     pub passes: usize,
 }
@@ -93,6 +100,17 @@ pub enum PostOp {
         b: f64,
         /// Right-hand side.
         rhs: f64,
+    },
+    /// `x_s = (rhs - sum_k a_k x_k) / a` (original indices).
+    Agg {
+        /// Substituted column.
+        s: usize,
+        /// Its coefficient.
+        a: f64,
+        /// Right-hand side.
+        rhs: f64,
+        /// The row's other entries.
+        terms: Vec<(usize, f64)>,
     },
 }
 
@@ -130,6 +148,14 @@ impl Presolved {
             match *op {
                 PostOp::Fix(j, v) => x[j] = v,
                 PostOp::Subst { s, t, a, b, rhs } => x[s] = (rhs - b * x[t]) / a,
+                PostOp::Agg {
+                    s,
+                    a,
+                    rhs,
+                    ref terms,
+                } => {
+                    x[s] = (rhs - terms.iter().map(|&(k, v)| v * x[k]).sum::<f64>()) / a;
+                }
             }
         }
         x
@@ -347,6 +373,179 @@ impl Work {
         true
     }
 
+    /// HiGHS `aggregator` on equality row `r`: substitute out an implied-free column.
+    fn aggregate(&mut self, r: usize) -> bool {
+        const PIVOT_THRESHOLD: f64 = 0.01;
+        const MAX_FILLIN: i64 = 10;
+        const MAX_ROW_LEN: usize = 16;
+        let (ri, rv) = self.rows[r].clone();
+        if ri.len() < 3 || ri.len() > MAX_ROW_LEN {
+            return false;
+        }
+        let rhs = self.up[r];
+        let maxabs = rv.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let all_int = ri.iter().all(|&k| self.is_int[k]);
+        // Candidate order: continuous columns first, then by column length.
+        let mut cand: Vec<usize> = (0..ri.len()).collect();
+        cand.sort_by_key(|&p| (self.is_int[ri[p]], self.col_rows[ri[p]].len()));
+        for p in cand {
+            let (s, a) = (ri[p], rv[p]);
+            if a.abs() < PIVOT_THRESHOLD * maxabs {
+                continue;
+            }
+            if self.is_int[s] {
+                // Implied integral: every other column integer, every ratio integral.
+                if !all_int {
+                    continue;
+                }
+                let ok = rv
+                    .iter()
+                    .all(|&v| ((v / a) - (v / a).round()).abs() <= 1e-12)
+                    && ((rhs / a) - (rhs / a).round()).abs() <= 1e-12;
+                if !ok {
+                    continue;
+                }
+            }
+            // Implied free (HiGHS `isImpliedFree`): the rows containing x_s, with the
+            // other columns' bounds, keep x_s within [l_s, u_s]. Sound here without
+            // HiGHS's source tracking: this presolve's bounds only ever come from original
+            // constraints (removed singleton rows, substituted columns' bounds), never from
+            // propagation through rows that stay, so no implication is circular.
+            let (mut il, mut iu) = (f64::NEG_INFINITY, f64::INFINITY);
+            for &q in &self.col_rows[s] {
+                if !self.row_alive[q] {
+                    continue;
+                }
+                let Some(pq) = self.rows[q].0.iter().position(|&k| k == s) else {
+                    continue;
+                };
+                let aq = self.rows[q].1[pq];
+                let (mut rmin, mut rmax) = (0.0f64, 0.0f64);
+                let (mut nmin, mut nmax) = (0usize, 0usize);
+                for (&k, &v) in self.rows[q].0.iter().zip(&self.rows[q].1) {
+                    if k == s {
+                        continue;
+                    }
+                    let (lo_c, hi_c) = if v > 0.0 {
+                        (v * self.l[k], v * self.u[k])
+                    } else {
+                        (v * self.u[k], v * self.l[k])
+                    };
+                    if lo_c.is_finite() {
+                        rmin += lo_c
+                    } else {
+                        nmin += 1
+                    }
+                    if hi_c.is_finite() {
+                        rmax += hi_c
+                    } else {
+                        nmax += 1
+                    }
+                }
+                // aq x_s in [lo_q - rest_max, up_q - rest_min].
+                let low = if self.lo[q].is_finite() && nmax == 0 {
+                    self.lo[q] - rmax
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let high = if self.up[q].is_finite() && nmin == 0 {
+                    self.up[q] - rmin
+                } else {
+                    f64::INFINITY
+                };
+                let (b1, b2) = if aq > 0.0 {
+                    (low / aq, high / aq)
+                } else {
+                    (high / aq, low / aq)
+                };
+                if b1.is_finite() || b1 == f64::INFINITY {
+                    il = il.max(b1);
+                }
+                if b2.is_finite() || b2 == f64::NEG_INFINITY {
+                    iu = iu.min(b2);
+                }
+            }
+            let tl = self.tol(il);
+            let tu = self.tol(iu);
+            if (self.l[s].is_finite() && (il < self.l[s] - tl || il.is_nan()))
+                || (self.u[s].is_finite() && (iu > self.u[s] + tu || iu.is_nan()))
+            {
+                continue;
+            }
+            // Fill-in: new entries in the other rows of x_s.
+            let mut fill: i64 = -((ri.len() + self.col_rows[s].len()) as i64 - 1);
+            for &q in &self.col_rows[s] {
+                if q == r || !self.row_alive[q] {
+                    continue;
+                }
+                for &k in &ri {
+                    if k != s && !self.rows[q].0.contains(&k) {
+                        fill += 1;
+                    }
+                }
+            }
+            if fill > MAX_FILLIN {
+                continue;
+            }
+            // Substitute x_s = rhs/a - sum_k (a_k/a) x_k.
+            let terms: Vec<(usize, f64)> = ri
+                .iter()
+                .zip(&rv)
+                .filter(|(&k, _)| k != s)
+                .map(|(&k, &v)| (k, v))
+                .collect();
+            self.ops.push(PostOp::Agg {
+                s,
+                a,
+                rhs,
+                terms: terms.clone(),
+            });
+            self.col_alive[s] = false;
+            self.row_alive[r] = false;
+            let c0 = rhs / a;
+            self.offset += self.c[s] * c0;
+            for &(k, v) in &terms {
+                self.c[k] -= self.c[s] * v / a;
+            }
+            let srows = self.col_rows[s].clone();
+            for q in srows {
+                if !self.row_alive[q] {
+                    continue;
+                }
+                let Some(pq) = self.rows[q].0.iter().position(|&k| k == s) else {
+                    continue;
+                };
+                let coef = self.rows[q].1[pq];
+                self.rows[q].0.swap_remove(pq);
+                self.rows[q].1.swap_remove(pq);
+                if self.lo[q].is_finite() {
+                    self.lo[q] -= coef * c0;
+                }
+                if self.up[q].is_finite() {
+                    self.up[q] -= coef * c0;
+                }
+                self.shift[q] += coef * c0;
+                for &(k, v) in &terms {
+                    let add = -coef * v / a;
+                    if let Some(pk) = self.rows[q].0.iter().position(|&j| j == k) {
+                        self.rows[q].1[pk] += add;
+                        if self.rows[q].1[pk].abs() <= 1e-12 {
+                            self.rows[q].0.swap_remove(pk);
+                            self.rows[q].1.swap_remove(pk);
+                        }
+                    } else if add != 0.0 {
+                        self.rows[q].0.push(k);
+                        self.rows[q].1.push(add);
+                        self.col_rows[k].push(q);
+                    }
+                }
+            }
+            self.stats.aggregated += 1;
+            return true;
+        }
+        false
+    }
+
     fn pass(&mut self) -> bool {
         let mut changed = false;
         // Fixed columns.
@@ -387,6 +586,10 @@ impl Work {
                 continue;
             }
             if len == 2 && self.lo[r] == self.up[r] && self.doubleton_eq(r) {
+                changed = true;
+                continue;
+            }
+            if len >= 3 && self.lo[r] == self.up[r] && self.aggregate(r) {
                 changed = true;
                 continue;
             }
@@ -757,7 +960,7 @@ mod tests {
                 }
             }
         }
-        RowForm {
+        let mut f = RowForm {
             n,
             rows,
             lo,
@@ -766,7 +969,28 @@ mod tests {
             l,
             u,
             is_int: vec![true; n],
+        };
+        if n >= 3 && r.int(0, 2) == 0 {
+            // An aggregation row: x_s = rhs - sum of unit terms, x_s's box wide enough for
+            // the row alone to imply it (an implied-free, implied-integral column).
+            let s = r.int(0, n as i64 - 1) as usize;
+            let others: Vec<usize> = (0..n).filter(|&k| k != s).collect();
+            let rv: Vec<f64> = others
+                .iter()
+                .map(|_| if r.int(0, 1) == 0 { 1.0 } else { -1.0 })
+                .collect();
+            let rhs = r.int(-2, 2) as f64;
+            f.l[s] = -20.0;
+            f.u[s] = 20.0;
+            let mut ri = others.clone();
+            ri.push(s);
+            let mut vals = rv.clone();
+            vals.push(1.0);
+            f.rows.push((ri, vals));
+            f.lo.push(rhs);
+            f.up.push(rhs);
         }
+        f
     }
 
     #[test]
@@ -775,12 +999,14 @@ mod tests {
         let (mut cases, mut reduced, mut infeasible, mut feasible) =
             (0usize, 0usize, 0usize, 0usize);
         let mut doubletons = 0usize;
+        let mut aggregated = 0usize;
         for _ in 0..3000 {
             let f = random_ip(&mut r);
             let want = brute_min(&f);
             let p = presolve(&f, 1e-9, 20);
             cases += 1;
             doubletons += p.stats.doubleton_eqs;
+            aggregated += p.stats.aggregated;
             if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
                 reduced += 1;
             }
@@ -818,8 +1044,9 @@ mod tests {
                 && reduced > 1000
                 && infeasible > 50
                 && feasible > 500
-                && doubletons > 50,
-            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons}"
+                && doubletons > 50
+                && aggregated > 20,
+            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated}"
         );
     }
 }
