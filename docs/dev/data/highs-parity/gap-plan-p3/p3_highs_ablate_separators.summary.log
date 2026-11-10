@@ -1,0 +1,11 @@
+resuming: 0 done, 496 to run
+arm            certified  lost_vs_default  gained  total_wall
+default               60                0       0        140   lost=[] gained=[]
+no_tableau            58                3       1        155   lost=['b-ball', 'enlight_hard', 'gsvm2rl3'] gained=['neos-2624317-amur']
+no_path               58                3       1        192   lost=['b-ball', 'neos-911970', 'nexp-50-20-4-2'] gained=['neos-2624317-amur']
+no_modk               60                1       1        145   lost=['enlight_hard'] gained=['neos-2624317-amur']
+no_implb_clique        59                1       0        138   lost=['gsvm2rl3'] gained=[]
+no_node_cuts          58                2       0        156   lost=['gsvm2rl3', 'neos-911970'] gained=[]
+path_only             58                3       1        161   lost=['b-ball', 'enlight_hard', 'gsvm2rl3'] gained=['neos-2624317-amur']
+tableau_only          57                3       0        199   lost=['b-ball', 'neos-911970', 'nexp-50-20-4-2'] gained=[]
+solves: 496

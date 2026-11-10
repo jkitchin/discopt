@@ -1024,3 +1024,20 @@ together it still certifies 60. The 13 rows lost without cuts are the P3 target 
 (beavma, sp150x300d x2, nexp-50-20-1-1/-4-2, neos-911970, neos17, gsvm2rl3, enlight_hard,
 fiber, issue-2446, b-ball, neos-3611689-kaihu). This retires the "missing presolve /
 restarts / conflicts" hypotheses for this panel and makes one general component the work.
+
+Per family (`p3_highs_ablate_separators.*`): no single family is decisive. Tableau off 58,
+path off 58, mod-k off 60, implied-bound + clique off 59, node cuts off 58; **path only 58,
+tableau only 57**. The families back each other up, so HiGHS with *either* its tableau or
+its path separator alone keeps almost all of its lead. Discopt's flag ports both and its
+certified count did not move, so the gap is in how the same families perform on full
+models, or downstream of them.
+
+Root bound, HiGHS (presolve off, root only) vs discopt (flag bundle, root only), on the
+cut-dependent rows (`p3_root_cmp_highs.py`): HiGHS tighter on beavma 0.82 vs 5.81 %,
+sp150x300d 0.00 vs 2.90, nexp-4-2 0.00 vs 1.41, neos-911970 4.77 vs 13.70, neos17 2.60 vs
+9.97, b-ball 6.55 vs 21.21, enlight_hard 29.7 vs 46.0, enlight8 25.9 vs 59.3, fiber 2.11 vs
+3.07, mik-1 1.75 vs 2.40; comparable or better for discopt on nexp-1-1 (0/0),
+gsvm2rl3 (23.9/22.2), neos-3611689-kaihu (4.2/2.5). And HiGHS's root takes **0.2-1.8 s**
+where discopt's takes **2-20 s**. Two general gaps follow: root cut quality on full models
+(10 of 14 rows) and root cost (5-20x), which leaves the tree little time; on the rows with
+a comparable root, HiGHS still certifies via its tree.
