@@ -1741,3 +1741,28 @@ HiGHS's 59 is also one thread): cert-clean (512 checks).
 The only difference is bell5. At equal threads the HiGHS configuration built in §12.27-§12.32
 moves one row and almost no gap, and the HiGHS gap is 47-48 vs 59. The multi-threaded counts
 earlier in this plan (48, 49) overstated discopt against single-threaded HiGHS.
+
+### 12.33 Presolve: what it wins for HiGHS, and where (2026-11-10)
+
+Repeated runs, HiGHS 1 thread, 20 s (`p3_highs_presolve_noise.py`): with presolve, issue-2446
+certifies in 0.2 s, enlight_hard in 12.6 s, neos-911970 in 11 s (both runs each); with presolve
+off everywhere (top level and sub-MIPs, `presolve = off` + `mip_root_presolve_only = true`)
+issue-2446 and enlight_hard fail both runs, neos-911970 certifies once at 19.2 s. issue-2446 and
+enlight_hard are rows discopt loses.
+
+Where (`p3_highs_presolve_rules.py`, `p3_highs_presolve_where.py`):
+- **issue-2446** needs a broad structural presolve. HiGHS reduces it from 1,963 rows x 2,200
+  columns to 857 x 856 (nonzeros 5,206 -> 2,543). Switching off any single rule
+  (`presolve_rule_off`) still solves it in <= 0.2 s; parallel rows/columns (-1,024 instead of
+  -1,344 columns when off), probing and the aggregator contribute most. discopt on the
+  unreduced model: 10 node LPs in 20 s, ~200 ms per node LP, strong branching 7.2 s over 3 calls.
+- **enlight_hard, neos-911970**: HiGHS's top-level presolve removes nothing ("Not reduced").
+  Top-level presolve off alone, sub-MIP presolve off alone, or restarts off alone all still
+  certify; only presolve off everywhere loses them. The contribution is redundant across the
+  top level (bound/coefficient work and probing that remove no rows) and the sub-MIPs.
+
+Plan: a MILP presolve on the pure-MILP route, Rust, with primal postsolve, translated from
+HiGHS's `HPresolve` with provenance (§ licensing in CLAUDE.md), starting with the rules
+issue-2446 exercises (parallel rows/columns, probing, aggregator, doubleton equations, plus empty/
+singleton rows, fixed/empty columns, forcing rows, dominated columns, dual fixing), then the same
+presolve on RENS/RINS sub-MIPs.
