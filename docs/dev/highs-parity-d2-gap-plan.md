@@ -1766,3 +1766,26 @@ HiGHS's `HPresolve` with provenance (§ licensing in CLAUDE.md), starting with t
 issue-2446 exercises (parallel rows/columns, probing, aggregator, doubleton equations, plus empty/
 singleton rows, fixed/empty columns, forcing rows, dominated columns, dual fixing), then the same
 presolve on RENS/RINS sub-MIPs.
+
+### 12.34 MILP presolve: inventory and design (2026-11-10)
+
+**Inventory** (`p3_discopt_presolve_probe.py`, issue-2446). discopt's root presolve
+(`_relax/presolve_pipeline.run_root_presolve`: eliminate, aggregate, redundancy, implied bounds,
+FBBT, probing, ...) is MINLP-oriented and runs on the model repr; on the pure-MILP route only its
+*bounds* are written back (`propagate_bounds_to_model`), so the engine always receives the
+unreduced model. On issue-2446 it hit its 30 s budget (5 s on the route, `0.25 x time_limit`)
+after 2 sweeps: 66 aggregations, 0 redundant rows (1.7 M row pairs compared pairwise), 657 bound
+tightenings. HiGHS: 0.1 s, 1,106 rows and 1,344 columns removed, most by its always-on core rules
+(empty/singleton/redundant rows, empty/fixed/dominated columns) plus parallel rows/columns.
+
+**Design.** A MILP presolve inside the Rust engine on the LP it receives, `bnb/milp_presolve.rs`:
+row form (`lo <= a x <= up` from the standard form's singleton slacks), the HiGHS `HPresolve`
+rule set translated with provenance (CLAUDE.md), better rules where a measurement justifies them,
+and a postsolve stack replayed in reverse to map the reduced solution back. Soundness: every
+reduction exact (no tolerance-based removal of a row that could bind); objective offset carried;
+the postsolved incumbent re-verified on the original rows before it counts, and the certificate
+withdrawn if it fails. Order of work, by measured value on issue-2446: core rules (empty /
+singleton / redundant rows, empty / fixed / dominated columns, dual fixing, forcing rows);
+parallel rows and columns (hashing, not pairwise); doubleton equations and the aggregator;
+probing on binaries (with the ported `HighsDomain`); then the same presolve on RENS/RINS
+sub-MIPs and after root restarts. Rules HiGHS lacks are candidates only with evidence.
