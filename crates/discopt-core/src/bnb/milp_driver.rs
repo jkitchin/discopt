@@ -3573,6 +3573,13 @@ fn solve_presolved(
         is_int,
     };
     let p = presolve(&rf, 1e-9, 20);
+    // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
+    // show what is left to remove (gap plan §12.36).
+    if let Ok(path) = std::env::var("DISCOPT_MILP_PRESOLVE_DUMP") {
+        if let Err(e) = std::fs::write(&path, crate::bnb::milp_presolve::to_free_mps(&p.form)) {
+            eprintln!("MILP presolve: could not write {path}: {e}");
+        }
+    }
     if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
         eprintln!(
             "MILP presolve: {}x{} -> {}x{} (offset {:e}, infeasible {}) {:?}",

@@ -486,36 +486,36 @@ impl Work {
 
     /// HiGHS `aggregator` on equality row `r`: substitute out an implied-free column.
     fn aggregate(&mut self, r: usize) -> bool {
+        // HiGHS `presolve_pivot_threshold` and `presolve_substitution_maxfillin`.
         const PIVOT_THRESHOLD: f64 = 0.01;
         const MAX_FILLIN: i64 = 10;
-        const MAX_ROW_LEN: usize = 16;
         let (ri, rv) = self.rows[r].clone();
-        if ri.len() < 3 || ri.len() > MAX_ROW_LEN {
+        if ri.len() < 3 {
             return false;
         }
         let rhs = self.up[r];
-        let maxabs = rv.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-        let all_int = ri.iter().all(|&k| self.is_int[k]);
+        let row_max = rv.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         // Candidate order: continuous columns first, then by column length.
         let mut cand: Vec<usize> = (0..ri.len()).collect();
         cand.sort_by_key(|&p| (self.is_int[ri[p]], self.col_rows[ri[p]].len()));
         for p in cand {
             let (s, a) = (ri[p], rv[p]);
-            if a.abs() < PIVOT_THRESHOLD * maxabs {
-                continue;
-            }
-            if self.is_int[s] {
-                // Implied integral: every other column integer, every ratio integral.
-                if !all_int {
-                    continue;
-                }
-                let ok = rv
+            // Pivot: large enough against the row's or the column's largest entry.
+            if a.abs() < PIVOT_THRESHOLD * row_max {
+                let col_max = self.col_rows[s]
                     .iter()
-                    .all(|&v| ((v / a) - (v / a).round()).abs() <= 1e-12)
-                    && ((rhs / a) - (rhs / a).round()).abs() <= 1e-12;
-                if !ok {
+                    .filter(|&&q| self.row_alive[q])
+                    .filter_map(|&q| {
+                        let rq = &self.rows[q];
+                        rq.0.iter().position(|&k| k == s).map(|pq| rq.1[pq].abs())
+                    })
+                    .fold(0.0f64, f64::max);
+                if a.abs() < PIVOT_THRESHOLD * col_max {
                     continue;
                 }
+            }
+            if self.is_int[s] && !self.implied_integral(s) {
+                continue;
             }
             // Implied free (HiGHS `isImpliedFree`): the rows containing x_s, with the
             // other columns' bounds (and their implied bounds from other rows), keep x_s
@@ -671,6 +671,30 @@ impl Work {
             return true;
         }
         false
+    }
+
+    /// HiGHS `isImpliedIntegral`: some alive equality row of `x_s` has every other
+    /// column integer with `a_k / a_s` and `rhs / a_s` integral, so `x_s` is integral
+    /// whenever that row holds. Substituting `x_s` out through any row then drops a
+    /// constraint the kept row still enforces (and the postsolve check re-verifies
+    /// integrality on the original problem).
+    fn implied_integral(&self, s: usize) -> bool {
+        let integral = |v: f64| (v - v.round()).abs() <= 1e-12 * v.abs().max(1.0);
+        self.col_rows[s].iter().any(|&q| {
+            if !self.row_alive[q] || self.lo[q] != self.up[q] {
+                return false;
+            }
+            let (qi, qv) = &self.rows[q];
+            let Some(pq) = qi.iter().position(|&k| k == s) else {
+                return false;
+            };
+            let a = qv[pq];
+            integral(self.up[q] / a)
+                && qi
+                    .iter()
+                    .zip(qv)
+                    .all(|(&k, &v)| k == s || (self.is_int[k] && integral(v / a)))
+        })
     }
 
     /// Bound propagation over the rows (HiGHS presolve's activity-based bound
@@ -1708,6 +1732,81 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
         infeasible: w.infeasible,
         stats: w.stats,
     }
+}
+
+/// `f` as free-format MPS (minimization), for diagnostics.
+#[allow(clippy::needless_range_loop)]
+pub fn to_free_mps(f: &RowForm) -> String {
+    use std::fmt::Write;
+    let mut o = String::from("NAME reduced\nROWS\n N obj\n");
+    for r in 0..f.rows.len() {
+        let t = match (f.lo[r].is_finite(), f.up[r].is_finite()) {
+            (true, true) if f.lo[r] == f.up[r] => "E",
+            (true, _) => "G",
+            (false, true) => "L",
+            (false, false) => "N",
+        };
+        let _ = writeln!(o, " {t} r{r}");
+    }
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); f.n];
+    for (r, (ri, rv)) in f.rows.iter().enumerate() {
+        for (&j, &a) in ri.iter().zip(rv) {
+            cols[j].push((r, a));
+        }
+    }
+    o.push_str("COLUMNS\n");
+    let mut in_int = false;
+    for j in 0..f.n {
+        if f.is_int[j] != in_int {
+            let m = if f.is_int[j] { "INTORG" } else { "INTEND" };
+            let _ = writeln!(o, " M{j} 'MARKER' '{m}'");
+            in_int = f.is_int[j];
+        }
+        let _ = writeln!(o, " x{j} obj {:e}", f.c[j]);
+        for &(r, a) in &cols[j] {
+            let _ = writeln!(o, " x{j} r{r} {a:e}");
+        }
+    }
+    if in_int {
+        o.push_str(" Mend 'MARKER' 'INTEND'\n");
+    }
+    o.push_str("RHS\n");
+    for r in 0..f.rows.len() {
+        let v = if f.lo[r].is_finite() {
+            f.lo[r]
+        } else {
+            f.up[r]
+        };
+        if v.is_finite() && v != 0.0 {
+            let _ = writeln!(o, " rhs r{r} {v:e}");
+        }
+    }
+    o.push_str("RANGES\n");
+    for r in 0..f.rows.len() {
+        if f.lo[r].is_finite() && f.up[r].is_finite() && f.lo[r] != f.up[r] {
+            let _ = writeln!(o, " rng r{r} {:e}", f.up[r] - f.lo[r]);
+        }
+    }
+    o.push_str("BOUNDS\n");
+    for j in 0..f.n {
+        let (l, u) = (f.l[j], f.u[j]);
+        if l == u {
+            let _ = writeln!(o, " FX bnd x{j} {l:e}");
+            continue;
+        }
+        if l.is_finite() {
+            let _ = writeln!(o, " LO bnd x{j} {l:e}");
+        } else {
+            let _ = writeln!(o, " MI bnd x{j}");
+        }
+        if u.is_finite() {
+            let _ = writeln!(o, " UP bnd x{j} {u:e}");
+        } else {
+            let _ = writeln!(o, " PL bnd x{j}");
+        }
+    }
+    o.push_str("ENDATA\n");
+    o
 }
 
 /// Whether `x` satisfies `f`'s rows, bounds and integrality within `tol` (relative).
