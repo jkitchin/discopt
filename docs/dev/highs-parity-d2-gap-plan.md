@@ -1126,3 +1126,45 @@ substitution, `untransform`) and `HighsLpAggregator`, replayed the same way: dum
 the core consumed here. After that, the path and tableau separators (phase 3) and the cut
 pool, selection, ageing and separation round (phase 4). No solver path calls the port yet,
 so this phase changes no result.
+
+### 12.17 Option A, phase 2: `HighsTransformedLp` ported and replayed (2026-11-10)
+
+`transformed_lp.rs` ports `HighsTransformedLp` (constructor, `transform`,
+`untransform`) and the variable-bound choice it depends on
+(`HighsImplications::getBestVub`/`getBestVlb`, and `cleanupVub`/`cleanupVlb` with
+`allowBoundChanges = false`, the form `transform` calls). `sparse_vec.rs` ports
+`HighsSparseVectorSum`, whose first-touch order and back-to-front `cleanup` swap fix
+the column order of every row built through it.
+
+**Instrument.** `p3_highs_transformedlp_dump.patch` (`HS_DUMP_TL=<file>`,
+`HS_DUMP_TL_MAX` objects per run) dumps each transformed LP's inputs at construction:
+LP values and reduced costs, global and slack bounds, integrality, and each column's
+variable bounds after `cleanupVarbounds`, in the store's iteration order with the
+node-queue counts. It then dumps the constructor's outputs and every
+`transform`/`untransform` call on that object, in order. Each call carries the
+bounds it reads, because the global domain can tighten between calls; an
+untransform also carries the LP rows of the slacks it resubstitutes. Collected at
+the root on MIPLIB-38+M, at most 12 objects per instance
+(`p3_highs_transformedlp_collect.py`).
+
+**Result.** 526 constructions on 47 instances; 29,659 columns with variable bounds;
+984,577 transforms (915,403 returning a row) and 104,525 untransforms (104,520
+returning a cut). **0 mismatches**: constructor distances and chosen variable bounds,
+and every output row, bound, LP value and rhs are bit-identical.
+
+**Variable bounds matter here.** HiGHS has them on 29 of the 47 instances even with
+presolve off. They come from its clique-table and implication setup, which discopt
+has no counterpart for. The port reads them through `TlSetup`; wiring it in will
+need a source for them (§12.18).
+
+**Is the probe live (§6)?** On a six-instance subset (132,485 transforms):
+- dropping `getBestVub`'s distance filter: 7,339 mismatches;
+- a stable `cleanup` in place of HiGHS's swap: 5,742 mismatches;
+- flipping the integral simple-bound tie in `transform`'s first loop: 0 mismatches.
+  That choice is always overwritten by the integer loop that follows, so it is dead
+  in HiGHS too.
+
+Committed sample: `crates/discopt-core/tests/data/highs_transformedlp_replay.txt`,
+the first transformed LP of egout, gr4x6, bell5, enlight8 and lseu
+(`transformed_lp_fixture_replays_bit_identically`). The full replay is
+`full_transformed_lp_replay` with `DISCOPT_HIGHS_TL_REPLAY=<dir>`.

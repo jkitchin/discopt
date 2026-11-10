@@ -1,0 +1,289 @@
+diff --git a/highs/mip/HighsImplications.h b/highs/mip/HighsImplications.h
+index a82cc1d..0b1e8f5 100644
+--- a/highs/mip/HighsImplications.h
++++ b/highs/mip/HighsImplications.h
+@@ -183,6 +183,11 @@ class HighsImplications {
+ 
+   void cleanupVarbounds(HighsInt col);
+ 
++  template <typename F>
++  void debugForEachVub(HighsInt col, F&& f) const { vubs[col].for_each(f); }
++  template <typename F>
++  void debugForEachVlb(HighsInt col, F&& f) const { vlbs[col].for_each(f); }
++
+   void cleanupVlb(HighsInt col, HighsInt vlbCol,
+                   HighsImplications::VarBound& vlb, double lb, bool& redundant,
+                   bool& infeasible, bool allowBoundChanges = true) const;
+diff --git a/highs/mip/HighsTransformedLp.cpp b/highs/mip/HighsTransformedLp.cpp
+index 609c7dd..98e02b0 100644
+--- a/highs/mip/HighsTransformedLp.cpp
++++ b/highs/mip/HighsTransformedLp.cpp
+@@ -12,6 +12,38 @@
+ #include "util/HighsCDouble.h"
+ #include "util/HighsIntegers.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++#include <set>
++// ---- HighsTransformedLp replay dump (HS_DUMP_TL=<path>) ----
++static FILE* tlDumpFile(const HighsMipSolver& mip) {
++  static FILE* f = nullptr;
++  static bool init = false;
++  if (mip.submip) return nullptr;
++  if (!init) {
++    init = true;
++    const char* p = std::getenv("HS_DUMP_TL");
++    if (p) f = std::fopen(p, "w");
++  }
++  return f;
++}
++static long tlDumpCounter = 0;
++static long tlDumpMax() {
++  static long m = -1;
++  if (m < 0) { const char* e = std::getenv("HS_DUMP_TL_MAX"); m = e ? std::atol(e) : 40; }
++  return m;
++}
++static void tlD(FILE* f, const char* tag, const double* v, size_t n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (size_t i = 0; i < n; ++i) std::fprintf(f, " %a", v[i]);
++  std::fprintf(f, "\n");
++}
++static void tlI(FILE* f, const char* tag, const HighsInt* v, size_t n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (size_t i = 0; i < n; ++i) std::fprintf(f, " %d", (int)v[i]);
++  std::fprintf(f, "\n");
++}
++
+ HighsTransformedLp::HighsTransformedLp(const HighsLpRelaxation& lprelaxation,
+                                        HighsImplications& implications,
+                                        const HighsDomain& globaldom)
+@@ -33,12 +65,54 @@ HighsTransformedLp::HighsTransformedLp(const HighsLpRelaxation& lprelaxation,
+                  std::make_pair(-1, HighsImplications::VarBound()));
+   boundTypes.resize(numTransformedCol);
+   vectorsum.setDimension(numTransformedCol);
++  FILE* tlf = tlDumpFile(mipsolver);
++  if (tlf && tlDumpCounter < tlDumpMax()) {
++    dumpId = tlDumpCounter++;
++    const HighsInt nc = lprelaxation.numCols(), nr = lprelaxation.numRows();
++    std::fprintf(tlf, "TL_NEW %ld ncols %d nrows %d mipcols %d feastol %a smv %a\n", dumpId, (int)nc,
++                 (int)nr, (int)mipsolver.numCol(), mipsolver.mipdata_->feastol,
++                 mipsolver.options_mip_->small_matrix_value);
++    tlD(tlf, "colval", lpSolution.col_value.data(), nc);
++    tlD(tlf, "coldual", lpSolution.col_dual.data(), nc);
++    tlD(tlf, "rowval", lpSolution.row_value.data(), nr);
++    tlD(tlf, "glb", globaldom_.col_lower_.data(), nc);
++    tlD(tlf, "gub", globaldom_.col_upper_.data(), nc);
++    std::vector<double> sl(nr), su(nr);
++    for (HighsInt r = 0; r < nr; ++r) { sl[r] = lprelaxation.slackLower(r, globaldom_); su[r] = lprelaxation.slackUpper(r, globaldom_); }
++    tlD(tlf, "slb", sl.data(), nr);
++    tlD(tlf, "sub", su.data(), nr);
++    std::fprintf(tlf, "isint %d", (int)(nc + nr));
++    for (HighsInt c = 0; c < nc + nr; ++c) std::fprintf(tlf, " %d", (int)lprelaxation.isColIntegral(c));
++    std::fprintf(tlf, "\n");
++    tlI(tlf, "contcols", mipsolver.mipdata_->continuous_cols.data(), mipsolver.mipdata_->continuous_cols.size());
++    tlI(tlf, "intcols", mipsolver.mipdata_->integral_cols.data(), mipsolver.mipdata_->integral_cols.size());
++  }
+ 
+   for (HighsInt col : mipsolver.mipdata_->continuous_cols) {
+     if (!mipsolver.mipdata_->parallelLockActive())
+       mipsolver.mipdata_->implications.cleanupVarbounds(col);
+ 
+-    if (globaldom_.infeasible()) return;
++    if (globaldom_.infeasible()) {
++      if (dumpId >= 0) std::fprintf(tlf, "TL_ABORT\n");
++      dumpId = -1;
++      return;
++    }
++    if (dumpId >= 0) {
++      const auto& nq = mipsolver.mipdata_->nodequeue;
++      std::vector<std::string> parts;
++      std::string vu, vl;
++      int nvu = 0, nvl = 0;
++      char buf[256];
++      mipsolver.mipdata_->implications.debugForEachVub(col, [&](HighsInt vc, const HighsImplications::VarBound& vb) {
++        std::snprintf(buf, sizeof buf, " %d %a %a %lld %lld", (int)vc, vb.coef, vb.constant,
++                      (long long)nq.numNodesDown(vc), (long long)nq.numNodesUp(vc));
++        vu += buf; ++nvu; });
++      mipsolver.mipdata_->implications.debugForEachVlb(col, [&](HighsInt vc, const HighsImplications::VarBound& vb) {
++        std::snprintf(buf, sizeof buf, " %d %a %a %lld %lld", (int)vc, vb.coef, vb.constant,
++                      (long long)nq.numNodesDown(vc), (long long)nq.numNodesUp(vc));
++        vl += buf; ++nvl; });
++      if (nvu || nvl) std::fprintf(tlf, "VB %d %d%s %d%s\n", (int)col, nvu, vu.c_str(), nvl, vl.c_str());
++    }
+ 
+     if (globaldom_.isFixed(col)) continue;
+ 
+@@ -69,7 +143,27 @@ HighsTransformedLp::HighsTransformedLp(const HighsLpRelaxation& lprelaxation,
+     if (!mipsolver.mipdata_->parallelLockActive())
+       mipsolver.mipdata_->implications.cleanupVarbounds(col);
+ 
+-    if (globaldom_.infeasible()) return;
++    if (globaldom_.infeasible()) {
++      if (dumpId >= 0) std::fprintf(tlf, "TL_ABORT\n");
++      dumpId = -1;
++      return;
++    }
++    if (dumpId >= 0) {
++      const auto& nq = mipsolver.mipdata_->nodequeue;
++      std::vector<std::string> parts;
++      std::string vu, vl;
++      int nvu = 0, nvl = 0;
++      char buf[256];
++      mipsolver.mipdata_->implications.debugForEachVub(col, [&](HighsInt vc, const HighsImplications::VarBound& vb) {
++        std::snprintf(buf, sizeof buf, " %d %a %a %lld %lld", (int)vc, vb.coef, vb.constant,
++                      (long long)nq.numNodesDown(vc), (long long)nq.numNodesUp(vc));
++        vu += buf; ++nvu; });
++      mipsolver.mipdata_->implications.debugForEachVlb(col, [&](HighsInt vc, const HighsImplications::VarBound& vb) {
++        std::snprintf(buf, sizeof buf, " %d %a %a %lld %lld", (int)vc, vb.coef, vb.constant,
++                      (long long)nq.numNodesDown(vc), (long long)nq.numNodesUp(vc));
++        vl += buf; ++nvl; });
++      if (nvu || nvl) std::fprintf(tlf, "VB %d %d%s %d%s\n", (int)col, nvu, vu.c_str(), nvl, vl.c_str());
++    }
+     simpleUbDist[col] = bestub - lpSolution.col_value[col];
+     if (simpleUbDist[col] <= mipsolver.mipdata_->feastol)
+       simpleUbDist[col] = 0.0;
+@@ -127,6 +221,20 @@ HighsTransformedLp::HighsTransformedLp(const HighsLpRelaxation& lprelaxation,
+ 
+     boundDist[slackIndex] = std::min(lbDist[slackIndex], ubDist[slackIndex]);
+   }
++  if (dumpId >= 0) {
++    size_t n = lbDist.size();
++    std::fprintf(tlf, "TL_OUT %ld\n", dumpId);
++    tlD(tlf, "lbdist", lbDist.data(), n);
++    tlD(tlf, "ubdist", ubDist.data(), n);
++    tlD(tlf, "slbdist", simpleLbDist.data(), n);
++    tlD(tlf, "subdist", simpleUbDist.data(), n);
++    tlD(tlf, "bdist", boundDist.data(), n);
++    std::fprintf(tlf, "bestvlb %d", (int)n);
++    for (size_t c = 0; c < n; ++c) std::fprintf(tlf, " %d %a %a", (int)bestVlb[c].first, bestVlb[c].second.coef, bestVlb[c].second.constant);
++    std::fprintf(tlf, "\nbestvub %d", (int)n);
++    for (size_t c = 0; c < n; ++c) std::fprintf(tlf, " %d %a %a", (int)bestVub[c].first, bestVub[c].second.coef, bestVub[c].second.constant);
++    std::fprintf(tlf, "\n");
++  }
+ }
+ 
+ bool HighsTransformedLp::transform(std::vector<double>& vals,
+@@ -143,6 +251,27 @@ bool HighsTransformedLp::transform(std::vector<double>& vals,
+   const HighsInt slackOffset = lprelaxation.numCols();
+ 
+   HighsInt numNz = inds.size();
++  FILE* tlf = dumpId >= 0 ? tlDumpFile(mip) : nullptr;
++  if (tlf) {
++    std::fprintf(tlf, "TF %ld prefervbds %d intspos %d rhs %a\n", dumpId, (int)preferVbds,
++                 (int)integersPositive, rhs);
++    tlI(tlf, "inds", inds.data(), numNz);
++    tlD(tlf, "vals", vals.data(), numNz);
++    std::set<HighsInt> cs;
++    for (HighsInt k = 0; k < numNz; ++k) {
++      HighsInt c = inds[k];
++      cs.insert(c);
++      if (bestVlb[c].first != -1) cs.insert(bestVlb[c].first);
++      if (bestVub[c].first != -1) cs.insert(bestVub[c].first);
++    }
++    std::fprintf(tlf, "bnd %d", (int)cs.size());
++    for (HighsInt c : cs) {
++      double l = c < slackOffset ? globaldom_.col_lower_[c] : lprelaxation.slackLower(c - slackOffset, globaldom_);
++      double u = c < slackOffset ? globaldom_.col_upper_[c] : lprelaxation.slackUpper(c - slackOffset, globaldom_);
++      std::fprintf(tlf, " %d %a %a", (int)c, l, u);
++    }
++    std::fprintf(tlf, "\n");
++  }
+ 
+   auto getLb = [&](HighsInt col) {
+     return (col < slackOffset
+@@ -179,6 +308,7 @@ bool HighsTransformedLp::transform(std::vector<double>& vals,
+ 
+     if (lb == -kHighsInf && ub == kHighsInf) {
+       vectorsum.clear();
++      if (tlf) std::fprintf(tlf, "TF_OUT 0 free\n");
+       return false;
+     }
+ 
+@@ -441,9 +571,15 @@ bool HighsTransformedLp::transform(std::vector<double>& vals,
+ 
+   rhs = double(tmpRhs);
+ 
+-  if (numNz == 0 && rhs >= -mip.mipdata_->feastol) return false;
+-
+-  return true;
++  bool tfret = !(numNz == 0 && rhs >= -mip.mipdata_->feastol);
++  if (tlf) {
++    std::fprintf(tlf, "TF_OUT %d intspos %d rhs %a\n", (int)tfret, (int)integersPositive, rhs);
++    tlI(tlf, "inds", inds.data(), numNz);
++    tlD(tlf, "vals", vals.data(), numNz);
++    tlD(tlf, "upper", upper.data(), numNz);
++    tlD(tlf, "solval", solval.data(), numNz);
++  }
++  return tfret;
+ }
+ 
+ bool HighsTransformedLp::untransform(std::vector<double>& vals,
+@@ -454,6 +590,36 @@ bool HighsTransformedLp::untransform(std::vector<double>& vals,
+   const HighsInt slackOffset = mip.numCol();
+ 
+   HighsInt numNz = inds.size();
++  FILE* tlf = dumpId >= 0 ? tlDumpFile(mip) : nullptr;
++  if (tlf) {
++    std::fprintf(tlf, "UT %ld integral %d rhs %a\n", dumpId, (int)integral, rhs);
++    tlI(tlf, "inds", inds.data(), numNz);
++    tlD(tlf, "vals", vals.data(), numNz);
++    std::set<HighsInt> cs;
++    std::set<HighsInt> rs;
++    for (HighsInt k = 0; k < numNz; ++k) {
++      HighsInt c = inds[k];
++      if (bestVlb[c].first != -1) cs.insert(bestVlb[c].first);
++      if (bestVub[c].first != -1) cs.insert(bestVub[c].first);
++      if (c < slackOffset) cs.insert(c);
++      else {
++        HighsInt r = c - slackOffset, rl; const HighsInt* ri; const double* rv;
++        lprelaxation.getRow(r, rl, ri, rv);
++        rs.insert(r);
++        for (HighsInt j = 0; j < rl; ++j) cs.insert(ri[j]);
++      }
++    }
++    std::fprintf(tlf, "bnd %d", (int)cs.size());
++    for (HighsInt c : cs) std::fprintf(tlf, " %d %a %a", (int)c, globaldom_.col_lower_[c], globaldom_.col_upper_[c]);
++    std::fprintf(tlf, "\nrows %d\n", (int)rs.size());
++    for (HighsInt r : rs) {
++      HighsInt rl; const HighsInt* ri; const double* rv;
++      lprelaxation.getRow(r, rl, ri, rv);
++      std::fprintf(tlf, "row %d %a %a", (int)r, lprelaxation.slackLower(r, globaldom_), lprelaxation.slackUpper(r, globaldom_));
++      tlI(tlf, " ri", ri, rl);
++      tlD(tlf, "rv", rv, rl);
++    }
++  }
+ 
+   for (HighsInt i = 0; i != numNz; ++i) {
+     if (vals[i] == 0.0) continue;
+@@ -550,6 +716,7 @@ bool HighsTransformedLp::untransform(std::vector<double>& vals,
+     vectorsum.cleanup(IsZero);
+     if (abort) {
+       vectorsum.clear();
++      if (tlf) std::fprintf(tlf, "UT_OUT 0\n");
+       return false;
+     }
+     rhs = double(tmpRhs);
+@@ -565,6 +732,11 @@ bool HighsTransformedLp::untransform(std::vector<double>& vals,
+   else
+     for (HighsInt i = 0; i != numNz; ++i) vals[i] = vectorsum.getValue(inds[i]);
+   vectorsum.clear();
++  if (tlf) {
++    std::fprintf(tlf, "UT_OUT 1 rhs %a\n", rhs);
++    tlI(tlf, "inds", inds.data(), numNz);
++    tlD(tlf, "vals", vals.data(), numNz);
++  }
+ 
+   return true;
+ }
+diff --git a/highs/mip/HighsTransformedLp.h b/highs/mip/HighsTransformedLp.h
+index bb7e929..b7cb3b7 100644
+--- a/highs/mip/HighsTransformedLp.h
++++ b/highs/mip/HighsTransformedLp.h
+@@ -46,6 +46,7 @@ class HighsTransformedLp {
+   };
+   std::vector<BoundType> boundTypes;
+   HighsSparseVectorSum vectorsum;
++  long dumpId = -1;
+ 
+  public:
+   HighsTransformedLp(const HighsLpRelaxation& lprelaxation,

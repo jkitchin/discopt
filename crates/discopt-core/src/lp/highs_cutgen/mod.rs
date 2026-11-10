@@ -14,7 +14,9 @@
 //! - [`stdalgo`]  `pdqsort` and the libstdc++ algorithms whose tie order the cut
 //!   depends on;
 //! - [`integers`] `HighsIntegers` (integral scales, continued fractions);
-//! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`.
+//! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`;
+//! - [`sparse_vec`] `HighsSparseVectorSum`;
+//! - [`transformed_lp`] `HighsTransformedLp` and the variable-bound choice it uses.
 //!
 //! The replay fixture `tests/data/highs_cutgen_replay.txt` holds records dumped by
 //! a HiGHS build patched to print every `generateCut` call's inputs and outputs
@@ -27,14 +29,22 @@
 #![allow(
     clippy::needless_range_loop,
     clippy::int_plus_one,
-    clippy::double_comparisons
+    clippy::double_comparisons,
+    clippy::if_same_then_else,
+    clippy::too_many_arguments,
+    clippy::excessive_precision,
+    clippy::type_complexity
 )]
 
 pub mod cdouble;
 pub mod core;
 pub mod integers;
 pub mod random;
+pub mod sparse_vec;
 pub mod stdalgo;
+pub mod transformed_lp;
 
 #[cfg(test)]
 mod replay;
+#[cfg(test)]
+mod replay_tl;
