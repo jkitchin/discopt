@@ -428,6 +428,13 @@ counters!(
     HsDomainRebuilds,
     HsDomainJumps,
     HsDomainInfeasible,
+    // MILP presolve (gap plan §12.34): runs, columns/rows removed, and fallbacks to the
+    // original problem (presolve claimed infeasible; postsolved point failed).
+    MilpPresolveRuns,
+    MilpPresolveColsRemoved,
+    MilpPresolveRowsRemoved,
+    MilpPresolveInfeasibleFallback,
+    MilpPresolveVerifyFallback,
     PlungeContinued,
     PlungeStarts,
     RootRensRuns,

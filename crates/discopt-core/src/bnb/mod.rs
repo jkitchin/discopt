@@ -8,6 +8,7 @@ pub mod in_tree_presolve;
 pub mod mccormick_patch;
 pub mod milp_driver;
 pub mod milp_handle;
+pub mod milp_presolve;
 pub mod node;
 pub mod obbt_sweep;
 pub mod obj_integral;

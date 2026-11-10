@@ -3443,6 +3443,23 @@ pub fn solve_milp_node_hooked(
     let l = prep.l.as_deref().unwrap_or(l);
     let u = prep.u.as_deref().unwrap_or(u);
     let (n_relaxed, unscalable) = (prep.n_relaxed, prep.unscalable);
+    // Gap plan §12.34: MILP presolve at the top level, no callbacks.
+    if milp_presolve_enabled()
+        && hook.is_none()
+        && lazy.is_none()
+        && node.is_none()
+        && opts.bound_hook.is_none()
+        && MILP_DEPTH.with(|d| d.get()) == 0
+    {
+        if let Some(mut res) = solve_presolved(&prep.csc, m, n, c, l, u, b, obj_const, opts) {
+            crate::profile::incr_by(crate::profile::Ctr::MilpNoiseEntriesRelaxed, n_relaxed);
+            if unscalable {
+                crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
+                withdraw_certificate(&mut res);
+            }
+            return res;
+        }
+    }
     let mut res = solve_milp_node_search(
         prep.csc, m, n, c, l, u, b, obj_const, opts, hook, lazy, node,
     );
@@ -3453,6 +3470,234 @@ pub fn solve_milp_node_hooked(
         withdraw_certificate(&mut res);
     }
     res
+}
+
+/// `DISCOPT_MILP_PRESOLVE` (gap plan §12.34): run [`crate::bnb::milp_presolve`] on the
+/// top-level MILP and solve the reduced problem. Default OFF until a panel; garbage is
+/// refused.
+fn milp_presolve_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_PRESOLVE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_MILP_PRESOLVE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
+/// singleton slack per inequality row after them), solve the reduced problem, map the
+/// answer back and re-verify it on the original rows. `None` means "solve the original
+/// instead": the slack structure is not clean, presolve reduced nothing, presolve
+/// claimed infeasibility (never trusted as a certificate here), or the postsolved
+/// point failed verification.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn solve_presolved(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+) -> Option<MilpResult> {
+    use crate::bnb::milp_presolve::{presolve, row_form_feasible, RowForm};
+    let ns = opts.n_struct.min(n);
+    let fin = |v: f64| {
+        if v <= -INF {
+            f64::NEG_INFINITY
+        } else if v >= INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    // Row form: structural entries, range from the row's singleton slack.
+    let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            if v != 0.0 {
+                rows[i].0.push(j);
+                rows[i].1.push(v);
+            }
+        }
+    }
+    let mut slack: Vec<Option<(usize, f64)>> = vec![None; m];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        if nz.len() != 1 || c[j] != 0.0 || slack[nz[0].0].is_some() {
+            return None;
+        }
+        slack[nz[0].0] = Some((j, nz[0].1));
+    }
+    let (mut lo, mut up) = (vec![0.0; m], vec![0.0; m]);
+    for i in 0..m {
+        match slack[i] {
+            None => {
+                lo[i] = b[i];
+                up[i] = b[i];
+            }
+            Some((j, sigma)) => {
+                let (sl, su) = (fin(l[j]), fin(u[j]));
+                let (e1, e2) = (b[i] - sigma * sl, b[i] - sigma * su);
+                let (a, z) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                lo[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                up[i] = if z.is_nan() { f64::INFINITY } else { z };
+            }
+        }
+    }
+    let mut is_int = vec![false; ns];
+    for &j in &opts.integer_cols {
+        if j < ns {
+            is_int[j] = true;
+        }
+    }
+    let rf = RowForm {
+        n: ns,
+        rows,
+        lo,
+        up,
+        c: c[..ns].to_vec(),
+        l: l[..ns].iter().map(|&v| fin(v)).collect(),
+        u: u[..ns].iter().map(|&v| fin(v)).collect(),
+        is_int,
+    };
+    let p = presolve(&rf, 1e-9, 20);
+    if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+        eprintln!(
+            "MILP presolve: {}x{} -> {}x{} (offset {:e}, infeasible {}) {:?}",
+            m,
+            ns,
+            p.form.rows.len(),
+            p.keep_cols.len(),
+            p.offset,
+            p.infeasible,
+            p.stats
+        );
+    }
+    if p.infeasible {
+        // Never trusted as a certificate: the original is solved instead.
+        return None;
+    }
+    if p.keep_cols.len() == ns && p.form.rows.len() == m {
+        return None;
+    }
+    // Rebuild the standard form: reduced structurals, then one slack per inequality row.
+    let f = &p.form;
+    let k = f.n;
+    let (mut b2, mut sl, mut su) = (Vec::new(), Vec::new(), Vec::new());
+    let mut kept_rows: Vec<usize> = Vec::new();
+    for r in 0..f.rows.len() {
+        let (a, z) = (f.lo[r], f.up[r]);
+        if !a.is_finite() && !z.is_finite() {
+            continue;
+        }
+        kept_rows.push(r);
+        if a == z {
+            b2.push(a);
+            sl.push(f64::NAN);
+            su.push(f64::NAN);
+        } else if z.is_finite() {
+            // a x + s = up, s in [0, up - lo].
+            b2.push(z);
+            sl.push(0.0);
+            su.push(if a.is_finite() { z - a } else { INF });
+        } else {
+            // a x - s = lo, s in [0, inf).
+            b2.push(a);
+            sl.push(-0.0);
+            su.push(INF);
+        }
+    }
+    let m2 = kept_rows.len();
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for (i2, &r) in kept_rows.iter().enumerate() {
+        for (&j, &v) in f.rows[r].0.iter().zip(&f.rows[r].1) {
+            cols[j].push((i2, v));
+        }
+    }
+    let (mut c2, mut l2, mut u2) = (f.c.clone(), Vec::new(), Vec::new());
+    for j in 0..k {
+        l2.push(if f.l[j].is_finite() { f.l[j] } else { -INF });
+        u2.push(if f.u[j].is_finite() { f.u[j] } else { INF });
+    }
+    for i2 in 0..m2 {
+        if sl[i2].is_nan() {
+            continue;
+        }
+        let sign = if sl[i2].is_sign_negative() { -1.0 } else { 1.0 };
+        cols.push(vec![(i2, sign)]);
+        c2.push(0.0);
+        l2.push(0.0);
+        u2.push(su[i2]);
+    }
+    let n2 = cols.len();
+    let mut cp = vec![0usize];
+    let (mut ri2, mut rv2) = (Vec::new(), Vec::new());
+    for col in &cols {
+        let mut col = col.clone();
+        col.sort_by_key(|e| e.0);
+        for (i, v) in col {
+            ri2.push(i);
+            rv2.push(v);
+        }
+        cp.push(ri2.len());
+    }
+    let csc2 = SparseCols::from_csc(cp, ri2, rv2);
+    let mut o2 = opts.clone();
+    o2.n_struct = k;
+    o2.integer_cols = (0..k).filter(|&q| f.is_int[q]).collect();
+    o2.initial_incumbent = opts
+        .initial_incumbent
+        .as_ref()
+        .map(|x| p.keep_cols.iter().map(|&j| x[j]).collect());
+    let res2 = solve_milp_node_search(
+        csc2,
+        m2,
+        n2,
+        &c2,
+        &l2,
+        &u2,
+        &b2,
+        obj_const + p.offset,
+        &o2,
+        None,
+        None,
+        None,
+    );
+    // After the search: its `begin_solve` resets the counters.
+    crate::profile::incr(crate::profile::Ctr::MilpPresolveRuns);
+    crate::profile::incr_by(
+        crate::profile::Ctr::MilpPresolveColsRemoved,
+        (ns - p.keep_cols.len()) as u64,
+    );
+    crate::profile::incr_by(
+        crate::profile::Ctr::MilpPresolveRowsRemoved,
+        (m - p.form.rows.len()) as u64,
+    );
+    let has_x = matches!(res2.status, MilpStatus::Optimal | MilpStatus::Feasible);
+    let mut res = res2;
+    if has_x {
+        let x = p.postsolve(&res.x, ns);
+        if !row_form_feasible(&rf, &x, 1e-6) {
+            crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+            return None;
+        }
+        res.x = x;
+    } else {
+        res.x = vec![0.0; ns];
+    }
+    Some(res)
 }
 
 /// The box the #1296 gate measures an entry's reach over (#2107): the caller's
