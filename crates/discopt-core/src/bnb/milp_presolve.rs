@@ -26,6 +26,8 @@
 //!   (10); an integer column only when every other column of the row is integer and
 //!   every ratio and the right-hand side divided by its coefficient are integral.
 //!
+//! - bound propagation: integer bounds tightened from row activities; continuous
+//!   columns keep implied bounds that feed only the aggregator's implied-free test;
 //! - dominated columns (HiGHS `detectDominatedCol`): the reduced cost is bounded over a
 //!   box of row duals (row signs, tightened one step by the dual constraints of continuous
 //!   columns with an infinite bound) and a (weakly) dominated column is fixed; see
@@ -84,6 +86,8 @@ pub struct PresolveStats {
     pub doubleton_eqs: usize,
     /// Implied-free columns aggregated out of equality rows.
     pub aggregated: usize,
+    /// Integer bound tightenings by row-activity propagation.
+    pub propagated: usize,
     /// Columns fixed as (weakly) dominated by row-dual bounds.
     pub dominated_cols: usize,
     /// Of those, fixings that needed a row-dual bound derived from a column.
@@ -183,6 +187,12 @@ struct Work {
     u: Vec<f64>,
     is_int: Vec<bool>,
     col_alive: Vec<bool>,
+    /// Implied lower/upper bounds of continuous columns with the row implying them
+    /// (HiGHS `implColLower/Upper` + source). Never written into `l/u`: they only feed
+    /// the aggregator's implied-free test, whose bound drops make the reduced problem a
+    /// relaxation the postsolve check guards.
+    impl_l: Vec<(f64, usize)>,
+    impl_u: Vec<(f64, usize)>,
     /// Rows each column appears in (may include dead rows).
     col_rows: Vec<Vec<usize>>,
     ops: Vec<PostOp>,
@@ -423,10 +433,13 @@ impl Work {
                 }
             }
             // Implied free (HiGHS `isImpliedFree`): the rows containing x_s, with the
-            // other columns' bounds, keep x_s within [l_s, u_s]. Sound here without
-            // HiGHS's source tracking: this presolve's bounds only ever come from original
-            // constraints (removed singleton rows, substituted columns' bounds), never from
-            // propagation through rows that stay, so no implication is circular.
+            // other columns' bounds (and their implied bounds from other rows), keep x_s
+            // within [l_s, u_s]. Implications can chain (as in HiGHS), so a wrong "implied"
+            // is possible in principle; it only drops x_s's bounds, which makes the reduced
+            // problem a relaxation: its infeasibility and (verified) optimum carry over, and
+            // `solve_presolved` re-checks the postsolved point on the original rows and
+            // bounds and falls back to the original problem when it fails or when the
+            // reduced problem is unbounded.
             let (mut il, mut iu) = (f64::NEG_INFINITY, f64::INFINITY);
             for &q in &self.col_rows[s] {
                 if !self.row_alive[q] {
@@ -442,10 +455,21 @@ impl Work {
                     if k == s {
                         continue;
                     }
-                    let (lo_c, hi_c) = if v > 0.0 {
-                        (v * self.l[k], v * self.u[k])
+                    // Other columns' implied bounds, except those this row implies.
+                    let lk = if self.impl_l[k].1 != q {
+                        self.l[k].max(self.impl_l[k].0)
                     } else {
-                        (v * self.u[k], v * self.l[k])
+                        self.l[k]
+                    };
+                    let uk = if self.impl_u[k].1 != q {
+                        self.u[k].min(self.impl_u[k].0)
+                    } else {
+                        self.u[k]
+                    };
+                    let (lo_c, hi_c) = if v > 0.0 {
+                        (v * lk, v * uk)
+                    } else {
+                        (v * uk, v * lk)
                     };
                     if lo_c.is_finite() {
                         rmin += lo_c
@@ -562,6 +586,115 @@ impl Work {
             return true;
         }
         false
+    }
+
+    /// Bound propagation over the rows (HiGHS presolve's activity-based bound
+    /// tightening): integer columns get their bounds tightened (rounded with HiGHS's
+    /// `1e-6` integrality slack, so only points violating a row are removed); continuous
+    /// columns record implied bounds in `impl_l/impl_u` and keep their bounds.
+    fn propagate(&mut self) -> bool {
+        const INT_SLACK: f64 = 1e-6;
+        let mut changed = false;
+        for j in 0..self.n {
+            self.impl_l[j] = (-INF, usize::MAX);
+            self.impl_u[j] = (INF, usize::MAX);
+        }
+        for r in 0..self.rows.len() {
+            if !self.row_alive[r] || self.rows[r].0.len() < 2 {
+                continue;
+            }
+            let (mn, nmn, mx, nmx) = self.activity(r);
+            if nmn > 1 && nmx > 1 {
+                continue;
+            }
+            let (lo, up) = (self.lo[r], self.up[r]);
+            let (ri, rv) = self.rows[r].clone();
+            for (&j, &a) in ri.iter().zip(&rv) {
+                if a.abs() < 1e-9 || !self.col_alive[j] {
+                    continue;
+                }
+                let (lj, uj) = (self.l[j], self.u[j]);
+                let (cmin, cmax) = if a > 0.0 {
+                    (a * lj, a * uj)
+                } else {
+                    (a * uj, a * lj)
+                };
+                // Residual activity ranges without column j.
+                let rmin = if cmin.is_finite() {
+                    if nmn == 0 {
+                        Some(mn - cmin)
+                    } else {
+                        None
+                    }
+                } else if nmn == 1 {
+                    Some(mn)
+                } else {
+                    None
+                };
+                let rmax = if cmax.is_finite() {
+                    if nmx == 0 {
+                        Some(mx - cmax)
+                    } else {
+                        None
+                    }
+                } else if nmx == 1 {
+                    Some(mx)
+                } else {
+                    None
+                };
+                // a x_j <= up - rmin and a x_j >= lo - rmax.
+                let hi_ax = match rmin {
+                    Some(v) if up.is_finite() => up - v,
+                    _ => INF,
+                };
+                let lo_ax = match rmax {
+                    Some(v) if lo.is_finite() => lo - v,
+                    _ => -INF,
+                };
+                let (bl, bu) = if a > 0.0 {
+                    (lo_ax / a, hi_ax / a)
+                } else {
+                    (hi_ax / a, lo_ax / a)
+                };
+                let bl = if bl.is_nan() { -INF } else { bl };
+                let bu = if bu.is_nan() { INF } else { bu };
+                if self.is_int[j] {
+                    let nl = if bl.is_finite() {
+                        (bl - INT_SLACK * (1.0 + bl.abs())).ceil()
+                    } else {
+                        -INF
+                    };
+                    let nu = if bu.is_finite() {
+                        (bu + INT_SLACK * (1.0 + bu.abs())).floor()
+                    } else {
+                        INF
+                    };
+                    // Integral steps only; huge implied values are left alone.
+                    let tl = nl > self.l[j] && nl.abs() < 1e9;
+                    let tu = nu < self.u[j] && nu.abs() < 1e9;
+                    if tl || tu {
+                        self.tighten(
+                            j,
+                            if tl { nl } else { self.l[j] },
+                            if tu { nu } else { self.u[j] },
+                        );
+                        self.stats.propagated += 1;
+                        changed = true;
+                        if self.infeasible {
+                            return false;
+                        }
+                    }
+                } else {
+                    if bl > self.impl_l[j].0 {
+                        self.impl_l[j] = (bl, r);
+                    }
+                    if bu < self.impl_u[j].0 {
+                        self.impl_u[j] = (bu, r);
+                    }
+                }
+            }
+        }
+        changed
     }
 
     /// Row-dual bounds from the row sense alone (minimization, reduced cost
@@ -759,6 +892,12 @@ impl Work {
                 self.stats.fixed_cols += 1;
                 changed = true;
             }
+        }
+        if self.propagate() {
+            changed = true;
+        }
+        if self.infeasible {
+            return false;
         }
         // Rows: empty, singleton, redundant, forcing.
         for r in 0..self.rows.len() {
@@ -974,6 +1113,8 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
         u: f.u.clone(),
         is_int: f.is_int.clone(),
         col_alive: vec![true; f.n],
+        impl_l: vec![(-INF, usize::MAX); f.n],
+        impl_u: vec![(INF, usize::MAX); f.n],
         col_rows,
         ops: Vec::new(),
         offset: 0.0,
@@ -1206,6 +1347,7 @@ mod tests {
             (0usize, 0usize, 0usize, 0usize);
         let mut doubletons = 0usize;
         let mut aggregated = 0usize;
+        let mut propagated = 0usize;
         for _ in 0..3000 {
             let f = random_ip(&mut r);
             let want = brute_min(&f);
@@ -1213,6 +1355,7 @@ mod tests {
             cases += 1;
             doubletons += p.stats.doubleton_eqs;
             aggregated += p.stats.aggregated;
+            propagated += p.stats.propagated;
             if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
                 reduced += 1;
             }
@@ -1251,8 +1394,9 @@ mod tests {
                 && infeasible > 50
                 && feasible > 500
                 && doubletons > 50
-                && aggregated > 20,
-            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated}"
+                && aggregated > 20
+                && propagated > 100,
+            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated}"
         );
     }
 }

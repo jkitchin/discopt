@@ -3711,6 +3711,15 @@ fn solve_presolved(
         crate::profile::Ctr::MilpPresolveRowsRemoved,
         (m - p.form.rows.len()) as u64,
     );
+    // The reduced problem may drop bounds the presolve found implied (aggregator), so it
+    // can be a relaxation: its infeasibility carries over, its unboundedness does not.
+    if res2.status == MilpStatus::Unbounded {
+        if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+            eprintln!("MILP presolve: reduced problem unbounded; solving the original");
+        }
+        crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+        return None;
+    }
     let has_x = matches!(res2.status, MilpStatus::Optimal | MilpStatus::Feasible);
     let mut res = res2;
     if has_x {
@@ -11597,6 +11606,8 @@ mod tests {
         };
         let (mut compared, mut optimal, mut aggregations) = (0usize, 0usize, 0usize);
         let mut dominated = 0usize;
+        let mut fallbacks = 0usize;
+        let mut presolve_infeasible = 0usize;
         for _ in 0..300 {
             let ns = rnd(3, 7) as usize;
             let m = rnd(2, 6) as usize;
@@ -11690,7 +11701,9 @@ mod tests {
                     .collect(),
                 is_int: is_int.clone(),
             };
-            let st = presolve(&rf, 1e-9, 20).stats;
+            let pr = presolve(&rf, 1e-9, 20);
+            let pre_infeasible = pr.infeasible;
+            let st = pr.stats;
             aggregations += st.aggregated;
             dominated += st.dominated_by_derived;
             let base = solve_milp_node_search(
@@ -11707,7 +11720,16 @@ mod tests {
                 None,
                 None,
             );
+            if pre_infeasible {
+                assert_ne!(
+                    base.status,
+                    MilpStatus::Optimal,
+                    "presolve claimed infeasible on a problem with a certified optimum"
+                );
+                presolve_infeasible += 1;
+            }
             let Some(pre) = solve_presolved(&csc, m, n, &cf, &lf, &uf, &b, 0.0, &o) else {
+                fallbacks += 1;
                 continue;
             };
             compared += 1;
@@ -11761,7 +11783,7 @@ mod tests {
                 _ => {}
             }
         }
-        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated}");
+        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated} fallbacks {fallbacks} presolve_infeasible {presolve_infeasible}");
         assert!(compared > 50 && optimal > 30 && aggregations > 20 && dominated > 10,
             "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations} dominated by derived dual bounds {dominated}");
     }
