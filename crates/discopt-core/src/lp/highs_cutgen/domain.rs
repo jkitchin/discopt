@@ -205,6 +205,9 @@ pub struct Domain {
     model: Arc<DomainModel>,
     feastol: f64,
     epsilon: f64,
+    /// Minimum relative improvement to accept a continuous column's new bound
+    /// (`adjustedUb/Lb`: HiGHS uses 0.3).
+    cont_accept: f64,
     /// Current column lower bounds.
     pub col_lower: Vec<f64>,
     /// Current column upper bounds.
@@ -244,6 +247,7 @@ impl Domain {
             model,
             feastol,
             epsilon,
+            cont_accept: 0.3,
             col_lower: lb[..n].to_vec(),
             col_upper: ub[..n].to_vec(),
             col_lower_pos: vec![-1; n],
@@ -267,6 +271,11 @@ impl Domain {
         };
         d.compute_row_activities();
         d
+    }
+
+    /// Set the minimum relative improvement for continuous bound changes (HiGHS: 0.3).
+    pub fn set_continuous_accept(&mut self, v: f64) {
+        self.cont_accept = v;
     }
 
     /// Whether the domain is infeasible.
@@ -406,7 +415,7 @@ impl Domain {
                 } else {
                     rel /= self.col_upper[col].abs().max(bound.abs());
                 }
-                rel >= 0.3
+                rel >= self.cont_accept
             } else {
                 false
             };
@@ -437,7 +446,7 @@ impl Domain {
                 } else {
                     rel /= self.col_lower[col].abs().max(bound.abs());
                 }
-                rel >= 0.3
+                rel >= self.cont_accept
             } else {
                 false
             };
@@ -914,6 +923,25 @@ impl Domain {
         if old_infeasible {
             self.infeasible_reason = Reason::Unspecified;
             self.infeasible = false;
+        }
+        self.domchgstack.clear();
+        self.prevboundval.clear();
+        self.domchgreason.clear();
+        self.branch_pos.clear();
+    }
+
+    /// Make the current bounds the global baseline: clear the change stack so
+    /// [`Self::backtrack_to_global`] returns here (HiGHS keeps global-domain changes off
+    /// a local domain's stack: the local domain starts as a copy of the propagated
+    /// global one). Only valid when the current bounds hold globally, e.g. after
+    /// propagating the global box.
+    pub fn commit_as_global(&mut self) {
+        assert!(!self.infeasible, "cannot commit an infeasible domain");
+        for c in &self.domchgstack {
+            match c.boundtype {
+                BoundType::Lower => self.col_lower_pos[c.column] = -1,
+                BoundType::Upper => self.col_upper_pos[c.column] = -1,
+            }
         }
         self.domchgstack.clear();
         self.prevboundval.clear();

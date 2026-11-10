@@ -736,9 +736,9 @@ fn highs_sb_tree() -> bool {
 }
 
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: the sequential HiGHS search (gap plan §12.31):
-/// dives at batch size 1 with one incremental `HighsDomain` kept across nodes in place of
-/// per-node FBBT. Implies [`highs_dive`]. Default OFF; `DISCOPT_HIGHS_SEARCH=1` opts in.
-/// Read per solve, refusing garbage.
+/// dives at batch size 1 (one plunge at a time, the LP and cut pool fixed along a dive).
+/// Implies [`highs_dive`]. Default OFF; `DISCOPT_HIGHS_SEARCH=1` opts in. Read per solve,
+/// refusing garbage.
 fn highs_search() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEARCH") {
         Err(_) => false,
@@ -746,6 +746,26 @@ fn highs_search() -> bool {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
             other => panic!("DISCOPT_HIGHS_SEARCH={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Under the sequential search: node boxes from the persistent incremental `HighsDomain`
+/// instead of per-node FBBT (gap plan §12.31). Default OFF, a documented opt-in: the
+/// HiGHS-faithful domain (30 % acceptance rule for continuous columns, change-triggered
+/// rows) gives looser boxes than discopt's FBBT, and discopt's warm dual simplex pays
+/// for the looser structural and slack boxes (bell5: ~90 pivots per node LP vs ~2,
+/// 2.6 ms vs 0.2 ms). Kept for the layers that need the domain (cut-pool and conflict
+/// propagation); turn on when those land and a panel shows it pays.
+fn highs_search_domain() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH_DOMAIN") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEARCH_DOMAIN={other:?} is not recognized (expected 1 or 0)")
+            }
         },
     }
 }
@@ -765,7 +785,10 @@ fn domain_model_from_lp(
     l: &[f64],
     u: &[f64],
     is_int: &[bool],
-) -> crate::lp::highs_cutgen::domain::DomainModel {
+) -> (
+    crate::lp::highs_cutgen::domain::DomainModel,
+    Vec<Option<(usize, f64)>>,
+) {
     let lo = |v: f64| if v <= -INF { f64::NEG_INFINITY } else { v };
     let hi = |v: f64| if v >= INF { f64::INFINITY } else { v };
     let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
@@ -814,12 +837,24 @@ fn domain_model_from_lp(
             _ => {}
         }
     }
-    crate::lp::highs_cutgen::domain::DomainModel::from_rows(
-        ns,
-        &rows,
-        rl,
-        ru,
-        is_int[..ns].to_vec(),
+    let slack_map: Vec<Option<(usize, f64)>> = (0..m)
+        .map(|i| {
+            if slack_count[i] == 1 {
+                slack_of[i]
+            } else {
+                None
+            }
+        })
+        .collect();
+    (
+        crate::lp::highs_cutgen::domain::DomainModel::from_rows(
+            ns,
+            &rows,
+            rl,
+            ru,
+            is_int[..ns].to_vec(),
+        ),
+        slack_map,
     )
 }
 
@@ -5442,8 +5477,10 @@ fn solve_milp_node_search(
     });
     // Gap plan §12.28: plunging under the highs arm.
     let search_on = highs_sep.is_some() && highs_search() && lazy.is_none();
+    let search_domain_on = search_on && highs_search_domain();
     let dive_on = highs_sep.is_some() && (highs_dive() || search_on);
     let mut hs_domain: Option<(u64, crate::lp::highs_cutgen::domain::Domain)> = None;
+    let mut hs_slacks: Vec<Option<(usize, f64)>> = Vec::new();
     let sb_tree_on = highs_sep.is_some() && highs_sb_tree();
     if dive_on {
         tm.enable_plunging(
@@ -5733,7 +5770,7 @@ fn solve_milp_node_search(
 
         // Gap plan §12.31: under the sequential search, bring the persistent domain to
         // the node's box (incrementally when the box refines the domain) and propagate.
-        let domain_pre: Option<DomainPre> = if search_on && batch.node_ids.len() == 1 {
+        let domain_pre: Option<DomainPre> = if search_domain_on && batch.node_ids.len() == 1 {
             let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
             let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (m_w as u64) ^ ((n_w as u64) << 20);
             h = h.wrapping_mul(0x100_0000_01b3) ^ lp_version;
@@ -5741,8 +5778,9 @@ fn solve_milp_node_search(
                 h = (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3);
             }
             if hs_domain.as_ref().is_none_or(|(k, _)| *k != h) {
-                let model =
+                let (model, slack_map) =
                     domain_model_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
+                hs_slacks = slack_map;
                 let gl: Vec<f64> = l_w[..ns]
                     .iter()
                     .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
@@ -5766,6 +5804,7 @@ fn solve_milp_node_search(
                     hs_domain = None;
                 } else {
                     d.clear_changed_cols();
+                    d.commit_as_global();
                     hs_domain = Some((h, d));
                 }
             }
@@ -5820,13 +5859,43 @@ fn solve_milp_node_search(
                     (id, None)
                 } else {
                     let map = |v: f64, inf: f64| if v.is_infinite() { inf } else { v };
-                    (
-                        id,
-                        Some((
-                            d.col_lower.iter().map(|&v| map(v, -INF)).collect(),
-                            d.col_upper.iter().map(|&v| map(v, INF)).collect(),
-                        )),
-                    )
+                    let mut fl: Vec<f64> = d.col_lower.iter().map(|&v| map(v, -INF)).collect();
+                    let mut fu: Vec<f64> = d.col_upper.iter().map(|&v| map(v, INF)).collect();
+                    fl.extend_from_slice(&l_w[ns..n_w]);
+                    fu.extend_from_slice(&u_w[ns..n_w]);
+                    // A row's slack takes the range implied by the row's activity over the
+                    // domain's box (`a x + sigma s = b`), relaxed by 1e-9 relative: boxed
+                    // slacks let the warm dual simplex flip bounds instead of pivoting
+                    // (gap plan §12.31: without them a node LP took ~90 pivots, with them ~2).
+                    for (row, sm) in hs_slacks.iter().enumerate() {
+                        let Some((sj, sigma)) = *sm else { continue };
+                        if sj >= n_w || row >= m_w {
+                            continue;
+                        }
+                        let (amin, nmin, amax, nmax) = d.row_activity(row);
+                        let amin = if nmin > 0 { f64::NEG_INFINITY } else { amin };
+                        let amax = if nmax > 0 { f64::INFINITY } else { amax };
+                        let (e_hi, e_lo) = ((b_w[row] - amin) / sigma, (b_w[row] - amax) / sigma);
+                        let (mut slo, mut shi) = if sigma > 0.0 {
+                            (e_lo, e_hi)
+                        } else {
+                            (e_hi, e_lo)
+                        };
+                        if slo.is_nan() {
+                            slo = f64::NEG_INFINITY;
+                        }
+                        if shi.is_nan() {
+                            shi = f64::INFINITY;
+                        }
+                        slo -= 1e-9 * (1.0 + slo.abs());
+                        shi += 1e-9 * (1.0 + shi.abs());
+                        let (nl, nu) = (fl[sj].max(map(slo, -INF)), fu[sj].min(map(shi, INF)));
+                        if nl <= nu {
+                            fl[sj] = nl;
+                            fu[sj] = nu;
+                        }
+                    }
+                    (id, Some((fl, fu)))
                 }
             })
         } else {
@@ -7294,13 +7363,16 @@ fn solve_node(
             let mut l = full_l.clone();
             let mut u = full_u.clone();
             if let Some((dl, du)) = pre {
-                l[..ctx.ns].copy_from_slice(dl);
-                u[..ctx.ns].copy_from_slice(du);
+                let k = dl.len().min(l.len());
+                l[..k].copy_from_slice(&dl[..k]);
+                u[..k].copy_from_slice(&du[..k]);
             }
-            crate::lp::simplex::presolve::PresolveResult {
-                l,
-                u,
-                infeasible: pre.is_none(),
+            {
+                crate::lp::simplex::presolve::PresolveResult {
+                    l,
+                    u,
+                    infeasible: pre.is_none(),
+                }
             }
         } else {
             // cert:T0.3 — time per-node FBBT/constraint propagation. T3b5: FBBT on

@@ -1677,3 +1677,46 @@ each node independently, so the domain lands with the sequential search loop (ne
 A replay against HiGHS's own domain (as for the separators) is pending: HiGHS's local domain also
 runs objective, cut-pool and clique propagation, so the replay needs those switched off in the
 patched build first.
+
+### 12.31 Sequential search loop: built, diagnosed, and a threading confound (2026-11-10)
+
+`DISCOPT_HIGHS_SEARCH=1` (default OFF): dives at batch size 1, one plunge at a time; the node cut
+pool, its ageing, the fold into the shared LP and cut-row deletion run only at plunge starts, so
+the LP stays fixed along a dive (HiGHS adds pool cuts only in `separate` at the node from the
+queue). Two fixes made it run at all: the domain rebuild is keyed on an `lp_version` counter
+bumped where the working matrix changes (`cut_lp_epoch` advances every batch), and the sub-MIP
+stride counts nodes under dives (§12.29).
+
+**The HiGHS domain gives looser node boxes than discopt's FBBT, and the LP pays.** bell5, 10 s:
+batch 1 without the search 1.4 pivots per node LP (0.22 ms); search with the domain 93 pivots
+(2.6 ms); search without the domain 1.6 pivots (0.20 ms), certified. Comparing the two boxes at
+the same nodes: the domain is looser on ~39 columns per node, mostly continuous, often by more
+than 30 % of the width, because HiGHS's acceptance rule (`adjustedUb/Lb`: a continuous bound
+moves only on a >= 30 % relative improvement) rejects moderate tightenings that start chains FBBT
+follows (bell5 column 13: 0 -> 382 of 1,511, rejected, so column 0's 79 % tightening never
+happens), and the domain propagates only change-triggered rows. Lowering the threshold to 0.05 or
+0.001 still left ~40 pivots per LP. Running FBBT for slack columns only on top of the domain box
+restores ~2 pivots: discopt's warm dual simplex flips bounds on boxed slacks instead of pivoting,
+and FBBT's slack ranges come from its tighter structural box. Slack ranges from the domain's own
+row activities did not help (they inherit its looser box). So node boxes stay FBBT;
+`DISCOPT_HIGHS_SEARCH_DOMAIN=1` keeps the domain path as a documented opt-in for the cut-pool and
+conflict propagation layers.
+
+**Threading confound.** The batch loop evaluates its 64 nodes in parallel (rayon); every HiGHS
+run in this plan used `threads = 1`. On mik-1 the batch-64 run's separation timers sum to 19 s of
+a 20 s wall. Six probe rows, bundle (batch 64) vs search, 20 s (`p3_ab_sequential_search_*`):
+
+| row | bundle, multi-thread | search | bundle, 1 thread | search, 1 thread |
+|---|---|---|---|---|
+| bell5 | cert 1.4 s | cert 3.3 s | cert 3.5 s | cert 3.6 s |
+| enlight_hard | 2.7 % | 8.1 % | 8.1 % | 8.1 % |
+| mik-1 | 0.83 % | 1.33 % | 1.18 % | 1.30 % |
+| neos17 | 0.34 % (p 8.0 %) | 0.52 % | 0.55 % | 0.45 % (p 22.5 %) |
+| 2122 (p) | 762 % | 5.0 % | 762 % | 5.0 % |
+| b-ball | 0.08 % | 0.12 % | 0.09 % | 0.12 % |
+
+Single-threaded, the two loops are about even, and the bundle's enlight_hard certification
+(§12.28) came from parallelism. Every discopt-vs-HiGHS count in this plan (47, 48, 49 vs 59)
+compared multi-threaded discopt with single-threaded HiGHS. A fair comparison runs both at the
+same thread count; the counts at one thread are not yet measured. In the sequential search the
+dominant cost on mik is FBBT at 5.2 ms per node (1,257 calls, 6.5 s of 20 s).
