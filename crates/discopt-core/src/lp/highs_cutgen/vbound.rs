@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Variable-bound discovery, ported from HiGHS: the variable-upper/lower-bound
 //! halves of `HighsCliqueTable::extractCliques` (model rows, run once at setup with
 //! `transformRows`) and `HighsCliqueTable::extractCliquesFromCut` (each pool cut of

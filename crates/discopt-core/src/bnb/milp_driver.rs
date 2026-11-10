@@ -1,5 +1,10 @@
 //! Rust-internal MILP branch-and-bound driven by the warm-started simplex.
 //!
+//! Provenance: the gap-plan-P3 primal heuristics (RENS/RINS, randomized rounding),
+//! child selection and strong-branching rules marked as HiGHS's below are derived from
+//! HiGHS (https://github.com/ERGO-Code/HiGHS, Copyright (c) HiGHS, MIT License); see
+//! `THIRD_PARTY_NOTICES.md` at the repository root.
+//!
 //! This runs the *entire* pure-MILP solve in Rust (roadmap P4): it reuses the
 //! existing [`TreeManager`] (selection, pruning, branching, pseudocosts,
 //! incumbent, gap) but solves each node's LP relaxation in-process with the
@@ -729,6 +734,98 @@ fn highs_sb_tree() -> bool {
         },
     }
 }
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: the sequential HiGHS search (gap plan §12.31):
+/// dives at batch size 1 with one incremental `HighsDomain` kept across nodes in place of
+/// per-node FBBT. Implies [`highs_dive`]. Default OFF; `DISCOPT_HIGHS_SEARCH=1` opts in.
+/// Read per solve, refusing garbage.
+fn highs_search() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_SEARCH={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// The working LP `A x = b` (structural columns `0..ns`, slacks after) as the rows of a
+/// [`crate::lp::highs_cutgen::domain::DomainModel`] over the structural columns: a row
+/// with one singleton slack takes its range from the slack's bounds, a row with no slack
+/// is an equality, and a row whose slack structure is anything else is left free (it
+/// never propagates). The `1e20` sentinel maps to infinity.
+#[allow(clippy::too_many_arguments)]
+fn domain_model_from_lp(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int: &[bool],
+) -> crate::lp::highs_cutgen::domain::DomainModel {
+    let lo = |v: f64| if v <= -INF { f64::NEG_INFINITY } else { v };
+    let hi = |v: f64| if v >= INF { f64::INFINITY } else { v };
+    let mut rows: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); m];
+    for j in 0..ns {
+        let (ri, rv) = csc.col(j);
+        for (&i, &v) in ri.iter().zip(rv) {
+            if v != 0.0 && i < m {
+                rows[i].0.push(j);
+                rows[i].1.push(v);
+            }
+        }
+    }
+    let mut slack_count = vec![0usize; m];
+    let mut slack_of: Vec<Option<(usize, f64)>> = vec![None; m];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let nz: Vec<(usize, f64)> = ri
+            .iter()
+            .zip(rv)
+            .filter(|(&i, &v)| v != 0.0 && i < m)
+            .map(|(&i, &v)| (i, v))
+            .collect();
+        for &(i, _) in &nz {
+            slack_count[i] += 1;
+        }
+        if nz.len() == 1 {
+            slack_of[nz[0].0] = Some((j, nz[0].1));
+        }
+    }
+    let mut rl = vec![f64::NEG_INFINITY; m];
+    let mut ru = vec![f64::INFINITY; m];
+    for i in 0..m {
+        match (slack_count[i], slack_of[i]) {
+            (0, _) => {
+                rl[i] = b[i];
+                ru[i] = b[i];
+            }
+            (1, Some((j, sigma))) => {
+                // a x + sigma s = b, s in [sl, su]  =>  a x in b - sigma [sl, su].
+                let (sl, su) = (lo(l[j]), hi(u[j]));
+                let (e1, e2) = (b[i] - sigma * sl, b[i] - sigma * su);
+                let (a, c) = if sigma > 0.0 { (e2, e1) } else { (e1, e2) };
+                rl[i] = if a.is_nan() { f64::NEG_INFINITY } else { a };
+                ru[i] = if c.is_nan() { f64::INFINITY } else { c };
+            }
+            _ => {}
+        }
+    }
+    crate::lp::highs_cutgen::domain::DomainModel::from_rows(
+        ns,
+        &rows,
+        rl,
+        ru,
+        is_int[..ns].to_vec(),
+    )
+}
+
+/// A node's box after the sequential search's domain propagation: `None` inside when
+/// the domain proved it infeasible (gap plan §12.31).
+type DomainPre = (NodeId, Option<(Vec<f64>, Vec<f64>)>);
 
 /// Nodes per plunge before it returns to the queue (HiGHS `processNodes`'s
 /// `plungeLimit`).
@@ -4215,6 +4312,9 @@ fn solve_milp_node_search(
         } else {
             None
         };
+    // Bumped whenever the working matrix changes (fold, cut-row deletion): part of the
+    // sequential search domain's rebuild key with the size and every bound (§12.31).
+    let mut lp_version: u64 = 0;
     let mut pool_ids: Vec<i32> = Vec::new();
     let mut round_pool_ids: Vec<i32> = Vec::new();
     // Gap plan §12.27: root RENS between root passes (`highs_root_rens`).
@@ -4888,6 +4988,7 @@ fn solve_milp_node_search(
                     &new_cuts,
                 );
                 csc_w = nw_csc;
+                lp_version += 1;
                 m_w = nm;
                 n_w = nn;
                 if prune_base.is_some() {
@@ -5340,7 +5441,9 @@ fn solve_milp_node_search(
         top_level: milp_depth == 0,
     });
     // Gap plan §12.28: plunging under the highs arm.
-    let dive_on = highs_sep.is_some() && highs_dive();
+    let search_on = highs_sep.is_some() && highs_search() && lazy.is_none();
+    let dive_on = highs_sep.is_some() && (highs_dive() || search_on);
+    let mut hs_domain: Option<(u64, crate::lp::highs_cutgen::domain::Domain)> = None;
     let sb_tree_on = highs_sep.is_some() && highs_sb_tree();
     if dive_on {
         tm.enable_plunging(
@@ -5358,7 +5461,7 @@ fn solve_milp_node_search(
                 .parse()
                 .unwrap_or_else(|_| panic!("DISCOPT_HIGHS_DIVE_BATCH={v:?} is not a count"))
         })
-        .unwrap_or(64)
+        .unwrap_or(if search_on { 1 } else { 64 })
         .max(1);
     let mut plunge_next: Vec<NodeId> = Vec::new();
     let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
@@ -5628,6 +5731,107 @@ fn solve_milp_node_search(
         );
         let dive_batch = dive_batch || improve_batch;
 
+        // Gap plan §12.31: under the sequential search, bring the persistent domain to
+        // the node's box (incrementally when the box refines the domain) and propagate.
+        let domain_pre: Option<DomainPre> = if search_on && batch.node_ids.len() == 1 {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (m_w as u64) ^ ((n_w as u64) << 20);
+            h = h.wrapping_mul(0x100_0000_01b3) ^ lp_version;
+            for v in l_w.iter().chain(u_w.iter()) {
+                h = (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3);
+            }
+            if hs_domain.as_ref().is_none_or(|(k, _)| *k != h) {
+                let model =
+                    domain_model_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
+                let gl: Vec<f64> = l_w[..ns]
+                    .iter()
+                    .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
+                    .collect();
+                let gu: Vec<f64> = u_w[..ns]
+                    .iter()
+                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
+                    .collect();
+                let mut d = crate::lp::highs_cutgen::domain::Domain::new(
+                    std::sync::Arc::new(model),
+                    &gl,
+                    &gu,
+                    1e-6,
+                    1e-9,
+                );
+                d.propagate();
+                crate::profile::incr(crate::profile::Ctr::HsDomainRebuilds);
+                if d.infeasible() {
+                    // The global rows alone are infeasible over the global box: no
+                    // domain to keep; the node falls back to its own FBBT.
+                    hs_domain = None;
+                } else {
+                    d.clear_changed_cols();
+                    hs_domain = Some((h, d));
+                }
+            }
+            hs_domain.as_mut().map(|(_, d)| {
+                use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
+                let id = batch.node_ids[0];
+                let tl: Vec<f64> = batch.lb[0]
+                    .iter()
+                    .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
+                    .collect();
+                let tu: Vec<f64> = batch.ub[0]
+                    .iter()
+                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
+                    .collect();
+                let refines = !d.infeasible()
+                    && (0..ns).all(|j| tl[j] >= d.col_lower[j] && tu[j] <= d.col_upper[j]);
+                if !refines {
+                    d.backtrack_to_global();
+                    crate::profile::incr(crate::profile::Ctr::HsDomainJumps);
+                }
+                for j in 0..ns {
+                    if d.infeasible() {
+                        break;
+                    }
+                    if tl[j] > d.col_lower[j] {
+                        d.change_bound(
+                            DomainChange {
+                                boundval: tl[j],
+                                column: j,
+                                boundtype: BoundType::Lower,
+                            },
+                            Reason::Branching,
+                        );
+                    }
+                    if tu[j] < d.col_upper[j] && !d.infeasible() {
+                        d.change_bound(
+                            DomainChange {
+                                boundval: tu[j],
+                                column: j,
+                                boundtype: BoundType::Upper,
+                            },
+                            Reason::Branching,
+                        );
+                    }
+                }
+                if !d.infeasible() {
+                    d.propagate();
+                }
+                d.clear_changed_cols();
+                if d.infeasible() {
+                    crate::profile::incr(crate::profile::Ctr::HsDomainInfeasible);
+                    (id, None)
+                } else {
+                    let map = |v: f64, inf: f64| if v.is_infinite() { inf } else { v };
+                    (
+                        id,
+                        Some((
+                            d.col_lower.iter().map(|&v| map(v, -INF)).collect(),
+                            d.col_upper.iter().map(|&v| map(v, INF)).collect(),
+                        )),
+                    )
+                }
+            })
+        } else {
+            None
+        };
         let outputs: Vec<NodeOutput> = {
             let ctx = NodeCtx {
                 b_w: &b_w,
@@ -5685,6 +5889,7 @@ fn solve_milp_node_search(
                 },
                 tm: &tm,
                 highs_node,
+                domain_pre: domain_pre.as_ref(),
             };
             #[cfg(feature = "parallel")]
             {
@@ -6177,7 +6382,11 @@ fn solve_milp_node_search(
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.
-        if node_gmi_on {
+        // Gap plan §12.31: under the sequential search the pool, its ageing and the
+        // fold into the shared LP are maintained only after a plunge start (where node
+        // separation runs), so the LP and the domain stay fixed along a dive, as in
+        // HiGHS (pool cuts enter its LP only in `separate` at the node from the queue).
+        if node_gmi_on && (!search_on || n_plunge_cont == 0) {
             for a in gmi_pool_age.iter_mut() {
                 *a = a.saturating_add(1);
             }
@@ -6539,6 +6748,7 @@ fn solve_milp_node_search(
                 &pending_cuts,
             );
             csc_w = nw_csc;
+            lp_version += 1;
             m_w = nm;
             n_w = nn;
             slack_l = l_w[ns..].to_vec();
@@ -6551,7 +6761,12 @@ fn solve_milp_node_search(
         // used by a matrix row that is not a folded cut is kept (that row could not be
         // rewritten); folded rows that use it are rewritten by substitution.
         cut_lp_epoch += 1;
-        if cut_lp_on && cut_lp_epoch % CUT_LP_DELETE_EVERY == 0 && !cut_lp_rows.is_empty() {
+        let delete_due = if search_on {
+            n_plunge_cont == 0
+        } else {
+            cut_lp_epoch % CUT_LP_DELETE_EVERY == 0
+        };
+        if cut_lp_on && delete_due && !cut_lp_rows.is_empty() {
             let managed: HashSet<usize> = cut_lp_rows.iter().map(|r| r.row).collect();
             let mut del: Vec<usize> = Vec::new();
             let mut relaxed_any = false;
@@ -6602,6 +6817,7 @@ fn solve_milp_node_search(
                 }
                 let d = delete_cut_rows(&csc_w, m_w, n_w, &b_w, &mut gone, &mut kept);
                 csc_w = d.csc;
+                lp_version += 1;
                 b_w = d.b;
                 let keep_col = |j: usize| d.col_map[j] != usize::MAX;
                 c_w = c_w
@@ -6862,6 +7078,9 @@ struct NodeCtx<'a> {
     /// Gap plan §12.23 (`DISCOPT_HIGHS_SEPA_NODE` under `DISCOPT_MILP_ROOT_CMIR=highs`):
     /// node rounds run the ported HiGHS separators instead of discopt's node GMI.
     highs_node: Option<HighsNodeCtx<'a>>,
+    /// Gap plan §12.31: the persistent domain's propagated box for this node (`None`
+    /// inside: proven infeasible), replacing the node's own FBBT.
+    domain_pre: Option<&'a DomainPre>,
 }
 
 /// What node separation under the HiGHS port reads beyond the node LP.
@@ -7069,8 +7288,21 @@ fn solve_node(
     // tightened structural bounds via the reduce). Runs on the working matrix
     // (including cut rows) with the node's local bounds.
     let mut tightened: Option<(Vec<f64>, Vec<f64>)> = None;
-    if ctx.opts.node_propagation {
-        let pr = {
+    let dpre = ctx.domain_pre.filter(|(pid, _)| *pid == id);
+    if ctx.opts.node_propagation || dpre.is_some() {
+        let pr = if let Some((_, pre)) = dpre {
+            let mut l = full_l.clone();
+            let mut u = full_u.clone();
+            if let Some((dl, du)) = pre {
+                l[..ctx.ns].copy_from_slice(dl);
+                u[..ctx.ns].copy_from_slice(du);
+            }
+            crate::lp::simplex::presolve::PresolveResult {
+                l,
+                u,
+                infeasible: pre.is_none(),
+            }
+        } else {
             // cert:T0.3 — time per-node FBBT/constraint propagation. T3b5: FBBT on
             // the UNSCALED working CSC (`ctx.csc_rc`; the dense `prop_lp.a` was
             // `ctx.a_w`, unscaled), bit-identical to the dense `tighten_bounds`.

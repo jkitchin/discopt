@@ -184,6 +184,7 @@ module-name = "discopt._rust"
 features = ["pyo3/extension-module"]
 include = [
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "Cargo.toml",
     "Cargo.lock",
     "crates/**/*.rs",

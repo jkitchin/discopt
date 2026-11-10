@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful port of `util/HighsCDouble.h`: a double-double ("compensated double")
 //! value `hi + lo`, with every operator reproducing HiGHS's exact operation order so
 //! that a replayed cut is bit-identical to the C++ one.

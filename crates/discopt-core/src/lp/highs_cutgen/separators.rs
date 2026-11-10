@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful ports of `HighsLpAggregator`, the `generateCut`/`finalizeAndAddCut`
 //! wrappers of `HighsCutGeneration`, `HighsDomain::tightenCoefficients`, and the
 //! path-aggregation (`HighsPathSeparator`) and tableau (`HighsTableauSeparator`)

@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! `HighsDomain`'s incremental bound propagation over model rows (gap plan §12.30).
 //!
 //! Each row keeps its minimum and maximum activity over the current column bounds
@@ -20,6 +24,7 @@
 //! implication fixings on binaries, redundant-row recording.
 
 use super::cdouble::CDouble;
+use std::sync::Arc;
 
 const INF: f64 = f64::INFINITY;
 /// `kHighsTiny`.
@@ -195,8 +200,8 @@ fn bound_range(upper: f64, lower: f64, tolerance: f64, continuous: bool) -> f64 
 }
 
 /// `HighsDomain` (model-row propagation).
-pub struct Domain<'m> {
-    model: &'m DomainModel,
+pub struct Domain {
+    model: Arc<DomainModel>,
     feastol: f64,
     epsilon: f64,
     /// Current column lower bounds.
@@ -223,9 +228,15 @@ pub struct Domain<'m> {
     infeasible_reason: Reason,
 }
 
-impl<'m> Domain<'m> {
+impl Domain {
     /// `HighsDomain(mipsolver)` + `computeRowActivities()`, over the global bounds.
-    pub fn new(model: &'m DomainModel, lb: &[f64], ub: &[f64], feastol: f64, epsilon: f64) -> Self {
+    pub fn new(
+        model: Arc<DomainModel>,
+        lb: &[f64],
+        ub: &[f64],
+        feastol: f64,
+        epsilon: f64,
+    ) -> Self {
         let n = model.ncols;
         let m = model.nrows();
         let mut d = Domain {
@@ -623,7 +634,7 @@ impl<'m> Domain<'m> {
 
     /// `updateActivityLbChange` / `updateActivityUbChange` (`lower` selects which).
     fn update_activity(&mut self, col: usize, oldbound: f64, newbound: f64, lower: bool) {
-        let model = self.model;
+        let model = Arc::clone(&self.model);
         let (start, mut end) = (model.a_start[col], model.a_start[col + 1]);
         let ft = self.feastol;
         let inf = if lower { -INF } else { INF };
@@ -914,7 +925,7 @@ impl<'m> Domain<'m> {
         if self.propagateinds.is_empty() {
             return false;
         }
-        let model = self.model;
+        let model = Arc::clone(&self.model);
         let ft = self.feastol;
         let mut inds: Vec<usize> = Vec::new();
         let mut buf: Vec<(usize, Vec<DomainChange>, Vec<DomainChange>)> = Vec::new();
@@ -1089,7 +1100,8 @@ mod tests {
         let (mut checked, mut propagated, mut infeasible_proofs) = (0usize, 0usize, 0usize);
         for _ in 0..400 {
             let (model, lb, ub, pts) = random_ip(&mut r);
-            let mut d = Domain::new(&model, &lb, &ub, 1e-6, 1e-9);
+            let model = Arc::new(model);
+            let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
             // A random branching, then propagation.
             let col = r.int(0, model.ncols as i64 - 1) as usize;
             let up = r.int(0, 1) == 1;
@@ -1162,7 +1174,7 @@ mod tests {
     fn backtrack_pops_to_the_last_branching() {
         let rows = vec![(vec![0, 1], vec![1.0, 1.0])];
         let model = DomainModel::from_rows(2, &rows, vec![-INF], vec![3.0], vec![true, true]);
-        let mut d = Domain::new(&model, &[0.0, 0.0], &[5.0, 5.0], 1e-6, 1e-9);
+        let mut d = Domain::new(Arc::new(model), &[0.0, 0.0], &[5.0, 5.0], 1e-6, 1e-9);
         assert!(d.propagate());
         assert_eq!(d.col_upper, vec![3.0, 3.0]);
         d.change_bound(

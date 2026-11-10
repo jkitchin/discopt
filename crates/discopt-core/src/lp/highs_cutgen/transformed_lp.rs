@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful port of `mip/HighsTransformedLp.cpp` (bound substitution for single-row
 //! cut generation) and of the variable-bound choice it relies on,
 //! `HighsImplications::getBestVub`/`getBestVlb`/`cleanupVub`/`cleanupVlb`.

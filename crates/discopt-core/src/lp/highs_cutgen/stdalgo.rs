@@ -1,3 +1,8 @@
+//! Provenance: the pdqsort part is an altered Rust translation of Orson Peters' pdqsort
+//! (zlib License, as vendored by HiGHS); see `THIRD_PARTY_NOTICES.md` at the repository root.
+//! The libstdc++ algorithm ports below (`partition`, `partial_sort`, heap, `upper_bound`) are
+//! slated for replacement by independent implementations (gap plan §12.31, licensing).
+//!
 //! Exact ports of the ordering algorithms the HiGHS cut generator calls: Orson
 //! Peters' `pdqsort` / `pdqsort_branchless` (`extern/pdqsort/pdqsort.h`, zlib
 //! license, as vendored by HiGHS) and the libstdc++ `std::partition`,

@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful port of `mip/HighsCutPool.cpp` (single-threaded paths) and the parts of
 //! `HighsDynamicRowMatrix` and `HighsHashHelpers` it depends on: row-slot reuse
 //! (which fixes the row index every selection tiebreak hashes), the bucketed

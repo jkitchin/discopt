@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful port of `util/HighsSparseVectorSum.h`: a dense accumulator of
 //! compensated sums with a list of touched indices in first-touch order. The
 //! nonzero order is part of every row HiGHS builds with it (aggregations,

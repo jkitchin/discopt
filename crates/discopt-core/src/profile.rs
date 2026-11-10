@@ -423,6 +423,11 @@ counters!(
     // Plunging (gap plan §12.28): batch slots continuing a plunge, and plunge starts.
     // Root cuts dropped by cleanup that seeded the node pool (gap plan §12.28).
     RootPoolSeeded,
+    // Sequential search domain (gap plan §12.31): model rebuilds, jumps back to the
+    // global box, nodes proven infeasible by it.
+    HsDomainRebuilds,
+    HsDomainJumps,
+    HsDomainInfeasible,
     PlungeContinued,
     PlungeStarts,
     RootRensRuns,

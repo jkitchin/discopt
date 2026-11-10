@@ -1,3 +1,7 @@
+//! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
+//! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
+//! at the repository root for the license text.
+//!
 //! Faithful port of the single-row core of `mip/HighsCutGeneration.cpp`: everything
 //! `generateCut` does between `HighsTransformedLp::transform` and `untransform`
 //! (`preprocessBaseInequality`, `determineCover`, the three lifted-cover functions,
