@@ -26,6 +26,11 @@
 //!   (10); an integer column only when every other column of the row is integer and
 //!   every ratio and the right-hand side divided by its coefficient are integral.
 //!
+//! - dominated columns (HiGHS `detectDominatedCol`): the reduced cost is bounded over a
+//!   box of row duals (row signs, tightened one step by the dual constraints of continuous
+//!   columns with an infinite bound) and a (weakly) dominated column is fixed; see
+//!   `Work::dominated_cols` for why this is valid for a MILP.
+//!
 //! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
 //! Every step is exact up to `feastol` on the row activity, and the caller re-verifies
@@ -79,6 +84,10 @@ pub struct PresolveStats {
     pub doubleton_eqs: usize,
     /// Implied-free columns aggregated out of equality rows.
     pub aggregated: usize,
+    /// Columns fixed as (weakly) dominated by row-dual bounds.
+    pub dominated_cols: usize,
+    /// Of those, fixings that needed a row-dual bound derived from a column.
+    pub dominated_by_derived: usize,
     /// Passes over the rule set.
     pub passes: usize,
 }
@@ -208,8 +217,15 @@ impl Work {
         (mn, nmn, mx, nmx)
     }
 
+    /// Relative tolerance at `v`. An infinite `v` gets the absolute `feastol`: a
+    /// tolerance of `inf` turns every comparison against it into `-inf < -inf`, which
+    /// once let the aggregator take an unbounded implied range for an implied-free one.
     fn tol(&self, v: f64) -> f64 {
-        self.feastol * (1.0 + v.abs())
+        if v.is_finite() {
+            self.feastol * (1.0 + v.abs())
+        } else {
+            self.feastol
+        }
     }
 
     fn fix_col(&mut self, j: usize, v: f64) {
@@ -465,8 +481,10 @@ impl Work {
                     iu = iu.min(b2);
                 }
             }
-            let tl = self.tol(il);
-            let tu = self.tol(iu);
+            // Tolerances at the column's own bounds, never at the implied ones (which may
+            // be infinite).
+            let tl = self.tol(self.l[s]);
+            let tu = self.tol(self.u[s]);
             if (self.l[s].is_finite() && (il < self.l[s] - tl || il.is_nan()))
                 || (self.u[s].is_finite() && (iu > self.u[s] + tu || iu.is_nan()))
             {
@@ -544,6 +562,191 @@ impl Work {
             return true;
         }
         false
+    }
+
+    /// Row-dual bounds from the row sense alone (minimization, reduced cost
+    /// `z = c - A^T y`): a `>=` row has `y >= 0`, a `<=` row `y <= 0`, a ranged or
+    /// equality row a free `y`.
+    fn sign_dual_bounds(&self, r: usize) -> (f64, f64) {
+        match (self.lo[r].is_finite(), self.up[r].is_finite()) {
+            (true, false) => (0.0, INF),
+            (false, true) => (-INF, 0.0),
+            _ => (-INF, INF),
+        }
+    }
+
+    /// Dominated columns (HiGHS `detectDominatedCol`, strong and weak): bound the
+    /// reduced cost `z_j = c_j - a_j^T y` over a box of row duals and fix `x_j` at the
+    /// bound the sign of `z_j` points to.
+    ///
+    /// Why this is valid for a MILP. Take an optimal `x*`, fix the integer columns other
+    /// than `j` at their `x*` values and move `x_j` by `delta` toward `l_j`; the remaining
+    /// LP over the continuous columns has value function `v`, and LP duality gives
+    /// `v(b - delta a_j) <= v(b) - delta min_{y in D} a_j^T y` over its dual region `D`
+    /// (bounded in that direction means primal feasible). So the objective changes by at
+    /// most `-delta (c_j - max_{y in D} a_j^T y)`, which is `<= 0` when the lower bound
+    /// on `z_j` over a box containing `D` is `>= 0`. The box must therefore contain the
+    /// dual region of the LP *without* column `j`:
+    /// - row signs bound every `y`;
+    /// - a continuous column `k != j` whose upper (lower) bound is infinite adds the dual
+    ///   constraint `a_k^T y <= c_k` (`>= c_k`), from which a bound on one `y_i` follows
+    ///   using only the sign bounds of the other rows (one step, so no derived bound
+    ///   rests on a constraint of `j`);
+    /// - integer columns contribute nothing (their duals are not constraints of the LP).
+    ///
+    /// Each derived bound records its source column; for `j` it falls back to the sign
+    /// bound when the source is `j`, and fixing `j` drops the bounds it sourced.
+    fn dominated_cols(&mut self) -> bool {
+        let m = self.rows.len();
+        // Best derived bound per row side, with its source column.
+        let mut ylo = vec![(-INF, usize::MAX); m];
+        let mut yup = vec![(INF, usize::MAX); m];
+        for r in 0..m {
+            if self.row_alive[r] {
+                let (a, b) = self.sign_dual_bounds(r);
+                ylo[r].0 = a;
+                yup[r].0 = b;
+            }
+        }
+        // Column entries over alive rows.
+        let col_entries = |w: &Work, k: usize| -> Vec<(usize, f64)> {
+            let mut e = Vec::new();
+            for &q in &w.col_rows[k] {
+                if !w.row_alive[q] {
+                    continue;
+                }
+                if let Some(p) = w.rows[q].0.iter().position(|&t| t == k) {
+                    e.push((q, w.rows[q].1[p]));
+                }
+            }
+            e
+        };
+        for k in 0..self.n {
+            if !self.col_alive[k] || self.is_int[k] {
+                continue;
+            }
+            let ek = col_entries(self, k);
+            if ek.is_empty() {
+                continue;
+            }
+            // Dual constraints: `sense = +1` for `a^T y <= c` (upper bound infinite),
+            // `-1` for `a^T y >= c` (lower bound infinite), i.e. `sense a^T y <= sense c`.
+            for sense in [1.0f64, -1.0] {
+                let unbounded = if sense > 0.0 {
+                    self.u[k] == INF
+                } else {
+                    self.l[k] == -INF
+                };
+                if !unbounded {
+                    continue;
+                }
+                // Minimum of each term sense*a_i*y_i over the sign box.
+                let term_min = |q: usize, a: f64| -> f64 {
+                    let (lo, up) = self.sign_dual_bounds(q);
+                    let s = sense * a;
+                    let v = if s > 0.0 { s * lo } else { s * up };
+                    if v.is_nan() {
+                        0.0
+                    } else {
+                        v
+                    }
+                };
+                let mins: Vec<f64> = ek.iter().map(|&(q, a)| term_min(q, a)).collect();
+                let ninf = mins.iter().filter(|v| v.is_infinite()).count();
+                if ninf > 1 {
+                    continue;
+                }
+                let finite_sum: f64 = mins.iter().filter(|v| v.is_finite()).sum();
+                let rhs = sense * self.c[k];
+                for (p, &(q, a)) in ek.iter().enumerate() {
+                    // sense*a*y_q <= rhs - sum_{others} min.
+                    let rest = if mins[p].is_infinite() {
+                        finite_sum
+                    } else if ninf == 0 {
+                        finite_sum - mins[p]
+                    } else {
+                        continue;
+                    };
+                    let s = sense * a;
+                    let bound = (rhs - rest) / s;
+                    // Slack against rounding: loosen by a relative 1e-9.
+                    let slack = 1e-9 * (1.0 + bound.abs());
+                    if s > 0.0 {
+                        let b = bound + slack;
+                        if b < yup[q].0 {
+                            yup[q] = (b, k);
+                        }
+                    } else {
+                        let b = bound - slack;
+                        if b > ylo[q].0 {
+                            ylo[q] = (b, k);
+                        }
+                    }
+                }
+            }
+        }
+        let mut changed = false;
+        for j in 0..self.n {
+            if !self.col_alive[j] {
+                continue;
+            }
+            let ej = col_entries(self, j);
+            if ej.is_empty() {
+                continue;
+            }
+            // z_j lower = c_j - max a^T y; upper = c_j - min a^T y.
+            let (mut amax, mut amin) = (0.0f64, 0.0f64);
+            // The same sums over the sign box alone (to count what the derived bounds add).
+            let (mut smax, mut smin) = (0.0f64, 0.0f64);
+            for &(q, a) in &ej {
+                let (sl, su) = self.sign_dual_bounds(q);
+                let (mx, mn) = if a > 0.0 {
+                    (a * su, a * sl)
+                } else {
+                    (a * sl, a * su)
+                };
+                smax += mx;
+                smin += mn;
+                let lo = if ylo[q].1 == j { sl } else { ylo[q].0 };
+                let up = if yup[q].1 == j { su } else { yup[q].0 };
+                let (mx, mn) = if a > 0.0 {
+                    (a * up, a * lo)
+                } else {
+                    (a * lo, a * up)
+                };
+                amax += if mx.is_nan() { 0.0 } else { mx };
+                amin += if mn.is_nan() { 0.0 } else { mn };
+            }
+            let zlo = self.c[j] - amax;
+            let zup = self.c[j] - amin;
+            const TOL: f64 = 1e-9;
+            let target = if zlo >= -TOL * (1.0 + self.c[j].abs()) && self.l[j].is_finite() {
+                Some(self.l[j])
+            } else if zup <= TOL * (1.0 + self.c[j].abs()) && self.u[j].is_finite() {
+                Some(self.u[j])
+            } else {
+                None
+            };
+            if let Some(v) = target {
+                let tol = TOL * (1.0 + self.c[j].abs());
+                if !(self.c[j] - smax >= -tol || self.c[j] - smin <= tol) {
+                    self.stats.dominated_by_derived += 1;
+                }
+                self.fix_col(j, v);
+                self.stats.dominated_cols += 1;
+                changed = true;
+                // Bounds sourced by j no longer hold for the problem without j.
+                for q in 0..m {
+                    if ylo[q].1 == j {
+                        ylo[q] = (self.sign_dual_bounds(q).0, usize::MAX);
+                    }
+                    if yup[q].1 == j {
+                        yup[q] = (self.sign_dual_bounds(q).1, usize::MAX);
+                    }
+                }
+            }
+        }
+        changed
     }
 
     fn pass(&mut self) -> bool {
@@ -689,6 +892,9 @@ impl Work {
                     changed = true;
                 }
             }
+        }
+        if self.dominated_cols() {
+            changed = true;
         }
         // Parallel rows: hash the row normalized by its first coefficient.
         let mut seen: HashMap<Vec<(usize, i64)>, usize> = HashMap::new();

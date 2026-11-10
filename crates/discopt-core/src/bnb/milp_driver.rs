@@ -11596,7 +11596,8 @@ mod tests {
             lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
         };
         let (mut compared, mut optimal, mut aggregations) = (0usize, 0usize, 0usize);
-        for _ in 0..150 {
+        let mut dominated = 0usize;
+        for _ in 0..300 {
             let ns = rnd(3, 7) as usize;
             let m = rnd(2, 6) as usize;
             let is_int: Vec<bool> = (0..ns).map(|_| rnd(0, 1) == 0).collect();
@@ -11632,6 +11633,14 @@ mod tests {
                 rv.push(1.0);
                 rows.push((ri, rv, true, rnd(-2, 2) as f64));
                 c[sj] = rnd(-2, 2) as f64;
+            }
+            // Half-unbounded continuous columns with nonnegative cost: their dual
+            // constraints bound row duals, which the dominated-column rule uses.
+            for j in 0..ns {
+                if !is_int[j] && Some(j) != (0..ns).find(|&k| !is_int[k]) && rnd(0, 1) == 0 {
+                    u[j] = INF;
+                    c[j] = rnd(0, 3) as f64;
+                }
             }
             let m = rows.len();
             // Standard form: inequality rows get a slack `a x + s = b`, s >= 0.
@@ -11675,10 +11684,15 @@ mod tests {
                 up: rows.iter().map(|r| r.3).collect(),
                 c: c.clone(),
                 l: l.clone(),
-                u: u.clone(),
+                // The engine's INF sentinel is 1e20; the row form uses true infinities.
+                u: u.iter()
+                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
+                    .collect(),
                 is_int: is_int.clone(),
             };
-            aggregations += presolve(&rf, 1e-9, 20).stats.aggregated;
+            let st = presolve(&rf, 1e-9, 20).stats;
+            aggregations += st.aggregated;
+            dominated += st.dominated_by_derived;
             let base = solve_milp_node_search(
                 csc.clone(),
                 m,
@@ -11747,8 +11761,9 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(compared > 50 && optimal > 30 && aggregations > 20,
-            "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations}");
+        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated}");
+        assert!(compared > 50 && optimal > 30 && aggregations > 20 && dominated > 10,
+            "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations} dominated by derived dual bounds {dominated}");
     }
 
     /// #2163 / #2165 review: #1380's witness `min -x + 3z, x <= M z, x in [0, 10]`,
