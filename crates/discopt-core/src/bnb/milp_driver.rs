@@ -862,6 +862,12 @@ fn domain_model_from_lp(
 /// the domain proved it infeasible (gap plan §12.31).
 type DomainPre = (NodeId, Option<(Vec<f64>, Vec<f64>)>);
 
+/// Concurrent plunges under the sequential search (gap plan §12.32): each batch slot
+/// continues its own dive and the slots are evaluated in parallel. Fixed (not the thread
+/// count) so the search is the same on every machine; threads only change its speed, up
+/// to this many. HiGHS gets parallelism the same way (workers each running dives).
+const HIGHS_SEARCH_PLUNGE_SLOTS: usize = 8;
+
 /// Nodes per plunge before it returns to the queue (HiGHS `processNodes`'s
 /// `plungeLimit`).
 const PLUNGE_LIMIT: usize = 100;
@@ -5498,7 +5504,11 @@ fn solve_milp_node_search(
                 .parse()
                 .unwrap_or_else(|_| panic!("DISCOPT_HIGHS_DIVE_BATCH={v:?} is not a count"))
         })
-        .unwrap_or(if search_on { 1 } else { 64 })
+        .unwrap_or(if search_on {
+            HIGHS_SEARCH_PLUNGE_SLOTS
+        } else {
+            64
+        })
         .max(1);
     let mut plunge_next: Vec<NodeId> = Vec::new();
     let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
@@ -6451,11 +6461,12 @@ fn solve_milp_node_search(
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.
-        // Gap plan §12.31: under the sequential search the pool, its ageing and the
-        // fold into the shared LP are maintained only after a plunge start (where node
-        // separation runs), so the LP and the domain stay fixed along a dive, as in
-        // HiGHS (pool cuts enter its LP only in `separate` at the node from the queue).
-        if node_gmi_on && (!search_on || n_plunge_cont == 0) {
+        // Gap plan §12.31-12.32: under the sequential search the pool, its ageing and
+        // the fold into the shared LP are maintained only after a batch in which some
+        // slot started a plunge (node separation runs only there), so the LP stays fixed
+        // while every slot is mid-dive, as in HiGHS (pool cuts enter its LP only in
+        // `separate` at the node from the queue).
+        if node_gmi_on && (!search_on || n_plunge_cont < batch.node_ids.len()) {
             for a in gmi_pool_age.iter_mut() {
                 *a = a.saturating_add(1);
             }
@@ -6831,7 +6842,7 @@ fn solve_milp_node_search(
         // rewritten); folded rows that use it are rewritten by substitution.
         cut_lp_epoch += 1;
         let delete_due = if search_on {
-            n_plunge_cont == 0
+            n_plunge_cont < batch.node_ids.len()
         } else {
             cut_lp_epoch % CUT_LP_DELETE_EVERY == 0
         };

@@ -1,0 +1,12 @@
+{"name": "mik-250-20-75-1", "arm": "bundle", "opt": -49716.0, "status": "feasible", "objective": -49716.0, "bound": -50192.65070586021, "gap_certified": false, "nodes": 4489, "wall": 20.12271706699994}
+{"name": "mik-250-20-75-1", "arm": "search", "opt": -49716.0, "status": "feasible", "objective": -49716.0, "bound": -50168.45525768189, "gap_certified": false, "nodes": 3095, "wall": 20.133870829999978}
+{"name": "enlight_hard", "arm": "search", "opt": 37.0, "status": "feasible", "objective": 37.0, "bound": 35.0, "gap_certified": false, "nodes": 2281, "wall": 20.057012348999706}
+{"name": "enlight_hard", "arm": "bundle", "opt": 37.0, "status": "feasible", "objective": 37.0, "bound": 35.0, "gap_certified": false, "nodes": 2101, "wall": 20.043218029999935}
+{"name": "neos17", "arm": "bundle", "opt": 0.1500025774, "status": "feasible", "objective": 0.2301948751248757, "bound": 0.14654577883938036, "gap_certified": false, "nodes": 2391, "wall": 20.193575352999687}
+{"name": "neos17", "arm": "search", "opt": 0.1500025774, "status": "feasible", "objective": 0.15000257742257733, "bound": 0.14810213863192215, "gap_certified": false, "nodes": 1817, "wall": 20.242397825000353}
+{"name": "b-ball", "arm": "search", "opt": -1.50000000000001, "status": "feasible", "objective": -1.5, "bound": -1.5006718990636274, "gap_certified": false, "nodes": 20759, "wall": 20.073780841999906}
+{"name": "b-ball", "arm": "bundle", "opt": -1.50000000000001, "status": "feasible", "objective": -1.5, "bound": -1.5012258970133368, "gap_certified": false, "nodes": 32693, "wall": 20.06886694900004}
+{"name": "2122", "arm": "bundle", "opt": -187612.94419439966, "status": "feasible", "objective": -1616877.467756924, "bound": -187605.43488350697, "gap_certified": false, "nodes": 3399, "wall": 24.8368631190001}
+{"name": "2122", "arm": "search", "opt": -187612.94419439966, "status": "feasible", "objective": -189999.50111953128, "bound": -187611.15592214424, "gap_certified": false, "nodes": 3475, "wall": 24.58371627700035}
+{"name": "bell5", "arm": "search", "opt": 8966406.49152, "status": "optimal", "objective": 8966406.491519999, "bound": 8965511.505209867, "gap_certified": true, "nodes": 8767, "wall": 5.3349688870002865}
+{"name": "bell5", "arm": "bundle", "opt": 8966406.49152, "status": "optimal", "objective": 8966406.491520002, "bound": 8965578.679253569, "gap_certified": true, "nodes": 4195, "wall": 2.008935649999785}
