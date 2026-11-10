@@ -33,6 +33,10 @@
 //!   columns with an infinite bound) and a (weakly) dominated column is fixed; see
 //!   `Work::dominated_cols` for why this is valid for a MILP.
 //!
+//! - dominated column pairs (Achterberg et al. 2020 §6.4; Gamrath et al. 2015 Thm. 3;
+//!   HiGHS `dominatedColumns`): fixings and integer bound tightenings; see
+//!   `Work::dominated_pairs`.
+//!
 //! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
 //! Every step is exact up to `feastol` on the row activity, and the caller re-verifies
@@ -92,6 +96,8 @@ pub struct PresolveStats {
     pub dominated_cols: usize,
     /// Of those, fixings that needed a row-dual bound derived from a column.
     pub dominated_by_derived: usize,
+    /// Dominated column pairs that fixed or tightened a column.
+    pub dominated_pairs: usize,
     /// Passes over the rule set.
     pub passes: usize,
 }
@@ -697,6 +703,269 @@ impl Work {
         changed
     }
 
+    /// Residual activity range of row `r` without column `col`, with column `fixed.0`
+    /// (if present in the row) counted at the value `fixed.1`. `None` for an infinite
+    /// side.
+    fn residual(
+        &self,
+        r: usize,
+        col: usize,
+        fixed: Option<(usize, f64)>,
+    ) -> (Option<f64>, Option<f64>) {
+        let (mut mn, mut mx) = (Some(0.0f64), Some(0.0f64));
+        for (&k, &a) in self.rows[r].0.iter().zip(&self.rows[r].1) {
+            if k == col {
+                continue;
+            }
+            let (lk, uk) = match fixed {
+                Some((f, v)) if f == k => (v, v),
+                _ => (self.l[k], self.u[k]),
+            };
+            let (cmin, cmax) = if a > 0.0 {
+                (a * lk, a * uk)
+            } else {
+                (a * uk, a * lk)
+            };
+            mn = mn.and_then(|s| {
+                if cmin.is_finite() {
+                    Some(s + cmin)
+                } else {
+                    None
+                }
+            });
+            mx = mx.and_then(|s| {
+                if cmax.is_finite() {
+                    Some(s + cmax)
+                } else {
+                    None
+                }
+            });
+        }
+        (mn, mx)
+    }
+
+    /// Bounds on `x_col` from its rows with `fixed` substituted. `worst = false`: the
+    /// implied range (every feasible point lies in it). `worst = true`: the range in
+    /// which every row holds whatever the other columns are (residual taken at its
+    /// least favourable end).
+    fn col_range(&self, col: usize, fixed: Option<(usize, f64)>, worst: bool) -> (f64, f64) {
+        let (mut lo, mut hi) = (-INF, INF);
+        for &r in &self.col_rows[col] {
+            if !self.row_alive[r] {
+                continue;
+            }
+            let Some(p) = self.rows[r].0.iter().position(|&k| k == col) else {
+                continue;
+            };
+            let a = self.rows[r].1[p];
+            let (rmin, rmax) = self.residual(r, col, fixed);
+            // a x <= up - (rmin | rmax), a x >= lo - (rmax | rmin).
+            let (ru, rl) = if worst { (rmax, rmin) } else { (rmin, rmax) };
+            let ax_hi = match ru {
+                Some(v) if self.up[r].is_finite() => self.up[r] - v,
+                _ if self.up[r].is_finite() && worst => -INF,
+                _ => INF,
+            };
+            let ax_lo = match rl {
+                Some(v) if self.lo[r].is_finite() => self.lo[r] - v,
+                _ if self.lo[r].is_finite() && worst => INF,
+                _ => -INF,
+            };
+            let (bl, bu) = if a > 0.0 {
+                (ax_lo / a, ax_hi / a)
+            } else {
+                (ax_hi / a, ax_lo / a)
+            };
+            if !bl.is_nan() {
+                lo = lo.max(bl);
+            }
+            if !bu.is_nan() {
+                hi = hi.min(bu);
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Whether `sj x_j` dominates `sk x_k` (`sj, sk` in `{1, -1}`): no larger cost, and
+    /// in every row a coefficient that moves each finite side no worse (equal on rows
+    /// with both sides finite). Then some optimal solution has `x_j` at its `sj`-upper
+    /// bound or `x_k` at its `sk`-lower bound: moving `delta` from `sk x_k` to `sj x_j`
+    /// changes each row by `delta (alpha - beta)` on the safe side and the objective by
+    /// `delta (sj c_j - sk c_k) <= 0`, and keeps integrality since both have the same
+    /// type.
+    fn dominates(&self, j: usize, sj: f64, k: usize, sk: f64) -> bool {
+        const EPS: f64 = 1e-9;
+        if sj * self.c[j] > sk * self.c[k] + EPS {
+            return false;
+        }
+        let entry = |c: usize, r: usize| -> f64 {
+            self.rows[r]
+                .0
+                .iter()
+                .position(|&q| q == c)
+                .map_or(0.0, |p| self.rows[r].1[p])
+        };
+        for &(c, s) in &[(j, true), (k, false)] {
+            for &r in &self.col_rows[c] {
+                if !self.row_alive[r] {
+                    continue;
+                }
+                // Rows holding both are checked once, from j's side.
+                if !s && self.rows[r].0.contains(&j) {
+                    continue;
+                }
+                let alpha = sj * entry(j, r);
+                let beta = sk * entry(k, r);
+                if self.up[r].is_finite() && alpha > beta + EPS {
+                    return false;
+                }
+                if self.lo[r].is_finite() && alpha < beta - EPS {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dominated columns, pairwise (Achterberg et al. 2020, section 6.4; Gamrath et
+    /// al. 2015, Theorem 3, "predictive bound analysis"; HiGHS `dominatedColumns`).
+    /// For `sj x_j` dominating `sk x_k`, with `J` the `sj`-upper bound of `x_j` and `K`
+    /// the `sk`-lower bound of `x_k`, some optimal solution has `x_j = J` or `x_k = K`
+    /// (see `dominates`). Hence, for every such solution:
+    /// - `J` infinite: `x_k = K` (fixed);
+    /// - `sj x_j >= min(sj J, implied lower of sj x_j given x_k = K)`;
+    /// - `sk x_k <= max(sk K, implied upper of sk x_k given x_j = J)`;
+    ///
+    /// and one of them can be modified, keeping it optimal and of that form, to also have
+    /// - if `sj c_j <= 0`: `sj x_j >= min(sj J, worst-case upper of sj x_j given x_k = K)`
+    ///   (raising it there keeps every row whatever the others are);
+    /// - if `sk c_k >= 0`: `sk x_k <= max(sk K, worst-case lower of sk x_k given x_j = J)`.
+    ///
+    /// Each step is argued on the current (already tightened) problem. As in HiGHS,
+    /// bounds change only on integer columns (or when a column becomes fixed).
+    /// Candidates `k` are drawn from `j`'s shortest row, as HiGHS does.
+    fn dominated_pairs(&mut self) -> bool {
+        const INT_SLACK: f64 = 1e-6;
+        let mut changed = false;
+        for j in 0..self.n {
+            if !self.col_alive[j] || self.l[j] == self.u[j] {
+                continue;
+            }
+            // Shortest alive row of j.
+            let mut best: Option<usize> = None;
+            for &r in &self.col_rows[j] {
+                if self.row_alive[r]
+                    && self.rows[r].0.contains(&j)
+                    && best.is_none_or(|b| self.rows[r].0.len() < self.rows[b].0.len())
+                {
+                    best = Some(r);
+                }
+            }
+            let Some(br) = best else { continue };
+            let cands: Vec<usize> = self.rows[br].0.clone();
+            for k in cands {
+                if k == j || !self.col_alive[k] || !self.col_alive[j] {
+                    continue;
+                }
+                if self.is_int[j] != self.is_int[k] {
+                    continue;
+                }
+                for &(sj, sk) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                    if !self.col_alive[k] || self.l[k] == self.u[k] || self.l[j] == self.u[j] {
+                        break;
+                    }
+                    if !self.dominates(j, sj, k, sk) {
+                        continue;
+                    }
+                    let jstar = if sj > 0.0 { self.u[j] } else { self.l[j] };
+                    let kstar = if sk > 0.0 { self.l[k] } else { self.u[k] };
+                    if !jstar.is_finite() {
+                        if kstar.is_finite() {
+                            self.l[k] = kstar;
+                            self.u[k] = kstar;
+                            self.stats.dominated_pairs += 1;
+                            changed = true;
+                        }
+                        continue;
+                    }
+                    if !kstar.is_finite() {
+                        continue;
+                    }
+                    // Tighten j away from J (its sj-lower side).
+                    let (il, iu) = self.col_range(j, Some((k, kstar)), false);
+                    let mut nb = if sj > 0.0 { il } else { -iu };
+                    if sj * self.c[j] <= 0.0 {
+                        let (wl, wu) = self.col_range(j, Some((k, kstar)), true);
+                        let w = if sj > 0.0 { wu } else { -wl };
+                        if w > nb {
+                            nb = w;
+                        }
+                    }
+                    let nb = nb.min(sj * jstar);
+                    let jfix = self.set_side_bound(j, sj, nb, INT_SLACK);
+                    // Tighten k away from K (its sk-upper side).
+                    let (il, iu) = self.col_range(k, Some((j, jstar)), false);
+                    let mut nb = if sk > 0.0 { iu } else { -il };
+                    if sk * self.c[k] >= 0.0 {
+                        let (wl, wu) = self.col_range(k, Some((j, jstar)), true);
+                        let w = if sk > 0.0 { wl } else { -wu };
+                        if w < nb {
+                            nb = w;
+                        }
+                    }
+                    let nb = nb.max(sk * kstar);
+                    let kfix = self.set_side_bound_upper(k, sk, nb, INT_SLACK);
+                    if jfix || kfix {
+                        self.stats.dominated_pairs += 1;
+                        changed = true;
+                    }
+                    if self.infeasible {
+                        return false;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// `s x_j >= nb` (`s` in `{1, -1}`): applied to an integer column (rounded with the
+    /// integrality slack), or to any column when it fixes it. Returns whether it applied.
+    fn set_side_bound(&mut self, j: usize, s: f64, nb: f64, slack: f64) -> bool {
+        if !nb.is_finite() {
+            return false;
+        }
+        // In x space: s = 1 -> x >= nb; s = -1 -> x <= -nb.
+        let (mut lo, mut up) = (self.l[j], self.u[j]);
+        if s > 0.0 {
+            let v = if self.is_int[j] {
+                (nb - slack * (1.0 + nb.abs())).ceil()
+            } else {
+                nb
+            };
+            if v <= lo || !(self.is_int[j] || v >= up) {
+                return false;
+            }
+            lo = v.min(up);
+        } else {
+            let v = if self.is_int[j] {
+                (-nb + slack * (1.0 + nb.abs())).floor()
+            } else {
+                -nb
+            };
+            if v >= up || !(self.is_int[j] || v <= lo) {
+                return false;
+            }
+            up = v.max(lo);
+        }
+        self.tighten(j, lo, up);
+        true
+    }
+
+    /// `s x_k <= nb`: the mirror of `set_side_bound`.
+    fn set_side_bound_upper(&mut self, k: usize, s: f64, nb: f64, slack: f64) -> bool {
+        self.set_side_bound(k, -s, -nb, slack)
+    }
+
     /// Row-dual bounds from the row sense alone (minimization, reduced cost
     /// `z = c - A^T y`): a `>=` row has `y >= 0`, a `<=` row `y <= 0`, a ranged or
     /// equality row a free `y`.
@@ -1035,6 +1304,12 @@ impl Work {
         if self.dominated_cols() {
             changed = true;
         }
+        if self.dominated_pairs() {
+            changed = true;
+        }
+        if self.infeasible {
+            return false;
+        }
         // Parallel rows: hash the row normalized by its first coefficient.
         let mut seen: HashMap<Vec<(usize, i64)>, usize> = HashMap::new();
         for r in 0..self.rows.len() {
@@ -1348,6 +1623,7 @@ mod tests {
         let mut doubletons = 0usize;
         let mut aggregated = 0usize;
         let mut propagated = 0usize;
+        let mut pairs = 0usize;
         for _ in 0..3000 {
             let f = random_ip(&mut r);
             let want = brute_min(&f);
@@ -1356,6 +1632,7 @@ mod tests {
             doubletons += p.stats.doubleton_eqs;
             aggregated += p.stats.aggregated;
             propagated += p.stats.propagated;
+            pairs += p.stats.dominated_pairs;
             if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
                 reduced += 1;
             }
@@ -1395,8 +1672,9 @@ mod tests {
                 && feasible > 500
                 && doubletons > 50
                 && aggregated > 20
-                && propagated > 100,
-            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated}"
+                && propagated > 100
+                && pairs > 100,
+            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated} dominated pairs {pairs}"
         );
     }
 }
