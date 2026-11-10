@@ -1,0 +1,141 @@
+--- a/highs/mip/HighsNodeQueue.cpp	2026-11-10 23:12:16.935451050 +0000
++++ b/highs/mip/HighsNodeQueue.cpp	2026-11-10 23:14:03.380602480 +0000
+@@ -16,6 +16,32 @@
+ #include "mip/HighsMipSolverData.h"
+ #include "util/HighsSplay.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++
++// discopt dump (HS_DUMP_QUEUE): every queue operation, then the queue's state, so the
++// port of HighsNodeQueue can be replayed against it. Queues are tagged by first use.
++static FILE* hsQueueDump() {
++  static FILE* f = nullptr;
++  static bool init = false;
++  if (!init) {
++    init = true;
++    if (const char* p = std::getenv("HS_DUMP_QUEUE")) f = std::fopen(p, "w");
++  }
++  return f;
++}
++static int hsQueueTag(const void* q) {
++  static std::map<const void*, int> tags;
++  auto it = tags.find(q);
++  if (it != tags.end()) return it->second;
++  int t = (int)tags.size();
++  tags[q] = t;
++  return t;
++}
++#define HSQ_STATE(f)                                                          std::fprintf(f, "QS %d %lld %lld %lld %lld %a
++", hsQueueTag(this),                     (long long)numActiveNodes(), (long long)lowerMin,                           (long long)hybridEstimMin, (long long)numSuboptimal,                        optimality_limit)
++
+ #define ESTIMATE_WEIGHT .5
+ #define LOWERBOUND_WEIGHT .5
+ 
+@@ -216,6 +242,9 @@
+ }
+ 
+ void HighsNodeQueue::setNumCol(HighsInt numCol) {
++  if (FILE* f = hsQueueDump())
++    std::fprintf(f, "QN %d %d
++", hsQueueTag(this), (int)numCol);
+   if (this->numCol == numCol) return;
+   this->numCol = numCol;
+   allocatorState = std::unique_ptr<AllocatorState>(new AllocatorState());
+@@ -251,6 +280,13 @@
+   for (auto it = colUpperNodes[col].begin(); it != pruneend; ++it)
+     delnodes.insert(it->second);
+ 
++  if (!delnodes.empty())
++    if (FILE* f = hsQueueDump()) {
++      std::fprintf(f, "QG %d %d", hsQueueTag(this), (int)delnodes.size());
++      for (int64_t d : delnodes) std::fprintf(f, " %lld", (long long)d);
++      std::fprintf(f, "
++");
++    }
+   for (int64_t delnode : delnodes) {
+     if (nodes[delnode].estimate != kHighsInf)
+       treeweight += std::ldexp(1.0, 1 - nodes[delnode].depth);
+@@ -305,6 +341,7 @@
+     globaldomain.propagate();
+   } while (numchgs != globaldomain.getDomainChangeStack().size());
+ 
++  if (FILE* f = hsQueueDump()) HSQ_STATE(f);
+   return double(treeweight);
+ }
+ 
+@@ -319,6 +356,9 @@
+ double HighsNodeQueue::performBounding(double upper_limit) {
+   NodeLowerRbTree lowerTree(this);
+ 
++  if (FILE* f = hsQueueDump())
++    std::fprintf(f, "QB %d %a %a
++", hsQueueTag(this), upper_limit, optimality_limit);
+   if (lowerTree.empty()) return 0.0;
+ 
+   HighsCDouble treeweight = 0.0;
+@@ -356,6 +396,7 @@
+     }
+   }
+ 
++  if (FILE* f = hsQueueDump()) HSQ_STATE(f);
+   return double(treeweight);
+ }
+ 
+@@ -382,13 +423,33 @@
+   assert(nodes[pos].estimate == estimate);
+   assert(nodes[pos].depth == depth);
+ 
+-  return link(pos);
++  double hsret = link(pos);
++  if (FILE* f = hsQueueDump()) {
++    const auto& n = nodes[pos];
++    std::fprintf(f, "QE %d %lld %a %a %d %a %d", hsQueueTag(this), (long long)pos,
++                 lower_bound, estimate, (int)depth, optimality_limit,
++                 (int)n.domchgstack.size());
++    for (const auto& d : n.domchgstack)
++      std::fprintf(f, " %d %d %a", (int)d.column,
++                   d.boundtype == HighsBoundType::kLower ? 0 : 1, d.boundval);
++    std::fprintf(f, " %d", (int)n.branchings.size());
++    for (HighsInt b : n.branchings) std::fprintf(f, " %d", (int)b);
++    std::fprintf(f, "
++");
++    HSQ_STATE(f);
++  }
++  return hsret;
+ }
+ 
+ HighsNodeQueue::OpenNode&& HighsNodeQueue::popBestNode() {
+   int64_t bestNode = hybridEstimMin;
+ 
+   unlink(bestNode);
++  if (FILE* f = hsQueueDump()) {
++    std::fprintf(f, "QP %d E %lld
++", hsQueueTag(this), (long long)bestNode);
++    HSQ_STATE(f);
++  }
+ 
+   return std::move(nodes[bestNode]);
+ }
+@@ -397,6 +458,11 @@
+   int64_t bestBoundNode = lowerMin;
+ 
+   unlink(bestBoundNode);
++  if (FILE* f = hsQueueDump()) {
++    std::fprintf(f, "QP %d B %lld
++", hsQueueTag(this), (long long)bestBoundNode);
++    HSQ_STATE(f);
++  }
+ 
+   return std::move(nodes[bestBoundNode]);
+ }
+@@ -420,6 +486,8 @@
+ }
+ 
+ void HighsNodeQueue::clear() {
++  if (FILE* f = hsQueueDump()) std::fprintf(f, "QC %d
++", hsQueueTag(this));
+   const bool original = false;
+   HighsNodeQueue nodequeue;
+   nodequeue.setNumCol(numCol);

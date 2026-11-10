@@ -62,7 +62,7 @@ pub mod transformed_lp;
 pub mod vbound;
 
 #[cfg(test)]
-mod replay;
+pub(crate) mod replay;
 #[cfg(test)]
 mod replay_pool;
 #[cfg(test)]

@@ -142,3 +142,41 @@ own dependency order (pseudocost feeds search, cliques feed domain and heuristic
    returns inside stages 2-4.
 3. Stage 1 design note: the sequential loop's interface to the kept safety layer and hooks,
    before code.
+
+## 6. Stage 1 design: the search loop before its components
+
+Stage 1 replaces the *control* of the search (which node, when to dive, branch, backtrack,
+plunge, separate, run heuristics) with HiGHS's, sequentially. The components it calls are
+replaced by later stages, so stage 1 calls them through narrow interfaces, each first backed
+by discopt's current implementation and later swapped for the HiGHS translation:
+
+| interface | HiGHS call sites | stage-1 backing (today's code) | replaced by |
+|---|---|---|---|
+| `NodeLp::evaluate(box) -> NodeEval` (status, safe bound, point, basis, fractional columns) | `HighsSearch::evaluateNode` (LP part) | `solve_node`'s LP solve with the safety layer (NS bound, Farkas check, unresolved floor) | stage 2 (`HighsLpRelaxation`); the safety layer stays |
+| `Domain` (install a node's bound changes, propagate, backtrack) | `installNode`, `localdom.propagate`, `backtrack` | node box vectors + FBBT | stage 3 (`HighsDomain` local/global) |
+| `Branching::select(point) -> (col, value)` and the child estimate | `selectBranchingCandidate`, `branch` | current scorer and strong branching | stage 5 (`HighsPseudocost`) |
+| `Separation::at_node()` | `separateAndStoreBasis` in `processNodes` | node separation as today | stage 4 |
+| `Heuristics::before_dive()` | `runHeuristics` | sub-MIP/rounding as today | stage 6 |
+
+**Ported faithfully in stage 1:** `HighsNodeQueue` (done, `bnb/highs_search/node_queue.rs`,
+replay against `HS_DUMP_QUEUE`), `HighsSearch`'s node stack (`NodeData`: bounds, estimate,
+branching decision, open subtrees, domain-stack positions), `installNode`, `evaluateNode`'s
+control part, `branch`, `backtrack`, `backtrackPlunge`, `dive`, `currentNodeToQueue`,
+`openNodesToQueue`, and `HighsMipSolver::run`'s node-processing loop
+(`processNodes`/`evaluateNode`/`pruneNode`/`separateAndStoreBasis`/`backtrackPlunge` with its
+plunge limits and node selection policy).
+
+**Kept discopt's, re-hosted on the new loop:** the safety layer (inside `NodeLp`), the
+certified dual bound (the minimum over the queue, the search's open subtrees and the
+unresolved floor), the incumbent with its independent verification, lazy-constraint vetoes
+(#1060: the node is re-evaluated, as HiGHS re-evaluates after `addIncumbent` rejection),
+fractional-node hooks (#1141: a separation call at the node), bound and debugger hooks,
+deadline handling.
+
+**Gates.** (a) Queue replay bit-exact (`full_queue_replay` on a mik dump). (b) Search-control
+replay: a `HS_DUMP_SEARCH` dump records, per node, what HiGHS's control decided given its node
+evaluations (install, result, branching column and direction, backtrack target, plunge
+choice); the port, fed the dumped evaluations through mock `NodeLp`/`Branching`, must take the
+same decisions. (c) Soundness panel clean. (d) Deleted in the same change: batched node
+evaluation, the reduce, plunge emulation (`DISCOPT_HIGHS_SEARCH`, `_SEARCH_DOMAIN`, `_DIVE`,
+`_DIVE_BATCH`), and the MILP driver's use of `TreeManager` (which the spatial B&B keeps).
