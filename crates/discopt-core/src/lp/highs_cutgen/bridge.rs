@@ -535,15 +535,17 @@ pub fn vbounds_enabled() -> bool {
 }
 
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the ported mod-k separator
-/// (`HighsModkSeparator`, gap plan §12.24) runs after the path separator, at the
-/// root and (with [`node_sepa_enabled`]) at nodes. Default OFF;
-/// `DISCOPT_HIGHS_SEPA_MODK=1` opts in. Read per call, refusing garbage.
+/// (`HighsModkSeparator`) runs after the path separator, at the root and (with
+/// [`node_sepa_enabled`]) at nodes. **ON** with the `highs` arm since gap plan
+/// §12.26 (62-row panel: 46 -> 48 certified, 0 soundness violations in 508 checks,
+/// no row lost); `DISCOPT_HIGHS_SEPA_MODK=0` opts out. Read per call, refusing
+/// garbage.
 pub fn modk_enabled() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEPA_MODK") {
-        Err(_) => false,
+        Err(_) => true,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
             other => {
                 panic!("DISCOPT_HIGHS_SEPA_MODK={other:?} is not recognized (expected 1 or 0)")
             }

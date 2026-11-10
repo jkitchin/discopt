@@ -1,0 +1,14 @@
+maximisation: ['2122', 'issue-2446']
+checks: 501 violations: 0
+maximisation: ['2122', 'issue-2446']
+checks: 508 violations: 0
+violations: 3
+  VIOLATION ('issue-2446', 'vb', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'node', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'node_modk', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+solves: 186
+violations: 3
+  VIOLATION ('issue-2446', 'vb', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'modk', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'add_modk', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+solves: 186

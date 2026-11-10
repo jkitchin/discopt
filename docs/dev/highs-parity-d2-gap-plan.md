@@ -1496,3 +1496,34 @@ incumbent degrades): it takes the 64 deepest nodes, not a single dive.
 
 Next: `p3_highs_plunge_population.py` (HiGHS with vs without plunging over all 62 rows) decides
 whether plunging is worth building beyond bell5.
+
+### 12.26 Population check of plunging; node separation and mod-k panels (2026-11-10)
+
+**Plunging is not the population lever.** `p3_highs_plunge_population.py`: HiGHS default with
+and without plunging certifies 59 of 62 both ways (-23588, +gsvm2rl3). §12.25's bell5 result
+holds only in a cut-free tree, where plunging and node cuts substitute for each other. Not
+built. (HiGHS's node counter under `HS_NODE_LIM=1` reads implausibly low, e.g. b-ball 2, so
+only the statuses are used.)
+
+**Node separation helps bell5 in discopt.** On bell5 our node GMI hurts (bound 8,963,628 with
+it, 8,965,317 without) and the ported node separators certify it (30k nodes); §12.23's
+"neutral" came from five rows chosen by the strip ranking and missed this. On neos-1425699 the
+ported separators find no cuts at the top level, so `=1` (replace) removed the node GMI cuts
+that led the tree to its incumbent (257 nodes -> no incumbent in 75k); `=add` keeps both and
+restores it.
+
+**Panels** (62 rows, 20 s, 3 arms rotated, 2 in parallel on an idle 4-core machine;
+`p3_ab_node_modk.jsonl`, soundness re-scored by sense, 0 violations):
+
+| arm | certified | vs default |
+|---|---|---|
+| default highs arm | 46 | |
+| node `=1` | 46 | +bell5, +gesa2, -neos-1425699, -2122 |
+| node `=1` + mod-k | 46 | +enlight8, +gesa2, -neos-1425699, -2122 |
+| mod-k (root) | **48** | +enlight8 (3.1 s, 1 node), +gesa2 (20.5 s); none lost |
+| node `=add` + mod-k | 47 | +enlight8, +gesa2 (11.4 s); -2122 (incumbent) |
+
+Wall on the 42 rows all arms certify: 72.0 / 72.8 / 77.7 s (default / mod-k / add+mod-k).
+Mod-k graduates ON within the `highs` arm (`=0` opt-out). Node separation stays a documented
+opt-in. bell5 sits at the 0.01 % line under every node-separation arm (bound gap ~0.012 %), so
+its certification flips between runs.
