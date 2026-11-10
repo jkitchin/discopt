@@ -750,6 +750,34 @@ fn highs_search() -> bool {
     }
 }
 
+/// Gap plan §12.38 (`DISCOPT_HIGHS_SEP_FIRST`, under `DISCOPT_HIGHS_SEARCH` with the
+/// cut LP): separate at the node taken from the queue *before* branching, in the shared
+/// LP, as HiGHS's `separateAndStoreBasis` does (`HighsMipSolver.cpp`, `processNodes`):
+/// the plunge start's first visit skips strong branching, reports its violated pool cuts
+/// and its new cuts (scored at its point), and is re-queued with its proven bound; the
+/// batch boundary folds the selected cuts into the shared LP, and the node re-solves
+/// there. Rounds repeat under HiGHS's rule (`HighsSeparation::separate`: cuts found and
+/// the objective, measured from the root, grew by more than 1 %), then a last visit
+/// strong-branches and branches, and the dive below keeps the rows. Default OFF until
+/// its panel. Evidence: HiGHS on mik-250-20-75-1 needs 672 nodes with node separation
+/// and 5,267 without; re-adding pool cuts alone keeps 813 (gap plan §12.36).
+fn highs_sep_first() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEP_FIRST") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEP_FIRST={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Safety cap on separation visits per plunge start under `DISCOPT_HIGHS_SEP_FIRST`
+/// (HiGHS has only its 1 % progress rule; the cap bounds a pathological tail).
+const SEP_FIRST_MAX_ROUNDS: usize = 20;
+
 /// Under the sequential search: node boxes from the persistent incremental `HighsDomain`
 /// instead of per-node FBBT (gap plan §12.31). Default OFF, a documented opt-in: the
 /// HiGHS-faithful domain (30 % acceptance rule for continuous columns, change-triggered
@@ -5804,6 +5832,14 @@ fn solve_milp_node_search(
         .max(1);
     let mut plunge_next: Vec<NodeId> = Vec::new();
     let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
+    // DISCOPT_HIGHS_SEP_FIRST: separation rounds done per plunge start (with its last
+    // bound), the nodes due a final (branching) visit, and the re-queued nodes that
+    // lead the next batch.
+    let sep_first_on = search_on && cut_lp_on && highs_sep_first();
+    let mut sep_rounds: HashMap<NodeId, (usize, f64)> = HashMap::new();
+    let mut sep_final: HashSet<NodeId> = HashSet::new();
+    let mut sep_next: Vec<NodeId> = Vec::new();
+    let sep_root_obj = tm.stats().global_lower_bound;
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
     let mut strong_probe_lps: usize = 0;
@@ -5912,8 +5948,13 @@ fn solve_milp_node_search(
                 break;
             }
         }
+        let preferred: Vec<NodeId> = if sep_first_on && !sep_next.is_empty() {
+            sep_next.iter().chain(plunge_next.iter()).copied().collect()
+        } else {
+            plunge_next.clone()
+        };
         let (batch, n_plunge_cont) = if dive_on {
-            tm.export_batch_preferring(&plunge_next, dive_batch_size)
+            tm.export_batch_preferring(&preferred, dive_batch_size)
         } else {
             (tm.export_batch(64), 0)
         };
@@ -5923,7 +5964,7 @@ fn solve_milp_node_search(
             .iter()
             .enumerate()
             .map(|(k, id)| {
-                if k < n_plunge_cont {
+                if k < n_plunge_cont || sep_rounds.contains_key(id) || sep_final.contains(id) {
                     plunge_len.get(id).copied().unwrap_or(0)
                 } else {
                     0
@@ -5932,15 +5973,30 @@ fn solve_milp_node_search(
             .collect();
         // Node separation slots: plunge starts under dives, else the leading
         // best-bound nodes.
+        // DISCOPT_HIGHS_SEP_FIRST: a separation visit is a fresh plunge start or a node
+        // re-queued mid-separation; a node due its final visit only branches.
+        let sep_visits: Vec<bool> = batch
+            .node_ids
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                sep_first_on
+                    && !sep_final.contains(id)
+                    && (sep_rounds.contains_key(id) || k >= n_plunge_cont)
+            })
+            .collect();
         let gmi_slots: Vec<bool> = (0..batch.node_ids.len())
             .map(|k| {
-                if dive_on {
+                if sep_first_on {
+                    sep_visits[k]
+                } else if dive_on {
                     k >= n_plunge_cont
                 } else {
                     k < NODE_GMI_PER_BATCH
                 }
             })
             .collect();
+        let mut sep_requeued: Vec<NodeId> = Vec::new();
         if dive_on {
             crate::profile::incr_by(crate::profile::Ctr::PlungeContinued, n_plunge_cont as u64);
             crate::profile::incr_by(
@@ -6282,6 +6338,7 @@ fn solve_milp_node_search(
                                 &ctx,
                                 dive_batch && k == 0,
                                 gmi_slots[k],
+                                sep_visits[k],
                             )
                         })
                         .collect()
@@ -6295,6 +6352,7 @@ fn solve_milp_node_search(
                                 &ctx,
                                 dive_batch && k == 0,
                                 gmi_slots[k],
+                                sep_visits[k],
                             )
                         })
                         .collect()
@@ -6311,6 +6369,7 @@ fn solve_milp_node_search(
                             &ctx,
                             dive_batch && k == 0,
                             gmi_slots[k],
+                            sep_visits[k],
                         )
                     })
                     .collect()
@@ -6321,6 +6380,7 @@ fn solve_milp_node_search(
         let mut hit_unbounded = false;
         // D2 B1': global GMI cuts separated this batch, and pool cuts the batch used.
         let mut batch_new_gmi: Vec<GomoryCut> = Vec::new();
+        let mut batch_new_scores: Vec<Option<f64>> = Vec::new();
         let mut batch_used_gmi: Vec<usize> = Vec::new();
         // D2 W1: best HiGHS score of each violated pool cut over the batch's nodes.
         let mut batch_cut_score: HashMap<usize, f64> = HashMap::new();
@@ -6342,6 +6402,13 @@ fn solve_milp_node_search(
                 if sc > *e {
                     *e = sc;
                 }
+            }
+            let sep_found =
+                !out.gmi_used.is_empty() || out.gmi_new_scores.iter().any(|s| s.is_some());
+            if out.gmi_new_scores.len() == out.gmi_new.len() {
+                batch_new_scores.append(&mut out.gmi_new_scores);
+            } else {
+                batch_new_scores.extend(std::iter::repeat_n(None, out.gmi_new.len()));
             }
             batch_new_gmi.append(&mut out.gmi_new);
             batch_used_gmi.append(&mut out.gmi_used);
@@ -6709,6 +6776,38 @@ fn solve_milp_node_search(
                     }
                 }
             }
+            if sep_first_on {
+                let lb = out.result.lower_bound;
+                let prunable = tm.incumbent().is_some_and(|(_, v)| lb >= v - 1e-9);
+                if out.sep_round && lb.is_finite() && lb < INFEAS_SENTINEL - 1.0 && !prunable {
+                    // Re-solve this node against the cuts folded at this boundary
+                    // before branching. Sound as for the node-hook re-queue: the node
+                    // keeps the bound its LP proved over its box, and the folded rows
+                    // are globally valid, so the re-solve can only tighten it.
+                    let (r, last) = sep_rounds
+                        .get(&id)
+                        .copied()
+                        .unwrap_or((0, f64::NEG_INFINITY));
+                    let obj = out.sep_lp_obj;
+                    let progress =
+                        r == 0 || (obj - sep_root_obj) > 1.01 * (last - sep_root_obj).max(1e-6);
+                    tm.raise_node_bound(id, lb);
+                    tm.requeue_node(id);
+                    if sep_found && progress && r + 1 < SEP_FIRST_MAX_ROUNDS {
+                        sep_rounds.insert(id, (r + 1, obj));
+                        crate::profile::incr(crate::profile::Ctr::SepFirstRounds);
+                    } else {
+                        sep_rounds.remove(&id);
+                        sep_final.insert(id);
+                    }
+                    sep_requeued.push(id);
+                    continue;
+                }
+                sep_rounds.remove(&id);
+                if sep_final.remove(&id) {
+                    crate::profile::incr(crate::profile::Ctr::SepFirstFinal);
+                }
+            }
             point_values.push(out.point_value);
             results.push(out.result);
         }
@@ -6739,7 +6838,12 @@ fn solve_milp_node_search(
                 .zip(slot_plunge_len.iter().copied())
                 .collect();
             plunge_next.clear();
+            let keep_len: Vec<(NodeId, usize)> = sep_requeued
+                .iter()
+                .map(|id| (*id, len_of.get(id).copied().unwrap_or(0)))
+                .collect();
             plunge_len.clear();
+            plunge_len.extend(keep_len);
             for (parent, child) in tm.take_plunge_children() {
                 let Some(&l) = len_of.get(&parent) else {
                     continue;
@@ -6758,7 +6862,10 @@ fn solve_milp_node_search(
         // slot started a plunge (node separation runs only there), so the LP stays fixed
         // while every slot is mid-dive, as in HiGHS (pool cuts enter its LP only in
         // `separate` at the node from the queue).
-        if node_gmi_on && (!search_on || n_plunge_cont < batch.node_ids.len()) {
+        sep_next = std::mem::take(&mut sep_requeued);
+        if node_gmi_on
+            && (!search_on || n_plunge_cont < batch.node_ids.len() || sep_visits.iter().any(|&v| v))
+        {
             for a in gmi_pool_age.iter_mut() {
                 *a = a.saturating_add(1);
             }
@@ -6767,7 +6874,7 @@ fn solve_milp_node_search(
                     *a = 0;
                 }
             }
-            for cut in batch_new_gmi {
+            for (cut, new_score) in batch_new_gmi.into_iter().zip(batch_new_scores) {
                 if cut_lp_on {
                     // HiGHS length cap (`HighsCutGeneration.cpp:974`).
                     let nz = cut.coeffs.iter().filter(|v| **v != 0.0).count();
@@ -6783,6 +6890,14 @@ fn solve_milp_node_search(
                     } else {
                         0
                     });
+                    // DISCOPT_HIGHS_SEP_FIRST: a new cut violated at the node that
+                    // found it competes in this boundary's selection.
+                    if let Some(sc) = new_score {
+                        let e = batch_cut_score.entry(gmi_pool.len() - 1).or_insert(sc);
+                        if sc > *e {
+                            *e = sc;
+                        }
+                    }
                     crate::profile::incr(crate::profile::Ctr::NodeGmiPoolAdded);
                 }
             }
@@ -7503,6 +7618,16 @@ struct NodeOutput {
     dive_iters: usize,
     /// `DISCOPT_MILP_NODE_GMI`: new global cuts for the pool, and pool indices used.
     gmi_new: Vec<GomoryCut>,
+    /// `DISCOPT_HIGHS_SEP_FIRST`: per `gmi_new` cut, its HiGHS pool score at this
+    /// node's LP point (violated), so new cuts compete in the boundary selection as
+    /// HiGHS's do in `separate` (empty when not a separation visit).
+    gmi_new_scores: Vec<Option<f64>>,
+    /// `DISCOPT_HIGHS_SEP_FIRST`: this was a separation visit at a fractional node
+    /// (strong branching skipped); the reduce decides whether to re-solve it.
+    sep_round: bool,
+    /// The shared LP's objective at this visit (before any node-local lift): HiGHS's
+    /// separation-progress rule measures the LP, not a lifted bound.
+    sep_lp_obj: f64,
     gmi_used: Vec<usize>,
     /// `DISCOPT_MILP_CUT_LP`: HiGHS pool score of each `gmi_used` cut at this node.
     gmi_scores: Vec<f64>,
@@ -7605,6 +7730,7 @@ fn solve_node(
     ctx: &NodeCtx<'_>,
     dive_slot: bool,
     gmi_slot: bool,
+    sep_visit: bool,
 ) -> NodeOutput {
     // Deadline guard BEFORE the expensive LP solve. The loop-top check only stops
     // *dispatching* new batches; a single batch of N nodes whose per-node LP costs
@@ -7639,6 +7765,9 @@ fn solve_node(
             deferred: true,
             dive_iters: 0,
             gmi_new: Vec::new(),
+            gmi_new_scores: Vec::new(),
+            sep_round: false,
+            sep_lp_obj: f64::NEG_INFINITY,
             gmi_used: Vec::new(),
             gmi_scores: Vec::new(),
             cut_lp_active: Vec::new(),
@@ -7718,6 +7847,9 @@ fn solve_node(
                 deferred: false,
                 dive_iters: 0,
                 gmi_new: Vec::new(),
+                gmi_new_scores: Vec::new(),
+                sep_round: false,
+                sep_lp_obj: f64::NEG_INFINITY,
                 gmi_used: Vec::new(),
                 gmi_scores: Vec::new(),
                 cut_lp_active: Vec::new(),
@@ -7894,6 +8026,9 @@ fn solve_node(
         deferred: false,
         dive_iters: 0,
         gmi_new: Vec::new(),
+        gmi_new_scores: Vec::new(),
+        sep_round: false,
+        sep_lp_obj: f64::NEG_INFINITY,
         gmi_used: Vec::new(),
         gmi_scores: Vec::new(),
         cut_lp_active: Vec::new(),
@@ -8185,7 +8320,10 @@ fn solve_node(
             // Only the *choice* of variable changes, so this never affects
             // correctness — only the node count. The prunable check uses the
             // batch-start incumbent snapshot (an effort decision, not a bound).
-            if ctx.sb_active && !feasible && !time_up {
+            // DISCOPT_HIGHS_SEP_FIRST: a separation visit re-solves before branching
+            // (HiGHS separates at the node from the queue, then branches), so its
+            // probes would be spent on an LP about to change.
+            if ctx.sb_active && !feasible && !time_up && !sep_visit {
                 let node_bound = sol.obj + ctx.obj_const;
                 let prunable = ctx
                     .inc_snapshot
@@ -8328,7 +8466,16 @@ fn solve_node(
                     }
                 }
                 out.gmi_new = lg.new_cuts;
+                if sep_visit && ctx.cut_lp {
+                    out.gmi_new_scores = out
+                        .gmi_new
+                        .iter()
+                        .map(|c| cut_pool_score(c, &sol.x, &full_l, &full_u, ctx.opts.simplex.tol))
+                        .collect();
+                }
             }
+            out.sep_round = sep_visit && !feasible && !time_up;
+            out.sep_lp_obj = sol.obj + ctx.obj_const;
             out.result = NodeResult {
                 node_id: id,
                 lower_bound: node_lp_bound + ctx.obj_const,

@@ -437,6 +437,10 @@ counters!(
     MilpPresolveVerifyFallback,
     PlungeContinued,
     PlungeStarts,
+    // DISCOPT_HIGHS_SEP_FIRST (gap plan §12.38): separation re-solves at plunge starts,
+    // and final (branching) visits after them.
+    SepFirstRounds,
+    SepFirstFinal,
     RootRensRuns,
     RootRensImproved,
     RcFixCalls,
