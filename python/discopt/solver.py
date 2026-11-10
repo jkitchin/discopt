@@ -38153,7 +38153,9 @@ def _solve_milp_highs(
 
 def _milp_root_cmir_mode() -> str:
     """``DISCOPT_MILP_ROOT_CMIR`` (gap plan P3, default OFF): ``"off"``, ``"with_gmi"``
-    (``1``) or ``"only"`` (c-MIR without GMI, an entry-experiment arm).
+    (``1``), ``"only"`` (c-MIR without GMI, an entry-experiment arm) or ``"highs"``
+    (the bundle with the root separation run by the faithful port of HiGHS's separation
+    subsystem, ``lp/highs_cutgen``; gap plan §12.16-§12.20).
 
     Armed, the pure-MILP route's root loop runs the aggregated c-MIR / lifted-cover
     separator (``lp/cmir.rs``) at HiGHS's design, allows stalled root rounds, and gets
@@ -38181,9 +38183,13 @@ def _milp_root_cmir_mode() -> str:
         return "with_gmi"
     if raw == "only":
         return "only"
+    if raw == "highs":
+        return "highs"
     if raw in ("", "0", "false", "no"):
         return "off"
-    raise ValueError(f"DISCOPT_MILP_ROOT_CMIR={raw!r} is not recognized (expected 1, only or 0)")
+    raise ValueError(
+        f"DISCOPT_MILP_ROOT_CMIR={raw!r} is not recognized (expected 1, only, highs or 0)"
+    )
 
 
 def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:

@@ -97,11 +97,18 @@ pub(crate) enum RootCmirMode {
     Off,
     WithGmi,
     Only,
+    /// `highs`: the P3 bundle with the root separation replaced by the faithful port
+    /// of HiGHS's separation subsystem (`lp::highs_cutgen`, gap plan §12.16-§12.20).
+    Highs,
 }
 
 impl RootCmirMode {
     pub(crate) fn on(self) -> bool {
         self != RootCmirMode::Off
+    }
+    /// The ported HiGHS separation subsystem runs the root rounds.
+    pub(crate) fn highs_sepa(self) -> bool {
+        self == RootCmirMode::Highs
     }
 }
 
@@ -111,8 +118,9 @@ fn parse_root_cmir(raw: &str) -> Result<RootCmirMode, String> {
         "" | "0" | "false" | "no" => Ok(RootCmirMode::Off),
         "1" | "true" | "yes" => Ok(RootCmirMode::WithGmi),
         "only" => Ok(RootCmirMode::Only),
+        "highs" => Ok(RootCmirMode::Highs),
         other => Err(format!(
-            "DISCOPT_MILP_ROOT_CMIR={other:?} is not recognized (expected 1, only or 0)"
+            "DISCOPT_MILP_ROOT_CMIR={other:?} is not recognized (expected 1, only, highs or 0)"
         )),
     }
 }
@@ -1713,6 +1721,9 @@ mod tests {
         assert_eq!(parse_root_cmir("0").unwrap(), RootCmirMode::Off);
         assert_eq!(parse_root_cmir("1").unwrap(), RootCmirMode::WithGmi);
         assert_eq!(parse_root_cmir(" Only ").unwrap(), RootCmirMode::Only);
+        assert_eq!(parse_root_cmir("HIGHS").unwrap(), RootCmirMode::Highs);
+        assert!(RootCmirMode::Highs.on() && RootCmirMode::Highs.highs_sepa());
+        assert!(!RootCmirMode::WithGmi.highs_sepa());
         assert!(parse_root_cmir("maybe").is_err());
     }
 
