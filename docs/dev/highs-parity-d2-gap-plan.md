@@ -1871,3 +1871,50 @@ dropped LP rows to it, age per node). Open: which HiGHS mechanism makes its node
 pure-integer; the discopt-side gain of (1) is inferred from the knock-outs, not measured.
 Unverified finding to check: `TreeManager::process_evaluated` may feed a pruned-infeasible
 child's 1e30 sentinel bound into the pseudocosts (did not fire on mik).
+
+### 12.37 MILP presolve at near-parity, and its solve panel (2026-11-10)
+
+**Rules now in `bnb/milp_presolve.rs`** (beyond §12.35): the aggregator with HiGHS's acceptance
+(pivot against the row's or the column's largest entry, implied integrality by any equality
+row, no row-length cap); bound propagation (integer bounds tightened, continuous columns keep
+implied bounds with their source row for the implied-free test); dominated columns by row-dual
+bounds (HiGHS `detectDominatedCol`) and pairwise with predictive bound analysis (Achterberg et
+al. 2020 6.4, Gamrath et al. 2015 Thm. 3, HiGHS `dominatedColumns`); parallel columns with a
+split postsolve; redundant rows over implied bounds (source-excluded).
+
+**Sizes** (`p3_presolve_parity.json`, `p3_presolve_parity_gap.py`, 62 rows): original
+15,282 x 25,323, discopt 11,021 x 21,228, HiGHS 10,724 x 20,705: 93 % of HiGHS's row
+reductions and 89 % of its column reductions (mik now identical; issue-2446 879 x 862 vs
+857 x 856). Running HiGHS on discopt's reduced problems (`DISCOPT_MILP_PRESOLVE_DUMP`) shows the
+rest is mostly order-dependent: on supportcase14 HiGHS removes nothing more from our output
+(75 x 224) yet reaches 44 x 117 from the original; blend2's extra aggregations open up only after
+HiGHS's other reductions. HiGHS runs cheap rules from change queues to a fixed point and the
+expensive ones (aggregator, parallel, pairwise domination, probing) gated by > 5 % progress;
+ours sweeps every rule in a fixed order. Missing rules (probing, free-column substitution,
+forcing column, sparsify) are small on this population.
+
+**Three soundness bugs found by the tests and fixed** (all behind the default-OFF flag, none in
+a certifying run): the aggregator's implied-free tolerance became infinite at an infinite
+implied bound, dropping bounds of a column with an unbounded implied range (the engine test
+then saw `Unbounded` on a problem with certified optimum -105; the issue-2446 size 717 x 715
+reported earlier in this work came from it and is **retracted**); `solve_presolved` passed a
+reduced problem's `Unbounded` through (it now falls back, the reduced problem being a
+relaxation); pairwise domination used an integer column's worst-case bound before flooring it
+(2.5 became `x >= 3`, cutting every feasible point).
+
+**Solve panel** (`p3_ab_presolve.py`, 62 rows, 20 s, `RAYON_NUM_THREADS=1`, bundle + search
+config, presolve OFF vs ON, two solves at a time with arm order rotated, idle machine;
+`p3_ab_presolve_parity.jsonl`): **48 -> 50 certified**, none lost (+2122 20.4 -> 3.4 s,
++issue-2446 13.6 s uncertified -> 7.1 s); total wall 405.9 -> 383.9 s; on the 44 names both
+certify, shifted geometric-mean wall ratio 0.953. Faster > 1.5x: gesa2 13.0 -> 2.0, iskar
+8.0 -> 3.2, bell5 7.7 -> 4.2, kaihu 11.5 -> 7.3, supportcase16, sp150x300d; slower > 1.5x:
+app2-2 3.9 -> 13.5, nexp-50-20-1-1 0.9 -> 3.7, jijia 12.1 -> 19.3, dcmulti 2.9 -> 4.7.
+Soundness (`p3_score_ab.py`, sense-aware): 345 checks, 0 violations (the panel script's own
+minimisation-only check flags issue-2446's baseline bound, which is on the right side of a
+maximisation optimum).
+
+**Decision.** Cert-clean and net-positive on the search configuration: presolve joins the HiGHS
+bundle. Graduating it for the default MILP route needs the same A/B on the default
+configuration (§5); until then the flag stays default OFF. Closing the remaining size gap
+(restructuring into HiGHS's queue-driven loop) is deferred: +2 certificates came from the rules,
+and the next measured lever is the plunge-start pool separation of §12.36.
