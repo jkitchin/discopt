@@ -6365,9 +6365,15 @@ fn solve_milp_node_search(
         }
         if let Some(base) = sub_mip_base.as_ref() {
             let budget = sub_mip_node_budget(tm.stats().total_nodes, sub_mip_spent);
-            sub_mip_since += 1;
-            let due =
-                sub_mip_since >= sub_mip_backoff_stride(SUB_MIP_BATCH_STRIDE, sub_mip_fail_streak);
+            // Under dives the stride counts nodes (16 batches of 64), so the sub-MIP
+            // effort does not grow as the dive batch shrinks (gap plan §12.29).
+            let (step, base_stride) = if dive_on {
+                (results.len(), SUB_MIP_BATCH_STRIDE * 64)
+            } else {
+                (1, SUB_MIP_BATCH_STRIDE)
+            };
+            sub_mip_since += step;
+            let due = sub_mip_since >= sub_mip_backoff_stride(base_stride, sub_mip_fail_streak);
             if due && budget > 0 {
                 let inc = tm.incumbent().and_then(|(x, v)| {
                     (v < INFEAS_SENTINEL - 1.0 && x.len() >= ns).then(|| (x.to_vec(), v))

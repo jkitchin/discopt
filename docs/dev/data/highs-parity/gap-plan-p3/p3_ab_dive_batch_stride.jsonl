@@ -1,0 +1,12 @@
+{"name": "mik-250-20-75-1", "arm": "bundle64", "opt": -49716.0, "status": "feasible", "objective": -49716.0, "bound": -50138.98216468337, "gap_certified": false, "nodes": 5899, "wall": 20.17220493900004}
+{"name": "mik-250-20-75-1", "arm": "bundle1", "opt": -49716.0, "status": "feasible", "objective": -49716.0, "bound": -50315.248590788135, "gap_certified": false, "nodes": 1487, "wall": 20.131007986999975}
+{"name": "mik-250-20-75-1", "arm": "bundle8", "opt": -49716.0, "status": "feasible", "objective": -49716.0, "bound": -50150.72741757173, "gap_certified": false, "nodes": 3195, "wall": 20.1936799770001}
+{"name": "enlight_hard", "arm": "bundle1", "opt": 37.0, "status": "optimal", "objective": 37.0, "bound": 37.0, "gap_certified": true, "nodes": 217, "wall": 8.664779949999684}
+{"name": "enlight_hard", "arm": "bundle8", "opt": 37.0, "status": "optimal", "objective": 37.0, "bound": 37.0, "gap_certified": true, "nodes": 163, "wall": 6.5148285000000214}
+{"name": "enlight_hard", "arm": "bundle64", "opt": 37.0, "status": "optimal", "objective": 37.0, "bound": 37.0, "gap_certified": true, "nodes": 657, "wall": 8.612325905000034}
+{"name": "2122", "arm": "bundle8", "opt": -187612.94419439966, "status": "feasible", "objective": -187820.1149640674, "bound": -187608.63468170434, "gap_certified": false, "nodes": 2861, "wall": 22.693084850000105}
+{"name": "2122", "arm": "bundle64", "opt": -187612.94419439966, "status": "feasible", "objective": -1616877.467756924, "bound": -187605.43488350697, "gap_certified": false, "nodes": 2673, "wall": 20.718215570999746}
+{"name": "2122", "arm": "bundle1", "opt": -187612.94419439966, "status": "feasible", "objective": -374248.63749635767, "bound": -187607.98713287, "gap_certified": false, "nodes": 3235, "wall": 20.708386849000362}
+{"name": "bell5", "arm": "bundle64", "opt": 8966406.49152, "status": "optimal", "objective": 8966406.491520002, "bound": 8965578.679253569, "gap_certified": true, "nodes": 4195, "wall": 1.6771926930000518}
+{"name": "bell5", "arm": "bundle1", "opt": 8966406.49152, "status": "optimal", "objective": 8966406.491519975, "bound": 8965510.030964568, "gap_certified": true, "nodes": 15509, "wall": 19.222533702999954}
+{"name": "bell5", "arm": "bundle8", "opt": 8966406.49152, "status": "optimal", "objective": 8966406.491519975, "bound": 8965518.136196261, "gap_certified": true, "nodes": 4137, "wall": 2.0140280010000424}

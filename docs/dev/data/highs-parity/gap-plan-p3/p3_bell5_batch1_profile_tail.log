@@ -1,0 +1,14 @@
+  SearchLoop            14 calls   20357.90 ms
+  SepGomory           3821 calls    5768.37 ms
+  Fbbt               14086 calls    5642.59 ms
+  NodeGmiSep          3821 calls    4442.42 ms
+  NodeLpSolve        13179 calls    3444.38 ms
+  DualPrepare        14935 calls    2281.06 ms
+  LuNumeric          18868 calls    2240.63 ms
+  SubMip                13 calls    1403.44 ms
+  DualPivotLoop      15136 calls     628.54 ms
+  RootCutLoop           14 calls     376.81 ms
+  NodeGmiLp           1475 calls     354.36 ms
+  DualRecompute      15136 calls     175.18 ms
+  SepCmir               65 calls      89.00 ms
+  NodeGmiNs           1475 calls      43.28 ms

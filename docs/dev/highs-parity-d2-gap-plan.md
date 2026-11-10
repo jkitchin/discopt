@@ -1640,3 +1640,15 @@ ported separators/cut pool (`lp/highs_cutgen`), strong branching and the RENS/RI
 ~10 sentinels) scored by final gap as well as certification, with the baseline run twice for the
 noise band; the 62-row certification panel only decides graduation. Judge the configuration
 whole until the loop is in; only then ablate.
+
+**Update (same day): what the per-node overhead at batch size 1 is.** Profile of bell5 under the
+bundle at `DISCOPT_HIGHS_DIVE_BATCH=1`: 271 sub-MIPs took 16.0 s of the 28.5 s search, because
+the sub-MIP stride counts *batches* (16), i.e. every 16 nodes at batch size 1. Under dives the
+stride now counts nodes (16 x 64). After that fix (`p3_ab_dive_batch_stride.jsonl`,
+`p3_bell5_batch1_profile_tail.log`): node separation 10.2 s over 3,821 plunge starts (node GMI
+plus the ported separators, each call rebuilding the LP view and B^-1 rows), FBBT 5.6 s (0.4 ms
+per call: discopt re-propagates every row at every node; HiGHS's `HighsDomain` propagates only
+the rows of columns whose bounds changed), LP 3.4 s, sub-MIP 1.4 s. So the search-loop port's
+first two pieces are (a) incremental domain propagation (a `HighsDomain` port: activities kept
+per row, a changed-column queue; also the base for cut-pool and conflict propagation) and (b)
+node separation against a persistent LP view instead of a rebuilt one.
