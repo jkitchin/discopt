@@ -659,6 +659,25 @@ fn highs_sepa_propagate() -> bool {
     }
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the root loop runs the ported RENS on
+/// the root LP point once its cut rounds stop and, when that improves the incumbent,
+/// runs a second pass of rounds with root reduced-cost fixing and propagation against
+/// it (gap plan §12.27; HiGHS `evaluateRootNode`: heuristics, then "if there are new
+/// global bound changes we re-evaluate the LP and do one more separation round").
+/// Default OFF; `DISCOPT_HIGHS_ROOT_RENS=1` opts in. Read per solve, refusing garbage.
+fn highs_root_rens() -> bool {
+    match std::env::var("DISCOPT_HIGHS_ROOT_RENS") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_ROOT_RENS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// The driver's FBBT: exact rows, or rows relaxed by [`row_tolerances`] under
 /// [`tol_robust_enabled`].
 #[allow(clippy::too_many_arguments)]
@@ -3884,7 +3903,23 @@ fn solve_milp_node_search(
     // genuinely feasible seed survives the tightening). A seed that cannot be
     // proven feasible is dropped silently — seeding is an optimization and
     // must never be able to produce a false certificate.
-    if let Some(seed) = opts.initial_incumbent.as_ref() {
+    // Diagnostic instrument (gap plan §12.27): `DISCOPT_MILP_SEED_POINT=<file>` seeds the
+    // top-level solve with a point in the driver's own column space (the format
+    // `DISCOPT_MILP_DUMP_INCUMBENT` writes), for entry experiments that need an
+    // incumbent from the start. It goes through the same validation as any seed, so a
+    // wrong file is dropped, never trusted. Off when unset.
+    let seed_file: Option<Vec<f64>> = if milp_depth == 0 && opts.initial_incumbent.is_none() {
+        std::env::var("DISCOPT_MILP_SEED_POINT").ok().map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("DISCOPT_MILP_SEED_POINT {path}: {e}"))
+                .split_ascii_whitespace()
+                .map(|t| t.parse::<f64>().expect("seed point value"))
+                .collect()
+        })
+    } else {
+        None
+    };
+    if let Some(seed) = opts.initial_incumbent.as_ref().or(seed_file.as_ref()) {
         if let Some((sx, sobj)) =
             validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
         {
@@ -3912,6 +3947,12 @@ fn solve_milp_node_search(
                 }
             };
             if accept {
+                if seed_file.is_some() {
+                    eprintln!(
+                        "DISCOPT_MILP_SEED_POINT accepted, objective {:e}",
+                        sobj + obj_const
+                    );
+                }
                 tm.inject_incumbent(sx, sobj + obj_const);
             }
         }
@@ -4120,6 +4161,9 @@ fn solve_milp_node_search(
         };
     let mut pool_ids: Vec<i32> = Vec::new();
     let mut round_pool_ids: Vec<i32> = Vec::new();
+    // Gap plan §12.27: root RENS between root passes (`highs_root_rens`).
+    let root_rens_on = highs_sep.is_some() && sub_mip_base.is_some() && highs_root_rens();
+    let mut root_rens_ran = false;
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
@@ -4155,730 +4199,817 @@ fn solve_milp_node_search(
         // HiGHS's root round cap (`HighsMipSolverData.cpp:1990-1993, 1044-1046`):
         // 2 sqrt(maxTreeSizeLog2), each unfixed integer adding ceil(log2(min(1024,
         // 1 + u - l))) (under `DISCOPT_MILP_ROOT_CMIR`).
-        for _round in 0..opts.cut_rounds {
-            if total_cuts >= opts.root_cuts {
-                break;
-            }
-            if let Some(dl) = root_cut_deadline {
-                if std::time::Instant::now() >= dl {
+        for root_pass in 0..if root_rens_on { 2 } else { 1 } {
+            if root_pass > 0 {
+                // Root RENS (HiGHS `evaluateRootNode`): on the root LP point, after the
+                // first pass of rounds. Only an improved incumbent earns a second pass.
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                     break;
                 }
-            }
-            crate::profile::incr(crate::profile::Ctr::RootCutRounds);
-            let root = {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
-                // Re-optimize from the PREVIOUS round's optimal basis instead of
-                // re-deriving the augmented LP from scratch. Appending a cut adds a
-                // row and its surplus slack; `extend_basis` makes that slack basic,
-                // which leaves the basis nonsingular and still dual-feasible (the
-                // slack's cost is 0), so a warm DUAL re-solve is the textbook
-                // re-optimizer — it pivots in the few violated cut rows rather than
-                // running a fresh primal phase-1 over the whole matrix.
-                //
-                // The loop already kept `root_basis` for the post-loop root node; it
-                // simply never fed it back in, so every round paid a cold solve.
-                // Measured on the rsyn0840m OA master at `root_cuts=500,
-                // cut_rounds=15`: 14 cold root solves = 23.1 s of the 24.2 s cut
-                // loop, 16127 phase-1 pivots, `EntryColsWarm = 0`.
-                //
-                // Bound-safe: the LP optimum does not depend on the starting basis,
-                // and the warm solve falls back to the cold `solve_lp_root_csc` on
-                // IterLimit/Numerical exactly as the node path does. Only which
-                // optimal vertex is reached — hence which Gomory cuts are read off
-                // the basis — can differ, the same latitude the post-loop
-                // `root_warm_basis` path already has.
-                // Borrowed, not taken: a round whose LP comes back non-Optimal
-                // breaks out of the loop *without* refreshing `root_basis`, and the
-                // post-loop root node still wants the last good basis to warm-start
-                // from. Taking it here would silently cold-solve that root.
-                match root_basis.as_ref() {
-                    Some(&(ref b, basis_n)) => {
-                        crate::profile::incr(crate::profile::Ctr::RootCutWarmReopt);
-                        let b = if basis_n < n_w {
-                            extend_basis(b.clone(), n_w)
-                        } else {
-                            b.clone()
-                        };
-                        let lp = LpView {
-                            a: &[],
-                            m: m_w,
-                            n: n_w,
-                            c: &c_w,
-                            l: &l_w,
-                            u: &u_w,
-                        };
-                        let warm = solve_lp_warm_scaled_csc(
-                            &lp,
-                            &b_w,
-                            &b,
-                            &warm_root_opts(&root_simplex, m_w, n_w),
-                            &csc_w,
-                        );
-                        // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): a failed warm re-solve ends the
-                        // round loop (HiGHS stops separating on an LP failure) instead of a
-                        // cold solve, which cost ~3 s each on the nexp neighbourhood.
-                        let nocold = crate::lp::cmir::root_cmir_mode().on();
-                        if warm.status == LpStatus::Numerical
-                            && nocold
-                            && warm.basis.basic_vars.len() == m_w
-                            && warm.basis.col_status.len() == n_w
-                            && warm.x.len() == n_w
-                            && warm.obj.is_finite()
-                            && {
-                                // Only a vertex that satisfies `A x = b` and the box.
-                                let x = &warm.x;
-                                let mut r = b_w.clone();
-                                let (cp, ri, va) = csc_w.raw();
-                                for j in 0..n_w {
-                                    for k in cp[j]..cp[j + 1] {
-                                        r[ri[k]] -= va[k] * x[j];
-                                    }
-                                }
-                                r.iter()
-                                    .zip(&b_w)
-                                    .all(|(ri, bi)| ri.abs() <= 1e-6 * (1.0 + bi.abs()))
-                                    && (0..n_w).all(|j| {
-                                        x[j] >= l_w[j] - 1e-6 * (1.0 + l_w[j].abs().min(1e6))
-                                            && x[j] <= u_w[j] + 1e-6 * (1.0 + u_w[j].abs().min(1e6))
-                                    })
-                            }
-                        {
-                            // `=2`: the dual reached its vertex and only the sub-tolerance
-                            // repair failed; separate from that vertex. A cut is valid
-                            // whatever point it separates, and this loop's LP value is
-                            // never a bound (the root node is re-solved in the tree).
-                            let mut w = warm;
-                            w.status = LpStatus::Optimal;
-                            w
-                        } else if matches!(warm.status, LpStatus::IterLimit | LpStatus::Numerical)
-                            && nocold
-                        {
-                            warm
-                        } else {
-                            match warm.status {
-                                LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
-                                    &csc_w,
-                                    m_w,
-                                    n_w,
-                                    &c_w,
-                                    &l_w,
-                                    &u_w,
-                                    &b_w,
-                                    &root_simplex,
-                                ),
-                                _ => warm,
-                            }
-                        }
-                    }
-                    None => {
-                        solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &root_simplex)
-                    }
+                let (Some(base), Some(rx)) = (sub_mip_base.as_ref(), last_root_x.as_ref()) else {
+                    break;
+                };
+                if rx.len() < ns {
+                    break;
                 }
-            };
-            lp_iters += root.iters;
-            if root.status != LpStatus::Optimal {
-                break;
-            }
-            // Keep this round's optimal basis for the root B&B node. If the loop
-            // exits now (tailing off / no cuts) it already spans the final matrix;
-            // if more cuts are appended below it is extended to the new size after
-            // the loop. The clone is cheap next to the solve it came from.
-            root_basis = Some((root.basis.clone(), n_w));
-            root_duals = root.dual.clone();
-            if prune_base.is_some() {
-                last_root_x = Some(root.x.clone());
-            }
-            if hs_stall_on {
-                // HiGHS's root stall rule (`HighsMipSolverData.cpp:2215-2245`), ported
-                // literally: the LP point's movement from the first root LP point,
-                // smoothed; a round stalls when that progress grows < 1 % and the bound
-                // gain is <= 1.001 x the previous gain; 3 stalled rounds end the loop.
-                gmi_phase = true;
-                if hs_first.is_none() {
-                    hs_first = Some((root.x[..ns].to_vec(), root.obj));
-                    hs_prev_obj = root.obj;
-                } else if let Some((fx, fobj)) = hs_first.as_ref() {
-                    hs_rounds += 1;
-                    let cur: Vec<f64> = (0..ns).map(|j| fx[j] - root.x[j]).collect();
-                    let sq: f64 = cur.iter().map(|v| v * v).sum();
-                    let progress = if sq > 0.0 {
-                        let scale = 1.0 / sq.sqrt();
-                        let mut an = 0.0;
-                        let mut dot = 0.0;
-                        for j in 0..ns {
-                            hs_avg[j] = (scale * cur[j] - hs_avg[j]) / hs_rounds as f64;
-                            an += hs_avg[j] * hs_avg[j];
-                            dot += hs_avg[j] * cur[j];
-                        }
-                        if an > 0.0 {
-                            dot / an.sqrt()
-                        } else {
-                            0.0
-                        }
+                let cut = SubMipBase {
+                    csc: csc_w.clone(),
+                    m: m_w,
+                    n: n_w,
+                    c: c_w.clone(),
+                    l: l_w.clone(),
+                    u: u_w.clone(),
+                    b: b_w.clone(),
+                    is_int_full: is_int_full.clone(),
+                };
+                let (up, dn) = rounding_locks(base, ns);
+                let mut order: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+                let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
+                order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+                let start: Option<Basis> = root_basis.as_ref().map(|(b, bn)| {
+                    if *bn < n_w {
+                        extend_basis(b.clone(), n_w)
                     } else {
-                        0.0
-                    };
-                    if hs_rounds == 1 {
-                        hs_smooth = progress;
-                    } else {
-                        let next = (2.0 / 3.0) * hs_smooth + progress / 3.0;
-                        if next < hs_smooth * 1.01
-                            && (root.obj - fobj) <= (hs_prev_obj - fobj) * 1.001
-                        {
-                            hs_stall += 1;
-                        } else {
-                            hs_stall = 0;
-                        }
-                        hs_smooth = next;
+                        b.clone()
                     }
-                    hs_prev_obj = root.obj;
-                    if hs_stall >= 3 {
+                });
+                let live = |v: f64| v.is_finite() && v < INFEAS_SENTINEL - 1.0;
+                let before = tm.incumbent().map(|(_, v)| v).filter(|&v| live(v));
+                root_rens_ran = true;
+                crate::profile::incr(crate::profile::Ctr::RootRensRuns);
+                if let Some((sx, sobj)) = try_rens_highs(
+                    &cut,
+                    base,
+                    &order,
+                    obj_const,
+                    ns,
+                    &is_int,
+                    &rx[..ns],
+                    Some(&rx[..ns]),
+                    None,
+                    start.as_ref(),
+                    opts,
+                    deadline,
+                    0,
+                ) {
+                    tm.inject_incumbent(sx, sobj);
+                }
+                let after = tm.incumbent().map(|(_, v)| v).filter(|&v| live(v));
+                let improved = match (before, after) {
+                    (_, None) => false,
+                    (None, Some(_)) => true,
+                    (Some(b), Some(a)) => a < b - 1e-9 * (1.0 + b.abs()),
+                };
+                if !improved {
+                    break;
+                }
+                crate::profile::incr(crate::profile::Ctr::RootRensImproved);
+                root_stalled = 0;
+                hs_stall = 0;
+            }
+            for _round in 0..opts.cut_rounds {
+                if total_cuts >= opts.root_cuts {
+                    break;
+                }
+                if let Some(dl) = root_cut_deadline {
+                    if std::time::Instant::now() >= dl {
                         break;
                     }
                 }
-                prev_obj = prev_obj.max(root.obj);
-            } else
-            // Tailing off: stop once added cuts barely move the bound.
-            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs())
-                && prev_obj > f64::NEG_INFINITY
-            {
-                // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): with c-MIR on, allow a few
-                // consecutive stalled rounds. A dual-degenerate root (assignment rows)
-                // moves to an equal-objective vertex for several rounds before the
-                // bound rises (`neos-911970`, gap plan §12.2 item 1); SCIP allows
-                // stalled root rounds too. Off the flag the loop stops at the first
-                // stalled round, as before.
-                root_stalled += 1;
-                // Gap plan P3: c-MIR first, GMI once it stalls. The first stalled
-                // round of the c-MIR phase hands over to GMI (with a fresh stall
-                // allowance) instead of counting toward the stop.
-                if !gmi_phase {
-                    gmi_phase = true;
-                    root_stalled = 0;
-                    crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
-                }
-                let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
-                    ROOT_CMIR_STALL_ROUNDS
-                } else {
-                    0
-                };
-                if root_stalled > allow {
-                    break;
-                }
-            } else {
-                root_stalled = 0;
-            }
-            prev_obj = prev_obj.max(root.obj);
-            // HiGHS runs randomized rounding on every root round's LP point while
-            // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
-            // completion LP is over the uncut base rows, as in HiGHS.
-            if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
-                if tm
-                    .incumbent()
-                    .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
-                {
-                    if let Some((x, v)) = try_randomized_rounding(
-                        base,
-                        locks,
-                        obj_const,
-                        ns,
-                        &is_int,
-                        &root.x,
-                        0x5EED_0000 + _round as u64,
-                        opts,
-                        deadline,
-                    ) {
-                        tm.inject_incumbent(x, v);
-                    }
-                }
-            }
-
-            if highs_sep.is_some() && highs_sepa_propagate() {
-                // HiGHS's root rounds propagate the global domain after every LP
-                // (`HighsSeparation::separationRound` -> `propagateAndResolve`, and
-                // `evaluateRootLp`), over the model rows AND the cut pool's rows, and
-                // fix by reduced cost against the incumbent
-                // (`redcostfixing.addRootRedcost/propagateRootRedcost`). Here: reduced-
-                // cost fixing at this round's LP, then FBBT over every LP row (cuts
-                // included), into the root box the next round and the tree start from.
-                // Both are sound contractions: RC fixing keeps every point at least as
-                // good as the incumbent (with a margin on the LP value), FBBT keeps
-                // every point satisfying globally valid rows.
-                let _t = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
-                let mut changed = false;
-                if let Some((_, inc)) = tm
-                    .incumbent()
-                    .filter(|(_, v)| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)
-                {
-                    let margin = 1e-6 * (1.0 + root.obj.abs());
-                    if let Some((rl, ru)) = reduced_cost_fix(
-                        &csc_w,
-                        m_w,
-                        &c_w,
-                        &root.basis,
-                        &root.dual,
-                        root.obj + obj_const - margin,
-                        inc,
-                        &l_w,
-                        &u_w,
-                        ns,
-                        &is_int_full,
-                        opts.simplex.tol,
-                    ) {
-                        for j in 0..ns {
-                            if rl[j] > l_w[j] && rl[j] <= u_w[j] {
-                                l_w[j] = rl[j];
-                                changed = true;
-                            }
-                            if ru[j] < u_w[j] && ru[j] >= l_w[j] {
-                                u_w[j] = ru[j];
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                let pr = fbbt_rows(
-                    &csc_w,
-                    m_w,
-                    n_w,
-                    &l_w,
-                    &u_w,
-                    &b_w,
-                    &is_int_full,
-                    opts.simplex.tol,
-                );
-                if !pr.infeasible {
-                    for j in 0..n_w {
-                        if pr.l[j] > l_w[j] {
-                            l_w[j] = pr.l[j];
-                            changed = true;
-                        }
-                        if pr.u[j] < u_w[j] {
-                            u_w[j] = pr.u[j];
-                            changed = true;
-                        }
-                    }
-                }
-                if changed {
-                    crate::profile::incr(crate::profile::Ctr::RootHighsPropagated);
-                    tm.tighten_root_box(&l_w[..ns], &u_w[..ns]);
-                }
-            }
-            let new_cuts = if let Some(hs) = highs_sep.as_mut() {
-                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
-                hs.add_lp_iterations(root.iters as i64);
-                let rc = hs.round(&crate::lp::highs_cutgen::bridge::StdFormRound {
-                    csc: &csc_w,
-                    m: m_w,
-                    n: n_w,
-                    ns,
-                    b: &b_w,
-                    l: &l_w,
-                    u: &u_w,
-                    is_int: &is_int_full,
-                    x: &root.x,
-                    y: &root.dual,
-                    basic_vars: &root.basis.basic_vars,
-                });
-                crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
-                let remaining = opts.root_cuts - total_cuts;
-                round_pool_ids.clear();
-                let mut out = Vec::new();
-                for (k, (id, cut)) in rc.cuts.into_iter().enumerate() {
-                    if k < remaining {
-                        round_pool_ids.push(id);
-                        out.push(cut);
-                    } else {
-                        // Over the root-cut budget: not in the LP after all.
-                        hs.lp_cut_removed(id);
-                    }
-                }
-                out
-            } else {
-                // Knapsack cover cuts (sparse, strong on knapsack structure) plus
-                // Gomory mixed-integer cuts off the native basis.
-                let mut cuts = {
-                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
-                    separate_cover_csc(
-                        &csc_w,
-                        n_w,
-                        m_w,
-                        &l_w,
-                        &u_w,
-                        &b_w,
-                        &root.x,
-                        ns,
-                        &is_int_full,
-                        n_orig_rows,
-                        opts.simplex.tol,
-                    )
-                };
-                if opts.cmir_cuts {
-                    // #2107: aggregated c-MIR with variable-bound substitution, from the
-                    // original rows only (`n_orig_rows`). Its cuts are over the original
-                    // structural and slack columns, rewritten below like every other cut.
-                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
-                    let found = separate_cmir_csc(
-                        &csc_w,
-                        n_w,
-                        m_w,
-                        &l_w,
-                        &u_w,
-                        &b_w,
-                        &root.x,
-                        &is_int_full,
-                        // P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's path separator walks every LP
-                        // row, the current cuts included (`HighsPathSeparator.cpp:30-50`).
-                        if crate::lp::cmir::root_cmir_mode().on() {
-                            m_w
-                        } else {
-                            n_orig_rows
-                        },
-                        if crate::lp::cmir::root_cmir_mode().on() {
-                            CMIR_MAX_AGGR_DESIGN
-                        } else {
-                            CMIR_MAX_AGGR
-                        },
-                        CMIR_MAX_CUTS,
-                        opts.simplex.tol,
-                    );
-                    crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
-                    if found.is_empty() && !gmi_phase {
-                        // c-MIR has nothing left at this point: GMI joins this round.
-                        gmi_phase = true;
-                        crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
-                    }
-                    cuts.extend(found);
-                }
-                // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator (c-MIR on tableau-row
-                // aggregations) every round; `1` replaces GMI with it, `2` runs both.
-                let tableau_on = opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on();
-                if opts.gmi_cuts && tableau_on {
-                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
-                    cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
-                        &csc_w,
-                        n_w,
-                        m_w,
-                        &l_w,
-                        &u_w,
-                        &b_w,
-                        &root.x,
-                        &root.basis,
-                        &is_int_full,
-                        n_orig_rows,
-                        CMIR_MAX_CUTS,
-                        opts.simplex.tol,
-                    ));
-                }
-                if opts.gmi_cuts && gmi_phase && !tableau_on {
-                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
-                    cuts.extend(separate_gomory_cols(
-                        &csc_w,
-                        m_w,
-                        n_w,
-                        &l_w,
-                        &u_w,
-                        &b_w,
-                        &root.basis,
-                        &is_int_full,
-                        opts.simplex.tol,
-                        1e7,
-                    ));
-                }
-                // Rewrite every separated cut over structural columns only, before
-                // anything downstream looks at it. Doing it here (rather than at
-                // append time) means selection scores, dedup signatures and the
-                // cleanup's tightness test all see one consistent space, and no cut
-                // row ever references another row's slack.
-                {
-                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
-                    let before = cuts.len();
-                    let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
-                    cuts = cuts
-                        .iter()
-                        .filter_map(|c| {
-                            substitute_slacks_to_structural(
-                                c,
-                                &base_rows,
-                                &structural_cuts,
-                                ns,
-                                n_base0,
-                                &root.x,
-                                &l_w,
-                                &u_w,
-                                cut_max_len,
-                                opts.simplex.tol,
-                                1e7,
-                                gmi_repair,
-                            )
-                        })
-                        .collect();
-                    crate::profile::incr_by(
-                        crate::profile::Ctr::RootCutsSubstDropped,
-                        (before - cuts.len()) as u64,
-                    );
-                }
-                if !aged_pool.is_empty() {
-                    let mut back = 0u64;
-                    aged_pool.retain(|pc| {
-                        let act: f64 = pc.coeffs.iter().zip(&root.x).map(|(a, x)| a * x).sum();
-                        if act < pc.rhs - 1e-6 * (1.0 + pc.rhs.abs()) {
-                            cuts.push(pc.clone());
-                            back += 1;
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    crate::profile::incr_by(crate::profile::Ctr::RootCutsGenerated, back);
-                }
-                // Keep the strongest, most diverse few (efficacy + orthogonality)
-                // up to the remaining root-cut budget; otherwise add first-come.
-                let remaining = opts.root_cuts - total_cuts;
-                let selected = if opts.cut_select && crate::lp::cmir::root_cmir_mode().on() {
-                    // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
-                    // viol / (active nnz * sqrt(active row norm)) over columns strictly inside
-                    // their bounds, the adaptive min-score factor, parallelism <= 0.1.
-                    let x = &root.x;
-                    let mut cands: Vec<(f64, usize)> = Vec::new();
-                    for (k, c) in cuts.iter().enumerate() {
-                        let act: f64 = c.coeffs.iter().zip(x).map(|(a, v)| a * v).sum();
-                        let viol = c.rhs - act;
-                        if viol <= 1e-6 * (1.0 + c.rhs.abs()) {
-                            continue;
-                        }
-                        let (mut nrm, mut nact) = (0.0f64, 0usize);
-                        for (j, &a) in c.coeffs.iter().enumerate() {
-                            if a != 0.0
-                                && j < x.len()
-                                && x[j] > l_w[j] + 1e-6
-                                && x[j] < u_w[j] - 1e-6
+                crate::profile::incr(crate::profile::Ctr::RootCutRounds);
+                let root = {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
+                    // Re-optimize from the PREVIOUS round's optimal basis instead of
+                    // re-deriving the augmented LP from scratch. Appending a cut adds a
+                    // row and its surplus slack; `extend_basis` makes that slack basic,
+                    // which leaves the basis nonsingular and still dual-feasible (the
+                    // slack's cost is 0), so a warm DUAL re-solve is the textbook
+                    // re-optimizer — it pivots in the few violated cut rows rather than
+                    // running a fresh primal phase-1 over the whole matrix.
+                    //
+                    // The loop already kept `root_basis` for the post-loop root node; it
+                    // simply never fed it back in, so every round paid a cold solve.
+                    // Measured on the rsyn0840m OA master at `root_cuts=500,
+                    // cut_rounds=15`: 14 cold root solves = 23.1 s of the 24.2 s cut
+                    // loop, 16127 phase-1 pivots, `EntryColsWarm = 0`.
+                    //
+                    // Bound-safe: the LP optimum does not depend on the starting basis,
+                    // and the warm solve falls back to the cold `solve_lp_root_csc` on
+                    // IterLimit/Numerical exactly as the node path does. Only which
+                    // optimal vertex is reached — hence which Gomory cuts are read off
+                    // the basis — can differ, the same latitude the post-loop
+                    // `root_warm_basis` path already has.
+                    // Borrowed, not taken: a round whose LP comes back non-Optimal
+                    // breaks out of the loop *without* refreshing `root_basis`, and the
+                    // post-loop root node still wants the last good basis to warm-start
+                    // from. Taking it here would silently cold-solve that root.
+                    match root_basis.as_ref() {
+                        Some(&(ref b, basis_n)) => {
+                            crate::profile::incr(crate::profile::Ctr::RootCutWarmReopt);
+                            let b = if basis_n < n_w {
+                                extend_basis(b.clone(), n_w)
+                            } else {
+                                b.clone()
+                            };
+                            let lp = LpView {
+                                a: &[],
+                                m: m_w,
+                                n: n_w,
+                                c: &c_w,
+                                l: &l_w,
+                                u: &u_w,
+                            };
+                            let warm = solve_lp_warm_scaled_csc(
+                                &lp,
+                                &b_w,
+                                &b,
+                                &warm_root_opts(&root_simplex, m_w, n_w),
+                                &csc_w,
+                            );
+                            // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): a failed warm re-solve ends the
+                            // round loop (HiGHS stops separating on an LP failure) instead of a
+                            // cold solve, which cost ~3 s each on the nexp neighbourhood.
+                            let nocold = crate::lp::cmir::root_cmir_mode().on();
+                            if warm.status == LpStatus::Numerical
+                                && nocold
+                                && warm.basis.basic_vars.len() == m_w
+                                && warm.basis.col_status.len() == n_w
+                                && warm.x.len() == n_w
+                                && warm.obj.is_finite()
+                                && {
+                                    // Only a vertex that satisfies `A x = b` and the box.
+                                    let x = &warm.x;
+                                    let mut r = b_w.clone();
+                                    let (cp, ri, va) = csc_w.raw();
+                                    for j in 0..n_w {
+                                        for k in cp[j]..cp[j + 1] {
+                                            r[ri[k]] -= va[k] * x[j];
+                                        }
+                                    }
+                                    r.iter()
+                                        .zip(&b_w)
+                                        .all(|(ri, bi)| ri.abs() <= 1e-6 * (1.0 + bi.abs()))
+                                        && (0..n_w).all(|j| {
+                                            x[j] >= l_w[j] - 1e-6 * (1.0 + l_w[j].abs().min(1e6))
+                                                && x[j]
+                                                    <= u_w[j] + 1e-6 * (1.0 + u_w[j].abs().min(1e6))
+                                        })
+                                }
                             {
-                                nrm += a * a;
-                                nact += 1;
-                            }
-                        }
-                        if nact == 0 || nrm <= 0.0 {
-                            continue;
-                        }
-                        cands.push((viol / (nact as f64 * nrm.sqrt()), k));
-                    }
-                    let sel =
-                        cut_lp_select(cands, &cuts, &[], &mut root_sel_best, &mut root_sel_factor);
-                    let mut keep = vec![false; cuts.len()];
-                    for k in sel.into_iter().take(remaining) {
-                        keep[k] = true;
-                    }
-                    cuts.into_iter()
-                        .zip(keep)
-                        .filter(|(_, k)| *k)
-                        .map(|(c, _)| c)
-                        .collect()
-                } else if opts.cut_select {
-                    select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
-                } else {
-                    cuts.truncate(remaining);
-                    cuts
-                };
-                dedup_new_cuts(selected, &mut pool_sigs, usize::MAX)
-            };
-            if new_cuts.is_empty() {
-                break;
-            }
-            total_cuts += new_cuts.len();
-            // Cut `i` occupies column `n_base0 + i`; later rounds expand a
-            // reference to that slack through this entry, so the order here must
-            // match the append order below exactly.
-            structural_cuts.extend(new_cuts.iter().cloned());
-            let (nw_csc, nm, nn) = augment_csc_with_cuts(
-                &csc_w,
-                &mut b_w,
-                &mut c_w,
-                &mut l_w,
-                &mut u_w,
-                &mut is_int_full,
-                m_w,
-                n_w,
-                &new_cuts,
-            );
-            csc_w = nw_csc;
-            m_w = nm;
-            n_w = nn;
-            if prune_base.is_some() {
-                all_root_cuts.extend(new_cuts);
-                if highs_sep.is_some() {
-                    pool_ids.append(&mut round_pool_ids);
-                }
-            }
-            // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): drop, every round, the cuts whose slack is
-            // BASIC at this round's optimal basis (zero dual: removing the row keeps
-            // this round's optimum), instead of carrying every generated cut to the
-            // post-loop cleanup. HiGHS ages inactive cuts out of the LP the same way.
-            if let (Some((csc_base, m_base, n_base)), Some((rb, rn)), true) = (
-                prune_base.as_ref(),
-                root_basis.as_ref(),
-                crate::lp::cmir::root_cmir_mode().on(),
-            ) {
-                let (m_base, n_base, rn) = (*m_base, *n_base, *rn);
-                let total = all_root_cuts.len();
-                debug_assert_eq!(n_w, n_base + total);
-                let n_old = rn.saturating_sub(n_base).min(total);
-                // HiGHS `performAging(true)` (`HighsLpRelaxation.cpp:629-675`): a cut
-                // whose slack is basic ages by one, one with a nonzero dual resets to 0;
-                // rows are deleted only every max(agelimit/2, 2) epochs, those with age
-                // above min(epochs, agelimit), agelimit = `mip_lp_age_limit` = 10.
-                cut_ages.resize(total, 0);
-                cut_epochs += 1;
-                const AGE_LIMIT: u32 = 10;
-                let delete_now = cut_epochs % (AGE_LIMIT / 2).max(2) == 0;
-                let limit = AGE_LIMIT.min(cut_epochs);
-                let mut keep = vec![true; total];
-                for (i, k) in keep.iter_mut().enumerate().take(n_old) {
-                    if rb.col_status.get(n_base + i) == Some(&BASIC) {
-                        cut_ages[i] += 1;
-                        if delete_now && cut_ages[i] > limit {
-                            *k = false;
-                        }
-                    } else if root_duals.get(m_base + i).is_some_and(|d| d.abs() > 1e-9) {
-                        cut_ages[i] = 0;
-                    }
-                }
-                for ci in (0..total).rev() {
-                    if keep[ci] {
-                        for (j, &a) in all_root_cuts[ci].coeffs.iter().enumerate() {
-                            if a != 0.0 && j >= n_base && j - n_base < ci {
-                                keep[j - n_base] = true;
-                            }
-                        }
-                    }
-                }
-                let n_keep = keep.iter().filter(|&&k| k).count();
-                if n_keep < total {
-                    if let Some(hs) = highs_sep.as_mut() {
-                        // The pool re-offers a dropped cut when it is violated again.
-                        for (c, &k) in keep.iter().enumerate() {
-                            if !k {
-                                if let Some(&id) = pool_ids.get(c) {
-                                    hs.lp_cut_removed(id);
+                                // `=2`: the dual reached its vertex and only the sub-tolerance
+                                // repair failed; separate from that vertex. A cut is valid
+                                // whatever point it separates, and this loop's LP value is
+                                // never a bound (the root node is re-solved in the tree).
+                                let mut w = warm;
+                                w.status = LpStatus::Optimal;
+                                w
+                            } else if matches!(
+                                warm.status,
+                                LpStatus::IterLimit | LpStatus::Numerical
+                            ) && nocold
+                            {
+                                warm
+                            } else {
+                                match warm.status {
+                                    LpStatus::IterLimit | LpStatus::Numerical => solve_lp_root_csc(
+                                        &csc_w,
+                                        m_w,
+                                        n_w,
+                                        &c_w,
+                                        &l_w,
+                                        &u_w,
+                                        &b_w,
+                                        &root_simplex,
+                                    ),
+                                    _ => warm,
                                 }
                             }
                         }
-                        pool_ids = pool_ids
+                        None => solve_lp_root_csc(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &c_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root_simplex,
+                        ),
+                    }
+                };
+                lp_iters += root.iters;
+                if root.status != LpStatus::Optimal {
+                    break;
+                }
+                // Keep this round's optimal basis for the root B&B node. If the loop
+                // exits now (tailing off / no cuts) it already spans the final matrix;
+                // if more cuts are appended below it is extended to the new size after
+                // the loop. The clone is cheap next to the solve it came from.
+                root_basis = Some((root.basis.clone(), n_w));
+                root_duals = root.dual.clone();
+                if prune_base.is_some() {
+                    last_root_x = Some(root.x.clone());
+                }
+                if hs_stall_on {
+                    // HiGHS's root stall rule (`HighsMipSolverData.cpp:2215-2245`), ported
+                    // literally: the LP point's movement from the first root LP point,
+                    // smoothed; a round stalls when that progress grows < 1 % and the bound
+                    // gain is <= 1.001 x the previous gain; 3 stalled rounds end the loop.
+                    gmi_phase = true;
+                    if hs_first.is_none() {
+                        hs_first = Some((root.x[..ns].to_vec(), root.obj));
+                        hs_prev_obj = root.obj;
+                    } else if let Some((fx, fobj)) = hs_first.as_ref() {
+                        hs_rounds += 1;
+                        let cur: Vec<f64> = (0..ns).map(|j| fx[j] - root.x[j]).collect();
+                        let sq: f64 = cur.iter().map(|v| v * v).sum();
+                        let progress = if sq > 0.0 {
+                            let scale = 1.0 / sq.sqrt();
+                            let mut an = 0.0;
+                            let mut dot = 0.0;
+                            for j in 0..ns {
+                                hs_avg[j] = (scale * cur[j] - hs_avg[j]) / hs_rounds as f64;
+                                an += hs_avg[j] * hs_avg[j];
+                                dot += hs_avg[j] * cur[j];
+                            }
+                            if an > 0.0 {
+                                dot / an.sqrt()
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+                        if hs_rounds == 1 {
+                            hs_smooth = progress;
+                        } else {
+                            let next = (2.0 / 3.0) * hs_smooth + progress / 3.0;
+                            if next < hs_smooth * 1.01
+                                && (root.obj - fobj) <= (hs_prev_obj - fobj) * 1.001
+                            {
+                                hs_stall += 1;
+                            } else {
+                                hs_stall = 0;
+                            }
+                            hs_smooth = next;
+                        }
+                        hs_prev_obj = root.obj;
+                        if hs_stall >= 3 {
+                            break;
+                        }
+                    }
+                    prev_obj = prev_obj.max(root.obj);
+                } else
+                // Tailing off: stop once added cuts barely move the bound.
+                if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs())
+                    && prev_obj > f64::NEG_INFINITY
+                {
+                    // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`): with c-MIR on, allow a few
+                    // consecutive stalled rounds. A dual-degenerate root (assignment rows)
+                    // moves to an equal-objective vertex for several rounds before the
+                    // bound rises (`neos-911970`, gap plan §12.2 item 1); SCIP allows
+                    // stalled root rounds too. Off the flag the loop stops at the first
+                    // stalled round, as before.
+                    root_stalled += 1;
+                    // Gap plan P3: c-MIR first, GMI once it stalls. The first stalled
+                    // round of the c-MIR phase hands over to GMI (with a fresh stall
+                    // allowance) instead of counting toward the stop.
+                    if !gmi_phase {
+                        gmi_phase = true;
+                        root_stalled = 0;
+                        crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                    }
+                    let allow = if opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on() {
+                        ROOT_CMIR_STALL_ROUNDS
+                    } else {
+                        0
+                    };
+                    if root_stalled > allow {
+                        break;
+                    }
+                } else {
+                    root_stalled = 0;
+                }
+                prev_obj = prev_obj.max(root.obj);
+                // HiGHS runs randomized rounding on every root round's LP point while
+                // there is no incumbent (`HighsMipSolverData.cpp:1858-1865`); the
+                // completion LP is over the uncut base rows, as in HiGHS.
+                if let (Some(base), Some(locks)) = (sub_mip_base.as_ref(), rr_locks.as_ref()) {
+                    if tm
+                        .incumbent()
+                        .is_none_or(|(_, v)| v >= INFEAS_SENTINEL - 1.0)
+                    {
+                        if let Some((x, v)) = try_randomized_rounding(
+                            base,
+                            locks,
+                            obj_const,
+                            ns,
+                            &is_int,
+                            &root.x,
+                            0x5EED_0000 + _round as u64,
+                            opts,
+                            deadline,
+                        ) {
+                            tm.inject_incumbent(x, v);
+                        }
+                    }
+                }
+
+                if highs_sep.is_some() && (highs_sepa_propagate() || root_rens_on) {
+                    // HiGHS's root rounds propagate the global domain after every LP
+                    // (`HighsSeparation::separationRound` -> `propagateAndResolve`, and
+                    // `evaluateRootLp`), over the model rows AND the cut pool's rows, and
+                    // fix by reduced cost against the incumbent
+                    // (`redcostfixing.addRootRedcost/propagateRootRedcost`). Here: reduced-
+                    // cost fixing at this round's LP, then FBBT over every LP row (cuts
+                    // included), into the root box the next round and the tree start from.
+                    // Both are sound contractions: RC fixing keeps every point at least as
+                    // good as the incumbent (with a margin on the LP value), FBBT keeps
+                    // every point satisfying globally valid rows.
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                    let mut changed = false;
+                    if let Some((_, inc)) = tm
+                        .incumbent()
+                        .filter(|(_, v)| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)
+                    {
+                        let margin = 1e-6 * (1.0 + root.obj.abs());
+                        if let Some((rl, ru)) = reduced_cost_fix(
+                            &csc_w,
+                            m_w,
+                            &c_w,
+                            &root.basis,
+                            &root.dual,
+                            root.obj + obj_const - margin,
+                            inc,
+                            &l_w,
+                            &u_w,
+                            ns,
+                            &is_int_full,
+                            opts.simplex.tol,
+                        ) {
+                            for j in 0..ns {
+                                if rl[j] > l_w[j] && rl[j] <= u_w[j] {
+                                    l_w[j] = rl[j];
+                                    changed = true;
+                                }
+                                if ru[j] < u_w[j] && ru[j] >= l_w[j] {
+                                    u_w[j] = ru[j];
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    let pr = fbbt_rows(
+                        &csc_w,
+                        m_w,
+                        n_w,
+                        &l_w,
+                        &u_w,
+                        &b_w,
+                        &is_int_full,
+                        opts.simplex.tol,
+                    );
+                    if !pr.infeasible {
+                        for j in 0..n_w {
+                            if pr.l[j] > l_w[j] {
+                                l_w[j] = pr.l[j];
+                                changed = true;
+                            }
+                            if pr.u[j] < u_w[j] {
+                                u_w[j] = pr.u[j];
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        crate::profile::incr(crate::profile::Ctr::RootHighsPropagated);
+                        tm.tighten_root_box(&l_w[..ns], &u_w[..ns]);
+                    }
+                }
+                let new_cuts = if let Some(hs) = highs_sep.as_mut() {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                    hs.add_lp_iterations(root.iters as i64);
+                    let rc = hs.round(&crate::lp::highs_cutgen::bridge::StdFormRound {
+                        csc: &csc_w,
+                        m: m_w,
+                        n: n_w,
+                        ns,
+                        b: &b_w,
+                        l: &l_w,
+                        u: &u_w,
+                        is_int: &is_int_full,
+                        x: &root.x,
+                        y: &root.dual,
+                        basic_vars: &root.basis.basic_vars,
+                    });
+                    crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, rc.generated as u64);
+                    let remaining = opts.root_cuts - total_cuts;
+                    round_pool_ids.clear();
+                    let mut out = Vec::new();
+                    for (k, (id, cut)) in rc.cuts.into_iter().enumerate() {
+                        if k < remaining {
+                            round_pool_ids.push(id);
+                            out.push(cut);
+                        } else {
+                            // Over the root-cut budget: not in the LP after all.
+                            hs.lp_cut_removed(id);
+                        }
+                    }
+                    out
+                } else {
+                    // Knapsack cover cuts (sparse, strong on knapsack structure) plus
+                    // Gomory mixed-integer cuts off the native basis.
+                    let mut cuts = {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
+                        separate_cover_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            ns,
+                            &is_int_full,
+                            n_orig_rows,
+                            opts.simplex.tol,
+                        )
+                    };
+                    if opts.cmir_cuts {
+                        // #2107: aggregated c-MIR with variable-bound substitution, from the
+                        // original rows only (`n_orig_rows`). Its cuts are over the original
+                        // structural and slack columns, rewritten below like every other cut.
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                        let found = separate_cmir_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            &is_int_full,
+                            // P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's path separator walks every LP
+                            // row, the current cuts included (`HighsPathSeparator.cpp:30-50`).
+                            if crate::lp::cmir::root_cmir_mode().on() {
+                                m_w
+                            } else {
+                                n_orig_rows
+                            },
+                            if crate::lp::cmir::root_cmir_mode().on() {
+                                CMIR_MAX_AGGR_DESIGN
+                            } else {
+                                CMIR_MAX_AGGR
+                            },
+                            CMIR_MAX_CUTS,
+                            opts.simplex.tol,
+                        );
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::SepCmirCuts,
+                            found.len() as u64,
+                        );
+                        if found.is_empty() && !gmi_phase {
+                            // c-MIR has nothing left at this point: GMI joins this round.
+                            gmi_phase = true;
+                            crate::profile::incr(crate::profile::Ctr::RootCmirGmiHandover);
+                        }
+                        cuts.extend(found);
+                    }
+                    // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator (c-MIR on tableau-row
+                    // aggregations) every round; `1` replaces GMI with it, `2` runs both.
+                    let tableau_on = opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on();
+                    if opts.gmi_cuts && tableau_on {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                        cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
+                            &csc_w,
+                            n_w,
+                            m_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.x,
+                            &root.basis,
+                            &is_int_full,
+                            n_orig_rows,
+                            CMIR_MAX_CUTS,
+                            opts.simplex.tol,
+                        ));
+                    }
+                    if opts.gmi_cuts && gmi_phase && !tableau_on {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                        cuts.extend(separate_gomory_cols(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &root.basis,
+                            &is_int_full,
+                            opts.simplex.tol,
+                            1e7,
+                        ));
+                    }
+                    // Rewrite every separated cut over structural columns only, before
+                    // anything downstream looks at it. Doing it here (rather than at
+                    // append time) means selection scores, dedup signatures and the
+                    // cleanup's tightness test all see one consistent space, and no cut
+                    // row ever references another row's slack.
+                    {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                        let before = cuts.len();
+                        let gmi_repair = crate::lp::gomory::gmi_repair_enabled();
+                        cuts = cuts
+                            .iter()
+                            .filter_map(|c| {
+                                substitute_slacks_to_structural(
+                                    c,
+                                    &base_rows,
+                                    &structural_cuts,
+                                    ns,
+                                    n_base0,
+                                    &root.x,
+                                    &l_w,
+                                    &u_w,
+                                    cut_max_len,
+                                    opts.simplex.tol,
+                                    1e7,
+                                    gmi_repair,
+                                )
+                            })
+                            .collect();
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::RootCutsSubstDropped,
+                            (before - cuts.len()) as u64,
+                        );
+                    }
+                    if !aged_pool.is_empty() {
+                        let mut back = 0u64;
+                        aged_pool.retain(|pc| {
+                            let act: f64 = pc.coeffs.iter().zip(&root.x).map(|(a, x)| a * x).sum();
+                            if act < pc.rhs - 1e-6 * (1.0 + pc.rhs.abs()) {
+                                cuts.push(pc.clone());
+                                back += 1;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        crate::profile::incr_by(crate::profile::Ctr::RootCutsGenerated, back);
+                    }
+                    // Keep the strongest, most diverse few (efficacy + orthogonality)
+                    // up to the remaining root-cut budget; otherwise add first-come.
+                    let remaining = opts.root_cuts - total_cuts;
+                    let selected = if opts.cut_select && crate::lp::cmir::root_cmir_mode().on() {
+                        // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
+                        // viol / (active nnz * sqrt(active row norm)) over columns strictly inside
+                        // their bounds, the adaptive min-score factor, parallelism <= 0.1.
+                        let x = &root.x;
+                        let mut cands: Vec<(f64, usize)> = Vec::new();
+                        for (k, c) in cuts.iter().enumerate() {
+                            let act: f64 = c.coeffs.iter().zip(x).map(|(a, v)| a * v).sum();
+                            let viol = c.rhs - act;
+                            if viol <= 1e-6 * (1.0 + c.rhs.abs()) {
+                                continue;
+                            }
+                            let (mut nrm, mut nact) = (0.0f64, 0usize);
+                            for (j, &a) in c.coeffs.iter().enumerate() {
+                                if a != 0.0
+                                    && j < x.len()
+                                    && x[j] > l_w[j] + 1e-6
+                                    && x[j] < u_w[j] - 1e-6
+                                {
+                                    nrm += a * a;
+                                    nact += 1;
+                                }
+                            }
+                            if nact == 0 || nrm <= 0.0 {
+                                continue;
+                            }
+                            cands.push((viol / (nact as f64 * nrm.sqrt()), k));
+                        }
+                        let sel = cut_lp_select(
+                            cands,
+                            &cuts,
+                            &[],
+                            &mut root_sel_best,
+                            &mut root_sel_factor,
+                        );
+                        let mut keep = vec![false; cuts.len()];
+                        for k in sel.into_iter().take(remaining) {
+                            keep[k] = true;
+                        }
+                        cuts.into_iter()
+                            .zip(keep)
+                            .filter(|(_, k)| *k)
+                            .map(|(c, _)| c)
+                            .collect()
+                    } else if opts.cut_select {
+                        select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
+                    } else {
+                        cuts.truncate(remaining);
+                        cuts
+                    };
+                    dedup_new_cuts(selected, &mut pool_sigs, usize::MAX)
+                };
+                if new_cuts.is_empty() {
+                    break;
+                }
+                total_cuts += new_cuts.len();
+                // Cut `i` occupies column `n_base0 + i`; later rounds expand a
+                // reference to that slack through this entry, so the order here must
+                // match the append order below exactly.
+                structural_cuts.extend(new_cuts.iter().cloned());
+                let (nw_csc, nm, nn) = augment_csc_with_cuts(
+                    &csc_w,
+                    &mut b_w,
+                    &mut c_w,
+                    &mut l_w,
+                    &mut u_w,
+                    &mut is_int_full,
+                    m_w,
+                    n_w,
+                    &new_cuts,
+                );
+                csc_w = nw_csc;
+                m_w = nm;
+                n_w = nn;
+                if prune_base.is_some() {
+                    all_root_cuts.extend(new_cuts);
+                    if highs_sep.is_some() {
+                        pool_ids.append(&mut round_pool_ids);
+                    }
+                }
+                // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): drop, every round, the cuts whose slack is
+                // BASIC at this round's optimal basis (zero dual: removing the row keeps
+                // this round's optimum), instead of carrying every generated cut to the
+                // post-loop cleanup. HiGHS ages inactive cuts out of the LP the same way.
+                if let (Some((csc_base, m_base, n_base)), Some((rb, rn)), true) = (
+                    prune_base.as_ref(),
+                    root_basis.as_ref(),
+                    crate::lp::cmir::root_cmir_mode().on(),
+                ) {
+                    let (m_base, n_base, rn) = (*m_base, *n_base, *rn);
+                    let total = all_root_cuts.len();
+                    debug_assert_eq!(n_w, n_base + total);
+                    let n_old = rn.saturating_sub(n_base).min(total);
+                    // HiGHS `performAging(true)` (`HighsLpRelaxation.cpp:629-675`): a cut
+                    // whose slack is basic ages by one, one with a nonzero dual resets to 0;
+                    // rows are deleted only every max(agelimit/2, 2) epochs, those with age
+                    // above min(epochs, agelimit), agelimit = `mip_lp_age_limit` = 10.
+                    cut_ages.resize(total, 0);
+                    cut_epochs += 1;
+                    const AGE_LIMIT: u32 = 10;
+                    let delete_now = cut_epochs % (AGE_LIMIT / 2).max(2) == 0;
+                    let limit = AGE_LIMIT.min(cut_epochs);
+                    let mut keep = vec![true; total];
+                    for (i, k) in keep.iter_mut().enumerate().take(n_old) {
+                        if rb.col_status.get(n_base + i) == Some(&BASIC) {
+                            cut_ages[i] += 1;
+                            if delete_now && cut_ages[i] > limit {
+                                *k = false;
+                            }
+                        } else if root_duals.get(m_base + i).is_some_and(|d| d.abs() > 1e-9) {
+                            cut_ages[i] = 0;
+                        }
+                    }
+                    for ci in (0..total).rev() {
+                        if keep[ci] {
+                            for (j, &a) in all_root_cuts[ci].coeffs.iter().enumerate() {
+                                if a != 0.0 && j >= n_base && j - n_base < ci {
+                                    keep[j - n_base] = true;
+                                }
+                            }
+                        }
+                    }
+                    let n_keep = keep.iter().filter(|&&k| k).count();
+                    if n_keep < total {
+                        if let Some(hs) = highs_sep.as_mut() {
+                            // The pool re-offers a dropped cut when it is violated again.
+                            for (c, &k) in keep.iter().enumerate() {
+                                if !k {
+                                    if let Some(&id) = pool_ids.get(c) {
+                                        hs.lp_cut_removed(id);
+                                    }
+                                }
+                            }
+                            pool_ids = pool_ids
+                                .iter()
+                                .enumerate()
+                                .filter(|(c, _)| keep[*c])
+                                .map(|(_, &id)| id)
+                                .collect();
+                        }
+                        for (c, cut) in all_root_cuts.iter().enumerate() {
+                            if highs_sep.is_some() {
+                                break;
+                            }
+                            if !keep[c] && cut.coeffs.iter().skip(n_base).all(|&v| v == 0.0) {
+                                pool_sigs.remove(&cut_signature(cut));
+                                let mut pc = cut.clone();
+                                pc.coeffs.truncate(n_base);
+                                aged_pool.push(pc);
+                            }
+                        }
+                        let mut newidx = vec![usize::MAX; total];
+                        let mut next = 0usize;
+                        for (c, &k) in keep.iter().enumerate() {
+                            if k {
+                                newidx[c] = next;
+                                next += 1;
+                            }
+                        }
+                        let kept: Vec<GomoryCut> = all_root_cuts
                             .iter()
                             .enumerate()
                             .filter(|(c, _)| keep[*c])
-                            .map(|(_, &id)| id)
+                            .map(|(_, cut)| {
+                                let mut coeffs = vec![0.0; n_base + n_keep];
+                                for (j, &a) in cut.coeffs.iter().enumerate() {
+                                    if a == 0.0 {
+                                        continue;
+                                    }
+                                    if j < n_base {
+                                        coeffs[j] = a;
+                                    } else {
+                                        coeffs[n_base + newidx[j - n_base]] = a;
+                                    }
+                                }
+                                GomoryCut {
+                                    coeffs,
+                                    rhs: cut.rhs,
+                                }
+                            })
                             .collect();
-                    }
-                    for (c, cut) in all_root_cuts.iter().enumerate() {
-                        if highs_sep.is_some() {
-                            break;
-                        }
-                        if !keep[c] && cut.coeffs.iter().skip(n_base).all(|&v| v == 0.0) {
-                            pool_sigs.remove(&cut_signature(cut));
-                            let mut pc = cut.clone();
-                            pc.coeffs.truncate(n_base);
-                            aged_pool.push(pc);
-                        }
-                    }
-                    let mut newidx = vec![usize::MAX; total];
-                    let mut next = 0usize;
-                    for (c, &k) in keep.iter().enumerate() {
-                        if k {
-                            newidx[c] = next;
-                            next += 1;
-                        }
-                    }
-                    let kept: Vec<GomoryCut> = all_root_cuts
-                        .iter()
-                        .enumerate()
-                        .filter(|(c, _)| keep[*c])
-                        .map(|(_, cut)| {
-                            let mut coeffs = vec![0.0; n_base + n_keep];
-                            for (j, &a) in cut.coeffs.iter().enumerate() {
-                                if a == 0.0 {
-                                    continue;
-                                }
-                                if j < n_base {
-                                    coeffs[j] = a;
-                                } else {
-                                    coeffs[n_base + newidx[j - n_base]] = a;
-                                }
-                            }
-                            GomoryCut {
-                                coeffs,
-                                rhs: cut.rhs,
-                            }
-                        })
-                        .collect();
-                    // The basis over the kept columns: a dropped row's slack is basic,
-                    // so removing row and slack together leaves a square, nonsingular
-                    // basis with the same reduced costs.
-                    let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
-                    #[allow(clippy::needless_range_loop)]
-                    for i in 0..n_old {
-                        if keep[i] {
-                            col_status.push(rb.col_status[n_base + i]);
-                        }
-                    }
-                    let basic_vars: Vec<usize> = rb
-                        .basic_vars
-                        .iter()
-                        .filter_map(|&j| {
-                            if j < n_base {
-                                Some(j)
-                            } else if keep[j - n_base] {
-                                Some(n_base + newidx[j - n_base])
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    let new_rn = col_status.len();
-                    root_basis = Some((
-                        Basis {
-                            col_status,
-                            basic_vars,
-                        },
-                        new_rn,
-                    ));
-                    b_w.truncate(m_base);
-                    c_w.truncate(n_base);
-                    l_w.truncate(n_base);
-                    u_w.truncate(n_base);
-                    is_int_full.truncate(n_base);
-                    for cut in &kept {
-                        b_w.push(cut.rhs);
-                        c_w.push(0.0);
-                        l_w.push(0.0);
-                        u_w.push(INF);
-                        is_int_full.push(false);
-                    }
-                    csc_w = rebuild_csc_with_cuts(csc_base, m_base, n_base, &kept);
-                    m_w = m_base + kept.len();
-                    n_w = n_base + kept.len();
-                    structural_cuts = kept.clone();
-                    all_root_cuts = kept;
-                    cut_ages = cut_ages
-                        .iter()
-                        .enumerate()
-                        .filter(|(c, _)| keep[*c])
-                        .map(|(_, &a)| a)
-                        .collect();
-                    if let Some(x) = last_root_x.as_ref() {
-                        let mut nx: Vec<f64> = x[..n_base.min(x.len())].to_vec();
+                        // The basis over the kept columns: a dropped row's slack is basic,
+                        // so removing row and slack together leaves a square, nonsingular
+                        // basis with the same reduced costs.
+                        let mut col_status: Vec<i8> = rb.col_status[..n_base].to_vec();
                         #[allow(clippy::needless_range_loop)]
                         for i in 0..n_old {
                             if keep[i] {
-                                nx.push(x.get(n_base + i).copied().unwrap_or(0.0));
+                                col_status.push(rb.col_status[n_base + i]);
                             }
                         }
-                        last_root_x = Some(nx);
+                        let basic_vars: Vec<usize> = rb
+                            .basic_vars
+                            .iter()
+                            .filter_map(|&j| {
+                                if j < n_base {
+                                    Some(j)
+                                } else if keep[j - n_base] {
+                                    Some(n_base + newidx[j - n_base])
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let new_rn = col_status.len();
+                        root_basis = Some((
+                            Basis {
+                                col_status,
+                                basic_vars,
+                            },
+                            new_rn,
+                        ));
+                        b_w.truncate(m_base);
+                        c_w.truncate(n_base);
+                        l_w.truncate(n_base);
+                        u_w.truncate(n_base);
+                        is_int_full.truncate(n_base);
+                        for cut in &kept {
+                            b_w.push(cut.rhs);
+                            c_w.push(0.0);
+                            l_w.push(0.0);
+                            u_w.push(INF);
+                            is_int_full.push(false);
+                        }
+                        csc_w = rebuild_csc_with_cuts(csc_base, m_base, n_base, &kept);
+                        m_w = m_base + kept.len();
+                        n_w = n_base + kept.len();
+                        structural_cuts = kept.clone();
+                        all_root_cuts = kept;
+                        cut_ages = cut_ages
+                            .iter()
+                            .enumerate()
+                            .filter(|(c, _)| keep[*c])
+                            .map(|(_, &a)| a)
+                            .collect();
+                        if let Some(x) = last_root_x.as_ref() {
+                            let mut nx: Vec<f64> = x[..n_base.min(x.len())].to_vec();
+                            #[allow(clippy::needless_range_loop)]
+                            for i in 0..n_old {
+                                if keep[i] {
+                                    nx.push(x.get(n_base + i).copied().unwrap_or(0.0));
+                                }
+                            }
+                            last_root_x = Some(nx);
+                        }
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::RootCutsSubstDropped,
+                            (total - n_keep) as u64,
+                        );
                     }
-                    crate::profile::incr_by(
-                        crate::profile::Ctr::RootCutsSubstDropped,
-                        (total - n_keep) as u64,
-                    );
                 }
             }
         }
@@ -5067,7 +5198,8 @@ fn solve_milp_node_search(
         b: b_w.clone(),
         is_int_full: is_int_full.clone(),
     });
-    let mut rens_root_done = false;
+    // The tree's first RENS is skipped when the root already ran it (§12.27).
+    let mut rens_root_done = root_rens_ran;
     let rens_root_x: Option<Vec<f64>> = last_root_x
         .as_ref()
         .filter(|x| x.len() >= ns)

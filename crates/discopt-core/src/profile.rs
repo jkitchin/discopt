@@ -418,6 +418,10 @@ counters!(
     RcFixRefactor,
     // Node reduced-cost fixing (gap plan §12.25): calls, nodes where it tightened
     // at least one integer column, and integer bounds tightened.
+    // Root RENS between root passes (gap plan §12.27): runs, and runs that improved
+    // the incumbent (each earns a second pass of root rounds).
+    RootRensRuns,
+    RootRensImproved,
     RcFixCalls,
     RcFixNodesHit,
     RcFixCols,
