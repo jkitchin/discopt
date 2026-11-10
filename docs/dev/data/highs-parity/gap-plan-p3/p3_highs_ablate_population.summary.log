@@ -1,0 +1,12 @@
+resuming: 326 done, 232 to run
+arm            certified  lost_vs_default  gained  total_wall
+default               60                0       0        131   lost=[] gained=[]
+presolve_off          60                0       0        150   lost=[] gained=[]
+restart_off           60                0       0        125   lost=[] gained=[]
+symmetry_off          60                0       0        138   lost=[] gained=[]
+heur_off              60                0       0        122   lost=[] gained=[]
+sb_off                60                0       0        133   lost=[] gained=[]
+cuts_off              47               13       0        422   lost=['b-ball', 'beavma', 'enlight_hard', 'fiber', 'gsvm2rl3', 'issue-2446', 'neos-3611689-kaihu', 'neos-911970', 'neos17', 'nexp-50-20-1-1', 'nexp-50-20-4-2', 'sp150x300d', 'sp150x300d'] gained=[]
+conflict_off          61                0       1        135   lost=[] gained=['neos-2624317-amur']
+discopt_like          60                0       0        150   lost=[] gained=[]
+solves: 558

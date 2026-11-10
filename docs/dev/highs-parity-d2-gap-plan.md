@@ -1001,3 +1001,26 @@ a WEAKER bound (-1.5499 vs -1.50015, certified off in 2.3 s); `dcmulti` (off 4 s
 worse bound and incumbent. Under the flag the tree differs in its root cut set (all-row
 c-MIR + tableau, pruned/remapped), full bases (expelled artificials) and the RENS/RINS
 port; which one weakens the node bound on these rows is the next measurement. Default OFF.
+
+### 12.14 Where the HiGHS gap is: a population-wide ablation of HiGHS itself (2026-11-10)
+
+The instance-by-instance P3 work (§12.10-12.13) netted **zero**: on MIPLIB-38 + M at 20 s
+(1 rep, `p3_ab_main_vs_branch.*`) main certifies 43/62, this branch 43 (flag off) and 41
+(flag bundle on), HiGHS 59. So the question was re-asked structurally: which HiGHS stages
+account for its lead? HiGHS (ref source, ablation build `p3_highs_*.patch`, 1 thread, 20 s)
+with one stage off per arm (`p3_highs_ablate_population.*`):
+
+| arm | certified | lost vs default |
+|---|---|---|
+| default | 60 | - |
+| presolve off / restarts off / symmetry off / heuristics off / strong branching off | 60 each | 0 |
+| conflict analysis off | 61 | 0 |
+| presolve + restarts + symmetry + conflicts all off | 60 | 0 |
+| **cuts off** (all separators, root and node) | **47** | **13** |
+
+At this budget on this population HiGHS's lead is its **cut separation**: without cuts it
+certifies 47 (discopt: 43); without presolve, restarts, symmetry and conflict analysis
+together it still certifies 60. The 13 rows lost without cuts are the P3 target list
+(beavma, sp150x300d x2, nexp-50-20-1-1/-4-2, neos-911970, neos17, gsvm2rl3, enlight_hard,
+fiber, issue-2446, b-ball, neos-3611689-kaihu). This retires the "missing presolve /
+restarts / conflicts" hypotheses for this panel and makes one general component the work.
