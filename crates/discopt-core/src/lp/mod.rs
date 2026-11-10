@@ -17,5 +17,6 @@ pub mod cover;
 pub mod crossover;
 pub mod cut_select;
 pub mod gomory;
+pub mod highs_cutgen;
 pub mod mir;
 pub mod simplex;

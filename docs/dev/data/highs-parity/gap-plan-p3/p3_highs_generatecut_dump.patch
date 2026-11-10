@@ -1,0 +1,163 @@
+diff --git a/highs/mip/HighsCutGeneration.cpp b/highs/mip/HighsCutGeneration.cpp
+index 4013925..9ba8668 100644
+--- a/highs/mip/HighsCutGeneration.cpp
++++ b/highs/mip/HighsCutGeneration.cpp
+@@ -13,6 +13,37 @@
+ #include "mip/HighsTransformedLp.h"
+ #include "util/HighsIntegers.h"
+ 
++#include <cstdio>
++#include <cstdlib>
++// ---- generateCut replay dump (HS_DUMP_GC=<path>) ----
++static long gcDumpCounter = 0;
++static FILE* gcDumpFile(const HighsMipSolver& mip) {
++  static FILE* f = nullptr;
++  static bool init = false;
++  static long maxc = 0;
++  if (mip.submip) return nullptr;
++  if (!init) {
++    init = true;
++    const char* p = std::getenv("HS_DUMP_GC");
++    if (p) f = std::fopen(p, "w");
++    const char* m = std::getenv("HS_DUMP_GC_MAX");
++    maxc = m ? std::atol(m) : 4000;
++  }
++  if (!f) return nullptr;
++  if (gcDumpCounter >= maxc) { std::fflush(f); return nullptr; }
++  return f;
++}
++static void gcDumpD(FILE* f, const char* tag, const double* v, HighsInt n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (HighsInt i = 0; i < n; ++i) std::fprintf(f, " %a", v[i]);
++  std::fprintf(f, "\n");
++}
++static void gcDumpI(FILE* f, const char* tag, const HighsInt* v, HighsInt n) {
++  std::fprintf(f, "%s %d", tag, (int)n);
++  for (HighsInt i = 0; i < n; ++i) std::fprintf(f, " %d", (int)v[i]);
++  std::fprintf(f, "\n");
++}
++
+ HighsCutGeneration::HighsCutGeneration(const HighsLpRelaxation& lpRelaxation,
+                                        HighsCutPool& cutpool)
+     : lpRelaxation(lpRelaxation),
+@@ -1111,6 +1142,27 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+   this->vals = vals_.data();
+   this->rhs = rhs_;
+   complementation.clear();
++  FILE* gcf = gcDumpFile(lpRelaxation.getMipSolver());
++  if (gcf) {
++    std::fprintf(gcf, "GC_IN %ld numcols %d feastol %a epsilon %a onlyinit %d intspos %d rng %llu rhs %a\n",
++                 gcDumpCounter, (int)lpRelaxation.numCols(), feastol, epsilon,
++                 (int)onlyInitialCMIRScale, (int)intsPositive,
++                 (unsigned long long)randgen.debugState(), rhs_);
++    gcDumpI(gcf, "inds", inds, rowlen);
++    gcDumpD(gcf, "vals", vals, rowlen);
++    gcDumpD(gcf, "upper", upper.data(), rowlen);
++    gcDumpD(gcf, "solval", solval.data(), rowlen);
++    std::fprintf(gcf, "isint %d", (int)rowlen);
++    for (HighsInt i = 0; i < rowlen; ++i)
++      std::fprintf(gcf, " %d", (int)lpRelaxation.isColIntegral(inds[i]));
++    std::fprintf(gcf, "\n");
++  }
++  struct GcEnd {
++    FILE* f; long id; const HighsRandom& rg; bool done;
++    GcEnd(FILE* f_, long id_, const HighsRandom& rg_) : f(f_), id(id_), rg(rg_), done(false) {}
++    ~GcEnd() { if (f && !done) std::fprintf(f, "GC_CORE_FAIL %ld rng %llu\nGC_END\n", id, (unsigned long long)rg.debugState()); }
++  } gcend(gcf, gcDumpCounter, randgen);
++  ++gcDumpCounter;
+   bool hasUnboundedInts = false;
+   bool hasGeneralInts = false;
+   bool hasContinuous = false;
+@@ -1151,27 +1203,63 @@ bool HighsCutGeneration::generateCut(HighsTransformedLp& transLp,
+       vals[i] = vals[rowlen];
+     }
+   }
++  if (gcf) {
++    gcend.done = true;
++    std::fprintf(gcf, "GC_CORE_OUT %ld rng %llu rhshi %a rhslo %a isup %d icoef %d\n",
++                 gcend.id, (unsigned long long)randgen.debugState(), rhs.debugHi(),
++                 rhs.debugLo(), (int)integralSupport, (int)integralCoefficients);
++    gcDumpI(gcf, "inds", inds, rowlen);
++    gcDumpD(gcf, "vals", vals, rowlen);
++  }
+ 
+   // transform the cut back into the original space, i.e. remove the bound
+   // substitution and replace implicit slack variables
+   rhs_ = (double)rhs;
+   vals_.resize(rowlen);
+   inds_.resize(rowlen);
+-  if (!transLp.untransform(vals_, inds_, rhs_)) return false;
++  if (!transLp.untransform(vals_, inds_, rhs_)) {
++    if (gcf) std::fprintf(gcf, "GC_UNTRANSFORM_FAIL\nGC_END\n");
++    return false;
++  }
+ 
+   rowlen = inds_.size();
+   inds = inds_.data();
+   vals = vals_.data();
+   rhs = rhs_;
++  if (gcf) {
++    const HighsDomain& gd = transLp.getGlobaldom();
++    std::fprintf(gcf, "GC_PP_IN rhs %a isup %d icoef %d\n", rhs_, (int)integralSupport,
++                 (int)integralCoefficients);
++    gcDumpI(gcf, "inds", inds, rowlen);
++    gcDumpD(gcf, "vals", vals, rowlen);
++    std::fprintf(gcf, "lb %d", (int)rowlen);
++    for (HighsInt i = 0; i < rowlen; ++i) std::fprintf(gcf, " %a", gd.col_lower_[inds[i]]);
++    std::fprintf(gcf, "\nub %d", (int)rowlen);
++    for (HighsInt i = 0; i < rowlen; ++i) std::fprintf(gcf, " %a", gd.col_upper_[inds[i]]);
++    std::fprintf(gcf, "\nisint %d", (int)rowlen);
++    for (HighsInt i = 0; i < rowlen; ++i)
++      std::fprintf(gcf, " %d", (int)lpRelaxation.isColIntegral(inds[i]));
++    std::fprintf(gcf, "\n");
++  }
+ 
+   lpRelaxation.getMipSolver().mipdata_->debugSolution.checkCut(inds, vals,
+                                                                rowlen, rhs_);
+   // apply cut postprocessing including scaling and removal of small
+   // coefficients
+-  if (!postprocessCut(transLp.getGlobaldom())) return false;
++  if (!postprocessCut(transLp.getGlobaldom())) {
++    if (gcf) std::fprintf(gcf, "GC_PP_FAIL\nGC_END\n");
++    return false;
++  }
+   rhs_ = (double)rhs;
+   vals_.resize(rowlen);
+   inds_.resize(rowlen);
++  if (gcf) {
++    std::fprintf(gcf, "GC_PP_OUT rhs %a isup %d icoef %d\n", rhs_, (int)integralSupport,
++                 (int)integralCoefficients);
++    gcDumpI(gcf, "inds", inds, rowlen);
++    gcDumpD(gcf, "vals", vals, rowlen);
++    std::fprintf(gcf, "GC_END\n");
++  }
+ 
+   lpRelaxation.getMipSolver().mipdata_->debugSolution.checkCut(
+       inds_.data(), vals_.data(), rowlen, rhs_);
+diff --git a/highs/util/HighsCDouble.h b/highs/util/HighsCDouble.h
+index 4b2592b..5f43d81 100644
+--- a/highs/util/HighsCDouble.h
++++ b/highs/util/HighsCDouble.h
+@@ -64,6 +64,8 @@ class HighsCDouble {
+   HighsCDouble(double val) : hi(val), lo(0.0) {}
+ 
+   explicit operator double() const { return hi + lo; }
++  double debugHi() const { return hi; }
++  double debugLo() const { return lo; }
+ 
+   HighsCDouble& operator+=(double v) {
+     double c;
+diff --git a/highs/util/HighsRandom.h b/highs/util/HighsRandom.h
+index 1101416..9683157 100644
+--- a/highs/util/HighsRandom.h
++++ b/highs/util/HighsRandom.h
+@@ -235,6 +235,9 @@ class HighsRandom {
+     }
+   }
+ 
++ public:
++  uint64_t debugState() const { return state; }
++
+  private:
+   uint64_t state;
+ };

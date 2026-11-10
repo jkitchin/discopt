@@ -1074,3 +1074,55 @@ pool, as HiGHS does, recovers some rows (nexp-50-20-4-2 0.0 %, gsvm2rl3 6.9 %) b
 big ones (beavma 33.8 %). Both changes are reverted (patch kept); the measured lesson is that
 HiGHS's selection only works on HiGHS's candidate population, which is far less redundant
 than ours after round 1. Porting pieces in isolation does not transfer.
+
+### 12.16 Option A, phase 1: HiGHS's cut-generation core ported and replayed bit for bit (2026-11-10)
+
+Owner decision after §12.15: port HiGHS's root separation subsystem wholesale, bottom-up,
+checking each layer against HiGHS itself before building the next. Phase 1 is the layer
+every separator calls: `HighsCutGeneration`'s single-row core.
+
+**Ported** (`crates/discopt-core/src/lp/highs_cutgen/`), statement for statement:
+`HighsCDouble` (`cdouble.rs`); `HighsRandom` and the hash helpers (`random.rs`);
+`pdqsort`/`pdqsort_branchless` and the libstdc++ `partition`, `partial_sort`, heap and
+`upper_bound` (`stdalgo.rs`), because the cover comparator is not a strict weak order and
+the cut depends on the algorithm's comparison sequence; `HighsIntegers` (`integers.rs`);
+and `preprocessBaseInequality`, `determineCover`, the knapsack, mixed-binary and
+mixed-integer lifted covers, `cmirCutGenerationHeuristic`, `tryGenerateCut` and
+`postprocessCut` (`core.rs`). Not ported: the `lpSol = false` cover order, which only
+conflict generation uses.
+
+**Instrument.** A HiGHS build patched to print every main-solve `generateCut` call
+(`p3_highs_generatecut_dump.patch`, `HS_DUMP_GC=<file>`): the transformed row, bounds, LP
+values and integrality going in, the random state, the core's cut (compensated rhs, both
+parts) and integrality flags, the untransformed cut with its global bounds, and the
+postprocessed cut. Collected at the root (`opt_root.txt`, presolve off) on the
+MIPLIB-38+M population, at most 3000 records per instance (`p3_highs_generatecut_collect.py`).
+
+**Result.** 117,534 records from 50 instances (the rest generate no cuts at the root):
+40,198 core cuts and 40,023 postprocessed cuts. **0 mismatches** in outcome, indices,
+coefficient bits, rhs bits (both parts), integrality flags and random state after the
+call. Paths exercised: mixed-integer cover 23,176, mixed-binary cover 13,353, knapsack
+cover 859, c-MIR 2,810. The forced c-MIR route for an unbounded integer occurs 0 times
+in this population.
+
+**Is the probe live (§6)?** Three of four injected deviations are caught:
+- an extra `lo * v.hi` term in `CDouble * CDouble`: 1,916 mismatches;
+- the cover's contribution order reversed: 3,014 mismatches;
+- the cover's hash tiebreak reversed, or its random draw replaced by 0: **0 mismatches**.
+
+The tiebreak never decides a recorded cut, so the replay does not verify the hash. It is
+pinned instead by `hash_and_generator_match_highs_reference_values`, whose values come
+from a C++ program built against HiGHS's own headers
+(`p3_highs_random_hash_reference.cpp`).
+
+**Tests.** `fixture_replays_bit_identically` replays a 331-record sample committed as
+`crates/discopt-core/tests/data/highs_cutgen_replay.txt`: at most 2 records of each outcome
+kind per instance, rows of 120 nonzeros or fewer. The full replay is the `#[ignore]`d
+`full_dump_replay`, run with `DISCOPT_HIGHS_CUTGEN_REPLAY=<dump dir>`.
+
+**Next (phase 2).** `HighsTransformedLp` (bound substitution with variable bounds, slack
+substitution, `untransform`) and `HighsLpAggregator`, replayed the same way: dump
+`transform`'s input (the aggregated row and the LP state), compare its output with what
+the core consumed here. After that, the path and tableau separators (phase 3) and the cut
+pool, selection, ageing and separation round (phase 4). No solver path calls the port yet,
+so this phase changes no result.
