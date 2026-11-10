@@ -1,0 +1,181 @@
+diff --git a/crates/discopt-core/src/bnb/milp_driver.rs b/crates/discopt-core/src/bnb/milp_driver.rs
+index f615abf2..11dc1f69 100644
+--- a/crates/discopt-core/src/bnb/milp_driver.rs
++++ b/crates/discopt-core/src/bnb/milp_driver.rs
+@@ -3994,6 +3994,7 @@ fn solve_milp_node_search(
+     // P3: cuts aged out of the root LP stay available (HiGHS keeps them in its cut pool
+     // and re-adds them when violated again, `HighsCutPool::separate`).
+     let mut aged_pool: Vec<GomoryCut> = Vec::new();
++    let mut root_pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
+     let (mut root_sel_best, mut root_sel_factor) = (0.0f64, 0.9f64);
+     let hs_stall_on = crate::lp::cmir::root_cmir_mode().on();
+     let mut hs_first: Option<(Vec<f64>, f64)> = None;
+@@ -4018,6 +4019,7 @@ fn solve_milp_node_search(
+         let mut total_cuts = 0usize;
+         let mut prev_obj = f64::NEG_INFINITY;
+         let mut root_stalled = 0usize;
++        let mut tr_round = 0usize;
+         // Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR=1`): rounds separate c-MIR alone until
+         // the bound stalls or c-MIR finds nothing, then GMI joins. Off that arm GMI
+         // runs from the first round, as before (`gmi_phase` starts true).
+@@ -4058,6 +4060,7 @@ fn solve_milp_node_search(
+                 }
+             }
+             crate::profile::incr(crate::profile::Ctr::RootCutRounds);
++            let tr_t0 = std::time::Instant::now();
+             let root = {
+                 let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
+                 // Re-optimize from the PREVIOUS round's optimal basis instead of
+@@ -4169,6 +4172,7 @@ fn solve_milp_node_search(
+                 }
+             };
+             lp_iters += root.iters;
++            let tr_lp_ms = tr_t0.elapsed().as_secs_f64() * 1e3;
+             if root.status != LpStatus::Optimal {
+                 break;
+             }
+@@ -4288,6 +4292,7 @@ fn solve_milp_node_search(
+ 
+             // Knapsack cover cuts (sparse, strong on knapsack structure) plus
+             // Gomory mixed-integer cuts off the native basis.
++            let tr = milp_depth == 0 && std::env::var("DISCOPT_ROOT_TRACE").is_ok();
+             let mut cuts = {
+                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
+                 separate_cover_csc(
+@@ -4334,6 +4339,9 @@ fn solve_milp_node_search(
+                     opts.simplex.tol,
+                 );
+                 crate::profile::incr_by(crate::profile::Ctr::SepCmirCuts, found.len() as u64);
++                if tr {
++                    eprintln!("RTRACE sep path={}", found.len());
++                }
+                 if found.is_empty() && !gmi_phase {
+                     // c-MIR has nothing left at this point: GMI joins this round.
+                     gmi_phase = true;
+@@ -4344,6 +4352,7 @@ fn solve_milp_node_search(
+             // Gap plan P3 (under `DISCOPT_MILP_ROOT_CMIR`): HiGHS's tableau separator (c-MIR on tableau-row
+             // aggregations) every round; `1` replaces GMI with it, `2` runs both.
+             let tableau_on = opts.cmir_cuts && crate::lp::cmir::root_cmir_mode().on();
++            let tr_before_tab = cuts.len();
+             if opts.gmi_cuts && tableau_on {
+                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
+                 cuts.extend(crate::lp::cmir::separate_tableau_cmir_csc(
+@@ -4425,6 +4434,17 @@ fn solve_milp_node_search(
+             }
+             // Keep the strongest, most diverse few (efficacy + orthogonality)
+             // up to the remaining root-cut budget; otherwise add first-come.
++            let tr_cand = cuts.len();
++            if let (true, Ok(dp)) = (milp_depth == 0, std::env::var("DISCOPT_DUMP_CANDS")) {
++                use std::io::Write;
++                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dp) {
++                    for c in &cuts {
++                        let nz: Vec<String> = c.coeffs.iter().enumerate().filter(|(_, v)| **v != 0.0)
++                            .map(|(j, v)| format!("[{j},{v:e}]")).collect();
++                        let _ = writeln!(f, "{{\"round\":{},\"rhs\":{:e},\"nz\":[{}]}}", tr_round + 1, c.rhs, nz.join(","));
++                    }
++                }
++            }
+             let remaining = opts.root_cuts - total_cuts;
+             let selected = if opts.cut_select && crate::lp::cmir::root_cmir_mode().on() {
+                 // HiGHS's root selection (`HighsCutPool::separate`, `:300-418`): score
+@@ -4440,7 +4460,16 @@ fn solve_milp_node_search(
+                     }
+                     let (mut nrm, mut nact) = (0.0f64, 0usize);
+                     for (j, &a) in c.coeffs.iter().enumerate() {
+-                        if a != 0.0 && j < x.len() && x[j] > l_w[j] + 1e-6 && x[j] < u_w[j] - 1e-6 {
++                        // HiGHS's active rule (`HighsCutPool.cpp:309-330`): an entry is
++                        // active unless its column sits at the bound that MINIMISES the
++                        // cut's activity. For `coeffs . x >= rhs` (the negation of HiGHS's
++                        // `<=`): a > 0 is active below its upper bound, a < 0 above its
++                        // lower. Counting only columns strictly inside both bounds (the
++                        // first port) dropped the entries that make a cut strong and let
++                        // near-zero norms inflate junk scores (beavma round 1: selected
++                        // cuts' single gains 0-139 while candidates worth 4,535 were cut).
++                        let act = (a > 0.0 && x[j] < u_w[j] - 1e-6) || (a < 0.0 && x[j] > l_w[j] + 1e-6);
++                        if a != 0.0 && j < x.len() && act {
+                             nrm += a * a;
+                             nact += 1;
+                         }
+@@ -4449,25 +4478,77 @@ fn solve_milp_node_search(
+                         continue;
+                     }
+                     cands.push((viol / (nact as f64 * nrm.sqrt()), k));
++                    if let (true, Ok(dp)) = (milp_depth == 0, std::env::var("DISCOPT_DUMP_SCORES")) {
++                        use std::io::Write;
++                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dp) {
++                            let nz: Vec<String> = c.coeffs.iter().enumerate().filter(|(_, v)| **v != 0.0)
++                                .map(|(j, v)| format!("[{j},{v:e}]")).collect();
++                            let _ = writeln!(f, "{{\"round\":{},\"viol\":{viol:e},\"nact\":{nact},\"nrm\":{nrm:e},\"rhs\":{:e},\"nz\":[{}]}}", tr_round + 1, c.rhs, nz.join(","));
++                        }
++                    }
+                 }
++                let tr_nc = cands.len();
++                let tr_best = cands.iter().map(|c| c.0).fold(0.0f64, f64::max);
++                let tr_bo = root_sel_best.max(tr_best);
++                let tr_pass = cands.iter().filter(|c| c.0 >= root_sel_factor * tr_bo).count();
++                let tr_f = root_sel_factor;
+                 let sel =
+                     cut_lp_select(cands, &cuts, &[], &mut root_sel_best, &mut root_sel_factor);
++                if milp_depth == 0 && std::env::var("DISCOPT_ROOT_TRACE").is_ok() {
++                    eprintln!("RTRACE sel violated={tr_nc} best_round={tr_best:.3} best_observed={tr_bo:.3} factor_in={tr_f:.3} pass_threshold={tr_pass} after_parallelism={} factor_out={:.3}", sel.len(), root_sel_factor);
++                }
+                 let mut keep = vec![false; cuts.len()];
+                 for k in sel.into_iter().take(remaining) {
+                     keep[k] = true;
+                 }
+-                cuts.into_iter()
+-                    .zip(keep)
+-                    .filter(|(_, k)| *k)
+-                    .map(|(c, _)| c)
+-                    .collect()
++                // HiGHS keeps every separated cut in its pool and selects among all of
++                // them each round (`HighsCutPool::separate`); an unselected candidate
++                // stays available instead of being discarded (`DISCOPT_P3_POOL=1`, test).
++                let pool_on = std::env::var("DISCOPT_P3_POOL").as_deref() == Ok("1");
++                let mut chosen: Vec<GomoryCut> = Vec::new();
++                for (c, k) in cuts.into_iter().zip(keep) {
++                    if k {
++                        chosen.push(c);
++                    } else if pool_on && c.coeffs.iter().skip(n_base0).all(|&v| v == 0.0) {
++                        let sig = cut_signature(&c);
++                        if root_pool_sigs.insert(sig) {
++                            let mut pc = c;
++                            pc.coeffs.truncate(n_base0);
++                            aged_pool.push(pc);
++                        }
++                    }
++                }
++                chosen
+             } else if opts.cut_select {
+                 select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
+             } else {
+                 cuts.truncate(remaining);
+                 cuts
+             };
++            let tr_sel = selected.len();
+             let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
++            if let (true, Ok(dp)) = (milp_depth == 0, std::env::var("DISCOPT_DUMP_CUTS")) {
++                use std::io::Write;
++                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dp) {
++                    if tr_round == 0 {
++                        let cs: Vec<String> = c_w[..ns].iter().map(|v| format!("{v:e}")).collect();
++                        let _ = writeln!(f, "{{\"c\":[{}],\"ns\":{ns}}}", cs.join(","));
++                    }
++                    for c in &new_cuts {
++                        let nz: Vec<String> = c.coeffs.iter().enumerate().filter(|(_, v)| **v != 0.0)
++                            .map(|(j, v)| format!("[{j},{v:e}]")).collect();
++                        let _ = writeln!(f, "{{\"round\":{},\"rhs\":{:e},\"nz\":[{}]}}", tr_round + 1, c.rhs, nz.join(","));
++                    }
++                }
++            }
++            tr_round += 1;
++            if tr {
++                eprintln!(
++                    "RTRACE round obj={:.6} rows={m_w} lp_iters={} lp_ms={:.1} cand={} tab+gmi={} selected={tr_sel} new={} round_ms={:.1}",
++                    root.obj + obj_const, root.iters, tr_lp_ms, tr_cand, tr_cand - tr_before_tab, new_cuts.len(),
++                    tr_t0.elapsed().as_secs_f64() * 1e3
++                );
++            }
+             if new_cuts.is_empty() {
+                 break;
+             }

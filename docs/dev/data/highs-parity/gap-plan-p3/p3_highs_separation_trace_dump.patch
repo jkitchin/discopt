@@ -1,0 +1,78 @@
+--- /home/user/discopt/ref/HiGHS/highs/mip/HighsSeparation.cpp	2026-11-07 21:44:04.447414376 +0000
++++ highs/mip/HighsSeparation.cpp	2026-11-10 01:04:51.251141940 +0000
+@@ -6,6 +6,8 @@
+ /*                                                                       */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ #include "mip/HighsSeparation.h"
++#include <cstdlib>
++static bool hsOff(const char* k) { const char* v = std::getenv(k); return v && v[0] == '1'; }
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -35,9 +37,9 @@
+   implBoundClock = 990;
+   cliqueClock = 991;
+   const HighsMipSolver& mipsolver = mipworker.getMipSolver();
+-  separators.emplace_back(new HighsTableauSeparator(mipsolver));
+-  separators.emplace_back(new HighsPathSeparator(mipsolver));
+-  separators.emplace_back(new HighsModkSeparator(mipsolver));
++  if (!hsOff("HS_NO_TABLEAU")) separators.emplace_back(new HighsTableauSeparator(mipsolver));
++  if (!hsOff("HS_NO_PATH")) separators.emplace_back(new HighsPathSeparator(mipsolver));
++  if (!hsOff("HS_NO_MODK")) separators.emplace_back(new HighsModkSeparator(mipsolver));
+ }
+ 
+ HighsInt HighsSeparation::separationRound(HighsDomain& propdomain,
+@@ -91,7 +93,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(implBoundClock);
+-  mipdata.implications.separateImpliedBounds(
++  if (!hsOff("HS_NO_IMPLB")) mipdata.implications.separateImpliedBounds(
+       *lp, lp->getSolution().col_value, mipworker_.getCutPool(),
+       mipdata.feastol, mipworker_.getGlobalDomain(),
+       mipdata.parallelLockActive());
+@@ -107,7 +109,7 @@
+ 
+   if (!mipdata.parallelLockActive())
+     lp->getMipSolver().profiling_->start(cliqueClock);
+-  mipdata.cliquetable.separateCliques(
++  if (!hsOff("HS_NO_CLIQUE")) mipdata.cliquetable.separateCliques(
+       lp->getMipSolver(), sol.col_value, mipworker_.getCutPool(),
+       mipdata.feastol,
+       mipdata.parallelLockActive() ? mipworker_.randgen
+@@ -137,8 +139,13 @@
+   }
+   HighsLpAggregator lpAggregator(*lp);
+ 
++  int hs_k = 0;
+   for (const std::unique_ptr<HighsSeparator>& separator : separators) {
++    HighsInt hs_before = mipworker_.getCutPool().getNumCuts();
+     separator->run(*lp, lpAggregator, transLp, mipworker_.getCutPool());
++    if (std::getenv("HS_TRACE"))
++      printf("HSTRACE sep %d pool_added=%d\n", hs_k, (int)(mipworker_.getCutPool().getNumCuts() - hs_before));
++    ++hs_k;
+     if (mipworker_.getGlobalDomain().infeasible()) {
+       status = HighsLpRelaxation::Status::kInfeasible;
+       return 0;
+@@ -159,6 +166,21 @@
+                                   mipdata.feastol, mipdata.cutpools, true);
+   }
+ 
++  if (std::getenv("HS_TRACE"))
++    printf("HSTRACE pool_selected=%d lprows=%d\n", (int)cutset.numCuts(), (int)lp->numRows());
++  if (const char* dp = (lp->getMipSolver().submip ? nullptr : std::getenv("HS_DUMP_CUTS"))) {
++    static int hs_round = 0;
++    ++hs_round;
++    if (FILE* f = std::fopen(dp, "a")) {
++      for (HighsInt c = 0; c < cutset.numCuts(); ++c) {
++        std::fprintf(f, "{\"round\":%d,\"ub\":%.17g,\"nz\":[", hs_round, cutset.upper_[c]);
++        for (HighsInt k = cutset.ARstart_[c]; k < cutset.ARstart_[c + 1]; ++k)
++          std::fprintf(f, "%s[%d,%.17g]", k == cutset.ARstart_[c] ? "" : ",", (int)cutset.ARindex_[k], cutset.ARvalue_[k]);
++        std::fprintf(f, "]}\n");
++      }
++      std::fclose(f);
++    }
++  }
+   if (cutset.numCuts() > 0) {
+     ncuts += cutset.numCuts();
+     lp->addCuts(cutset);

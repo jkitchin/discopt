@@ -1041,3 +1041,36 @@ gsvm2rl3 (23.9/22.2), neos-3611689-kaihu (4.2/2.5). And HiGHS's root takes **0.2
 where discopt's takes **2-20 s**. Two general gaps follow: root cut quality on full models
 (10 of 14 rows) and root cost (5-20x), which leaves the tree little time; on the rows with
 a comparable root, HiGHS still certifies via its tree.
+
+### 12.15 Separator differential on full models (2026-11-10)
+
+Method (`p3_cut_eval_same_lp.py`, `p3_cut_single_gain.py`, dumps from
+`p3_highs_separation_trace_dump.patch` / `p3_separator_differential_instruments.patch`): each
+solver's root cuts, round by round, are added to the **same** LP relaxation (HiGHS's LP,
+presolve off; discopt's structural columns verified equal to the MPS columns via the
+objective). beavma:
+
+| cuts from rounds | HiGHS cuts -> bound | discopt cuts -> bound |
+|---|---|---|
+| 1 | 11 -> 171,642 | 13 -> 156,315 |
+| 2 | 33 -> 223,139 | 22 -> 159,736 |
+| 20 | 191 -> 348,816 | 148 -> 291,371 |
+
+(LP without cuts 155,778.) The strong first round is HiGHS's path separator (path-only: 22
+cuts -> 176,761). Per-cut single gains show discopt's **generator** is not the round-1
+problem: its 82 round-1 candidates include cuts worth 4,535 / 2,131 / 2,096 alone (sum 47k
+vs HiGHS's 22 path cuts 23.7k; all 82 together 168,688). Its **selection** kept the 13
+weakest (single gains 0-139). Cause: a porting bug in the score's active-entry rule — HiGHS
+counts an entry active unless its column sits at the activity-minimising bound
+(`HighsCutPool.cpp:309-330`); the port counted only columns strictly inside both bounds, so a
+zero-gain cut with an active norm of 3.7e-4 scored highest and set the adaptive threshold.
+
+Fixing the rule makes round 1 stronger (8 cuts -> 163,953) but the root WORSE overall on
+the 14 cut-dependent rows (beavma 5.8 -> 47.2 %, sp150x300d 2.9 -> 26.1 %): with a correct
+score, the 0.1 parallelism filter leaves 2-8 cuts per round from discopt's 80-160
+candidates and the loop stalls; HiGHS keeps 10-22 per round under the same filter
+(parallelism measures verified identical). Keeping unselected candidates in a persistent
+pool, as HiGHS does, recovers some rows (nexp-50-20-4-2 0.0 %, gsvm2rl3 6.9 %) but not the
+big ones (beavma 33.8 %). Both changes are reverted (patch kept); the measured lesson is that
+HiGHS's selection only works on HiGHS's candidate population, which is far less redundant
+than ours after round 1. Porting pieces in isolation does not transfer.
