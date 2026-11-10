@@ -298,6 +298,8 @@ pub(crate) struct TlStats {
     pub sep_path: usize,
     pub sep_tab: usize,
     pub sep_cuts: usize,
+    /// Path-separator RNG states adopted from HiGHS under the resync diagnostic.
+    pub rng_resyncs: usize,
 }
 
 struct Live {
@@ -589,7 +591,17 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
                     let numcuts: i64 = kv(&t, "numcuts").parse().unwrap();
                     let sep = path_sep.get_or_insert_with(|| PathSeparator::with_state(rng));
                     if sep.rng_state() != rng {
-                        bad.push(format!("path rng {} vs {rng}", sep.rng_state()));
+                        // Diagnostic (`DISCOPT_HIGHS_SEP_REPLAY_RESYNC`): adopt HiGHS's
+                        // generator state so an earlier divergence does not cascade,
+                        // leaving only differences that arise in this round itself.
+                        if std::env::var("DISCOPT_HIGHS_SEP_REPLAY_RESYNC").is_ok() {
+                            let calls = sep.num_calls;
+                            *sep = PathSeparator::with_state(rng);
+                            sep.num_calls = calls;
+                            s.rng_resyncs += 1;
+                        } else {
+                            bad.push(format!("path rng {} vs {rng}", sep.rng_state()));
+                        }
                     }
                     let mut pool = MockPool {
                         want,
@@ -853,7 +865,7 @@ fn full_transformed_lp_replay() {
         eprintln!("  {m}");
     }
     eprintln!(
-        "TOTAL tls {} vbd_cols {} tf {} tf_rows {} ut {} ut_rows {} sep_path {} sep_tab {} sep_cuts {} mismatches {}",
+        "TOTAL tls {} vbd_cols {} tf {} tf_rows {} ut {} ut_rows {} sep_path {} sep_tab {} sep_cuts {} rng_resyncs {} mismatches {}",
         s.tls,
         s.tl_vbd_cols,
         s.tf,
@@ -863,6 +875,7 @@ fn full_transformed_lp_replay() {
         s.sep_path,
         s.sep_tab,
         s.sep_cuts,
+        s.rng_resyncs,
         s.mismatches.len()
     );
     assert!(s.tf > 0 && s.ut > 0);

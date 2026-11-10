@@ -707,13 +707,29 @@ fn highs_dive() -> bool {
 /// `HighsCutPool::separate`). Default OFF; `DISCOPT_HIGHS_ROOT_POOL=1` opts in. Read
 /// per solve, refusing garbage.
 fn highs_root_pool() -> bool {
+    highs_root_pool_mode() != RootPoolMode::Off
+}
+
+/// `DISCOPT_HIGHS_ROOT_POOL` values: `1` seeds the node pool with the root cuts the
+/// root cleanup dropped from the LP; `all` (gap plan §12.39) with every live cut of
+/// the ported root pool, as HiGHS's global pool holds them, and sizes the node pool
+/// at HiGHS's soft limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootPoolMode {
+    Off,
+    Dropped,
+    All,
+}
+
+fn highs_root_pool_mode() -> RootPoolMode {
     match std::env::var("DISCOPT_HIGHS_ROOT_POOL") {
-        Err(_) => false,
+        Err(_) => RootPoolMode::Off,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
+            "1" | "true" | "yes" | "on" => RootPoolMode::Dropped,
+            "all" => RootPoolMode::All,
+            "0" | "false" | "no" | "off" | "" => RootPoolMode::Off,
             other => {
-                panic!("DISCOPT_HIGHS_ROOT_POOL={other:?} is not recognized (expected 1 or 0)")
+                panic!("DISCOPT_HIGHS_ROOT_POOL={other:?} is not recognized (expected 1, all or 0)")
             }
         },
     }
@@ -5592,6 +5608,20 @@ fn solve_milp_node_search(
                 }
             }
         }
+        if node_gmi_on && highs_root_pool_mode() == RootPoolMode::All {
+            if let Some(h) = highs_sep.as_ref() {
+                // Every live root-pool cut, over the structural columns (globally
+                // valid), seeds the node pool fresh.
+                for mut pc in h.pool_cuts(ns) {
+                    pc.coeffs.resize(n_base, 0.0);
+                    if gmi_pool_sigs.insert(cut_signature(&pc)) {
+                        gmi_pool.push(pc);
+                        gmi_pool_age.push(0);
+                        crate::profile::incr(crate::profile::Ctr::RootPoolSeeded);
+                    }
+                }
+            }
+        }
         let n_keep = keep.iter().filter(|&&k| k).count();
         crate::profile::incr_by(
             crate::profile::Ctr::RootCutsGenerated,
@@ -5836,6 +5866,12 @@ fn solve_milp_node_search(
     // bound), the nodes due a final (branching) visit, and the re-queued nodes that
     // lead the next batch.
     let sep_first_on = search_on && cut_lp_on && highs_sep_first();
+    // HiGHS's `mip_pool_soft_limit` when the node pool holds the whole root pool.
+    let node_pool_cap = if highs_root_pool_mode() == RootPoolMode::All {
+        crate::lp::highs_cutgen::bridge::POOL_SOFT_LIMIT as usize
+    } else {
+        NODE_GMI_POOL_CAP
+    };
     let mut sep_rounds: HashMap<NodeId, (usize, f64)> = HashMap::new();
     let mut sep_final: HashSet<NodeId> = HashSet::new();
     let mut sep_next: Vec<NodeId> = Vec::new();
@@ -6965,7 +7001,7 @@ fn solve_milp_node_search(
                     );
                 }
             }
-            let over = gmi_pool.len().saturating_sub(NODE_GMI_POOL_CAP);
+            let over = gmi_pool.len().saturating_sub(node_pool_cap);
             let mut order: Vec<usize> = (0..gmi_pool.len()).collect();
             order.sort_by_key(|&k| std::cmp::Reverse(gmi_pool_age[k]));
             let mut drop = vec![false; gmi_pool.len()];

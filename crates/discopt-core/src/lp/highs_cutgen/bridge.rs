@@ -800,6 +800,23 @@ impl RootSeparation {
 }
 
 impl RootSeparation {
+    /// Every live cut in the root pool, as `coeffs·x >= rhs` over the structural
+    /// columns (the form `round` hands to the LP). HiGHS keeps them all in its global
+    /// pool and re-adds violated ones at nodes (`HighsCutPool::separate`).
+    pub fn pool_cuts(&self, ns: usize) -> Vec<GomoryCut> {
+        (0..self.pool.num_slots())
+            .filter(|&r| self.pool.is_live(r as i32))
+            .map(|r| {
+                let (inds, vals, rhs) = self.pool.cut(r as i32);
+                let mut coeffs = vec![0.0; ns];
+                for (&j, &v) in inds.iter().zip(vals) {
+                    coeffs[j as usize] = -v;
+                }
+                GomoryCut { coeffs, rhs: -rhs }
+            })
+            .collect()
+    }
+
     /// Hand over the variable-bound store after the root (for node separation, which
     /// reads it shared and never adds to it).
     pub fn take_vbounds(&mut self) -> Option<VarBoundStore> {
