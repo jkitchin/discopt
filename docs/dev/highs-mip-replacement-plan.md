@@ -202,3 +202,19 @@ evaluation, the reduce, plunge emulation (`DISCOPT_HIGHS_SEARCH`, `_SEARCH_DOMAI
 **Next: stage 1** (§6): the `HS_DUMP_SEARCH` dump of HiGHS's search control, the
 `HighsSearch` node stack and control translation with its replay, then the switch-over of the
 driver's search loop.
+
+**Stage 1, sub-phases** (from reading `HighsSearch.cpp`: `evaluateNode`, `backtrack`,
+`backtrackPlunge`, `currentNodeToQueue`, `openNodesToQueue`, `installNode`). The control is
+inseparable from the local domain (`setDomainChangeStack`, `propagate`, `backtrack`,
+`backtrackToGlobal`, `getReducedDomainChangeStack`, `getObjectiveLowerBound`) and from
+pseudocost scores (`backtrackPlunge` queues the sibling when an ancestor's inactive-minus-active
+score exceeds the sibling's score). So stage 1 uses the translated `HighsDomain`
+(`highs_cutgen/domain.rs`) as its local domain from the start, extended as needed (that pulls
+the local-domain half of stage 3 forward), and reads scores through a pseudocost interface.
+
+| sub-phase | content | gate |
+|---|---|---|
+| 1a | `HighsNodeQueue` | queue replay, 0 mismatches (**done**) |
+| 1b | `HS_DUMP_SEARCH`: per node, the inputs and outcome of each control decision (install, evaluate result and bounds, branching decision, each backtrack step with prune outcome, `backtrackPlunge` scores and plunge/queue choice, dive steps, main-loop plunge/queue selection) | dump covers all decision kinds on mik and the queue fixture's instances |
+| 1c | `HighsSearch` node stack and control (`NodeData`, `installNode`, `evaluateNode` control, `branch` control, `backtrack`, `backtrackPlunge`, `backtrackUntilDepth`, `dive`, `currentNodeToQueue`, `openNodesToQueue`) with `NodeLp`, `Pseudocost` and `Domain` behind traits | replay with mocks fed from 1b: identical decisions |
+| 1d | `HighsMipSolver::run`'s node processing over 1c; the driver's search loop switched to it; the safety layer and hooks re-hosted; batches, reduce and plunge emulation deleted | Rust and Python suites green; soundness panel clean; certified count recorded against stage 0 |
