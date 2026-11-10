@@ -985,3 +985,19 @@ taken from HiGHS's source or its logs rather than guessed:
 
 Next is the separator itself — strength and speed on these neighbourhoods, where HiGHS's
 root is the measured reference (`nbhd_*.mps` can be regenerated with `P3_RENS_DUMP`).
+
+### 12.13 §5 bundle panel (2026-11-10): not graduated
+
+Bundle `DISCOPT_MILP_ROOT_CMIR,DISCOPT_MILP_RAND_ROUND,DISCOPT_MILP_RUN1_CONTINUE` after the
+fold (`62e83dab`), `d2_flag_panel.py --fired SepCmirCuts`, MIPLIB-38 + M, 3 reps, 20 s, 372
+solves (`gap-plan-p3/p3_bundle_panel.json.gz`). Bar 1 passes (372 checks, no bound past an
+optimum). Certified 129 -> 123 (incl. bimodal p0548): gained `gesa2` 0 -> 3,
+`nexp-50-20-4-2` 0 -> 3; lost `2122` 3 -> 0, `b-ball` 3 -> 0, `dcmulti` 6 -> 0 (bar 1b).
+Nodes on the 37 always-certified rows 38,370 -> 33,357 (-13 %). Dual losses 4 (cap 2),
+incumbent lost on `enlight8`, median primal gap 0.012 -> 0.045. Fails 1b, 2a-2e.
+
+The losses are tree-side, not root time: `b-ball` runs 20,135 nodes (off 5,753) and ends at
+a WEAKER bound (-1.5499 vs -1.50015, certified off in 2.3 s); `dcmulti` (off 4 s) ends with a
+worse bound and incumbent. Under the flag the tree differs in its root cut set (all-row
+c-MIR + tableau, pruned/remapped), full bases (expelled artificials) and the RENS/RINS
+port; which one weakens the node bound on these rows is the next measurement. Default OFF.

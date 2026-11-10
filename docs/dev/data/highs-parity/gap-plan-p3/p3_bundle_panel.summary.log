@@ -1,0 +1,56 @@
+header {"load": [4.43212890625, 7.40234375, 4.84716796875], "commit": "62e83dab", "highspy": "1.15.1", "highs_version": "1.15.1", "python": "/usr/local/bin/python"} instances 62
+{
+ "bar1_problems": [],
+ "bar1_pass": true,
+ "bar1b_cert_lost_every_rep": [
+  "2122",
+  "b-ball",
+  "dcmulti"
+ ],
+ "bar1b_pass": false,
+ "cert_wobble": {},
+ "bimodal_off": {
+  "p0548": {
+   "off": 3,
+   "on": 3
+  }
+ },
+ "solved_including_bimodal": {
+  "off": 129,
+  "on": 123
+ },
+ "bar1_checks": 372,
+ "solved": {
+  "off": 126,
+  "on": 120
+ },
+ "both_certified": 37,
+ "nodes_both_certified": {
+  "off": 38370.0,
+  "on": 33357.0
+ },
+ "population_open": 21,
+ "dual_losses": 4,
+ "dual_loss_cap": 2,
+ "incumbent_lost_on": [
+  "enlight8"
+ ],
+ "median_primal_gap": {
+  "off": 0.011811023622047697,
+  "on": 0.04527559055118135
+ },
+ "bar2": {
+  "2a_solved_on_ge_off": false,
+  "2b_nodes_minus15_or_solved_plus2": false,
+  "2c_dual_losses_le_10pct": false,
+  "2d_no_incumbent_lost": false,
+  "2e_median_primal_not_higher": false
+ },
+ "bar2_pass": false,
+ "graduate": false,
+ "fired": {
+  "off": 0,
+  "on": 611004
+ }
+}
+d2 flag panel DISCOPT_MILP_ROOT_CMIR,DISCOPT_MILP_RAND_ROUND,DISCOPT_MILP_RUN1_CONTINUE: executed=372 fired={'off': 0, 'on': 611004}
