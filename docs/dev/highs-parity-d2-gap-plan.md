@@ -1325,3 +1325,58 @@ enlight. The unported pieces this panel points at:
   bounds within a single round;
 - variable bounds, which HiGHS has on 29 of 47 instances;
 - `evaluateRootLp`'s per-round propagation and reduced-cost fixing.
+
+### 12.21 Root propagation, reduced-cost fixing and variable bounds in the port (2026-11-10)
+
+These are the three pieces §12.20 named, each behind its own lever inside the
+`highs` arm.
+
+- **Propagation + reduced-cost fixing** (`DISCOPT_HIGHS_SEPA_PROPAGATE`). Each root
+  round runs reduced-cost fixing against the incumbent (LP value less a 1e-6 relative
+  margin), then FBBT over every LP row, cuts included. The tightened bounds go into
+  the next round's box and into the still-pending root node
+  (`TreeManager::tighten_root_box`), as HiGHS's `propagateAndResolve`,
+  `evaluateRootLp` and `addRootRedcost` do.
+- **Variable bounds** (`DISCOPT_HIGHS_SEPA_VBOUNDS`, `vbound.rs`). The VUB/VLB halves
+  of HiGHS's `extractCliques` (model rows, once) and `extractCliquesFromCut` (every
+  accepted pool cut of length <= 100), with `addVUB`/`addVLB` semantics, feeding the
+  transformed LP's `getBestVub`/`getBestVlb`. HiGHS runs model-row extraction only
+  inside presolve, which my dumps had off; its bounds there come from probing and
+  cuts. On the first transformed LP, 1,082 bounds match HiGHS's, 2,193 are HiGHS's
+  alone (probing, not ported) and 16,861 are ours alone (row extraction)
+  (`variable_bound_discovery_vs_highs`).
+
+**Soundness.**
+- `derived_variable_bounds_hold_at_every_feasible_point` samples every feasible point
+  of a small box.
+- The check-point probe now judges only the top-level solve. On 7 instances
+  (22433, 23588, sp150x300d, neos17, fiber, nexp-50-20-4-2, beavma) it reports 0
+  violated cuts of ~89k checked, with variable bounds on and off.
+
+**Retracted (§11):** "the baseline port makes invalid cuts in late rounds". The
+probe judged cuts from the RENS/RINS sub-MIPs, whose root loops run inside fixed
+neighbourhoods, against a reference outside them. Those cuts are valid where they
+are used. A first propagation panel was discarded because my own compiles loaded the
+machine (load 8.8 on 4 cores, §9).
+
+**Four-arm panel** (`p3_ab_highs_four.*`, 62 rows, 20 s, idle machine; 668 sense-aware
+soundness checks, 0 violations):
+
+| arm | certified | total wall |
+|---|---|---|
+| port alone | 45 | 427.2 s |
+| + propagation/RC fixing | 45 | 420.6 s |
+| + variable bounds | **47** | 397.3 s |
+| + both | 47 | 399.1 s |
+
+- **Variable bounds:** +2122 (certified at 20.4 s), +sp150x300d (both copies;
+  1 s / 19 nodes, against a time-out at 10k nodes), -bell5.
+- **bell5 is systematic:** 3/3 reps certify in 1.2 s without variable bounds and 0/3
+  within 20 s with them (130-139k nodes). Its root is *tighter* with them (3.38 vs
+  3.84 %), so the loss is in what the tree inherits; it is not yet diagnosed.
+- **Propagation/RC fixing:** neutral, alone or combined, so it is default OFF and kept
+  as a documented opt-in (§5).
+
+**Decision.** In the `highs` arm, `VBOUNDS` stays ON and `PROPAGATE` is OFF. HiGHS
+certifies 59. Still HiGHS-only: the mik family (4), enlight8, neos-911970, neos17,
+b-ball, bppc8-02, gsvm2rl3, issue-2446, plus bell5 under variable bounds.

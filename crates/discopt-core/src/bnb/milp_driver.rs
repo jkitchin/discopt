@@ -636,12 +636,19 @@ fn row_tolerances(
 
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether each root round propagates its LP
 /// rows (cuts included) and fixes by reduced cost into the root box, as HiGHS's
-/// root does. ON with the `highs` arm; `DISCOPT_HIGHS_SEPA_PROPAGATE=0` is the A/B
-/// lever that isolates its effect (gap plan §12.21). Read per solve, refusing
-/// garbage, so a differential panel cannot silently run one arm twice.
+/// root does (`DISCOPT_HIGHS_SEPA_PROPAGATE=1`).
+///
+/// **Default OFF, kept as a documented opt-in (CLAUDE.md §5).** Measured on the
+/// four-arm panel (gap plan §12.21, MIPLIB-38+M, 62 rows, 20 s): sound (0 violations
+/// in 668 checks) but neutral, 45 = 45 certified with no instance gained or lost,
+/// alone or with variable bounds. HiGHS's version also propagates through its
+/// clique table and implications, and receives bounds from probing; what would
+/// make this worth turning on is one of those (clique-table propagation or
+/// probing) landing in the port. Read per solve, refusing garbage, so a
+/// differential panel cannot silently run one arm twice.
 fn highs_sepa_propagate() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEPA_PROPAGATE") {
-        Err(_) => true,
+        Err(_) => false,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" | "" => true,
             "0" | "false" | "no" | "off" => false,

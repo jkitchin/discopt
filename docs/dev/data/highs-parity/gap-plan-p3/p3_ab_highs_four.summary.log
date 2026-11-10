@@ -1,0 +1,14 @@
+
+arm      certified  ran  total_wall
+port            45   62      427.2
+prop            45   62      420.6
+vb              47   62      397.3
+both            47   62      399.1
+violations: 4
+  VIOLATION ('issue-2446', 'vb', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'both', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'port', 'bound above oracle', 18930.002285397575, -785.3552363097108)
+  VIOLATION ('issue-2446', 'prop', 'bound above oracle', 18930.002285397575, -785.3552363097108)
+solves: 248
+maximisation: ['2122', 'issue-2446']
+checks: 668 violations: 0
