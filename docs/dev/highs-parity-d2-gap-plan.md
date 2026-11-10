@@ -1652,3 +1652,28 @@ the rows of columns whose bounds changed), LP 3.4 s, sub-MIP 1.4 s. So the searc
 first two pieces are (a) incremental domain propagation (a `HighsDomain` port: activities kept
 per row, a changed-column queue; also the base for cut-pool and conflict propagation) and (b)
 node separation against a persistent LP view instead of a rebuilt one.
+
+### 12.30 Search-loop port, piece 1: `HighsDomain` incremental propagation (2026-11-10)
+
+`lp/highs_cutgen/domain.rs` ports the model-row core of `HighsDomain`: per-row min/max
+activities in double-double with infinite contributions counted apart, updated per bound
+change (`updateActivityLb/UbChange`, reversed on infeasibility), the capacity threshold that
+keeps rows that cannot tighten anything off the queue (`markPropagate`,
+`recomputeCapacityThreshold`), HiGHS's acceptance rules for new bounds (`adjustedUb/Lb`: integer
+rounding with `feastol`, a 30 % relative-improvement rule for continuous columns), the change
+stack with previous values (`changeBound`, `backtrack` to the last branching,
+`backtrackToGlobal`, `getColLower/UpperPos`), and `propagate` over the queued rows only.
+
+Tests: on 400 random small integer programs with enumerated feasible points, a random branching
+then propagation never removes a feasible point and every infeasible verdict is right; the
+incremental activities equal recomputed ones (HiGHS's `#ifndef NDEBUG` asserts); backtracking to
+global restores bounds and activities exactly. The test asserts it fired (> 1,000 point checks,
+> 100 propagations, > 10 infeasibility proofs).
+
+Not yet ported: objective propagation, cut-pool and conflict-pool propagation, conflict
+analysis, clique-table/implication fixings on binaries. Not yet wired: the incremental gain
+needs one domain persisting along a dive (change, propagate, backtrack); the batch loop rebuilds
+each node independently, so the domain lands with the sequential search loop (next piece).
+A replay against HiGHS's own domain (as for the separators) is pending: HiGHS's local domain also
+runs objective, cut-pool and clique propagation, so the replay needs those switched off in the
+patched build first.

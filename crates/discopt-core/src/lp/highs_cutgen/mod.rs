@@ -43,6 +43,7 @@
 pub mod bridge;
 pub mod cdouble;
 pub mod core;
+pub mod domain;
 pub mod integers;
 pub mod modk;
 pub mod pool;
