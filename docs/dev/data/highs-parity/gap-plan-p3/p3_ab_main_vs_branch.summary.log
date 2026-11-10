@@ -1,0 +1,32 @@
+p0548                 OPT d=  0.0 p=  0.0  1.2  OPT d=  0.0 p=  0.0  1.1  OPT d=  0.0 p=  0.0  1.3  OPT d=  0.0 p=  0.0  0.6
+rgn                   OPT d=  0.0 p=  0.0  1.4  OPT d=  0.0 p=  0.0  1.0  OPT d=  0.0 p=  0.0  1.1  OPT d=  0.0 p=  0.0  0.6
+small_mip             OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1  OPT d=  0.0 p=  0.0  0.1
+sp150x300d           feas d= 10.1 p= 29.0 20.3 feas d= 10.1 p= 29.0 20.3 feas d=  2.9 p=  0.0 20.4  OPT d=  0.0 p=  0.0  1.1
+arms: main | br_off | br_flag | highs
+{
+ "main": {
+  "certified": 43,
+  "errors": 0,
+  "median_wall_solved": 0.695366371000091,
+  "total_wall": 483.0
+ },
+ "br_off": {
+  "certified": 43,
+  "errors": 0,
+  "median_wall_solved": 0.6748484689996985,
+  "total_wall": 480.7
+ },
+ "br_flag": {
+  "certified": 41,
+  "errors": 0,
+  "median_wall_solved": 0.7121009550000963,
+  "total_wall": 506.1
+ },
+ "highs": {
+  "certified": 59,
+  "errors": 0,
+  "median_wall_solved": 0.738640241000212,
+  "total_wall": 217.8
+ }
+}
+solves: 248
