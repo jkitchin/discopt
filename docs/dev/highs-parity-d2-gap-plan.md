@@ -1789,3 +1789,43 @@ singleton / redundant rows, empty / fixed / dominated columns, dual fixing, forc
 parallel rows and columns (hashing, not pairwise); doubleton equations and the aggregator;
 probing on binaries (with the ported `HighsDomain`); then the same presolve on RENS/RINS
 sub-MIPs and after root restarts. Rules HiGHS lacks are candidates only with evidence.
+
+### 12.35 MILP presolve: layout fix, doubleton equations, and the parity table (2026-11-10)
+
+**Panel of phase 1** (`DISCOPT_MILP_PRESOLVE`, 62 rows, 1 thread): cert-clean (337 checks) but
+48 -> 45 certified, small rows ~3 s slower. Cause, isolated with an identity rebuild (no
+reductions): the rebuilt standard form re-oriented every row's slack, which the engine's aligned
+slacks depend on (supportcase14 0.7 -> 4.0 s, beavma 0.9 -> 11 s with no reduction at all). The
+rebuild now keeps each kept row's own slack column and shifts its right-hand side; identity
+matches baseline exactly. **Doubleton equations** added (postsolve stack of fixings and
+substitutions). issue-2446 now certifies (1963x2200 -> 1124x1297); fiber 4.2 -> 3.6 s, p0201
+5.1 -> 3.1 s; blend2 5.4 -> 8.0 s, kaihu lost this run.
+
+**Parity** (`p3_presolve_parity.py`: sizes ours vs HiGHS; `p3_highs_presolve_rule_table.py`:
+HiGHS's per-rule log, `presolve_rule_logging` allowed for MIPs by
+`p3_highs_presolve_rule_log_mip.patch`), summed over the 53 rows HiGHS presolves:
+
+| HiGHS rule | rows | cols | discopt |
+|---|---|---|---|
+| singleton row | 2,089 | 390 | yes (bounds only; HiGHS also removes the column, 390) |
+| doubleton equation | 948 | 948 | yes |
+| aggregator | 644 | 633 | missing |
+| fixed column | 0 | 901 | yes |
+| dominated column | 0 | 658 | partial (simple dual fixing) |
+| parallel rows / columns | 221 | 428 | rows yes, columns missing |
+| empty column | 0 | 461 | yes |
+| redundant row | 324 | 0 | yes |
+| empty row | 286 | 0 | yes |
+| forcing row | 106 | 44 | yes |
+| free-column substitution | 37 | 37 | missing |
+| forcing column | 4 | 4 | missing |
+| sparsify | 3 | 1 | missing |
+
+Probing, dependent equations, enumeration, dual fixing (as a separate rule) and column stuffing
+remove nothing on this population. Largest size gaps: gen (ours unchanged, HiGHS 780x870 ->
+388x521: aggregator 144, dominated 37, forcing rows 97), neos-2624317-amur (aggregator 127),
+supportcase14/16, p0548, egout; HiGHS solves several small issue-* rows in presolve (0x0).
+
+Parity order by measured volume: aggregator; dominated columns (HiGHS's dual-bound test);
+parallel columns; singleton-row column removal; free-column substitution; forcing columns;
+sparsify last.

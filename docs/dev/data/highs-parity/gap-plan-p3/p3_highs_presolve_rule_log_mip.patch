@@ -1,0 +1,13 @@
+diff --git a/highs/presolve/HPresolveAnalysis.cpp b/highs/presolve/HPresolveAnalysis.cpp
+index f4724eb..3339d9b 100644
+--- a/highs/presolve/HPresolveAnalysis.cpp
++++ b/highs/presolve/HPresolveAnalysis.cpp
+@@ -64,7 +64,7 @@ void HPresolveAnalysis::setup(const HighsLp* model_,
+     }
+   }
+   // Allow logging if option is set and model is not a MIP
+-  allow_logging_ = options_->presolve_rule_logging && !model_->isMip();
++  allow_logging_ = options_->presolve_rule_logging;
+   logging_on_ = allow_logging_;
+   log_rule_type_ = kPresolveRuleIllegal;
+   resetNumDeleted();
