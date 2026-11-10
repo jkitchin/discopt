@@ -685,6 +685,37 @@ impl TreeManager {
         self.pool.add(root);
     }
 
+    /// Intersect the root node's box with `lb`/`ub` (structural columns), while the
+    /// root is still the only node and has not been exported. For bounds derived
+    /// before the search starts (root-loop propagation over globally valid rows and
+    /// cuts, root reduced-cost fixing against the incumbent). Returns whether the
+    /// root was tightened; a no-op once the search has begun.
+    pub fn tighten_root_box(&mut self, lb: &[f64], ub: &[f64]) -> bool {
+        if self.node_counter != 1 {
+            return false;
+        }
+        let root = self.pool.get_mut(NodeId(0));
+        if !matches!(root.status, NodeStatus::Pending) {
+            return false;
+        }
+        root.materialize_box();
+        if lb.len() != root.lb.len() || ub.len() != root.ub.len() {
+            return false;
+        }
+        let mut changed = false;
+        for j in 0..lb.len() {
+            if lb[j] > root.lb[j] {
+                root.lb[j] = lb[j];
+                changed = true;
+            }
+            if ub[j] < root.ub[j] {
+                root.ub[j] = ub[j];
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Export a batch of up to `batch_size` pending nodes for relaxation evaluation.
     ///
     /// Selected nodes are moved to `Evaluated` status (so they won't be

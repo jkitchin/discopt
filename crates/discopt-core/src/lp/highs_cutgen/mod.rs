@@ -50,6 +50,7 @@ pub mod separators;
 pub mod sparse_vec;
 pub mod stdalgo;
 pub mod transformed_lp;
+pub mod vbound;
 
 #[cfg(test)]
 mod replay;

@@ -24,7 +24,8 @@ use super::pool::{CutPool, NoObserver};
 use super::separators::{
     CutSink, LpAggregator, PathSeparator, SepContext, TableauContext, TableauSeparator,
 };
-use super::transformed_lp::{TlContext, TlSetup, TransformedLp, VbEntry};
+use super::transformed_lp::{TlContext, TlSetup, TransformedLp};
+use super::vbound::{Domain, VarBoundStore};
 use crate::lp::gomory::GomoryCut;
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
 use crate::lp::simplex::sparse::SparseCols;
@@ -452,13 +453,18 @@ fn check_point() -> Option<&'static [f64]> {
 struct PoolSink<'a> {
     pool: &'a mut CutPool,
     source: &'static str,
+    /// The reference point, at the top level only.
+    probe: Option<&'static [f64]>,
     checked: usize,
     violated: usize,
+    /// HiGHS extracts variable bounds from every accepted pool cut of length
+    /// <= 100 (`HighsCutPool::addCut` -> `extractCliquesFromCut`).
+    vb: Option<(&'a mut VarBoundStore, &'a [f64], &'a [f64], &'a [bool])>,
 }
 
 impl CutSink for PoolSink<'_> {
     fn add_cut(&mut self, inds: &[i32], vals: &[f64], rhs: f64, integral: bool) -> i32 {
-        if let Some(xr) = check_point() {
+        if let Some(xr) = self.probe {
             self.checked += 1;
             let act: f64 = inds
                 .iter()
@@ -474,8 +480,15 @@ impl CutSink for PoolSink<'_> {
                 );
             }
         }
-        self.pool
-            .add_cut(&mut NoObserver, inds, vals, rhs, integral, true, false)
+        let idx = self
+            .pool
+            .add_cut(&mut NoObserver, inds, vals, rhs, integral, true, false);
+        if idx >= 0 && inds.len() <= 100 {
+            if let Some((store, lb, ub, is_int)) = self.vb.as_mut() {
+                store.extract_from_cut(&Domain { lb, ub, is_int }, inds, vals, rhs);
+            }
+        }
+        idx
     }
     fn num_cuts(&self) -> i64 {
         self.pool.num_cuts()
@@ -493,8 +506,32 @@ pub struct RootSeparation {
     tableau: TableauSeparator,
     random_seed: i32,
     lp_iterations: i64,
+    model_rows: usize,
+    /// The top-level solve (not a sub-MIP): only there is a reference point of the
+    /// whole problem meaningful for `DISCOPT_HIGHS_SEPA_CHECK_POINT`.
+    top_level: bool,
+    /// Variable bounds (HiGHS's clique-table extraction from model rows and pool
+    /// cuts); `None` until the first round, or always under
+    /// `DISCOPT_HIGHS_SEPA_VBOUNDS=0`.
+    vbounds: Option<VarBoundStore>,
     /// Cuts added to the pool across rounds.
     pub cuts_generated: usize,
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the transformed LP substitutes
+/// variable bounds (gap plan §12.21). ON with the `highs` arm;
+/// `DISCOPT_HIGHS_SEPA_VBOUNDS=0` is the A/B lever. Read per solve, refusing garbage.
+pub fn vbounds_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_VBOUNDS") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_VBOUNDS={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
 }
 
 /// One round's outcome.
@@ -510,7 +547,7 @@ pub struct RoundCuts {
 impl RootSeparation {
     /// A fresh separation state for a model with `ns` structural columns and the
     /// given original row count and nonzero count (the pool's density limits).
-    pub fn new(ns: usize, model_rows: usize, model_nnz: usize) -> Self {
+    pub fn new(ns: usize, model_rows: usize, model_nnz: usize, top_level: bool) -> Self {
         RootSeparation {
             pool: CutPool::new(
                 ns,
@@ -523,8 +560,16 @@ impl RootSeparation {
             tableau: TableauSeparator::default(),
             random_seed: 0,
             lp_iterations: 0,
+            model_rows,
+            top_level,
+            vbounds: None,
             cuts_generated: 0,
         }
+    }
+
+    /// Variable bounds held (0 when off).
+    pub fn num_vbounds(&self) -> i64 {
+        self.vbounds.as_ref().map_or(0, |v| v.len())
     }
 
     /// The LP dropped the row of pool cut `index`.
@@ -541,8 +586,25 @@ impl RootSeparation {
     /// pool's selection for the LP.
     pub fn round(&mut self, r: &StdFormRound<'_>) -> RoundCuts {
         let mut view = View::build(r);
-        let empty: Vec<VbEntry> = Vec::new();
-        let novb = |_c: i32| empty.clone();
+        if self.vbounds.is_none() && vbounds_enabled() {
+            // HiGHS extracts from the model rows once (`extractCliques`, run by its
+            // presolve's probing), over the global box at that point.
+            let mut store = VarBoundStore::new(r.ns, FEASTOL);
+            let d = Domain {
+                lb: &view.cl,
+                ub: &view.cu,
+                is_int: &view.isint[..r.ns],
+            };
+            for i in 0..self.model_rows.min(view.m) {
+                let (ri, rv) = &view.rows[i];
+                store.extract_from_model_row(&d, ri, rv, view.rowlo[i], view.rowup[i], EPSILON);
+            }
+            self.vbounds = Some(store);
+        }
+        let empty = Vec::new();
+        let vstore = self.vbounds.take();
+        let vubs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vubs(c));
+        let vlbs = |c: i32| vstore.as_ref().map_or_else(|| empty.clone(), |v| v.vlbs(c));
         let intcols: Vec<i32> = (0..r.ns)
             .filter(|&j| r.is_int[j])
             .map(|j| j as i32)
@@ -553,10 +615,11 @@ impl RootSeparation {
             row_value: &view.rowval.clone(),
             continuous_cols: &view.contcols.clone(),
             integral_cols: &intcols,
-            vubs: &novb,
-            vlbs: &novb,
+            vubs: &vubs,
+            vlbs: &vlbs,
         };
-        if let Some(xr) = check_point() {
+        let probe = if self.top_level { check_point() } else { None };
+        if let Some(xr) = probe {
             // The instrument is only meaningful if the point satisfies this LP's rows
             // and the view's column bounds; say so before judging any cut by it.
             let (mut bad_rows, mut bad_cols) = (0usize, 0usize);
@@ -566,9 +629,23 @@ impl RootSeparation {
                 let tol = 1e-6 * (1.0 + act.abs());
                 if act < view.slb[i] - tol || act > view.sub[i] + tol {
                     if bad_rows < 3 {
+                        let slack: Vec<String> = (r.ns..r.n)
+                            .filter_map(|j| {
+                                let (rr, rv) = r.csc.col(j);
+                                rr.iter().position(|&q| q == i).map(|p| {
+                                    format!(
+                                        "col {j} coef {:e} [{:e},{:e}] nnz {}",
+                                        rv[p],
+                                        r.l[j],
+                                        r.u[j],
+                                        rr.len()
+                                    )
+                                })
+                            })
+                            .collect();
                         eprintln!(
-                            "HIGHS_SEPA_POINT row {i} act {act:e} not in [{:e}, {:e}] (lo {:e} up {:e}, len {}, int {})",
-                            view.slb[i], view.sub[i], view.rowlo[i], view.rowup[i], ri.len(), view.isint[view.ns + i]
+                            "HIGHS_SEPA_POINT row {i} act {act:e} not in [{:e}, {:e}] (lo {:e} up {:e}, b {:e}, len {}, int {}) slack {:?}",
+                            view.slb[i], view.sub[i], view.rowlo[i], view.rowup[i], r.b[i], ri.len(), view.isint[view.ns + i], slack
                         );
                     }
                     bad_rows += 1;
@@ -601,6 +678,12 @@ impl RootSeparation {
             );
         }
         let mut tl = TransformedLp::new(&view, &setup);
+        let mut vstore = vstore;
+        let (cl, cu, vint) = (
+            view.cl.clone(),
+            view.cu.clone(),
+            view.isint[..r.ns].to_vec(),
+        );
         let mut agg = LpAggregator::new(&view);
         let before = self.pool.num_cuts();
         {
@@ -609,12 +692,14 @@ impl RootSeparation {
             let mut sink = PoolSink {
                 pool: &mut self.pool,
                 source: "tableau",
+                probe,
                 checked: 0,
                 violated: 0,
+                vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
             };
             self.tableau
                 .separate(&mut view, &mut agg, &mut tl, &mut sink, seed);
-            if check_point().is_some() {
+            if probe.is_some() {
                 eprintln!(
                     "HIGHS_SEPA_CHECK tableau checked={} violated={}",
                     sink.checked, sink.violated
@@ -627,18 +712,25 @@ impl RootSeparation {
             let mut sink = PoolSink {
                 pool: &mut self.pool,
                 source: "path",
+                probe,
                 checked: 0,
                 violated: 0,
+                vb: vstore.as_mut().map(|v| (v, &cl[..], &cu[..], &vint[..])),
             };
             self.path
                 .separate(&view, &mut agg, &mut tl, &mut sink, seed);
-            if check_point().is_some() {
+            if probe.is_some() {
                 eprintln!(
                     "HIGHS_SEPA_CHECK path checked={} violated={}",
                     sink.checked, sink.violated
                 );
             }
         }
+        self.vbounds = vstore;
+        crate::profile::record_max(
+            crate::profile::Ctr::HighsSepaVarBounds,
+            self.num_vbounds().max(0) as u64,
+        );
         let generated = (self.pool.num_cuts() - before).max(0) as usize;
         self.cuts_generated += generated;
         let mut cutset = Vec::new();

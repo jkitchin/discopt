@@ -634,6 +634,24 @@ fn row_tolerances(
     eps
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether each root round propagates its LP
+/// rows (cuts included) and fixes by reduced cost into the root box, as HiGHS's
+/// root does. ON with the `highs` arm; `DISCOPT_HIGHS_SEPA_PROPAGATE=0` is the A/B
+/// lever that isolates its effect (gap plan §12.21). Read per solve, refusing
+/// garbage, so a differential panel cannot silently run one arm twice.
+fn highs_sepa_propagate() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_PROPAGATE") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEPA_PROPAGATE={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// The driver's FBBT: exact rows, or rows relaxed by [`row_tolerances`] under
 /// [`tol_robust_enabled`].
 #[allow(clippy::too_many_arguments)]
@@ -4027,6 +4045,7 @@ fn solve_milp_node_search(
                 ns,
                 n_orig_rows,
                 nnz,
+                milp_depth == 0,
             ))
         } else {
             None
@@ -4306,6 +4325,77 @@ fn solve_milp_node_search(
                 }
             }
 
+            if highs_sep.is_some() && highs_sepa_propagate() {
+                // HiGHS's root rounds propagate the global domain after every LP
+                // (`HighsSeparation::separationRound` -> `propagateAndResolve`, and
+                // `evaluateRootLp`), over the model rows AND the cut pool's rows, and
+                // fix by reduced cost against the incumbent
+                // (`redcostfixing.addRootRedcost/propagateRootRedcost`). Here: reduced-
+                // cost fixing at this round's LP, then FBBT over every LP row (cuts
+                // included), into the root box the next round and the tree start from.
+                // Both are sound contractions: RC fixing keeps every point at least as
+                // good as the incumbent (with a margin on the LP value), FBBT keeps
+                // every point satisfying globally valid rows.
+                let _t = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
+                let mut changed = false;
+                if let Some((_, inc)) = tm
+                    .incumbent()
+                    .filter(|(_, v)| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)
+                {
+                    let margin = 1e-6 * (1.0 + root.obj.abs());
+                    if let Some((rl, ru)) = reduced_cost_fix(
+                        &csc_w,
+                        m_w,
+                        &c_w,
+                        &root.basis,
+                        &root.dual,
+                        root.obj + obj_const - margin,
+                        inc,
+                        &l_w,
+                        &u_w,
+                        ns,
+                        &is_int_full,
+                        opts.simplex.tol,
+                    ) {
+                        for j in 0..ns {
+                            if rl[j] > l_w[j] && rl[j] <= u_w[j] {
+                                l_w[j] = rl[j];
+                                changed = true;
+                            }
+                            if ru[j] < u_w[j] && ru[j] >= l_w[j] {
+                                u_w[j] = ru[j];
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                let pr = fbbt_rows(
+                    &csc_w,
+                    m_w,
+                    n_w,
+                    &l_w,
+                    &u_w,
+                    &b_w,
+                    &is_int_full,
+                    opts.simplex.tol,
+                );
+                if !pr.infeasible {
+                    for j in 0..n_w {
+                        if pr.l[j] > l_w[j] {
+                            l_w[j] = pr.l[j];
+                            changed = true;
+                        }
+                        if pr.u[j] < u_w[j] {
+                            u_w[j] = pr.u[j];
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    crate::profile::incr(crate::profile::Ctr::RootHighsPropagated);
+                    tm.tighten_root_box(&l_w[..ns], &u_w[..ns]);
+                }
+            }
             let new_cuts = if let Some(hs) = highs_sep.as_mut() {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
                 hs.add_lp_iterations(root.iters as i64);

@@ -219,6 +219,12 @@ counters!(
     StrongBranchDeadlineStop,
     // Gap plan P3: the root loop's c-MIR phase handed over to GMI.
     RootCmirGmiHandover,
+    // Gap plan P3 option A (`DISCOPT_MILP_ROOT_CMIR=highs`): a root round's reduced-cost
+    // fixing / FBBT over the LP rows (cuts included) tightened the root box.
+    RootHighsPropagated,
+    // Gap plan P3 option A: variable bounds held by the ported separation (model rows
+    // + pool cuts), recorded per round (max).
+    HighsSepaVarBounds,
     DiveSteps,
     DiveHitIntegral,
     DiveAbandonedInfeasible,

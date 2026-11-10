@@ -905,3 +905,112 @@ fn separators_fixture_replay_bit_identically() {
     assert!(s.sep_cuts >= 300, "{s:?}");
     assert!(s.mismatches.is_empty(), "{:#?}", s.mismatches);
 }
+
+/// Variable-bound discovery vs HiGHS: for each dump's first transformed LP (all
+/// rows are model rows there), derive bounds from the model rows with
+/// `VarBoundStore::extract_from_model_row` and compare with the bounds HiGHS held
+/// (`VB` lines). Reports matched / HiGHS-only / ours-only per file.
+#[test]
+#[ignore]
+fn variable_bound_discovery_vs_highs() {
+    use super::vbound::{Domain, VarBoundStore};
+    let p = std::env::var("DISCOPT_HIGHS_TL_REPLAY").expect("set DISCOPT_HIGHS_TL_REPLAY");
+    let mut files: Vec<_> = std::fs::read_dir(&p)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    files.sort();
+    let (mut tm, mut th, mut to) = (0usize, 0usize, 0usize);
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let Some(i) = lines.iter().position(|l| l.starts_with("TL_NEW 0 ")) else {
+            continue;
+        };
+        let t: Vec<&str> = lines[i].split_ascii_whitespace().collect();
+        let ncols: usize = kv(&t, "ncols").parse().unwrap();
+        let nrows: usize = kv(&t, "nrows").parse().unwrap();
+        let glb = fa(lines[i + 4], "glb");
+        let gub = fa(lines[i + 5], "gub");
+        let isint: Vec<bool> = arr(lines[i + 8], "isint")
+            .iter()
+            .take(ncols)
+            .map(|x| *x == "1")
+            .collect();
+        if !lines[i + 11].starts_with("rowlo ") {
+            continue;
+        }
+        let rowlo = fa(lines[i + 11], "rowlo");
+        let rowup = fa(lines[i + 12], "rowup");
+        let mut k = i + 18;
+        let d = Domain {
+            lb: &glb,
+            ub: &gub,
+            is_int: &isint,
+        };
+        let mut store = VarBoundStore::new(ncols, 1e-6);
+        for r in 0..nrows {
+            let ri = ia(lines[k], "lri");
+            let rv = fa(lines[k + 1], "lrv");
+            k += 2;
+            store.extract_from_model_row(&d, &ri, &rv, rowlo[r], rowup[r], EPSILON);
+        }
+        // HiGHS's bounds: VB lines follow the row block.
+        let mut theirs: Vec<(i32, bool, i32, f64, f64)> = Vec::new();
+        while lines[k].starts_with("VB ") {
+            let v: Vec<&str> = lines[k].split_ascii_whitespace().collect();
+            let col: i32 = v[1].parse().unwrap();
+            let mut q = 2;
+            for upper in [true, false] {
+                let m: usize = v[q].parse().unwrap();
+                q += 1;
+                for _ in 0..m {
+                    theirs.push((
+                        col,
+                        upper,
+                        v[q].parse().unwrap(),
+                        hx(v[q + 1]),
+                        hx(v[q + 2]),
+                    ));
+                    q += 5;
+                }
+            }
+            k += 1;
+        }
+        let mut ours: Vec<(i32, bool, i32, f64, f64)> = Vec::new();
+        for col in 0..ncols as i32 {
+            for e in store.vubs(col) {
+                ours.push((col, true, e.col, e.vb.coef, e.vb.constant));
+            }
+            for e in store.vlbs(col) {
+                ours.push((col, false, e.col, e.vb.coef, e.vb.constant));
+            }
+        }
+        let same = |a: &(i32, bool, i32, f64, f64), b: &(i32, bool, i32, f64, f64)| {
+            a.0 == b.0
+                && a.1 == b.1
+                && a.2 == b.2
+                && (a.3 - b.3).abs() <= 1e-9 * (1.0 + a.3.abs())
+                && (a.4 - b.4).abs() <= 1e-9 * (1.0 + a.4.abs())
+        };
+        let m = theirs
+            .iter()
+            .filter(|a| ours.iter().any(|b| same(a, b)))
+            .count();
+        tm += m;
+        th += theirs.len() - m;
+        to += ours.len()
+            - ours
+                .iter()
+                .filter(|b| theirs.iter().any(|a| same(a, b)))
+                .count();
+        eprintln!(
+            "{}: HiGHS {} ours {} matched {m}",
+            f.file_name().unwrap().to_string_lossy(),
+            theirs.len(),
+            ours.len()
+        );
+    }
+    eprintln!("TOTAL matched {tm} highs_only {th} ours_only {to}");
+    assert!(tm + th + to > 0);
+}
