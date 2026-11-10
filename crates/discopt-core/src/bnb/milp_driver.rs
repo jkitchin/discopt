@@ -678,6 +678,62 @@ fn highs_root_rens() -> bool {
     }
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the tree plunges (gap plan §12.28):
+/// each batch first continues the plunges of the previous one (each branched node's
+/// preferred child, HiGHS `kRootSol`), up to [`PLUNGE_LIMIT`] nodes per plunge, then
+/// fills from the best-bound queue; node separation runs at plunge starts only (HiGHS
+/// `processNodes`: `separateAndStoreBasis` on the node taken from the queue, then
+/// `dive`). Default OFF; `DISCOPT_HIGHS_DIVE=1` opts in. Read per solve, refusing
+/// garbage.
+fn highs_dive() -> bool {
+    match std::env::var("DISCOPT_HIGHS_DIVE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_DIVE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether root cuts dropped by the root cut
+/// cleanup go to the node cut pool instead of being discarded (gap plan §12.28; HiGHS
+/// keeps every root cut in its global pool and re-adds violated ones at nodes,
+/// `HighsCutPool::separate`). Default OFF; `DISCOPT_HIGHS_ROOT_POOL=1` opts in. Read
+/// per solve, refusing garbage.
+fn highs_root_pool() -> bool {
+    match std::env::var("DISCOPT_HIGHS_ROOT_POOL") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_ROOT_POOL={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether reliability branching keeps
+/// strong-branching unreliable columns for the whole tree instead of only the first
+/// `sb_node_budget` nodes (gap plan §12.28; HiGHS's reliability branching probes any
+/// column with fewer than `mip_pscost_minreliable` observations at every node).
+/// Default OFF; `DISCOPT_HIGHS_SB_TREE=1` opts in. Read per solve, refusing garbage.
+fn highs_sb_tree() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SB_TREE") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!("DISCOPT_HIGHS_SB_TREE={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
+/// Nodes per plunge before it returns to the queue (HiGHS `processNodes`'s
+/// `plungeLimit`).
+const PLUNGE_LIMIT: usize = 100;
+
 /// The driver's FBBT: exact rows, or rows relaxed by [`row_tolerances`] under
 /// [`tol_robust_enabled`].
 #[allow(clippy::too_many_arguments)]
@@ -5089,6 +5145,26 @@ fn solve_milp_node_search(
                     next += 1;
                 }
             }
+            if node_gmi_on && highs_sep.is_some() && highs_root_pool() {
+                // Dropped cuts over the base columns only (none of a dropped row's
+                // slack): valid globally, so they seed the node pool, fresh.
+                for (c, cut) in all_root_cuts.iter().enumerate() {
+                    if keep[c] || cut.coeffs.iter().skip(n_base).any(|&a| a != 0.0) {
+                        continue;
+                    }
+                    let mut coeffs = cut.coeffs.clone();
+                    coeffs.truncate(n_base);
+                    let pc = GomoryCut {
+                        coeffs,
+                        rhs: cut.rhs,
+                    };
+                    if gmi_pool_sigs.insert(cut_signature(&pc)) {
+                        gmi_pool.push(pc);
+                        gmi_pool_age.push(0);
+                        crate::profile::incr(crate::profile::Ctr::RootPoolSeeded);
+                    }
+                }
+            }
             let kept: Vec<GomoryCut> = all_root_cuts
                 .iter()
                 .enumerate()
@@ -5263,6 +5339,19 @@ fn solve_milp_node_search(
             .sum(),
         top_level: milp_depth == 0,
     });
+    // Gap plan §12.28: plunging under the highs arm.
+    let dive_on = highs_sep.is_some() && highs_dive();
+    let sb_tree_on = highs_sep.is_some() && highs_sb_tree();
+    if dive_on {
+        tm.enable_plunging(
+            last_root_x
+                .as_ref()
+                .map(|x| x[..ns.min(x.len())].to_vec())
+                .unwrap_or_default(),
+        );
+    }
+    let mut plunge_next: Vec<NodeId> = Vec::new();
+    let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     let root_cut_rows = m_w.saturating_sub(m_base0);
     let mut strong_probe_lps: usize = 0;
@@ -5371,7 +5460,42 @@ fn solve_milp_node_search(
                 break;
             }
         }
-        let batch = tm.export_batch(64);
+        let (batch, n_plunge_cont) = if dive_on {
+            tm.export_batch_preferring(&plunge_next, 64)
+        } else {
+            (tm.export_batch(64), 0)
+        };
+        // Per batch slot: plunge length so far (0 = a plunge start).
+        let slot_plunge_len: Vec<usize> = batch
+            .node_ids
+            .iter()
+            .enumerate()
+            .map(|(k, id)| {
+                if k < n_plunge_cont {
+                    plunge_len.get(id).copied().unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .collect();
+        // Node separation slots: plunge starts under dives, else the leading
+        // best-bound nodes.
+        let gmi_slots: Vec<bool> = (0..batch.node_ids.len())
+            .map(|k| {
+                if dive_on {
+                    k >= n_plunge_cont
+                } else {
+                    k < NODE_GMI_PER_BATCH
+                }
+            })
+            .collect();
+        if dive_on {
+            crate::profile::incr_by(crate::profile::Ctr::PlungeContinued, n_plunge_cont as u64);
+            crate::profile::incr_by(
+                crate::profile::Ctr::PlungeStarts,
+                (batch.node_ids.len() - n_plunge_cont) as u64,
+            );
+        }
         if batch.node_ids.is_empty() {
             break;
         }
@@ -5447,7 +5571,7 @@ fn solve_milp_node_search(
         // (a probe's hint would override them).
         let sb_active = match opts.branch_rule {
             crate::bnb::branching::BranchRule::Reliability => {
-                opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget
+                opts.strong_branch && (sb_tree_on || tm.stats().total_nodes < opts.sb_node_budget)
             }
             crate::bnb::branching::BranchRule::Strong => true,
             _ => false,
@@ -5571,7 +5695,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
-                                k < NODE_GMI_PER_BATCH,
+                                gmi_slots[k],
                             )
                         })
                         .collect()
@@ -5584,7 +5708,7 @@ fn solve_milp_node_search(
                                 &batch.ub[k],
                                 &ctx,
                                 dive_batch && k == 0,
-                                k < NODE_GMI_PER_BATCH,
+                                gmi_slots[k],
                             )
                         })
                         .collect()
@@ -5600,7 +5724,7 @@ fn solve_milp_node_search(
                             &batch.ub[k],
                             &ctx,
                             dive_batch && k == 0,
-                            k < NODE_GMI_PER_BATCH,
+                            gmi_slots[k],
                         )
                     })
                     .collect()
@@ -6020,6 +6144,26 @@ fn solve_milp_node_search(
         tm.import_results_with_point_values(&results, &point_values)
             .expect("one point value per node result");
         tm.process_evaluated();
+        if dive_on {
+            // Continue each plunge into its node's preferred child, in batch order.
+            let len_of: HashMap<NodeId, usize> = batch
+                .node_ids
+                .iter()
+                .copied()
+                .zip(slot_plunge_len.iter().copied())
+                .collect();
+            plunge_next.clear();
+            plunge_len.clear();
+            for (parent, child) in tm.take_plunge_children() {
+                let Some(&l) = len_of.get(&parent) else {
+                    continue;
+                };
+                if l + 1 < PLUNGE_LIMIT {
+                    plunge_next.push(child);
+                    plunge_len.insert(child, l + 1);
+                }
+            }
+        }
         // D2 B1': update the global GMI pool, in batch order (deterministic): reset the
         // age of every cut a node used, age the rest, admit the new cuts (deduplicated),
         // then drop cuts past the age limit and the oldest beyond the cap.

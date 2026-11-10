@@ -420,6 +420,11 @@ counters!(
     // at least one integer column, and integer bounds tightened.
     // Root RENS between root passes (gap plan §12.27): runs, and runs that improved
     // the incumbent (each earns a second pass of root rounds).
+    // Plunging (gap plan §12.28): batch slots continuing a plunge, and plunge starts.
+    // Root cuts dropped by cleanup that seeded the node pool (gap plan §12.28).
+    RootPoolSeeded,
+    PlungeContinued,
+    PlungeStarts,
     RootRensRuns,
     RootRensImproved,
     RcFixCalls,
