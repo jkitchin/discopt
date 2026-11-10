@@ -1,0 +1,12 @@
+{"name": "enlight8", "status": "Optimal", "nodes": 104, "root": 96.3, "dual": 0.0, "restarts": 0, "wall": 2.1}
+{"name": "mik-250-20-75-5", "status": "Optimal", "nodes": 515, "root": 1.63, "dual": 0.01, "restarts": 0, "wall": 7.4}
+{"name": "neos-911970", "status": "reached", "nodes": 920, "root": 4.77, "dual": 3.15, "restarts": 0, "wall": 20.0}
+{"name": "mik-250-20-75-3", "status": "Optimal", "nodes": 453, "root": 2.03, "dual": 0.01, "restarts": 0, "wall": 7.1}
+{"name": "mik-250-20-75-2", "status": "Optimal", "nodes": 89, "root": 1.53, "dual": 0.01, "restarts": 0, "wall": 4.2}
+{"name": "mik-250-20-75-1", "status": "Optimal", "nodes": 672, "root": 1.75, "dual": 0.01, "restarts": 0, "wall": 7.6}
+{"name": "enlight_hard", "status": "Optimal", "nodes": 1027, "root": 58.11, "dual": 0.0, "restarts": 0, "wall": 13.1}
+{"name": "neos17", "status": "Optimal", "nodes": 2044, "root": 2.6, "dual": 0.0, "restarts": 0, "wall": 13.7}
+{"name": "b-ball", "status": "Optimal", "nodes": 10227, "root": 14.91, "dual": 0.0, "restarts": 0, "wall": 3.5}
+{"name": "bppc8-02", "status": "Optimal", "nodes": 258, "root": 4.04, "dual": 0.0, "restarts": 0, "wall": 0.7}
+{"name": "bell5", "status": "Optimal", "nodes": 325, "root": 3.41, "dual": 0.0, "restarts": 0, "wall": 0.7}
+{"name": "issue-2446", "status": "Optimal", "nodes": 355, "root": 2510.37, "dual": 0.0, "restarts": 0, "wall": 5.6}

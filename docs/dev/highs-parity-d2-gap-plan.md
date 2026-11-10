@@ -1430,3 +1430,37 @@ A3 split, each removed from A2 (`p3_highs_strip_split.py`):
 
 Restart, symmetry and conflict analysis stay unported (0). The revisited flow
 diagram is published as an artifact.
+
+### 12.23 Node separation and mod-k: ported, not shown to help (2026-11-10)
+
+`DISCOPT_HIGHS_SEPA_NODE=1` runs the ported tableau and path separators on node LPs over
+the global box (`bridge::separate_node`), replacing node GMI in the existing node-cut
+rounds. `DISCOPT_HIGHS_SEPA_MODK=1` adds the ported `HighsModkSeparator` (GF(k) solve with
+HiGHS's splay trees and heap tie-breaking) after the path separator. Both default OFF.
+
+Entry experiment on the five rows §12.22 attributed to node cuts: **neutral**. iskar and
+istra already certify without node cuts; b-ball, mik-1, mik-3 stay uncertified with 3 or 10
+rounds per node, though it fired (mik-1: 4,282 node cuts, 1,179 node bounds lifted vs 413).
+No reference-point violations. No population panel has been run for either lever.
+
+**Retraction (§11).** §12.22 ranked work by what HiGHS loses when one of *its* features is
+stripped and read that as what discopt would gain. That transfer was never tested, and for
+node cuts it was wrong. §12.24 replaces it with a direct comparison.
+
+### 12.24 Where the gap is, measured directly (2026-11-10)
+
+`p3_gap_diagnostic.py`: per row, HiGHS default, discopt (highs arm) full and root-only, 20 s;
+`p3_gap_diagnostic_stripped_highs.py`: HiGHS with presolve, restarts, symmetry and conflict
+off on the 12 rows HiGHS certifies and discopt does not. (The report keys by name, so 4 rows
+with duplicate names in the population are dropped: 58 compared.) Stripped HiGHS still
+certifies 11 of the 12, so none of presolve, restarts, symmetry or conflict explains them.
+
+| class | rows | evidence (stripped HiGHS vs discopt) |
+|---|---|---|
+| root cut loop | mik-250-20-75-{1,2,3,5} | root gap 1.5-2.0 % vs 2.9-4.9 %, no presolve/restart on either side |
+| tree | bell5, b-ball, neos17, enlight8, enlight_hard | root equal or ours better (bell5 3.41/3.38, b-ball 14.9/0.11); HiGHS closes in 104-10,227 nodes, discopt open after 10k-76k |
+| primal / throughput | bppc8-02, issue-2446 | bppc8-02: same root (4.04), our incumbent 2.37 % off; issue-2446: no incumbent, 7 nodes in 19 s |
+| needs presolve | neos-911970 | stripped HiGHS fails too |
+
+The tree class is the largest and the most surprising: on bell5 the roots match and HiGHS
+needs 325 nodes, discopt 76,405 without closing. Node propagation is already on in discopt.
