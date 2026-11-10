@@ -1,0 +1,10 @@
+arm      certified  ran  total_wall
+bundle          41   62      525.8
+port            45   62      410.1
+highs           59   62      225.8
+violations: 2
+  VIOLATION ('issue-2446', 'bundle', 'bound above oracle', 15901.776712192299, -785.3552363097108)
+  VIOLATION ('issue-2446', 'port', 'bound above oracle', 18930.002285397575, -785.3552363097108)
+solves: 186
+maximisation: ['2122', 'issue-2446']
+checks: 512 violations: 0

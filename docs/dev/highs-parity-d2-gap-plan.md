@@ -1255,3 +1255,73 @@ bell5, issue-2173; `cut_pool_fixture_replays_bit_identically`).
 and the smoothed-progress stall rule); `HighsSeparation::separationRound` (separate,
 propagate, resolve, add the pool's selection to the LP, LP ageing via
 `HighsLpRelaxation::performAging`); and cut propagation into the global domain.
+
+### 12.20 Option A, phase 4b: the port wired into the root loop, and its first panel (2026-11-10)
+
+`DISCOPT_MILP_ROOT_CMIR=highs` (default OFF; a new arm of the P3 flag) runs the root
+rounds through the port. `bridge.rs` builds HiGHS's LP view from the standard-form root
+LP each round: each row's range comes from its singleton slack column, or it is an
+equality when it has none. B^-1 rows are rescaled to HiGHS's slack sign. Integral rows'
+bounds and integer columns' bounds are rounded as HiGHS's setup rounds them. The view is
+fed through the ported tableau and path separators into the persistent ported pool; the
+pool's selection becomes the round's `>=` cuts. Rows the LP drops are reported back
+(`lpCutRemoved`), so the pool can offer them again. Not ported: propagation of pool cuts
+into the global domain, variable bounds (clique table / implications), and the
+implied-bound, clique and mod-k separators.
+
+**Soundness defect found in the bridge and fixed before any measurement counted.**
+The first wired run returned false certificates: fiber "optimal" at 1,306,143
+(optimum 405,935), nexp-50-20-4-2 at 124 (71), beavma "infeasible". The cause was
+discopt's `1e20` infinity sentinel (CLAUDE.md "Key Constraints"). Passed through
+unmapped, it failed HiGHS's `== kHighsInf` tests, so the generator complemented
+against a bound of 1e20 and the cancellation produced invalid cuts. Every bound is now
+mapped at the bridge.
+
+**Instruments.** `DISCOPT_HIGHS_SEPA_CHECK_POINT=<file>` checks every pool cut against a
+reference point. It first checks the point itself: rows, bounds, and integrality in the
+view. `DISCOPT_MILP_DUMP_INCUMBENT=<path>` writes the top-level incumbent of each engine
+call that has integer columns. With a genuine integer reference, rounds 1-2 on fiber
+and nexp-50-20-4-2 have 0 violated cuts (106 and 213 checked in round 1).
+
+**Retracted (§11).** Two earlier probe verdicts were wrong:
+- "Most cuts are invalid" (made after the infinity fix) used a point that failed the
+  integrality check: the dump had captured the output of an LP-only engine call.
+- "issue-2446 and 2122 violate their oracles" (made during the panel) came from my
+  checker assuming minimisation; both instances are maximisation problems.
+
+**Root gap vs the bundle** (route, root only, 13 cut-dependent rows): better on 8.
+- beavma 5.81 -> 0.21 %
+- neos17 9.97 -> 1.67
+- b-ball 21.21 -> 0.11
+- nexp-50-20-4-2 1.41 -> 0.00
+- gsvm2rl3 22.24 -> 15.07
+- enlight_hard 45.95 -> 40.54
+- fiber 3.07 -> 2.41
+
+Worse on 3:
+- sp150x300d 2.90 -> 5.80
+- mik-250-20-75-1 2.48 -> 4.88
+- neos-3611689-kaihu 2.52 -> 3.36
+
+Unchanged: neos-911970, enlight8, nexp-50-20-1-1. Root wall is lower on every row.
+
+**Population A/B** (`p3_ab_highs_port.py`, MIPLIB-38+M, 62 rows, 20 s, 2 in parallel,
+arm order rotated). Certified: **bundle 41, port 45, HiGHS 59**. Total wall: 525.8 /
+410.1 / 225.8 s. The port gains nexp-50-20-1-1, beavma and dcmulti (dcmulti appears
+twice in the population) and loses nothing. Cert-clean: 512 checks
+(`p3_ab_score_sense.py`, sense from the panel loader), 0 violations.
+
+Still certified by HiGHS only (13 rows):
+- the four mik-250-20-75 rows: a dual gap; the port's root is weaker than the
+  bundle's here;
+- enlight8, sp150x300d, neos-911970, neos17, b-ball, bppc8-02, gsvm2rl3, 2122,
+  issue-2446.
+
+b-ball's root is at 0.11 %, so on b-ball the gap is in the tree, not the root.
+
+**Next.** HiGHS's root still beats ours on neos-911970, sp150x300d, the mik family and
+enlight. The unported pieces this panel points at:
+- propagation of pool cuts into the global domain: the replay showed HiGHS tightens
+  bounds within a single round;
+- variable bounds, which HiGHS has on 29 of 47 instances;
+- `evaluateRootLp`'s per-round propagation and reduced-cost fixing.
