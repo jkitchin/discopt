@@ -3592,54 +3592,80 @@ fn solve_presolved(
     if p.keep_cols.len() == ns && p.form.rows.len() == m {
         return None;
     }
-    // Rebuild the standard form: reduced structurals, then one slack per inequality row.
+    // Rebuild in the ORIGINAL layout: each kept row keeps its own slack column (same
+    // orientation, same column order) and its right-hand side shifted by the constants
+    // presolve moved out; the slack's bounds follow from the row's new range. The engine
+    // relies on that layout (aligned slacks): a rebuild with re-oriented slacks alone
+    // cost supportcase14 0.7 -> 4.0 s and beavma 0.9 -> 11 s (gap plan §12.35).
     let f = &p.form;
     let k = f.n;
-    let (mut b2, mut sl, mut su) = (Vec::new(), Vec::new(), Vec::new());
-    let mut kept_rows: Vec<usize> = Vec::new();
-    for r in 0..f.rows.len() {
-        let (a, z) = (f.lo[r], f.up[r]);
-        if !a.is_finite() && !z.is_finite() {
-            continue;
-        }
-        kept_rows.push(r);
-        if a == z {
-            b2.push(a);
-            sl.push(f64::NAN);
-            su.push(f64::NAN);
-        } else if z.is_finite() {
-            // a x + s = up, s in [0, up - lo].
-            b2.push(z);
-            sl.push(0.0);
-            su.push(if a.is_finite() { z - a } else { INF });
-        } else {
-            // a x - s = lo, s in [0, inf).
-            b2.push(a);
-            sl.push(-0.0);
-            su.push(INF);
-        }
+    let m2 = f.rows.len();
+    let mut red_row = vec![usize::MAX; m];
+    for (r2, &i) in p.keep_rows.iter().enumerate() {
+        red_row[i] = r2;
     }
-    let m2 = kept_rows.len();
+    let b2: Vec<f64> = (0..m2)
+        .map(|r2| b[p.keep_rows[r2]] - p.row_shift[r2])
+        .collect();
     let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
-    for (i2, &r) in kept_rows.iter().enumerate() {
-        for (&j, &v) in f.rows[r].0.iter().zip(&f.rows[r].1) {
-            cols[j].push((i2, v));
+    for (r2, (ri, rv)) in f.rows.iter().enumerate() {
+        for (&j, &v) in ri.iter().zip(rv) {
+            cols[j].push((r2, v));
         }
     }
-    let (mut c2, mut l2, mut u2) = (f.c.clone(), Vec::new(), Vec::new());
-    for j in 0..k {
-        l2.push(if f.l[j].is_finite() { f.l[j] } else { -INF });
-        u2.push(if f.u[j].is_finite() { f.u[j] } else { INF });
-    }
-    for i2 in 0..m2 {
-        if sl[i2].is_nan() {
+    let mut c2 = f.c.clone();
+    let mut l2: Vec<f64> =
+        f.l.iter()
+            .map(|&v| if v.is_finite() { v } else { -INF })
+            .collect();
+    let mut u2: Vec<f64> =
+        f.u.iter()
+            .map(|&v| if v.is_finite() { v } else { INF })
+            .collect();
+    let mut has_slack = vec![false; m2];
+    for j in ns..n {
+        let (ri, rv) = csc.col(j);
+        let (i, sigma) = ri
+            .iter()
+            .zip(rv)
+            .find(|(_, &v)| v != 0.0)
+            .map(|(&i, &v)| (i, v))?;
+        let r2 = red_row[i];
+        if r2 == usize::MAX {
             continue;
         }
-        let sign = if sl[i2].is_sign_negative() { -1.0 } else { 1.0 };
-        cols.push(vec![(i2, sign)]);
+        has_slack[r2] = true;
+        // a x + sigma s = b2, a x in [lo, up]  =>  s in (b2 - [lo, up]) / sigma.
+        let (e_lo, e_hi) = ((b2[r2] - f.up[r2]) / sigma, (b2[r2] - f.lo[r2]) / sigma);
+        let (mut sl, mut su) = if sigma > 0.0 {
+            (e_lo, e_hi)
+        } else {
+            (e_hi, e_lo)
+        };
+        if sl.is_nan() {
+            sl = f64::NEG_INFINITY;
+        }
+        if su.is_nan() {
+            su = f64::INFINITY;
+        }
+        cols.push(vec![(r2, sigma)]);
         c2.push(0.0);
-        l2.push(0.0);
-        u2.push(su[i2]);
+        l2.push(if sl.is_finite() {
+            sl.max(fin(l[j]))
+        } else {
+            l[j]
+        });
+        u2.push(if su.is_finite() {
+            su.min(fin(u[j]))
+        } else {
+            u[j]
+        });
+    }
+    // A row without a slack is an equality: its reduced range must be a point.
+    for r2 in 0..m2 {
+        if !has_slack[r2] && f.lo[r2] != f.up[r2] {
+            return None;
+        }
     }
     let n2 = cols.len();
     let mut cp = vec![0usize];
@@ -3690,6 +3716,11 @@ fn solve_presolved(
     if has_x {
         let x = p.postsolve(&res.x, ns);
         if !row_form_feasible(&rf, &x, 1e-6) {
+            if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+                eprintln!(
+                    "MILP presolve: postsolved point failed verification; solving the original"
+                );
+            }
             crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
             return None;
         }

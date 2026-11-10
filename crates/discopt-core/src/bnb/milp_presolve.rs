@@ -16,7 +16,12 @@
 //! - empty columns are fixed at their best bound by cost;
 //! - dual fixing: a column whose cost and every row push the same way is fixed at that
 //!   bound (keeps at least one optimal solution);
-//! - parallel rows (found by hashing the normalized row, not pairwise) are merged.
+//! - parallel rows (found by hashing the normalized row, not pairwise) are merged;
+//! - doubleton equations `a x_s + b x_t = rhs` substitute `x_s` out (HiGHS
+//!   `doubletonEq`: a continuous `x_s` preferred; two integers only when `b/a` and
+//!   `rhs/a` are integral), `x_s`'s bounds becoming implied bounds on `x_t`.
+//!
+//! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
 //! Every step is exact up to `feastol` on the row activity, and the caller re-verifies
 //! the postsolved point on the original rows before it may count toward a certificate.
@@ -65,8 +70,30 @@ pub struct PresolveStats {
     pub dual_fixed: usize,
     /// Parallel rows merged.
     pub parallel_rows: usize,
+    /// Doubleton equations substituted out.
+    pub doubleton_eqs: usize,
     /// Passes over the rule set.
     pub passes: usize,
+}
+
+/// One postsolve step.
+#[derive(Clone, Debug)]
+pub enum PostOp {
+    /// Column `j` fixed at `v`.
+    Fix(usize, f64),
+    /// `x_s = (rhs - b x_t) / a` (original indices).
+    Subst {
+        /// Substituted column.
+        s: usize,
+        /// Staying column.
+        t: usize,
+        /// Coefficient of `x_s`.
+        a: f64,
+        /// Coefficient of `x_t`.
+        b: f64,
+        /// Right-hand side.
+        rhs: f64,
+    },
 }
 
 /// The presolved problem and how to map its solutions back.
@@ -76,8 +103,14 @@ pub struct Presolved {
     pub form: RowForm,
     /// Original index of each reduced column.
     pub keep_cols: Vec<usize>,
-    /// Columns removed, with their fixed values (original indices).
-    pub fixed: Vec<(usize, f64)>,
+    /// Original index of each reduced row.
+    pub keep_rows: Vec<usize>,
+    /// Per reduced row, the constant moved out of its activity (fixed columns,
+    /// substitutions): reduced `lo/up` = original `lo/up` minus this, unless a merge or
+    /// tightening also changed the range.
+    pub row_shift: Vec<f64>,
+    /// Postsolve steps, in the order they were made.
+    pub ops: Vec<PostOp>,
     /// Objective constant of the removed columns.
     pub offset: f64,
     /// Presolve proved the problem infeasible.
@@ -93,8 +126,11 @@ impl Presolved {
         for (k, &j) in self.keep_cols.iter().enumerate() {
             x[j] = x_red[k];
         }
-        for &(j, v) in &self.fixed {
-            x[j] = v;
+        for op in self.ops.iter().rev() {
+            match *op {
+                PostOp::Fix(j, v) => x[j] = v,
+                PostOp::Subst { s, t, a, b, rhs } => x[s] = (rhs - b * x[t]) / a,
+            }
         }
         x
     }
@@ -105,6 +141,7 @@ struct Work {
     rows: Vec<(Vec<usize>, Vec<f64>)>,
     lo: Vec<f64>,
     up: Vec<f64>,
+    shift: Vec<f64>,
     row_alive: Vec<bool>,
     c: Vec<f64>,
     l: Vec<f64>,
@@ -113,7 +150,7 @@ struct Work {
     col_alive: Vec<bool>,
     /// Rows each column appears in (may include dead rows).
     col_rows: Vec<Vec<usize>>,
-    fixed: Vec<(usize, f64)>,
+    ops: Vec<PostOp>,
     offset: f64,
     infeasible: bool,
     feastol: f64,
@@ -155,7 +192,7 @@ impl Work {
         }
         let v = if self.is_int[j] { v.round() } else { v };
         self.col_alive[j] = false;
-        self.fixed.push((j, v));
+        self.ops.push(PostOp::Fix(j, v));
         self.offset += self.c[j] * v;
         for &r in &self.col_rows[j] {
             if !self.row_alive[r] {
@@ -172,6 +209,7 @@ impl Work {
                 if self.up[r].is_finite() {
                     self.up[r] -= a * v;
                 }
+                self.shift[r] += a * v;
             }
         }
     }
@@ -205,6 +243,108 @@ impl Work {
             self.l[j] = v;
             self.u[j] = v;
         }
+    }
+
+    /// `doubletonEq` on equality row `r` with exactly two entries. Returns whether it
+    /// substituted.
+    fn doubleton_eq(&mut self, r: usize) -> bool {
+        let (ri, rv) = self.rows[r].clone();
+        let rhs0 = self.up[r];
+        let ((j1, a1), (j2, a2)) = ((ri[0], rv[0]), (ri[1], rv[1]));
+        // Which column to substitute out: continuous first; among two continuous the
+        // larger |coefficient| (better conditioned); two integers: the smaller |coef|.
+        let (i1, i2) = (self.is_int[j1], self.is_int[j2]);
+        let first = match (i1, i2) {
+            (false, true) => true,
+            (true, false) => false,
+            (false, false) => a1.abs() >= a2.abs(),
+            (true, true) => a1.abs() <= a2.abs(),
+        };
+        let (s, a, t, mut b) = if first {
+            (j1, a1, j2, a2)
+        } else {
+            (j2, a2, j1, a1)
+        };
+        let mut rhs = rhs0;
+        if self.is_int[s] {
+            // Both integer: x_s = rhs/a - (b/a) x_t must be integral for integral x_t.
+            let q = (b / a).round();
+            if (q * a - b).abs() > 1e-12 * b.abs().max(1.0) {
+                return false;
+            }
+            b = q * a;
+            let qr = (rhs / a).round();
+            if (qr * a - rhs).abs() > self.tol(rhs) {
+                self.infeasible = true;
+                return false;
+            }
+            rhs = qr * a;
+        }
+        // x_s's bounds as implied bounds on x_t: l_s <= (rhs - b x_t)/a <= u_s.
+        let (ls, us) = (self.l[s], self.u[s]);
+        let at_l = if ls.is_finite() {
+            (rhs - a * ls) / b
+        } else if (a / b) > 0.0 {
+            INF
+        } else {
+            -INF
+        };
+        let at_u = if us.is_finite() {
+            (rhs - a * us) / b
+        } else if (a / b) > 0.0 {
+            -INF
+        } else {
+            INF
+        };
+        let (tlo, tup) = if at_l <= at_u {
+            (at_l, at_u)
+        } else {
+            (at_u, at_l)
+        };
+        self.tighten(t, tlo, tup);
+        if self.infeasible {
+            return false;
+        }
+        self.ops.push(PostOp::Subst { s, t, a, b, rhs });
+        self.col_alive[s] = false;
+        self.row_alive[r] = false;
+        // x_s = rhs/a + f x_t, f = -b/a.
+        let (c0, f) = (rhs / a, -b / a);
+        self.offset += self.c[s] * c0;
+        self.c[t] += self.c[s] * f;
+        let srows = self.col_rows[s].clone();
+        for q in srows {
+            if !self.row_alive[q] {
+                continue;
+            }
+            let Some(p) = self.rows[q].0.iter().position(|&k| k == s) else {
+                continue;
+            };
+            let coef = self.rows[q].1[p];
+            self.rows[q].0.swap_remove(p);
+            self.rows[q].1.swap_remove(p);
+            if self.lo[q].is_finite() {
+                self.lo[q] -= coef * c0;
+            }
+            if self.up[q].is_finite() {
+                self.up[q] -= coef * c0;
+            }
+            self.shift[q] += coef * c0;
+            let add = coef * f;
+            if let Some(pt) = self.rows[q].0.iter().position(|&k| k == t) {
+                self.rows[q].1[pt] += add;
+                if self.rows[q].1[pt].abs() <= 1e-12 {
+                    self.rows[q].0.swap_remove(pt);
+                    self.rows[q].1.swap_remove(pt);
+                }
+            } else if add != 0.0 {
+                self.rows[q].0.push(t);
+                self.rows[q].1.push(add);
+                self.col_rows[t].push(q);
+            }
+        }
+        self.stats.doubleton_eqs += 1;
+        true
     }
 
     fn pass(&mut self) -> bool {
@@ -245,6 +385,13 @@ impl Work {
                 self.stats.singleton_rows += 1;
                 changed = true;
                 continue;
+            }
+            if len == 2 && self.lo[r] == self.up[r] && self.doubleton_eq(r) {
+                changed = true;
+                continue;
+            }
+            if self.infeasible {
+                return false;
             }
             let (mn, nmn, mx, nmx) = self.activity(r);
             let (lo, up) = (self.lo[r], self.up[r]);
@@ -411,6 +558,7 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
         rows: f.rows.clone(),
         lo: f.lo.clone(),
         up: f.up.clone(),
+        shift: vec![0.0; f.rows.len()],
         row_alive: vec![true; f.rows.len()],
         c: f.c.clone(),
         l: f.l.clone(),
@@ -418,7 +566,7 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
         is_int: f.is_int.clone(),
         col_alive: vec![true; f.n],
         col_rows,
-        fixed: Vec::new(),
+        ops: Vec::new(),
         offset: 0.0,
         infeasible: false,
         feastol,
@@ -443,10 +591,13 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
     }
     let mut rows = Vec::new();
     let (mut lo, mut up) = (Vec::new(), Vec::new());
+    let (mut keep_rows, mut row_shift) = (Vec::new(), Vec::new());
     for r in 0..w.rows.len() {
         if !w.row_alive[r] {
             continue;
         }
+        keep_rows.push(r);
+        row_shift.push(w.shift[r]);
         let (ri, rv) = &w.rows[r];
         rows.push((ri.iter().map(|&j| newidx[j]).collect(), rv.clone()));
         lo.push(w.lo[r]);
@@ -465,7 +616,9 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
             is_int: keep_cols.iter().map(|&j| w.is_int[j]).collect(),
         },
         keep_cols,
-        fixed: w.fixed,
+        keep_rows,
+        row_shift,
+        ops: w.ops,
         offset: w.offset,
         infeasible: w.infeasible,
         stats: w.stats,
@@ -621,11 +774,13 @@ mod tests {
         let mut r = Lcg(2024);
         let (mut cases, mut reduced, mut infeasible, mut feasible) =
             (0usize, 0usize, 0usize, 0usize);
+        let mut doubletons = 0usize;
         for _ in 0..3000 {
             let f = random_ip(&mut r);
             let want = brute_min(&f);
             let p = presolve(&f, 1e-9, 20);
             cases += 1;
+            doubletons += p.stats.doubleton_eqs;
             if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
                 reduced += 1;
             }
@@ -659,8 +814,12 @@ mod tests {
             }
         }
         assert!(
-            cases == 3000 && reduced > 1000 && infeasible > 50 && feasible > 500,
-            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible}"
+            cases == 3000
+                && reduced > 1000
+                && infeasible > 50
+                && feasible > 500
+                && doubletons > 50,
+            "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons}"
         );
     }
 }
