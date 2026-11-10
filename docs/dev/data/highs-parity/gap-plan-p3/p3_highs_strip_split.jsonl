@@ -1,0 +1,248 @@
+{"name": "neos-1425699", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "blend2", "arm": "A2", "status": "Optimal", "nodes": 84}
+{"name": "blend2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 83}
+{"name": "blend2", "arm": "A2_modk", "status": "Optimal", "nodes": 84}
+{"name": "blend2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 327}
+{"name": "enlight8", "arm": "A2", "status": "Optimal", "nodes": 185}
+{"name": "enlight8", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 306}
+{"name": "enlight8", "arm": "A2_modk", "status": "Optimal", "nodes": 10279}
+{"name": "enlight8", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 230}
+{"name": "p0201", "arm": "A2", "status": "Optimal", "nodes": 25}
+{"name": "p0201", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 25}
+{"name": "p0201", "arm": "A2_modk", "status": "Optimal", "nodes": 13}
+{"name": "p0201", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 25}
+{"name": "mik-250-20-75-5", "arm": "A2", "status": "Optimal", "nodes": 723}
+{"name": "mik-250-20-75-5", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 3820}
+{"name": "mik-250-20-75-5", "arm": "A2_modk", "status": "Optimal", "nodes": 725}
+{"name": "mik-250-20-75-5", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 957}
+{"name": "neos-911970", "arm": "A2", "status": "Optimal", "nodes": 687}
+{"name": "neos-911970", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1259}
+{"name": "neos-911970", "arm": "A2_modk", "status": "Time limit reached", "nodes": 1923}
+{"name": "neos-911970", "arm": "A2_implb_clique", "status": "Time limit reached", "nodes": 1875}
+{"name": "mik-250-20-75-3", "arm": "A2", "status": "Optimal", "nodes": 611}
+{"name": "mik-250-20-75-3", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 5701}
+{"name": "mik-250-20-75-3", "arm": "A2_modk", "status": "Optimal", "nodes": 998}
+{"name": "mik-250-20-75-3", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 502}
+{"name": "fiber", "arm": "A2", "status": "Optimal", "nodes": 3}
+{"name": "fiber", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 13}
+{"name": "fiber", "arm": "A2_modk", "status": "Optimal", "nodes": 7}
+{"name": "fiber", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 7}
+{"name": "khb05250", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "mik-250-20-75-2", "arm": "A2", "status": "Optimal", "nodes": 95}
+{"name": "mik-250-20-75-2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 724}
+{"name": "mik-250-20-75-2", "arm": "A2_modk", "status": "Optimal", "nodes": 253}
+{"name": "mik-250-20-75-2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 129}
+{"name": "22433", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "mik-250-20-75-1", "arm": "A2", "status": "Optimal", "nodes": 672}
+{"name": "mik-250-20-75-1", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 4348}
+{"name": "mik-250-20-75-1", "arm": "A2_modk", "status": "Optimal", "nodes": 880}
+{"name": "mik-250-20-75-1", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 866}
+{"name": "23588", "arm": "A2", "status": "Optimal", "nodes": 476}
+{"name": "23588", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 634}
+{"name": "23588", "arm": "A2_modk", "status": "Optimal", "nodes": 491}
+{"name": "23588", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 523}
+{"name": "flugpl", "arm": "A2", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A2_modk", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 60}
+{"name": "dcmulti", "arm": "A2", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 21}
+{"name": "dcmulti", "arm": "A2_modk", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 5}
+{"name": "enlight_hard", "arm": "A2", "status": "Optimal", "nodes": 2045}
+{"name": "enlight_hard", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 4856}
+{"name": "enlight_hard", "arm": "A2_modk", "status": "Time limit reached", "nodes": 7357}
+{"name": "enlight_hard", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 464}
+{"name": "sp150x300d", "arm": "A2", "status": "Optimal", "nodes": 58}
+{"name": "sp150x300d", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 62}
+{"name": "sp150x300d", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "sp150x300d", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 229}
+{"name": "gen", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "neos17", "arm": "A2", "status": "Optimal", "nodes": 1977}
+{"name": "neos17", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 4225}
+{"name": "neos17", "arm": "A2_modk", "status": "Optimal", "nodes": 1977}
+{"name": "neos17", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 2132}
+{"name": "beavma", "arm": "A2", "status": "Optimal", "nodes": 18}
+{"name": "beavma", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 20}
+{"name": "beavma", "arm": "A2_modk", "status": "Optimal", "nodes": 15}
+{"name": "beavma", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 9}
+{"name": "neos-3611447-jijia", "arm": "A2", "status": "Optimal", "nodes": 300}
+{"name": "neos-3611447-jijia", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 4389}
+{"name": "neos-3611447-jijia", "arm": "A2_modk", "status": "Optimal", "nodes": 296}
+{"name": "neos-3611447-jijia", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 562}
+{"name": "neos-3610051-istra", "arm": "A2", "status": "Optimal", "nodes": 2632}
+{"name": "neos-3610051-istra", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 7614}
+{"name": "neos-3610051-istra", "arm": "A2_modk", "status": "Optimal", "nodes": 2705}
+{"name": "neos-3610051-istra", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 2754}
+{"name": "neos-3611689-kaihu", "arm": "A2", "status": "Optimal", "nodes": 587}
+{"name": "neos-3611689-kaihu", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 3776}
+{"name": "neos-3611689-kaihu", "arm": "A2_modk", "status": "Optimal", "nodes": 544}
+{"name": "neos-3611689-kaihu", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 546}
+{"name": "neos-3610040-iskar", "arm": "A2", "status": "Optimal", "nodes": 4801}
+{"name": "neos-3610040-iskar", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 17681}
+{"name": "neos-3610040-iskar", "arm": "A2_modk", "status": "Optimal", "nodes": 4390}
+{"name": "neos-3610040-iskar", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 4008}
+{"name": "neos-5192052-neckar", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "neos-2624317-amur", "arm": "A2", "status": "Time limit reached", "nodes": 586}
+{"name": "neos-2624317-amur", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 542}
+{"name": "neos-2624317-amur", "arm": "A2_modk", "status": "Time limit reached", "nodes": 805}
+{"name": "neos-2624317-amur", "arm": "A2_implb_clique", "status": "Time limit reached", "nodes": 2133}
+{"name": "app2-2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "b-ball", "arm": "A2", "status": "Optimal", "nodes": 135}
+{"name": "b-ball", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 28940}
+{"name": "b-ball", "arm": "A2_modk", "status": "Optimal", "nodes": 135}
+{"name": "b-ball", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 241}
+{"name": "bppc8-02", "arm": "A2", "status": "Optimal", "nodes": 345}
+{"name": "bppc8-02", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 880}
+{"name": "bppc8-02", "arm": "A2_modk", "status": "Optimal", "nodes": 345}
+{"name": "bppc8-02", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 262}
+{"name": "supportcase16", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "gsvm2rl3", "arm": "A2", "status": "Time limit reached", "nodes": 2977}
+{"name": "gsvm2rl3", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 4141}
+{"name": "gsvm2rl3", "arm": "A2_modk", "status": "Time limit reached", "nodes": 3893}
+{"name": "gsvm2rl3", "arm": "A2_implb_clique", "status": "Time limit reached", "nodes": 3792}
+{"name": "neos-3118745-obra", "arm": "A2", "status": "Time limit reached", "nodes": 706}
+{"name": "neos-3118745-obra", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 720}
+{"name": "neos-3118745-obra", "arm": "A2_modk", "status": "Time limit reached", "nodes": 507}
+{"name": "neos-3118745-obra", "arm": "A2_implb_clique", "status": "Time limit reached", "nodes": 707}
+{"name": "gr4x6", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1599}
+{"name": "2171", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "bell5", "arm": "A2", "status": "Optimal", "nodes": 99}
+{"name": "bell5", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 12509}
+{"name": "bell5", "arm": "A2_modk", "status": "Optimal", "nodes": 99}
+{"name": "bell5", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 300}
+{"name": "bound_implied", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "dcmulti", "arm": "A2", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 21}
+{"name": "dcmulti", "arm": "A2_modk", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 5}
+{"name": "egout", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "flugpl", "arm": "A2", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A2_modk", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 60}
+{"name": "gesa2", "arm": "A2", "status": "Optimal", "nodes": 11}
+{"name": "gesa2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 168}
+{"name": "gesa2", "arm": "A2_modk", "status": "Optimal", "nodes": 11}
+{"name": "gesa2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 11}
+{"name": "gt2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "issue-2173", "arm": "A2", "status": "Optimal", "nodes": 34}
+{"name": "issue-2173", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 25}
+{"name": "issue-2173", "arm": "A2_modk", "status": "Optimal", "nodes": 34}
+{"name": "issue-2173", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 34}
+{"name": "issue-2204", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "issue-2446", "arm": "A2", "status": "Time limit reached", "nodes": 768}
+{"name": "issue-2446", "arm": "A2_nodecuts", "status": "Time limit reached", "nodes": 667}
+{"name": "issue-2446", "arm": "A2_modk", "status": "Time limit reached", "nodes": 947}
+{"name": "issue-2446", "arm": "A2_implb_clique", "status": "Time limit reached", "nodes": 1160}
+{"name": "issue-2585", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "lseu", "arm": "A2", "status": "Optimal", "nodes": 5}
+{"name": "lseu", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 7}
+{"name": "lseu", "arm": "A2_modk", "status": "Optimal", "nodes": 42}
+{"name": "lseu", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 5}
+{"name": "p01", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "rgn", "arm": "A2", "status": "Optimal", "nodes": 103}
+{"name": "rgn", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1063}
+{"name": "rgn", "arm": "A2_modk", "status": "Optimal", "nodes": 103}
+{"name": "rgn", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 105}
+{"name": "small_mip", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 1}
+{"name": "sp150x300d", "arm": "A2", "status": "Optimal", "nodes": 58}
+{"name": "sp150x300d", "arm": "A2_nodecuts", "status": "Optimal", "nodes": 62}
+{"name": "sp150x300d", "arm": "A2_modk", "status": "Optimal", "nodes": 1}
+{"name": "sp150x300d", "arm": "A2_implb_clique", "status": "Optimal", "nodes": 229}

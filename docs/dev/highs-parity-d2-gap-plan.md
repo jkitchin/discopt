@@ -1380,3 +1380,53 @@ soundness checks, 0 violations):
 **Decision.** In the `highs` arm, `VBOUNDS` stays ON and `PROPAGATE` is OFF. HiGHS
 certifies 59. Still HiGHS-only: the mik family (4), enlight8, neos-911970, neos17,
 b-ball, bppc8-02, gsvm2rl3, issue-2446, plus bell5 under variable bounds.
+
+### 12.22 Where the remaining gap is: HiGHS stripped to discopt's feature set (2026-11-10)
+
+The single-stage ablations of §12.14 found most HiGHS stages worth 0 because the others
+back them up. This round strips HiGHS **cumulatively** toward the features discopt has
+(`p3_highs_strip.py`, 62 rows, 20 s, 1 thread). What HiGHS loses on the way is what
+discopt still lacks, ranked by measured impact.
+
+| step | certified | lost (vs previous) |
+|---|---|---|
+| HiGHS default | 59 | |
+| A1 presolve off everywhere, sub-MIPs included (`mip_root_presolve_only`) | 57 | enlight_hard, issue-2446, neos-911970 (one gained) |
+| A2 + restart, symmetry, conflict off | 58 | noise (±1) |
+| A3 + node cuts, mod-k, implied-bound and clique separators off | **51** | **b-ball, bell5, enlight_hard, mik-3, neos-3610040-iskar, neos-3610051-istra, neos-911970** |
+| A4 + heuristics discopt lacks off (feasibility jump, ZI round, shifting, root red-cost) | 50 | net -1 |
+| A5 + RENS/RINS off | 48 | net -2 |
+
+**HiGHS stripped to discopt's features certifies 48; discopt certifies 47.** So
+the 12-row gap is accounted for by the features removed above.
+
+A3 split, each removed from A2 (`p3_highs_strip_split.py`):
+
+| removed | certified | lost |
+|---|---|---|
+| node cut separation | **53 (-5)** | b-ball, mik-1, mik-3, neos-3610040-iskar, neos-3610051-istra |
+| mod-k separator | 56 (-2) | enlight_hard, neos-911970 |
+| implied-bound + clique separators | 57 (-1) | neos-911970 |
+
+**Supporting measurements.**
+- **Node counts.** On the mik rows HiGHS needs 91-453 nodes; discopt processes
+  5-6.6k nodes at 2-10x HiGHS's node rate and stays 1.6-3 % open. The gap is in what
+  each node proves, consistent with node separation.
+- **Sub-MIP presolve.** HiGHS presolves every sub-MIP (`HighsPrimalHeuristics.cpp:124-130`)
+  even with top-level presolve off. The §12.14 "presolve off: 0" arm kept sub-MIP
+  presolve; turning it off too costs 2 (`p3_highs_submip_presolve.py`).
+- **Primal sources.** HiGHS's improving solutions on the open rows are mostly `L`
+  (sub-MIP) at node 0. discopt's RENS runs 5 times on neos17 (1,407 sub-nodes) and 3
+  times on neos-911970 without an improvement.
+
+**Priority:**
+1. **node separation:** run the ported separators and pool re-separation at tree
+   nodes, feeding the existing node-LP cut fold (`CUT_LP`); cuts built against the
+   global box so they stay globally valid; -5;
+2. **mod-k separator:** -2;
+3. **sub-MIP strength** (presolve inside sub-MIPs): -2;
+4. implied-bound and clique separators: -1;
+5. feasibility jump: -1.
+
+Restart, symmetry and conflict analysis stay unported (0). The revisited flow
+diagram is published as an artifact.

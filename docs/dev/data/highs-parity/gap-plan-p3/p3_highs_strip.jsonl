@@ -1,0 +1,310 @@
+{"name": "neos-1425699", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "neos-1425699", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "blend2", "arm": "A1", "status": "Optimal", "nodes": 75}
+{"name": "blend2", "arm": "A2", "status": "Optimal", "nodes": 84}
+{"name": "blend2", "arm": "A3", "status": "Optimal", "nodes": 302}
+{"name": "blend2", "arm": "A4", "status": "Optimal", "nodes": 274}
+{"name": "blend2", "arm": "A5", "status": "Optimal", "nodes": 14785}
+{"name": "enlight8", "arm": "A1", "status": "Optimal", "nodes": 14}
+{"name": "enlight8", "arm": "A2", "status": "Optimal", "nodes": 185}
+{"name": "enlight8", "arm": "A3", "status": "Optimal", "nodes": 17667}
+{"name": "enlight8", "arm": "A4", "status": "Optimal", "nodes": 14637}
+{"name": "enlight8", "arm": "A5", "status": "Optimal", "nodes": 9795}
+{"name": "p0201", "arm": "A1", "status": "Optimal", "nodes": 7}
+{"name": "p0201", "arm": "A2", "status": "Optimal", "nodes": 25}
+{"name": "p0201", "arm": "A3", "status": "Optimal", "nodes": 28}
+{"name": "p0201", "arm": "A4", "status": "Optimal", "nodes": 38}
+{"name": "p0201", "arm": "A5", "status": "Optimal", "nodes": 45}
+{"name": "mik-250-20-75-5", "arm": "A1", "status": "Optimal", "nodes": 835}
+{"name": "mik-250-20-75-5", "arm": "A2", "status": "Optimal", "nodes": 723}
+{"name": "mik-250-20-75-5", "arm": "A3", "status": "Optimal", "nodes": 3763}
+{"name": "mik-250-20-75-5", "arm": "A4", "status": "Time limit reached", "nodes": 4087}
+{"name": "mik-250-20-75-5", "arm": "A5", "status": "Time limit reached", "nodes": 6098}
+{"name": "neos-911970", "arm": "A1", "status": "Time limit reached", "nodes": 1298}
+{"name": "neos-911970", "arm": "A2", "status": "Optimal", "nodes": 687}
+{"name": "neos-911970", "arm": "A3", "status": "Time limit reached", "nodes": 2646}
+{"name": "neos-911970", "arm": "A4", "status": "Time limit reached", "nodes": 2418}
+{"name": "neos-911970", "arm": "A5", "status": "Time limit reached", "nodes": 7604}
+{"name": "mik-250-20-75-3", "arm": "A1", "status": "Optimal", "nodes": 767}
+{"name": "mik-250-20-75-3", "arm": "A2", "status": "Optimal", "nodes": 611}
+{"name": "mik-250-20-75-3", "arm": "A3", "status": "Time limit reached", "nodes": 5218}
+{"name": "mik-250-20-75-3", "arm": "A4", "status": "Time limit reached", "nodes": 4729}
+{"name": "mik-250-20-75-3", "arm": "A5", "status": "Time limit reached", "nodes": 11270}
+{"name": "fiber", "arm": "A1", "status": "Optimal", "nodes": 13}
+{"name": "fiber", "arm": "A2", "status": "Optimal", "nodes": 3}
+{"name": "fiber", "arm": "A3", "status": "Optimal", "nodes": 11}
+{"name": "fiber", "arm": "A4", "status": "Optimal", "nodes": 9}
+{"name": "fiber", "arm": "A5", "status": "Optimal", "nodes": 19}
+{"name": "khb05250", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "khb05250", "arm": "A5", "status": "Optimal", "nodes": 120}
+{"name": "nexp-50-20-1-1", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-1-1", "arm": "A5", "status": "Optimal", "nodes": 112}
+{"name": "mik-250-20-75-2", "arm": "A1", "status": "Optimal", "nodes": 87}
+{"name": "mik-250-20-75-2", "arm": "A2", "status": "Optimal", "nodes": 95}
+{"name": "mik-250-20-75-2", "arm": "A3", "status": "Optimal", "nodes": 850}
+{"name": "mik-250-20-75-2", "arm": "A4", "status": "Optimal", "nodes": 4567}
+{"name": "mik-250-20-75-2", "arm": "A5", "status": "Time limit reached", "nodes": 8628}
+{"name": "22433", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "22433", "arm": "A5", "status": "Optimal", "nodes": 5}
+{"name": "nexp-50-20-4-2", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "nexp-50-20-4-2", "arm": "A5", "status": "Optimal", "nodes": 166}
+{"name": "gt2", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A5", "status": "Optimal", "nodes": 180}
+{"name": "mik-250-20-75-1", "arm": "A1", "status": "Optimal", "nodes": 784}
+{"name": "mik-250-20-75-1", "arm": "A2", "status": "Optimal", "nodes": 672}
+{"name": "mik-250-20-75-1", "arm": "A3", "status": "Optimal", "nodes": 2365}
+{"name": "mik-250-20-75-1", "arm": "A4", "status": "Optimal", "nodes": 1954}
+{"name": "mik-250-20-75-1", "arm": "A5", "status": "Time limit reached", "nodes": 16558}
+{"name": "23588", "arm": "A1", "status": "Optimal", "nodes": 419}
+{"name": "23588", "arm": "A2", "status": "Optimal", "nodes": 476}
+{"name": "23588", "arm": "A3", "status": "Optimal", "nodes": 554}
+{"name": "23588", "arm": "A4", "status": "Optimal", "nodes": 1016}
+{"name": "23588", "arm": "A5", "status": "Optimal", "nodes": 943}
+{"name": "flugpl", "arm": "A1", "status": "Optimal", "nodes": 104}
+{"name": "flugpl", "arm": "A2", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A3", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A4", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A5", "status": "Optimal", "nodes": 58}
+{"name": "dcmulti", "arm": "A1", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A3", "status": "Optimal", "nodes": 5}
+{"name": "dcmulti", "arm": "A4", "status": "Optimal", "nodes": 5}
+{"name": "dcmulti", "arm": "A5", "status": "Optimal", "nodes": 61}
+{"name": "enlight_hard", "arm": "A1", "status": "Time limit reached", "nodes": 3486}
+{"name": "enlight_hard", "arm": "A2", "status": "Optimal", "nodes": 2045}
+{"name": "enlight_hard", "arm": "A3", "status": "Time limit reached", "nodes": 25227}
+{"name": "enlight_hard", "arm": "A4", "status": "Time limit reached", "nodes": 25565}
+{"name": "enlight_hard", "arm": "A5", "status": "Time limit reached", "nodes": 29659}
+{"name": "sp150x300d", "arm": "A1", "status": "Optimal", "nodes": 27}
+{"name": "sp150x300d", "arm": "A2", "status": "Optimal", "nodes": 58}
+{"name": "sp150x300d", "arm": "A3", "status": "Optimal", "nodes": 1772}
+{"name": "sp150x300d", "arm": "A4", "status": "Optimal", "nodes": 1615}
+{"name": "sp150x300d", "arm": "A5", "status": "Optimal", "nodes": 2460}
+{"name": "gen", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "gen", "arm": "A5", "status": "Optimal", "nodes": 0}
+{"name": "neos17", "arm": "A1", "status": "Optimal", "nodes": 1828}
+{"name": "neos17", "arm": "A2", "status": "Optimal", "nodes": 1977}
+{"name": "neos17", "arm": "A3", "status": "Optimal", "nodes": 4922}
+{"name": "neos17", "arm": "A4", "status": "Time limit reached", "nodes": 6503}
+{"name": "neos17", "arm": "A5", "status": "Optimal", "nodes": 3255}
+{"name": "beavma", "arm": "A1", "status": "Optimal", "nodes": 18}
+{"name": "beavma", "arm": "A2", "status": "Optimal", "nodes": 18}
+{"name": "beavma", "arm": "A3", "status": "Optimal", "nodes": 9}
+{"name": "beavma", "arm": "A4", "status": "Optimal", "nodes": 9}
+{"name": "beavma", "arm": "A5", "status": "Optimal", "nodes": 14}
+{"name": "neos-3611447-jijia", "arm": "A1", "status": "Optimal", "nodes": 727}
+{"name": "neos-3611447-jijia", "arm": "A2", "status": "Optimal", "nodes": 300}
+{"name": "neos-3611447-jijia", "arm": "A3", "status": "Optimal", "nodes": 7913}
+{"name": "neos-3611447-jijia", "arm": "A4", "status": "Optimal", "nodes": 7934}
+{"name": "neos-3611447-jijia", "arm": "A5", "status": "Optimal", "nodes": 10731}
+{"name": "neos-3610051-istra", "arm": "A1", "status": "Optimal", "nodes": 3447}
+{"name": "neos-3610051-istra", "arm": "A2", "status": "Optimal", "nodes": 2632}
+{"name": "neos-3610051-istra", "arm": "A3", "status": "Time limit reached", "nodes": 7907}
+{"name": "neos-3610051-istra", "arm": "A4", "status": "Time limit reached", "nodes": 6884}
+{"name": "neos-3610051-istra", "arm": "A5", "status": "Time limit reached", "nodes": 10413}
+{"name": "neos-3611689-kaihu", "arm": "A1", "status": "Optimal", "nodes": 644}
+{"name": "neos-3611689-kaihu", "arm": "A2", "status": "Optimal", "nodes": 587}
+{"name": "neos-3611689-kaihu", "arm": "A3", "status": "Optimal", "nodes": 5426}
+{"name": "neos-3611689-kaihu", "arm": "A4", "status": "Optimal", "nodes": 7508}
+{"name": "neos-3611689-kaihu", "arm": "A5", "status": "Optimal", "nodes": 9747}
+{"name": "neos-3610040-iskar", "arm": "A1", "status": "Optimal", "nodes": 4365}
+{"name": "neos-3610040-iskar", "arm": "A2", "status": "Optimal", "nodes": 4801}
+{"name": "neos-3610040-iskar", "arm": "A3", "status": "Time limit reached", "nodes": 17740}
+{"name": "neos-3610040-iskar", "arm": "A4", "status": "Time limit reached", "nodes": 19791}
+{"name": "neos-3610040-iskar", "arm": "A5", "status": "Time limit reached", "nodes": 25311}
+{"name": "neos-5192052-neckar", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "neos-5192052-neckar", "arm": "A4", "status": "Optimal", "nodes": 9}
+{"name": "neos-5192052-neckar", "arm": "A5", "status": "Optimal", "nodes": 9}
+{"name": "neos-2624317-amur", "arm": "A1", "status": "Time limit reached", "nodes": 820}
+{"name": "neos-2624317-amur", "arm": "A2", "status": "Time limit reached", "nodes": 645}
+{"name": "neos-2624317-amur", "arm": "A3", "status": "Time limit reached", "nodes": 3600}
+{"name": "neos-2624317-amur", "arm": "A4", "status": "Optimal", "nodes": 1653}
+{"name": "neos-2624317-amur", "arm": "A5", "status": "Time limit reached", "nodes": 10777}
+{"name": "app2-2", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "app2-2", "arm": "A5", "status": "Optimal", "nodes": 19}
+{"name": "b-ball", "arm": "A1", "status": "Optimal", "nodes": 246}
+{"name": "b-ball", "arm": "A2", "status": "Optimal", "nodes": 135}
+{"name": "b-ball", "arm": "A3", "status": "Time limit reached", "nodes": 32663}
+{"name": "b-ball", "arm": "A4", "status": "Time limit reached", "nodes": 18058}
+{"name": "b-ball", "arm": "A5", "status": "Time limit reached", "nodes": 146903}
+{"name": "bppc8-02", "arm": "A1", "status": "Optimal", "nodes": 218}
+{"name": "bppc8-02", "arm": "A2", "status": "Optimal", "nodes": 345}
+{"name": "bppc8-02", "arm": "A3", "status": "Optimal", "nodes": 301}
+{"name": "bppc8-02", "arm": "A4", "status": "Optimal", "nodes": 301}
+{"name": "bppc8-02", "arm": "A5", "status": "Optimal", "nodes": 596}
+{"name": "supportcase16", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "supportcase16", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "supportcase14", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "f2gap40400", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "gsvm2rl3", "arm": "A1", "status": "Optimal", "nodes": 4112}
+{"name": "gsvm2rl3", "arm": "A2", "status": "Time limit reached", "nodes": 3786}
+{"name": "gsvm2rl3", "arm": "A3", "status": "Time limit reached", "nodes": 4041}
+{"name": "gsvm2rl3", "arm": "A4", "status": "Time limit reached", "nodes": 4934}
+{"name": "gsvm2rl3", "arm": "A5", "status": "Time limit reached", "nodes": 28132}
+{"name": "neos-3118745-obra", "arm": "A1", "status": "Time limit reached", "nodes": 490}
+{"name": "neos-3118745-obra", "arm": "A2", "status": "Time limit reached", "nodes": 706}
+{"name": "neos-3118745-obra", "arm": "A3", "status": "Time limit reached", "nodes": 503}
+{"name": "neos-3118745-obra", "arm": "A4", "status": "Time limit reached", "nodes": 714}
+{"name": "neos-3118745-obra", "arm": "A5", "status": "Time limit reached", "nodes": 8005}
+{"name": "gr4x6", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "gr4x6", "arm": "A4", "status": "Optimal", "nodes": 17}
+{"name": "gr4x6", "arm": "A5", "status": "Optimal", "nodes": 36}
+{"name": "1451", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "1451", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "2122", "arm": "A4", "status": "Optimal", "nodes": 1416}
+{"name": "2122", "arm": "A5", "status": "Optimal", "nodes": 4813}
+{"name": "2171", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "2171", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "bell5", "arm": "A1", "status": "Optimal", "nodes": 85}
+{"name": "bell5", "arm": "A2", "status": "Optimal", "nodes": 99}
+{"name": "bell5", "arm": "A3", "status": "Time limit reached", "nodes": 53357}
+{"name": "bell5", "arm": "A4", "status": "Time limit reached", "nodes": 61398}
+{"name": "bell5", "arm": "A5", "status": "Time limit reached", "nodes": 71687}
+{"name": "bound_implied", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "bound_implied", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "dcmulti", "arm": "A1", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A2", "status": "Optimal", "nodes": 14}
+{"name": "dcmulti", "arm": "A3", "status": "Optimal", "nodes": 5}
+{"name": "dcmulti", "arm": "A4", "status": "Optimal", "nodes": 5}
+{"name": "dcmulti", "arm": "A5", "status": "Optimal", "nodes": 61}
+{"name": "egout", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "egout", "arm": "A5", "status": "Optimal", "nodes": 0}
+{"name": "fixed-binary", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "fixed-binary", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "flugpl", "arm": "A1", "status": "Optimal", "nodes": 104}
+{"name": "flugpl", "arm": "A2", "status": "Optimal", "nodes": 60}
+{"name": "flugpl", "arm": "A3", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A4", "status": "Optimal", "nodes": 58}
+{"name": "flugpl", "arm": "A5", "status": "Optimal", "nodes": 58}
+{"name": "gesa2", "arm": "A1", "status": "Optimal", "nodes": 13}
+{"name": "gesa2", "arm": "A2", "status": "Optimal", "nodes": 11}
+{"name": "gesa2", "arm": "A3", "status": "Optimal", "nodes": 27}
+{"name": "gesa2", "arm": "A4", "status": "Optimal", "nodes": 155}
+{"name": "gesa2", "arm": "A5", "status": "Optimal", "nodes": 788}
+{"name": "gt2", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "gt2", "arm": "A5", "status": "Optimal", "nodes": 180}
+{"name": "issue-2095", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "issue-2095", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "issue-2173", "arm": "A1", "status": "Optimal", "nodes": 43}
+{"name": "issue-2173", "arm": "A2", "status": "Optimal", "nodes": 34}
+{"name": "issue-2173", "arm": "A3", "status": "Optimal", "nodes": 25}
+{"name": "issue-2173", "arm": "A4", "status": "Optimal", "nodes": 25}
+{"name": "issue-2173", "arm": "A5", "status": "Optimal", "nodes": 28}
+{"name": "issue-2204", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "issue-2204", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "issue-2290", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "issue-2388", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "issue-2446", "arm": "A1", "status": "Time limit reached", "nodes": 867}
+{"name": "issue-2446", "arm": "A2", "status": "Time limit reached", "nodes": 710}
+{"name": "issue-2446", "arm": "A3", "status": "Time limit reached", "nodes": 1138}
+{"name": "issue-2446", "arm": "A4", "status": "Time limit reached", "nodes": 1152}
+{"name": "issue-2446", "arm": "A5", "status": "Time limit reached", "nodes": 6753}
+{"name": "issue-2585", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "issue-2585", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "lseu", "arm": "A1", "status": "Optimal", "nodes": 5}
+{"name": "lseu", "arm": "A2", "status": "Optimal", "nodes": 5}
+{"name": "lseu", "arm": "A3", "status": "Optimal", "nodes": 99}
+{"name": "lseu", "arm": "A4", "status": "Optimal", "nodes": 228}
+{"name": "lseu", "arm": "A5", "status": "Optimal", "nodes": 363}
+{"name": "p01", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "p01", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "p0548", "arm": "A4", "status": "Optimal", "nodes": 6}
+{"name": "p0548", "arm": "A5", "status": "Optimal", "nodes": 179}
+{"name": "rgn", "arm": "A1", "status": "Optimal", "nodes": 5}
+{"name": "rgn", "arm": "A2", "status": "Optimal", "nodes": 103}
+{"name": "rgn", "arm": "A3", "status": "Optimal", "nodes": 1101}
+{"name": "rgn", "arm": "A4", "status": "Optimal", "nodes": 1185}
+{"name": "rgn", "arm": "A5", "status": "Optimal", "nodes": 1351}
+{"name": "small_mip", "arm": "A1", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A2", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A3", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A4", "status": "Optimal", "nodes": 1}
+{"name": "small_mip", "arm": "A5", "status": "Optimal", "nodes": 1}
+{"name": "sp150x300d", "arm": "A1", "status": "Optimal", "nodes": 27}
+{"name": "sp150x300d", "arm": "A2", "status": "Optimal", "nodes": 58}
+{"name": "sp150x300d", "arm": "A3", "status": "Optimal", "nodes": 1772}
+{"name": "sp150x300d", "arm": "A4", "status": "Optimal", "nodes": 1615}
+{"name": "sp150x300d", "arm": "A5", "status": "Optimal", "nodes": 2460}
