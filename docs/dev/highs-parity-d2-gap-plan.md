@@ -1571,3 +1571,72 @@ in the conversation I said HiGHS certifies mik with no separators; that held onl
 and restarts on (`hs_ablate_pop` `cuts_off` arm). The open question is how HiGHS's node cuts
 differ from ours in use: HiGHS separates at the start of every dive and the cuts stay in that
 dive's LP; ours run on 8 best-bound nodes per batch and reach the shared LP at batch boundaries.
+
+### 12.28 The HiGHS search configuration as one bundle (2026-11-10)
+
+Built under the `highs` arm, all default OFF, to be judged together (owner, 2026-11-10: "if
+HiGHS has it, we need it, and probably it isn't wired correctly"):
+`DISCOPT_HIGHS_ROOT_RENS` (§12.27), `DISCOPT_HIGHS_DIVE` (each batch continues the previous
+batch's plunges into the preferred child, HiGHS `kRootSol`, up to 100 nodes, then fills
+best-first; node separation at plunge starts), `DISCOPT_HIGHS_SEPA_NODE=add`,
+`DISCOPT_HIGHS_ROOT_POOL` (root cuts dropped by cleanup seed the node pool),
+`DISCOPT_HIGHS_SB_TREE` (reliability strong branching for the whole tree; it was capped at the
+first 48 nodes, `sb_node_budget`). Mod-k is ON with the arm (§12.26).
+
+Panel (`p3_ab_bundle.jsonl`, 62 rows, 20 s): cert-clean (343 checks); **48 -> 49**: +bell5
+(1.8 s, 3,037 nodes; default 105k nodes open), +enlight_hard (7.2 s, 169 nodes; default 8.1 %
+open), -2122 (incumbent not found: 1,607 nodes vs 12,877). mik final gaps 2.95/2.05/2.87/1.56 ->
+0.97/0.33/1.25/0.54 %; neos17 0.79 -> 0.44 %. Wall on the 44 common rows 81 -> 94 s. A
+knock-out-per-lever run was stopped half way (`p3_ab_bundle_ablation_partial.jsonl`):
+enlight_hard needs root RENS; mik needs root RENS and SB through the tree.
+
+HiGHS on mik with cuts on (presolve/restarts/symmetry/conflict off,
+`p3_highs_tree_knockout_mik_cuts.py`): no single knock-out stops it certifying (no node cuts
+19 s, no heuristics 19 s, every other component < 10 s). Its tree is redundant; the components
+compound.
+
+### 12.29 Why progress was slow, and the plan that replaces piece-by-piece porting (2026-11-10)
+
+**Accounting.** The cumulative HiGHS strip (§12.22, `p3_highs_strip.jsonl`): default 59;
+presolve off 57; + restarts/symmetry/conflict off 58; + node separation, mod-k, implied-bound and
+clique separators off **51**; + heuristics 50; + RENS/RINS 48. discopt is at 49. So ~7 rows are
+HiGHS's cuts *inside its search loop*, ~2 presolve.
+
+**Why the ported parts did not convert.** Parts with a local effect transferred (root separators
+41 -> 45, variable bounds +2, mod-k +2). Parts whose value depends on how the search runs (node
+cuts, plunging, reduced-cost fixing in dives, strong-branching reliability) were grafted onto a
+different search loop and measured neutral, and §5's per-flag "net-positive alone" rule turned
+complementary parts off one at a time. The 20 s certified count also hid real gains (the mik
+gaps halving) while edge rows (2122 at 18-22 s, bell5 at the 0.01 % line) flipped on timing.
+
+**The loop itself is the blocker** (`p3_ab_dive_batch.jsonl`, `DISCOPT_HIGHS_DIVE_BATCH`, an
+experiment knob). HiGHS searches sequentially: one dive at a time in one LP that keeps the dive's
+cuts, reduced-cost fixing applied to the node in place and the node re-evaluated
+(`HighsSearch::evaluateNode` returns `evaluateNode()` when the local domain changed). discopt
+evaluates 64-node batches and folds cuts in at batch boundaries. Shrinking the batch makes it
+more HiGHS-like and slower: batch 1 finds 2122's incumbent (0.08 % vs 762 % at 64) but runs 713
+nodes on mik-1 in 20 s (HiGHS: 1,099 nodes in 8 s with separation), bell5 15.7 s vs 1.1 s. The
+batch machinery costs milliseconds per batch, so a faithful sequential search cannot be emulated
+inside it.
+
+**Plan.** Port HiGHS's search loop as a dedicated sequential module under the `highs` arm
+(`bnb/highs_search.rs`), reusing discopt's simplex (warm solves, NS-safe bounds), FBBT, the
+ported separators/cut pool (`lp/highs_cutgen`), strong branching and the RENS/RINS port:
+
+1. `HighsNodeQueue`: open nodes with bound-change stacks, best-bound / best-estimate selection,
+   pruning at the optimality limit.
+2. `HighsSearch`: node stack, `installNode`, `evaluateNode` (propagate, LP, reduced-cost fixing in
+   place and re-evaluate, pseudocost/inference/cutoff observations), `branch` (reliability SB with
+   HiGHS's iteration budget, child by `kRootSol`), `backtrack`/`backtrackPlunge` (plunge limit
+   100), `openNodesToQueue`.
+3. One persistent node LP (`HighsLpRelaxation` role): working rows + cuts, aging
+   (`mip_lp_age_limit`), warm basis along the dive.
+4. Main loop (`HighsMipSolver::run` `processNodes`): separation rounds at each node taken from the
+   queue (ported separators + cut-pool separation), heuristics schedule, dive, backtrack-plunge.
+5. Later layers: lurking root reduced-cost bounds, cut-pool and conflict-pool propagation,
+   conflict analysis, presolve.
+
+**Measurement.** Iterate on a fast panel (the rows HiGHS certifies and discopt does not, plus
+~10 sentinels) scored by final gap as well as certification, with the baseline run twice for the
+noise band; the 62-row certification panel only decides graduation. Judge the configuration
+whole until the loop is in; only then ablate.

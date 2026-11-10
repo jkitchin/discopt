@@ -5350,6 +5350,16 @@ fn solve_milp_node_search(
                 .unwrap_or_default(),
         );
     }
+    // Experiment knob (gap plan §12.29): batch size under dives (HiGHS is sequential).
+    let dive_batch_size: usize = std::env::var("DISCOPT_HIGHS_DIVE_BATCH")
+        .ok()
+        .map(|v| {
+            v.trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("DISCOPT_HIGHS_DIVE_BATCH={v:?} is not a count"))
+        })
+        .unwrap_or(64)
+        .max(1);
     let mut plunge_next: Vec<NodeId> = Vec::new();
     let mut plunge_len: HashMap<NodeId, usize> = HashMap::new();
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
@@ -5461,7 +5471,7 @@ fn solve_milp_node_search(
             }
         }
         let (batch, n_plunge_cont) = if dive_on {
-            tm.export_batch_preferring(&plunge_next, 64)
+            tm.export_batch_preferring(&plunge_next, dive_batch_size)
         } else {
             (tm.export_batch(64), 0)
         };
