@@ -2,6 +2,13 @@
 //! <https://github.com/ERGO-Code/HiGHS>), built bottom-up so each layer can be
 //! checked bit-for-bit against HiGHS itself before the next is ported.
 //!
+//! Provenance: translated from HiGHS's C++ source (Copyright (c) HiGHS, MIT License);
+//! pdqsort from Orson Peters (zlib License). License texts: `THIRD_PARTY_NOTICES.md`.
+//! Why ported rather than linked: deep integration with discopt's own LP, tree and
+//! certificate machinery, behaviour compatible with HiGHS (checked by bit-exact replay),
+//! and a pure-Rust build: no C/C++/Fortran compiler and no native solver library to
+//! ship, which keeps installation and distribution simple.
+//!
 //! Why a port and not more tuning of `lp/cmir.rs`: on the MIPLIB-38+M population
 //! HiGHS's root separation is the one stage whose removal costs it certifications
 //! (60 -> 47 at 20 s), and a same-LP differential showed its generation and its
@@ -11,8 +18,8 @@
 //! Layers, bottom-up:
 //! - [`cdouble`]  `HighsCDouble`, the double-double type the generator computes in;
 //! - [`random`]   `HighsRandom` and the hash helpers it is built on;
-//! - [`stdalgo`]  `pdqsort` and the libstdc++ algorithms whose tie order the cut
-//!   depends on;
+//! - [`stdalgo`]  `pdqsort` (translated, zlib) and independent implementations of the
+//!   C++ standard algorithms HiGHS calls;
 //! - [`integers`] `HighsIntegers` (integral scales, continued fractions);
 //! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`;
 //! - [`sparse_vec`] `HighsSparseVectorSum`;

@@ -1,6 +1,7 @@
 //! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
 //! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
-//! at the repository root for the license text.
+//! at the repository root for the license text, and `mod.rs` for why HiGHS is ported
+//! rather than linked.
 //!
 //! Faithful port of `util/HighsSparseVectorSum.h`: a dense accumulator of
 //! compensated sums with a list of touched indices in first-touch order. The
@@ -82,7 +83,7 @@ impl SparseVectorSum {
         }
         self.nonzeroinds.clear();
     }
-    /// `partition(pred)` over the nonzero list (libstdc++ order).
+    /// `partition(pred)` over the nonzero list (order within each side unspecified).
     pub fn partition<P: FnMut(&i32) -> bool>(&mut self, pred: P) -> usize {
         partition(&mut self.nonzeroinds, pred)
     }

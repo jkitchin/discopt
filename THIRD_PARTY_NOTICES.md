@@ -4,6 +4,15 @@ discopt is licensed under the Eclipse Public License 2.0 (see `LICENSE`). Parts 
 derived from third-party software under the licenses reproduced below. Each derived file says
 so in its header.
 
+## Why discopt ports rather than links
+
+discopt translates selected algorithms from other open-source solvers into Rust instead of
+linking their native libraries. The reasons: deep integration with discopt's own LP, tree and
+certificate machinery; behaviour compatible with the original (checked where possible by
+bit-exact replay against the original program); and a pure-Rust build that needs no C, C++ or
+Fortran compiler and ships no native solver library, which keeps installation and distribution
+simple. Every translated or derived file says where it comes from and under which license.
+
 ## HiGHS (MIT License)
 
 `crates/discopt-core/src/lp/highs_cutgen/` (`cdouble`, `random`, `integers`, `core`,

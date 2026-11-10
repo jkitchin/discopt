@@ -508,6 +508,19 @@ in this repo, so treat that README's framing of them as unverified here.
 
 ## Key Constraints
 
+- **Third-party code: always state provenance and why.** discopt translates selected
+  algorithms from other solvers (HiGHS so far) into Rust instead of linking them, for deep
+  integration with its own LP/tree/certificate machinery, compatibility with the original
+  (bit-exact replay where possible), and a pure-Rust build with no C/C++/Fortran compiler or
+  native library to ship. Every translated or derived file must say, in its header, what it
+  is derived from, the upstream copyright and license, and point to `THIRD_PARTY_NOTICES.md`
+  (which holds the license texts and ships in the sdist/wheel via `tool.maturin.include`).
+  Add the upstream license there in the same PR that adds the code. Only port from
+  permissively licensed sources (MIT, BSD, zlib, Apache-2.0); never translate GPL/LGPL source
+  (e.g. libstdc++) -- write an independent implementation and check it against the original's
+  *outputs* instead. Example: the libstdc++ `partition`/`partial_sort`/heap/
+  `upper_bound` translations were replaced by Rust std versions in this way.
+
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
 - **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12
   (the `numerical_tolerance` fixture in `discopt_benchmarks/tests/conftest.py` — there are

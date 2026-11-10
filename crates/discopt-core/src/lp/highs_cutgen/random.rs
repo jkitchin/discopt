@@ -1,6 +1,7 @@
 //! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
 //! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
-//! at the repository root for the license text.
+//! at the repository root for the license text, and `mod.rs` for why HiGHS is ported
+//! rather than linked.
 //!
 //! Faithful port of `util/HighsRandom.h` and the parts of `util/HighsHash.h` it and
 //! the cut generator use (`pair_hash`, `hash(std::pair<int,int>)`, `log2i`).

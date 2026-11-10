@@ -1,6 +1,7 @@
 //! Provenance: a Rust translation of HiGHS source (https://github.com/ERGO-Code/HiGHS,
 //! Copyright (c) HiGHS, MIT License), modified for discopt. See `THIRD_PARTY_NOTICES.md`
-//! at the repository root for the license text.
+//! at the repository root for the license text, and `mod.rs` for why HiGHS is ported
+//! rather than linked.
 //!
 //! `HighsModkSeparator` with `HighsGFkSolve` and `HighsSplay` (gap plan P3,
 //! option A, §12.24): mod-k cuts from integer combinations of tight LP rows.
