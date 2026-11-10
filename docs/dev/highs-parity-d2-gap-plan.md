@@ -1829,3 +1829,45 @@ supportcase14/16, p0548, egout; HiGHS solves several small issue-* rows in preso
 Parity order by measured volume: aggregator; dominated columns (HiGHS's dual-bound test);
 parallel columns; singleton-row column removal; free-column substitution; forcing columns;
 sparsify last.
+
+### 12.36 mik per-node diagnosis: HiGHS's pool cuts at plunge starts (2026-11-10)
+
+A side diagnosis (separate worktree; HiGHS at `threads=1` with presolve, restarts, symmetry and
+conflict analysis off, node counts identical across reruns; discopt bundle + search config with
+the loaded build asserted) asked why HiGHS certifies mik-250-20-75-1 in 672 nodes and discopt
+does not. The root bound is not it: capping HiGHS's root at 19-23 rounds gives a root as weak as
+or weaker than discopt's (-50,718 to -50,628 vs -50,684), and HiGHS still certifies in 391-586
+nodes. Per node over the first ~1,000 nodes:
+
+| | HiGHS | discopt |
+|---|---|---|
+| reduced-cost fixings | 37 | 10 |
+| integer-column tightenings by propagation | 22.6 | 6.5 (FBBT) |
+| node-cut bound lift at plunge starts (median) | 103 | 3.9 |
+| gap closed at depth 12-17 (same root value) | 0.82-0.91 | 0.66-0.75 |
+
+HiGHS knock-outs (nodes to certify): base 672; no node separation 5,267 (and the gap closed by
+depth drops to 0.63-0.74, discopt's level); node separation re-adding pool cuts only, no new
+cuts, 813; no cut-pool propagation 1,161; no node reduced-cost fixing 1,266; no node
+propagation 1,520; all three of pool propagation, node reduced-cost fixing and pool-only node
+separation 8,136. Pool size is a dose-response: `mip_pool_soft_limit` 400 / 200 / 100 -> 1,522 /
+2,756 / 4,580 nodes (HiGHS's pool holds 5,087 cuts after the root, 1,913 at node 300; discopt's
+node pool about 115 plus about 130 cut rows in the LP, with 312 rows relaxed out and never
+re-admitted, violated 35,659 times).
+
+All 366 distinct HiGHS cuts that tighten bounds are pure-integer (108 of 112 pure-integer root
+cuts come from mod-k); discopt has no pure-integer cut anywhere (node pool, LP rows, or the
+3,731-cut root pool of the ported separators): each carries 7-20 of mik's 20 continuous
+columns, which are unbounded above, so cut-pool propagation prototyped in discopt found 0
+tightenings. discopt knock-ins: re-admitting relaxed rows 1.15 -> 1.05 % at ~1,540 nodes;
+seeding the root pool into the node pool, no gain per node; SB only for the first 48 nodes,
+much worse.
+
+**What this says to build, in order:** (1) separate at plunge starts *before* branching, in the
+shared LP, re-adding violated pool cuts and keeping them for the dive (HiGHS's `separate()`
+placement; 672 vs 5,267 nodes); (2) find why the ported mod-k yields no pure-integer cut on mik,
+then port cut-pool propagation; (3) a HiGHS-sized global pool (keep the root pool, return
+dropped LP rows to it, age per node). Open: which HiGHS mechanism makes its node cuts
+pure-integer; the discopt-side gain of (1) is inferred from the knock-outs, not measured.
+Unverified finding to check: `TreeManager::process_evaluated` may feed a pruned-infeasible
+child's 1e30 sentinel bound into the pseudocosts (did not fire on mik).
