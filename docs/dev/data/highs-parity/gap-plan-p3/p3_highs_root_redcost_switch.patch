@@ -1,0 +1,47 @@
+diff --git a/highs/mip/HighsRedcostFixing.cpp b/highs/mip/HighsRedcostFixing.cpp
+index 6f3e627..3e49e74 100644
+--- a/highs/mip/HighsRedcostFixing.cpp
++++ b/highs/mip/HighsRedcostFixing.cpp
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <cstdlib>
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ /*                                                                       */
+ /*    This file is part of the HiGHS linear optimization suite           */
+@@ -35,6 +37,7 @@ HighsRedcostFixing::getLurkingBounds(const HighsMipSolver& mipsolver,
+ }
+ 
+ void HighsRedcostFixing::propagateRootRedcost(const HighsMipSolver& mipsolver) {
++  if (std::getenv("HS_NO_ROOT_REDCOST")) return;
+   if (lurkingColLower.empty()) return;
+ 
+   for (HighsInt col : mipsolver.mipdata_->integral_cols) {
+@@ -85,6 +88,12 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+   double tolerance = std::max(10 * mipsolver.mipdata_->feastol,
+                               mipsolver.mipdata_->epsilon * double(gap));
+ 
++  static long rcCalls = 0, rcCols = 0, rcNodesHit = 0;
++  struct RcReport { ~RcReport() { if (std::getenv("HS_RC_COUNT")) std::fprintf(stderr, "HS_RC calls %ld nodes_hit %ld cols %ld\n", rcCalls, rcNodesHit, rcCols); } };
++  static RcReport rcReport;
++  ++rcCalls;
++  long colsBefore = rcCols;
++  struct RcHit { long& a; long& b; long before; ~RcHit() { if (a > before) ++b; } } rcHit{rcCols, rcNodesHit, colsBefore};
+   assert(!localdomain.infeasible());
+   std::vector<HighsDomainChange> boundChanges;
+   boundChanges.reserve(mipsolver.mipdata_->integral_cols.size());
+@@ -110,6 +119,7 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+           double(floor(gap / lpredcost[col] + localdomain.col_lower_[col] +
+                        mipsolver.mipdata_->feastol));
+       if (newub >= localdomain.col_upper_[col]) continue;
++      ++rcCols;
+       assert(newub < localdomain.col_upper_[col]);
+ 
+       if (globaldom.isBinary(col)) {
+@@ -128,6 +138,7 @@ void HighsRedcostFixing::propagateRedCost(const HighsMipSolver& mipsolver,
+                       mipsolver.mipdata_->feastol));
+ 
+       if (newlb <= localdomain.col_lower_[col]) continue;
++      ++rcCols;
+       assert(newlb > localdomain.col_lower_[col]);
+ 
+       if (globaldom.isBinary(col)) {

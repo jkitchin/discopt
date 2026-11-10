@@ -1527,3 +1527,47 @@ Wall on the 42 rows all arms certify: 72.0 / 72.8 / 77.7 s (default / mod-k / ad
 Mod-k graduates ON within the `highs` arm (`=0` opt-out). Node separation stays a documented
 opt-in. bell5 sits at the 0.01 % line under every node-separation arm (bound gap ~0.012 %), so
 its certification flips between runs.
+
+### 12.27 The mik root gap: root reduced-cost fixing against a root incumbent (2026-11-10)
+
+**HiGHS knock-out** (`p3_highs_root_knockout.py`; root only, presolve/restarts/symmetry/conflict
+off; `HS_NO_ROOT_REDCOST` added to the patched build, `p3_highs_root_redcost_switch.patch`):
+
+| HiGHS root gap | mik-1 | mik-2 | mik-3 | mik-5 |
+|---|---|---|---|---|
+| stripped | 1.75 % | 1.53 % | 2.03 % | 1.63 % |
+| no root reduced-cost fixing | 7.40 % | 7.09 % | 6.06 % | 6.76 % |
+| no heuristics (no root incumbent) | 5.08 % | 4.50 % | 7.08 % | 5.21 % |
+| no tableau / no path | 2.2 / 2.8 % | 2.0 / 2.3 % | 2.1 / 2.5 % | 2.2 / 2.6 % |
+| no mod-k, implied-bound or clique cuts | unchanged | | | |
+
+HiGHS's mik root comes from fixing integer bounds by the root LP's reduced costs against an
+incumbent its root heuristics find (RENS in `evaluateRootNode`), then separating again on the
+smaller box; its separators are not the difference.
+
+**Entry experiment in discopt** (`p3_mik_seed_root.py`, diagnostic `DISCOPT_MILP_SEED_POINT`):
+seeding our root loop with our own incumbent and turning on the root fixing that already existed
+(`DISCOPT_HIGHS_SEPA_PROPAGATE`) takes the root gap from 4.88/3.20/4.35/2.92 % to
+2.03/1.58/1.99/1.57 %. Seed alone, fixing off: unchanged. This is why the propagate lever measured
+neutral in §12.21: our root loop never had an incumbent while it ran.
+
+**Built** (`DISCOPT_HIGHS_ROOT_RENS`, default OFF): after the first pass of root rounds, the ported
+RENS runs on the root LP point; an improved incumbent earns a second pass of rounds with root
+reduced-cost fixing and propagation. Root only (`p3_mik_root_rens.py`): 1.95/1.59/1.99/1.62 %,
+HiGHS's level.
+
+**Panel** (62 rows, 20 s, `p3_ab_root_rens.jsonl`): cert-clean (341 checks, 0 violations);
+certified 48 -> 47 (-2122, which sits at the 20 s edge in every run: 19.0 s vs 20.7 s). Final dual
+gaps: mik-1 2.98 -> 1.44 %, mik-2 2.10 -> 0.82, mik-3 2.91 -> 1.37, mik-5 1.60 -> 1.01,
+enlight_hard 8.1 -> 2.7, neos17 0.80 -> 0.48. Not net-positive in certifications, so it stays OFF
+(documented opt-in, audit row) until the tree can use it.
+
+**Where mik now stands.** Root bound at HiGHS's level; HiGHS then closes in 70-1,100 nodes, discopt
+is 0.8-1.4 % open after 8-9k. Stripped HiGHS with no cuts at all cannot solve mik
+(`p3_highs_tree_knockout_mik.py`: ~15 % gap at 20 s in every arm), and the §12.22 strip showed
+node cuts off alone loses mik-1, so HiGHS's tree closes mik with node separation. Root RENS plus
+our ported node separation (`=add`) does not certify mik either (gaps unchanged). **Retraction:**
+in the conversation I said HiGHS certifies mik with no separators; that held only with presolve
+and restarts on (`hs_ablate_pop` `cuts_off` arm). The open question is how HiGHS's node cuts
+differ from ours in use: HiGHS separates at the start of every dive and the cuts stay in that
+dive's LP; ours run on 8 best-bound nodes per batch and reach the shared LP at batch boundaries.

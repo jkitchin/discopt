@@ -1,0 +1,8 @@
+maximisation: ['2122', 'issue-2446']
+checks: 341 violations: 0
+base            48   62      391.2
+root_rens        47   62      398.4
+violations: 2
+  VIOLATION ('issue-2446', 'base', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'root_rens', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+solves: 124
