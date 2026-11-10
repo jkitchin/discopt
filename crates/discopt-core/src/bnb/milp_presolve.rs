@@ -80,6 +80,8 @@ pub struct PresolveStats {
     pub singleton_rows: usize,
     /// Redundant rows removed.
     pub redundant_rows: usize,
+    /// Rows redundant only over implied bounds of continuous columns.
+    pub redundant_rows_implied: usize,
     /// Forcing rows (their columns fixed).
     pub forcing_rows: usize,
     /// Empty columns fixed.
@@ -1164,6 +1166,56 @@ impl Work {
         changed
     }
 
+    /// Whether row `r` is redundant over the columns' bounds tightened by the implied
+    /// bounds of continuous columns from *other* rows (HiGHS's row activity bounds over
+    /// `implColLower/Upper` with source exclusion). A wrong drop could only relax the
+    /// problem, which the postsolve check guards; `drop_sourced_by` keeps a dropped row
+    /// from supporting any later decision.
+    fn redundant_by_implied(&self, r: usize) -> bool {
+        let (lo, up) = (self.lo[r], self.up[r]);
+        let (mut mn, mut mx) = (0.0f64, 0.0f64);
+        let mut used = false;
+        for (&k, &a) in self.rows[r].0.iter().zip(&self.rows[r].1) {
+            let lk = if self.impl_l[k].1 != r && self.impl_l[k].0 > self.l[k] {
+                used = true;
+                self.impl_l[k].0
+            } else {
+                self.l[k]
+            };
+            let uk = if self.impl_u[k].1 != r && self.impl_u[k].0 < self.u[k] {
+                used = true;
+                self.impl_u[k].0
+            } else {
+                self.u[k]
+            };
+            let (cmin, cmax) = if a > 0.0 {
+                (a * lk, a * uk)
+            } else {
+                (a * uk, a * lk)
+            };
+            mn += cmin;
+            mx += cmax;
+        }
+        if !used || mn.is_nan() || mx.is_nan() {
+            return false;
+        }
+        let lo_ok = !lo.is_finite() || mn >= lo - self.tol(lo) * 1e-3;
+        let up_ok = !up.is_finite() || mx <= up + self.tol(up) * 1e-3;
+        lo_ok && up_ok
+    }
+
+    /// Forget the implied bounds row `r` was the source of (it is gone).
+    fn drop_sourced_by(&mut self, r: usize) {
+        for k in 0..self.n {
+            if self.impl_l[k].1 == r {
+                self.impl_l[k] = (-INF, usize::MAX);
+            }
+            if self.impl_u[k].1 == r {
+                self.impl_u[k] = (INF, usize::MAX);
+            }
+        }
+    }
+
     /// Row-dual bounds from the row sense alone (minimization, reduced cost
     /// `z = c - A^T y`): a `>=` row has `y >= 0`, a `<=` row `y <= 0`, a ranged or
     /// equality row a free `y`.
@@ -1418,6 +1470,13 @@ impl Work {
             if lo_ok && up_ok {
                 self.row_alive[r] = false;
                 self.stats.redundant_rows += 1;
+                changed = true;
+                continue;
+            }
+            if self.redundant_by_implied(r) {
+                self.row_alive[r] = false;
+                self.drop_sourced_by(r);
+                self.stats.redundant_rows_implied += 1;
                 changed = true;
                 continue;
             }

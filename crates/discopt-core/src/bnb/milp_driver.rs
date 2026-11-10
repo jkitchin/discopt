@@ -11608,6 +11608,7 @@ mod tests {
         let mut dominated = 0usize;
         let mut fallbacks = 0usize;
         let mut presolve_infeasible = 0usize;
+        let mut red_implied = 0usize;
         for _ in 0..300 {
             let ns = rnd(3, 7) as usize;
             let m = rnd(2, 6) as usize;
@@ -11706,6 +11707,7 @@ mod tests {
             let st = pr.stats;
             aggregations += st.aggregated;
             dominated += st.dominated_by_derived;
+            red_implied += st.redundant_rows_implied;
             let base = solve_milp_node_search(
                 csc.clone(),
                 m,
@@ -11783,8 +11785,8 @@ mod tests {
                 _ => {}
             }
         }
-        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated} fallbacks {fallbacks} presolve_infeasible {presolve_infeasible}");
-        assert!(compared > 50 && optimal > 30 && aggregations > 20 && dominated > 10,
+        eprintln!("compared {compared} optimal {optimal} aggregations {aggregations} dominated(derived) {dominated} fallbacks {fallbacks} presolve_infeasible {presolve_infeasible} redundant-by-implied {red_implied}");
+        assert!(compared > 50 && optimal > 30 && aggregations > 20 && dominated > 10 && red_implied > 10,
             "probe fired too little: compared {compared} optimal {optimal} aggregations {aggregations} dominated by derived dual bounds {dominated}");
     }
 
