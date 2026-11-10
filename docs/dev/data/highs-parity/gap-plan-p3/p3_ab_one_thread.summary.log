@@ -1,0 +1,10 @@
+maximisation: ['2122', 'issue-2446']
+checks: 512 violations: 0
+base            47   62      402.7
+bundle          48   62      410.2
+search          48   62      404.7
+violations: 3
+  VIOLATION ('issue-2446', 'base', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'bundle', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+  VIOLATION ('issue-2446', 'search', 'bound above oracle', 18930.00228539758, -785.3552363097108)
+solves: 186

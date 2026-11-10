@@ -1720,3 +1720,24 @@ Single-threaded, the two loops are about even, and the bundle's enlight_hard cer
 compared multi-threaded discopt with single-threaded HiGHS. A fair comparison runs both at the
 same thread count; the counts at one thread are not yet measured. In the sequential search the
 dominant cost on mik is FBBT at 5.2 ms per node (1,257 calls, 6.5 s of 20 s).
+
+### 12.32 Parallel plunges, and the first equal-thread count (2026-11-10)
+
+The sequential search now runs 8 fixed plunge slots per batch, evaluated in parallel (fixed, not
+the thread count, so the search is identical on every machine); pool maintenance runs after any
+batch in which a slot started a plunge. Six probe rows (`p3_ab_parallel_plunges_t{1,2}.jsonl`):
+better gap or incumbent than the batch-64 bundle on mik-1, neos17, 2122, b-ball, enlight_hard at
+1 and 2 threads; bell5 slower (8.8k nodes vs 4.2k).
+
+**62 rows, one thread each (`RAYON_NUM_THREADS=1`), 20 s** (`p3_ab_one_thread.jsonl`;
+HiGHS's 59 is also one thread): cert-clean (512 checks).
+
+| arm | certified | mean final gap, 15 rows not all certify | SGM wall, 44 common rows |
+|---|---|---|---|
+| default highs arm | 47 | 15.6 % | 1.21 s |
+| bundle (§12.28) | 48 | 15.5 % | 1.36 s |
+| parallel-plunge search | 48 | 15.4 % | 1.32 s |
+
+The only difference is bell5. At equal threads the HiGHS configuration built in §12.27-§12.32
+moves one row and almost no gap, and the HiGHS gap is 47-48 vs 59. The multi-threaded counts
+earlier in this plan (48, 49) overstated discopt against single-threaded HiGHS.
