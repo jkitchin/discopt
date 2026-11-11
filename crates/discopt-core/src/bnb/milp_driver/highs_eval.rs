@@ -14,14 +14,17 @@
 //! cutoff and propagation, and is re-evaluated when that changed columns (HiGHS's
 //! `return evaluateNode()`).
 //!
-//! Not yet HiGHS's (later stages): the estimate is the LP objective until the
-//! pseudocost port (stage 5); no symmetry, no conflict analysis (stage 7), no basic
-//! degenerate duals (stage 2).
+//! Pseudocost observations (inference, cutoff, objective change) go through
+//! [`super::highs_branch::BranchPseudocost`]. Not yet HiGHS's (later stages): the
+//! estimate is the LP objective until `computeBestEstimate` lands with the pseudocost
+//! port (stage 5); no symmetry, no conflict analysis (stage 7), no basic degenerate
+//! duals (stage 2).
 
 // Wired into the driver by stage 1d-5 (the search loop switch); until then only the
 // stage 1d-2 differential gate (`diff`, tests) runs it.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use super::highs_branch::BranchPseudocost;
 use super::*;
 use crate::bnb::highs_search::search::{NodeData, NodeResult as SearchResult};
 use crate::lp::highs_cutgen::domain::{BoundType, Domain, DomainChange, Reason};
@@ -62,6 +65,26 @@ pub(super) struct HighsEval {
     pub point: Option<Vec<f64>>,
     /// Whether the last LP was unbounded.
     pub unbounded: bool,
+    /// Reduced costs of the structurals at the last trusted LP (`col_dual`).
+    pub redcost: Option<Vec<f64>>,
+    /// Unscaled row duals of the last trusted LP (`row_dual`).
+    pub last_dual: Option<Vec<f64>>,
+    /// LP iterations: all node and strong-branching solves, and the strong-branching
+    /// share (`lpiterations`, `sblpiterations`); heuristics' share (`heurlpiterations`).
+    pub lp_iters: i64,
+    pub sb_iters: i64,
+    pub heur_iters: i64,
+    /// The root LP solution (`getRootLpSol`), set by the search after the root.
+    pub root_sol: Vec<f64>,
+    /// `subrootsol`: the LP solution at the subtree root (cleared at `installNode`).
+    pub subrootsol: Vec<f64>,
+    /// `reliableatnode`: per column, `1` up reliable, `2` down reliable; HiGHS clears
+    /// it when a dive starts (`diveImpl`), which the search does.
+    pub reliable_at_node: std::collections::HashMap<usize, u8>,
+    /// Nodes that could be neither branched nor resolved: the smallest bound among
+    /// them (the certified dual bound must stay at or below it; HiGHS declares such
+    /// a node infeasible, discopt keeps its valid bound).
+    pub unresolved_floor: f64,
     /// Whether incumbents found tighten [`Self::cutoff`] (HiGHS: `addIncumbent`
     /// lowers the upper limit). Off for a fixed external cutoff.
     pub tighten_cutoff: bool,
@@ -91,6 +114,15 @@ impl HighsEval {
             branch_hint: None,
             point: None,
             unbounded: false,
+            redcost: None,
+            last_dual: None,
+            lp_iters: 0,
+            sb_iters: 0,
+            heur_iters: 0,
+            root_sol: Vec::new(),
+            subrootsol: Vec::new(),
+            reliable_at_node: std::collections::HashMap::new(),
+            unresolved_floor: f64::INFINITY,
             tighten_cutoff: true,
             stats: EvalStats::default(),
         })
@@ -146,21 +178,29 @@ impl HighsEval {
 
     fn offer(&mut self, inc: Option<(Vec<f64>, f64)>) {
         if let Some((x, v)) = inc {
-            if self.tighten_cutoff && v < self.cutoff {
-                self.cutoff = v;
-            }
-            self.found.push((x, v));
+            self.offer_found(x, v);
         }
+    }
+
+    /// `addIncumbent` for a verified point: record it and lower the cutoff.
+    pub fn offer_found(&mut self, x: Vec<f64>, v: f64) {
+        if self.tighten_cutoff && v < self.cutoff {
+            self.cutoff = v;
+        }
+        self.found.push((x, v));
     }
 
     /// The post-LP part of `evaluateNodeImpl` for one LP outcome: updates `node` and
     /// returns the result, or `None` when reduced-cost fixing and propagation changed
     /// columns and the node must be evaluated again.
+    #[allow(clippy::too_many_arguments)]
     pub fn classify(
         &mut self,
         ctx: &NodeCtx<'_>,
         nl: NodeLp,
         node: &mut NodeData,
+        parent: Option<&NodeData>,
+        pc: &mut dyn BranchPseudocost,
         full_l: &[f64],
         full_u: &[f64],
         redcost: bool,
@@ -168,9 +208,11 @@ impl HighsEval {
         let oc = ctx.obj_const;
         self.branch_hint = None;
         self.unbounded = false;
+        self.lp_iters += nl.sol.iters as i64;
         match nl.verdict {
             NodeLpVerdict::InfeasibleProved => {
                 self.stats.lp_infeasible += 1;
+                cutoff_observation(parent, pc);
                 Some(SearchResult::LpInfeasible)
             }
             NodeLpVerdict::Unbounded => {
@@ -196,12 +238,15 @@ impl HighsEval {
             NodeLpVerdict::SnapRefused {
                 bound,
                 col,
-                incumbent,
+                ref incumbent,
             } => {
-                self.offer(incumbent);
+                self.offer(incumbent.clone());
                 self.basis = Some(nl.sol.basis.clone());
                 node.lp_objective = nl.sol.obj + oc;
                 node.estimate = node.lp_objective;
+                self.redcost = Some(structural_redcost(ctx, &nl));
+                self.last_dual = Some(nl.rc_dual().to_vec());
+                objective_observation(parent, node, pc);
                 node.lower_bound = node.lower_bound.max(bound + oc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
                 self.branch_hint = Some(col);
@@ -212,6 +257,9 @@ impl HighsEval {
                 self.basis = Some(nl.sol.basis.clone());
                 node.lp_objective = nl.sol.obj + oc;
                 node.estimate = node.lp_objective;
+                self.redcost = Some(structural_redcost(ctx, &nl));
+                self.last_dual = Some(nl.rc_dual().to_vec());
+                objective_observation(parent, node, pc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
                 if integral {
                     // `addIncumbent`; the LP is dual feasible, so the node is done.
@@ -280,6 +328,7 @@ impl HighsEval {
                     if self.dom.infeasible() {
                         self.dom.clear_changed_cols();
                         self.stats.domain_infeasible += 1;
+                        cutoff_observation(parent, pc);
                         return Some(SearchResult::DomainInfeasible);
                     }
                     if !self.dom.changed_cols().is_empty() {
@@ -301,6 +350,8 @@ impl HighsEval {
         &mut self,
         ctx: &NodeCtx<'_>,
         node: &mut NodeData,
+        parent: Option<&NodeData>,
+        pc: &mut dyn BranchPseudocost,
         inheuristic: bool,
         optimality_limit: f64,
     ) -> SearchResult {
@@ -314,9 +365,22 @@ impl HighsEval {
             self.stats.evaluations += 1;
             self.dom.set_upper_limit(self.cutoff - oc);
             self.dom.propagate();
+            if let Some(p) = parent {
+                // `addInferenceObservation`: the changes since the node's branching.
+                if p.decision.col >= 0 {
+                    let inferences = self.dom.domain_change_stack().len() as i64
+                        - (node.domchg_stack_pos as i64 + 1);
+                    pc.add_inference_observation(
+                        p.decision.col as usize,
+                        inferences,
+                        !p.decision.upper,
+                    );
+                }
+            }
             if self.dom.infeasible() {
                 self.dom.clear_changed_cols();
                 self.stats.domain_infeasible += 1;
+                cutoff_observation(parent, pc);
                 return SearchResult::DomainInfeasible;
             }
             // `lp->flushDomain(localdom)`.
@@ -326,9 +390,48 @@ impl HighsEval {
             if let Some((v, 0)) = self.dom.objective_lower() {
                 node.lower_bound = node.lower_bound.max(v + oc);
             }
-            if let Some(r) = self.classify(ctx, nl, node, &fl, &fu, true) {
+            if let Some(r) = self.classify(ctx, nl, node, parent, pc, &fl, &fu, true) {
                 return r;
             }
+        }
+    }
+}
+
+/// The structurals' reduced costs `c_j - a_j^T y` at an LP (`col_dual`).
+fn structural_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
+    let y = nl.rc_dual();
+    (0..ctx.ns)
+        .map(|j| ctx.c_w[j] - ctx.csc_rc.dot(j, y))
+        .collect()
+}
+
+/// `pseudocost.addCutoffObservation` for the parent's branching, when the parent had
+/// an LP and the branching was not a fallback (`branching_point != boundval`).
+fn cutoff_observation(parent: Option<&NodeData>, pc: &mut dyn BranchPseudocost) {
+    if let Some(p) = parent {
+        if p.decision.col >= 0
+            && p.lp_objective != f64::NEG_INFINITY
+            && p.branching_point != p.decision.val
+        {
+            pc.add_cutoff_observation(p.decision.col as usize, !p.decision.upper);
+        }
+    }
+}
+
+/// `pseudocost.addObservation(col, boundval - branching_point, max(0, lp - parent lp))`.
+fn objective_observation(
+    parent: Option<&NodeData>,
+    node: &NodeData,
+    pc: &mut dyn BranchPseudocost,
+) {
+    if let Some(p) = parent {
+        if p.decision.col >= 0
+            && p.lp_objective != f64::NEG_INFINITY
+            && p.branching_point != p.decision.val
+        {
+            let delta = p.decision.val - p.branching_point;
+            let objdelta = (node.lp_objective - p.lp_objective).max(0.0);
+            pc.add_observation(p.decision.col as usize, delta, objdelta);
         }
     }
 }
@@ -393,7 +496,16 @@ pub(super) mod diff {
         e.tighten_cutoff = false;
         let mut node = NodeData::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
         let r = e
-            .classify(ctx, nl, &mut node, &full_l, &full_u, false)
+            .classify(
+                ctx,
+                nl,
+                &mut node,
+                None,
+                &mut super::super::highs_branch::NoPseudocost,
+                &full_l,
+                &full_u,
+                false,
+            )
             .expect("no re-evaluation without reduced-cost fixing");
         st.same_box += 1;
         let res = &out.result;
@@ -457,7 +569,14 @@ pub(super) mod diff {
         let in_box = (0..ctx.ns).all(|j| xr[j] >= lb[j] - 1e-9 && xr[j] <= ub[j] + 1e-9);
         let mut node = NodeData::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
         let r = if e.install_box(lb, ub) {
-            e.evaluate(ctx, &mut node, false, f64::INFINITY)
+            e.evaluate(
+                ctx,
+                &mut node,
+                None,
+                &mut super::super::highs_branch::NoPseudocost,
+                false,
+                f64::INFINITY,
+            )
         } else {
             SearchResult::DomainInfeasible
         };

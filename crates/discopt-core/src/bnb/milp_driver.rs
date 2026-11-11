@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod highs_branch;
 mod highs_eval;
 
 use crate::bnb::branching::VarBranchInfo;
@@ -6364,6 +6365,8 @@ fn solve_milp_node_search(
             // Stage 1d-2 gate: the HiGHS-search evaluation on the same nodes (tests only).
             #[cfg(test)]
             highs_eval::diff::batch(&ctx, &batch.node_ids, &batch.lb, &batch.ub, &outs);
+            #[cfg(test)]
+            highs_branch::e2e::maybe_run(&ctx);
             outs
         };
 
@@ -11764,6 +11767,136 @@ mod tests {
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
+    }
+
+    /// Stage 1d-3 gate: the HiGHS-design search (translated control, node queue, local
+    /// domain, `highs_eval` evaluation, `highs_branch` reliability strong branching) run
+    /// on the working LP the batched search has at its root reaches the batched
+    /// search's certified optimum on random pure-integer and mixed MILPs, closes its own
+    /// gap, and returns a point feasible on the original rows, bounds and integrality.
+    #[test]
+    fn highs_search_reaches_the_certified_optimum() {
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 31u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut problems, mut optimal, mut infeasible) = (0usize, 0usize, 0usize);
+        let mut tot = E2eResult::default();
+        for it in 0..120 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 20) as usize;
+            let m = rnd(6, 12) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+            let mut b = Vec::new();
+            for row in rows.iter_mut() {
+                for j in 0..ns {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            row.push((j, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, v) in row {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            E2E.with(|e| *e.borrow_mut() = Some(E2eResult::default()));
+            let r = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran {
+                continue;
+            }
+            problems += 1;
+            assert!(
+                !h.stopped_by_limit,
+                "the HiGHS-design search hit its node limit"
+            );
+            match r.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    let tol = 1e-6 * (1.0 + r.obj.abs());
+                    let (x, v) = h.best.clone().expect("HiGHS-design search found no point");
+                    assert!((v - r.obj).abs() <= tol, "optimum {v} vs batched {}", r.obj);
+                    assert!(
+                        h.bound >= r.obj - tol && h.bound <= v + tol,
+                        "gap not closed: bound {} obj {v}",
+                        h.bound
+                    );
+                    for (i, row) in rows.iter().enumerate() {
+                        let a: f64 = row.iter().map(|&(j, w)| w * x[j]).sum();
+                        assert!(a <= b[i] + 1e-6 * (1.0 + b[i].abs()), "row {i} violated");
+                    }
+                    for j in 0..ns {
+                        assert!(x[j] >= l[j] - 1e-6 && x[j] <= u[j] + 1e-6, "bound violated");
+                        if is_int[j] {
+                            assert!((x[j] - x[j].round()).abs() <= 1e-6, "integrality violated");
+                        }
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    infeasible += 1;
+                    assert!(h.best.is_none(), "point found in an infeasible problem");
+                }
+                other => panic!("batched search ended {other:?}"),
+            }
+            tot.nodes += h.nodes;
+            tot.rounds += h.rounds;
+            tot.commits += h.commits;
+            tot.branched += h.branched;
+            tot.sb_iters += h.sb_iters;
+            tot.eval.lp_infeasible += h.eval.lp_infeasible;
+            tot.eval.domain_infeasible += h.eval.domain_infeasible;
+            tot.eval.bound_exceeding += h.eval.bound_exceeding;
+            tot.eval.reevaluations += h.eval.reevaluations;
+        }
+        eprintln!("problems {problems} optimal {optimal} infeasible {infeasible} {tot:?}");
+        assert!(
+            // Measured: 120 problems, all optimal; 4083 nodes, 2162 branchings, 88
+            // strong-branching commitments, 1876 strong-branching LP iterations, 1733
+            // re-evaluations.
+            problems > 100
+                && optimal > 100
+                && tot.branched > 1000
+                && tot.commits > 40
+                && tot.sb_iters > 900
+                && tot.eval.reevaluations > 800,
+            "probe fired too little: problems {problems} optimal {optimal} {tot:?}"
+        );
     }
 
     /// Stage 1d-2 gate (`docs/dev/highs-mip-replacement-plan.md`): the HiGHS-search node

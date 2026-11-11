@@ -1062,6 +1062,14 @@ impl Domain {
         self.changedcols.clear();
     }
 
+    /// `clearChangedCols(start)`: forget the changed columns recorded from `start` on.
+    pub fn clear_changed_cols_from(&mut self, start: usize) {
+        for &c in &self.changedcols[start.min(self.changedcols.len())..] {
+            self.changedcolsflags[c] = false;
+        }
+        self.changedcols.truncate(start);
+    }
+
     /// The domain change stack.
     pub fn domain_change_stack(&self) -> &[DomainChange] {
         &self.domchgstack

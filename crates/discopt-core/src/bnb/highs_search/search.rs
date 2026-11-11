@@ -248,7 +248,7 @@ pub trait SearchEnv {
     /// The component part of `branch`: candidate selection (strong branching, which
     /// may commit to children and re-evaluate), as steps for the control to apply, and
     /// the outcome. `top` is the node being branched (read-only).
-    fn branch(&mut self, top: &NodeData, depth: i32) -> BranchOutcome;
+    fn branch(&mut self, top: &NodeData, parent: Option<&NodeData>, depth: i32) -> BranchOutcome;
     /// Pseudocost scores for `backtrackPlunge`: the sibling's
     /// (`getScoreDown`/`getScoreUp` of `col` at `point`, `up` for the up branch) and, for
     /// the deepest open ancestor `(col, point, ancestor decision is a lower-bound
@@ -404,7 +404,9 @@ impl Search {
         let depth = self.current_depth();
         let lb0 = self.nodestack.last().unwrap().lower_bound;
         self.nodestack.last_mut().unwrap().decision.col = -1;
-        let out = env.branch(self.nodestack.last().unwrap(), depth);
+        let n0 = self.nodestack.len();
+        let parent0 = (n0 >= 2).then(|| &self.nodestack[n0 - 2]);
+        let out = env.branch(self.nodestack.last().unwrap(), parent0, depth);
         for step in &out.steps {
             match *step {
                 BranchStep::Commit {
@@ -973,7 +975,7 @@ mod tests {
         fn evaluate(&mut self, _n: &mut NodeData, _p: Option<&NodeData>, _d: i32) -> NodeResult {
             NodeResult::Open
         }
-        fn branch(&mut self, _t: &NodeData, _d: i32) -> BranchOutcome {
+        fn branch(&mut self, _t: &NodeData, _p: Option<&NodeData>, _d: i32) -> BranchOutcome {
             unreachable!()
         }
         fn plunge_scores(

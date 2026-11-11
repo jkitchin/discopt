@@ -494,7 +494,12 @@ impl SearchEnv for Mock {
             r
         }
     }
-    fn branch(&mut self, _top: &NodeData, _depth: i32) -> BranchOutcome {
+    fn branch(
+        &mut self,
+        _top: &NodeData,
+        _parent: Option<&NodeData>,
+        _depth: i32,
+    ) -> BranchOutcome {
         // Everything up to `SB` is branch selection's: strong-branching commitments
         // (`SBD` + `SBS`) and re-evaluations of the top node (`SE`).
         let mut steps = Vec::new();
