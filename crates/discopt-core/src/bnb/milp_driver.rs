@@ -6627,6 +6627,8 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
                     incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
                     incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
+                    incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
+                    incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
                 }
             }
             outs
@@ -7758,6 +7760,7 @@ fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
 /// working LP (constant within a batch), the options, and a snapshot of the
 /// tree's read-only state. All fields are `Sync`, so `solve_node` runs under
 /// `rayon`'s `into_par_iter` over the batch.
+#[derive(Clone, Copy)]
 struct NodeCtx<'a> {
     b_w: &'a [f64],
     c_w: &'a [f64],

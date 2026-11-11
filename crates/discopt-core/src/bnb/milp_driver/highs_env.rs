@@ -112,6 +112,9 @@ pub(super) struct Outcome {
     /// `MilpBoundHook` calls, and the node bounds they raised.
     pub bound_hook_calls: usize,
     pub bound_hook_raised: usize,
+    /// Step 2.1: cut rows added to and deleted from the search's LP.
+    pub cut_rows_added: usize,
+    pub cut_rows_deleted: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -261,6 +264,129 @@ impl<'a> Debugger<'a> {
     }
 }
 
+/// `DISCOPT_HIGHS_SEARCH_CUT_LP` (step 2.1 of `docs/dev/highs-mip-replacement-plan.md`):
+/// cuts separated at nodes join the search's own LP as rows that persist for every
+/// later node, aged out when non-binding (HiGHS `mip_lp_age_limit`) and re-added from
+/// the pool when violated again. Default OFF until its §5 panel; read per solve,
+/// garbage refused. Entry evidence: HiGHS with cuts aged out at once goes from 102
+/// nodes to 92k on `b-ball` and from a 4.9 to a 23.0 % gap on `gsvm2rl3`, where the
+/// search with a fixed LP sits (`data/highs-parity/search/step2_entry.txt`).
+pub(super) fn search_cut_lp_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEARCH_CUT_LP") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_SEARCH_CUT_LP={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
+/// Cut rows the search's LP may carry at once, beyond the root's: bounds the per-LP
+/// cost (the falsified 1d-5 fold doubled it with unmanaged rows).
+fn search_cut_cap(base_rows: usize) -> usize {
+    base_rows.max(100)
+}
+
+/// New cut rows one node's separation may add.
+const SEARCH_CUTS_PER_NODE: usize = 20;
+
+/// The search's own copy of the working LP once it carries cut rows (step 2.1): the
+/// driver's root working LP plus managed cut rows `a·x - s = rhs`, `s >= 0`. Every
+/// cut row's coefficients are over the base columns (the driver's working columns):
+/// a cut found at a node, which may use cut slacks, is rewritten by substituting
+/// `s_r = a_r·x - rhs_r` (an identity on the LP) before it is stored, so deleting a
+/// row never touches another.
+pub(super) struct SearchLp {
+    csc: SparseCols,
+    b: Vec<f64>,
+    c: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+    is_int_full: Vec<bool>,
+    m: usize,
+    n: usize,
+    problem: ScaledProblem,
+    slack_l: Vec<f64>,
+    slack_u: Vec<f64>,
+    rows: Vec<CutLpRow>,
+}
+
+impl SearchLp {
+    fn from_base(base: &NodeCtx<'_>) -> Self {
+        let csc = base.csc_rc.clone();
+        let problem = ScaledProblem::new(csc.clone(), base.m_w, base.n_w, base.c_w, base.b_w);
+        SearchLp {
+            csc,
+            b: base.b_w.to_vec(),
+            c: base.c_w.to_vec(),
+            l: base.l_w.to_vec(),
+            u: base.u_w.to_vec(),
+            is_int_full: base.is_int_full.to_vec(),
+            m: base.m_w,
+            n: base.n_w,
+            problem,
+            slack_l: base.slack_l.to_vec(),
+            slack_u: base.slack_u.to_vec(),
+            rows: Vec::new(),
+        }
+    }
+
+    fn rebuild(&mut self, ns: usize) {
+        self.problem = ScaledProblem::new(self.csc.clone(), self.m, self.n, &self.c, &self.b);
+        self.slack_l = self.l[ns..].to_vec();
+        self.slack_u = self.u[ns..].to_vec();
+    }
+
+    /// `cut` (over the current columns) over the base columns `0..n0`.
+    fn to_base(&self, cut: &GomoryCut, n0: usize) -> GomoryCut {
+        let mut out = GomoryCut {
+            coeffs: cut.coeffs[..cut.coeffs.len().min(n0)].to_vec(),
+            rhs: cut.rhs,
+        };
+        out.coeffs.resize(n0, 0.0);
+        for r in &self.rows {
+            let g = cut.coeffs.get(r.col).copied().unwrap_or(0.0);
+            if g == 0.0 {
+                continue;
+            }
+            for (j, &v) in r.cut.coeffs.iter().enumerate() {
+                if v != 0.0 {
+                    out.coeffs[j] += g * v;
+                }
+            }
+            out.rhs += g * r.cut.rhs;
+        }
+        out
+    }
+}
+
+/// The working LP the search's components see: the driver's, or the search's own once
+/// it carries cut rows.
+fn make_ctx<'x>(base: &NodeCtx<'x>, lp: &'x Option<SearchLp>) -> NodeCtx<'x> {
+    let Some(lp) = lp else { return *base };
+    NodeCtx {
+        b_w: &lp.b,
+        c_w: &lp.c,
+        l_w: &lp.l,
+        u_w: &lp.u,
+        scaling: lp.problem.scaling(),
+        sc: lp.problem.solve_c(),
+        sb: lp.problem.solve_b(),
+        csc: lp.problem.solve_matrix(),
+        csc_rc: lp.problem.original_matrix(),
+        problem: &lp.problem,
+        slack_l: &lp.slack_l,
+        slack_u: &lp.slack_u,
+        is_int_full: &lp.is_int_full,
+        m_w: lp.m,
+        n_w: lp.n,
+        ..*base
+    }
+}
+
 /// One node's box and id, as a debugger batch: `(lower, upper, ids)`.
 type DbgBatch<'x> = (&'x [Vec<f64>], &'x [Vec<f64>], &'x [NodeId]);
 
@@ -300,6 +426,13 @@ pub(super) struct HighsEnv<'a, 'b> {
     hook_last: Option<(u64, Option<f64>)>,
     pub bound_hook_calls: usize,
     pub bound_hook_raised: usize,
+    /// Step 2.1 (`DISCOPT_HIGHS_SEARCH_CUT_LP`): the search's own LP once it carries
+    /// cut rows, and the signatures of the cuts currently in it.
+    cut_lp: bool,
+    lp: Option<SearchLp>,
+    in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
+    pub cut_rows_added: usize,
+    pub cut_rows_deleted: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -341,6 +474,158 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         if matches!(d.hook.checkpoint(&state), MilpDebugControl::Stop) && self.stop.is_none() {
             self.stop = Some(Stop::Debugger);
         }
+    }
+
+    /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
+    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
+        if cuts.is_empty() {
+            return;
+        }
+        let base = self.ctx;
+        let n0 = base.n_w;
+        let lp = self.lp.get_or_insert_with(|| SearchLp::from_base(base));
+        let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
+        let mut add: Vec<GomoryCut> = Vec::new();
+        for cut in cuts {
+            if add.len() >= room {
+                break;
+            }
+            let c = lp.to_base(cut, n0);
+            if self.in_lp.insert(cut_signature(&c)) {
+                add.push(c);
+            }
+        }
+        if add.is_empty() {
+            return;
+        }
+        let (m0, n0w) = (lp.m, lp.n);
+        let (csc, m, n) = augment_csc_with_cuts(
+            &lp.csc,
+            &mut lp.b,
+            &mut lp.c,
+            &mut lp.l,
+            &mut lp.u,
+            &mut lp.is_int_full,
+            lp.m,
+            lp.n,
+            &add,
+        );
+        lp.csc = csc;
+        lp.m = m;
+        lp.n = n;
+        for (i, cut) in add.into_iter().enumerate() {
+            lp.rows.push(CutLpRow {
+                row: m0 + i,
+                col: n0w + i,
+                age: 0,
+                cut,
+                relaxed: false,
+            });
+        }
+        lp.rebuild(base.ns);
+        self.cut_rows_added += m - m0;
+        // The basis takes the new slacks as basic (block-triangular, nonsingular);
+        // reduced costs of basic columns are zero. The other caches describe the
+        // old LP: the next evaluation (the dive's, right after separation) rebuilds
+        // them.
+        self.eval.basis = self.eval.basis.take().map(|b| extend_basis(b, n));
+        if let Some(d) = self.eval.basis_d.as_mut() {
+            d.resize(n, 0.0);
+        }
+        self.clear_lp_caches();
+    }
+
+    fn clear_lp_caches(&mut self) {
+        self.eval.point_full = None;
+        self.eval.last_dual = None;
+        self.eval.last_dual_raw = None;
+        self.eval.last_box = None;
+    }
+
+    /// Age the cut rows on the last LP's row duals (HiGHS: a row ages while its dual
+    /// is zero, `HighsLpRelaxation.cpp:660-673`).
+    fn age_cut_rows(&mut self) {
+        let (Some(lp), Some(y)) = (self.lp.as_mut(), self.eval.last_dual.as_ref()) else {
+            return;
+        };
+        if y.len() != lp.m {
+            return;
+        }
+        for r in lp.rows.iter_mut() {
+            if y[r.row].abs() > CUT_LP_DUAL_TOL {
+                r.age = 0;
+            } else {
+                r.age = r.age.saturating_add(1);
+            }
+        }
+    }
+
+    /// Delete cut rows aged past `CUT_LP_AGE_LIMIT` whose slack is basic in the LP's
+    /// basis (dropping a basic slack with its row keeps the basis a basis). Their cuts
+    /// stay in the pool and are re-added when violated again.
+    fn delete_aged_cut_rows(&mut self) {
+        let Some(lp) = self.lp.as_mut() else { return };
+        let basis = self.eval.basis.as_ref();
+        let (mut gone, mut kept): (Vec<CutLpRow>, Vec<CutLpRow>) =
+            lp.rows.drain(..).partition(|r| {
+                r.age > CUT_LP_AGE_LIMIT
+                    && basis.is_none_or(|b| b.col_status.get(r.col).is_none_or(|&s| s == BASIC))
+            });
+        if gone.is_empty() {
+            lp.rows = kept;
+            return;
+        }
+        for r in &gone {
+            self.in_lp.remove(&cut_signature(&r.cut));
+        }
+        let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
+        let col_map = d.col_map.clone();
+        let keep = |j: usize| col_map[j] != usize::MAX;
+        lp.c =
+            lp.c.iter()
+                .enumerate()
+                .filter(|(j, _)| keep(*j))
+                .map(|(_, &x)| x)
+                .collect();
+        lp.l =
+            lp.l.iter()
+                .enumerate()
+                .filter(|(j, _)| keep(*j))
+                .map(|(_, &x)| x)
+                .collect();
+        lp.u =
+            lp.u.iter()
+                .enumerate()
+                .filter(|(j, _)| keep(*j))
+                .map(|(_, &x)| x)
+                .collect();
+        lp.is_int_full = lp
+            .is_int_full
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| keep(*j))
+            .map(|(_, &x)| x)
+            .collect();
+        lp.csc = d.csc;
+        lp.b = d.b;
+        lp.m -= gone.len();
+        lp.n -= gone.len();
+        lp.rows = kept;
+        lp.rebuild(self.ctx.ns);
+        self.cut_rows_deleted += gone.len();
+        self.eval.basis = self
+            .eval
+            .basis
+            .take()
+            .and_then(|b| remap_basis_after_delete(&b, &col_map));
+        self.eval.basis_d = self.eval.basis_d.take().map(|v| {
+            v.iter()
+                .enumerate()
+                .filter(|(j, _)| keep(*j))
+                .map(|(_, &x)| x)
+                .collect()
+        });
+        self.clear_lp_caches();
     }
 
     /// The external node bound (`MilpBoundHook`, `Model.solve(lagrangian_bound=True)`),
@@ -687,9 +972,11 @@ impl SearchEnv for HighsEnv<'_, '_> {
         if let Some(d) = self.dbg.as_mut() {
             d.best = None;
         }
+        let ctx = make_ctx(self.ctx, &self.lp);
         let r = self
             .eval
-            .evaluate(self.ctx, node, parent, &mut self.pc, false, limit);
+            .evaluate(&ctx, node, parent, &mut self.pc, false, limit);
+        self.age_cut_rows();
         if let Some(d) = self.dbg.as_mut() {
             let id = node.ident.id;
             if self.eval.found.len() > found0 {
@@ -721,7 +1008,8 @@ impl SearchEnv for HighsEnv<'_, '_> {
             child_rule: ChildSelectionRule::RootSol,
             inheuristic: false,
         };
-        let out = self.eval.branch(self.ctx, &mut self.pc, top, parent, &bc);
+        let ctx = make_ctx(self.ctx, &self.lp);
+        let out = self.eval.branch(&ctx, &mut self.pc, top, parent, &bc);
         self.commits += out
             .steps
             .iter()
@@ -761,9 +1049,11 @@ impl SearchEnv for HighsEnv<'_, '_> {
         // `separateAndStoreBasis` with discopt's node separation: node-local Gomory
         // rounds plus the pool cuts this node violates, on a copy of the node LP; the
         // bound they prove holds on the node's box and lifts the node when the dive
-        // re-evaluates it. (HiGHS adds its cuts to the shared LP; the working LP is
-        // fixed during this search, so the cuts stay node-local and in the pool.)
-        let ctx = self.ctx;
+        // re-evaluates it. Under `DISCOPT_HIGHS_SEARCH_CUT_LP` (step 2.1) the cuts also
+        // join the search's LP as persistent rows, as HiGHS adds its cuts to the shared
+        // LP; otherwise they stay node-local and in the pool.
+        let ctx = make_ctx(self.ctx, &self.lp);
+        let ctx = &ctx;
         if !ctx.node_gmi {
             return false;
         }
@@ -786,6 +1076,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         let mut pick: Vec<(f64, usize)> = Vec::new();
         for (k, cut) in self.pool.iter().enumerate() {
+            if self.cut_lp && self.in_lp.contains(&cut_signature(cut)) {
+                continue;
+            }
             let (mut act, mut nrm) = (0.0, 0.0);
             for (j, &a) in cut.coeffs.iter().enumerate() {
                 if a != 0.0 {
@@ -828,11 +1121,30 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.sep_lifts += 1;
             self.eval.pending_lift = Some(g + ctx.obj_const);
         }
-        for cut in lg.new_cuts {
-            if self.pool_sigs.insert(cut_signature(&cut)) {
-                self.pool.push(cut);
+        if !self.cut_lp {
+            for cut in lg.new_cuts {
+                if self.pool_sigs.insert(cut_signature(&cut)) {
+                    self.pool.push(cut);
+                }
             }
+            return false;
         }
+        // Step 2.1: the pool holds cuts over the base columns; the LP gets the pool
+        // cuts this node violates and its new cuts, as persistent rows.
+        let n0 = self.ctx.n_w;
+        let new_base: Vec<GomoryCut> = match self.lp.as_ref() {
+            Some(lp) => lg.new_cuts.iter().map(|c| lp.to_base(c, n0)).collect(),
+            None => lg.new_cuts,
+        };
+        let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
+        for cut in new_base {
+            if self.pool_sigs.insert(cut_signature(&cut)) {
+                self.pool.push(cut.clone());
+            }
+            add.push(cut);
+        }
+        add.truncate(SEARCH_CUTS_PER_NODE);
+        self.append_cut_rows(&add);
         false
     }
     fn heuristics_allowed(&mut self) -> bool {
@@ -844,9 +1156,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
         let Some(x) = self.eval.point_full.clone() else {
             return;
         };
+        // The driver's working LP (cut rows are implied by it); the point's prefix over
+        // its columns (cut slacks come after them).
         let ctx = self.ctx;
+        let x = &x[..ctx.n_w.min(x.len())];
         if let Some((cand, v)) = try_rounding_csc(
-            &x,
+            x,
             ctx.ns,
             ctx.is_int,
             ctx.csc_rc,
@@ -901,6 +1216,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 _ => {}
             }
         }
+        self.delete_aged_cut_rows();
         self.q.perform_bounding(self.eval.cutoff);
         let optlim = self.optlim();
         self.q.set_optimality_limit(optlim);
@@ -975,6 +1291,11 @@ pub(super) fn run<'a>(
         hook_last: None,
         bound_hook_calls: 0,
         bound_hook_raised: 0,
+        cut_lp: search_cut_lp_enabled(),
+        lp: None,
+        in_lp: std::collections::HashSet::new(),
+        cut_rows_added: 0,
+        cut_rows_deleted: 0,
     };
     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
     if let Some(d) = env.dbg.as_mut() {
@@ -1048,5 +1369,7 @@ pub(super) fn run<'a>(
         sub_mip_hits: env.sub_mip_hits,
         bound_hook_calls: env.bound_hook_calls,
         bound_hook_raised: env.bound_hook_raised,
+        cut_rows_added: env.cut_rows_added,
+        cut_rows_deleted: env.cut_rows_deleted,
     })
 }

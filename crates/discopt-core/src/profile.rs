@@ -722,6 +722,9 @@ counters!(
     // Stage 1d-5: MILP solves whose tree was searched by the HiGHS-design search
     // (`DISCOPT_HIGHS_MIP_SEARCH`).
     HighsMipSearchRuns,
+    // Step 2.1: cut rows added to / deleted from the HiGHS search's own LP.
+    HighsSearchCutRowsAdded,
+    HighsSearchCutRowsDeleted,
     HighsMipSearchNodes,
     HighsMipSearchBranched,
     HighsMipSearchSbIters,

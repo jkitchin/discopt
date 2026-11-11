@@ -1,0 +1,17 @@
+Step 2.1 A/B (2026-11-11): DISCOPT_HIGHS_SEARCH_CUT_LP off vs on, 20 s, one thread, two solves in
+parallel, arm order alternated, load ~1.4 (step21_ab.py). Columns: name arm status dual-gap% nodes
+wall cut-rows-added cut-rows-deleted (max over the run's profile blocks). No bound past an oracle.
+mik-250-20-75-2 off feasible 0.986 6364 22.0
+mik-250-20-75-2 on  feasible 0.924 4509 22.1
+mik-250-20-75-1 on  feasible 1.335 4993 20.9
+mik-250-20-75-1 off feasible 1.445 7166 20.9
+neos17 off feasible 0.513 2149 20.3
+neos17 on  feasible 0.588 432 20.4
+b-ball off feasible 4.461 69012 20.1 0 0
+b-ball on  feasible 3.193 37348 20.1 2789 2628
+gsvm2rl3 on  feasible 22.63 2852 20.1 614 578
+gsvm2rl3 off feasible 24.693 7008 20.1 0 0
+(first-pass rows for mik/neos17 read their counters from the wrong profile block; the on/off
+ node counts and bounds differ, and the corrected b-ball/gsvm2rl3 rerun shows the rows fire.)
+Kill criterion (step2_entry): b-ball closes or falls well below 4.5 %, gsvm2rl3 drops > 5 points.
+Not met: b-ball 4.46 -> 3.19 (HiGHS closes it in 102 nodes), gsvm2rl3 24.69 -> 22.63 (2.1 points).
