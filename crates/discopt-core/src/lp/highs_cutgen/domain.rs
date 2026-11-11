@@ -891,6 +891,117 @@ impl Domain {
         Some(chg)
     }
 
+    /// `setDomainChangeStack(domchgstack, branchingPositions)`: install a node's bound
+    /// changes on a domain that is at its global bounds (HiGHS installs only after the
+    /// search backtracked to the global domain). Changes already implied are skipped;
+    /// each applied change is propagated; a branching change is kept as a branching
+    /// position unless it is strictly redundant or a local change already implies it.
+    pub fn set_domain_change_stack(
+        &mut self,
+        stack: &[DomainChange],
+        branching_positions: &[usize],
+    ) {
+        self.infeasible = false;
+        for c in &self.domchgstack {
+            match c.boundtype {
+                BoundType::Lower => self.col_lower_pos[c.column] = -1,
+                BoundType::Upper => self.col_upper_pos[c.column] = -1,
+            }
+        }
+        self.prevboundval.clear();
+        self.domchgstack.clear();
+        self.domchgreason.clear();
+        self.branch_pos.clear();
+        let implied = |d: &Domain, c: &DomainChange| match c.boundtype {
+            BoundType::Lower => c.boundval <= d.col_lower[c.column],
+            BoundType::Upper => c.boundval >= d.col_upper[c.column],
+        };
+        let mut k = 0usize;
+        for &bp in branching_positions {
+            while k < bp {
+                if !implied(self, &stack[k]) {
+                    self.change_bound(stack[k], Reason::Unspecified);
+                    if !self.infeasible {
+                        self.propagate();
+                    }
+                    if self.infeasible {
+                        return;
+                    }
+                }
+                k += 1;
+            }
+            if k == stack.len() {
+                return;
+            }
+            let c = stack[k];
+            let skip = match c.boundtype {
+                BoundType::Lower => {
+                    c.boundval <= self.col_lower[c.column]
+                        && (c.boundval < self.col_lower[c.column]
+                            || self.col_lower_pos[c.column] != -1)
+                }
+                BoundType::Upper => {
+                    c.boundval >= self.col_upper[c.column]
+                        && (c.boundval > self.col_upper[c.column]
+                            || self.col_upper_pos[c.column] != -1)
+                }
+            };
+            if !skip {
+                self.change_bound(c, Reason::Branching);
+                if !self.infeasible {
+                    self.propagate();
+                }
+                if self.infeasible {
+                    return;
+                }
+            }
+            k += 1;
+        }
+        while k < stack.len() {
+            if !implied(self, &stack[k]) {
+                self.change_bound(stack[k], Reason::Unspecified);
+                if !self.infeasible {
+                    self.propagate();
+                }
+                if self.infeasible {
+                    break;
+                }
+            }
+            k += 1;
+        }
+    }
+
+    /// `getReducedDomainChangeStack(branchingPositions)`: the tightest change per column
+    /// and bound, in stack order, with the positions of those that are (or descend from)
+    /// branching changes.
+    pub fn reduced_domain_change_stack(&self) -> (Vec<DomainChange>, Vec<usize>) {
+        let mut reduced = Vec::with_capacity(self.domchgstack.len());
+        let mut positions = Vec::with_capacity(self.branch_pos.len());
+        for (i, c) in self.domchgstack.iter().enumerate() {
+            let last = match c.boundtype {
+                BoundType::Lower => self.col_lower_pos[c.column],
+                BoundType::Upper => self.col_upper_pos[c.column],
+            };
+            if last != i as i64 {
+                continue;
+            }
+            if self.domchgreason[i] == Reason::Branching {
+                positions.push(reduced.len());
+            } else {
+                let mut k = i;
+                while self.prevboundval[k].1 != -1 {
+                    k = self.prevboundval[k].1 as usize;
+                    if self.domchgreason[k] == Reason::Branching {
+                        positions.push(reduced.len());
+                        break;
+                    }
+                }
+            }
+            reduced.push(*c);
+        }
+        (reduced, positions)
+    }
+
     /// `backtrackToGlobal()`.
     pub fn backtrack_to_global(&mut self) {
         let mut k = self.domchgstack.len() as i64 - 1;
@@ -1197,6 +1308,72 @@ mod tests {
         }
         assert!(checked > 1000 && propagated > 100 && infeasible_proofs > 10,
             "probe fired too little: checked {checked} propagated {propagated} infeasible {infeasible_proofs}");
+    }
+
+    #[test]
+    fn reduced_stack_reinstalls_to_the_same_bounds() {
+        // Branch down a random path with propagation, take HiGHS's reduced stack, and
+        // install it on a fresh domain at the global bounds: the same box, and no more
+        // branching positions, on every node of the path.
+        let mut r = Lcg(11);
+        let (mut checked, mut with_implied) = (0usize, 0usize);
+        for _ in 0..300 {
+            let (model, lb, ub, _) = random_ip(&mut r);
+            let model = Arc::new(model);
+            let mut d = Domain::new(model.clone(), &lb, &ub, 1e-6, 1e-9);
+            d.propagate();
+            if d.infeasible() {
+                continue;
+            }
+            d.commit_as_global();
+            let (glb, gub) = (d.col_lower.clone(), d.col_upper.clone());
+            for _ in 0..4 {
+                let free: Vec<usize> = (0..lb.len())
+                    .filter(|&j| d.col_upper[j] > d.col_lower[j])
+                    .collect();
+                if free.is_empty() {
+                    break;
+                }
+                let j = free[r.int(0, free.len() as i64 - 1) as usize];
+                let up = r.int(0, 1) == 1;
+                let chg = if up {
+                    DomainChange {
+                        boundval: d.col_lower[j] + 1.0,
+                        column: j,
+                        boundtype: BoundType::Lower,
+                    }
+                } else {
+                    DomainChange {
+                        boundval: d.col_upper[j] - 1.0,
+                        column: j,
+                        boundtype: BoundType::Upper,
+                    }
+                };
+                d.change_bound(chg, Reason::Branching);
+                d.propagate();
+                if d.infeasible() {
+                    break;
+                }
+                let (stack, pos) = d.reduced_domain_change_stack();
+                if stack.len() > pos.len() {
+                    with_implied += 1;
+                }
+                let mut e = Domain::new(model.clone(), &glb, &gub, 1e-6, 1e-9);
+                e.set_domain_change_stack(&stack, &pos);
+                assert!(!e.infeasible());
+                assert_eq!(e.col_lower, d.col_lower, "lower bounds after reinstall");
+                assert_eq!(e.col_upper, d.col_upper, "upper bounds after reinstall");
+                // A branching change that earlier changes already imply is dropped on
+                // reinstall (HiGHS's rule), so positions can only shrink.
+                assert!(e.reduced_domain_change_stack().1.len() <= pos.len());
+                checked += 1;
+            }
+        }
+        // §6: the check ran, also on stacks carrying propagated (non-branching) changes.
+        assert!(
+            checked > 200 && with_implied > 50,
+            "checked {checked}, with implied {with_implied}"
+        );
     }
 
     #[test]

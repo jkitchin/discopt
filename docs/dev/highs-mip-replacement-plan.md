@@ -276,3 +276,13 @@ off in every recorded solve; HiGHS's default restarts are a later addition).
 **Next: stage 1d** (§6): the production `SearchEnv` over discopt's components with the
 safety layer, the driver's search loop switched to `MainLoop`, and the batched search
 deleted.
+
+**Stage 1d, broken down** (the switch-over; each piece tested before the next):
+
+| piece | content | gate |
+|---|---|---|
+| 1d-1 | local domain for the control: `HighsDomain::setDomainChangeStack` and `getReducedDomainChangeStack` added to the domain translation (`highs_cutgen/domain.rs`) | install/reduce round trip on random IPs (**done**) |
+| 1d-2 | node evaluation behind `SearchEnv::evaluate`: the LP solve on the local domain's box with the safety layer (safe bound, Farkas check, unresolved floor, incumbent verification) and the evaluation's propagation recursion | a driver-level test that the new evaluation and `solve_node` agree on bounds and verdicts on the in-repo MILPs |
+| 1d-3 | branching behind `SearchEnv::branch` (today's candidate scoring and strong branching, reporting commits as `BranchStep`s) and `plunge_scores` from today's pseudocosts | branching unit tests; replay-style check that steps apply as HiGHS's |
+| 1d-4 | separation, heuristics, limits, after-round bound/prune behind `SearchEnv`; the hooks re-hosted (lazy veto = re-evaluation, node hook = separation at the node, bound hook, debugger, node callback) | the hook tests (`test_1060_*`, `test_1141_*`, debugger tests) on the new loop |
+| 1d-5 | the driver's search loop replaced by `MainLoop`; batches, reduce, plunge emulation and their flags deleted | all Rust tests; `pytest -m smoke`; adversarial suite; soundness panel; certified count vs stage 0 |
