@@ -118,6 +118,13 @@ pub struct Pseudocosts {
     default_cost: f64,
 }
 
+/// Whether `v` can be a relaxation bound: finite and below the LP layer's `INF`
+/// sentinel (`1e20`). The `1e30` infeasibility/exclusion sentinel a pruned child
+/// carries fails this, as do `±inf`.
+fn is_bound(v: f64) -> bool {
+    v.is_finite() && v.abs() < 1e20
+}
+
 impl Pseudocosts {
     /// Create a new pseudocost tracker for `n_vars` variables.
     pub fn new(n_vars: usize) -> Self {
@@ -146,6 +153,20 @@ impl Pseudocosts {
         is_down: bool,
     ) {
         if var_index >= self.down_sum.len() {
+            return;
+        }
+        crate::profile::incr(crate::profile::Ctr::PseudocostUpdates);
+        // A child pruned as LP-infeasible carries the `1e30` exclusion sentinel
+        // as its "lower bound"; an unbounded or failed relaxation carries `±inf`.
+        // Neither is a bound, so neither is a bound gain: taken at face value one
+        // infeasible child added ~1e30/frac to this variable's sum for the rest of
+        // the search and dominated every later score. HiGHS likewise records an
+        // infeasible child as a cutoff observation, never as a cost observation
+        // (`HighsPseudocost::addCutoffObservation` vs `addObservation`). The
+        // observation is dropped, count included, so a variable is not made
+        // "reliable" by children that taught nothing about its cost.
+        if !is_bound(parent_lb) || !is_bound(child_lb) {
+            crate::profile::incr(crate::profile::Ctr::PseudocostSentinelSkipped);
             return;
         }
         let delta_bound = child_lb - parent_lb;
@@ -1358,6 +1379,27 @@ mod tests {
         pc.update(0, 1.0, 2.0, 0.5, true);
         assert_eq!(pc.observation_count(0), 2);
         assert!((pc.down_cost(0) - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_pseudocosts_ignore_sentinel_and_nonfinite_bounds() {
+        // An LP-infeasible child carries the 1e30 exclusion sentinel; before the
+        // guard it added (1e30 - 1)/0.5 ~ 2e30 to var 0's down sum.
+        let mut pc = Pseudocosts::new(2);
+        pc.update(0, 1.0, 3.0, 0.5, true); // a real observation: 4.0 per unit
+        pc.update(0, 1.0, 1e30, 0.5, true); // infeasible child
+        pc.update(0, 1.0, 1e20, 0.5, true); // the LP layer's INF
+        pc.update(0, 1.0, f64::INFINITY, 0.5, true);
+        pc.update(0, 1.0, f64::NAN, 0.5, true);
+        pc.update(0, f64::NEG_INFINITY, 3.0, 0.5, true); // unbounded parent
+        pc.update(0, 1.0, 1e30, 0.5, false); // infeasible up child
+        assert_eq!(pc.observation_count(0), 1);
+        assert!((pc.down_cost(0) - 4.0).abs() < 1e-10, "{}", pc.down_cost(0));
+        assert_eq!(pc.up_cost(0), 1.0, "up side keeps the default");
+        // A large but genuine bound still counts.
+        pc.update(1, 0.0, 1e15, 0.5, true);
+        assert_eq!(pc.observation_count(1), 1);
+        assert!((pc.down_cost(1) - 2e15).abs() < 1.0);
     }
 
     #[test]

@@ -669,6 +669,17 @@ counters!(
     // difference between "the change is neutral" and "the experiment measured
     // nothing" (CLAUDE.md §6).
     TreeCertInfeasPrunes,
+    // Pseudocost observations offered to `Pseudocosts::update`, and those it
+    // refused because a bound was not a bound: non-finite, or at/above the LP
+    // layer's INF (1e20) -- in practice the 1e30 infeasibility/exclusion sentinel
+    // an LP-infeasible MILP child carries. Before the guard each such child added
+    // ~1e30/frac to its variable's pseudocost sum for the rest of the search.
+    // `PseudocostUntrustedChild`: observations from a child whose own relaxation
+    // produced no bound (failed LP; the tree floors it at the parent bound, so it
+    // reads as a zero gain) -- counted, not filtered, for the same audit.
+    PseudocostUpdates,
+    PseudocostSentinelSkipped,
+    PseudocostUntrustedChild,
     // #1296: MILP solves whose certificate was withdrawn because an entry sits
     // below the equilibration noise floor of its line while still able to move
     // its row past the feasibility tolerance, or because an integral node
