@@ -43,6 +43,20 @@ pub struct DomainChange {
     pub val: f64,
 }
 
+/// discopt's identity for a node (not HiGHS's: `HighsNodeQueue` keeps none): its id,
+/// its parent's id and the branching change that created it. Bookkeeping for the
+/// debugger, carried with the node through the stack and the queue and never read
+/// by the search.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NodeIdent {
+    /// This node's id.
+    pub id: u64,
+    /// The parent's id (`None` for the root).
+    pub parent: Option<u64>,
+    /// The branching change that created it (`None` for the root).
+    pub branch: Option<DomainChange>,
+}
+
 /// `HighsNodeQueue::OpenNode`.
 #[derive(Clone, Debug, Default)]
 pub struct OpenNode {
@@ -56,6 +70,8 @@ pub struct OpenNode {
     pub estimate: f64,
     /// Depth.
     pub depth: i32,
+    /// discopt's node identity (see [`NodeIdent`]).
+    pub ident: NodeIdent,
 }
 
 /// `NodeLowerRbTree` key: (lower bound, bound changes, estimate, slot).
@@ -196,6 +212,7 @@ impl NodeQueue {
             lower_bound,
             estimate,
             depth,
+            ident: NodeIdent::default(),
         };
         let pos = match self.freeslots.pop() {
             Some(Reverse(p)) => {
@@ -208,6 +225,11 @@ impl NodeQueue {
             }
         };
         (pos, self.link(pos))
+    }
+
+    /// Set the identity of the node at `slot` (discopt's; see [`NodeIdent`]).
+    pub fn set_ident(&mut self, slot: i64, ident: NodeIdent) {
+        self.nodes[slot as usize].ident = ident;
     }
 
     /// `popBestNode`: the node with the smallest hybrid estimate.

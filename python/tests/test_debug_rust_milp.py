@@ -113,17 +113,9 @@ def test_rust_milp_after_select_exposes_node_boxes():
 
 
 @pytest.mark.smoke
-def test_rust_milp_after_select_bound_neutral(monkeypatch):
-    """The added after_select fire-site must not perturb the search.
-
-    A solve with a debugger runs the batched search (the debugger is not yet re-hosted
-    on the default HiGHS-design search), so neutrality is asserted against that engine
-    and the result against the default solve's certified optimum.
-    """
-    default = _knapsack().solve(time_limit=15.0, nlp_solver="simplex")
-    monkeypatch.setenv("DISCOPT_HIGHS_MIP_SEARCH", "0")
+def test_rust_milp_after_select_bound_neutral():
+    """The added after_select fire-site must not perturb the search."""
     base = _knapsack().solve(time_limit=15.0, nlp_solver="simplex")
-    monkeypatch.delenv("DISCOPT_HIGHS_MIP_SEARCH")
 
     class Noop:
         def interact(self, ctx, session):
@@ -136,5 +128,3 @@ def test_rust_milp_after_select_bound_neutral(monkeypatch):
         debug.detach()
     assert dbg.node_count == base.node_count
     assert dbg.objective == base.objective
-    assert dbg.status == default.status == "optimal"
-    assert dbg.objective == pytest.approx(default.objective, abs=1e-9)

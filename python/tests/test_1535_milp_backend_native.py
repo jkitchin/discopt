@@ -317,7 +317,11 @@ def test_node_callback_on_a_default_milp_runs_the_engine(monkeypatch):
     highs.clear()
     res = _knapsack().solve(node_callback=lambda ctx, m: seen.append(ctx))
     assert highs == []
-    assert seen and res.node_count > 0
+    # Served by the engine: callbacks arrived, in step with the result's node count.
+    # (Not `node_count > 0`: the default stack closes this knapsack at the root.)
+    assert seen
+    counts = [c.node_count for c in seen]
+    assert counts == sorted(counts) and counts[-1] <= res.node_count
     assert res.algorithm_route.startswith("native-milp"), res.algorithm_route
     assert "route/python_milp_tree_entry" not in (res.solver_stats or {})
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)

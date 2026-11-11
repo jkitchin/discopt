@@ -21,7 +21,18 @@
 //! symmetry/orbital fixing, conflict analysis, LP basis storage and recovery, worker
 //! parallelism, restarts. Each is a call into `SearchEnv` or a recorded gap.
 
-use super::node_queue::{DomainChange, OpenNode};
+use super::node_queue::{DomainChange, NodeIdent, OpenNode};
+
+/// How a node's processing ended, for [`SearchEnv::node_closed`] (discopt's debugger
+/// bookkeeping; the search never reads it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeFate {
+    /// Children were created from it.
+    Branched,
+    /// Closed without children: infeasible, bound-exceeding, cut off, or suboptimal
+    /// (above the optimality limit, kept in the queue's suboptimal set for the bound).
+    Pruned,
+}
 
 /// `HighsSearch::NodeResult` (same order as HiGHS's enum, which the dumps record).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +88,11 @@ pub struct NodeData {
     pub skip_depth_count: u8,
     /// `opensubtrees`.
     pub opensubtrees: u8,
+    /// discopt's node identity (see [`NodeIdent`]); never read by the search.
+    pub ident: NodeIdent,
+    /// The identity of the child the next flip of `decision` will create (settled when
+    /// the node branches, so the debugger can report both children with the parent).
+    pub sibling: Option<NodeIdent>,
 }
 
 impl NodeData {
@@ -96,6 +112,8 @@ impl NodeData {
             domchg_stack_pos: -1,
             skip_depth_count: 0,
             opensubtrees: 2,
+            ident: NodeIdent::default(),
+            sibling: None,
         }
     }
 }
@@ -312,6 +330,18 @@ pub trait SearchEnv {
     fn note_heuristics(&mut self) {}
     /// `ML`.
     fn note_plunge_limit(&mut self) {}
+
+    // --- node identity (discopt's debugger bookkeeping; no-ops by default) ---
+    /// The node just handed to [`Self::queue_emplace`] has this identity.
+    fn queue_tag(&mut self, _ident: NodeIdent) {}
+    /// A node was created (pushed on the stack, queued, or pruned at creation).
+    fn node_created(&mut self, _ident: NodeIdent) {}
+    /// A node is about to be evaluated (the stack's top), or a child committed by
+    /// strong branching was evaluated inside `branch`. Called on every evaluation;
+    /// the environment decides what is a first selection.
+    fn node_selected(&mut self, _node: &NodeData) {}
+    /// A node's processing ended.
+    fn node_closed(&mut self, _id: u64, _fate: NodeFate) {}
     /// After a main-loop round: bounds updated, solutions synced, limits checked,
     /// global domain propagated and the queue pruned (`MG` in the dump). Returns
     /// whether the search stops (`checkLimits`: gap closed, time or node limit).
@@ -335,12 +365,52 @@ pub struct Search {
     pub count_tree_weight: bool,
     /// `inheuristic`.
     pub inheuristic: bool,
+    /// The next node id to hand out (discopt's [`NodeIdent`]; the caller seeds it past
+    /// the root's).
+    pub next_id: u64,
 }
 
 impl Search {
     /// Nodes on the stack with an open subtree (each will yield another node).
     pub fn open_on_stack(&self) -> usize {
         self.nodestack.iter().filter(|n| n.opensubtrees > 0).count()
+    }
+
+    /// A fresh identity for a child of `parent` created by `decision`.
+    fn child_ident(&mut self, parent: u64, decision: DomainChange) -> NodeIdent {
+        let id = self.next_id;
+        self.next_id += 1;
+        NodeIdent {
+            id,
+            parent: Some(parent),
+            branch: Some(decision),
+        }
+    }
+
+    /// Settle the identity of the child the next flip of node `i`'s decision creates.
+    fn settle_sibling(&mut self, i: usize) -> NodeIdent {
+        let mut flipped = self.nodestack[i].clone();
+        Self::flip(&mut flipped);
+        let parent = self.nodestack[i].ident.id;
+        let s = self.child_ident(parent, flipped.decision);
+        self.nodestack[i].sibling = Some(s);
+        s
+    }
+
+    /// The identity of the child the flip just made on the top node creates: the one
+    /// settled when it branched, else a fresh one (`true`: not yet reported created).
+    fn take_sibling(&mut self, decision: DomainChange) -> (NodeIdent, bool) {
+        let top = self.nodestack.last_mut().unwrap();
+        match top.sibling.take() {
+            Some(s) => {
+                debug_assert_eq!(s.branch, Some(decision));
+                (s, false)
+            }
+            None => {
+                let parent = top.ident.id;
+                (self.child_ident(parent, decision), true)
+            }
+        }
     }
 
     /// `getCurrentDepth`.
@@ -363,8 +433,9 @@ impl Search {
     /// `installNode`.
     pub fn install_node<E: SearchEnv>(&mut self, env: &mut E, node: OpenNode) {
         env.domain_install(&node);
-        self.nodestack
-            .push(NodeData::new(node.lower_bound, node.estimate));
+        let mut nd = NodeData::new(node.lower_bound, node.estimate);
+        nd.ident = node.ident;
+        self.nodestack.push(nd);
         self.depthoffset = node.depth - 1;
         let d = self.current_depth();
         env.note_installed(d, &node);
@@ -376,9 +447,11 @@ impl Search {
         let optlim = env.optimality_limit();
         let n = self.nodestack.len();
         let early = !self.inheuristic && self.nodestack[n - 1].lower_bound > optlim;
+        let id = self.nodestack[n - 1].ident.id;
         let mut r = if early {
             NodeResult::SubOptimal
         } else {
+            env.node_selected(&self.nodestack[n - 1]);
             let (head, top) = self.nodestack.split_at_mut(n - 1);
             env.evaluate(&mut top[0], head.last(), depth)
         };
@@ -392,17 +465,23 @@ impl Search {
             }
         }
         env.note_evaluated(r, depth, &self.nodestack[n - 1]);
+        if !early && r != NodeResult::Open {
+            env.node_closed(id, NodeFate::Pruned);
+        }
         r
     }
 
     /// `branchDownwards` (`upper`) / `branchUpwards`: commit the top node to one child.
     fn branch_to(&mut self, decision: DomainChange, branching_point: f64, pos: i32) {
+        let parent = self.nodestack.last().unwrap().ident.id;
+        let ident = self.child_ident(parent, decision);
         let top = self.nodestack.last_mut().unwrap();
         top.opensubtrees = 1;
         top.branching_point = branching_point;
         top.decision = decision;
         let mut child = NodeData::new(top.lower_bound, top.estimate);
         child.domchg_stack_pos = pos;
+        child.ident = ident;
         self.nodestack.push(child);
     }
 
@@ -414,6 +493,7 @@ impl Search {
         let n0 = self.nodestack.len();
         let parent0 = (n0 >= 2).then(|| &self.nodestack[n0 - 2]);
         let out = env.branch(self.nodestack.last().unwrap(), parent0, depth);
+        let mut committed: Option<usize> = None;
         for step in &out.steps {
             match *step {
                 BranchStep::Commit {
@@ -423,6 +503,12 @@ impl Search {
                     parent_open,
                     parent_other_lb,
                 } => {
+                    // A child committed before without an `Update` is selected first: it
+                    // is this commit's parent.
+                    if let Some(i) = committed.take() {
+                        env.node_selected(&self.nodestack[i]);
+                    }
+                    let parent_id = self.nodestack.last().unwrap().ident.id;
                     self.branch_to(decision, branching_point, pos);
                     let n = self.nodestack.len();
                     let parent = &mut self.nodestack[n - 2];
@@ -430,6 +516,15 @@ impl Search {
                     parent.other_child_lb = parent_other_lb;
                     parent.skip_depth_count = 1;
                     self.depthoffset -= 1;
+                    // The committed child was evaluated inside the component's branch;
+                    // the other side stays open when the parent keeps a subtree.
+                    env.node_created(self.nodestack[n - 1].ident);
+                    if parent_open > 0 {
+                        let sib = self.settle_sibling(n - 2);
+                        env.node_created(sib);
+                    }
+                    env.node_closed(parent_id, NodeFate::Branched);
+                    committed = Some(n - 1);
                 }
                 BranchStep::Update {
                     lower_bound,
@@ -442,11 +537,20 @@ impl Search {
                     top.estimate = estimate;
                     top.lp_objective = lp_objective;
                     top.opensubtrees = opensubtrees;
+                    // A committed child is reported selected with its evaluated values.
+                    if let Some(i) = committed.take() {
+                        env.node_selected(&self.nodestack[i]);
+                    }
                 }
             }
         }
+        if let Some(i) = committed.take() {
+            env.node_selected(&self.nodestack[i]);
+        }
         let r = out.result;
         if let Some((decision, bp, ocl, lb, est, child_lb, pos)) = out.branched {
+            let top_id = self.nodestack.last().unwrap().ident.id;
+            let ident = self.child_ident(top_id, decision);
             let top = self.nodestack.last_mut().unwrap();
             top.decision = decision;
             top.branching_point = bp;
@@ -456,7 +560,13 @@ impl Search {
             top.opensubtrees = 1;
             let mut child = NodeData::new(child_lb.max(lb), est);
             child.domchg_stack_pos = pos;
+            child.ident = ident;
             self.nodestack.push(child);
+            let n = self.nodestack.len();
+            let sib = self.settle_sibling(n - 2);
+            env.node_created(ident);
+            env.node_created(sib);
+            env.node_closed(top_id, NodeFate::Branched);
         } else if let Some((lb, est, open, col)) = out.closed {
             let top = self.nodestack.last_mut().unwrap();
             top.lower_bound = lb;
@@ -465,6 +575,9 @@ impl Search {
             top.decision.col = col;
         }
         let n = self.nodestack.len();
+        if r != NodeResult::Branched && r != NodeResult::Open {
+            env.node_closed(self.nodestack[n - 1].ident.id, NodeFate::Pruned);
+        }
         let parent = (r == NodeResult::Branched && n >= 2).then(|| self.nodestack[n - 2].clone());
         env.note_branched(
             r,
@@ -514,7 +627,11 @@ impl Search {
                     if self.count_tree_weight {
                         self.treeweight += 2f64.powi(-depth);
                     }
-                    self.nodestack.last_mut().unwrap().opensubtrees = 0;
+                    let top = self.nodestack.last_mut().unwrap();
+                    top.opensubtrees = 0;
+                    if let Some(s) = top.sibling.take() {
+                        env.node_closed(s.id, NodeFate::Pruned);
+                    }
                 }
             }
         }
@@ -549,11 +666,16 @@ impl Search {
                     curr.estimate,
                 )
             };
+            let (ident, fresh) = self.take_sibling(decision);
+            if fresh {
+                env.node_created(ident);
+            }
             let over = nodelb > cutoff;
             let inf = env.domain_try_sibling(decision, over);
             let prune = over || inf;
             env.note_sibling(depth, decision, nodelb, prune);
             if prune {
+                env.node_closed(ident.id, NodeFate::Pruned);
                 env.domain_undo_sibling();
                 if self.count_tree_weight {
                     self.treeweight += 2f64.powi(-depth);
@@ -562,6 +684,7 @@ impl Search {
             }
             let mut child = NodeData::new(nodelb, est);
             child.domchg_stack_pos = pos;
+            child.ident = ident;
             self.nodestack.push(child);
             return true;
         }
@@ -597,11 +720,16 @@ impl Search {
                 )
             };
             let pos = env.domain_stack_len();
+            let (ident, fresh) = self.take_sibling(decision);
+            if fresh {
+                env.node_created(ident);
+            }
             let over = nodelb > cutoff;
             let inf = env.domain_try_sibling(decision, over);
             let prune = over || inf;
             env.note_sibling(depth, decision, nodelb, prune);
             if prune {
+                env.node_closed(ident.id, NodeFate::Pruned);
                 env.domain_undo_sibling();
                 if self.count_tree_weight {
                     self.treeweight += 2f64.powi(-depth);
@@ -652,6 +780,7 @@ impl Search {
             if to_queue {
                 let (stack, br) = env.domain_reduced_stack();
                 let w = env.queue_emplace(stack, br, nodelb, est, depth + 1);
+                env.queue_tag(ident);
                 if self.count_tree_weight {
                     self.treeweight += w;
                 }
@@ -660,6 +789,7 @@ impl Search {
             }
             let mut child = NodeData::new(nodelb, est);
             child.domchg_stack_pos = pos;
+            child.ident = ident;
             self.nodestack.push(child);
             return true;
         }
@@ -679,11 +809,15 @@ impl Search {
             let olb = env.domain_objective_lower_bound();
             let est = self.nodestack.last().unwrap().estimate;
             let w = env.queue_emplace(stack, br, lb.max(olb), est, depth);
+            env.queue_tag(self.nodestack.last().unwrap().ident);
             if self.count_tree_weight {
                 self.treeweight += w;
             }
-        } else if self.count_tree_weight {
-            self.treeweight += 2f64.powi(1 - depth);
+        } else {
+            env.node_closed(self.nodestack.last().unwrap().ident.id, NodeFate::Pruned);
+            if self.count_tree_weight {
+                self.treeweight += 2f64.powi(1 - depth);
+            }
         }
         self.nodestack.last_mut().unwrap().opensubtrees = 0;
     }
@@ -815,6 +949,7 @@ impl MainLoop {
             env.note_separate();
             if env.separate() {
                 search.cutoff_node();
+                env.node_closed(search.nodestack.last().unwrap().ident.id, NodeFate::Pruned);
                 search.open_nodes_to_queue(env);
                 return;
             }

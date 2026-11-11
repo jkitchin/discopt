@@ -22,9 +22,13 @@
 //! * time, node and open-node limits stop the search with that valid bound,
 //!   uncertified.
 //!
+//! The debugger (`MilpDebugHook`, which also serves `node_callback`) runs on this
+//! search ([`Debugger`]): every evaluated node is a batch of one, with discopt's node
+//! identity (`NodeIdent`) carried through the stack and the queue.
+//!
 //! Not yet re-hosted (the driver keeps the batched search for these): lazy
-//! constraints, node and bound hooks, the debugger, node cuts (the working LP is
-//! fixed during this search), and an unbounded LP relaxation. Also routed there, as
+//! constraints, node and bound hooks, node cuts (the working LP is fixed during this
+//! search), and an unbounded LP relaxation. Also routed there, as
 //! options this search does not implement: a branching rule other than reliability,
 //! a selection other than best-first, `node_propagation = false`, and the off-root
 //! repair dive (`DISCOPT_MILP_DIVE_STRIDE`).
@@ -32,12 +36,14 @@
 use super::highs_branch::{BranchCtx, BranchPseudocost, ChildSelectionRule};
 use super::highs_eval::HighsEval;
 use super::*;
+use crate::bnb::highs_search::node_queue::NodeIdent;
 use crate::bnb::highs_search::node_queue::{DomainChange as QDomainChange, NodeQueue, OpenNode};
 use crate::bnb::highs_search::pseudocost::{Pseudocost, DEFAULT_MIN_RELIABLE};
 use crate::bnb::highs_search::search::{
-    BranchOutcome, BranchStep, MainLoop, NodeData, NodeResult as SearchResult, Search, SearchEnv,
-    NO_NODE_LIMIT,
+    BranchOutcome, BranchStep, MainLoop, NodeData, NodeFate, NodeResult as SearchResult, Search,
+    SearchEnv, NO_NODE_LIMIT,
 };
+use crate::bnb::node::{BranchRecord, NodeStatus};
 use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
 
 #[cfg(test)]
@@ -75,6 +81,8 @@ pub(super) enum Stop {
     Time,
     /// The stall guard: no incumbent at `stall_at`.
     Stall,
+    /// The attached debugger asked the search to stop.
+    Debugger,
 }
 
 /// The outcome of [`run`].
@@ -166,6 +174,91 @@ pub(super) enum HeurCall<'x> {
 /// The driver's heuristics: a verified better point or `None`.
 pub(super) type SubMip<'a> = &'a mut dyn FnMut(HeurCall<'_>) -> Option<(Vec<f64>, f64)>;
 
+/// The debugger attached to the search (`MilpDebugHook`), and what it needs to report
+/// the tree the way the batched search does: every evaluated node is a batch of one
+/// (`AfterSelect` before its first evaluation, `AfterProcess` when it is branched or
+/// closed), with its lineage and the nodes created since the last report.
+pub(super) struct Debugger<'a> {
+    pub hook: &'a dyn MilpDebugHook,
+    pub t_start: std::time::Instant,
+    /// The driver's checkpoint counter, continued.
+    pub iter: usize,
+    /// The root's id; the driver already fired `IterStart`/`AfterSelect` for it.
+    pub root_id: u64,
+    lineage: HashMap<u64, NodeLineage>,
+    /// Created since the last `AfterProcess`.
+    created: Vec<u64>,
+    /// Ever selected; selected and not yet processed.
+    selected: HashSet<u64>,
+    open: HashSet<u64>,
+    /// Nodes whose evaluation produced a verified integral point.
+    fathomed: HashSet<u64>,
+    /// The box reported for a selected node, with how many of its children have been
+    /// settled (reported, or pruned at creation); dropped once two have (a branched
+    /// node has two; a node committed to one child by strong branching keeps its box
+    /// until the search ends, which is bounded by the number of commits). A node reinstalled from the queue carries only
+    /// HiGHS's reduced domain-change stack, so before its own propagation its domain
+    /// can be wider than its parent's was; its region is inside the parent's box, so
+    /// the reported box is the domain intersected with the parent's.
+    boxes: HashMap<u64, (Vec<f64>, Vec<f64>, usize)>,
+    /// The LP bound and point of the node evaluated last.
+    best: Option<(u64, f64, Vec<f64>)>,
+    /// A valid dual bound: the root's, then each round's (the stack's nodes are not in
+    /// the queue mid-round, so the queue alone is not a bound there).
+    bound: f64,
+    last_inc: f64,
+}
+
+impl<'a> Debugger<'a> {
+    pub fn new(
+        hook: &'a dyn MilpDebugHook,
+        t_start: std::time::Instant,
+        iter: usize,
+        root_id: u64,
+        root_box: (Vec<f64>, Vec<f64>),
+        root_relaxation: Option<(f64, Vec<f64>)>,
+        last_inc: f64,
+    ) -> Self {
+        let mut lineage = HashMap::new();
+        lineage.insert(
+            root_id,
+            NodeLineage {
+                id: NodeId(root_id as usize),
+                parent: None,
+                depth: 0,
+                branch: None,
+                status: NodeStatus::Pending,
+            },
+        );
+        // The driver selected the root (its root batch's `AfterSelect`).
+        let selected: HashSet<u64> = [root_id].into_iter().collect();
+        let open = selected.clone();
+        Debugger {
+            hook,
+            t_start,
+            iter,
+            root_id,
+            lineage,
+            created: Vec::new(),
+            selected,
+            open,
+            fathomed: HashSet::new(),
+            // The root's box exactly as the driver's `AfterSelect` reported it.
+            boxes: [(root_id, (root_box.0, root_box.1, 0))]
+                .into_iter()
+                .collect(),
+            // The driver's root evaluation, for the root's `AfterProcess` when the
+            // search closes the root without evaluating it again.
+            best: root_relaxation.map(|(b, x)| (root_id, b, x)),
+            bound: f64::NEG_INFINITY,
+            last_inc,
+        }
+    }
+}
+
+/// One node's box and id, as a debugger batch: `(lower, upper, ids)`.
+type DbgBatch<'x> = (&'x [Vec<f64>], &'x [Vec<f64>], &'x [NodeId]);
+
 /// The production search environment.
 pub(super) struct HighsEnv<'a, 'b> {
     ctx: &'a NodeCtx<'b>,
@@ -192,9 +285,78 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub sep_calls: usize,
     pub sep_lifts: usize,
     pub sub_mip_hits: usize,
+    /// The queue slot of the node emplaced last (for [`SearchEnv::queue_tag`]).
+    last_slot: i64,
+    pub dbg: Option<Debugger<'a>>,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
+    /// Fire a debugger checkpoint; a `Stop` ends the search (uncertified).
+    #[allow(clippy::too_many_arguments)]
+    fn fire(
+        &mut self,
+        cp: MilpCheckpoint,
+        batch: Option<DbgBatch<'_>>,
+        lineage: Option<&[NodeLineage]>,
+        created: Option<&[NodeLineage]>,
+        best: Option<(f64, &[f64])>,
+    ) {
+        let Some(d) = self.dbg.as_ref() else { return };
+        let inc = self.best.as_ref().map(|b| b.1);
+        let gap = match inc {
+            Some(v) if d.bound.is_finite() => ((v - d.bound) / v.abs().max(1.0)).max(0.0),
+            _ => f64::INFINITY,
+        };
+        let state = MilpDebugState {
+            checkpoint: cp,
+            iteration: d.iter,
+            // The count the result reports (`Outcome::nodes`).
+            total_nodes: self.nodes.max(0) as usize,
+            open_nodes: self.q.num_nodes() as usize + self.open_on_stack,
+            incumbent: inc,
+            bound: d.bound,
+            gap,
+            elapsed: d.t_start.elapsed().as_secs_f64(),
+            n_vars: self.ctx.ns,
+            batch_lb: batch.map(|b| b.0),
+            batch_ub: batch.map(|b| b.1),
+            batch_ids: batch.map(|b| b.2),
+            batch_lineage: lineage,
+            created,
+            batch_best_bound: best.map(|b| b.0),
+            batch_best_x: best.map(|b| b.1),
+        };
+        if matches!(d.hook.checkpoint(&state), MilpDebugControl::Stop) && self.stop.is_none() {
+            self.stop = Some(Stop::Debugger);
+        }
+    }
+
+    /// `AfterProcess` for a selected node: its lineage (with how it closed), the nodes
+    /// created since the last report, and its LP bound and point.
+    fn dbg_processed(&mut self, id: u64) {
+        let Some(d) = self.dbg.as_mut() else { return };
+        if !d.open.remove(&id) {
+            return;
+        }
+        let lin = [d.lineage[&id]];
+        let created: Vec<NodeLineage> = std::mem::take(&mut d.created)
+            .iter()
+            .map(|c| d.lineage[c])
+            .collect();
+        let best = d.best.take().filter(|b| b.0 == id);
+        let best_ref = best.as_ref().map(|b| (b.1, b.2.as_slice()));
+        self.fire(
+            MilpCheckpoint::AfterProcess,
+            None,
+            Some(&lin),
+            Some(&created),
+            best_ref,
+        );
+        if let Some(d) = self.dbg.as_mut() {
+            d.iter += 1;
+        }
+    }
+
     /// Take up incumbents the components found, and set the cutoff to the best value.
     fn sync(&mut self) {
         while self.nseen < self.eval.found.len() {
@@ -211,6 +373,10 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             // upper limit): with lattice spacing g a better point is at least g
             // below the incumbent.
             self.eval.cutoff = self.ctx.tm.cutoff_for(v);
+            if self.dbg.as_ref().is_some_and(|d| v < d.last_inc - 1e-9) {
+                self.dbg.as_mut().unwrap().last_inc = v;
+                self.fire(MilpCheckpoint::IncumbentFound, None, None, None, None);
+            }
         }
     }
 
@@ -256,7 +422,107 @@ impl SearchEnv for HighsEnv<'_, '_> {
         est: f64,
         depth: i32,
     ) -> f64 {
-        self.q.emplace_node(d, b, lb, est, depth).1
+        let (slot, w) = self.q.emplace_node(d, b, lb, est, depth);
+        self.last_slot = slot;
+        w
+    }
+    fn queue_tag(&mut self, ident: NodeIdent) {
+        self.q.set_ident(self.last_slot, ident);
+    }
+    fn node_created(&mut self, ident: NodeIdent) {
+        let Some(d) = self.dbg.as_mut() else { return };
+        let depth = ident
+            .parent
+            .and_then(|p| d.lineage.get(&p))
+            .map_or(0, |p| p.depth + 1);
+        let branch = ident.branch.map(|c| BranchRecord {
+            var: c.col as usize,
+            // An upper-bound change (`x <= v`) makes the down child.
+            up: !c.upper,
+            value: c.val,
+        });
+        d.lineage.insert(
+            ident.id,
+            NodeLineage {
+                id: NodeId(ident.id as usize),
+                parent: ident.parent.map(|p| NodeId(p as usize)),
+                depth,
+                branch,
+                status: NodeStatus::Pending,
+            },
+        );
+        d.created.push(ident.id);
+    }
+    fn node_selected(&mut self, node: &NodeData) {
+        let id = node.ident.id;
+        let Some(d) = self.dbg.as_mut() else { return };
+        // The node's relaxation as known now: a child committed by strong branching
+        // was evaluated inside `branch` (its bound and the LP point are current); a
+        // node about to be evaluated gets the fresh one from `evaluate`.
+        if let Some(x) = self.eval.point.as_ref() {
+            if node.lower_bound.is_finite() && x.len() >= self.ctx.ns {
+                d.best = Some((id, node.lower_bound, x[..self.ctx.ns].to_vec()));
+            }
+        }
+        if !d.selected.insert(id) {
+            return;
+        }
+        d.open.insert(id);
+        let ns = self.ctx.ns;
+        let mut lo = self.eval.dom.col_lower[..ns].to_vec();
+        let mut hi = self.eval.dom.col_upper[..ns].to_vec();
+        if let Some(p) = node.ident.parent {
+            if let Some((plo, phi, settled)) = d.boxes.get_mut(&p) {
+                for j in 0..ns {
+                    lo[j] = lo[j].max(plo[j]);
+                    hi[j] = hi[j].min(phi[j]);
+                }
+                *settled += 1;
+                if *settled >= 2 {
+                    d.boxes.remove(&p);
+                }
+            }
+        }
+        d.boxes.insert(id, (lo.clone(), hi.clone(), 0));
+        let lin = [d.lineage[&id]];
+        self.fire(MilpCheckpoint::IterStart, None, None, None, None);
+        let lb = [lo];
+        let ub = [hi];
+        let ids = [NodeId(id as usize)];
+        self.fire(
+            MilpCheckpoint::AfterSelect,
+            Some((&lb, &ub, &ids)),
+            Some(&lin),
+            None,
+            None,
+        );
+    }
+    fn node_closed(&mut self, id: u64, fate: NodeFate) {
+        let Some(d) = self.dbg.as_mut() else { return };
+        let status = match fate {
+            NodeFate::Branched => NodeStatus::Branched,
+            NodeFate::Pruned if d.fathomed.contains(&id) => NodeStatus::Fathomed,
+            NodeFate::Pruned => NodeStatus::Pruned,
+        };
+        if let Some(l) = d.lineage.get_mut(&id) {
+            l.status = status;
+        }
+        if status != NodeStatus::Branched {
+            d.boxes.remove(&id);
+        }
+        // A child pruned at creation (never selected) settles too.
+        if !d.selected.contains(&id) {
+            if let Some(p) = d.lineage.get(&id).and_then(|l| l.parent) {
+                let p = p.0 as u64;
+                if let Some(b) = d.boxes.get_mut(&p) {
+                    b.2 += 1;
+                    if b.2 >= 2 {
+                        d.boxes.remove(&p);
+                    }
+                }
+            }
+        }
+        self.dbg_processed(id);
     }
     fn queue_pop_best(&mut self) -> OpenNode {
         self.q.pop_best_node().1
@@ -351,9 +617,26 @@ impl SearchEnv for HighsEnv<'_, '_> {
     ) -> SearchResult {
         self.nodes += 1;
         let limit = self.optlim();
+        let found0 = self.eval.found.len();
+        // Only this evaluation's own LP point describes this node (none when it is
+        // infeasible).
+        if let Some(d) = self.dbg.as_mut() {
+            d.best = None;
+        }
         let r = self
             .eval
             .evaluate(self.ctx, node, parent, &mut self.pc, false, limit);
+        if let Some(d) = self.dbg.as_mut() {
+            let id = node.ident.id;
+            if self.eval.found.len() > found0 {
+                d.fathomed.insert(id);
+            }
+            if let Some(x) = self.eval.point.as_ref() {
+                if node.lower_bound.is_finite() && x.len() >= self.ctx.ns {
+                    d.best = Some((id, node.lower_bound, x[..self.ctx.ns].to_vec()));
+                }
+            }
+        }
         self.sync();
         r
     }
@@ -563,6 +846,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
             inc.min(self.lift(self.q.best_lower_bound()))
         }
         .min(self.lift(self.eval.unresolved_floor));
+        if let Some(d) = self.dbg.as_mut() {
+            d.bound = d.bound.max(lb);
+        }
         if gap_closed(self.lim, inc, lb) {
             self.gap_stop = true;
             return true;
@@ -583,6 +869,7 @@ pub(super) fn run<'a>(
     initial: Option<(Vec<f64>, f64)>,
     root_bound: f64,
     sub_mip: Option<SubMip<'a>>,
+    dbg: Option<Debugger<'a>>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -617,14 +904,31 @@ pub(super) fn run<'a>(
         sep_calls: 0,
         sep_lifts: 0,
         sub_mip_hits: 0,
+        last_slot: -1,
+        dbg,
     };
+    let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
+    if let Some(d) = env.dbg.as_mut() {
+        d.bound = root_bound;
+    }
     if let Some((x, v)) = initial {
+        // `IncumbentFound` when it improves on the last one the driver reported.
         env.accept(x, v);
     }
-    env.q
+    let (slot, _) = env
+        .q
         .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
+    env.q.set_ident(
+        slot,
+        NodeIdent {
+            id: root_id,
+            parent: None,
+            branch: None,
+        },
+    );
     let mut search = Search {
         count_tree_weight: true,
+        next_id: root_id + 1,
         ..Default::default()
     };
     let mut ml = MainLoop::default();
@@ -649,6 +953,15 @@ pub(super) fn run<'a>(
         env.lift(env.q.best_lower_bound())
     };
     let bound = inc.min(open).min(env.lift(env.eval.unresolved_floor));
+    if let Some(d) = env.dbg.as_mut() {
+        d.bound = d.bound.max(bound);
+    }
+    // The root the driver selected and the search closed without evaluating (already
+    // within the gap): its `AfterProcess` is still owed.
+    if env.dbg.as_ref().is_some_and(|d| d.open.contains(&root_id)) {
+        env.node_closed(root_id, NodeFate::Pruned);
+    }
+    env.fire(MilpCheckpoint::Terminated, None, None, None, None);
     Some(Outcome {
         best: env.best.clone(),
         bound,

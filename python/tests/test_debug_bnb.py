@@ -466,18 +466,9 @@ def test_rust_milp_hook_fires_across_pyo3():
 
 
 @pytest.mark.smoke
-def test_rust_milp_hook_is_bound_neutral(monkeypatch):
-    """A no-op debugger must not perturb the pure-Rust MILP search.
-
-    The debugger is not yet re-hosted on the HiGHS-design search (the default since
-    stage 1d-5; `docs/dev/highs-mip-replacement-plan.md`): a solve with a hook runs the
-    batched search. Bit-for-bit neutrality is therefore asserted against that engine,
-    and the debugged solve must still reach the default solve's certified optimum.
-    """
-    default = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
-    monkeypatch.setenv("DISCOPT_HIGHS_MIP_SEARCH", "0")
+def test_rust_milp_hook_is_bound_neutral():
+    """A no-op debugger must not perturb the pure-Rust MILP search."""
     base = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
-    monkeypatch.delenv("DISCOPT_HIGHS_MIP_SEARCH")
 
     debug.attach(DebugSession(RecordingFrontend(control=Control.CONTINUE)))
     try:
@@ -487,8 +478,6 @@ def test_rust_milp_hook_is_bound_neutral(monkeypatch):
 
     assert dbg.node_count == base.node_count
     assert dbg.objective == base.objective
-    assert dbg.status == default.status == "optimal"
-    assert dbg.objective == pytest.approx(default.objective, abs=1e-9)
 
 
 @pytest.mark.smoke

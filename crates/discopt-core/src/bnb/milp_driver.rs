@@ -780,7 +780,7 @@ fn highs_mip_search() -> bool {
     // run the HiGHS-design search (translated control, queue, local domain, node
     // evaluation through `node_lp`'s safety layer, reliability strong branching with
     // `HighsPseudocost`) from the root working LP instead of the batched search, for
-    // models with no lazy, node, bound or debug hook and the default branching rule
+    // models with no lazy, node or bound hook (a debugger runs on it) and the default branching rule
     // and node selection. Default ON since the stage 1d-5 graduation panel; `0`
     // restores the batched search (flag-retirement audit row).
     match std::env::var("DISCOPT_HIGHS_MIP_SEARCH") {
@@ -6066,7 +6066,6 @@ fn solve_milp_node_search(
     // that honours it rather than a silently ignored option. And the off-root repair
     // dive (`DISCOPT_MILP_DIVE_STRIDE`, opt-in), which only the batched search runs.
     let mut highs_route = highs_mip_search()
-        && hook.is_none()
         && lazy.is_none()
         && node.is_none()
         && opts.bound_hook.is_none()
@@ -6601,7 +6600,23 @@ fn solve_milp_node_search(
                     }
                     found
                 };
-                highs_outcome = highs_env::run(&ctx, &lim, initial, root_bound, Some(&mut sub_mip));
+                // The debugger continues on the search: the root batch's `IterStart` and
+                // `AfterSelect` have fired above; the search reports from the root's
+                // `AfterProcess` on, and fires `Terminated`.
+                let dbg = hook.map(|h| {
+                    highs_env::Debugger::new(
+                        h,
+                        t_start,
+                        dbg_iter,
+                        batch.node_ids[0].0 as u64,
+                        (batch.lb[0].clone(), batch.ub[0].clone()),
+                        (root_bound.is_finite() && r0.solution.len() >= ns)
+                            .then(|| (root_bound, r0.solution[..ns].to_vec())),
+                        dbg_last_inc,
+                    )
+                });
+                highs_outcome =
+                    highs_env::run(&ctx, &lim, initial, root_bound, Some(&mut sub_mip), dbg);
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
                     incr(Ctr::HighsMipSearchRuns);
@@ -13152,6 +13167,151 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 0.0, &o);
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    /// The debugger on the HiGHS-design search (the default since stage 1d-5): the
+    /// route runs with a hook attached, the tree it reports is consistent (a node's
+    /// parent was selected before it, its creation was reported before its selection,
+    /// depths nest, every selected node is processed with a final status,
+    /// `Terminated` fires once and last), and the hook changes nothing: nodes and
+    /// objective equal the unhooked solve. MILP presolve does not run with a hook (the
+    /// debugger's boxes are in the model's columns), so that solve has it off too.
+    #[test]
+    fn debug_hook_runs_on_the_highs_search_with_a_consistent_tree() {
+        use crate::bnb::node::NodeStatus;
+        use std::sync::Mutex;
+        #[derive(Clone, Debug)]
+        enum Ev {
+            Select(Vec<NodeLineage>),
+            Process(Vec<NodeLineage>, Vec<NodeLineage>),
+            Terminated,
+            Other,
+        }
+        struct Rec(Mutex<Vec<Ev>>);
+        impl MilpDebugHook for Rec {
+            fn checkpoint(&self, s: &MilpDebugState<'_>) -> MilpDebugControl {
+                let ev = match s.checkpoint {
+                    MilpCheckpoint::AfterSelect => Ev::Select(s.batch_lineage.unwrap().to_vec()),
+                    MilpCheckpoint::AfterProcess => Ev::Process(
+                        s.batch_lineage.unwrap().to_vec(),
+                        s.created.unwrap().to_vec(),
+                    ),
+                    MilpCheckpoint::Terminated => Ev::Terminated,
+                    _ => Ev::Other,
+                };
+                self.0.lock().unwrap().push(ev);
+                MilpDebugControl::Continue
+            }
+        }
+        // A 2x8 market split (equality rows, slack pairs): no cut closes it, so the
+        // search branches.
+        let w = [
+            [12.0, 47.0, 33.0, 18.0, 29.0, 41.0, 7.0, 25.0],
+            [38.0, 9.0, 21.0, 44.0, 16.0, 30.0, 27.0, 13.0],
+        ];
+        let rhs = [106.0, 99.0];
+        let (m, n) = (2, 12);
+        let mut a = vec![0.0; m * n];
+        let mut c = vec![0.0; n];
+        for i in 0..m {
+            for j in 0..8 {
+                a[i * n + j] = w[i][j];
+            }
+            a[i * n + 8 + 2 * i] = 1.0;
+            a[i * n + 9 + 2 * i] = -1.0;
+            c[8 + 2 * i] = 1.0;
+            c[9 + 2 * i] = 1.0;
+        }
+        let l = vec![0.0; n];
+        let mut u = vec![1.0; n];
+        for v in u.iter_mut().skip(8) {
+            *v = 1000.0;
+        }
+        let mut o = opts(n, (0..8).collect());
+        o.presolve = false;
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let base = solve_milp(&lp, &rhs, 0.0, &o);
+        let runs0 = highs_env::RUNS.with(|r| r.get());
+        let rec = Rec(Mutex::new(Vec::new()));
+        let hooked = solve_milp_hooked(
+            SparseCols::from_dense(&a, m, n),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &rhs,
+            0.0,
+            &o,
+            Some(&rec),
+        );
+        assert!(
+            highs_env::RUNS.with(|r| r.get()) > runs0,
+            "the debugged solve did not run the HiGHS-design search"
+        );
+        assert_eq!(base.status, hooked.status);
+        assert_eq!(
+            base.nodes, hooked.nodes,
+            "node count drifted with the debugger"
+        );
+        assert!((base.obj - hooked.obj).abs() < 1e-12);
+
+        let evs = rec.0.into_inner().unwrap();
+        assert!(matches!(evs.last(), Some(Ev::Terminated)));
+        assert_eq!(
+            evs.iter().filter(|e| matches!(e, Ev::Terminated)).count(),
+            1
+        );
+        let mut selected: HashMap<usize, usize> = HashMap::new(); // id -> depth
+        let mut created: HashSet<usize> = HashSet::new();
+        let mut closed: HashMap<usize, NodeStatus> = HashMap::new();
+        let mut children = 0;
+        for e in &evs {
+            match e {
+                Ev::Select(lin) => {
+                    for l in lin {
+                        if let Some(p) = l.parent {
+                            let pd = *selected.get(&p.0).expect("parent selected earlier");
+                            assert_eq!(l.depth, pd + 1);
+                            assert!(created.contains(&l.id.0), "selected before created");
+                            assert!(l.branch.is_some());
+                            children += 1;
+                        }
+                        selected.insert(l.id.0, l.depth);
+                    }
+                }
+                Ev::Process(lin, cr) => {
+                    for l in cr {
+                        created.insert(l.id.0);
+                    }
+                    for l in lin {
+                        closed.insert(l.id.0, l.status);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            children > 5,
+            "the search barely branched ({children} children)"
+        );
+        for id in selected.keys() {
+            assert!(
+                matches!(
+                    closed.get(id),
+                    Some(NodeStatus::Branched | NodeStatus::Pruned | NodeStatus::Fathomed)
+                ),
+                "node {id} selected but never processed: {:?}",
+                closed.get(id)
+            );
+        }
     }
 
     /// A no-op debug hook must be bound-neutral: identical status / obj / nodes
