@@ -409,3 +409,13 @@ impl NodeQueue {
         &self.nodes[n as usize]
     }
 }
+
+/// Conflict analysis weighs resolution candidates by the open nodes on each column.
+impl crate::lp::highs_cutgen::domain::OpenNodeCounts for NodeQueue {
+    fn num_nodes_up(&self, col: usize) -> i64 {
+        NodeQueue::num_nodes_up(self, col)
+    }
+    fn num_nodes_down(&self, col: usize) -> i64 {
+        NodeQueue::num_nodes_down(self, col)
+    }
+}

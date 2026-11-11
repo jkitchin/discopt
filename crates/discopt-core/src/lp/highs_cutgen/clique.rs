@@ -223,9 +223,9 @@ pub trait CliqueDomain {
     }
 }
 
-/// [`CliqueDomain`] over the translated `HighsDomain`. A clique-table reason is passed
-/// as `Reason::Unspecified` until the domain grows `kCliqueTable`: conflict analysis
-/// then treats the change as unexplained, which is sound (it gives up), not wrong.
+/// [`CliqueDomain`] over the translated `HighsDomain`; a clique-table reason becomes
+/// the domain's `Reason::CliqueTable(col, val)`, which conflict analysis explains as
+/// the fixing of `col` (an infeasibility from it stays unexplained, as in HiGHS).
 pub struct GlobalDomainView<'a> {
     /// The domain.
     pub dom: &'a mut Domain,
@@ -253,14 +253,19 @@ impl CliqueDomain for GlobalDomainView<'_> {
     fn feastol(&self) -> f64 {
         self.feastol
     }
-    fn change_bound(&mut self, boundtype: BoundType, col: usize, val: f64, _reason: CliqueReason) {
+    fn change_bound(&mut self, boundtype: BoundType, col: usize, val: f64, reason: CliqueReason) {
+        let reason = match reason {
+            CliqueReason::Unspecified => Reason::Unspecified,
+            // HiGHS's `Reason::cliqueTable(col, val)` index `2 * col + val`.
+            CliqueReason::CliqueTable(code) => Reason::CliqueTable(code >> 1, code & 1),
+        };
         self.dom.change_bound(
             DomainChange {
                 boundval: val,
                 column: col,
                 boundtype,
             },
-            Reason::Unspecified,
+            reason,
         );
     }
     fn propagate(&mut self) {

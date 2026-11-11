@@ -1577,3 +1577,16 @@ mod tests {
         p.finish(7);
     }
 }
+
+/// Conflict analysis (`HighsDomain::ConflictSet`) updates the conflict scores.
+impl crate::lp::highs_cutgen::domain::ConflictScores for Pseudocost {
+    fn increase_conflict_weight(&mut self) {
+        Pseudocost::increase_conflict_weight(self);
+    }
+    fn increase_conflict_score_up(&mut self, col: usize) {
+        Pseudocost::increase_conflict_score_up(self, col);
+    }
+    fn increase_conflict_score_down(&mut self, col: usize) {
+        Pseudocost::increase_conflict_score_down(self, col);
+    }
+}

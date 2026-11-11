@@ -4337,7 +4337,7 @@ mod tests {
         d.change_bound(one(1), Reason::Branching);
         assert!(d.infeasible());
         assert_eq!(d.infeasible_reason(), Reason::Cut(pool, 0));
-        assert_eq!(check_cut_activities(&d).1, true);
+        assert!(check_cut_activities(&d).1);
         d.backtrack_to_global();
         assert!(!d.infeasible());
         let (w, ok, n) = check_cut_activities(&d);
