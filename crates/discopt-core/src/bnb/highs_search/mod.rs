@@ -8,6 +8,7 @@
 //! HiGHS itself before the driver uses it.
 
 pub mod node_queue;
+pub mod pseudocost;
 pub mod search;
 
 #[cfg(test)]
