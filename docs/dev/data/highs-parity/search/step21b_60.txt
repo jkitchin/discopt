@@ -1,0 +1,23 @@
+Step 2.1b at 60 s (2026-11-11), the 11 rows the default stack leaves open; arms fixed vs highs (DISCOPT_HIGHS_SEARCH_CUT_LP=1 + DISCOPT_HIGHS_SEPA_NODE=1); one thread, two in parallel (step21b_ab60.py).
+mik-250-20-75-5 fixed feasible 0.698 19973 60.7 rows+ 0 rows- 0 sep_raw 7257 
+mik-250-20-75-5 highs feasible 0.347 10708 60.8 rows+ 11874 rows- 11552 sep_raw 957 
+neos-911970 highs feasible 2.109 1920 60.2 rows+ 84 rows- 81 sep_raw 121 
+neos-911970 fixed feasible 3.622 2606 60.2 rows+ 0 rows- 0 sep_raw 968 
+mik-250-20-75-3 fixed feasible 1.436 24538 60.8 rows+ 0 rows- 0 sep_raw 3815 
+mik-250-20-75-3 highs feasible 1.131 16090 60.7 rows+ 6563 rows- 6316 sep_raw 819 
+mik-250-20-75-2 highs feasible 0.18 13548 60.7 rows+ 15048 rows- 14696 sep_raw 1042 
+mik-250-20-75-2 fixed feasible 0.722 23583 60.8 rows+ 0 rows- 0 sep_raw 5490 
+mik-250-20-75-1 fixed feasible 0.969 25411 60.7 rows+ 0 rows- 0 sep_raw 6696 
+mik-250-20-75-1 highs feasible 0.451 15112 60.7 rows+ 14858 rows- 14541 sep_raw 860 
+enlight_hard highs optimal 0.0 1505 30.4 rows+ 857 rows- 834 sep_raw 359 
+enlight_hard fixed optimal 0.0 2393 23.1 rows+ 0 rows- 0 sep_raw 1013 
+neos17 fixed feasible 0.073 9649 60.2 rows+ 0 rows- 0 sep_raw 1158 
+neos17 highs feasible 0.076 5117 60.2 rows+ 6086 rows- 5967 sep_raw 584 
+neos-2624317-amur highs feasible 100.0 4879 60.1 rows+ 812 rows- 770 sep_raw 279 
+neos-2624317-amur fixed feasible 100.0 7247 60.1 rows+ 0 rows- 0 sep_raw 1543 
+b-ball fixed feasible 4.461 143515 60.2 rows+ 0 rows- 0 sep_raw 2836 
+b-ball highs feasible 0.126 124288 60.1 rows+ 38377 rows- 37863 sep_raw 2961 
+gsvm2rl3 highs feasible 22.624 22238 60.1 rows+ 0 rows- 0 sep_raw 0 
+gsvm2rl3 fixed feasible 22.624 22573 60.1 rows+ 0 rows- 0 sep_raw 1035 
+neos-3118745-obra fixed feasible 0.392 3570 60.2 rows+ 0 rows- 0 sep_raw 956 
+neos-3118745-obra highs feasible 0.392 2970 60.2 rows+ 283 rows- 270 sep_raw 370 

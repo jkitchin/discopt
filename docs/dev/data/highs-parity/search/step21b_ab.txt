@@ -1,0 +1,31 @@
+Step 2.1b A/B (2026-11-11), 20 s, one thread, two solves in parallel, arm order rotated (step21b_ab.py).
+Arms: fixed = search LP fixed; gmi = DISCOPT_HIGHS_SEARCH_CUT_LP=1 with discopt node GMI; highs = + DISCOPT_HIGHS_SEPA_NODE=1 (ported tableau/path/mod-k); add = both.
+Columns: name arm status dual-gap% nodes wall, cut rows added/deleted, node separator raw cuts (max over profile blocks).
+mik-250-20-75-2 fixed feasible 0.96 6981 20.8 rows+ 0 rows- 0 sep_raw 2281 
+mik-250-20-75-2 gmi feasible 0.908 5309 20.8 rows+ 2345 rows- 2174 sep_raw 2470 
+mik-250-20-75-2 highs feasible 0.755 4663 20.8 rows+ 2027 rows- 1825 sep_raw 494 
+mik-250-20-75-2 add feasible 0.814 5022 20.8 rows+ 3044 rows- 2810 sep_raw 2556 
+mik-250-20-75-1 gmi feasible 1.278 5530 20.7 rows+ 1884 rows- 1759 sep_raw 1993 
+mik-250-20-75-1 highs feasible 1.077 5133 20.8 rows+ 2427 rows- 2264 sep_raw 513 
+mik-250-20-75-1 add feasible 1.193 4413 20.8 rows+ 2473 rows- 2291 sep_raw 1748 
+mik-250-20-75-1 fixed feasible 1.369 8208 20.7 rows+ 0 rows- 0 sep_raw 1633 
+neos17 highs feasible 0.369 1795 20.2 rows+ 868 rows- 841 sep_raw 218 
+neos17 add feasible 0.428 889 20.4 rows+ 325 rows- 278 sep_raw 713 
+neos17 fixed feasible 0.426 2133 20.2 rows+ 0 rows- 0 sep_raw 807 
+neos17 gmi feasible 0.466 1228 20.3 rows+ 473 rows- 456 sep_raw 1010 
+b-ball add feasible 3.193 35581 20.1 rows+ 5171 rows- 5054 sep_raw 1578 
+b-ball fixed feasible 4.461 68719 20.1 rows+ 0 rows- 0 sep_raw 1186 
+b-ball gmi feasible 3.193 37932 20.1 rows+ 2825 rows- 2663 sep_raw 1338 
+b-ball highs feasible 0.314 52935 20.1 rows+ 12896 rows- 12677 sep_raw 1002 
+gsvm2rl3 fixed feasible 24.693 7499 20.1 rows+ 0 rows- 0 sep_raw 537 
+gsvm2rl3 gmi feasible 22.591 3312 20.2 rows+ 725 rows- 688 sep_raw 584 
+gsvm2rl3 highs feasible 24.693 7388 20.1 rows+ 0 rows- 0 sep_raw 0 
+gsvm2rl3 add feasible 22.591 2973 20.1 rows+ 634 rows- 595 sep_raw 584 
+
+b-ball: 4.461 -> 0.314 % under `highs` (kill criterion met). gsvm2rl3: the ported separators return
+0 cuts at its nodes, so `highs` = `fixed` (24.693); `gmi`/`add` 22.59 (criterion not met).
+Correction (CLAUDE.md §11): HiGHS's own log on gsvm2rl3 (20 s, one thread) shows its bound move at a
+restart -- 0.151 -> 0.229 -> 0.283 at 9.3-11.9 s, with 1485 conflicts and its cut pool carried over --
+not from cuts persisting in the tree's LP (10-56 in the LP). The step-2 entry experiment's no_persist
+arm also emptied the pool a restart carries, so gsvm2rl3 probes restart + pool persistence, not
+step 2.1's mechanism. The criterion is reported as written (not met on gsvm2rl3); the §5 panel decides.
