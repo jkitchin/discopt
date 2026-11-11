@@ -29,6 +29,10 @@ ARMS = {"default": ("R", dict()),
         # Step 2.1b: persistent aged cuts in the search's LP, from the ported HiGHS
         # separators at nodes.
         "cutlp_highs": ("R", dict(DISCOPT_HIGHS_SEARCH_CUT_LP="1", DISCOPT_HIGHS_SEPA_NODE="1")),
+        # Step 2 combination: persistent cuts + ported separators at nodes + separation
+        # over the objective-cutoff box.
+        "combo": ("R", dict(DISCOPT_HIGHS_SEARCH_CUT_LP="1", DISCOPT_HIGHS_SEPA_NODE="1",
+                            DISCOPT_HIGHS_SEPA_CUTOFF_BOX="1")),
         "legacy": ("R", dict(DISCOPT_HIGHS_MIP_SEARCH="0", DISCOPT_MILP_ROOT_CMIR="0",
                              DISCOPT_HIGHS_ROOT_RENS="0", DISCOPT_HIGHS_ROOT_POOL="0",
                              DISCOPT_MILP_PRESOLVE="0", DISCOPT_MILP_RAND_ROUND="0",
@@ -36,7 +40,7 @@ ARMS = {"default": ("R", dict()),
 if os.environ.get("PANEL_ARMS"):
     ARMS = {a: ARMS[a] for a in os.environ["PANEL_ARMS"].split(",")}
 names = list(ARMS)
-STRIP = ("DISCOPT_HIGHS_SEARCH_CUT_LP", "DISCOPT_HIGHS_MIP_SEARCH", "DISCOPT_MILP_PRESOLVE", "DISCOPT_HIGHS_SEARCH", "DISCOPT_HIGHS_DIVE_BATCH", "DISCOPT_HIGHS_DIVE", "DISCOPT_HIGHS_ROOT_POOL", "DISCOPT_HIGHS_SB_TREE", "DISCOPT_HIGHS_ROOT_RENS", "DISCOPT_HIGHS_SEPA_MODK", "DISCOPT_HIGHS_SEPA_NODE", "DISCOPT_HIGHS_SEPA_PROPAGATE", "DISCOPT_HIGHS_SEPA_VBOUNDS", "DISCOPT_MILP_ROOT_CMIR", "DISCOPT_MILP_RAND_ROUND", "DISCOPT_MILP_RUN1_CONTINUE", "DISCOPT_LP_MILP_BACKEND")
+STRIP = ("DISCOPT_HIGHS_SEPA_CUTOFF_BOX", "DISCOPT_HIGHS_SEARCH_CUT_LP", "DISCOPT_HIGHS_MIP_SEARCH", "DISCOPT_MILP_PRESOLVE", "DISCOPT_HIGHS_SEARCH", "DISCOPT_HIGHS_DIVE_BATCH", "DISCOPT_HIGHS_DIVE", "DISCOPT_HIGHS_ROOT_POOL", "DISCOPT_HIGHS_SB_TREE", "DISCOPT_HIGHS_ROOT_RENS", "DISCOPT_HIGHS_SEPA_MODK", "DISCOPT_HIGHS_SEPA_NODE", "DISCOPT_HIGHS_SEPA_PROPAGATE", "DISCOPT_HIGHS_SEPA_VBOUNDS", "DISCOPT_MILP_ROOT_CMIR", "DISCOPT_MILP_RAND_ROUND", "DISCOPT_MILP_RUN1_CONTINUE", "DISCOPT_LP_MILP_BACKEND")
 def run(job):
     k, arm = job; mem = pop[k]; route, extra = ARMS[arm]
     env = {a: b for a, b in os.environ.items() if a not in STRIP}
