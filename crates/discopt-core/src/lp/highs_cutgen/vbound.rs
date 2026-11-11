@@ -185,7 +185,7 @@ impl VarBoundStore {
     /// `sum vals x <= rhs` already complemented to positive coefficients
     /// (`complementation[k] = -1` where `x` was replaced by `ub - x`, `+1` where
     /// shifted by `lb`), `rhs` adjusted accordingly.
-    fn extract_from_complemented(
+    pub(crate) fn extract_from_complemented(
         &mut self,
         d: &Domain,
         inds: &[i32],

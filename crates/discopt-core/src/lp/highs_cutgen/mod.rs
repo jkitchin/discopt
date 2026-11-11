@@ -24,6 +24,7 @@
 //! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`;
 //! - [`sparse_vec`] `HighsSparseVectorSum`;
 //! - [`transformed_lp`] `HighsTransformedLp` and the variable-bound choice it uses;
+//! - [`clique`]   `HighsCliqueTable` (cliques, implications, partitions, separation);
 //! - [`separators`] `HighsLpAggregator`, the cut-generation wrappers, and the path
 //!   and tableau separators.
 //!
@@ -49,6 +50,7 @@
 
 pub mod bridge;
 pub mod cdouble;
+pub mod clique;
 pub mod core;
 pub mod domain;
 pub mod integers;
