@@ -1119,6 +1119,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             &rows,
             NODE_GMI_ROUNDS,
             self.nodes,
+            self.best.as_ref().map(|b| b.1),
         );
         self.eval.lp_iters += lg.pivots as i64;
         if let Some(g) = lg.bound {

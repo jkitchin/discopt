@@ -668,6 +668,85 @@ fn highs_sepa_propagate() -> bool {
     }
 }
 
+/// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the ported separators (root rounds
+/// and, with `DISCOPT_HIGHS_SEPA_NODE`, node rounds) read the global box tightened by
+/// the incumbent's objective cutoff (`DISCOPT_HIGHS_SEPA_CUTOFF_BOX=1`).
+///
+/// HiGHS's transformed LP reads the **global domain** (`HighsTransformedLp.cpp:45-67`),
+/// and that domain propagates the objective row `c x <= upper_limit` once an incumbent
+/// exists (`HighsMipSolverData.cpp:980`, `setupObjectivePropagation`). discopt handed
+/// the separators the root box alone. On a model whose columns are bounded only through
+/// the objective, every aggregation then holds a free column and `transform` refuses it:
+/// measured on `gsvm2rl3` (61 free columns: `b` and the 60 `u_k`, bounded in HiGHS by
+/// `s_k <= cutoff`, `-s_k <= u_k <= s_k`), 3,434-3,942 of 3,434-3,942 `transform` calls
+/// per round refused for a free column and 0 cuts at the root and at every node, while
+/// HiGHS's root separates 55 cuts (0.012 -> 0.031).
+///
+/// Soundness: the box is FBBT over the global rows plus `c x <= incumbent` (rounded
+/// outward, never HiGHS's strict `incumbent - feastol`), so a cut derived over it is
+/// valid for every feasible point at least as good as the incumbent -- the points a
+/// search with that incumbent must keep. Incumbents only decrease, so a cut stays valid
+/// as the cutoff tightens; this is the guarantee reduced-cost fixing already relies on.
+///
+/// **Default OFF** (bound-changing, CLAUDE.md §5) until a corpus panel: flag-retirement
+/// audit row. Read per call, refusing garbage.
+fn highs_sepa_cutoff_box() -> bool {
+    match std::env::var("DISCOPT_HIGHS_SEPA_CUTOFF_BOX") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!(
+                    "DISCOPT_HIGHS_SEPA_CUTOFF_BOX={other:?} is not recognized (expected 1 or 0)"
+                )
+            }
+        },
+    }
+}
+
+/// The global box `[l, u]` (all `n` columns of `A x = b`) tightened by FBBT over the rows
+/// and the objective cutoff `c x <= incumbent - obj_const` (rounded up), for the ported
+/// separators under [`highs_sepa_cutoff_box`]. `None` when there is no finite incumbent
+/// or the cutoff empties the box (no point beats the incumbent: nothing to separate for).
+/// Only ever tightens: every returned bound is within `[l, u]`.
+#[allow(clippy::too_many_arguments)]
+fn sepa_cutoff_box(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    c: &[f64],
+    incumbent: Option<f64>,
+    obj_const: f64,
+    tol: f64,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let inc = incumbent.filter(|v| v.is_finite() && *v < INFEAS_SENTINEL - 1.0)?;
+    let mut w = c.to_vec();
+    w.resize(n, 0.0);
+    let pr = fbbt_rows_with_row(
+        csc,
+        m,
+        n,
+        l,
+        u,
+        b,
+        is_int,
+        tol,
+        Some((&w, sub_up(inc, obj_const))),
+    );
+    if pr.infeasible {
+        return None;
+    }
+    crate::profile::incr(crate::profile::Ctr::HighsSepaCutoffBox);
+    let gl: Vec<f64> = (0..n).map(|j| pr.l[j].max(l[j])).collect();
+    let gu: Vec<f64> = (0..n).map(|j| pr.u[j].min(u[j])).collect();
+    Some((gl, gu))
+}
+
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the root loop runs the ported RENS on
 /// the root LP point once its cut rounds stop and, when that improves the incumbent,
 /// runs a second pass of rounds with root reduced-cost fixing and propagation against
@@ -1796,6 +1875,13 @@ struct LocalLp {
     basis: Basis,
     best: Option<f64>,
     pivots: usize,
+    /// When the NS verification abstains on an optimal LP, keep its point for
+    /// separation instead of abandoning the node's rounds (the HiGHS node-separation
+    /// arm under `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`; see [`LocalLp::step`]). Measured on
+    /// `gsvm2rl3` (2,000 nodes) with the root's cuts seeded into the search's pool: NS
+    /// abstained on 22 of 22 local solves (free columns with a dual residual), 20 of
+    /// them the inherited-pool solve that precedes separation, so 5 node rounds ran.
+    keep_unverified: bool,
 }
 
 impl LocalLp {
@@ -1841,6 +1927,17 @@ impl LocalLp {
         drop(t_ns);
         let Some(g) = ns else {
             crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstain);
+            if self.keep_unverified {
+                // The LP is optimal; only its bound is unproven (NS abstains on a free
+                // column with a dual residual). Its point, duals and basis still serve
+                // separation, whose cuts never read the bound: adopt them, record no
+                // bound, and report no improvement (the caller stops after this round).
+                crate::profile::incr(crate::profile::Ctr::NodeGmiNsAbstainKept);
+                self.x = sol.x;
+                self.y = sol.dual;
+                self.basis = sol.basis;
+                return Some(false);
+            }
             return None;
         };
         let g = g.min(sol.obj);
@@ -1877,6 +1974,7 @@ fn node_local_gmi_bound(
     pool_rows: &[GomoryCut],
     rounds: usize,
     seed: i64,
+    incumbent: Option<f64>,
 ) -> LocalGmi {
     let tol = ctx.opts.simplex.tol;
     let mut lp = LocalLp {
@@ -1893,6 +1991,7 @@ fn node_local_gmi_bound(
         basis: basis0.clone(),
         best: None,
         pivots: 0,
+        keep_unverified: ctx.highs_node.is_some() && highs_sepa_cutoff_box(),
     };
     let mut new_cuts: Vec<GomoryCut> = Vec::new();
     if !pool_rows.is_empty() {
@@ -1918,7 +2017,27 @@ fn node_local_gmi_bound(
         let t_sep = crate::profile::Timer::new(crate::profile::Phase::NodeGmiSep);
         let sel = if let Some(h) = ctx.highs_node.as_ref() {
             // Gap plan §12.23: HiGHS's tableau and path separators over the global
-            // box (`gl`/`gu`, slacks included), selected by a fresh ported pool.
+            // box (`gl`/`gu`, slacks included), selected by a fresh ported pool; with
+            // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX` that box carries the objective cutoff, as
+            // HiGHS's global domain does.
+            if highs_sepa_cutoff_box() {
+                if let Some((cl, cu)) = sepa_cutoff_box(
+                    &lp.csc,
+                    lp.m,
+                    lp.n,
+                    &gl,
+                    &gu,
+                    &lp.b,
+                    &lp.is_int,
+                    &lp.c,
+                    incumbent,
+                    ctx.obj_const,
+                    tol,
+                ) {
+                    gl = cl;
+                    gu = cu;
+                }
+            }
             let cuts = crate::lp::highs_cutgen::bridge::separate_node(
                 &crate::lp::highs_cutgen::bridge::StdFormRound {
                     csc: &lp.csc,
@@ -5276,14 +5395,37 @@ fn solve_milp_node_search(
                 let new_cuts = if let Some(hs) = highs_sep.as_mut() {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::SepCmir);
                     hs.add_lp_iterations(root.iters as i64);
+                    // HiGHS separates over its global domain, which propagates the
+                    // objective cutoff (`highs_sepa_cutoff_box`).
+                    let sep_box = if highs_sepa_cutoff_box() {
+                        sepa_cutoff_box(
+                            &csc_w,
+                            m_w,
+                            n_w,
+                            &l_w,
+                            &u_w,
+                            &b_w,
+                            &is_int_full,
+                            &c_w,
+                            tm.incumbent().map(|(_, v)| v),
+                            obj_const,
+                            opts.simplex.tol,
+                        )
+                    } else {
+                        None
+                    };
+                    let (sep_l, sep_u) = match sep_box.as_ref() {
+                        Some((gl, gu)) => (&gl[..], &gu[..]),
+                        None => (&l_w[..], &u_w[..]),
+                    };
                     let rc = hs.round(&crate::lp::highs_cutgen::bridge::StdFormRound {
                         csc: &csc_w,
                         m: m_w,
                         n: n_w,
                         ns,
                         b: &b_w,
-                        l: &l_w,
-                        u: &u_w,
+                        l: sep_l,
+                        u: sep_u,
                         is_int: &is_int_full,
                         x: &root.x,
                         y: &root.dual,
@@ -8565,6 +8707,7 @@ fn solve_node(
                     &rows,
                     if gmi_slot { NODE_GMI_ROUNDS } else { 0 },
                     id.0 as i64,
+                    ctx.inc_snapshot,
                 );
                 out.iters += lg.pivots;
                 if let Some(g) = lg.bound {
@@ -16610,6 +16753,191 @@ mod p3_incprop_tests {
         assert!(
             empty_verdicts > 5 && tightenings > 50,
             "propagation never fired"
+        );
+    }
+}
+
+/// The ported HiGHS separators over a box with a column bounded only through the
+/// objective (`DISCOPT_HIGHS_SEPA_CUTOFF_BOX`; measured on `gsvm2rl3`, where 61 such
+/// columns made every `transform` refuse and every root and node round return 0 cuts).
+#[cfg(test)]
+mod sepa_cutoff_box_tests {
+    use super::*;
+    use crate::lp::highs_cutgen::bridge::{separate_node, NodeSepa, RootSeparation, StdFormRound};
+
+    /// `min s + 0.6 z` s.t. `u + 100 z >= 1` (a big-M row, as in `gsvm2rl3`), `s >= u`,
+    /// `s >= -u`, `z` binary, `u` free, `s >= 0`, in discopt's standard form (columns
+    /// `z, u, s` then one slack per row). The LP optimum is `z = 0.01, u = s = 0`. Only an
+    /// objective cutoff bounds `u`: with the incumbent [`INC`] = 1.5, `|u| <= s <= 1.5`,
+    /// over which `u >= 1 - 2.5 z` is valid and cuts the LP point off.
+    struct Toy {
+        csc: SparseCols,
+        b: Vec<f64>,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        is_int: Vec<bool>,
+        sol: crate::lp::simplex::LpSolve,
+    }
+
+    const M: usize = 3;
+    const N: usize = 6;
+    const NS: usize = 3;
+
+    fn toy() -> Toy {
+        #[rustfmt::skip]
+        let a = vec![
+            // z     u     s    sl0   sl1   sl2
+          100.0,  1.0,  0.0, -1.0,  0.0,  0.0, // u + 100z - sl0 = 1
+            0.0, -1.0,  1.0,  0.0, -1.0,  0.0, // s - u - sl1 = 0
+            0.0,  1.0,  1.0,  0.0,  0.0, -1.0, // s + u - sl2 = 0
+        ];
+        let csc = SparseCols::from_dense(&a, M, N);
+        let b = vec![1.0, 0.0, 0.0];
+        let c = vec![0.6, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let l = vec![0.0, -INF, 0.0, 0.0, 0.0, 0.0];
+        let u = vec![1.0, INF, INF, INF, INF, INF];
+        let is_int = vec![true, false, false, false, false, false];
+        let sol = solve_lp_root_csc(&csc, M, N, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(sol.status, LpStatus::Optimal);
+        assert!((sol.obj - 0.006).abs() < 1e-9, "LP optimum {}", sol.obj);
+        assert!((sol.x[0] - 0.01).abs() < 1e-9, "z = {}", sol.x[0]);
+        Toy {
+            csc,
+            b,
+            c,
+            l,
+            u,
+            is_int,
+            sol,
+        }
+    }
+
+    fn round<'a>(t: &'a Toy, l: &'a [f64], u: &'a [f64]) -> StdFormRound<'a> {
+        StdFormRound {
+            csc: &t.csc,
+            m: M,
+            n: N,
+            ns: NS,
+            b: &t.b,
+            l,
+            u,
+            is_int: &t.is_int,
+            x: &t.sol.x,
+            y: &t.sol.dual,
+            basic_vars: &t.sol.basis.basic_vars,
+        }
+    }
+
+    fn cutoff_box(t: &Toy, inc: Option<f64>, obj_const: f64) -> Option<(Vec<f64>, Vec<f64>)> {
+        sepa_cutoff_box(
+            &t.csc, M, N, &t.l, &t.u, &t.b, &t.is_int, &t.c, inc, obj_const, 1e-9,
+        )
+    }
+
+    /// The incumbent value the tests separate against.
+    const INC: f64 = 1.5;
+
+    /// Integer-feasible points no worse than [`INC`], which every cut must keep:
+    /// `z = 1` with `u` across `[-0.9, 0.9]`, and `z = 0, u = 1`; `s = |u|`.
+    const KEEP: [[f64; NS]; 5] = [
+        [1.0, 0.0, 0.0],
+        [1.0, -0.9, 0.9],
+        [1.0, 0.9, 0.9],
+        [0.0, 1.0, 1.0],
+        [0.0, 1.5, 1.5],
+    ];
+
+    /// Every cut `coeffs . x >= rhs` holds at each [`KEEP`] point and the LP point
+    /// violates it. Returns the executed comparisons (CLAUDE.md §6).
+    fn assert_cuts(cuts: &[GomoryCut], x_lp: &[f64]) -> usize {
+        let mut checks = 0;
+        for k in cuts {
+            let act = |x: &[f64]| -> f64 { (0..NS).map(|j| k.coeffs[j] * x[j]).sum() };
+            for p in &KEEP {
+                assert!(
+                    act(p) >= k.rhs - 1e-9,
+                    "cut {:?} >= {} cuts off {p:?}",
+                    k.coeffs,
+                    k.rhs
+                );
+                checks += 1;
+            }
+            assert!(
+                act(x_lp) < k.rhs - 1e-6,
+                "cut {:?} >= {} does not separate the LP point",
+                k.coeffs,
+                k.rhs
+            );
+            checks += 1;
+        }
+        checks
+    }
+
+    #[test]
+    fn cutoff_box_bounds_the_objective_bounded_column() {
+        let t = toy();
+        assert!(
+            cutoff_box(&t, None, 0.0).is_none(),
+            "no incumbent, no cutoff box"
+        );
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).expect("the incumbent stays in the box");
+        assert!(
+            gl[1] >= -INC - 1e-9 && gu[1] <= INC + 1e-9,
+            "u in [{}, {}]",
+            gl[1],
+            gu[1]
+        );
+        assert!(gu[2] <= INC + 1e-9, "s <= {}", gu[2]);
+        assert!(
+            gl[0] == 0.0 && gu[0] == 1.0,
+            "z must stay free: [{}, {}]",
+            gl[0],
+            gu[0]
+        );
+        for j in 0..N {
+            assert!(gl[j] >= t.l[j] && gu[j] <= t.u[j], "column {j} loosened");
+        }
+        // The cutoff is `incumbent - obj_const`.
+        let (_, gu2) = cutoff_box(&t, Some(INC + 1.0), 1.0).unwrap();
+        assert!(gu2[2] <= INC + 1e-9, "s <= {}", gu2[2]);
+        // A cutoff below every integer point empties the box: nothing to separate for.
+        assert!(cutoff_box(&t, Some(0.5), 0.0).is_none());
+    }
+
+    #[test]
+    fn root_round_separates_only_over_the_cutoff_box() {
+        let t = toy();
+        // The global box: `u` is free, so every aggregation holding it is refused.
+        let mut raw = RootSeparation::new(NS, M, 7, false);
+        assert_eq!(raw.round(&round(&t, &t.l, &t.u)).generated, 0);
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).unwrap();
+        let mut hs = RootSeparation::new(NS, M, 7, false);
+        let rc = hs.round(&round(&t, &gl, &gu));
+        assert!(rc.generated > 0, "no cut over the cutoff box");
+        let cuts: Vec<GomoryCut> = rc.cuts.into_iter().map(|(_, k)| k).collect();
+        assert!(assert_cuts(&cuts, &t.sol.x) > 0, "no cut selected");
+    }
+
+    #[test]
+    fn node_round_separates_only_over_the_cutoff_box() {
+        let t = toy();
+        let p = NodeSepa {
+            node_l: &t.l[..NS],
+            node_u: &t.u[..NS],
+            model_rows: M,
+            model_nnz: 7,
+            vbounds: None,
+            seed: 0,
+            top_level: false,
+            max_cuts: 10,
+        };
+        assert!(separate_node(&round(&t, &t.l, &t.u), &p).is_empty());
+        let (gl, gu) = cutoff_box(&t, Some(INC), 0.0).unwrap();
+        let cuts = separate_node(&round(&t, &gl, &gu), &p);
+        assert!(
+            assert_cuts(&cuts, &t.sol.x) > 0,
+            "no node cut over the cutoff box"
         );
     }
 }

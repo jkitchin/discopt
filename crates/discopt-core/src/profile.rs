@@ -225,6 +225,9 @@ counters!(
     // Gap plan P3 option A: variable bounds held by the ported separation (model rows
     // + pool cuts), recorded per round (max).
     HighsSepaVarBounds,
+    // `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`: a separation round (root or node) read the global
+    // box tightened by the incumbent's objective cutoff.
+    HighsSepaCutoffBox,
     DiveSteps,
     DiveHitIntegral,
     DiveAbandonedInfeasible,
@@ -335,6 +338,9 @@ counters!(
     NodeGmiCuts,
     NodeGmiLpFail,
     NodeGmiNsAbstain,
+    // ...of which the HiGHS node-separation arm kept the (optimal, unverified) LP point
+    // for separation instead of abandoning the node's rounds.
+    NodeGmiNsAbstainKept,
     NodeGmiLifted,
     // Nodes that re-solved with rows inherited from an ancestor.
     NodeGmiInheritSolves,

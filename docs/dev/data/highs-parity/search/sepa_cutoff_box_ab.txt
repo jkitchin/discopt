@@ -1,0 +1,63 @@
+DISCOPT_HIGHS_SEPA_CUTOFF_BOX -- why the ported separators returned 0 cuts on gsvm2rl3
+(2026-11-11; branch off claude/sleepy-gates-8ronyd @ 2ef4b8d5)
+
+Question: on gsvm2rl3 (180 rows, 241 cols, 60 binaries) `bridge::separate_node` returned 0
+cuts at every node (NodeGmiRaw 0), and the root's ported separation also generated 0
+(SepCmirCuts 0), while HiGHS's root separates 55 cuts (bound 0.012 -> 0.031, log below).
+
+Hypotheses from the task, with the measurement that decided each:
+ (a) separation never reached -- FALSE. NodeGmiSep 13 calls / 200 nodes; the root ran
+     7 rounds. Every call ran the separators.
+ (b) every cut rejected by efficacy / density / numerics -- FALSE. Temporary counters in
+     transform / generate_cut / finish (removed after the probe) per round:
+       root:  transform calls 3434-3942, refused for a FREE COLUMN 3434-3942 (100 %),
+              transformed 0, core/untransform/postprocess/pool rejections 0.
+       tableau: 7-31 fractional basics scored, all skipped before generate_cut by the
+              aggregation-dynamism test (max/min |coef| > 1e6) -- HiGHS has the same test.
+       nodes: identical shape (100 % free-column refusals).
+ (c) the LP handed to the bridge differs from HiGHS's -- TRUE, in its column BOUNDS.
+     The view had 61 free structural columns (b and u_1..u_60). In the model u_k is bounded
+     only through s_k >= |u_k| and s_k's objective cost: HiGHS's transformed LP reads the
+     global domain (HighsTransformedLp.cpp:45-67), and that domain propagates the objective
+     row c x <= upper_limit once an incumbent exists (HighsMipSolverData.cpp:980
+     setupObjectivePropagation). HiGHS has the incumbent 0.6 before its first separation
+     round ("S" row at node 0), so s_k <= 0.6, |u_k| <= 0.6, b >= finite, and the
+     aggregations transform. discopt handed the separators the root box alone.
+
+Fix (flag DISCOPT_HIGHS_SEPA_CUTOFF_BOX, default OFF):
+ - root rounds and node rounds separate over FBBT(global rows + c x <= incumbent - obj_const,
+   rounded up) -- never HiGHS's strict incumbent - feastol -- so every cut is valid for all
+   points at least as good as the incumbent (the guarantee RC fixing already relies on);
+ - in the node-separation arm, an NS abstention on the optimal local LP no longer abandons
+   the node's rounds: the point is kept for separation, no bound is recorded. Measured on
+   gsvm2rl3 at 2000 nodes with the box alone: NS abstained on 22/22 local solves (20 of them
+   the inherited-pool solve that precedes separation), so only 5 node rounds ran.
+
+Soundness: DISCOPT_HIGHS_SEPA_CHECK_POINT with gsvm2rl3's optimum (HiGHS, 0.33652753396,
+max viol 2.0e-11, permuted to the driver's column order), 2000 nodes, flag ON:
+  root-round point validations 44, bad rows/cols/fractional 0
+  root cuts checked 1853, violated 0; node cuts checked 377, violated 0.
+
+A/B, lp_milp_panel worker R, DISCOPT_PANEL_DETERMINISTIC=1 RAYON_NUM_THREADS=1
+DISCOPT_LP_MILP_BACKEND=rust DISCOPT_HIGHS_SEARCH_CUT_LP=1 DISCOPT_HIGHS_SEPA_NODE=1, fixed
+node budget (bound; incumbent; counters SepCmirCuts = root cuts generated, NodeGmiRaw):
+  instance          nodes  OFF bound          ON bound           oracle       OFF inc / ON inc
+  gsvm2rl3            200  0.012000           0.247800           0.33652753   0.5750 / 0.6000
+  gsvm2rl3           2000  0.052552           0.256491           0.33652753   0.5750 / 0.5837
+  b-ball             2000  -1.562643          -1.502244          -1.5         -1.5 / -1.5
+  neos17             2000  0.146784           0.145683           0.1500026    0.15132 / 0.15242
+  mik-250-20-75-1    2000  -50576.668         -50481.897         -49716       -48176 / -49616
+  gsvm2rl3 counters ON@2000: SepCmirCuts 3491, NodeGmiRaw 42, HighsSepaCutoffBox 88,
+  NodeGmiNsAbstainKept 46 (OFF: all 0).
+  No bound past an oracle. neos17 is not reproducible run to run in this arm (base build,
+  flag unset, 1000 nodes, two runs: 0.147345 / 72,919 LP iters vs 0.144941 / 61,961), so
+  its -0.0011 is within noise; gsvm2rl3 and b-ball reproduced exactly across runs.
+
+Flag unset, base build (2ef4b8d5) vs this build, 1000 nodes, bit-identical objective, bound,
+node count and LP iterations on gsvm2rl3, b-ball, neos17, mik-250-20-75-1, both the default
+env and the SEARCH_CUT_LP + SEPA_NODE arm.
+
+HiGHS 1.15.1, gsvm2rl3, 1 thread (root rows of its log):
+         0       0         0   0.00%   0.012           0.6               98.00%        0      0      0       225     0.0s
+ S       0       0         0   0.00%   0.0309677419    0.6               94.84%       55      2      0       237     0.0s
+ L       0       0         0   0.00%   0.0973929147    0.5979304535      83.71%      393     14      3       377     0.2s
