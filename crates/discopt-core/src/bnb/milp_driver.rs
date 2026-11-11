@@ -6614,8 +6614,23 @@ fn solve_milp_node_search(
                         dbg_last_inc,
                     )
                 });
-                highs_outcome =
-                    highs_env::run(&ctx, &lim, initial, root_bound, Some(&mut sub_mip), dbg);
+                let seed_pool = if highs_env::search_cut_lp_enabled() {
+                    highs_sep
+                        .as_ref()
+                        .map(|h| h.export_cuts())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                highs_outcome = highs_env::run(
+                    &ctx,
+                    &lim,
+                    initial,
+                    root_bound,
+                    Some(&mut sub_mip),
+                    dbg,
+                    seed_pool,
+                );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
                     incr(Ctr::HighsMipSearchRuns);
@@ -6629,6 +6644,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
                     incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
+                    incr_by(Ctr::HighsSearchPoolSeeded, o.seeded_pool as u64);
                 }
             }
             outs

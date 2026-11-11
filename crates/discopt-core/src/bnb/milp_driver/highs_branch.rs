@@ -1062,7 +1062,15 @@ pub(super) mod e2e {
             .incumbent()
             .filter(|(_, v)| *v < INFEAS_SENTINEL - 1.0)
             .map(|(x, v)| (x.to_vec(), v));
-        match highs_env::run(ctx, &lim, initial, f64::NEG_INFINITY, None, None) {
+        match highs_env::run(
+            ctx,
+            &lim,
+            initial,
+            f64::NEG_INFINITY,
+            None,
+            None,
+            Vec::new(),
+        ) {
             Some(o) => {
                 res.best = o.best;
                 res.bound = o.bound;

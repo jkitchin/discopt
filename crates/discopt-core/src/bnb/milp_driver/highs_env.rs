@@ -112,9 +112,11 @@ pub(super) struct Outcome {
     /// `MilpBoundHook` calls, and the node bounds they raised.
     pub bound_hook_calls: usize,
     pub bound_hook_raised: usize,
-    /// Step 2.1: cut rows added to and deleted from the search's LP.
+    /// Step 2.1: cut rows added to and deleted from the search's LP, and the root
+    /// cuts its pool started with.
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
+    pub seeded_pool: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -433,6 +435,8 @@ pub(super) struct HighsEnv<'a, 'b> {
     in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
+    /// Root cuts the pool started with (step 2.1).
+    pub seeded_pool: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -1251,6 +1255,7 @@ pub(super) fn run<'a>(
     root_bound: f64,
     sub_mip: Option<SubMip<'a>>,
     dbg: Option<Debugger<'a>>,
+    seed_pool: Vec<GomoryCut>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -1296,7 +1301,19 @@ pub(super) fn run<'a>(
         in_lp: std::collections::HashSet::new(),
         cut_rows_added: 0,
         cut_rows_deleted: 0,
+        seeded_pool: 0,
     };
+    // Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
+    // cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
+    // so does this one (the pool feeds the LP when a node violates a cut).
+    if env.cut_lp {
+        for cut in ctx.gmi_pool.iter().cloned().chain(seed_pool) {
+            if env.pool_sigs.insert(cut_signature(&cut)) {
+                env.pool.push(cut);
+            }
+        }
+        env.seeded_pool = env.pool.len();
+    }
     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
     if let Some(d) = env.dbg.as_mut() {
         d.bound = root_bound;
@@ -1371,5 +1388,6 @@ pub(super) fn run<'a>(
         bound_hook_raised: env.bound_hook_raised,
         cut_rows_added: env.cut_rows_added,
         cut_rows_deleted: env.cut_rows_deleted,
+        seeded_pool: env.seeded_pool,
     })
 }

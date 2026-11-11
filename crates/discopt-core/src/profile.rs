@@ -725,6 +725,7 @@ counters!(
     // Step 2.1: cut rows added to / deleted from the HiGHS search's own LP.
     HighsSearchCutRowsAdded,
     HighsSearchCutRowsDeleted,
+    HighsSearchPoolSeeded,
     HighsMipSearchNodes,
     HighsMipSearchBranched,
     HighsMipSearchSbIters,

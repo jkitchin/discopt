@@ -516,6 +516,8 @@ pub struct RootSeparation {
     vbounds: Option<VarBoundStore>,
     /// Cuts added to the pool across rounds.
     pub cuts_generated: usize,
+    /// Structural columns (the pool's cuts are over them).
+    ns: usize,
 }
 
 /// Under `DISCOPT_MILP_ROOT_CMIR=highs`: whether the transformed LP substitutes
@@ -583,7 +585,25 @@ impl RootSeparation {
             top_level,
             vbounds: None,
             cuts_generated: 0,
+            ns,
         }
+    }
+
+    /// The live cuts of the root's global pool as `coeffs·x >= rhs` over the structural
+    /// columns (HiGHS's pool holds them as `a·x <= b`), for a later search's pool: HiGHS
+    /// keeps every separated cut there, not only the ones its LP took.
+    pub fn export_cuts(&self) -> Vec<GomoryCut> {
+        (0..self.pool.num_slots() as i32)
+            .filter(|&r| self.pool.is_live(r))
+            .map(|r| {
+                let (inds, vals, rhs) = self.pool.cut(r);
+                let mut coeffs = vec![0.0; self.ns];
+                for (&j, &v) in inds.iter().zip(vals) {
+                    coeffs[j as usize] = -v;
+                }
+                GomoryCut { coeffs, rhs: -rhs }
+            })
+            .collect()
     }
 
     /// Variable bounds held (0 when off).
