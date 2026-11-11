@@ -1,0 +1,90 @@
+Step 2.3 (2026-11-11): HiGHS's objective propagation in the search's local domain,
+DISCOPT_HIGHS_SEARCH_OBJ_PROP (default OFF). Extracted from the obj arm of e2701ee4 (H2), whose
+cut-pool part was falsified and is not carried.
+
+PRE-REGISTERED (written before any measurement on this build):
+  Hypothesis: attaching HiGHS's ObjectivePropagation (c.x <= upper_limit, upper_limit = the
+  search's own lattice-aware cutoff - obj_const, re-set on every incumbent improvement) to the
+  search's domain improves b-ball's dual bound at a fixed node budget.
+  Pass (both): (a) b-ball's dual gap at 20000 nodes falls by >= 25 % vs off (median of 2 reps
+  per arm); (b) no instance among b-ball, mik-250-20-75-1/2/3/5, neos17, neos-911970, gsvm2rl3
+  ends with a worse bound at the same node budget by more than noise, where noise per instance is
+  the spread of the two off reps and "worse" means the better obj rep is below the worse off rep
+  by more than max(2 x that spread, 1e-6 x (1 + |bound|)); a certified instance counts as its
+  oracle bound (no bound comparison when both arms certify; nodes/wall are reported only).
+  Kill (any): (a) or (b) fails; any bound past the oracle optimum; any objective worse than the
+  oracle on a certified row; a row whose obj-arm profile shows HighsObjPropAttached = 0 (the
+  mechanism did not fire: the measurement is void, not a pass).
+  Secondary (reported, not gating): b-ball at 99999 nodes (1 rep per arm).
+
+Command (per row): DISCOPT_PANEL_DETERMINISTIC=1 RAYON_NUM_THREADS=1 DISCOPT_LP_MILP_BACKEND=rust
+DISCOPT_PROFILE=1 [DISCOPT_HIGHS_SEARCH_OBJ_PROP=1] python discopt_benchmarks/scripts/lp_milp_panel.py
+worker <ref>/miplib2017/<name>.mps.gz R 600 1e-4 20000. Runner: step23_obj_prop.py (rows in
+step23_obj_prop.jsonl). Oracle: miplib2017-v31.solu via discopt_benchmarks/data/miplib/panel.json.
+
+RESULTS (build = b8ef0fc9 + this change; loaded _rust.abi3.so asserted to be the worktree's, and the
+worker asserts discopt under the worktree's python/; 2 jobs in parallel, load 4-5 on 4 cores from
+other agents -- walls are not gating). Gaps are (oracle - bound)/|oracle| in %; certified rows
+count the oracle. Summary: step23_obj_prop_summary.py step23_obj_prop.jsonl (51 executed checks:
+no bound past an oracle, every obj-arm row attached, no certified row in this panel).
+
+| instance | nodes | off gap % (reps) | obj gap % (reps) | off nodes | obj nodes | off wall | obj wall | obj changes | obj-infeasible | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| b-ball | 20000 | 4.461/4.461 | 4.581/4.581 | 19999/19999 | 19999/19999 | 5.265/4.458 | 4.467/3.398 | 14/14 | 6802/6802 | WORSE |
+  median gap off 4.4609 obj 4.5809 change +2.7 %
+| mik-250-20-75-1 | 20000 | 1.166/1.356 | 1.156/1.156 | 19999/19999 | 19999/19999 | 95.650/102.801 | 91.964/97.664 | 37243/37134 | 0/0 | within noise |
+  median gap off 1.2612 obj 1.1562 change -8.3 %
+| mik-250-20-75-2 | 20000 | 0.628/0.652 | 0.591/0.806 | 19999/19999 | 19999/19999 | 71.483/74.618 | 61.309/68.674 | 251184/172172 | 0/0 | within noise |
+  median gap off 0.6398 obj 0.6982 change +9.1 %
+| mik-250-20-75-3 | 20000 | 1.567/1.604 | 1.366/1.366 | 19999/19999 | 19999/19999 | 55.663/52.346 | 46.849/47.491 | 381396/382711 | 0/0 | better |
+  median gap off 1.5854 obj 1.3662 change -13.8 %
+| mik-250-20-75-5 | 20000 | 0.855/0.855 | 0.467/0.467 | 19999/19999 | 19999/19999 | 64.469/64.298 | 59.547/58.409 | 47438/48477 | 0/0 | better |
+  median gap off 0.8548 obj 0.4674 change -45.3 %
+| neos17 | 20000 | 2.141/2.530 | 1.125/2.016 | 19999/19999 | 19999/19999 | 111.900/125.126 | 148.286/140.640 | 155867/143541 | 451/211 | within noise |
+  median gap off 2.3354 obj 1.5707 change -32.7 %
+| neos-911970 | 20000 | 1.683/1.683 | 0.986/1.742 | 19999/19999 | 19999/18910 | 528.655/437.564 | 548.710/600.427 | 0/0 | 400/725 | within noise |
+  median gap off 1.6829 obj 1.3641 change -18.9 %
+| gsvm2rl3 | 20000 | 67.741/67.741 | 90.683/90.683 | 19999/19999 | 382/382 | 54.896/64.916 | 604.871/626.100 | 4925/4925 | 0/0 | WORSE |
+  median gap off 67.7409 obj 90.6828 change +33.9 %
+| b-ball | 99999 | 4.461 | 4.581 | 99998 | 99998 | 54.099 | 36.125 | 68 | 39202 | WORSE |
+  median gap off 4.4609 obj 4.5809 change +2.7 %
+executed checks: 51
+
+The probe fired on every obj row (HighsObjPropAttached = searches run, 0 refused). b-ball and
+mik-5 are bit-deterministic run to run; mik-1/2/3, neos17, neos-911970 are not (spread above).
+
+VERDICT: FALSIFIED (kill fired on both legs).
+  (a) b-ball's gap at 20000 nodes went UP, 4.461 -> 4.581 % (+2.7 %, deterministic: both reps of
+      both arms bit-identical), not down >= 25 %. Same at 99999 nodes (the bound does not move
+      between 20k and 99999 nodes in either arm). Objective propagation made 14 bound changes and
+      pruned 6802 nodes before their LP (prune-before-LP, which changes the path, not the bound).
+  (b) gsvm2rl3 is worse beyond noise: 67.74 -> 90.68 % at the 600 s backstop, reached after only
+      382 of 20000 nodes. Not a bound effect -- a throughput pathology: at 150 nodes (1 rep each)
+      off 3.96 s / obj 396 s, with NodeLpSolve 1.77 s -> 394 s over ~1300 node LPs (~300 ms per LP,
+      DualPivotLoop 0.57 -> 122 s) while SubMip/RootCutLoop are unchanged. The objective
+      propagation's continuous-column tightenings (4925 changes) leave node LPs that the simplex
+      solves ~100x slower. Root cause not investigated; per node the obj arm's bound was better
+      there (0.031 vs 0.012 at 150 nodes).
+  Positive elsewhere, not enough to save it: mik-5 -45 %, mik-3 -14 %, neos17 -33 % median
+  (within its noise), neos-911970 -19 % median (within noise; one obj rep hit the 600 s backstop
+  at 18910 nodes), mik-1 -8 %, mik-2 +9 % (both within noise).
+
+POST-HOC (NOT pre-registered; reconciles with e2701ee4): the same b-ball A/B in the 2.1b
+configuration e2701ee4 measured in (DISCOPT_HIGHS_SEARCH_CUT_LP=1 DISCOPT_HIGHS_SEPA_NODE=1),
+rows in step23_obj_prop_posthoc_21b.jsonl:
+
+| instance | nodes | off gap % (reps) | obj gap % (reps) | off nodes | obj nodes | off wall | obj wall | obj changes | obj-infeasible | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| b-ball | 20000 | 1.509/1.509 | 1.148/1.148 | 19999/19999 | 19999/19999 | 11.691/10.571 | 10.226/9.295 | 15/15 | 5954/5954 | better |
+  median gap off 1.5089 obj 1.1478 change -23.9 %
+executed checks: 6
+
+-> reproduces e2701ee4 exactly (1.509 -> 1.148 %, -24 %). The b-ball lever is configuration-
+   dependent: with persistent node cuts it helps, on today's default search it hurts slightly.
+   A new hypothesis on that configuration would first have to fix the gsvm2rl3 LP slowdown.
+
+Soundness: regression test highs_search_objective_propagation_keeps_feasible_points (360 random
+MILPs, persistent cut rows on half): 360 certified, 0 changed optima/bounds (also at 3/12-node
+limits), 1093 reference-point checks with 0 violations, 3330 attachments, 22037 bound changes,
+270 nodes proved infeasible. Broken arm (upper limit 1.0 below the cutoff), 120 MILPs: 11 wrong
+results and 4 reference-point violations -> the test can fail.
