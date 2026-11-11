@@ -871,6 +871,9 @@ impl TreeManager {
                             .get(record.var_index)
                             .copied()
                             .unwrap_or(f64::INFINITY);
+                if !result.bound_trusted {
+                    crate::profile::incr(crate::profile::Ctr::PseudocostUntrustedChild);
+                }
                 self.pseudocosts.update(
                     record.var_index,
                     record.parent_lb,
@@ -3158,6 +3161,62 @@ mod tests {
         // Both children should have updated pseudocosts (branched further).
         assert_eq!(stats.branched, 2);
         // Pseudocosts should have been updated (2 observations total).
+    }
+
+    #[test]
+    fn test_pseudocost_ignores_infeasible_child_sentinel() {
+        // An LP-infeasible child comes back from the MILP driver with the 1e30
+        // exclusion sentinel (`sentinel_is_exclusion`), which `import_results`
+        // keeps as its `local_lower_bound`. The retroactive pseudocost update runs
+        // before pruning, and used to record (1e30 - parent_lb)/frac as a gain.
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![3.5],
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
+        tm.process_evaluated();
+        let batch = tm.export_batch(2);
+        assert_eq!(batch.node_ids.len(), 2);
+        tm.import_results(&[
+            NodeResult {
+                node_id: batch.node_ids[0],
+                lower_bound: 2.0,
+                solution: vec![3.0],
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: false,
+            },
+            NodeResult {
+                node_id: batch.node_ids[1],
+                lower_bound: 1e30,
+                solution: vec![0.0],
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: true,
+            },
+        ]);
+        let stats = tm.process_evaluated();
+        assert!(stats.pruned >= 1, "the sentinel child is pruned");
+        // Exactly one observation (the feasible child), worth (2-1)/0.5 = 2.
+        assert_eq!(tm.pseudocosts.observation_count(0), 1);
+        let worst = tm.pseudocosts.down_cost(0).max(tm.pseudocosts.up_cost(0));
+        assert!(worst < 1e3, "sentinel leaked into the pseudocost: {worst}");
     }
 
     #[test]
