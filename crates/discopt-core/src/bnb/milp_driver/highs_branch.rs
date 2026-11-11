@@ -755,6 +755,7 @@ impl HighsEval {
         let parent_point = self.point.clone();
         let parent_redcost = self.redcost.clone();
         let parent_dual = self.last_dual.clone();
+        let parent_basis_d = self.basis_d.clone();
         loop {
             let must_stop = self.sb_iters >= max_sb_iters || (bc.check_limits)();
             // `selectBestScore(mustStop)`.
@@ -809,6 +810,7 @@ impl HighsEval {
                 *up_lb = upbound[cand];
                 // Restore the parent LP state the probes overwrote.
                 self.basis = parent_basis;
+                self.basis_d = parent_basis_d;
                 self.point = parent_point;
                 self.redcost = parent_redcost;
                 self.last_dual = parent_dual;
@@ -839,13 +841,24 @@ impl HighsEval {
                 self.dom.backtrack();
                 self.dom.clear_changed_cols();
                 self.restore(&parent_basis, &parent_point, &parent_redcost, &parent_dual);
+                self.basis_d = parent_basis_d.clone();
                 self.commit_child(cur, under, steps, col, oupper, oval, fracval, 0, None);
                 return None;
             }
             pc.add_inference_observation(col, inferences, upbranch);
             self.dom.clear_changed_cols();
             let (fl, fu) = self.lp_box(ctx);
-            let nl = node_lp(ctx, parent_basis.clone(), &fl, &fu);
+            let nl = node_lp(
+                ctx,
+                super::highs_eval::fit_basis_to_box(
+                    parent_basis.clone(),
+                    parent_basis_d.as_deref(),
+                    &fl,
+                    &fu,
+                ),
+                &fl,
+                &fu,
+            );
             let iters = nl.sol.iters as i64;
             self.lp_iters += iters;
             self.sb_iters += iters;
@@ -921,6 +934,7 @@ impl HighsEval {
                         self.dom.backtrack();
                         self.dom.clear_changed_cols();
                         self.restore(&parent_basis, &parent_point, &parent_redcost, &parent_dual);
+                        self.basis_d = parent_basis_d.clone();
                         self.commit_child(
                             cur,
                             under,
@@ -940,6 +954,7 @@ impl HighsEval {
                     self.dom.backtrack();
                     self.dom.clear_changed_cols();
                     self.restore(&parent_basis, &parent_point, &parent_redcost, &parent_dual);
+                    self.basis_d = parent_basis_d.clone();
                     self.commit_child(cur, under, steps, col, oupper, oval, fracval, 0, None);
                     return None;
                 }

@@ -71,6 +71,9 @@ pub(super) struct HighsEval {
     pub redcost: Option<Vec<f64>>,
     /// Unscaled row duals of the last trusted LP (`row_dual`).
     pub last_dual: Option<Vec<f64>>,
+    /// Reduced costs of all working columns at [`Self::basis`] (for refitting it to
+    /// another node's box).
+    pub basis_d: Option<Vec<f64>>,
     /// The last trusted LP's duals as the solve returned them (solve space), and its
     /// working-LP box: what node separation re-solves from.
     pub last_dual_raw: Option<Vec<f64>>,
@@ -126,6 +129,7 @@ impl HighsEval {
             unbounded: false,
             redcost: None,
             last_dual: None,
+            basis_d: None,
             last_dual_raw: None,
             last_box: None,
             pending_lift: None,
@@ -262,6 +266,7 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.basis_d = Some(full_redcost(ctx, &nl));
                 self.last_dual_raw = Some(nl.sol.dual.clone());
                 self.last_box = Some((full_l.to_vec(), full_u.to_vec()));
                 objective_observation(parent, node, pc);
@@ -278,6 +283,7 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.basis_d = Some(full_redcost(ctx, &nl));
                 self.last_dual_raw = Some(nl.sol.dual.clone());
                 self.last_box = Some((full_l.to_vec(), full_u.to_vec()));
                 objective_observation(parent, node, pc);
@@ -411,7 +417,12 @@ impl HighsEval {
             // `lp->flushDomain(localdom)`.
             self.dom.clear_changed_cols();
             let (fl, fu) = self.lp_box(ctx);
-            let nl = node_lp(ctx, self.basis.clone(), &fl, &fu);
+            let nl = node_lp(
+                ctx,
+                fit_basis_to_box(self.basis.clone(), self.basis_d.as_deref(), &fl, &fu),
+                &fl,
+                &fu,
+            );
             if let Some((v, 0)) = self.dom.objective_lower() {
                 node.lower_bound = node.lower_bound.max(v + oc);
             }
@@ -420,6 +431,55 @@ impl HighsEval {
             }
         }
     }
+}
+
+/// A start basis for the LP over the box `l..u`, from a basis kept from another node
+/// and its reduced costs `d` (all working columns): every nonbasic column with both
+/// sides finite goes to the side its reduced cost makes dual feasible (`d > 0` lower,
+/// `d < 0` upper), and one on an infinite side moves to its finite side -- what
+/// HiGHS's dual simplex does with a kept basis when bounds change (bound flipping).
+/// A basis carried across nodes otherwise starts dual infeasible wherever a column
+/// fixed at the earlier node (`l = u`, any status) is boxed again, and the solve
+/// repairs that in dual phase 1. Only the start changes: the LP solved, and its
+/// safety layer, are the same.
+pub(super) fn fit_basis_to_box(
+    basis: Option<Basis>,
+    d: Option<&[f64]>,
+    l: &[f64],
+    u: &[f64],
+) -> Option<Basis> {
+    let mut b = basis?;
+    let mut moved = 0u64;
+    for (j, st) in b.col_status.iter_mut().enumerate() {
+        if j >= l.len() || *st == BASIC {
+            continue;
+        }
+        let (lo, hi) = (l[j] > -INF, u[j] < INF);
+        let want = match (lo, hi) {
+            (true, true) => match d.and_then(|d| d.get(j)) {
+                Some(&dj) if dj > 0.0 => AT_LOWER,
+                Some(&dj) if dj < 0.0 => AT_UPPER,
+                _ => *st,
+            },
+            (true, false) => AT_LOWER,
+            (false, true) => AT_UPPER,
+            (false, false) => *st,
+        };
+        if want != *st && (*st == AT_LOWER || *st == AT_UPPER) {
+            *st = want;
+            moved += 1;
+        }
+    }
+    crate::profile::incr_by(crate::profile::Ctr::HighsMipSearchBasisFits, moved);
+    Some(b)
+}
+
+/// Reduced costs `c_j - a_j^T y` of every working column at an LP.
+fn full_redcost(ctx: &NodeCtx<'_>, nl: &NodeLp) -> Vec<f64> {
+    let y = nl.rc_dual();
+    (0..ctx.n_w)
+        .map(|j| ctx.c_w[j] - ctx.csc_rc.dot(j, y))
+        .collect()
 }
 
 /// The structurals' reduced costs `c_j - a_j^T y` at an LP (`col_dual`).
