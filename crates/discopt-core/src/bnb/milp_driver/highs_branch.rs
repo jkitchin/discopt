@@ -1048,7 +1048,7 @@ pub(super) mod e2e {
             ran: true,
             ..Default::default()
         };
-        match highs_env::run(ctx, &lim, None, f64::NEG_INFINITY) {
+        match highs_env::run(ctx, &lim, None, f64::NEG_INFINITY, None) {
             Some(o) => {
                 res.best = o.best;
                 res.bound = o.bound;

@@ -2028,12 +2028,18 @@ impl TreeManager {
     /// latter; what it may fathom is the band `[U - 2D, U)`, and the global bound
     /// is capped at `U - 2D` to keep that band in the reported bound.
     pub fn cutoff_value(&self) -> f64 {
+        self.cutoff_for(self.incumbent_value)
+    }
+
+    /// [`Self::cutoff_value`] for an incumbent value `inc` held elsewhere (the
+    /// HiGHS-design search keeps its own incumbent; it prunes on the same lattice).
+    pub fn cutoff_for(&self, inc: f64) -> f64 {
         match self.obj_lattice {
-            Some(ObjLattice { spacing, drift, .. }) if self.incumbent_value.is_finite() => {
-                let c = self.incumbent_value - spacing + 2.0 * drift;
+            Some(ObjLattice { spacing, drift, .. }) if inc.is_finite() => {
+                let c = inc - spacing + 2.0 * drift;
                 c + LATTICE_EPS * c.abs().max(1.0)
             }
-            _ => self.incumbent_value,
+            _ => inc,
         }
     }
 

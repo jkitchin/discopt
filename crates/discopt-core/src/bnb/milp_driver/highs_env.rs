@@ -87,6 +87,8 @@ pub(super) struct Outcome {
     pub heuristic_hits: usize,
     pub sep_calls: usize,
     pub sep_lifts: usize,
+    /// Better points the sub-MIP heuristics found.
+    pub sub_mip_hits: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -138,10 +140,17 @@ fn from_q(c: &QDomainChange) -> DomainChange {
     }
 }
 
+/// A sub-MIP heuristic: from an LP point (structurals) and the incumbent, at a node
+/// count, a verified better point or `None` (the driver's RENS/RINS, schedule
+/// included).
+pub(super) type SubMip<'a> =
+    &'a mut dyn FnMut(&[f64], Option<(&[f64], f64)>, usize) -> Option<(Vec<f64>, f64)>;
+
 /// The production search environment.
 pub(super) struct HighsEnv<'a, 'b> {
     ctx: &'a NodeCtx<'b>,
     lim: &'a Limits,
+    sub_mip: Option<SubMip<'a>>,
     pub eval: HighsEval,
     pub pc: Pseudocost,
     pub q: NodeQueue,
@@ -159,6 +168,7 @@ pub(super) struct HighsEnv<'a, 'b> {
     pool_sigs: std::collections::HashSet<Vec<(u32, i64)>>,
     pub sep_calls: usize,
     pub sep_lifts: usize,
+    pub sub_mip_hits: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -174,12 +184,21 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     fn accept(&mut self, x: Vec<f64>, v: f64) {
         if self.best.as_ref().is_none_or(|b| v < b.1) {
             self.best = Some((x, v));
-            self.eval.cutoff = v;
+            // The driver's objective lattice (HiGHS: `isIntegral` and the floored
+            // upper limit): with lattice spacing g a better point is at least g
+            // below the incumbent.
+            self.eval.cutoff = self.ctx.tm.cutoff_for(v);
         }
+    }
+
+    /// A valid bound lifted to the objective lattice (`round_bound_up`).
+    fn lift(&self, v: f64) -> f64 {
+        self.ctx.tm.round_bound_up(v)
     }
 
     fn optlim(&self) -> f64 {
         optimality_limit(self.lim, self.best.as_ref().map_or(f64::INFINITY, |b| b.1))
+            .min(self.eval.cutoff)
     }
 
     fn check_limits(&mut self) -> bool {
@@ -315,15 +334,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
         r
     }
     fn branch(&mut self, top: &NodeData, parent: Option<&NodeData>, _depth: i32) -> BranchOutcome {
+        let optlim = self.optlim();
         let q = &self.q;
         let nodes = |c: usize| (q.num_nodes_up(c), q.num_nodes_down(c));
         let deadline = self.lim.deadline;
         let limits = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let bc = BranchCtx {
-            optimality_limit: optimality_limit(
-                self.lim,
-                self.best.as_ref().map_or(f64::INFINITY, |b| b.1),
-            ),
+            optimality_limit: optlim,
             upper_limit: self.eval.cutoff,
             feastol: 1e-6,
             epsilon: 1e-9,
@@ -472,6 +489,15 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.heuristic_hits += 1;
             self.accept(cand, v);
         }
+        // RENS / RINS (HiGHS's `runHeuristics`: RENS without an incumbent, RINS
+        // with one), on the driver's schedule.
+        if let (Some(sm), Some(xs)) = (self.sub_mip.as_mut(), self.eval.point.clone()) {
+            let inc = self.best.as_ref().map(|(bx, bv)| (bx.as_slice(), *bv));
+            if let Some((cand, v)) = sm(&xs, inc, self.nodes.max(0) as usize) {
+                self.sub_mip_hits += 1;
+                self.accept(cand, v);
+            }
+        }
     }
     fn after_round(&mut self) -> bool {
         self.q.perform_bounding(self.eval.cutoff);
@@ -481,9 +507,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
         let lb = if self.q.is_empty() {
             inc
         } else {
-            inc.min(self.q.best_lower_bound())
+            inc.min(self.lift(self.q.best_lower_bound()))
         }
-        .min(self.eval.unresolved_floor);
+        .min(self.lift(self.eval.unresolved_floor));
         if gap_closed(self.lim, inc, lb) {
             self.gap_stop = true;
             return true;
@@ -498,11 +524,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
 /// `obj_const` (`-inf` for none). `None` when the root LP is unbounded or
 /// the rows are infeasible over the global box before any search (the driver's own
 /// handling then decides).
-pub(super) fn run(
-    ctx: &NodeCtx<'_>,
-    lim: &Limits,
+pub(super) fn run<'a>(
+    ctx: &'a NodeCtx<'_>,
+    lim: &'a Limits,
     initial: Option<(Vec<f64>, f64)>,
     root_bound: f64,
+    sub_mip: Option<SubMip<'a>>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -511,6 +538,7 @@ pub(super) fn run(
     let mut env = HighsEnv {
         ctx,
         lim,
+        sub_mip,
         eval,
         pc: Pseudocost::new(ctx.ns, DEFAULT_MIN_RELIABLE),
         q: NodeQueue::new(ctx.ns),
@@ -526,6 +554,7 @@ pub(super) fn run(
         pool_sigs: std::collections::HashSet::new(),
         sep_calls: 0,
         sep_lifts: 0,
+        sub_mip_hits: 0,
     };
     if let Some((x, v)) = initial {
         env.accept(x, v);
@@ -552,9 +581,9 @@ pub(super) fn run(
     let open = if env.q.is_empty() {
         f64::INFINITY
     } else {
-        env.q.best_lower_bound()
+        env.lift(env.q.best_lower_bound())
     };
-    let bound = inc.min(open).min(env.eval.unresolved_floor);
+    let bound = inc.min(open).min(env.lift(env.eval.unresolved_floor));
     Some(Outcome {
         best: env.best.clone(),
         bound,
@@ -569,5 +598,6 @@ pub(super) fn run(
         heuristic_hits: env.heuristic_hits,
         sep_calls: env.sep_calls,
         sep_lifts: env.sep_lifts,
+        sub_mip_hits: env.sub_mip_hits,
     })
 }

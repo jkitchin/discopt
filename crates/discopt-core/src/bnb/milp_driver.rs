@@ -6437,7 +6437,71 @@ fn solve_milp_node_search(
                     } else {
                         f64::NEG_INFINITY
                     };
-                highs_outcome = highs_env::run(&ctx, &lim, initial, root_bound);
+                // The batched search's sub-MIP heuristics (RENS without an incumbent,
+                // RINS with one; the HiGHS RENS variant when its base exists), on the
+                // same schedule: due every SUB_MIP_BATCH_STRIDE * 64 nodes, backing
+                // off on failures, within the node budget. Called from the search's
+                // `runHeuristics` slot with the installed node's LP point.
+                let mut since_nodes = SUB_MIP_BATCH_STRIDE * 64;
+                let mut last_nodes = 0usize;
+                let mut sub_mip = |x: &[f64], inc: Option<(&[f64], f64)>, nodes: usize| {
+                    let base = sub_mip_base.as_ref()?;
+                    since_nodes += nodes.saturating_sub(last_nodes);
+                    last_nodes = nodes;
+                    let budget = sub_mip_node_budget(nodes, sub_mip_spent);
+                    let stride =
+                        sub_mip_backoff_stride(SUB_MIP_BATCH_STRIDE * 64, sub_mip_fail_streak);
+                    if since_nodes < stride || budget == 0 || x.len() < ns {
+                        return None;
+                    }
+                    since_nodes = 0;
+                    let kind = if inc.is_some() {
+                        SubMipKind::Rins
+                    } else {
+                        SubMipKind::Rens
+                    };
+                    let rens_now = kind == SubMipKind::Rens || !rens_root_done;
+                    rens_root_done = true;
+                    let rens_highs = rens_cut_base.as_ref().map(|cb| {
+                        try_rens_highs(
+                            cb,
+                            base,
+                            &rens_order,
+                            obj_const,
+                            ns,
+                            &is_int,
+                            x,
+                            rens_root_x.as_deref(),
+                            if rens_now { None } else { inc },
+                            rens_root_basis.as_ref(),
+                            opts,
+                            deadline,
+                            nodes,
+                        )
+                    });
+                    let found = rens_highs.unwrap_or_else(|| {
+                        try_sub_mip(
+                            kind,
+                            base,
+                            obj_const,
+                            ns,
+                            &is_int,
+                            x,
+                            inc,
+                            opts,
+                            deadline,
+                            budget,
+                            &mut sub_mip_spent,
+                        )
+                    });
+                    if found.is_some() {
+                        sub_mip_fail_streak = 0;
+                    } else {
+                        sub_mip_fail_streak = sub_mip_fail_streak.saturating_add(1);
+                    }
+                    found
+                };
+                highs_outcome = highs_env::run(&ctx, &lim, initial, root_bound, Some(&mut sub_mip));
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
                     incr(Ctr::HighsMipSearchRuns);
@@ -6448,6 +6512,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchHeuristicHits, o.heuristic_hits as u64);
                     incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
                     incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
+                    incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
                 }
             }
             outs
