@@ -73,8 +73,18 @@ _RTOL = 1e-4  # conftest's declared rel tolerance
 #
 # Measured: identical results over 3 repeats per budget, 0.6 s at 6 iterations
 # and 1.7 s at 12 -- cheaper than the 10 s budgets they replace.
-_BUDGET = 12
-_CONTROL_BUDGETS = (6, 12)
+#
+# Re-measured at the HiGHS-stack graduation (MILP presolve default-ON): 0.2 s at 6
+# iterations but 108 s at 12, where two masters take ~49 s each to find an exactly
+# feasible lot vector (the presolved master has no equality residual to exploit; see
+# `data/oa_masters/README.md`, portfol_roundlot). The shared run uses 6.
+#
+# The control budgets run with `DISCOPT_MILP_PRESOLVE=0`: with presolve on, no point
+# handed to the gate failed `verify_point` at any budget 1-13 (measured), so the gate
+# would have nothing to repair. Without it, the masters' tolerance-exploiting points
+# still reach the gate: the exit point is rejected at budgets 4, 5, 8 and 9.
+_BUDGET = 6
+_CONTROL_BUDGETS = (4, 5)
 _TL = 300.0  # deliberately non-binding; see above
 
 
@@ -152,11 +162,17 @@ def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
 
     real = oa._exit_verified_incumbent
 
+    handed: list[np.ndarray] = []
+
     def _identity(model, x_flat, obj, obj_sign, *, warn=True):
+        handed.append(np.asarray(x_flat, dtype=np.float64).copy())
         return np.asarray(x_flat, dtype=np.float64), obj, None
 
+    # See `_CONTROL_BUDGETS`: the control needs the unpresolved masters.
+    monkeypatch.setenv("DISCOPT_MILP_PRESOLVE", "0")
     reproduced = []
     for budget in _CONTROL_BUDGETS:
+        handed.clear()
         monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
         m_u, ungated = _solve(budget)
 
@@ -165,7 +181,12 @@ def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
 
         assert ungated.objective is not None and gated.objective is not None
 
-        before = verify_point(m_u, _flat(m_u, ungated.x))
+        # The positive control judges the point OA handed to the gate, not the
+        # ungated result: the model-level certificate repair (#1537 E) now projects
+        # a point with a small row excess after the solve, so the ungated RESULT
+        # verifies even when the gate had work to do (measured on every budget 1-9).
+        assert handed, f"max_nodes={budget}: the gate was never called"
+        before = verify_point(m_u, handed[-1])
         after = verify_point(m_g, _flat(m_g, gated.x))
         if not before.ok:
             reproduced.append((budget, before.reason))
@@ -268,13 +289,15 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
     """
     import discopt.solvers.oa as oa
 
-    seen: dict = {}
+    seen: list[tuple[float, np.ndarray]] = []
 
     def _always_refuse(model, x_flat, obj, obj_sign, *, warn=True):
-        # Record what the gate was handed, so the assertions below compare the
-        # result against THIS run rather than against a float from one machine.
-        seen["obj"] = obj
-        seen["x"] = np.asarray(x_flat, dtype=np.float64).copy()
+        # Record every point the gate was handed, so the assertions below compare
+        # the result against THIS run rather than against a float from one machine.
+        # The gate runs once per candidate incumbent, and a solve can offer several
+        # with the same objective (measured: points differing by 5e-15 in 6 of 17
+        # entries), so the result is matched against all of them, not the last.
+        seen.append((obj, np.asarray(x_flat, dtype=np.float64).copy()))
         return np.asarray(x_flat, dtype=np.float64), obj, "row 99 violated by 1.000e-03"
 
     monkeypatch.setattr(oa, "_exit_verified_incumbent", _always_refuse)
@@ -284,11 +307,39 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
     assert seen, "the gate was never called -- this test measured nothing"
     assert r.x is not None, "the forced-refusal run lost its incumbent entirely"
     # The point and its objective still reach the caller; the CERTIFICATE does not.
-    assert r.objective == seen["obj"]
-    np.testing.assert_array_equal(_flat(m, r.x)[: seen["x"].size], seen["x"])
+    # The one sanctioned change after the gate is the model-level certificate repair
+    # (#1537 E, `repair_point`), which projects a point with a tiny row excess and
+    # says so in `solver_stats` (measured here: excess 4.3e-10 before, the point moved
+    # 5.5e-15, objective shift 0). Without a recorded repair the point must be
+    # bit-identical to one the gate refused; with one, within the repair's reach and
+    # with the recorded objective shift.
+    stats = r.solver_stats or {}
+    repaired = bool(stats.get("certificate/incumbent_repaired"))
+    shift = abs(float(stats.get("certificate/repair_objective_shift", 0.0)))
+    flat = _flat(m, r.x)
+
+    def _matches(obj, x):
+        if not repaired:
+            return r.objective == obj and np.array_equal(flat[: x.size], x)
+        return abs(r.objective - obj) <= shift + 1e-12 and np.allclose(
+            flat[: x.size], x, rtol=0.0, atol=1e-6
+        )
+
+    handed = [(obj, x) for obj, x in seen if _matches(obj, x)]
+    assert handed, (
+        f"the returned point (objective {r.objective!r}, repaired={repaired}) is none "
+        f"of the {len(seen)} points the gate refused"
+    )
     assert r.status == "feasible"
     assert r.gap_certified is False
-    assert r.gap is None
+    if repaired:
+        # The repair re-verified the projected point (`verify_point`), so it may carry
+        # a gap again -- uncertified, and the one formula applied to that point.
+        from discopt.solvers._gap import reported_gap
+
+        assert r.gap == pytest.approx(reported_gap(r.objective, r.bound, abs_tol=1e-6))
+    else:
+        assert r.gap is None
     # The dual bound comes from the master relaxation, which never saw this
     # point, so a primal defect must not discard it.
     assert r.bound is not None, "a primal refusal discarded a valid dual bound"

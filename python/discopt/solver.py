@@ -38152,8 +38152,8 @@ def _solve_milp_highs(
 
 
 def _milp_root_cmir_mode() -> str:
-    """``DISCOPT_MILP_ROOT_CMIR`` (gap plan P3, default OFF): ``"off"``, ``"with_gmi"``
-    (``1``), ``"only"`` (c-MIR without GMI, an entry-experiment arm) or ``"highs"``
+    """``DISCOPT_MILP_ROOT_CMIR`` (gap plan P3, default ``highs``): ``"off"`` (``0``),
+    ``"with_gmi"`` (``1``), ``"only"`` (c-MIR without GMI, an entry-experiment arm) or ``"highs"``
     (the bundle with the root separation run by the faithful port of HiGHS's separation
     subsystem, ``lp/highs_cutgen``; gap plan §12.16-§12.20).
 
@@ -38174,11 +38174,14 @@ def _milp_root_cmir_mode() -> str:
     covers only; SCIP's aggregation separator alone closes the P3 rows' root gap to
     within 6 % with presolve off, and this configuration reaches it on
     ``nexp-50-20-1-1`` (0.0 %) and ``neos-911970`` (5.4 %) from 27.6 % / 57.5 % (gap
-    plan §12-12.2). Bound-changing, so default OFF until its §5 panel; every cut is a
-    nonnegative combination of model rows rounded over global bounds (the ``cmir.rs``
-    soundness argument). The Rust side reads the same variable.
+    plan §12-12.2). Bound-changing; graduated to ``highs`` by the stage 1d-5 §5 panel
+    with the rest of the HiGHS-design MILP stack (``docs/dev/flag-retirement-audit.md``),
+    ``0`` keeps the legacy root. Every cut is a nonnegative combination of model rows
+    rounded over global bounds (the ``cmir.rs`` soundness argument). The Rust side reads
+    the same variable.
     """
-    raw = os.environ.get("DISCOPT_MILP_ROOT_CMIR", "0").strip().lower()
+    # Default ``highs`` since the stage 1d-5 graduation panel; ``0`` opts out.
+    raw = os.environ.get("DISCOPT_MILP_ROOT_CMIR", "highs").strip().lower() or "highs"
     if raw in ("1", "true", "yes"):
         return "with_gmi"
     if raw == "only":
@@ -38255,7 +38258,7 @@ def _milp_root_cut_budget(engine_budget: float) -> Optional[dict]:
         "root_cuts": 1500 if _cmir_mode != "off" else 500,
         "cut_rounds": 150 if _cmir_mode != "off" else 50,
         "cut_select": True,
-        # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default OFF): c-MIR in the root loop.
+        # Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default `highs`): c-MIR in the root loop.
         "cmir_cuts": _cmir_mode != "off",
         "gmi_cuts": _cmir_mode != "only",
         # Half the engine's slice, floored so a very short budget still gets one
@@ -38414,7 +38417,13 @@ def _milp_run1_continue_enabled() -> bool:
     cut rows, pool, pseudocosts and incumbent (``HighsMipSolverData.cpp:1316-1420``).
     Changes the search, so gated per CLAUDE.md section 5; read at call time.
     """
-    return os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "0") == "1"
+    # Default ON since the stage 1d-5 graduation panel; ``0`` opts out.
+    raw = os.environ.get("DISCOPT_MILP_RUN1_CONTINUE", "1").strip().lower()
+    if raw in ("1", "true", "yes", "on", ""):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"DISCOPT_MILP_RUN1_CONTINUE={raw!r} is not recognized (expected 1 or 0)")
 
 
 def _milp_rust_coef_entry_enabled() -> bool:

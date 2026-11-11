@@ -59,9 +59,13 @@ def _spy(monkeypatch, name: str) -> list:
 @pytest.mark.smoke
 def test_native_knapsack_branches_and_matches_highs():
     """The issue's acceptance: a 20-variable knapsack on the native tree explores
-    nodes and certifies the HiGHS optimum."""
+    nodes and certifies the HiGHS optimum.
+
+    Root cuts are off so the tree has something to explore: with them (the default
+    HiGHS-design root) this knapsack, and every 20-50 item one in this family that was
+    measured, closes at the root with 0 nodes."""
     ref = _knapsack().solve()
-    res = _knapsack().solve(milp_backend="native")
+    res = _knapsack().solve(milp_backend="native", milp_cuts=False)
     assert ref.status == res.status == "optimal"
     assert res.node_count > 0
     assert res.objective == pytest.approx(ref.objective, abs=1e-6)

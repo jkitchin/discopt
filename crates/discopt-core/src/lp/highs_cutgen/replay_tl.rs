@@ -832,6 +832,7 @@ pub(crate) fn replay(text: &str, tag: &str, s: &mut TlStats) {
 #[test]
 #[ignore]
 fn full_transformed_lp_replay() {
+    super::transformed_lp::HIGHS_DROPS.with(|c| c.set(true));
     let p = std::env::var("DISCOPT_HIGHS_TL_REPLAY").expect("set DISCOPT_HIGHS_TL_REPLAY");
     let md = std::fs::metadata(&p).unwrap();
     let files: Vec<std::path::PathBuf> = if md.is_dir() {
@@ -884,6 +885,8 @@ fn full_transformed_lp_replay() {
 
 #[test]
 fn transformed_lp_fixture_replays_bit_identically() {
+    // The dumps are HiGHS's: drop small entries its way (`drop_with_bound`).
+    super::transformed_lp::HIGHS_DROPS.with(|c| c.set(true));
     // First transformed LP of the root (presolve off) of egout, gr4x6, bell5,
     // flugpl and beavma, with every call made on it.
     let path = concat!(
@@ -902,6 +905,8 @@ fn transformed_lp_fixture_replays_bit_identically() {
 
 #[test]
 fn separators_fixture_replay_bit_identically() {
+    // The dumps are HiGHS's: drop small entries its way (`drop_with_bound`).
+    super::transformed_lp::HIGHS_DROPS.with(|c| c.set(true));
     // The same five transformed LPs, now driven by the ported path and tableau
     // separators: every cut submitted to the pool must equal HiGHS's, in order.
     let path = concat!(

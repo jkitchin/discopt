@@ -129,6 +129,49 @@ pub struct TransformedLp {
     pub aborted: bool,
 }
 
+/// Relax `rhs` of a `≤` row for dropping the term `val·x_col`, by the column's bound on
+/// the side that keeps the row valid (`val > 0`: `x ≥ lb`; `val < 0`: `x ≤ ub`).
+/// Returns `false`, leaving `rhs` untouched, when that bound is infinite: the term must
+/// then be kept. Shared by every drop of a small coefficient in the separators.
+///
+/// **Deliberate deviation from HiGHS.** `HighsLpAggregator::getCurrentAggregation`, and
+/// the small-value cleanups in `HighsTransformedLp::transform`/`untransform`, drop an
+/// entry with `|val| <= small_matrix_value` and leave the right-hand side alone. That
+/// is a relaxation only if `|val·x|` is negligible, which fails on a large or unbounded
+/// column: on the captured fac2 OA master (`python/tests/test_1236_gmi_drops_no_term.py`)
+/// a 6e-11 coefficient on the epigraph column (value 3.3e8, no upper bound) carried
+/// 0.02 of activity per cut; 8 of 17 root cuts cut off a verified feasible point and
+/// the solve certified 376262250 against a feasible 331837498. HiGHS's own
+/// `postprocessCut` already relaxes by the bound for its drops; this applies the same
+/// rule to the three that did not. Under `cfg(test)`, [`HIGHS_DROPS`] restores HiGHS's
+/// behaviour so the bit-identical replays of HiGHS dumps keep checking everything else.
+pub(crate) fn drop_with_bound(ctx: &dyn TlContext, col: i32, val: f64, rhs: &mut CDouble) -> bool {
+    #[cfg(test)]
+    if HIGHS_DROPS.with(|c| c.get()) {
+        return true;
+    }
+    let so = ctx.num_cols() as i32;
+    let (lb, ub) = if col < so {
+        (ctx.col_lower(col), ctx.col_upper(col))
+    } else {
+        (ctx.slack_lower(col - so), ctx.slack_upper(col - so))
+    };
+    let bound = if val > 0.0 { lb } else { ub };
+    // Infinite in either convention (`f64::INFINITY` or the engine's 1e20 sentinel).
+    if !bound.is_finite() || bound.abs() >= 1e20 {
+        return false;
+    }
+    *rhs -= val * bound;
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: drop small entries the way HiGHS does (no right-hand-side change), for
+    /// the replays that compare against dumps of HiGHS. See [`drop_with_bound`].
+    pub(crate) static HIGHS_DROPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn is_fixed(ctx: &dyn TlContext, col: i32) -> bool {
     ctx.col_lower(col) == ctx.col_upper(col)
 }
@@ -687,7 +730,26 @@ impl TransformedLp {
                     self.vectorsum.add(inds[k], vals[k]);
                 }
             }
-            self.vectorsum.cleanup(|_, v| v.abs() <= smv);
+            // HiGHS drops these with no change to the right-hand side; relax it by the
+            // column's bound instead (see `drop_with_bound`). A term that cannot be
+            // dropped (infinite bound on its side) abandons the row: it may belong to a
+            // variable-bound partner this pass gave no bound type, so it cannot simply
+            // be kept.
+            let mut undroppable = false;
+            self.vectorsum.cleanup(|col, v| {
+                if v.abs() > smv {
+                    return false;
+                }
+                if drop_with_bound(ctx, col, v, &mut tmp_rhs) {
+                    return true;
+                }
+                undroppable = true;
+                false
+            });
+            if undroppable {
+                self.vectorsum.clear();
+                return None;
+            }
             inds = self.vectorsum.nonzeros().to_vec();
             num_nz = inds.len();
             vals = inds.iter().map(|&k| self.vectorsum.value(k)).collect();
@@ -835,7 +897,13 @@ impl TransformedLp {
             self.vectorsum.cleanup(|col, val| {
                 let absval = val.abs();
                 if absval <= smv {
-                    return true;
+                    // HiGHS drops these with no change to the right-hand side, which is
+                    // only sound for a column of moderate size: on the captured fac2 OA
+                    // master a 6e-11 coefficient on the epigraph column (3.3e8, no upper
+                    // bound) carried 0.02 of activity and the cut cut off a verified
+                    // feasible point. Relax by the bound like the band below, and keep
+                    // the term when that bound is infinite.
+                    return drop_with_bound(ctx, col, val, &mut tmp_rhs);
                 }
                 if absval <= feastol {
                     if val > 0.0 {
@@ -874,5 +942,162 @@ impl TransformedLp {
         };
         self.vectorsum.clear();
         Some((out_inds, out_vals, rhs_out))
+    }
+}
+
+/// Small coefficients on a large, one-sided column (the fac2 OA master's epigraph:
+/// a 6e-11 coefficient, value 3.3e8, no upper bound). HiGHS's uncompensated drops cut
+/// such a point off; `drop_with_bound` must not. Each test first runs HiGHS's semantics
+/// and asserts the violation, so a probe that measures nothing fails (CLAUDE.md §6).
+#[cfg(test)]
+mod drop_soundness {
+    use super::super::separators::LpAggregator;
+    use super::*;
+
+    /// Columns: 0 = eta in [-3.8e8, +inf) (continuous), 1 = y in [0, 1000]
+    /// (continuous). One row `-6e-11 eta - y`, slack in [-1, 10].
+    struct Mock {
+        rows: Vec<(Vec<i32>, Vec<f64>)>,
+    }
+    const LB: [f64; 2] = [-3.8e8, 0.0];
+    const UB: [f64; 2] = [f64::INFINITY, 1000.0];
+    const TINY: f64 = -6e-11;
+    /// A point every row here is valid for: eta = 3.3e8, y = 0.
+    const POINT: [f64; 2] = [3.3e8, 0.0];
+
+    impl TlContext for Mock {
+        fn num_cols(&self) -> usize {
+            2
+        }
+        fn num_rows(&self) -> usize {
+            self.rows.len()
+        }
+        fn feastol(&self) -> f64 {
+            1e-6
+        }
+        fn small_matrix_value(&self) -> f64 {
+            1e-9
+        }
+        fn col_lower(&self, col: i32) -> f64 {
+            LB[col as usize]
+        }
+        fn col_upper(&self, col: i32) -> f64 {
+            UB[col as usize]
+        }
+        fn slack_lower(&self, _row: i32) -> f64 {
+            -1.0
+        }
+        fn slack_upper(&self, _row: i32) -> f64 {
+            10.0
+        }
+        fn is_col_integral(&self, _col: i32) -> bool {
+            false
+        }
+        fn row(&self, row: i32) -> (&[i32], &[f64]) {
+            let (i, v) = &self.rows[row as usize];
+            (i, v)
+        }
+    }
+
+    fn mock() -> Mock {
+        Mock {
+            rows: vec![(vec![0, 1], vec![TINY, -1.0])],
+        }
+    }
+
+    /// `Σ vals·x` at `POINT`, slacks valued at their row's activity.
+    fn activity(m: &Mock, inds: &[i32], vals: &[f64]) -> f64 {
+        inds.iter()
+            .zip(vals)
+            .map(|(&j, &v)| {
+                let x = if (j as usize) < 2 {
+                    POINT[j as usize]
+                } else {
+                    let (ri, rv) = m.row(j - 2);
+                    ri.iter()
+                        .zip(rv)
+                        .map(|(&c, &w)| w * POINT[c as usize])
+                        .sum()
+                };
+                v * x
+            })
+            .sum()
+    }
+
+    fn with_highs_drops<T>(on: bool, f: impl FnOnce() -> T) -> T {
+        HIGHS_DROPS.with(|c| c.set(on));
+        let r = f();
+        HIGHS_DROPS.with(|c| c.set(false));
+        r
+    }
+
+    /// The aggregation `-6e-11 eta - y - s = 0` read as `≤`, in both directions.
+    fn aggregate(negate: bool) -> (f64, f64) {
+        let m = mock();
+        let mut agg = LpAggregator::new(&m);
+        agg.add_row(&m, 0, 1.0);
+        // Read the un-negated row first, as the tableau separator does, so the negated
+        // read sees a sum already cleaned.
+        let first = agg.current_aggregation(&m, false);
+        let (inds, vals, rhs) = if negate {
+            agg.current_aggregation(&m, true)
+        } else {
+            first
+        };
+        (activity(&m, &inds, &vals), rhs)
+    }
+
+    #[test]
+    fn aggregation_keeps_a_point_highs_cuts_off() {
+        // HiGHS: eta's entry is dropped with rhs 0, and the row then says `-y - s <= 0`,
+        // i.e. `-s <= 0` at y = 0, while s = -0.0198 there.
+        let (act, rhs) = with_highs_drops(true, || aggregate(false));
+        assert!(
+            act > rhs + 1e-3,
+            "probe: HiGHS's drop must cut the point ({act} <= {rhs})"
+        );
+        let mut checked = 0;
+        for negate in [false, true] {
+            let (act, rhs) = aggregate(negate);
+            assert!(act <= rhs + 1e-12, "negate={negate}: {act} > {rhs}");
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
+    }
+
+    /// `transform` then `untransform` of `-6e-11 eta - y <= -0.01` (valid at `POINT`:
+    /// -0.0198 <= -0.01) is the identity in exact arithmetic.
+    fn round_trip() -> (f64, f64) {
+        let m = mock();
+        let empty = |_: i32| Vec::new();
+        let setup = TlSetup {
+            col_value: &POINT,
+            col_dual: &[0.0, 0.0],
+            row_value: &[0.0],
+            continuous_cols: &[0, 1],
+            integral_cols: &[],
+            vubs: &empty,
+            vlbs: &empty,
+        };
+        let mut tl = TransformedLp::new(&m, &setup);
+        let row = tl
+            .transform(&m, 1e-9, vec![0, 1], vec![TINY, -1.0], -0.01, false, false)
+            .expect("the row transforms");
+        let (inds, vals, rhs) = tl
+            .untransform(&m, &row.inds, &row.vals, row.rhs, false)
+            .expect("the row untransforms");
+        (activity(&m, &inds, &vals), rhs)
+    }
+
+    #[test]
+    fn untransform_keeps_a_point_highs_cuts_off() {
+        // HiGHS: the round trip drops eta and returns `-y <= -0.01`, i.e. y >= 0.01.
+        let (act, rhs) = with_highs_drops(true, round_trip);
+        assert!(
+            act > rhs + 1e-3,
+            "probe: HiGHS's drop must cut the point ({act} <= {rhs})"
+        );
+        let (act, rhs) = round_trip();
+        assert!(act <= rhs + 1e-12, "{act} > {rhs}");
     }
 }

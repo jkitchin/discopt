@@ -28,6 +28,12 @@ import pytest
 
 _N = 100
 
+# The relative gap is pinned far below the default 1e-4 so the baseline has to search:
+# the default MILP stack proves this knapsack within 1e-4 at the root (0 nodes,
+# measured), which leaves an absolute tolerance nothing to shorten. With 1e-9 the
+# baseline takes 4 nodes and a loose absolute tolerance stops at the root.
+_TIGHT_REL = 1e-9
+
 
 def _knapsack() -> dm.Model:
     """A 100-item knapsack whose root LP gap is ~4e3, rebuilt fresh per solve."""
@@ -49,12 +55,17 @@ def _knapsack() -> dm.Model:
 @pytest.mark.smoke
 def test_abs_gap_tolerance_stops_the_rust_milp_engine_early():
     """A loose absolute tolerance must end the search, not be dropped on the floor."""
-    baseline = _knapsack().solve(nlp_solver="simplex", time_limit=120)
+    baseline = _knapsack().solve(nlp_solver="simplex", time_limit=120, gap_tolerance=_TIGHT_REL)
     assert baseline.status == "optimal"
     assert baseline.bound is not None
 
     # 10x the root gap: satisfiable immediately if the criterion is applied.
-    loose = _knapsack().solve(nlp_solver="simplex", time_limit=120, abs_gap_tolerance=10.0 * 4074.0)
+    loose = _knapsack().solve(
+        nlp_solver="simplex",
+        time_limit=120,
+        gap_tolerance=_TIGHT_REL,
+        abs_gap_tolerance=10.0 * 4074.0,
+    )
     assert loose.status == "optimal"
     assert loose.objective is not None and loose.bound is not None
 
@@ -73,8 +84,10 @@ def test_abs_gap_tolerance_is_honored_on_the_default_engine_route(monkeypatch):
     """The other reachable entry: the default engine under DISCOPT_LP_MILP_BACKEND=rust."""
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
 
-    baseline = _knapsack().solve(time_limit=120)
-    loose = _knapsack().solve(time_limit=120, abs_gap_tolerance=10.0 * 4074.0)
+    baseline = _knapsack().solve(time_limit=120, gap_tolerance=_TIGHT_REL)
+    loose = _knapsack().solve(
+        time_limit=120, gap_tolerance=_TIGHT_REL, abs_gap_tolerance=10.0 * 4074.0
+    )
 
     assert baseline.status == "optimal"
     assert loose.status == "optimal"
@@ -98,8 +111,11 @@ def test_omitting_abs_gap_tolerance_changes_nothing():
     assert omitted.node_count == explicit_none.node_count
     assert omitted.objective == explicit_none.objective
     assert omitted.bound == explicit_none.bound
-    # An unqualified solve still closes the gap exactly.
-    assert omitted.bound == pytest.approx(omitted.objective, rel=1e-6)
+    # An unqualified solve still certifies within the default relative gap (1e-4).
+    # Not "exactly": the default stack stops at the root here with bound 40180
+    # against 40177 (maximize), a relative gap of 7.5e-5.
+    assert omitted.bound >= omitted.objective
+    assert omitted.bound - omitted.objective <= 1e-4 * abs(omitted.objective)
 
 
 @pytest.mark.smoke

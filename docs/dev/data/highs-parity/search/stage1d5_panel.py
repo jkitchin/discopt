@@ -22,7 +22,14 @@ ROOT = dict(H, DISCOPT_HIGHS_ROOT_RENS="1", DISCOPT_HIGHS_ROOT_POOL="1", DISCOPT
 ARMS = {"default": ("R", dict()),
         "hmip": ("R", dict(DISCOPT_HIGHS_MIP_SEARCH="1")),
         "hmip_root": ("R", dict(ROOT, DISCOPT_HIGHS_MIP_SEARCH="1")),
-        "root_batched": ("R", dict(ROOT))}
+        "root_batched": ("R", dict(ROOT)),
+        # After the graduation the unset defaults ARE the HiGHS stack: `graduated` sets
+        # nothing, `legacy` opts every graduated flag out (r4 panel).
+        "graduated": ("R", dict()),
+        "legacy": ("R", dict(DISCOPT_HIGHS_MIP_SEARCH="0", DISCOPT_MILP_ROOT_CMIR="0",
+                             DISCOPT_HIGHS_ROOT_RENS="0", DISCOPT_HIGHS_ROOT_POOL="0",
+                             DISCOPT_MILP_PRESOLVE="0", DISCOPT_MILP_RAND_ROUND="0",
+                             DISCOPT_MILP_RUN1_CONTINUE="0"))}
 if os.environ.get("PANEL_ARMS"):
     ARMS = {a: ARMS[a] for a in os.environ["PANEL_ARMS"].split(",")}
 names = list(ARMS)

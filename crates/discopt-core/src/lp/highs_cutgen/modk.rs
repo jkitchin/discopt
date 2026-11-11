@@ -674,8 +674,8 @@ pub fn separate_modk(
                 let weight = scale * (((w.weight * (k - 1)) % k) as f64 / k as f64);
                 agg.add_row(ctx, row, weight);
             }
-            let (inds, vals) = agg.current_aggregation(ctx, false);
-            cut_gen.generate_cut(ctx, tl, pool, inds, vals, 0.0, true);
+            let (inds, vals, arhs) = agg.current_aggregation(ctx, false);
+            cut_gen.generate_cut(ctx, tl, pool, inds, vals, arhs, true);
             if k != 2 {
                 agg.clear();
                 for w in weights.iter() {
@@ -683,8 +683,8 @@ pub fn separate_modk(
                     agg.add_row(ctx, row, scale * (w.weight as f64 / k as f64));
                 }
             }
-            let (inds, vals) = agg.current_aggregation(ctx, true);
-            cut_gen.generate_cut(ctx, tl, pool, inds, vals, 0.0, true);
+            let (inds, vals, arhs) = agg.current_aggregation(ctx, true);
+            cut_gen.generate_cut(ctx, tl, pool, inds, vals, arhs, true);
             agg.clear();
         });
         if pool.num_cuts() != num_cuts {

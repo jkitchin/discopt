@@ -121,8 +121,15 @@ def _solve(**overrides):
 
 
 @pytest.mark.smoke
-def test_node_propagation_is_live_and_sound():
-    """The flag must change the search and must not change the answer."""
+def test_node_propagation_is_live_and_sound(monkeypatch):
+    """The flag must change the search and must not change the answer.
+
+    Pinned to the batched search (``DISCOPT_HIGHS_MIP_SEARCH=0``) so propagation is
+    the only difference between the arms: the default HiGHS-design search always
+    propagates its local domain, and ``node_propagation=False`` routes a solve to
+    the batched search (measured 2 nodes on, 7 off on that route; 1 vs 7 here).
+    """
+    monkeypatch.setenv("DISCOPT_HIGHS_MIP_SEARCH", "0")
     off_status, off_obj, off_nodes = _solve(node_propagation=False)
     on_status, on_obj, on_nodes = _solve(node_propagation=True)
 

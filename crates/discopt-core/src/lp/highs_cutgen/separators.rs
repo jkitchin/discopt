@@ -19,7 +19,7 @@ use super::core::{CoreCut, CutGenCore, CutGenParams};
 use super::random::{pair_hash, HighsRandom};
 use super::sparse_vec::SparseVectorSum;
 use super::stdalgo::{pdqsort, pdqsort_branchless};
-use super::transformed_lp::{TlContext, TransformedLp};
+use super::transformed_lp::{drop_with_bound, TlContext, TransformedLp};
 
 const INF: f64 = f64::INFINITY;
 const K_HIGHS_TINY: f64 = 1e-14;
@@ -82,6 +82,10 @@ pub trait CutSink {
 /// `HighsLpAggregator`.
 pub struct LpAggregator {
     vectorsum: SparseVectorSum,
+    /// Entries `current_aggregation` removed from `vectorsum` as small, since the last
+    /// `clear()`: the aggregation is `vectorsum + dropped`, which every later call must
+    /// still account for (HiGHS forgets them).
+    dropped: Vec<(i32, f64)>,
 }
 
 impl LpAggregator {
@@ -89,6 +93,7 @@ impl LpAggregator {
     pub fn new(ctx: &dyn TlContext) -> Self {
         LpAggregator {
             vectorsum: SparseVectorSum::new(ctx.num_rows() + ctx.num_cols()),
+            dropped: Vec::new(),
         }
     }
     /// `addRow(row, weight)`: add `weight * row`, with the row's slack.
@@ -99,27 +104,66 @@ impl LpAggregator {
         }
         self.vectorsum.add(ctx.num_cols() as i32 + row, -weight);
     }
-    /// `getCurrentAggregation(inds, vals, negate)`.
+    /// `getCurrentAggregation(inds, vals, negate)`, returning the base row
+    /// `Σ vals·x ≤ rhs` it implies.
+    ///
+    /// HiGHS drops structural entries with `|val| ≤ small_matrix_value` and keeps the
+    /// right-hand side at 0, which assumes a dropped term is negligible. It is not when
+    /// the column is large: on the captured fac2 OA master a 6e-11 coefficient on the
+    /// epigraph column (value 3.3e8, no upper bound) carried 0.02 of activity, and the
+    /// tableau and path separators emitted cuts violated by a verified feasible point,
+    /// which certified 376262250 against a feasible 331837498. Here a dropped entry
+    /// relaxes `rhs` by its bound on the safe side (`v > 0`: `-v·lb`; `v < 0`: `-v·ub`),
+    /// as HiGHS's own `postprocessCut` does, and an entry whose bound on that side is
+    /// infinite is kept rather than dropped (keeping a term is exact).
+    ///
+    /// The sum itself is cleaned exactly as HiGHS cleans it (same entries removed, same
+    /// order), so the returned row equals HiGHS's whenever every dropped entry has a
+    /// finite bound on its side; only `rhs` then differs from HiGHS's 0. The removed
+    /// entries are remembered until `clear()`, because the path and tableau separators
+    /// read the same sum again (negated, or after adding rows), and the relaxation is
+    /// direction-dependent.
     pub fn current_aggregation(
         &mut self,
         ctx: &dyn TlContext,
         negate: bool,
-    ) -> (Vec<i32>, Vec<f64>) {
+    ) -> (Vec<i32>, Vec<f64>, f64) {
         let droptol = ctx.small_matrix_value();
         let num_col = ctx.num_cols() as i32;
-        self.vectorsum
-            .cleanup(|col, val| col < num_col && val.abs() <= droptol);
-        let inds = self.vectorsum.nonzeros().to_vec();
-        let vals = if negate {
-            inds.iter().map(|&i| -self.vectorsum.value(i)).collect()
-        } else {
-            inds.iter().map(|&i| self.vectorsum.value(i)).collect()
-        };
-        (inds, vals)
+        let dropped = &mut self.dropped;
+        self.vectorsum.cleanup(|col, val| {
+            if col < num_col && val.abs() <= droptol {
+                dropped.push((col, val));
+                true
+            } else {
+                false
+            }
+        });
+        let sign = if negate { -1.0 } else { 1.0 };
+        let mut inds = self.vectorsum.nonzeros().to_vec();
+        let mut vals: Vec<f64> = inds
+            .iter()
+            .map(|&i| sign * self.vectorsum.value(i))
+            .collect();
+        let mut rhs = CDouble::new(0.0);
+        for &(col, val) in &self.dropped {
+            let v = sign * val;
+            if !drop_with_bound(ctx, col, v, &mut rhs) {
+                match inds.iter().position(|&c| c == col) {
+                    Some(k) => vals[k] += v,
+                    None => {
+                        inds.push(col);
+                        vals.push(v);
+                    }
+                }
+            }
+        }
+        (inds, vals, rhs.to_f64())
     }
     /// `clear()`.
     pub fn clear(&mut self) {
         self.vectorsum.clear();
+        self.dropped.clear();
     }
     /// `isEmpty()`.
     pub fn is_empty(&self) -> bool {
@@ -461,7 +505,7 @@ impl PathSeparator {
         let mut cut_gen = CutGenerator::new(ctx, cg_seed);
         const MAX_PATH_LEN: usize = 6;
         let mut current_path = [0i32; MAX_PATH_LEN];
-        let mut aggregated_path: Vec<(Vec<i32>, Vec<f64>)> = Vec::new();
+        let mut aggregated_path: Vec<(Vec<i32>, Vec<f64>, f64)> = Vec::new();
         let max_weight = 1.0 / feastol;
         let min_weight = feastol;
         let check_weight = |w: f64| {
@@ -491,7 +535,7 @@ impl PathSeparator {
                 aggregated_path.clear();
 
                 while curr_path_len != MAX_PATH_LEN {
-                    let (base_inds, base_vals) = agg.current_aggregation(ctx, false);
+                    let (base_inds, base_vals, base_rhs) = agg.current_aggregation(ctx, false);
                     let mut added_substitution_rows = false;
                     let mut best_out_arc_col = -1i32;
                     let mut out_arc_col_val = 0.0;
@@ -596,15 +640,17 @@ impl PathSeparator {
                         continue;
                     }
 
-                    success = cut_gen.generate_cut(ctx, tl, pool, base_inds, base_vals, 0.0, false);
-                    let (neg_inds, neg_vals) = agg.current_aggregation(ctx, true);
+                    success =
+                        cut_gen.generate_cut(ctx, tl, pool, base_inds, base_vals, base_rhs, false);
+                    let (neg_inds, neg_vals, neg_rhs) = agg.current_aggregation(ctx, true);
                     if !aggregated_path.is_empty()
                         || best_out_arc_col != -1
                         || best_in_arc_col != -1
                     {
-                        aggregated_path.push((neg_inds.clone(), neg_vals.clone()));
+                        aggregated_path.push((neg_inds.clone(), neg_vals.clone(), neg_rhs));
                     }
-                    success |= cut_gen.generate_cut(ctx, tl, pool, neg_inds, neg_vals, 0.0, false);
+                    success |=
+                        cut_gen.generate_cut(ctx, tl, pool, neg_inds, neg_vals, neg_rhs, false);
                     if success || (best_out_arc_col == -1 && best_in_arc_col == -1) {
                         break;
                     }
@@ -708,7 +754,7 @@ impl PathSeparator {
         tl: &mut TransformedLp,
         pool: &mut dyn CutSink,
         cut_gen: &mut CutGenerator,
-        aggregated_path: &mut [(Vec<i32>, Vec<f64>)],
+        aggregated_path: &mut [(Vec<i32>, Vec<f64>, f64)],
         path_len: &mut usize,
     ) -> bool {
         let feastol = ctx.feastol();
@@ -719,7 +765,9 @@ impl PathSeparator {
         let mut solval: Vec<f64> = Vec::new();
         let mut upper: Vec<f64> = Vec::new();
         let mut is_integral: Vec<bool> = Vec::new();
-        let mut rhs = vec![0.0f64; *path_len];
+        // Each aggregation's own right-hand side (0 in HiGHS; nonzero here only where
+        // `current_aggregation` relaxed it for a dropped entry).
+        let mut rhs: Vec<f64> = aggregated_path[..*path_len].iter().map(|a| a.2).collect();
         let mut delta = 1.0f64;
         let n0 = *path_len;
         for k in 0..n0 {
@@ -728,7 +776,7 @@ impl PathSeparator {
                 *path_len = k;
                 break;
             };
-            aggregated_path[k] = (row.inds.clone(), row.vals.clone());
+            aggregated_path[k] = (row.inds.clone(), row.vals.clone(), row.rhs);
             rhs[k] = row.rhs;
             if k == 0 {
                 if rhs[k] > K_HIGHS_TINY {
@@ -1013,7 +1061,7 @@ impl TableauSeparator {
             for &(row, w) in &fv.row_ep {
                 agg.add_row(ctx, row, w);
             }
-            let (inds, vals) = agg.current_aggregation(ctx, false);
+            let (inds, vals, arhs) = agg.current_aggregation(ctx, false);
             if 10usize.wrapping_mul(inds.len().wrapping_sub(fv.row_ep.len())) > 10000 + mip_cols {
                 agg.clear();
                 continue;
@@ -1032,9 +1080,9 @@ impl TableauSeparator {
                     continue;
                 }
             }
-            cut_gen.generate_cut(ctx, tl, pool, inds, vals, 0.0, false);
-            let (ninds, nvals) = agg.current_aggregation(ctx, true);
-            cut_gen.generate_cut(ctx, tl, pool, ninds, nvals, 0.0, false);
+            cut_gen.generate_cut(ctx, tl, pool, inds, vals, arhs, false);
+            let (ninds, nvals, nrhs) = agg.current_aggregation(ctx, true);
+            cut_gen.generate_cut(ctx, tl, pool, ninds, nvals, nrhs, false);
             agg.clear();
             if best_score == -1.0 && pool.num_cuts() != num_cuts0 {
                 best_score = fv.score;

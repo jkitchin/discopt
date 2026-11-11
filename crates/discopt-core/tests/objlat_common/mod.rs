@@ -16,6 +16,17 @@
 //! process through a `OnceLock`.
 
 use discopt_core::bnb::milp_driver::MilpOptions;
+
+/// Pin the engine these tests measure the lever on: no MILP presolve (it aggregates
+/// `z = sum x` away, so the direct lattice applies and the substitution never runs)
+/// and the batched search (the node counts below -- root = 1 node, the OFF arm must
+/// branch -- are that search's). Both are default-ON since the HiGHS-stack graduation;
+/// the lever itself is independent of either. Call before the first solve.
+#[allow(dead_code)]
+pub fn pin_engine() {
+    std::env::set_var("DISCOPT_MILP_PRESOLVE", "0");
+    std::env::set_var("DISCOPT_HIGHS_MIP_SEARCH", "0");
+}
 use discopt_core::lp::simplex::SimplexOptions;
 
 /// Odd, so the cover LP bound `K/2` is genuinely fractional.

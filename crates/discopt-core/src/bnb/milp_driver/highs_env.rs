@@ -24,7 +24,10 @@
 //!
 //! Not yet re-hosted (the driver keeps the batched search for these): lazy
 //! constraints, node and bound hooks, the debugger, node cuts (the working LP is
-//! fixed during this search), and an unbounded LP relaxation.
+//! fixed during this search), and an unbounded LP relaxation. Also routed there, as
+//! options this search does not implement: a branching rule other than reliability,
+//! a selection other than best-first, `node_propagation = false`, and the off-root
+//! repair dive (`DISCOPT_MILP_DIVE_STRIDE`).
 
 use super::highs_branch::{BranchCtx, BranchPseudocost, ChildSelectionRule};
 use super::highs_eval::HighsEval;
@@ -57,6 +60,11 @@ pub(super) struct Limits {
     pub abs_gap_tol: Option<f64>,
     /// Run the rounding heuristic at nodes.
     pub heuristics: bool,
+    /// Strong branching allowed (`MilpOptions::strong_branch`; off: `minreliable` 0).
+    pub strong_branch: bool,
+    /// `MilpOptions::stall_time_s` as an instant: there, a search with no incumbent
+    /// stops (uncertified), and one with an incumbent runs the stall re-solve once.
+    pub stall_at: Option<std::time::Instant>,
 }
 
 /// Why the search stopped early.
@@ -65,6 +73,8 @@ pub(super) enum Stop {
     Nodes,
     OpenNodes,
     Time,
+    /// The stall guard: no incumbent at `stall_at`.
+    Stall,
 }
 
 /// The outcome of [`run`].
@@ -140,11 +150,21 @@ fn from_q(c: &QDomainChange) -> DomainChange {
     }
 }
 
-/// A sub-MIP heuristic: from an LP point (structurals) and the incumbent, at a node
-/// count, a verified better point or `None` (the driver's RENS/RINS, schedule
-/// included).
-pub(super) type SubMip<'a> =
-    &'a mut dyn FnMut(&[f64], Option<(&[f64], f64)>, usize) -> Option<(Vec<f64>, f64)>;
+/// A call into the driver's heuristics.
+pub(super) enum HeurCall<'x> {
+    /// RENS/RINS (the driver's schedule) from an LP point (structurals), with the
+    /// incumbent, at a node count.
+    SubMip {
+        x: &'x [f64],
+        inc: Option<(&'x [f64], f64)>,
+        nodes: usize,
+    },
+    /// The once-per-solve stall re-solve (`try_stall_redive`) around the incumbent.
+    StallRedive { inc: (&'x [f64], f64) },
+}
+
+/// The driver's heuristics: a verified better point or `None`.
+pub(super) type SubMip<'a> = &'a mut dyn FnMut(HeurCall<'_>) -> Option<(Vec<f64>, f64)>;
 
 /// The production search environment.
 pub(super) struct HighsEnv<'a, 'b> {
@@ -162,6 +182,9 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub heuristic_hits: usize,
     pub stop: Option<Stop>,
     gap_stop: bool,
+    stall_redive_done: bool,
+    /// Open subtrees on the search's node stack at the last limit check.
+    open_on_stack: usize,
     /// Node separation's cuts (globally valid Gomory cuts found at nodes), offered to
     /// later nodes' separation; with signatures for deduplication.
     pool: Vec<GomoryCut>,
@@ -210,7 +233,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         } else if self
             .lim
             .max_open_nodes
-            .is_some_and(|k| self.q.num_nodes() as usize > k)
+            .is_some_and(|k| self.q.num_nodes() as usize + self.open_on_stack > k)
         {
             self.stop = Some(Stop::OpenNodes);
         } else if self
@@ -259,7 +282,8 @@ impl SearchEnv for HighsEnv<'_, '_> {
     fn feastol(&self) -> f64 {
         1e-6
     }
-    fn search_check_limits(&mut self, _nnodes: i64) -> bool {
+    fn search_check_limits(&mut self, _nnodes: i64, open_on_stack: usize) -> bool {
+        self.open_on_stack = open_on_stack;
         self.check_limits()
     }
     fn mip_check_limits(&mut self) -> bool {
@@ -493,13 +517,42 @@ impl SearchEnv for HighsEnv<'_, '_> {
         // with one), on the driver's schedule.
         if let (Some(sm), Some(xs)) = (self.sub_mip.as_mut(), self.eval.point.clone()) {
             let inc = self.best.as_ref().map(|(bx, bv)| (bx.as_slice(), *bv));
-            if let Some((cand, v)) = sm(&xs, inc, self.nodes.max(0) as usize) {
+            let call = HeurCall::SubMip {
+                x: &xs,
+                inc,
+                nodes: self.nodes.max(0) as usize,
+            };
+            if let Some((cand, v)) = sm(call) {
                 self.sub_mip_hits += 1;
                 self.accept(cand, v);
             }
         }
     }
     fn after_round(&mut self) -> bool {
+        // The stall guard (the batched loop's `stall_time_s`, gap plan P1): past the
+        // slice, stop without an incumbent; with one, run the stall re-solve once.
+        if self
+            .lim
+            .stall_at
+            .is_some_and(|t| std::time::Instant::now() >= t)
+        {
+            match self.best.clone() {
+                None => {
+                    crate::profile::incr(crate::profile::Ctr::MilpStallGuardStop);
+                    self.stop = Some(Stop::Stall);
+                    return true;
+                }
+                Some((bx, bv)) if !self.stall_redive_done => {
+                    self.stall_redive_done = true;
+                    if let Some(sm) = self.sub_mip.as_mut() {
+                        if let Some((cand, v)) = sm(HeurCall::StallRedive { inc: (&bx, bv) }) {
+                            self.accept(cand, v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         self.q.perform_bounding(self.eval.cutoff);
         let optlim = self.optlim();
         self.q.set_optimality_limit(optlim);
@@ -521,7 +574,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
 /// Search the whole tree from the driver's root working LP. `initial` is the best
 /// verified point the driver already holds; `root_bound` a valid bound on the root box
 /// the driver already proved (its root evaluation, node-local cuts included), with
-/// `obj_const` (`-inf` for none). `None` when the root LP is unbounded or
+/// `obj_const` (`-inf` for none). `None` when any LP of the search is unbounded or
 /// the rows are infeasible over the global box before any search (the driver's own
 /// handling then decides).
 pub(super) fn run<'a>(
@@ -540,7 +593,14 @@ pub(super) fn run<'a>(
         lim,
         sub_mip,
         eval,
-        pc: Pseudocost::new(ctx.ns, DEFAULT_MIN_RELIABLE),
+        pc: Pseudocost::new(
+            ctx.ns,
+            if lim.strong_branch {
+                DEFAULT_MIN_RELIABLE
+            } else {
+                0
+            },
+        ),
         q: NodeQueue::new(ctx.ns),
         best: None,
         nseen: 0,
@@ -550,6 +610,8 @@ pub(super) fn run<'a>(
         heuristic_hits: 0,
         stop: None,
         gap_stop: false,
+        stall_redive_done: false,
+        open_on_stack: 0,
         pool: Vec::new(),
         pool_sigs: std::collections::HashSet::new(),
         sep_calls: 0,
@@ -569,7 +631,10 @@ pub(super) fn run<'a>(
     let mut root = true;
     while !env.queue_is_empty() {
         let stop = ml.round(&mut env, &mut search, root, NO_NODE_LIMIT);
-        if root && env.eval.unbounded {
+        // An unbounded LP anywhere: no bound from this search is a certificate.
+        // Hand the problem back to the driver (its batched search decides
+        // Unbounded), as for an unbounded root.
+        if env.eval.unbounded_seen {
             return None;
         }
         root = false;

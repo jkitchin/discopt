@@ -431,6 +431,8 @@ counters!(
     // MILP presolve (gap plan §12.34): runs, columns/rows removed, and fallbacks to the
     // original problem (presolve claimed infeasible; postsolved point failed).
     MilpPresolveRuns,
+    // Reduced slack boxes empty within rounding, widened to their ends.
+    MilpPresolveEmptyBoxWidened,
     MilpPresolveColsRemoved,
     MilpPresolveRowsRemoved,
     MilpPresolveInfeasibleFallback,

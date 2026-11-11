@@ -200,8 +200,10 @@ pub trait SearchEnv {
     fn optimality_limit(&self) -> f64;
     /// `mipdata_->feastol`.
     fn feastol(&self) -> f64;
-    /// `HighsSearch::checkLimits(nodeOffset)` (time, node limits).
-    fn search_check_limits(&mut self, nnodes: i64) -> bool;
+    /// `HighsSearch::checkLimits(nodeOffset)` (time, node limits). `open_on_stack`:
+    /// the search's open subtrees on its node stack, which an open-node (memory)
+    /// limit counts with the queue's nodes.
+    fn search_check_limits(&mut self, nnodes: i64, open_on_stack: usize) -> bool;
     /// `mipdata_->checkLimits()`.
     fn mip_check_limits(&mut self) -> bool;
 
@@ -336,6 +338,11 @@ pub struct Search {
 }
 
 impl Search {
+    /// Nodes on the stack with an open subtree (each will yield another node).
+    pub fn open_on_stack(&self) -> usize {
+        self.nodestack.iter().filter(|n| n.opensubtrees > 0).count()
+    }
+
     /// `getCurrentDepth`.
     pub fn current_depth(&self) -> i32 {
         self.nodestack.len() as i32 + self.depthoffset
@@ -716,7 +723,8 @@ impl Search {
         loop {
             self.nnodes += 1;
             let r = self.evaluate_node(env);
-            if env.search_check_limits(self.nnodes) {
+            let open = self.open_on_stack();
+            if env.search_check_limits(self.nnodes, open) {
                 return r;
             }
             if r != NodeResult::Open {
@@ -827,7 +835,8 @@ impl MainLoop {
             if self.dive(env, search, node_lim) {
                 break;
             }
-            if env.search_check_limits(search.nnodes) {
+            let open = search.open_on_stack();
+            if env.search_check_limits(search.nnodes, open) {
                 break;
             }
             if search.nnodes + nodes_explored >= plunge_limit {
@@ -940,7 +949,7 @@ mod tests {
         fn feastol(&self) -> f64 {
             1e-6
         }
-        fn search_check_limits(&mut self, _n: i64) -> bool {
+        fn search_check_limits(&mut self, _n: i64, _o: usize) -> bool {
             false
         }
         fn mip_check_limits(&mut self) -> bool {

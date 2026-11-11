@@ -78,3 +78,27 @@ and the engine stopped at `iteration_limit` after 38 594 nodes. With
 `DISCOPT_NS_PROJECT=1` it certifies the master in 25 406 nodes. Carries
 `gap_tolerance` and `mip_start` (the seed the confirmation hands the engine) as
 well as the arrays of the format above. Used by `test_2115_ns_projection.py`.
+
+
+## `portfol_roundlot_master13.npz` (MILP presolve cancellation)
+
+The 14th master (0-based call 13) of an OA solve of `portfol_roundlot.nl` at
+`max_nodes=14` (`test_oa_exit_gate_verifies_incumbent.py`'s instance), captured at
+the `lp_backend.get_milp_solver` boundary during the HiGHS-stack graduation.
+
+| file | rows x cols | integers | note |
+|---|---|---|---|
+| `portfol_roundlot_master13.npz` | 28+9 x 17 | 8 | presolve certified a bound 4.6e-8 above `z_star` |
+
+Structure: weights `x_j` linked to integer lots `n_j = a_j x_j` (`a_j` up to 1e5),
+`sum x = 1`, objective `t` above OA cuts. MILP presolve aggregates the `x_j` out;
+the cancellation in the substituted cut rows left ~1e-12 coefficients on integers
+up to 1e5, which presolve deleted as zero without relaxing the row. The reduced
+problem then cut off a point feasible for this master, and the solve certified a
+dual bound of 0.0282902567 against `z_star_objective = 0.028290210887251116`; the
+OA run on top never closed (300 s, against 4.3 s before presolve was on).
+
+`z_star` is the integers `[87462, 0, 0, 0, 0, 8478, 1793, 624]` with the continuous
+part solved exactly (rows met to 2.3e-13). `test_presolve_cancellation_bound.py`
+re-verifies it before use. The test's slack, 1e-8, is absolute and measured: the
+fixed solve lands 2.4e-10 below `z_star_objective`.

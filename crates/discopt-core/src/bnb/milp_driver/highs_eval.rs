@@ -67,6 +67,9 @@ pub(super) struct HighsEval {
     pub point_full: Option<Vec<f64>>,
     /// Whether the last LP was unbounded.
     pub unbounded: bool,
+    /// Whether any LP of this search was unbounded (sticky): the search then gives
+    /// the problem back to the driver, whose own handling decides Unbounded.
+    pub unbounded_seen: bool,
     /// Reduced costs of the structurals at the last trusted LP (`col_dual`).
     pub redcost: Option<Vec<f64>>,
     /// Unscaled row duals of the last trusted LP (`row_dual`).
@@ -127,6 +130,7 @@ impl HighsEval {
             point: None,
             point_full: None,
             unbounded: false,
+            unbounded_seen: false,
             redcost: None,
             last_dual: None,
             basis_d: None,
@@ -234,6 +238,7 @@ impl HighsEval {
             }
             NodeLpVerdict::Unbounded => {
                 self.unbounded = true;
+                self.unbounded_seen = true;
                 self.point = None;
                 self.point_full = None;
                 self.stats.open += 1;
@@ -290,8 +295,12 @@ impl HighsEval {
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
                 self.point_full = Some(nl.sol.x.clone());
                 if integral {
-                    // `addIncumbent`; the LP is dual feasible, so the node is done.
-                    self.offer(Some((nl.sol.x[..ctx.ns].to_vec(), nl.sol.obj + oc)));
+                    // `addIncumbent`; the LP is dual feasible, so the node is done. The
+                    // point offered is the vertex's integral realisation, which the
+                    // safety layer verified on the original rows and bounds (#2163),
+                    // valued exactly (`c . x`, #2136).
+                    let (x, v) = integral_incumbent(ctx, &nl.sol.x);
+                    self.offer(Some((x, v)));
                     node.lower_bound = node.lower_bound.max(bound + oc);
                     self.stats.integral += 1;
                     self.stats.bound_exceeding += 1;
@@ -472,6 +481,15 @@ pub(super) fn fit_basis_to_box(
     }
     crate::profile::incr_by(crate::profile::Ctr::HighsMipSearchBasisFits, moved);
     Some(b)
+}
+
+/// The incumbent an integral vertex offers: its integral realisation (which the
+/// safety layer verified on the original rows and bounds, #2163) over the
+/// structurals, valued exactly as `c . x + obj_const` (#2136).
+pub(super) fn integral_incumbent(ctx: &NodeCtx<'_>, x_full: &[f64]) -> (Vec<f64>, f64) {
+    let x = snap_integral(ctx, x_full).unwrap_or_else(|| x_full.to_vec());
+    let v = x.iter().zip(ctx.c_w).map(|(xj, cj)| xj * cj).sum::<f64>() + ctx.obj_const;
+    (x[..ctx.ns].to_vec(), v)
 }
 
 /// Reduced costs `c_j - a_j^T y` of every working column at an LP.
@@ -720,6 +738,10 @@ pub(super) mod diff {
         ubs: &[Vec<f64>],
         outs: &[NodeOutput],
     ) {
+        // The top-level solve only (a sub-MIP's batches are not the problem's).
+        if MILP_DEPTH.with(|d| d.get()) != 1 {
+            return;
+        }
         DIFF.with(|d| {
             let mut d = d.borrow_mut();
             let Some(diff) = d.as_mut() else { return };

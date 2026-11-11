@@ -66,7 +66,28 @@ const FRAC_MIN_HIGHS: f64 = 0.005;
 /// HiGHS's feasibility tolerance for "off its bound" and delta deduplication.
 const HIGHS_FEASTOL: f64 = 1e-6;
 
-/// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default OFF until its panel): the route's
+#[cfg(test)]
+thread_local! {
+    /// Tests of the batched MILP engine's pre-graduation behaviour (goldens, hook
+    /// neutrality) run with the defaults before the stage 1d-5 graduation: the HiGHS
+    /// stack's flags read as off on this thread. The process environment is untouched
+    /// (tests run in parallel).
+    pub(crate) static LEGACY_DEFAULTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread runs a test pinned to the pre-graduation defaults.
+pub(crate) fn legacy_defaults() -> bool {
+    #[cfg(test)]
+    {
+        LEGACY_DEFAULTS.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Gap plan P3 (`DISCOPT_MILP_ROOT_CMIR`, default `highs` since the stage 1d-5 graduation): the route's
 /// root c-MIR separator at HiGHS's design. Read once; `1` (GMI + c-MIR) and `only`
 /// (c-MIR without GMI, entry experiment) both arm it, `0`/unset leave this module at
 /// its #2107 behaviour. Under it:
@@ -84,6 +105,9 @@ const HIGHS_FEASTOL: f64 = 1e-6;
 /// flag also turns on, c-MIR reaches `nexp-50-20-1-1` 0.0 % and `neos-911970` 5.4 %,
 /// SCIP's aggregation-only root (0.0 % / 6.0 %), from 27.6 % / 57.5 %.
 pub(crate) fn root_cmir_mode() -> RootCmirMode {
+    if legacy_defaults() {
+        return RootCmirMode::Off;
+    }
     static MODE: std::sync::OnceLock<RootCmirMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
         let raw = std::env::var("DISCOPT_MILP_ROOT_CMIR").unwrap_or_default();
@@ -115,7 +139,10 @@ impl RootCmirMode {
 /// The parse table behind [`root_cmir_mode`]; garbage is refused, not defaulted.
 fn parse_root_cmir(raw: &str) -> Result<RootCmirMode, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" => Ok(RootCmirMode::Off),
+        // Default `highs` since stage 1d-5's graduation panel (the HiGHS stack);
+        // `0` opts out.
+        "" => Ok(RootCmirMode::Highs),
+        "0" | "false" | "no" => Ok(RootCmirMode::Off),
         "1" | "true" | "yes" => Ok(RootCmirMode::WithGmi),
         "only" => Ok(RootCmirMode::Only),
         "highs" => Ok(RootCmirMode::Highs),
@@ -1717,7 +1744,8 @@ mod tests {
 
     #[test]
     fn root_cmir_parse_refuses_garbage() {
-        assert_eq!(parse_root_cmir("").unwrap(), RootCmirMode::Off);
+        // Default `highs` since the stage 1d-5 graduation; `0` opts out.
+        assert_eq!(parse_root_cmir("").unwrap(), RootCmirMode::Highs);
         assert_eq!(parse_root_cmir("0").unwrap(), RootCmirMode::Off);
         assert_eq!(parse_root_cmir("1").unwrap(), RootCmirMode::WithGmi);
         assert_eq!(parse_root_cmir(" Only ").unwrap(), RootCmirMode::Only);

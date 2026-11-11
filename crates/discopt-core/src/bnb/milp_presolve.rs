@@ -382,6 +382,40 @@ impl Work {
         }
     }
 
+    /// Entry `pos` of row `q` has just been updated by a substitution and may have
+    /// cancelled to round-off. An exact zero is removed. A nonzero `|v| <= 1e-12` is
+    /// removed only from an inequality, whose sides are then relaxed by the term's reach
+    /// `|v| max(|l_k|, |u_k|)` over the column's box; otherwise (an equality, which must
+    /// stay one for the rebuild, or an unbounded column) it is kept.
+    ///
+    /// Removing it outright is not a relaxation: on the captured portfol_roundlot OA
+    /// master (`x_j = n_j / a_j` aggregated, integers `n_j` up to 1e5) the leftovers of
+    /// the cancellation in `aggregate` carried 4.6e-8 of activity, the reduced problem
+    /// cut off a point verified feasible on the original rows, and the solve certified
+    /// a bound 4.6e-8 above it (0.0282902567 vs 0.0282902109).
+    fn cancel_entry(&mut self, q: usize, pos: usize) {
+        let v = self.rows[q].1[pos];
+        if v != 0.0 {
+            if v.abs() > 1e-12 || self.lo[q] == self.up[q] {
+                return;
+            }
+            let k = self.rows[q].0[pos];
+            let reach = self.l[k].abs().max(self.u[k].abs());
+            if !reach.is_finite() || reach >= INF {
+                return;
+            }
+            let slack = v.abs() * reach * (1.0 + 1e-12) + f64::MIN_POSITIVE;
+            if self.lo[q].is_finite() {
+                self.lo[q] -= slack;
+            }
+            if self.up[q].is_finite() {
+                self.up[q] += slack;
+            }
+        }
+        self.rows[q].0.swap_remove(pos);
+        self.rows[q].1.swap_remove(pos);
+    }
+
     /// `doubletonEq` on equality row `r` with exactly two entries. Returns whether it
     /// substituted.
     fn doubleton_eq(&mut self, r: usize) -> bool {
@@ -470,10 +504,7 @@ impl Work {
             let add = coef * f;
             if let Some(pt) = self.rows[q].0.iter().position(|&k| k == t) {
                 self.rows[q].1[pt] += add;
-                if self.rows[q].1[pt].abs() <= 1e-12 {
-                    self.rows[q].0.swap_remove(pt);
-                    self.rows[q].1.swap_remove(pt);
-                }
+                self.cancel_entry(q, pt);
             } else if add != 0.0 {
                 self.rows[q].0.push(t);
                 self.rows[q].1.push(add);
@@ -656,10 +687,7 @@ impl Work {
                     let add = -coef * v / a;
                     if let Some(pk) = self.rows[q].0.iter().position(|&j| j == k) {
                         self.rows[q].1[pk] += add;
-                        if self.rows[q].1[pk].abs() <= 1e-12 {
-                            self.rows[q].0.swap_remove(pk);
-                            self.rows[q].1.swap_remove(pk);
-                        }
+                        self.cancel_entry(q, pk);
                     } else if add != 0.0 {
                         self.rows[q].0.push(k);
                         self.rows[q].1.push(add);
@@ -1153,6 +1181,41 @@ impl Work {
                 } else {
                     continue;
                 };
+                // The columns are only CLOSE to parallel (the test above has an absolute
+                // floor, `max(|a1|, 1)`): merging drops `d_r = a_kr - s a_jr` from each row
+                // and `d_c = c_k - s c_j` from the objective. The objective term would move
+                // the reduced problem's bound (its objective is reported as is), so `d_c`
+                // must be exactly zero. A row term is absorbed by widening an inequality by
+                // its reach `|d_r| max(|l_k|, |u_k|)`; on an equality, or with no finite
+                // reach, the columns are not merged. (Same class as `cancel_entry`.)
+                if self.c[k] - s * self.c[j] != 0.0 {
+                    continue;
+                }
+                let reach_k = self.l[k].abs().max(self.u[k].abs());
+                let mut widen: Vec<(usize, f64)> = Vec::new();
+                let mut refuse = false;
+                for (&(r, aj), &(_, ak)) in entries[j].iter().zip(&entries[k]) {
+                    let d = (ak - s * aj).abs();
+                    if d == 0.0 {
+                        continue;
+                    }
+                    if self.lo[r] == self.up[r] || !reach_k.is_finite() || reach_k >= INF {
+                        refuse = true;
+                        break;
+                    }
+                    widen.push((r, d * reach_k * (1.0 + 1e-12) + f64::MIN_POSITIVE));
+                }
+                if refuse {
+                    continue;
+                }
+                for (r, w) in widen {
+                    if self.lo[r].is_finite() {
+                        self.lo[r] -= w;
+                    }
+                    if self.up[r].is_finite() {
+                        self.up[r] += w;
+                    }
+                }
                 self.ops.push(PostOp::Split {
                     j,
                     k,
@@ -1622,15 +1685,49 @@ impl Work {
                     .collect();
                 e0.sort_by_key(|e| e.0);
                 let lam = s / e0[0].1;
-                let exact = e0.len() == ent.len()
+                let close = e0.len() == ent.len()
                     && e0.iter().zip(&ent).all(|(&(j0, a0), &(j1, a1))| {
                         j0 == j1 && (a1 - lam * a0).abs() <= 1e-12 * a1.abs().max(1.0)
                     });
-                if !exact {
+                if !close {
                     continue;
                 }
-                // lo_r <= lam a0 x <= up_r  =>  a0 x in [lo_r, up_r] / lam.
-                let (a, b) = (self.lo[r] / lam, self.up[r] / lam);
+                // `r` is `lam r0 + d` with `d = a1 - lam a0` only CLOSE to zero, so its
+                // range moves to `r0` widened by `|d x|`'s reach over the box: `delta =
+                // sum |d_j| max(|l_j|, |u_j|)`. Taking the stricter side as if `d` were 0
+                // is not a relaxation: the closeness test above has an absolute floor
+                // (`max(|a1|, 1)`), so on small coefficients over large columns (OA cuts
+                // after aggregation: ~1e-6 on integers up to 1e5) a difference it accepts
+                // is worth ~1e-7 of activity. A nonzero `d_j` on an unbounded column has
+                // no finite reach: the rows are not merged. (The same class as
+                // `cancel_entry`; on the captured portfol_roundlot master the measured
+                // false bound came from there, not from this rule.)
+                let mut delta = 0.0f64;
+                let mut unbounded = false;
+                for (&(_, a0), &(j, a1)) in e0.iter().zip(&ent) {
+                    let d = (a1 - lam * a0).abs();
+                    if d == 0.0 {
+                        continue;
+                    }
+                    let reach = self.l[j].abs().max(self.u[j].abs());
+                    if !reach.is_finite() || reach >= INF {
+                        unbounded = true;
+                        break;
+                    }
+                    delta += d * reach;
+                }
+                if unbounded {
+                    continue;
+                }
+                // Outward for the rounding of the sum; exactly parallel rows (every
+                // `d_j` zero) merge as before, so an equality stays an equality.
+                let delta = if delta > 0.0 {
+                    delta * (1.0 + 1e-12) + f64::MIN_POSITIVE
+                } else {
+                    0.0
+                };
+                // lo_r - delta <= lam a0 x <= up_r + delta  =>  a0 x in that / lam.
+                let (a, b) = ((self.lo[r] - delta) / lam, (self.up[r] + delta) / lam);
                 let (nlo, nup) = if lam > 0.0 { (a, b) } else { (b, a) };
                 let nlo = if nlo.is_nan() { -INF } else { nlo };
                 let nup = if nup.is_nan() { INF } else { nup };
@@ -1834,6 +1931,79 @@ pub fn row_form_feasible(f: &RowForm, x: &[f64], tol: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A substitution whose coefficients cancel to round-off on a large column must not
+    /// drop the leftover from an inequality without relaxing it (`cancel_entry`; the
+    /// class behind the portfol_roundlot OA master's false bound). Aggregating `x` out of
+    /// `x - a n - b m = 0` leaves `5e-13 n` in `t - x + (a + 5e-13) n >= 0`, worth 5e-8
+    /// at `n = 1e5`; the point below is feasible and must stay feasible after presolve.
+    #[test]
+    fn a_cancelled_coefficient_is_not_dropped_without_relaxing_its_row() {
+        let a = 1e-5;
+        // Columns: 0 = x (continuous), 1 = n, 2 = m (integers), 3 = t (continuous).
+        let f = RowForm {
+            n: 4,
+            rows: vec![
+                (vec![0, 1, 2], vec![1.0, -a, -a]),
+                (vec![3, 0, 1], vec![1.0, -1.0, a + 5e-13]),
+            ],
+            lo: vec![0.0, 0.0],
+            up: vec![0.0, INF],
+            c: vec![0.0, 0.0, 0.0, 1.0],
+            l: vec![-100.0, 0.0, 0.0, -10.0],
+            u: vec![100.0, 1e5, 1e5, 10.0],
+            is_int: vec![false, true, true, false],
+        };
+        let point = [a * 1e5, 1e5, 0.0, 1.0 - (a + 5e-13) * 1e5];
+        assert!(
+            row_form_feasible(&f, &point, 1e-12),
+            "the point must be feasible"
+        );
+        let p = presolve(&f, 1e-9, 20);
+        // Probe (CLAUDE.md section 6): the rule under test must have fired.
+        assert!(
+            p.stats.aggregated + p.stats.doubleton_eqs > 0,
+            "{:?}",
+            p.stats
+        );
+        assert!(!p.infeasible);
+        let point_obj: f64 = f.c.iter().zip(&point).map(|(c, x)| c * x).sum();
+        if p.keep_cols.is_empty() {
+            // Presolve solved it outright (measured: `t` fixed by dual fixing): the
+            // reduced optimum is the offset, and it must not be above the point's
+            // objective. The pre-fix rule dropped the 5e-13 term and fixed t at 0.
+            assert!(
+                p.offset <= point_obj + 1e-15,
+                "presolve optimum {:e} above a feasible point's {point_obj:e}",
+                p.offset
+            );
+            return;
+        }
+        let red: Vec<f64> = p.keep_cols.iter().map(|&j| point[j]).collect();
+        let mut checked = 0;
+        for (r, (ri, rv)) in p.form.rows.iter().enumerate() {
+            let act: f64 = ri.iter().zip(rv).map(|(&k, &v)| v * red[k]).sum();
+            assert!(
+                act <= p.form.up[r] + 1e-12 && act >= p.form.lo[r] - 1e-12,
+                "reduced row {r}: activity {act:e} outside [{:e}, {:e}] at a feasible point",
+                p.form.lo[r],
+                p.form.up[r]
+            );
+            checked += 1;
+        }
+        // Rows that collapsed to a singleton became column bounds: judge those too.
+        for (k, &x) in red.iter().enumerate() {
+            assert!(
+                x >= p.form.l[k] - 1e-12 && x <= p.form.u[k] + 1e-12,
+                "reduced column {k} (original {}): {x:e} outside [{:e}, {:e}]",
+                p.keep_cols[k],
+                p.form.l[k],
+                p.form.u[k]
+            );
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
 
     struct Lcg(u64);
     impl Lcg {

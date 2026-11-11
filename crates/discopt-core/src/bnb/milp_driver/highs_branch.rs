@@ -919,8 +919,8 @@ impl HighsEval {
                         }
                     }
                     if integral {
-                        let v = nl.sol.obj + oc;
-                        self.offer_found(sol.clone(), v);
+                        let (x, v) = super::highs_eval::integral_incumbent(ctx, &nl.sol.x);
+                        self.offer_found(x, v);
                     }
                     // The child's safe bound (HiGHS: `solobj`, the vertex value).
                     let child_bound = bound + oc;
@@ -1031,6 +1031,11 @@ pub(super) mod e2e {
 
     /// Run the search once if a test armed [`E2E`].
     pub fn maybe_run(ctx: &NodeCtx<'_>) {
+        // The top-level solve only: a sub-MIP (RENS/RINS neighbourhood, columns
+        // fixed) runs its own driver, whose first batch is not the problem's root.
+        if MILP_DEPTH.with(|d| d.get()) != 1 {
+            return;
+        }
         let armed = E2E.with(|e| e.borrow().as_ref().is_some_and(|r| !r.ran));
         if !armed {
             return;
@@ -1043,12 +1048,21 @@ pub(super) mod e2e {
             rel_gap_max_abs: false,
             abs_gap_tol: None,
             heuristics: false,
+            strong_branch: true,
+            stall_at: None,
         };
         let mut res = E2eResult {
             ran: true,
             ..Default::default()
         };
-        match highs_env::run(ctx, &lim, None, f64::NEG_INFINITY, None) {
+        // Seeded with the tree's incumbent, as the production route is: the root may
+        // already have fixed columns by reduced cost against it.
+        let initial = ctx
+            .tm
+            .incumbent()
+            .filter(|(_, v)| *v < INFEAS_SENTINEL - 1.0)
+            .map(|(x, v)| (x.to_vec(), v));
+        match highs_env::run(ctx, &lim, initial, f64::NEG_INFINITY, None) {
             Some(o) => {
                 res.best = o.best;
                 res.bound = o.bound;

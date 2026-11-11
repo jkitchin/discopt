@@ -383,7 +383,7 @@ impl SearchEnv for Mock {
     fn feastol(&self) -> f64 {
         self.feastol
     }
-    fn search_check_limits(&mut self, _nnodes: i64) -> bool {
+    fn search_check_limits(&mut self, _nnodes: i64, _open_on_stack: usize) -> bool {
         false
     }
     fn mip_check_limits(&mut self) -> bool {

@@ -18,6 +18,7 @@ use objlat_common::{build, options, M, N, OPTIMUM};
 #[test]
 fn the_default_resolves_the_continuous_objective_column() {
     std::env::remove_var("DISCOPT_OBJ_LATTICE_SUBST");
+    objlat_common::pin_engine();
     std::env::set_var("DISCOPT_PROFILE", "1");
 
     let (a, b, c, l, u) = build();
