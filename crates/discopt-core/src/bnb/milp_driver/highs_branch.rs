@@ -123,6 +123,68 @@ impl BranchPseudocost for NoPseudocost {
     }
 }
 
+impl BranchPseudocost for crate::bnb::highs_search::pseudocost::Pseudocost {
+    fn min_reliable(&self) -> i64 {
+        self.get_min_reliable() as i64
+    }
+    fn set_min_reliable(&mut self, v: i64) {
+        crate::bnb::highs_search::pseudocost::Pseudocost::set_min_reliable(self, v as i32);
+    }
+    fn set_degeneracy_factor(&mut self, f: f64) {
+        crate::bnb::highs_search::pseudocost::Pseudocost::set_degeneracy_factor(self, f);
+    }
+    fn is_reliable(&self, col: usize) -> bool {
+        crate::bnb::highs_search::pseudocost::Pseudocost::is_reliable(self, col)
+    }
+    fn pseudocost_up(&self, col: usize, frac: f64) -> f64 {
+        self.get_pseudocost_up(col, frac)
+    }
+    fn pseudocost_down(&self, col: usize, frac: f64) -> f64 {
+        self.get_pseudocost_down(col, frac)
+    }
+    fn pseudocost_up_offset(&self, col: usize, frac: f64, offset: f64) -> f64 {
+        self.get_pseudocost_up_offset(col, frac, offset)
+    }
+    fn pseudocost_down_offset(&self, col: usize, frac: f64, offset: f64) -> f64 {
+        self.get_pseudocost_down_offset(col, frac, offset)
+    }
+    fn score_costs(&self, col: usize, up: f64, down: f64) -> f64 {
+        self.get_score_costs(col, up, down)
+    }
+    fn score_frac(&self, col: usize, frac: f64) -> f64 {
+        self.get_score(col, frac)
+    }
+    fn score_up(&self, col: usize, frac: f64) -> f64 {
+        self.get_score_up(col, frac)
+    }
+    fn score_down(&self, col: usize, frac: f64) -> f64 {
+        self.get_score_down(col, frac)
+    }
+    fn add_observation(&mut self, col: usize, delta: f64, objdelta: f64) {
+        crate::bnb::highs_search::pseudocost::Pseudocost::add_observation(
+            self, col, delta, objdelta,
+        );
+    }
+    fn add_inference_observation(&mut self, col: usize, inferences: i64, upbranch: bool) {
+        // `HighsInt` in HiGHS.
+        let n = inferences.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        crate::bnb::highs_search::pseudocost::Pseudocost::add_inference_observation(
+            self, col, n, upbranch,
+        );
+    }
+    fn add_cutoff_observation(&mut self, col: usize, upbranch: bool) {
+        crate::bnb::highs_search::pseudocost::Pseudocost::add_cutoff_observation(
+            self, col, upbranch,
+        );
+    }
+    fn avg_inferences_up(&self, col: usize) -> f64 {
+        self.get_avg_inferences_up(col)
+    }
+    fn avg_inferences_down(&self, col: usize) -> f64 {
+        self.get_avg_inferences_down(col)
+    }
+}
+
 /// `HighsSearch::ChildSelectionRule` (the rules `branchImpl` implements; HiGHS uses
 /// `RootSol`, and `HybridInferenceCost` in sub-MIPs -- the rest are kept for parity).
 #[allow(dead_code)]
@@ -959,114 +1021,10 @@ pub(super) mod e2e {
 
     const NODE_LIMIT: i64 = 200_000;
 
-    /// Test scaffolding until the `HighsPseudocost` translation is merged: per-column
-    /// up/down averages and sample counts, reliable at `minreliable` samples (HiGHS's
-    /// default 8), the product score. Enough to drive reliability strong branching.
-    struct TestPc {
-        up: Vec<(f64, i64)>,
-        down: Vec<(f64, i64)>,
-        inf_up: Vec<(f64, i64)>,
-        inf_down: Vec<(f64, i64)>,
-        total: (f64, i64),
-        minrel: i64,
-    }
-
-    impl TestPc {
-        fn new(n: usize) -> Self {
-            TestPc {
-                up: vec![(0.0, 0); n],
-                down: vec![(0.0, 0); n],
-                inf_up: vec![(0.0, 0); n],
-                inf_down: vec![(0.0, 0); n],
-                total: (0.0, 0),
-                minrel: 8,
-            }
-        }
-        fn avg(p: (f64, i64), dflt: f64) -> f64 {
-            if p.1 == 0 {
-                dflt
-            } else {
-                p.0 / p.1 as f64
-            }
-        }
-        fn cost_total(&self) -> f64 {
-            Self::avg(self.total, 1.0)
-        }
-    }
-
-    impl BranchPseudocost for TestPc {
-        fn min_reliable(&self) -> i64 {
-            self.minrel
-        }
-        fn set_min_reliable(&mut self, v: i64) {
-            self.minrel = v;
-        }
-        fn set_degeneracy_factor(&mut self, _f: f64) {}
-        fn is_reliable(&self, col: usize) -> bool {
-            self.up[col].1.min(self.down[col].1) >= self.minrel
-        }
-        fn pseudocost_up(&self, col: usize, frac: f64) -> f64 {
-            (frac.ceil() - frac) * Self::avg(self.up[col], self.cost_total())
-        }
-        fn pseudocost_down(&self, col: usize, frac: f64) -> f64 {
-            (frac - frac.floor()) * Self::avg(self.down[col], self.cost_total())
-        }
-        fn pseudocost_up_offset(&self, col: usize, frac: f64, offset: f64) -> f64 {
-            (frac.ceil() - frac) * (offset + Self::avg(self.up[col], self.cost_total()))
-        }
-        fn pseudocost_down_offset(&self, col: usize, frac: f64, offset: f64) -> f64 {
-            (frac - frac.floor()) * (offset + Self::avg(self.down[col], self.cost_total()))
-        }
-        fn score_costs(&self, _col: usize, up: f64, down: f64) -> f64 {
-            up.max(1e-6) * down.max(1e-6)
-        }
-        fn score_frac(&self, col: usize, frac: f64) -> f64 {
-            self.score_costs(
-                col,
-                self.pseudocost_up(col, frac),
-                self.pseudocost_down(col, frac),
-            )
-        }
-        fn score_up(&self, col: usize, frac: f64) -> f64 {
-            self.pseudocost_up(col, frac)
-        }
-        fn score_down(&self, col: usize, frac: f64) -> f64 {
-            self.pseudocost_down(col, frac)
-        }
-        fn add_observation(&mut self, col: usize, delta: f64, objdelta: f64) {
-            let unit = objdelta / delta.abs().max(1e-9);
-            let e = if delta > 0.0 {
-                &mut self.up[col]
-            } else {
-                &mut self.down[col]
-            };
-            e.0 += unit;
-            e.1 += 1;
-            self.total.0 += unit;
-            self.total.1 += 1;
-        }
-        fn add_inference_observation(&mut self, col: usize, inferences: i64, upbranch: bool) {
-            let e = if upbranch {
-                &mut self.inf_up[col]
-            } else {
-                &mut self.inf_down[col]
-            };
-            e.0 += inferences as f64;
-            e.1 += 1;
-        }
-        fn add_cutoff_observation(&mut self, _col: usize, _upbranch: bool) {}
-        fn avg_inferences_up(&self, col: usize) -> f64 {
-            Self::avg(self.inf_up[col], 0.0)
-        }
-        fn avg_inferences_down(&self, col: usize) -> f64 {
-            Self::avg(self.inf_down[col], 0.0)
-        }
-    }
-
     struct Env<'a, 'b> {
         ctx: &'a NodeCtx<'b>,
         eval: HighsEval,
-        pc: TestPc,
+        pc: crate::bnb::highs_search::pseudocost::Pseudocost,
         q: NodeQueue,
         best: Option<(Vec<f64>, f64)>,
         nseen: usize,
@@ -1314,7 +1272,10 @@ pub(super) mod e2e {
         let mut env = Env {
             ctx,
             eval,
-            pc: TestPc::new(ctx.ns),
+            pc: crate::bnb::highs_search::pseudocost::Pseudocost::new(
+                ctx.ns,
+                crate::bnb::highs_search::pseudocost::DEFAULT_MIN_RELIABLE,
+            ),
             q: NodeQueue::new(ctx.ns),
             best: None,
             nseen: 0,

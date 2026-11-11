@@ -11886,9 +11886,9 @@ mod tests {
         }
         eprintln!("problems {problems} optimal {optimal} infeasible {infeasible} {tot:?}");
         assert!(
-            // Measured: 120 problems, all optimal; 4083 nodes, 2162 branchings, 88
-            // strong-branching commitments, 1876 strong-branching LP iterations, 1733
-            // re-evaluations.
+            // Measured (with the `HighsPseudocost` translation): 120 problems, all
+            // optimal; 3875 nodes, 2039 branchings, 89 strong-branching commitments,
+            // 1888 strong-branching LP iterations, 1600 re-evaluations.
             problems > 100
                 && optimal > 100
                 && tot.branched > 1000
