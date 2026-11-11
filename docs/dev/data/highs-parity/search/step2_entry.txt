@@ -1,0 +1,32 @@
+Step 2 entry experiment (2026-11-11), 20 s, one thread, MIPLIB-38+M rows our default stack leaves open.
+
+HiGHS on the 11 open rows (step2_entry_highs_targets.py): status, dual gap %, nodes, wall
+mik-250-20-75-5 optimal 0.01 159 10.6
+neos-911970 optimal 0.01 1077 17.1
+mik-250-20-75-3 optimal 0.009 433 15.1
+mik-250-20-75-2 optimal 0.01 91 6.8
+mik-250-20-75-1 optimal 0.01 453 13.8
+enlight_hard feasible 18.919 1582 13.1
+neos17 optimal 0.001 1524 13.3
+neos-2624317-amur feasible 100.0 1696 13.1
+b-ball optimal 0.0 101 0.4
+gsvm2rl3 optimal 0.001 2547 13.0
+neos-3118745-obra feasible 0.392 1404 20.2
+
+HiGHS root gap (mip_max_nodes=1, step2_entry_root_gap.py) vs our final gap at 20 s (r4 panel):
+mik-1 1.596 vs 1.46 | mik-2 1.05 vs 1.00 | mik-3 1.442 vs 1.68 | mik-5 1.15 vs 1.10
+neos17 0.625 vs 0.42 | b-ball 4.74 vs 4.46 | neos-911970 3.689 vs 3.86 | gsvm2rl3 23.913 vs 24.69
+=> HiGHS's root is not stronger than ours; the difference is the tree.
+
+HiGHS with cuts aged out of the LP and pool immediately (mip_lp_age_limit=0,
+mip_pool_age_limit=0, mip_pool_soft_limit=1) vs default (step2_entry_highs_cut_persistence.py):
+mik-250-20-75-5      default: Optimal gap 0.007% nodes 71 3.1s | no_persist: Optimal gap 0.009% nodes 534 3.2s
+mik-250-20-75-2      default: Optimal gap 0.009% nodes 89 4.0s | no_persist: Optimal gap 0.010% nodes 618 5.5s
+mik-250-20-75-1      default: Optimal gap 0.010% nodes 1099 8.8s | no_persist: Optimal gap 0.009% nodes 2974 6.7s
+neos17               default: Optimal gap 0.001% nodes 428 8.3s | no_persist: Optimal gap 0.001% nodes 1907 11.1s
+b-ball               default: Optimal gap 0.000% nodes 102 0.2s | no_persist: Time lim gap 8.161% nodes 92201 20.0s
+gsvm2rl3             default: Time lim gap 4.864% nodes 4452 20.0s | no_persist: Time lim gap 22.984% nodes 12357 20.0s
+=> b-ball and gsvm2rl3: persistent cuts are the difference (no_persist lands where we are).
+   mik/neos17: persistence cuts HiGHS's nodes 4-15x, but HiGHS still closes them without it,
+   so a second factor separates us there.
+Caveat: age limit 0 removes non-binding cuts; binding ones stay.
