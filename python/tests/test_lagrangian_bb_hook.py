@@ -271,18 +271,12 @@ def _branching_brute(c, n, cap=5, target=35):
 
 
 @pytest.mark.smoke
-def test_hook_runs_on_the_rust_engine_soundly_and_prunes(monkeypatch):
+def test_hook_runs_on_the_rust_engine_soundly_and_prunes():
     """Python-MILP-tree retirement: ``lagrangian_bound=True`` runs on the Rust MILP
     engine through its ``MilpBoundHook``. Both arms on the engine with root cuts off
     (``milp_backend="native", milp_cuts=False``) so the tree branches; the hook must
     fire (§6), raise node bounds, keep the brute-force optimum, and not explore more.
-
-    A bound hook is not re-hosted on the default HiGHS-design search, so a hooked solve
-    runs the batched search; the OFF arm is pinned there too
-    (``DISCOPT_HIGHS_MIP_SEARCH=0``), or "not more nodes" would compare two engines
-    (measured: 3 nodes on the HiGHS search vs 7 on the batched one, hook ON).
     """
-    monkeypatch.setenv("DISCOPT_HIGHS_MIP_SEARCH", "0")
 
     def build():
         # The 11-column instance above closes at the engine's root; this size branches

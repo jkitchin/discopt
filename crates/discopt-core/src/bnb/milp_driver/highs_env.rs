@@ -26,8 +26,10 @@
 //! search ([`Debugger`]): every evaluated node is a batch of one, with discopt's node
 //! identity (`NodeIdent`) carried through the stack and the queue.
 //!
+//! So does the external node bound (`MilpBoundHook`, [`HighsEnv::apply_bound_hook`]).
+//!
 //! Not yet re-hosted (the driver keeps the batched search for these): lazy
-//! constraints, node and bound hooks, node cuts (the working LP is fixed during this
+//! constraints, node hooks, node cuts (the working LP is fixed during this
 //! search), and an unbounded LP relaxation. Also routed there, as
 //! options this search does not implement: a branching rule other than reliability,
 //! a selection other than best-first, `node_propagation = false`, and the off-root
@@ -107,6 +109,9 @@ pub(super) struct Outcome {
     pub sep_lifts: usize,
     /// Better points the sub-MIP heuristics found.
     pub sub_mip_hits: usize,
+    /// `MilpBoundHook` calls, and the node bounds they raised.
+    pub bound_hook_calls: usize,
+    pub bound_hook_raised: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -288,6 +293,13 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// The queue slot of the node emplaced last (for [`SearchEnv::queue_tag`]).
     last_slot: i64,
     pub dbg: Option<Debugger<'a>>,
+    /// The external node bound (`MilpBoundHook`): distinct nodes offered so far, the
+    /// last node's value (a node is re-evaluated within a round; the hook is asked
+    /// once), and the call/raise counts.
+    hook_nodes: usize,
+    hook_last: Option<(u64, Option<f64>)>,
+    pub bound_hook_calls: usize,
+    pub bound_hook_raised: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -328,6 +340,58 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         };
         if matches!(d.hook.checkpoint(&state), MilpDebugControl::Stop) && self.stop.is_none() {
             self.stop = Some(Stop::Debugger);
+        }
+    }
+
+    /// The external node bound (`MilpBoundHook`, `Model.solve(lagrangian_bound=True)`),
+    /// as the batched search applies it: on a node whose LP bound is real and whose
+    /// point is fractional (`Open`), every `bound_hook_every`-th node, over the node's
+    /// structural box (its local domain); the node keeps `max(LP bound, hook bound)`.
+    /// A raised bound past the cutoff prunes the node (`BoundExceeding`); one past the
+    /// optimality limit makes the control queue it as suboptimal. The hook must return
+    /// a valid bound over the box, so a valid hook can only tighten.
+    fn apply_bound_hook(&mut self, node: &mut NodeData, r: SearchResult) -> SearchResult {
+        let Some(h) = self.ctx.opts.bound_hook.as_ref() else {
+            return r;
+        };
+        let lb0 = node.lower_bound;
+        if r != SearchResult::Open || !lb0.is_finite() || lb0 >= INFEAS_SENTINEL {
+            return r;
+        }
+        let id = node.ident.id;
+        let v = match self.hook_last {
+            Some((k, v)) if k == id => v,
+            _ => {
+                let due = self.hook_nodes % self.ctx.opts.bound_hook_every.max(1) == 0;
+                self.hook_nodes += 1;
+                let v = if due {
+                    self.bound_hook_calls += 1;
+                    let ns = self.ctx.ns;
+                    h.node_bound(
+                        &self.eval.dom.col_lower[..ns],
+                        &self.eval.dom.col_upper[..ns],
+                    )
+                    .filter(|v| v.is_finite() && *v < INFEAS_SENTINEL)
+                } else {
+                    None
+                };
+                self.hook_last = Some((id, v));
+                if v.is_some_and(|v| v > lb0) {
+                    self.bound_hook_raised += 1;
+                }
+                v
+            }
+        };
+        match v {
+            Some(v) if v > lb0 => {
+                node.lower_bound = v;
+                if v > self.eval.cutoff {
+                    SearchResult::BoundExceeding
+                } else {
+                    r
+                }
+            }
+            _ => r,
         }
     }
 
@@ -637,6 +701,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 }
             }
         }
+        let r = self.apply_bound_hook(node, r);
         self.sync();
         r
     }
@@ -906,6 +971,10 @@ pub(super) fn run<'a>(
         sub_mip_hits: 0,
         last_slot: -1,
         dbg,
+        hook_nodes: 0,
+        hook_last: None,
+        bound_hook_calls: 0,
+        bound_hook_raised: 0,
     };
     let root_id = env.dbg.as_ref().map_or(0, |d| d.root_id);
     if let Some(d) = env.dbg.as_mut() {
@@ -977,5 +1046,7 @@ pub(super) fn run<'a>(
         sep_calls: env.sep_calls,
         sep_lifts: env.sep_lifts,
         sub_mip_hits: env.sub_mip_hits,
+        bound_hook_calls: env.bound_hook_calls,
+        bound_hook_raised: env.bound_hook_raised,
     })
 }

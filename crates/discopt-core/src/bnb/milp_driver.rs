@@ -780,7 +780,7 @@ fn highs_mip_search() -> bool {
     // run the HiGHS-design search (translated control, queue, local domain, node
     // evaluation through `node_lp`'s safety layer, reliability strong branching with
     // `HighsPseudocost`) from the root working LP instead of the batched search, for
-    // models with no lazy, node or bound hook (a debugger runs on it) and the default branching rule
+    // models with no lazy or node hook (a debugger or a bound hook runs on it) and the default branching rule
     // and node selection. Default ON since the stage 1d-5 graduation panel; `0`
     // restores the batched search (flag-retirement audit row).
     match std::env::var("DISCOPT_HIGHS_MIP_SEARCH") {
@@ -6068,7 +6068,6 @@ fn solve_milp_node_search(
     let mut highs_route = highs_mip_search()
         && lazy.is_none()
         && node.is_none()
-        && opts.bound_hook.is_none()
         && opts.node_propagation
         && dive_stride() == DIVE_STRIDE_DEFAULT
         && opts.branch_rule == crate::bnb::branching::BranchRule::Reliability
@@ -7728,8 +7727,8 @@ fn highs_search_result(
         node_cuts_added: 0,
         root_cut_rows,
         strong_probe_lps: 0,
-        bound_hook_calls: 0,
-        bound_hook_raised: 0,
+        bound_hook_calls: o.bound_hook_calls,
+        bound_hook_raised: o.bound_hook_raised,
     };
     if has_inc && incumbent_misvalued(res.obj, tree_v) {
         crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
@@ -12877,6 +12876,83 @@ mod tests {
             "instance too easy to show anything: {}",
             base.nodes
         );
+        let silent = Arc::new(Fixed(None, AtomicUsize::new(0)));
+        let r0 = run(Some(silent.clone()));
+        assert!(silent.1.load(Ordering::Relaxed) > 0, "the hook never ran");
+        assert_eq!(r0.bound_hook_calls, silent.1.load(Ordering::Relaxed));
+        assert_eq!(r0.bound_hook_raised, 0);
+        assert_eq!((r0.nodes, r0.status), (base.nodes, base.status));
+        assert_eq!(r0.obj, base.obj);
+        let tight = Arc::new(Fixed(Some(base.obj), AtomicUsize::new(0)));
+        let r1 = run(Some(tight.clone()));
+        assert_eq!(r1.status, MilpStatus::Optimal);
+        assert!(
+            (r1.obj - base.obj).abs() <= 1e-9,
+            "{} vs {}",
+            r1.obj,
+            base.obj
+        );
+        assert!(r1.bound_hook_raised > 0, "no node bound was raised");
+        assert!(r1.nodes <= base.nodes, "{} > {}", r1.nodes, base.nodes);
+    }
+
+    /// The bound hook on the HiGHS-design search (stage 1d-6): the route runs with a
+    /// hook attached; a hook that returns `None` is called and changes nothing (same
+    /// nodes, same answer); a valid hook (the true optimum, valid at every node) raises
+    /// node bounds, keeps the certified answer and does not explore more.
+    #[test]
+    fn bound_hook_runs_on_the_highs_search() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct Fixed(Option<f64>, AtomicUsize);
+        impl MilpBoundHook for Fixed {
+            fn node_bound(&self, lb: &[f64], ub: &[f64]) -> Option<f64> {
+                assert_eq!((lb.len(), ub.len()), (8, 8));
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0
+            }
+        }
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w
+            .iter()
+            .enumerate()
+            .map(|(i, v)| -(v + 0.3 * i as f64 + 0.5))
+            .collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |hook: Option<Arc<dyn MilpBoundHook>>| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.bound_hook = hook;
+            let runs0 = highs_env::RUNS.with(|r| r.get());
+            let r = solve_milp(&lp, &[20.5], 0.0, &o);
+            assert!(
+                highs_env::RUNS.with(|r| r.get()) > runs0,
+                "the solve did not run the HiGHS-design search"
+            );
+            r
+        };
+        let base = run(None);
+        assert_eq!(base.status, MilpStatus::Optimal);
+        assert!(base.nodes > 3, "instance too easy: {} nodes", base.nodes);
         let silent = Arc::new(Fixed(None, AtomicUsize::new(0)));
         let r0 = run(Some(silent.clone()));
         assert!(silent.1.load(Ordering::Relaxed) > 0, "the hook never ran");
