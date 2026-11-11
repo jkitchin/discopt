@@ -24,15 +24,31 @@
 //! `markPropagateCut(reason)`, `getMinCutActivity` and the cut-pool section of
 //! `propagate`; and `ObjectivePropagation` (constructor, `updateActivityLb/UbChange`,
 //! `recomputeCapacityThreshold`, `shouldBePropagated`, `propagate`,
-//! `getPropagationConstraint`) with `checkChangeBound`.
+//! `getPropagationConstraint`) with `checkChangeBound`; and `ConflictPoolPropagation`
+//! (`conflictAdded`, `conflictDeleted`, `markPropagateConflict`,
+//! `updateActivityLb/UbChange`, `propagateConflict`, the watched-literal lists) with
+//! the conflict-pool sections of `updateActivityLb/UbChange`, `propagate`,
+//! `markPropagateCut(reason)` and `havePropagationRows`, `isActive` and `flip`; and
+//! conflict analysis: `ConflictSet` (`explainInfeasibility*`, `explainBoundChange*`,
+//! `resolveLinearLeq/Geq`, the resolve queue, `resolveDepth`, `computeCuts`, both
+//! `conflictAnalysis`), `HighsDomain::conflictAnalysis` (both overloads) and
+//! `conflictAnalyzeReconvergence`. The conflict pool is [`super::conflict_pool`].
 //!
-//! Not yet ported (later layers of the search port): conflict-pool propagation,
-//! conflict analysis, clique-table and implication fixings on binaries,
-//! redundant-row recording.
+//! Not yet ported (later layers of the search port): clique-table and implication
+//! fixings on binaries (this port never produces a `kCliqueTable` reason; the
+//! explanation of one needs no clique table and is translated), redundant-row
+//! recording, `tightenCoefficients`, `fixCol`, the debug-solution checks.
+//!
+//! Conflict analysis reads two things HiGHS takes from other components: pseudocost
+//! conflict scores ([`ConflictScores`], `HighsPseudocost`) and the open-node counts per
+//! column ([`OpenNodeCounts`], `HighsNodeQueue::numNodesUp/Down`), both as traits so
+//! the translations of those components plug in.
 
 use super::cdouble::CDouble;
+use super::conflict_pool::{ConflictDomainObservers, ConflictPool};
 use super::objective::ObjectiveFunction;
-use std::collections::BTreeMap;
+use super::stdalgo::pdqsort;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 const INF: f64 = f64::INFINITY;
@@ -78,6 +94,59 @@ pub enum Reason {
     Cut(usize, usize),
     /// `kObjective`.
     Objective,
+    /// `Reason::cut(cutpoolpropagation.size() + conflictpoolindex, conflict)`:
+    /// conflict `conflict` of the domain's conflict pool `pool`.
+    Conflict(usize, usize),
+    /// `Reason::cliqueTable(col, val)`: implied by column `col` fixed to `val`
+    /// (never produced until the clique table is ported).
+    CliqueTable(usize, usize),
+}
+
+/// `HighsPseudocost`'s conflict scores, as conflict analysis updates them
+/// (`increaseConflictWeight`, `increaseConflictScoreUp/Down`). A trait so the
+/// pseudocost translation plugs in without this module depending on it.
+pub trait ConflictScores {
+    /// `increaseConflictWeight()`.
+    fn increase_conflict_weight(&mut self);
+    /// `increaseConflictScoreUp(col)`.
+    fn increase_conflict_score_up(&mut self, col: usize);
+    /// `increaseConflictScoreDown(col)`.
+    fn increase_conflict_score_down(&mut self, col: usize);
+}
+
+/// `HighsNodeQueue::numNodesUp/Down(col)`: open nodes with a lower (up) or upper
+/// (down) bound change on `col`; conflict analysis weighs its resolution candidates
+/// by them (`computePrio`).
+pub trait OpenNodeCounts {
+    /// `numNodesUp(col)`.
+    fn num_nodes_up(&self, col: usize) -> i64;
+    /// `numNodesDown(col)`.
+    fn num_nodes_down(&self, col: usize) -> i64;
+}
+
+/// No open nodes (an empty node queue).
+pub struct NoOpenNodes;
+impl OpenNodeCounts for NoOpenNodes {
+    fn num_nodes_up(&self, _col: usize) -> i64 {
+        0
+    }
+    fn num_nodes_down(&self, _col: usize) -> i64 {
+        0
+    }
+}
+
+/// Which domains in a conflict analysis propagate the conflict pool, with the
+/// pool's index among each one's conflict pools (`addConflictPool`). HiGHS's pool
+/// notifies its `propagationDomains`; with the global domain registered first and the
+/// search's local domain (a copy) after it, a new conflict reaches the global domain
+/// first. Other domains propagating the pool are notified by the caller with the
+/// indices conflict analysis returns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConflictLinks {
+    /// The pool's index in the local domain (the one analysed), if it propagates it.
+    pub local: Option<usize>,
+    /// The pool's index in the global domain, if it propagates it.
+    pub global: Option<usize>,
 }
 
 /// The rows a domain propagates: `row_lower <= a x <= row_upper` over the columns,
@@ -291,6 +360,135 @@ impl CutpoolProp {
     }
 }
 
+/// `ConflictPoolPropagation::WatchedLiteral`: a watched conflict literal (column -1
+/// when unused) and its links in the column's watch list.
+#[derive(Clone, Copy, Debug)]
+struct WatchedLiteral {
+    boundval: f64,
+    column: i64,
+    boundtype: BoundType,
+    prev: i64,
+    next: i64,
+}
+
+impl Default for WatchedLiteral {
+    /// `{0.0, -1, kLower}`, unlinked.
+    fn default() -> Self {
+        WatchedLiteral {
+            boundval: 0.0,
+            column: -1,
+            boundtype: BoundType::Lower,
+            prev: -1,
+            next: -1,
+        }
+    }
+}
+
+impl WatchedLiteral {
+    /// `watched.domchg != entry` (`HighsDomainChange::operator!=`).
+    fn differs(&self, d: &DomainChange) -> bool {
+        self.boundtype != d.boundtype
+            || self.column != d.column as i64
+            || self.boundval != d.boundval
+    }
+}
+
+/// `HighsDomain::ConflictPoolPropagation`: one conflict pool's conflicts as a domain
+/// tracks them, by two watched literals per conflict.
+///
+/// HiGHS reads the conflicts through a pointer to the pool; here the pool hands each
+/// conflict to the domain when it is added ([`Domain::conflict_added`]) and the domain
+/// keeps a copy (`None` once deleted), as [`CutpoolProp`] keeps the cut rows.
+///
+/// The watch lists reproduce a quirk of `linkWatchedLiteral` (HiGHS 1.15.1 and
+/// master): the list head is only moved when the list is non-empty
+/// (`if (head != -1) { ...; head = linkPos; }`), so a literal is never put into an
+/// empty list and every list stays empty. `updateActivityLb/UbChange` therefore never
+/// visits a conflict, and a conflict is propagated only when it is marked on
+/// `conflictAdded` (fewer than two literals inactive at that point) or through
+/// `markPropagateCut(reason)` when a change it explains is backtracked. Kept as is for
+/// replay; missing propagation is sound.
+#[derive(Clone, Default)]
+struct ConflictPoolProp {
+    /// Mirror of the pool's conflicts.
+    conflicts: Vec<Option<Vec<DomainChange>>>,
+    /// `colLowerWatched_`, `colUpperWatched_`: list heads per column.
+    col_lower_watched: Vec<i64>,
+    col_upper_watched: Vec<i64>,
+    /// `conflictFlag_`: number of inactive watched literals (bits 0-1), queued for
+    /// propagation (4), deleted (8).
+    conflict_flag: Vec<u8>,
+    /// `propagateConflictInds_`.
+    propagate_conflict_inds: Vec<usize>,
+    /// `watchedLiterals_`: two per conflict.
+    watched: Vec<WatchedLiteral>,
+}
+
+impl ConflictPoolProp {
+    fn new(ncols: usize) -> Self {
+        ConflictPoolProp {
+            col_lower_watched: vec![-1; ncols],
+            col_upper_watched: vec![-1; ncols],
+            ..Default::default()
+        }
+    }
+
+    /// The watch-list head of literal `link_pos`'s column and bound type.
+    fn head(&mut self, link_pos: usize) -> &mut i64 {
+        let w = self.watched[link_pos];
+        let col = w.column as usize;
+        if w.boundtype == BoundType::Lower {
+            &mut self.col_lower_watched[col]
+        } else {
+            &mut self.col_upper_watched[col]
+        }
+    }
+
+    /// `linkWatchedLiteral(linkPos)`, with HiGHS's head update (see the type's doc).
+    fn link_watched_literal(&mut self, link_pos: usize) {
+        debug_assert!(self.watched[link_pos].column != -1);
+        let head = *self.head(link_pos);
+        self.watched[link_pos].prev = -1;
+        self.watched[link_pos].next = head;
+        if head != -1 {
+            self.watched[head as usize].prev = link_pos as i64;
+            *self.head(link_pos) = link_pos as i64;
+        }
+    }
+
+    /// `unlinkWatchedLiteral(linkPos)`.
+    fn unlink_watched_literal(&mut self, link_pos: usize) {
+        if self.watched[link_pos].column == -1 {
+            return;
+        }
+        let (prev, next) = (self.watched[link_pos].prev, self.watched[link_pos].next);
+        if prev != -1 {
+            self.watched[prev as usize].next = next;
+        } else {
+            *self.head(link_pos) = next;
+        }
+        self.watched[link_pos].column = -1;
+        if next != -1 {
+            self.watched[next as usize].prev = prev;
+        }
+    }
+
+    /// `markPropagateConflict(conflict)`.
+    fn mark_propagate_conflict(&mut self, conflict: usize) {
+        if self.conflict_flag[conflict] < 2 {
+            self.propagate_conflict_inds.push(conflict);
+            self.conflict_flag[conflict] |= 4;
+        }
+    }
+
+    fn set_watched(&mut self, watch_pos: usize, d: &DomainChange) {
+        let w = &mut self.watched[watch_pos];
+        w.boundval = d.boundval;
+        w.column = d.column as i64;
+        w.boundtype = d.boundtype;
+    }
+}
+
 /// A contribution-tree key, ordered like HiGHS's `std::pair<double, HighsInt>`
 /// (`-contribution`, `col`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -404,6 +602,11 @@ pub struct Domain {
     obj_prop: Option<Box<ObjProp>>,
     /// `mipdata_->upper_limit`: the objective cutoff objective propagation uses.
     upper_limit: f64,
+    /// `conflictPoolPropagation`.
+    conflictpools: Vec<ConflictPoolProp>,
+    /// `conflictpool_->resetAge(conflict)` calls made during propagation, as
+    /// `(pool, conflict)`, for the caller to apply.
+    conflict_age_resets: Vec<(usize, usize)>,
 }
 
 impl Domain {
@@ -447,6 +650,8 @@ impl Domain {
             cut_age_resets: Vec::new(),
             obj_prop: None,
             upper_limit: INF,
+            conflictpools: Vec::new(),
+            conflict_age_resets: Vec::new(),
         };
         d.compute_row_activities();
         d
@@ -552,6 +757,427 @@ impl Domain {
     /// `(pool, cut)`; the caller applies them to its pools in order.
     pub fn take_cut_age_resets(&mut self) -> Vec<(usize, usize)> {
         std::mem::take(&mut self.cut_age_resets)
+    }
+
+    /// `addConflictPool(conflictPool)`: register a conflict pool; returns its index in
+    /// [`Reason::Conflict`]. Conflicts the pool holds already are not handed over (as
+    /// in HiGHS, a new `ConflictPoolPropagation` starts empty).
+    pub fn add_conflict_pool(&mut self) -> usize {
+        self.conflictpools
+            .push(ConflictPoolProp::new(self.model.ncols));
+        self.conflictpools.len() - 1
+    }
+
+    /// `ConflictPoolPropagation::conflictAdded(conflict)`, with the conflict's literals
+    /// handed over (HiGHS reads them from the pool).
+    pub fn conflict_added(&mut self, pool: usize, conflict: usize, entries: &[DomainChange]) {
+        let active: Vec<bool> = entries.iter().map(|e| self.is_active(e)).collect();
+        let positions: Vec<i64> = entries
+            .iter()
+            .map(|e| match e.boundtype {
+                BoundType::Lower => self.col_lower_pos[e.column],
+                BoundType::Upper => self.col_upper_pos[e.column],
+            })
+            .collect();
+        let cp = &mut self.conflictpools[pool];
+        if cp.conflicts.len() <= conflict {
+            cp.conflicts.resize(conflict + 1, None);
+        }
+        cp.conflicts[conflict] = Some(entries.to_vec());
+        if cp.conflict_flag.len() <= conflict {
+            cp.watched
+                .resize(2 * conflict + 2, WatchedLiteral::default());
+            cp.conflict_flag.resize(conflict + 1, 0);
+        }
+        let mut num_watched = 0usize;
+        for (i, e) in entries.iter().enumerate() {
+            if active[i] {
+                continue;
+            }
+            let watch_pos = 2 * conflict + num_watched;
+            cp.set_watched(watch_pos, e);
+            cp.link_watched_literal(watch_pos);
+            num_watched += 1;
+            if num_watched == 2 {
+                break;
+            }
+        }
+        match num_watched {
+            0 => {
+                // Every literal holds: watch the two set most recently.
+                let mut latest_active = [(0i64, 0usize); 2];
+                let mut num_active = 0usize;
+                for (i, &pos) in positions.iter().enumerate() {
+                    match num_active {
+                        0 => {
+                            latest_active[0] = (pos, i);
+                            num_active = 1;
+                        }
+                        1 => {
+                            latest_active[1] = (pos, i);
+                            num_active = 2;
+                            if latest_active[0].0 < latest_active[1].0 {
+                                latest_active.swap(0, 1);
+                            }
+                        }
+                        _ => {
+                            if pos > latest_active[1].0 {
+                                latest_active[1] = (pos, i);
+                                if latest_active[0].0 < latest_active[1].0 {
+                                    latest_active.swap(0, 1);
+                                }
+                            }
+                        }
+                    }
+                }
+                for (i, la) in latest_active.iter().enumerate().take(num_active) {
+                    let watch_pos = 2 * conflict + i;
+                    cp.set_watched(watch_pos, &entries[la.1]);
+                    cp.link_watched_literal(watch_pos);
+                }
+            }
+            1 => {
+                let mut latest = -1i64;
+                let mut latest_pos = -1i64;
+                for (i, &pos) in positions.iter().enumerate() {
+                    if pos > latest_pos {
+                        latest = i as i64;
+                        latest_pos = pos;
+                    }
+                }
+                if latest != -1 {
+                    let watch_pos = 2 * conflict + 1;
+                    cp.set_watched(watch_pos, &entries[latest as usize]);
+                    cp.link_watched_literal(watch_pos);
+                }
+            }
+            _ => {}
+        }
+        cp.conflict_flag[conflict] = num_watched as u8 | (cp.conflict_flag[conflict] & 4);
+        cp.mark_propagate_conflict(conflict);
+    }
+
+    /// `ConflictPoolPropagation::conflictDeleted(conflict)`; the mirror drops the
+    /// literals, as the pool's range becomes `(-1, -1)`.
+    pub fn conflict_deleted(&mut self, pool: usize, conflict: usize) {
+        let cp = &mut self.conflictpools[pool];
+        if conflict >= cp.conflict_flag.len() {
+            // Never handed to this domain (HiGHS indexes out of range here).
+            return;
+        }
+        cp.conflict_flag[conflict] |= 8;
+        cp.unlink_watched_literal(2 * conflict);
+        cp.unlink_watched_literal(2 * conflict + 1);
+        cp.conflicts[conflict] = None;
+    }
+
+    /// `ConflictPoolPropagation::updateActivityLbChange` (`lower`) or
+    /// `updateActivityUbChange`: count the watched literals the change makes
+    /// inactive (or active again) and queue the conflicts that reach fewer than two.
+    fn update_conflict_activity(
+        &mut self,
+        pool: usize,
+        col: usize,
+        oldbound: f64,
+        newbound: f64,
+        lower: bool,
+    ) {
+        debug_assert!(!self.infeasible);
+        let cp = &mut self.conflictpools[pool];
+        let mut i = if lower {
+            cp.col_lower_watched[col]
+        } else {
+            cp.col_upper_watched[col]
+        };
+        while i != -1 {
+            let iu = i as usize;
+            let conflict = iu >> 1;
+            let bv = cp.watched[iu].boundval;
+            let delta = if lower {
+                ((bv > newbound) as u8).wrapping_sub((bv > oldbound) as u8)
+            } else {
+                ((bv < newbound) as u8).wrapping_sub((bv < oldbound) as u8)
+            };
+            if delta != 0 {
+                cp.conflict_flag[conflict] = cp.conflict_flag[conflict].wrapping_add(delta);
+                cp.mark_propagate_conflict(conflict);
+            }
+            i = cp.watched[iu].next;
+        }
+    }
+
+    /// `ConflictPoolPropagation::propagateConflict(conflict)`.
+    fn propagate_conflict(&mut self, pool: usize, conflict: usize) {
+        // The propagate flag goes; the watched and deleted information stays.
+        self.conflictpools[pool].conflict_flag[conflict] &= 3 | 8;
+        // Two inactive literals watched, or the conflict deleted.
+        if self.conflictpools[pool].conflict_flag[conflict] >= 2 {
+            return;
+        }
+        if self.infeasible {
+            return;
+        }
+        let entries = match &self.conflictpools[pool].conflicts[conflict] {
+            Some(e) => e.clone(),
+            None => {
+                let cp = &mut self.conflictpools[pool];
+                cp.unlink_watched_literal(2 * conflict);
+                cp.unlink_watched_literal(2 * conflict + 1);
+                return;
+            }
+        };
+        let mut inactive = [0usize; 2];
+        let mut num_inactive = 0usize;
+        for (i, e) in entries.iter().enumerate() {
+            if self.is_active(e) {
+                continue;
+            }
+            inactive[num_inactive] = i;
+            num_inactive += 1;
+            if num_inactive == 2 {
+                break;
+            }
+        }
+        self.conflictpools[pool].conflict_flag[conflict] = num_inactive as u8;
+        match num_inactive {
+            0 => {
+                self.infeasible = true;
+                self.infeasible_reason = Reason::Conflict(pool, conflict);
+                self.infeasible_pos = self.domchgstack.len();
+                self.conflict_age_resets.push((pool, conflict));
+            }
+            1 => {
+                let domchg = self.flip(&entries[inactive[0]]);
+                if !self.is_active(&domchg) {
+                    self.change_bound(domchg, Reason::Conflict(pool, conflict));
+                    self.conflict_age_resets.push((pool, conflict));
+                }
+            }
+            _ => {
+                let cp = &mut self.conflictpools[pool];
+                if cp.watched[2 * conflict].differs(&entries[inactive[0]]) {
+                    cp.unlink_watched_literal(2 * conflict);
+                    cp.set_watched(2 * conflict, &entries[inactive[0]]);
+                    cp.link_watched_literal(2 * conflict);
+                }
+                if cp.watched[2 * conflict + 1].differs(&entries[inactive[1]]) {
+                    cp.unlink_watched_literal(2 * conflict + 1);
+                    cp.set_watched(2 * conflict + 1, &entries[inactive[1]]);
+                    cp.link_watched_literal(2 * conflict + 1);
+                }
+            }
+        }
+    }
+
+    /// The `conflictpool_->resetAge(conflict)` calls propagation made since the last
+    /// call, as `(pool, conflict)`; the caller applies them to its pools in order.
+    pub fn take_conflict_age_resets(&mut self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut self.conflict_age_resets)
+    }
+
+    /// `isActive(domchg)`: the literal holds in the current bounds.
+    pub fn is_active(&self, d: &DomainChange) -> bool {
+        match d.boundtype {
+            BoundType::Lower => d.boundval <= self.col_lower[d.column],
+            BoundType::Upper => d.boundval >= self.col_upper[d.column],
+        }
+    }
+
+    /// `flip(domchg)`: the literal's negation (by `feastol`, rounded for integers).
+    pub fn flip(&self, d: &DomainChange) -> DomainChange {
+        if d.boundtype == BoundType::Lower {
+            let mut v = d.boundval - self.feastol;
+            if self.model.is_int[d.column] {
+                v = v.floor();
+            }
+            DomainChange {
+                boundval: v,
+                column: d.column,
+                boundtype: BoundType::Upper,
+            }
+        } else {
+            let mut v = d.boundval + self.feastol;
+            if self.model.is_int[d.column] {
+                v = v.ceil();
+            }
+            DomainChange {
+                boundval: v,
+                column: d.column,
+                boundtype: BoundType::Lower,
+            }
+        }
+    }
+
+    /// The literals `addConflictCut` stores for a frontier: its changes in stack
+    /// order, a continuous column's bound moved by `feastol` away from the conflict
+    /// (so the stored literal is strictly weaker).
+    pub fn conflict_cut_entries<'a>(
+        &self,
+        frontier: impl IntoIterator<Item = &'a DomainChange>,
+    ) -> Vec<DomainChange> {
+        frontier
+            .into_iter()
+            .map(|d| {
+                let mut e = *d;
+                if !self.model.is_int[e.column] {
+                    if e.boundtype == BoundType::Lower {
+                        e.boundval += self.feastol;
+                    } else {
+                        e.boundval -= self.feastol;
+                    }
+                }
+                e
+            })
+            .collect()
+    }
+
+    /// The literals `addReconvergenceCut` stores: the flipped reconvergence change,
+    /// then the frontier as in [`Self::conflict_cut_entries`].
+    pub fn reconvergence_cut_entries<'a>(
+        &self,
+        frontier: impl IntoIterator<Item = &'a DomainChange>,
+        reconvergence_domchg: &DomainChange,
+    ) -> Vec<DomainChange> {
+        let mut out = vec![self.flip(reconvergence_domchg)];
+        out.extend(self.conflict_cut_entries(frontier));
+        out
+    }
+
+    /// `getMinActivity(row)`.
+    pub fn min_activity(&self, row: usize) -> f64 {
+        if self.activitymininf[row] == 0 {
+            self.activitymin[row].to_f64()
+        } else {
+            -INF
+        }
+    }
+
+    /// `getMaxActivity(row)`.
+    pub fn max_activity(&self, row: usize) -> f64 {
+        if self.activitymaxinf[row] == 0 {
+            self.activitymax[row].to_f64()
+        } else {
+            INF
+        }
+    }
+
+    /// `HighsDomain::conflictAnalysis(conflictPool, globaldom, pseudocost)`: explain
+    /// this (local, infeasible) domain's infeasibility over the global domain and
+    /// store the conflicts found in `pool`. Returns the indices of the conflicts
+    /// added, in order. The two domains must share their cut-pool indices (HiGHS
+    /// finds a pool in the global domain by its address).
+    pub fn conflict_analysis(
+        &mut self,
+        pool: &mut ConflictPool,
+        links: ConflictLinks,
+        globaldom: &mut Domain,
+        scores: &mut dyn ConflictScores,
+        nodes: &dyn OpenNodeCounts,
+    ) -> Vec<usize> {
+        if globaldom.infeasible() || !self.infeasible {
+            return Vec::new();
+        }
+        globaldom.propagate();
+        if globaldom.infeasible() {
+            return Vec::new();
+        }
+        let mut cs = ConflictSet::new(self, globaldom, links, nodes);
+        cs.conflict_analysis(pool, scores);
+        cs.added
+    }
+
+    /// `HighsDomain::conflictAnalysis(proofinds, proofvals, prooflen, proofrhs,
+    /// conflictPool, globaldom, pseudocost)`: a globally valid proof row
+    /// `vals . x[inds] <= rhs` that the local bounds violate (e.g. a dual ray of an
+    /// infeasible LP) is explained instead of the domain's infeasibility.
+    pub fn conflict_analysis_proof(
+        &mut self,
+        proofinds: &[usize],
+        proofvals: &[f64],
+        proofrhs: f64,
+        pool: &mut ConflictPool,
+        links: ConflictLinks,
+        globaldom: &mut Domain,
+        scores: &mut dyn ConflictScores,
+        nodes: &dyn OpenNodeCounts,
+    ) -> Vec<usize> {
+        if globaldom.infeasible() {
+            return Vec::new();
+        }
+        globaldom.propagate();
+        if globaldom.infeasible() {
+            return Vec::new();
+        }
+        let mut cs = ConflictSet::new(self, globaldom, links, nodes);
+        cs.conflict_analysis_proof(proofinds, proofvals, proofrhs, pool, scores);
+        cs.added
+    }
+
+    /// `conflictAnalyzeReconvergence(domchg, proofinds, proofvals, prooflen,
+    /// proofrhs, conflictPool, globaldom, pseudocost)`: explain the bound change
+    /// `domchg` (not on the stack) by the proof row and store the reconvergence cut.
+    pub fn conflict_analyze_reconvergence(
+        &mut self,
+        domchg: &DomainChange,
+        proofinds: &[usize],
+        proofvals: &[f64],
+        proofrhs: f64,
+        pool: &mut ConflictPool,
+        links: ConflictLinks,
+        globaldom: &mut Domain,
+        scores: &mut dyn ConflictScores,
+        nodes: &dyn OpenNodeCounts,
+    ) -> Vec<usize> {
+        if globaldom.infeasible() {
+            return Vec::new();
+        }
+        globaldom.propagate();
+        if globaldom.infeasible() {
+            return Vec::new();
+        }
+        let stack_len = self.domchgstack.len() as i64;
+        let mut cs = ConflictSet::new(self, globaldom, links, nodes);
+        let (ninfmin, activitymin) = cs.globaldom.compute_min_activity_of(proofinds, proofvals);
+        if ninfmin != 0 {
+            return Vec::new();
+        }
+        let frontier = Frontier::new();
+        if !cs.explain_bound_change_leq(
+            &frontier,
+            (stack_len, *domchg),
+            proofinds,
+            proofvals,
+            proofrhs,
+            activitymin.to_f64(),
+        ) {
+            return Vec::new();
+        }
+        if 10 * cs.resolved_domain_changes.len() > 1000 + 3 * cs.localdom.num_integral_cols() {
+            return Vec::new();
+        }
+        let mut frontier = frontier;
+        for &(p, d) in &cs.resolved_domain_changes {
+            frontier.entry(p).or_insert(d);
+        }
+        let mut depth = cs.localdom.branch_pos.len();
+        while depth > 0 {
+            let bp = cs.localdom.branch_pos[depth - 1];
+            if cs.localdom.domchgstack[bp].boundval != cs.localdom.prevboundval[bp].0 {
+                break;
+            }
+            depth -= 1;
+        }
+        cs.resolve_depth(&mut frontier, depth, 0, scores, 0, false);
+        let entries = cs
+            .localdom
+            .reconvergence_cut_entries(frontier.values(), domchg);
+        cs.add_to_pool(pool, &entries);
+        cs.added
+    }
+
+    /// `mipsolver->mipdata_->integral_cols.size()`.
+    fn num_integral_cols(&self) -> usize {
+        self.model.is_int.iter().filter(|&&b| b).count()
     }
 
     /// Set `mipdata_->upper_limit`, the cutoff objective propagation works against.
@@ -1034,8 +1660,12 @@ impl Domain {
 
     /// `markPropagateCut(reason)`.
     fn mark_propagate_cut_reason(&mut self, reason: Reason) {
-        if let Reason::Cut(pool, cut) = reason {
-            self.cutpools[pool].mark_propagate_cut(cut);
+        match reason {
+            Reason::Cut(pool, cut) => self.cutpools[pool].mark_propagate_cut(cut),
+            Reason::Conflict(pool, conflict) => {
+                self.conflictpools[pool].mark_propagate_conflict(conflict)
+            }
+            _ => {}
         }
     }
 
@@ -1708,6 +2338,10 @@ impl Domain {
             if self.obj_prop.is_some() {
                 self.obj_update(col, newbound, oldbound, lower);
             }
+        } else {
+            for p in 0..self.conflictpools.len() {
+                self.update_conflict_activity(p, col, oldbound, newbound, lower);
+            }
         }
     }
 
@@ -2035,6 +2669,15 @@ impl Domain {
             if self.obj_prop.is_some() {
                 self.obj_propagate();
             }
+            for pool in 0..self.conflictpools.len() {
+                while !self.conflictpools[pool].propagate_conflict_inds.is_empty() {
+                    let conflicts =
+                        std::mem::take(&mut self.conflictpools[pool].propagate_conflict_inds);
+                    for conflict in conflicts {
+                        self.propagate_conflict(pool, conflict);
+                    }
+                }
+            }
             std::mem::swap(&mut inds, &mut self.propagateinds);
             for &row in &inds {
                 self.propagateflags[row] = 0;
@@ -2138,11 +2781,15 @@ impl Domain {
         true
     }
 
-    /// `havePropagationRows()` (conflict propagation not yet ported).
+    /// `havePropagationRows()`.
     fn have_propagation_rows(&self) -> bool {
         !self.propagateinds.is_empty()
             || self.obj_should_be_propagated()
             || self.cutpools.iter().any(|cp| !cp.inds.is_empty())
+            || self
+                .conflictpools
+                .iter()
+                .any(|cp| !cp.propagate_conflict_inds.is_empty())
     }
 
     /// Debug check (HiGHS's `#ifndef NDEBUG` asserts): the incremental activities
@@ -2164,6 +2811,1122 @@ impl Domain {
             }
         }
         (worst, counts_ok)
+    }
+}
+
+/// A conflict-analysis frontier: `std::set<LocalDomChg>`, ordered by stack position,
+/// each with its (possibly relaxed) bound change.
+type Frontier = BTreeMap<i64, DomainChange>;
+
+/// `ConflictSet::ResolveCandidate`.
+#[derive(Clone, Copy, Debug, Default)]
+struct ResolveCandidate {
+    delta: f64,
+    base_bound: f64,
+    prio: f64,
+    bound_pos: i64,
+    value_pos: usize,
+}
+
+/// `ResolveCandidate::operator<`: higher priority first, then the earlier position.
+fn candidate_less(a: &ResolveCandidate, b: &ResolveCandidate) -> bool {
+    if a.prio > b.prio {
+        return true;
+    }
+    if b.prio > a.prio {
+        return false;
+    }
+    a.bound_pos < b.bound_pos
+}
+
+/// `computePrio(val, bound, globalbound, numnodes)`.
+fn compute_prio(val: f64, bound: f64, globalbound: f64, numnodes: i64) -> f64 {
+    (val * (bound - globalbound) * (1 + numnodes) as f64).abs()
+}
+
+/// `HighsDomain::ConflictSet`: the frontiers, resolve queue and buffers of one
+/// conflict analysis of `localdom` against `globaldom`.
+///
+/// HiGHS keeps the queue as a heap of iterators into a frontier set ordered by
+/// position; positions in a frontier are unique and an entry is queued at most once
+/// while it is in the frontier, so a max-heap of positions pops in the same order.
+struct ConflictSet<'a> {
+    localdom: &'a mut Domain,
+    /// Read only, except that the conflict pool notifies it of new conflicts.
+    globaldom: &'a mut Domain,
+    links: ConflictLinks,
+    /// `mipdata_->nodequeue`.
+    nodes: &'a dyn OpenNodeCounts,
+    reason_side_frontier: Frontier,
+    reconvergence_frontier: Frontier,
+    resolve_queue: BinaryHeap<i64>,
+    resolved_domain_changes: Vec<(i64, DomainChange)>,
+    resolve_buffer: Vec<ResolveCandidate>,
+    /// The conflicts added to the pool, in order.
+    added: Vec<usize>,
+}
+
+impl<'a> ConflictSet<'a> {
+    fn new(
+        localdom: &'a mut Domain,
+        globaldom: &'a mut Domain,
+        links: ConflictLinks,
+        nodes: &'a dyn OpenNodeCounts,
+    ) -> Self {
+        let cap = localdom.domchgstack.len();
+        ConflictSet {
+            localdom,
+            globaldom,
+            links,
+            nodes,
+            reason_side_frontier: Frontier::new(),
+            reconvergence_frontier: Frontier::new(),
+            resolve_queue: BinaryHeap::new(),
+            resolved_domain_changes: Vec::with_capacity(cap),
+            resolve_buffer: Vec::new(),
+            added: Vec::new(),
+        }
+    }
+
+    fn feastol(&self) -> f64 {
+        self.localdom.feastol
+    }
+
+    fn epsilon(&self) -> f64 {
+        self.localdom.epsilon
+    }
+
+    fn is_continuous(&self, col: usize) -> bool {
+        !self.localdom.model.is_int[col]
+    }
+
+    /// The pool's `addConflictCut`/`addReconvergenceCut` storage and notification:
+    /// the global domain first, then the local one (`propagationDomains` order).
+    fn add_to_pool(&mut self, pool: &mut ConflictPool, entries: &[DomainChange]) {
+        let mut obs: Vec<(&mut Domain, usize)> = Vec::with_capacity(2);
+        if let Some(g) = self.links.global {
+            obs.push((&mut *self.globaldom, g));
+        }
+        if let Some(l) = self.links.local {
+            obs.push((&mut *self.localdom, l));
+        }
+        let c = pool.add_conflict_cut(entries, &mut ConflictDomainObservers(obs));
+        self.added.push(c);
+    }
+
+    /// The rows a reason or the infeasibility refers to: model row `row`.
+    fn model_row(&self, row: usize) -> (Vec<usize>, Vec<f64>) {
+        let m = &self.localdom.model;
+        let (s, e) = (m.ar_start[row], m.ar_start[row + 1]);
+        (m.ar_index[s..e].to_vec(), m.ar_value[s..e].to_vec())
+    }
+
+    /// Cut `cut` of cut pool `pool` (`cutpool->getCut`, `getRhs`), from the local
+    /// domain's mirror of the pool.
+    fn cut_row(&self, pool: usize, cut: usize) -> (Vec<usize>, Vec<f64>, f64) {
+        let cp = &self.localdom.cutpools[pool];
+        let (i, v) = &cp.rows[cut];
+        (i.clone(), v.clone(), cp.rhs[cut])
+    }
+
+    /// The conflict behind a [`Reason::Conflict`], `None` when the local domain has
+    /// it flagged deleted (`conflictFlag_ & 8`).
+    fn conflict_entries(&self, pool: usize, conflict: usize) -> Option<Vec<DomainChange>> {
+        let cp = &self.localdom.conflictpools[pool];
+        if cp.conflict_flag[conflict] & 8 != 0 {
+            return None;
+        }
+        cp.conflicts[conflict].clone()
+    }
+
+    /// `explainBoundChangeGeq(currentFrontier, domchg, inds, vals, len, rhs, maxAct)`.
+    fn explain_bound_change_geq(
+        &mut self,
+        current_frontier: &Frontier,
+        domchg: (i64, DomainChange),
+        inds: &[usize],
+        vals: &[f64],
+        rhs: f64,
+        max_act: f64,
+    ) -> bool {
+        if max_act == INF {
+            return false;
+        }
+        let mut domchg_val = 0.0;
+        self.resolve_buffer.clear();
+        let mut m = CDouble::from(max_act);
+        for i in 0..inds.len() {
+            let col = inds[i];
+            if col == domchg.1.column {
+                domchg_val = vals[i];
+                continue;
+            }
+            let mut cand = ResolveCandidate {
+                value_pos: i,
+                ..Default::default()
+            };
+            if vals[i] > 0.0 {
+                let (ub, bp) = self.localdom.col_upper_pos(col, domchg.0);
+                cand.bound_pos = bp;
+                let gub = self.globaldom.col_upper[col];
+                if gub <= ub || bp == -1 {
+                    continue;
+                }
+                if let Some(fd) = current_frontier.get(&bp) {
+                    cand.base_bound = fd.boundval;
+                    if cand.base_bound != gub {
+                        m += vals[i] * (cand.base_bound - gub);
+                    }
+                    if cand.base_bound <= ub {
+                        continue;
+                    }
+                } else {
+                    cand.base_bound = gub;
+                }
+                cand.delta = vals[i] * (ub - cand.base_bound);
+                cand.prio = compute_prio(vals[i], ub, gub, self.nodes.num_nodes_down(col));
+            } else {
+                let (lb, bp) = self.localdom.col_lower_pos(col, domchg.0);
+                cand.bound_pos = bp;
+                let glb = self.globaldom.col_lower[col];
+                if glb >= lb || bp == -1 {
+                    continue;
+                }
+                if let Some(fd) = current_frontier.get(&bp) {
+                    cand.base_bound = fd.boundval;
+                    if cand.base_bound != glb {
+                        m += vals[i] * (cand.base_bound - glb);
+                    }
+                    if cand.base_bound >= lb {
+                        continue;
+                    }
+                } else {
+                    cand.base_bound = glb;
+                }
+                cand.delta = vals[i] * (lb - cand.base_bound);
+                cand.prio = compute_prio(vals[i], lb, glb, self.nodes.num_nodes_up(col));
+            }
+            self.resolve_buffer.push(cand);
+        }
+        if domchg_val == 0.0 {
+            return false;
+        }
+        pdqsort(&mut self.resolve_buffer, candidate_less);
+        // The bound constraint a0 x0 >= b0 is implied by a0 x0 + sum ai xi >= b when
+        // the residual maximum activity M is at most b - b0; M is lowered with the
+        // stronger local bounds until that holds.
+        let col = domchg.1.column;
+        let mut b0 = domchg.1.boundval;
+        if !self.is_continuous(col) {
+            // An integer bound was rounded and can be relaxed by 1 - 10 feastol.
+            if domchg.1.boundtype == BoundType::Lower {
+                b0 -= 1.0 - 10.0 * self.feastol();
+            } else {
+                b0 += 1.0 - 10.0 * self.feastol();
+            }
+        } else if domchg.1.boundtype == BoundType::Lower {
+            b0 -= self.epsilon();
+        } else {
+            b0 += self.epsilon();
+        }
+        b0 *= domchg_val;
+        let mupper = rhs - b0;
+        if domchg_val < 0.0 {
+            m -= domchg_val * self.globaldom.col_lower[col];
+        } else {
+            m -= domchg_val * self.globaldom.col_upper[col];
+        }
+        self.resolve_linear_geq(m, mupper, vals)
+    }
+
+    /// `explainBoundChangeLeq(currentFrontier, domchg, inds, vals, len, rhs, minAct)`.
+    fn explain_bound_change_leq(
+        &mut self,
+        current_frontier: &Frontier,
+        domchg: (i64, DomainChange),
+        inds: &[usize],
+        vals: &[f64],
+        rhs: f64,
+        min_act: f64,
+    ) -> bool {
+        if min_act == -INF {
+            return false;
+        }
+        let mut domchg_val = 0.0;
+        self.resolve_buffer.clear();
+        let mut m = CDouble::from(min_act);
+        for i in 0..inds.len() {
+            let col = inds[i];
+            if col == domchg.1.column {
+                domchg_val = vals[i];
+                continue;
+            }
+            let mut cand = ResolveCandidate {
+                value_pos: i,
+                ..Default::default()
+            };
+            if vals[i] > 0.0 {
+                let (lb, bp) = self.localdom.col_lower_pos(col, domchg.0);
+                cand.bound_pos = bp;
+                let glb = self.globaldom.col_lower[col];
+                if glb >= lb || bp == -1 {
+                    continue;
+                }
+                if let Some(fd) = current_frontier.get(&bp) {
+                    cand.base_bound = fd.boundval;
+                    if cand.base_bound != glb {
+                        m += vals[i] * (cand.base_bound - glb);
+                    }
+                    if cand.base_bound >= lb {
+                        continue;
+                    }
+                } else {
+                    cand.base_bound = glb;
+                }
+                cand.delta = vals[i] * (lb - cand.base_bound);
+                cand.prio = compute_prio(vals[i], lb, glb, self.nodes.num_nodes_up(col));
+            } else {
+                let (ub, bp) = self.localdom.col_upper_pos(col, domchg.0);
+                cand.bound_pos = bp;
+                let gub = self.globaldom.col_upper[col];
+                if gub <= ub || bp == -1 {
+                    continue;
+                }
+                if let Some(fd) = current_frontier.get(&bp) {
+                    cand.base_bound = fd.boundval;
+                    if cand.base_bound != gub {
+                        m += vals[i] * (cand.base_bound - gub);
+                    }
+                    if cand.base_bound <= ub {
+                        continue;
+                    }
+                } else {
+                    cand.base_bound = gub;
+                }
+                cand.delta = vals[i] * (ub - cand.base_bound);
+                cand.prio = compute_prio(vals[i], ub, gub, self.nodes.num_nodes_down(col));
+            }
+            self.resolve_buffer.push(cand);
+        }
+        if domchg_val == 0.0 {
+            return false;
+        }
+        pdqsort(&mut self.resolve_buffer, candidate_less);
+        // The bound constraint a0 x0 <= b0 is implied by a0 x0 + sum ai xi <= b when
+        // the residual minimum activity M is at least b - b0; M is raised with the
+        // stronger local bounds until that holds.
+        let col = domchg.1.column;
+        let mut b0 = domchg.1.boundval;
+        if !self.is_continuous(col) {
+            if domchg.1.boundtype == BoundType::Lower {
+                b0 -= 1.0 - 10.0 * self.feastol();
+            } else {
+                b0 += 1.0 - 10.0 * self.feastol();
+            }
+        } else if domchg.1.boundtype == BoundType::Lower {
+            b0 -= self.epsilon();
+        } else {
+            b0 += self.epsilon();
+        }
+        b0 *= domchg_val;
+        let mlower = rhs - b0;
+        if domchg_val < 0.0 {
+            m -= domchg_val * self.globaldom.col_upper[col];
+        } else {
+            m -= domchg_val * self.globaldom.col_lower[col];
+        }
+        self.resolve_linear_leq(m, mlower, vals)
+    }
+
+    /// Walk a relaxed lower bound back to the earliest stack position that still
+    /// implies it (`while (relaxLb <= prevboundval_[pos].first) pos = ...`). HiGHS
+    /// would index position -1 if the walk ran off the stack; it stops at the
+    /// earliest change instead, which still implies the relaxed bound.
+    fn walk_back_lower(&self, mut pos: i64, relax: f64) -> i64 {
+        let prev = &self.localdom.prevboundval;
+        while relax <= prev[pos as usize].0 && prev[pos as usize].1 != -1 {
+            pos = prev[pos as usize].1;
+        }
+        pos
+    }
+
+    /// The upper-bound counterpart of [`Self::walk_back_lower`].
+    fn walk_back_upper(&self, mut pos: i64, relax: f64) -> i64 {
+        let prev = &self.localdom.prevboundval;
+        while relax >= prev[pos as usize].0 && prev[pos as usize].1 != -1 {
+            pos = prev[pos as usize].1;
+        }
+        pos
+    }
+
+    /// `resolveLinearGeq(M, Mupper, vals)`.
+    fn resolve_linear_geq(&mut self, mut m: CDouble, mupper: f64, vals: &[f64]) -> bool {
+        self.resolved_domain_changes.clear();
+        let ft = self.feastol();
+        let eps = self.epsilon();
+        let mut covered = (m - mupper).to_f64();
+        if covered > 0.0 {
+            for k in 0..self.resolve_buffer.len() {
+                let cand = self.resolve_buffer[k];
+                let p = cand.bound_pos;
+                self.resolved_domain_changes
+                    .push((p, self.localdom.domchgstack[p as usize]));
+                m += cand.delta;
+                covered = (m - mupper).to_f64();
+                if covered <= 0.0 {
+                    break;
+                }
+            }
+            if covered > 0.0 {
+                return false;
+            }
+            if covered < -ft {
+                // Room to relax bounds or drop bound changes from the explanation.
+                let mut k = self.resolved_domain_changes.len() as i64 - 1;
+                while k >= 0 {
+                    let ku = k as usize;
+                    let cand = self.resolve_buffer[ku];
+                    let i = cand.value_pos;
+                    let (pos, d) = self.resolved_domain_changes[ku];
+                    let col = d.column;
+                    if d.boundtype == BoundType::Lower {
+                        let lb = d.boundval;
+                        let glb = cand.base_bound;
+                        let mut relax_lb = ((mupper - (m - cand.delta)) / vals[i] + glb).to_f64();
+                        if !self.is_continuous(col) {
+                            relax_lb = relax_lb.ceil();
+                        }
+                        if relax_lb - lb >= -ft {
+                            k -= 1;
+                            continue;
+                        }
+                        self.resolved_domain_changes[ku].1.boundval = relax_lb;
+                        if relax_lb - glb <= eps {
+                            // Dropped from the explanation altogether.
+                            let last = self.resolved_domain_changes.len() - 1;
+                            self.resolved_domain_changes.swap(last, ku);
+                            self.resolved_domain_changes.truncate(last);
+                            m -= cand.delta;
+                        } else {
+                            self.resolved_domain_changes[ku].0 =
+                                self.walk_back_lower(pos, relax_lb);
+                            m += vals[i] * (relax_lb - lb);
+                        }
+                        covered = (m - mupper).to_f64();
+                        if covered >= -ft {
+                            break;
+                        }
+                    } else {
+                        let ub = d.boundval;
+                        let gub = cand.base_bound;
+                        let mut relax_ub = ((mupper - (m - cand.delta)) / vals[i] + gub).to_f64();
+                        if !self.is_continuous(col) {
+                            relax_ub = relax_ub.floor();
+                        }
+                        if relax_ub - ub <= ft {
+                            k -= 1;
+                            continue;
+                        }
+                        self.resolved_domain_changes[ku].1.boundval = relax_ub;
+                        if relax_ub - gub >= -eps {
+                            let last = self.resolved_domain_changes.len() - 1;
+                            self.resolved_domain_changes.swap(last, ku);
+                            self.resolved_domain_changes.truncate(last);
+                            m -= cand.delta;
+                        } else {
+                            self.resolved_domain_changes[ku].0 =
+                                self.walk_back_upper(pos, relax_ub);
+                            m += vals[i] * (relax_ub - ub);
+                        }
+                        covered = (m - mupper).to_f64();
+                        if covered >= -ft {
+                            break;
+                        }
+                    }
+                    k -= 1;
+                }
+                debug_assert!(covered <= ft);
+            }
+        }
+        true
+    }
+
+    /// `resolveLinearLeq(M, Mlower, vals)`.
+    fn resolve_linear_leq(&mut self, mut m: CDouble, mlower: f64, vals: &[f64]) -> bool {
+        self.resolved_domain_changes.clear();
+        let ft = self.feastol();
+        let eps = self.epsilon();
+        let mut covered = (m - mlower).to_f64();
+        if covered < 0.0 {
+            for k in 0..self.resolve_buffer.len() {
+                let cand = self.resolve_buffer[k];
+                let p = cand.bound_pos;
+                self.resolved_domain_changes
+                    .push((p, self.localdom.domchgstack[p as usize]));
+                m += cand.delta;
+                covered = (m - mlower).to_f64();
+                if covered >= 0.0 {
+                    break;
+                }
+            }
+            if covered < 0.0 {
+                return false;
+            }
+            if covered > ft {
+                let mut k = self.resolved_domain_changes.len() as i64 - 1;
+                while k >= 0 {
+                    let ku = k as usize;
+                    let cand = self.resolve_buffer[ku];
+                    let i = cand.value_pos;
+                    let (pos, d) = self.resolved_domain_changes[ku];
+                    let col = d.column;
+                    if d.boundtype == BoundType::Lower {
+                        let lb = d.boundval;
+                        let glb = cand.base_bound;
+                        let mut relax_lb = ((mlower - (m - cand.delta)) / vals[i] + glb).to_f64();
+                        if !self.is_continuous(col) {
+                            relax_lb = relax_lb.ceil();
+                        }
+                        if relax_lb - lb >= -ft {
+                            k -= 1;
+                            continue;
+                        }
+                        self.resolved_domain_changes[ku].1.boundval = relax_lb;
+                        if relax_lb - glb <= eps {
+                            let last = self.resolved_domain_changes.len() - 1;
+                            self.resolved_domain_changes.swap(last, ku);
+                            self.resolved_domain_changes.truncate(last);
+                            m -= cand.delta;
+                        } else {
+                            self.resolved_domain_changes[ku].0 =
+                                self.walk_back_lower(pos, relax_lb);
+                            m += vals[i] * (relax_lb - lb);
+                        }
+                        covered = (m - mlower).to_f64();
+                        if covered <= ft {
+                            break;
+                        }
+                    } else {
+                        let ub = d.boundval;
+                        let gub = cand.base_bound;
+                        let mut relax_ub = ((mlower - (m - cand.delta)) / vals[i] + gub).to_f64();
+                        if !self.is_continuous(col) {
+                            relax_ub = relax_ub.floor();
+                        }
+                        if relax_ub - ub <= ft {
+                            k -= 1;
+                            continue;
+                        }
+                        self.resolved_domain_changes[ku].1.boundval = relax_ub;
+                        if relax_ub - gub >= -eps {
+                            let last = self.resolved_domain_changes.len() - 1;
+                            self.resolved_domain_changes.swap(last, ku);
+                            self.resolved_domain_changes.truncate(last);
+                            m -= cand.delta;
+                        } else {
+                            self.resolved_domain_changes[ku].0 =
+                                self.walk_back_upper(pos, relax_ub);
+                            m += vals[i] * (relax_ub - ub);
+                        }
+                        covered = (m - mlower).to_f64();
+                        if covered <= ft {
+                            break;
+                        }
+                    }
+                    k -= 1;
+                }
+                debug_assert!(covered >= -ft);
+            }
+        }
+        true
+    }
+
+    /// `explainInfeasibility()`.
+    fn explain_infeasibility(&mut self) -> bool {
+        match self.localdom.infeasible_reason {
+            Reason::Unspecified | Reason::Branching | Reason::RedCost => false,
+            Reason::ConflictingBounds(pos) => {
+                self.resolved_domain_changes.clear();
+                let p = pos as i64;
+                let chg = self.localdom.domchgstack[pos];
+                self.resolved_domain_changes.push((p, chg));
+                let other = if chg.boundtype == BoundType::Lower {
+                    self.localdom.col_upper_pos(chg.column, p).1
+                } else {
+                    self.localdom.col_lower_pos(chg.column, p).1
+                };
+                if other != -1 {
+                    self.resolved_domain_changes
+                        .push((other, self.localdom.domchgstack[other as usize]));
+                }
+                true
+            }
+            // HiGHS asserts here: a clique-table infeasibility is never recorded.
+            Reason::CliqueTable(..) => false,
+            Reason::ModelRowLower(row) => {
+                let (inds, vals) = self.model_row(row);
+                let max_act = self.globaldom.max_activity(row);
+                let rl = self.localdom.model.row_lower[row];
+                self.explain_infeasibility_geq(&inds, &vals, rl, max_act)
+            }
+            Reason::ModelRowUpper(row) => {
+                let (inds, vals) = self.model_row(row);
+                let min_act = self.globaldom.min_activity(row);
+                let ru = self.localdom.model.row_upper[row];
+                self.explain_infeasibility_leq(&inds, &vals, ru, min_act)
+            }
+            Reason::Objective => {
+                let ip = self.localdom.infeasible_pos as i64;
+                let (inds, vals, rhs) = self.localdom.objective_propagation_constraint(ip, None);
+                let (ninfmin, min_act) = self.globaldom.compute_min_activity_of(&inds, &vals);
+                // A globally unbounded column bounded locally (e.g. by a heuristic's
+                // branching).
+                if ninfmin > 0 {
+                    return false;
+                }
+                self.explain_infeasibility_leq(&inds, &vals, rhs, min_act.to_f64())
+            }
+            Reason::Cut(pool, cut) => {
+                let (inds, vals, rhs) = self.cut_row(pool, cut);
+                let min_act = self.globaldom.min_cut_activity(pool, cut);
+                self.explain_infeasibility_leq(&inds, &vals, rhs, min_act)
+            }
+            Reason::Conflict(pool, conflict) => match self.conflict_entries(pool, conflict) {
+                None => false,
+                Some(entries) => self.explain_infeasibility_conflict(&entries),
+            },
+        }
+    }
+
+    /// `explainInfeasibilityConflict(conflict, len)`.
+    fn explain_infeasibility_conflict(&mut self, conflict: &[DomainChange]) -> bool {
+        self.resolved_domain_changes.clear();
+        let ip = self.localdom.infeasible_pos as i64;
+        for e in conflict {
+            if self.globaldom.is_active(e) {
+                continue;
+            }
+            let prev = &self.localdom.prevboundval;
+            let mut pos;
+            if e.boundtype == BoundType::Lower {
+                let (lb, p) = self.localdom.col_lower_pos(e.column, ip);
+                pos = p;
+                if pos == -1 || lb < e.boundval {
+                    return false;
+                }
+                while prev[pos as usize].0 >= e.boundval {
+                    pos = prev[pos as usize].1;
+                    // HiGHS asserts this cannot happen (the literal is inactive
+                    // globally); a local domain whose start is tighter than the
+                    // global domain can reach it, and then there is no explanation.
+                    if pos == -1 {
+                        return false;
+                    }
+                }
+            } else {
+                let (ub, p) = self.localdom.col_upper_pos(e.column, ip);
+                pos = p;
+                if pos == -1 || ub > e.boundval {
+                    return false;
+                }
+                while prev[pos as usize].0 <= e.boundval {
+                    pos = prev[pos as usize].1;
+                    if pos == -1 {
+                        return false;
+                    }
+                }
+            }
+            self.resolved_domain_changes.push((pos, *e));
+        }
+        true
+    }
+
+    /// The local bound positions an infeasibility explanation starts from:
+    /// `infeasible_pos` when the domain is infeasible, `kHighsIInf` otherwise.
+    fn infeasible_stack_pos(&self) -> i64 {
+        if self.localdom.infeasible {
+            self.localdom.infeasible_pos as i64
+        } else {
+            i64::MAX
+        }
+    }
+
+    /// `explainInfeasibilityGeq(inds, vals, len, rhs, maxActivity)`.
+    fn explain_infeasibility_geq(
+        &mut self,
+        inds: &[usize],
+        vals: &[f64],
+        rhs: f64,
+        max_act: f64,
+    ) -> bool {
+        if max_act == INF {
+            return false;
+        }
+        let ip = self.infeasible_stack_pos();
+        self.resolve_buffer.clear();
+        for i in 0..inds.len() {
+            let col = inds[i];
+            let mut cand = ResolveCandidate {
+                value_pos: i,
+                ..Default::default()
+            };
+            if vals[i] > 0.0 {
+                let (ub, bp) = self.localdom.col_upper_pos(col, ip);
+                cand.bound_pos = bp;
+                cand.base_bound = self.globaldom.col_upper[col];
+                if cand.base_bound <= ub || bp == -1 {
+                    continue;
+                }
+                cand.delta = vals[i] * (ub - cand.base_bound);
+                cand.prio = compute_prio(
+                    vals[i],
+                    ub,
+                    self.globaldom.col_upper[col],
+                    self.nodes.num_nodes_down(col),
+                );
+            } else {
+                let (lb, bp) = self.localdom.col_lower_pos(col, ip);
+                cand.bound_pos = bp;
+                cand.base_bound = self.globaldom.col_lower[col];
+                if cand.base_bound >= lb || bp == -1 {
+                    continue;
+                }
+                cand.delta = vals[i] * (lb - cand.base_bound);
+                cand.prio = compute_prio(
+                    vals[i],
+                    lb,
+                    self.globaldom.col_lower[col],
+                    self.nodes.num_nodes_up(col),
+                );
+            }
+            self.resolve_buffer.push(cand);
+        }
+        pdqsort(&mut self.resolve_buffer, candidate_less);
+        let mupper = rhs - 10.0f64.max(rhs.abs()) * self.feastol();
+        self.resolve_linear_geq(CDouble::from(max_act), mupper, vals)
+    }
+
+    /// `explainInfeasibilityLeq(inds, vals, len, rhs, minActivity)`.
+    fn explain_infeasibility_leq(
+        &mut self,
+        inds: &[usize],
+        vals: &[f64],
+        rhs: f64,
+        min_act: f64,
+    ) -> bool {
+        if min_act == -INF {
+            return false;
+        }
+        let ip = self.infeasible_stack_pos();
+        self.resolve_buffer.clear();
+        for i in 0..inds.len() {
+            let col = inds[i];
+            let mut cand = ResolveCandidate {
+                value_pos: i,
+                ..Default::default()
+            };
+            if vals[i] > 0.0 {
+                let (lb, bp) = self.localdom.col_lower_pos(col, ip);
+                cand.bound_pos = bp;
+                cand.base_bound = self.globaldom.col_lower[col];
+                if cand.base_bound >= lb || bp == -1 {
+                    continue;
+                }
+                cand.delta = vals[i] * (lb - cand.base_bound);
+                cand.prio = compute_prio(
+                    vals[i],
+                    lb,
+                    self.globaldom.col_lower[col],
+                    self.nodes.num_nodes_up(col),
+                );
+            } else {
+                let (ub, bp) = self.localdom.col_upper_pos(col, ip);
+                cand.bound_pos = bp;
+                cand.base_bound = self.globaldom.col_upper[col];
+                if cand.base_bound <= ub || bp == -1 {
+                    continue;
+                }
+                cand.delta = vals[i] * (ub - cand.base_bound);
+                cand.prio = compute_prio(
+                    vals[i],
+                    ub,
+                    self.globaldom.col_upper[col],
+                    self.nodes.num_nodes_down(col),
+                );
+            }
+            self.resolve_buffer.push(cand);
+        }
+        pdqsort(&mut self.resolve_buffer, candidate_less);
+        let mlower = rhs + 10.0f64.max(rhs.abs()) * self.feastol();
+        self.resolve_linear_leq(CDouble::from(min_act), mlower, vals)
+    }
+
+    /// `explainBoundChange(currentFrontier, domchg)`.
+    fn explain_bound_change(
+        &mut self,
+        current_frontier: &Frontier,
+        domchg: (i64, DomainChange),
+    ) -> bool {
+        let pos = domchg.0;
+        match self.localdom.domchgreason[pos as usize] {
+            Reason::Unspecified
+            | Reason::Branching
+            | Reason::ConflictingBounds(_)
+            | Reason::RedCost => false,
+            Reason::CliqueTable(col, val) => {
+                // Implied by `col` fixed to `val`: that fixing explains it.
+                self.resolved_domain_changes.clear();
+                let bound_pos = if val != 0 {
+                    self.localdom.col_lower_pos(col, pos).1
+                } else {
+                    self.localdom.col_upper_pos(col, pos).1
+                };
+                if bound_pos != -1 {
+                    self.resolved_domain_changes
+                        .push((bound_pos, self.localdom.domchgstack[bound_pos as usize]));
+                }
+                true
+            }
+            Reason::ModelRowLower(row) => {
+                let (inds, vals) = self.model_row(row);
+                let max_act = self.globaldom.max_activity(row);
+                let rl = self.localdom.model.row_lower[row];
+                self.explain_bound_change_geq(current_frontier, domchg, &inds, &vals, rl, max_act)
+            }
+            Reason::ModelRowUpper(row) => {
+                let (inds, vals) = self.model_row(row);
+                let min_act = self.globaldom.min_activity(row);
+                let ru = self.localdom.model.row_upper[row];
+                self.explain_bound_change_leq(current_frontier, domchg, &inds, &vals, ru, min_act)
+            }
+            Reason::Objective => {
+                let (inds, vals, rhs) = self
+                    .localdom
+                    .objective_propagation_constraint(pos, Some(domchg.1.column));
+                let (ninfmin, min_act) = self.globaldom.compute_min_activity_of(&inds, &vals);
+                // HiGHS asserts at most one infinite contribution and gives up on
+                // one ("todo: treat case with a single infinite contribution"); more
+                // than one gives up too, rather than treat a partial sum as the
+                // minimum activity.
+                if ninfmin >= 1 {
+                    return false;
+                }
+                self.explain_bound_change_leq(
+                    current_frontier,
+                    domchg,
+                    &inds,
+                    &vals,
+                    rhs,
+                    min_act.to_f64(),
+                )
+            }
+            Reason::Cut(pool, cut) => {
+                let (inds, vals, rhs) = self.cut_row(pool, cut);
+                let min_act = self.globaldom.min_cut_activity(pool, cut);
+                self.explain_bound_change_leq(current_frontier, domchg, &inds, &vals, rhs, min_act)
+            }
+            Reason::Conflict(pool, conflict) => match self.conflict_entries(pool, conflict) {
+                None => false,
+                Some(entries) => self.explain_bound_change_conflict(domchg, &entries),
+            },
+        }
+    }
+
+    /// `explainBoundChangeConflict(domchg, conflict, len)`.
+    fn explain_bound_change_conflict(
+        &mut self,
+        locdomchg: (i64, DomainChange),
+        conflict: &[DomainChange],
+    ) -> bool {
+        self.resolved_domain_changes.clear();
+        let domchg = self.localdom.flip(&locdomchg.1);
+        let mut found_domchg = false;
+        for e in conflict {
+            if !found_domchg && e.column == domchg.column && e.boundtype == domchg.boundtype {
+                let covers = if e.boundtype == BoundType::Lower {
+                    e.boundval <= domchg.boundval
+                } else {
+                    e.boundval >= domchg.boundval
+                };
+                if covers {
+                    found_domchg = true;
+                    continue;
+                }
+            }
+            if self.globaldom.is_active(e) {
+                continue;
+            }
+            let prev = &self.localdom.prevboundval;
+            let mut pos;
+            if e.boundtype == BoundType::Lower {
+                let (lb, p) = self.localdom.col_lower_pos(e.column, locdomchg.0 - 1);
+                pos = p;
+                if pos == -1 || lb < e.boundval {
+                    return false;
+                }
+                while prev[pos as usize].0 >= e.boundval {
+                    pos = prev[pos as usize].1;
+                    // See `explain_infeasibility_conflict`.
+                    if pos == -1 {
+                        return false;
+                    }
+                }
+            } else {
+                let (ub, p) = self.localdom.col_upper_pos(e.column, locdomchg.0 - 1);
+                pos = p;
+                if pos == -1 || ub > e.boundval {
+                    return false;
+                }
+                while prev[pos as usize].0 <= e.boundval {
+                    pos = prev[pos as usize].1;
+                    if pos == -1 {
+                        return false;
+                    }
+                }
+            }
+            self.resolved_domain_changes
+                .push((pos, self.localdom.domchgstack[pos as usize]));
+        }
+        found_domchg
+    }
+
+    /// `resolvable(domChgPos)`: a change with a reason other than branching or
+    /// unknown (reduced-cost fixing is HiGHS's `unspecified()`).
+    fn resolvable(&self, pos: i64) -> bool {
+        !matches!(
+            self.localdom.domchgreason[pos as usize],
+            Reason::Branching | Reason::Unspecified | Reason::RedCost
+        )
+    }
+
+    /// `resolveDepth(frontier, depthLevel, stopSize, pseudocost, minResolve,
+    /// increaseConflictScore)`: resolve the frontier's changes at depth
+    /// `depth_level` (newest first) until at most `stop_size` resolvable ones are
+    /// left; -1 when the depth has no frontier change.
+    fn resolve_depth(
+        &mut self,
+        frontier: &mut Frontier,
+        depth_level: usize,
+        stop_size: usize,
+        scores: &mut dyn ConflictScores,
+        min_resolve: i64,
+        increase_conflict_score: bool,
+    ) -> i64 {
+        self.resolve_queue.clear();
+        let branch_pos = self.localdom.branch_pos.clone();
+        let start_pos = if depth_level == 0 {
+            0
+        } else {
+            branch_pos[depth_level - 1] as i64 + 1
+        };
+        let mut depth_level = depth_level;
+        while depth_level < branch_pos.len() {
+            let bp = branch_pos[depth_level];
+            if self.localdom.domchgstack[bp].boundval != self.localdom.prevboundval[bp].0 {
+                break;
+            }
+            // A redundant depth is skipped.
+            depth_level += 1;
+        }
+        let in_range: Vec<i64> = if depth_level == branch_pos.len() {
+            frontier.range(start_pos..).map(|(&p, _)| p).collect()
+        } else {
+            let end = branch_pos[depth_level] as i64;
+            if start_pos > end {
+                Vec::new()
+            } else {
+                frontier.range(start_pos..=end).map(|(&p, _)| p).collect()
+            }
+        };
+        if in_range.is_empty() {
+            return -1;
+        }
+        for p in in_range {
+            if self.resolvable(p) {
+                self.resolve_queue.push(p);
+            }
+        }
+        let mut num_resolved = 0i64;
+        while self.resolve_queue.len() > stop_size
+            || (!self.resolve_queue.is_empty() && num_resolved < min_resolve)
+        {
+            let p = self.resolve_queue.pop().unwrap();
+            let d = frontier[&p];
+            if !self.explain_bound_change(frontier, (p, d)) {
+                continue;
+            }
+            num_resolved += 1;
+            frontier.remove(&p);
+            let resolved = std::mem::take(&mut self.resolved_domain_changes);
+            for &(ip, id) in &resolved {
+                match frontier.entry(ip) {
+                    std::collections::btree_map::Entry::Vacant(v) => {
+                        v.insert(id);
+                        if increase_conflict_score {
+                            let s = self.localdom.domchgstack[ip as usize];
+                            if s.boundtype == BoundType::Lower {
+                                scores.increase_conflict_score_up(s.column);
+                            } else {
+                                scores.increase_conflict_score_down(s.column);
+                            }
+                        }
+                        if ip >= start_pos && self.resolvable(ip) {
+                            self.resolve_queue.push(ip);
+                        }
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut o) => {
+                        let cur = o.get_mut();
+                        if id.boundtype == BoundType::Lower {
+                            cur.boundval = cur.boundval.max(id.boundval);
+                        } else {
+                            cur.boundval = cur.boundval.min(id.boundval);
+                        }
+                    }
+                }
+            }
+            self.resolved_domain_changes = resolved;
+        }
+        num_resolved
+    }
+
+    /// `computeCuts(depthLevel, conflictPool, pseudocost)`: the conflict cut of a
+    /// depth and, at a unique implication point other than the branching, its
+    /// reconvergence cut; -1 for an empty depth.
+    fn compute_cuts(
+        &mut self,
+        depth_level: usize,
+        pool: &mut ConflictPool,
+        scores: &mut dyn ConflictScores,
+    ) -> i64 {
+        let mut frontier = std::mem::take(&mut self.reason_side_frontier);
+        let min_resolve = if depth_level == self.localdom.branch_pos.len() {
+            1
+        } else {
+            0
+        };
+        let num_resolved =
+            self.resolve_depth(&mut frontier, depth_level, 1, scores, min_resolve, true);
+        self.reason_side_frontier = frontier;
+        if num_resolved == -1 {
+            return -1;
+        }
+        let mut num_conflicts = 0;
+        if num_resolved > 0 {
+            let entries = self
+                .localdom
+                .conflict_cut_entries(self.reason_side_frontier.values());
+            self.add_to_pool(pool, &entries);
+            num_conflicts += 1;
+        }
+        // A queue of one: a resolvable unique implication point other than the
+        // branching.
+        if self.resolve_queue.len() == 1 {
+            let p = self.resolve_queue.pop().unwrap();
+            let uip = (p, self.reason_side_frontier[&p]);
+            self.resolve_queue.clear();
+            let mut rf = Frontier::new();
+            rf.insert(uip.0, uip.1);
+            let nr = self.resolve_depth(&mut rf, depth_level, 0, scores, 0, false);
+            let keep_uip = rf.contains_key(&uip.0);
+            self.reconvergence_frontier = rf;
+            if nr > 0 && !keep_uip {
+                let entries = self
+                    .localdom
+                    .reconvergence_cut_entries(self.reconvergence_frontier.values(), &uip.1);
+                self.add_to_pool(pool, &entries);
+                num_conflicts += 1;
+            }
+        }
+        num_conflicts
+    }
+
+    /// The depth loop shared by both `conflictAnalysis` overloads, after the
+    /// infeasibility is explained into `resolved_domain_changes`.
+    fn analyse_depths(&mut self, pool: &mut ConflictPool, scores: &mut dyn ConflictScores) {
+        scores.increase_conflict_weight();
+        for &(_, d) in &self.resolved_domain_changes {
+            if d.boundtype == BoundType::Lower {
+                scores.increase_conflict_score_up(d.column);
+            } else {
+                scores.increase_conflict_score_down(d.column);
+            }
+        }
+        if 10 * self.resolved_domain_changes.len() > 1000 + 3 * self.localdom.num_integral_cols() {
+            return;
+        }
+        for &(p, d) in &self.resolved_domain_changes {
+            self.reason_side_frontier.entry(p).or_insert(d);
+        }
+        let mut num_conflicts = 0i64;
+        let mut last_depth = self.localdom.branch_pos.len() as i64;
+        let mut curr_depth = last_depth;
+        while curr_depth >= 0 {
+            if curr_depth > 0 {
+                // Redundant branching changes (added for symmetry handling) are
+                // skipped.
+                let bp = self.localdom.branch_pos[curr_depth as usize - 1];
+                if self.localdom.domchgstack[bp].boundval == self.localdom.prevboundval[bp].0 {
+                    last_depth -= 1;
+                    curr_depth -= 1;
+                    continue;
+                }
+            }
+            let num_new = self.compute_cuts(curr_depth as usize, pool, scores);
+            if num_new == -1 {
+                // An empty depth does not count.
+                last_depth -= 1;
+                curr_depth -= 1;
+                continue;
+            }
+            num_conflicts += num_new;
+            // Nothing in the first non-empty depth: stop.
+            if num_conflicts == 0 {
+                break;
+            }
+            // Nothing at this depth, and the first five non-empty depths done: stop.
+            if last_depth - curr_depth >= 4 && num_new == 0 {
+                break;
+            }
+            curr_depth -= 1;
+        }
+        // Stopped in the highest non-empty depth: no conflict yet. The frontier is
+        // added anyway: the last branching itself led to the infeasibility and
+        // should have been propagated one depth up (e.g. an integer column's
+        // threshold was not reached).
+        if curr_depth == last_depth {
+            let entries = self
+                .localdom
+                .conflict_cut_entries(self.reason_side_frontier.values());
+            self.add_to_pool(pool, &entries);
+        }
+    }
+
+    /// `ConflictSet::conflictAnalysis(conflictPool, pseudocost)`.
+    fn conflict_analysis(&mut self, pool: &mut ConflictPool, scores: &mut dyn ConflictScores) {
+        if !self.explain_infeasibility() {
+            return;
+        }
+        self.analyse_depths(pool, scores);
+    }
+
+    /// `ConflictSet::conflictAnalysis(proofinds, proofvals, prooflen, proofrhs,
+    /// conflictPool, pseudocost)`.
+    fn conflict_analysis_proof(
+        &mut self,
+        proofinds: &[usize],
+        proofvals: &[f64],
+        proofrhs: f64,
+        pool: &mut ConflictPool,
+        scores: &mut dyn ConflictScores,
+    ) {
+        let (ninfmin, activitymin) = self.globaldom.compute_min_activity_of(proofinds, proofvals);
+        if ninfmin != 0 {
+            return;
+        }
+        if !self.explain_infeasibility_leq(proofinds, proofvals, proofrhs, activitymin.to_f64()) {
+            return;
+        }
+        self.analyse_depths(pool, scores);
     }
 }
 
@@ -2946,5 +4709,607 @@ mod tests {
         assert_eq!(b.column, 0);
         assert_eq!(d.col_lower[0], 0.0);
         assert_eq!(d.col_upper[1], 3.0);
+    }
+
+    // ------------------------------------------------------------ conflicts
+
+    use super::super::conflict_pool::{ConflictDomainObservers, ConflictPool};
+
+    fn lit(col: usize, lower: bool, v: f64) -> DomainChange {
+        DomainChange {
+            boundval: v,
+            column: col,
+            boundtype: if lower {
+                BoundType::Lower
+            } else {
+                BoundType::Upper
+            },
+        }
+    }
+
+    /// Counts the pseudocost conflict-score calls.
+    #[derive(Default)]
+    struct Scores {
+        weight: usize,
+        up: Vec<usize>,
+        down: Vec<usize>,
+    }
+    impl ConflictScores for Scores {
+        fn increase_conflict_weight(&mut self) {
+            self.weight += 1;
+        }
+        fn increase_conflict_score_up(&mut self, col: usize) {
+            self.up.push(col);
+        }
+        fn increase_conflict_score_down(&mut self, col: usize) {
+            self.down.push(col);
+        }
+    }
+
+    /// Open-node counts per column.
+    struct Nodes(Vec<i64>, Vec<i64>);
+    impl OpenNodeCounts for Nodes {
+        fn num_nodes_up(&self, col: usize) -> i64 {
+            self.0[col]
+        }
+        fn num_nodes_down(&self, col: usize) -> i64 {
+            self.1[col]
+        }
+    }
+
+    /// Does point `p` satisfy every literal of the conflict (so the conflict would
+    /// cut it off)?
+    fn satisfies_all(p: &[i64], conflict: &[DomainChange]) -> bool {
+        conflict.iter().all(|e| match e.boundtype {
+            BoundType::Lower => p[e.column] as f64 >= e.boundval - 1e-9,
+            BoundType::Upper => p[e.column] as f64 <= e.boundval + 1e-9,
+        })
+    }
+
+    /// The conflict-propagation bookkeeping is coherent: bit 4 exactly for queued
+    /// conflicts (each queued once), bit 8 exactly for deleted ones, watched literals
+    /// belong to their conflict, and (HiGHS's `linkWatchedLiteral` quirk) every watch
+    /// list is empty. Returns the number of tracked conflicts checked.
+    fn check_conflict_tracking(d: &Domain) -> usize {
+        let mut n = 0;
+        for cp in &d.conflictpools {
+            assert!(cp.col_lower_watched.iter().all(|&h| h == -1));
+            assert!(cp.col_upper_watched.iter().all(|&h| h == -1));
+            let mut queued = vec![0usize; cp.conflict_flag.len()];
+            for &c in &cp.propagate_conflict_inds {
+                queued[c] += 1;
+            }
+            for c in 0..cp.conflict_flag.len() {
+                n += 1;
+                let f = cp.conflict_flag[c];
+                assert!(queued[c] <= 1, "conflict {c} queued twice");
+                assert_eq!(f & 4 != 0, queued[c] == 1, "queue bit of conflict {c}");
+                // Deleted conflicts are dropped from the mirror (an index never
+                // handed to this domain has neither).
+                if f & 8 != 0 {
+                    assert!(cp.conflicts[c].is_none(), "deleted conflict {c} kept");
+                }
+                if cp.conflicts[c].is_some() {
+                    assert_eq!(f & 8, 0, "live conflict {c} flagged deleted");
+                }
+                for w in &cp.watched[2 * c..2 * c + 2] {
+                    if w.column == -1 {
+                        continue;
+                    }
+                    assert_eq!((w.prev, w.next), (-1, -1));
+                    let entries = cp.conflicts[c].as_ref().expect("watched deleted conflict");
+                    assert!(
+                        entries.iter().any(|e| !w.differs(e)),
+                        "watched literal not in conflict {c}"
+                    );
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn conflict_propagates_a_fixing_proves_infeasibility_and_is_deleted() {
+        let model = Arc::new(DomainModel::from_rows(
+            3,
+            &[],
+            vec![],
+            vec![],
+            vec![true; 3],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0; 3], &[1.0; 3], 1e-6, 1e-9);
+        let cp = d.add_conflict_pool();
+        let mut pool = ConflictPool::new(10, 100);
+        d.change_bound(lit(0, true, 1.0), Reason::Branching);
+        // Not both x0 = 1 and x1 = 1: with x0 = 1 the conflict has one inactive
+        // literal, is queued when added, and fixes x1 = 0.
+        let c = pool.add_conflict_cut(
+            &[lit(0, true, 1.0), lit(1, true, 1.0)],
+            &mut ConflictDomainObservers(vec![(&mut d, cp)]),
+        );
+        assert_eq!(c, 0);
+        assert!(d.propagate());
+        assert_eq!(d.col_upper[1], 0.0);
+        assert_eq!(d.domchgreason.last(), Some(&Reason::Conflict(cp, c)));
+        assert_eq!(d.take_conflict_age_resets(), vec![(cp, c)]);
+        check_conflict_tracking(&d);
+        // Backtracking the fixing re-queues its conflict (`markPropagateCut`); with
+        // both literals inactive it then watches them and stays quiet.
+        d.backtrack_to_global();
+        assert_eq!(d.conflictpools[cp].propagate_conflict_inds, vec![c]);
+        d.propagate();
+        assert_eq!(d.col_upper, vec![1.0; 3]);
+        assert_eq!(d.conflictpools[cp].conflict_flag[c], 2);
+        // HiGHS's watch lists stay empty (see `ConflictPoolProp`), so x0 = 1 alone no
+        // longer wakes the conflict: x1 keeps its bound.
+        d.change_bound(lit(0, true, 1.0), Reason::Branching);
+        assert!(!d.propagate());
+        assert_eq!(d.col_upper[1], 1.0);
+        check_conflict_tracking(&d);
+        d.backtrack_to_global();
+
+        // Both literals already true when the conflict arrives: infeasible.
+        let mut e = Domain::new(Arc::clone(&model), &[0.0; 3], &[1.0; 3], 1e-6, 1e-9);
+        let ecp = e.add_conflict_pool();
+        e.change_bound(lit(0, true, 1.0), Reason::Branching);
+        e.change_bound(lit(2, false, 0.0), Reason::Branching);
+        let c2 = pool.add_conflict_cut(
+            &[lit(2, false, 0.0), lit(0, true, 1.0)],
+            &mut ConflictDomainObservers(vec![(&mut d, cp), (&mut e, ecp)]),
+        );
+        assert_eq!(c2, 1);
+        e.propagate();
+        assert!(e.infeasible());
+        assert_eq!(e.infeasible_reason(), Reason::Conflict(ecp, c2));
+        e.backtrack_to_global();
+        assert!(!e.infeasible());
+        check_conflict_tracking(&e);
+
+        // Deletion: the domains drop the conflict; a re-mark does not queue it.
+        pool.remove_conflict(
+            c,
+            &mut ConflictDomainObservers(vec![(&mut d, cp), (&mut e, ecp)]),
+        );
+        assert!(d.conflictpools[cp].conflicts[c].is_none());
+        assert_eq!(d.conflictpools[cp].conflict_flag[c] & 8, 8);
+        d.mark_propagate_cut_reason(Reason::Conflict(cp, c));
+        assert!(d.conflictpools[cp].propagate_conflict_inds.is_empty());
+        check_conflict_tracking(&d);
+        // The freed index is reused by the next conflict, which the domains track
+        // afresh.
+        let c3 = pool.add_conflict_cut(
+            &[lit(1, false, 0.0)],
+            &mut ConflictDomainObservers(vec![(&mut d, cp)]),
+        );
+        assert_eq!(c3, c);
+        d.propagate();
+        assert_eq!(d.col_lower[1], 1.0);
+        check_conflict_tracking(&d);
+    }
+
+    /// Binaries x0, x1, x2 with x0 <= x2 and x0 + x1 + x2 <= 2, a global domain and a
+    /// local copy, both propagating one conflict pool.
+    fn implication_chain() -> (Domain, Domain, usize) {
+        let rows = vec![
+            (vec![0, 2], vec![1.0, -1.0]),
+            (vec![0, 1, 2], vec![1.0, 1.0, 1.0]),
+        ];
+        let model =
+            DomainModel::from_rows(3, &rows, vec![-INF, -INF], vec![0.0, 2.0], vec![true; 3]);
+        let mut global = Domain::new(Arc::new(model), &[0.0; 3], &[1.0; 3], 1e-6, 1e-9);
+        global.set_global(true);
+        let cp = global.add_conflict_pool();
+        let mut local = global.clone();
+        local.set_global(false);
+        (global, local, cp)
+    }
+
+    #[test]
+    fn conflict_analysis_finds_the_conflict_of_an_implication() {
+        let (mut global, mut local, cp) = implication_chain();
+        let mut pool = ConflictPool::new(10, 100);
+        let mut scores = Scores::default();
+        let links = ConflictLinks {
+            local: Some(cp),
+            global: Some(cp),
+        };
+        // x1 = 1 propagates nothing; x0 = 1 implies x2 = 1 (row 0), and then row 1
+        // is violated.
+        local.change_bound(lit(1, true, 1.0), Reason::Branching);
+        local.propagate();
+        local.change_bound(lit(0, true, 1.0), Reason::Branching);
+        local.propagate();
+        assert!(local.infeasible());
+        assert_eq!(local.domchgreason[2], Reason::ModelRowUpper(0));
+        assert_eq!(local.infeasible_reason(), Reason::ModelRowUpper(1));
+        let added =
+            local.conflict_analysis(&mut pool, links, &mut global, &mut scores, &NoOpenNodes);
+        // Row 1 is explained by x1 >= 1, x0 >= 1, x2 >= 1; at the last depth x2 >= 1
+        // resolves to x0 >= 1: the conflict "not (x1 >= 1 and x0 >= 1)". The first
+        // depth has nothing to resolve.
+        assert_eq!(added, vec![0]);
+        assert_eq!(
+            pool.conflict(0).unwrap(),
+            &[lit(1, true, 1.0), lit(0, true, 1.0)]
+        );
+        assert_eq!(scores.weight, 1);
+        assert_eq!(scores.up, vec![1, 0, 2]);
+        assert!(scores.down.is_empty());
+        // Both domains were told; the local one, infeasible, queued it.
+        assert!(global.conflictpools[cp].conflicts[0].is_some());
+        assert_eq!(local.conflictpools[cp].propagate_conflict_inds, vec![0]);
+        // Backtracking x0 = 1 leaves x1 = 1: the conflict fixes x0 = 0.
+        local.backtrack();
+        local.propagate();
+        assert!(!local.infeasible());
+        assert_eq!(local.col_upper[0], 0.0);
+        assert_eq!(local.domchgreason.last(), Some(&Reason::Conflict(cp, 0)));
+        check_conflict_tracking(&local);
+
+        // The proof-row overload on a feasible domain: 2 x0 + x1 <= 2 is valid (x0 = 1
+        // forces x1 = 0) and violated by x1 = 1, x0 = 1. Nothing at the last depth
+        // resolves, so the frontier itself is the conflict.
+        let (mut global, mut local, cp) = implication_chain();
+        let mut pool = ConflictPool::new(10, 100);
+        local.change_bound(lit(1, true, 1.0), Reason::Branching);
+        local.change_bound(lit(0, true, 1.0), Reason::Branching);
+        assert!(!local.infeasible());
+        let added = local.conflict_analysis_proof(
+            &[0, 1],
+            &[2.0, 1.0],
+            2.0,
+            &mut pool,
+            ConflictLinks {
+                local: Some(cp),
+                global: Some(cp),
+            },
+            &mut global,
+            &mut Scores::default(),
+            &NoOpenNodes,
+        );
+        assert_eq!(added, vec![0]);
+        assert_eq!(
+            pool.conflict(0).unwrap(),
+            &[lit(1, true, 1.0), lit(0, true, 1.0)]
+        );
+        // Not infeasible yet: the queued conflict proves it on propagation.
+        local.propagate();
+        assert!(local.infeasible());
+        assert_eq!(local.infeasible_reason(), Reason::Conflict(cp, 0));
+
+        // Reconvergence: x1 <= 0 is implied by the proof row given x0 = 1 (and so
+        // x2 = 1); the cut is "not (x1 >= 1 and x0 >= 1)".
+        let (mut global, mut local, cp) = implication_chain();
+        let mut pool = ConflictPool::new(10, 100);
+        local.change_bound(lit(0, true, 1.0), Reason::Branching);
+        local.propagate();
+        let added = local.conflict_analyze_reconvergence(
+            &lit(1, false, 0.0),
+            &[0, 1, 2],
+            &[1.0, 1.0, 1.0],
+            2.0,
+            &mut pool,
+            ConflictLinks {
+                local: Some(cp),
+                global: None,
+            },
+            &mut global,
+            &mut Scores::default(),
+            &NoOpenNodes,
+        );
+        assert_eq!(added, vec![0]);
+        assert_eq!(
+            pool.conflict(0).unwrap(),
+            &[lit(1, true, 1.0), lit(0, true, 1.0)]
+        );
+        assert!(global.conflictpools[cp].conflicts.is_empty());
+    }
+
+    /// Random valid rows for an IP: integer coefficients, rhs at the feasible
+    /// maximum (so every feasible point satisfies them).
+    fn random_valid_rows(
+        r: &mut Lcg,
+        n: usize,
+        pts: &[Vec<i64>],
+        k: usize,
+    ) -> Vec<(Vec<usize>, Vec<f64>, f64)> {
+        let mut out = Vec::new();
+        for _ in 0..k {
+            let (mut ri, mut rv) = (Vec::new(), Vec::new());
+            for j in 0..n {
+                let v = r.int(-3, 3);
+                if v != 0 {
+                    ri.push(j);
+                    rv.push(v as f64);
+                }
+            }
+            if ri.is_empty() {
+                ri.push(0);
+                rv.push(1.0);
+            }
+            let rhs = pts
+                .iter()
+                .map(|p| {
+                    ri.iter()
+                        .zip(&rv)
+                        .map(|(&j, &v)| v * p[j] as f64)
+                        .sum::<f64>()
+                })
+                .fold(-INF, f64::max);
+            out.push((ri, rv, rhs));
+        }
+        out
+    }
+
+    fn check_conflict_valid(pts: &[Vec<i64>], entries: &[DomainChange]) -> usize {
+        for p in pts {
+            assert!(
+                !satisfies_all(p, entries),
+                "conflict {entries:?} cuts off feasible point {p:?}"
+            );
+        }
+        pts.len()
+    }
+
+    #[test]
+    fn conflict_analysis_and_propagation_never_cut_a_feasible_point() {
+        let mut r = Lcg(31);
+        let (mut instances, mut analyses, mut proof_analyses) = (0usize, 0usize, 0usize);
+        let (mut conflicts, mut conflict_fixings, mut conflict_infeasible) = (0usize, 0, 0);
+        let (mut points_checked, mut deleted, mut global_fixings, mut tracked) =
+            (0usize, 0usize, 0usize, 0usize);
+        // Infeasibility reasons analysed: model row, cut, conflict, objective,
+        // conflicting bounds.
+        let mut reasons = [0usize; 5];
+        let mut with_objective = 0usize;
+        for _ in 0..3000 {
+            let (model, lb, ub, pts) = random_ip(&mut r);
+            if pts.is_empty() {
+                continue;
+            }
+            instances += 1;
+            let n = model.ncols;
+            let model = Arc::new(model);
+            let mut global = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+            global.set_global(true);
+            // Half the instances carry an objective cutoff: the points that count
+            // are then those under it (objective propagation removes the others).
+            let pts = if r.int(0, 1) == 1 {
+                let cost: Vec<f64> = (0..n).map(|_| r.int(-3, 3) as f64).collect();
+                let objv = |p: &Vec<i64>| (0..n).map(|j| cost[j] * p[j] as f64).sum::<f64>();
+                let best = pts.iter().map(objv).fold(INF, f64::min);
+                let upper_limit = best + r.int(0, 2) as f64 + 0.5;
+                let obj = ObjectiveFunction::new(&cost, &model.is_int, &lb, &ub);
+                global.set_upper_limit(upper_limit);
+                global.setup_objective_propagation(Arc::new(obj));
+                with_objective += 1;
+                pts.iter()
+                    .filter(|p| objv(p) <= upper_limit)
+                    .cloned()
+                    .collect()
+            } else {
+                pts
+            };
+            // Valid cuts in a cut pool both domains propagate (cut reasons), and
+            // valid rows kept back as LP-style proofs.
+            let gp = global.add_cutpool();
+            let ncuts = r.int(0, 3) as usize;
+            for (c, (ri, rv, rhs)) in random_valid_rows(&mut r, n, &pts, ncuts)
+                .into_iter()
+                .enumerate()
+            {
+                global.cut_added(gp, c, &ri, &rv, rhs, true);
+            }
+            let proofs = random_valid_rows(&mut r, n, &pts, 6);
+            let gcp = global.add_conflict_pool();
+            global.propagate();
+            assert!(
+                !global.infeasible(),
+                "valid rows proved a feasible model infeasible"
+            );
+            let nodes = Nodes(
+                (0..n).map(|_| r.int(0, 3)).collect(),
+                (0..n).map(|_| r.int(0, 3)).collect(),
+            );
+            // Small age limits, so conflicts are deleted while stacks still cite them.
+            let mut pool = ConflictPool::new(r.int(1, 4) as i32, r.int(2, 20) as i32);
+            let mut scores = Scores::default();
+            let links = ConflictLinks {
+                local: Some(gcp),
+                global: Some(gcp),
+            };
+            for _dive in 0..8 {
+                let mut local = global.clone();
+                local.set_global(false);
+                // The box of the current node, per branching depth.
+                let mut boxes: Vec<(Vec<f64>, Vec<f64>)> =
+                    vec![(global.col_lower.clone(), global.col_upper.clone())];
+                let mut seen_on_stack = local.domchgreason.len();
+                for _step in 0..12 {
+                    if local.infeasible() {
+                        let (blb, bub) = boxes.last().unwrap();
+                        assert!(
+                            !pts.iter()
+                                .any(|p| (0..n)
+                                    .all(|j| p[j] as f64 >= blb[j] && p[j] as f64 <= bub[j])),
+                            "infeasible verdict with a feasible point in the box"
+                        );
+                        reasons[match local.infeasible_reason() {
+                            Reason::ModelRowLower(_) | Reason::ModelRowUpper(_) => 0,
+                            Reason::Cut(..) => 1,
+                            Reason::Conflict(..) => 2,
+                            Reason::Objective => 3,
+                            Reason::ConflictingBounds(_) => 4,
+                            other => panic!("unexpected infeasibility reason {other:?}"),
+                        }] += 1;
+                        if matches!(local.infeasible_reason(), Reason::Conflict(..)) {
+                            conflict_infeasible += 1;
+                        }
+                        analyses += 1;
+                        let added = local.conflict_analysis(
+                            &mut pool,
+                            links,
+                            &mut global,
+                            &mut scores,
+                            &nodes,
+                        );
+                        for &c in &added {
+                            conflicts += 1;
+                            points_checked += check_conflict_valid(&pts, pool.conflict(c).unwrap());
+                        }
+                        for (_, c) in local
+                            .take_conflict_age_resets()
+                            .into_iter()
+                            .chain(global.take_conflict_age_resets())
+                        {
+                            pool.reset_age(c);
+                        }
+                        if local.backtrack().is_none() {
+                            break;
+                        }
+                        boxes.pop();
+                        seen_on_stack = seen_on_stack.min(local.domchgreason.len());
+                        local.propagate();
+                    } else {
+                        let free: Vec<usize> = (0..n)
+                            .filter(|&j| local.col_lower[j] < local.col_upper[j])
+                            .collect();
+                        if free.is_empty() {
+                            break;
+                        }
+                        let j = free[r.int(0, free.len() as i64 - 1) as usize];
+                        let up = r.int(0, 1) == 1;
+                        let mut v =
+                            r.int(local.col_lower[j] as i64, local.col_upper[j] as i64) as f64;
+                        // Now and then a bound past the other one (conflicting bounds).
+                        if r.int(0, 11) == 0 {
+                            v = if up {
+                                local.col_upper[j] + 1.0
+                            } else {
+                                local.col_lower[j] - 1.0
+                            };
+                        }
+                        let (mut blb, mut bub) = boxes.last().unwrap().clone();
+                        let chg = if up {
+                            blb[j] = blb[j].max(v);
+                            lit(j, true, v)
+                        } else {
+                            bub[j] = bub[j].min(v);
+                            lit(j, false, v)
+                        };
+                        boxes.push((blb, bub));
+                        local.change_bound(chg, Reason::Branching);
+                        // A proof row the local bounds violate is explained (as the
+                        // dual ray of an infeasible LP would be).
+                        if !local.infeasible() {
+                            for (pi, pv, prhs) in &proofs {
+                                let (ninf, act) = local.compute_min_activity_of(pi, pv);
+                                if ninf == 0 && act.to_f64() > prhs + 1e-6 {
+                                    proof_analyses += 1;
+                                    let added = local.conflict_analysis_proof(
+                                        pi,
+                                        pv,
+                                        *prhs,
+                                        &mut pool,
+                                        links,
+                                        &mut global,
+                                        &mut scores,
+                                        &nodes,
+                                    );
+                                    for &c in &added {
+                                        conflicts += 1;
+                                        points_checked +=
+                                            check_conflict_valid(&pts, pool.conflict(c).unwrap());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if r.int(0, 3) != 0 {
+                            local.propagate();
+                        }
+                    }
+                    // The conflict fixings new on the stack.
+                    seen_on_stack = seen_on_stack.min(local.domchgreason.len());
+                    conflict_fixings += local.domchgreason[seen_on_stack..]
+                        .iter()
+                        .filter(|r| matches!(r, Reason::Conflict(..)))
+                        .count();
+                    seen_on_stack = local.domchgreason.len();
+                    tracked += check_conflict_tracking(&local);
+                    if !local.infeasible() {
+                        // No feasible point of the node's box is removed, and the
+                        // row and cut activities stay exact.
+                        let (blb, bub) = boxes.last().unwrap();
+                        for p in &pts {
+                            if (0..n).all(|j| p[j] as f64 >= blb[j] && p[j] as f64 <= bub[j]) {
+                                for j in 0..n {
+                                    points_checked += 1;
+                                    assert!(
+                                        p[j] as f64 >= local.col_lower[j] - 1e-9
+                                            && p[j] as f64 <= local.col_upper[j] + 1e-9,
+                                        "propagation removed feasible point {p:?}"
+                                    );
+                                }
+                            }
+                        }
+                        let (w, ok) = local.check_activities();
+                        assert!(ok && w <= 1e-6, "row activities drifted");
+                        let (w, ok, _) = check_cut_activities(&local);
+                        assert!(ok && w <= 1e-6, "cut activities drifted");
+                    }
+                }
+                // Global propagation of the conflicts keeps every feasible point.
+                let before = global.domchgreason.len();
+                global.propagate();
+                assert!(
+                    !global.infeasible(),
+                    "conflicts proved a feasible model infeasible"
+                );
+                global_fixings += global.domchgreason[before..]
+                    .iter()
+                    .filter(|r| matches!(r, Reason::Conflict(..)))
+                    .count();
+                for p in &pts {
+                    for j in 0..n {
+                        points_checked += 1;
+                        assert!(
+                            p[j] as f64 >= global.col_lower[j] - 1e-9
+                                && p[j] as f64 <= global.col_upper[j] + 1e-9,
+                            "global conflict propagation removed feasible point {p:?}"
+                        );
+                    }
+                }
+                tracked += check_conflict_tracking(&global);
+                let live = pool.num_conflicts();
+                pool.perform_aging(
+                    false,
+                    &mut ConflictDomainObservers(vec![(&mut global, gcp)]),
+                );
+                deleted += live - pool.num_conflicts();
+            }
+        }
+        eprintln!(
+            "instances {instances} analyses {analyses} proof analyses {proof_analyses} \
+             conflicts {conflicts} conflict fixings {conflict_fixings} conflict \
+             infeasible {conflict_infeasible} global conflict fixings {global_fixings} \
+             deleted {deleted} points checked {points_checked} tracked {tracked} \
+             infeasibility reasons (row, cut, conflict, objective, conflicting bounds) \
+             {reasons:?} with objective {with_objective}"
+        );
+        assert!(
+            instances > 500
+                && analyses > 1000
+                && proof_analyses > 100
+                && conflicts > 1000
+                && conflict_fixings > 200
+                && conflict_infeasible > 20
+                && global_fixings > 50
+                && deleted > 200
+                && with_objective > 500
+                && reasons.iter().all(|&k| k > 20)
+                && points_checked > 100_000,
+            "probe fired too little"
+        );
     }
 }

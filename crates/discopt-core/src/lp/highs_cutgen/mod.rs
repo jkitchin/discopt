@@ -21,6 +21,8 @@
 //! - [`stdalgo`]  `pdqsort` (translated, zlib) and independent implementations of the
 //!   C++ standard algorithms HiGHS calls;
 //! - [`integers`] `HighsIntegers` (integral scales, continued fractions);
+//! - [`domain`] `HighsDomain` (propagation, conflict analysis) and [`conflict_pool`]
+//!   `HighsConflictPool`;
 //! - [`core`]     `HighsCutGeneration`'s single-row core and `postprocessCut`;
 //! - [`sparse_vec`] `HighsSparseVectorSum`;
 //! - [`transformed_lp`] `HighsTransformedLp` and the variable-bound choice it uses;
@@ -51,6 +53,7 @@
 pub mod bridge;
 pub mod cdouble;
 pub mod clique;
+pub mod conflict_pool;
 pub mod core;
 pub mod domain;
 pub mod integers;
