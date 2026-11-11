@@ -53,6 +53,7 @@ pub mod core;
 pub mod domain;
 pub mod integers;
 pub mod modk;
+pub mod objective;
 pub mod pool;
 pub mod random;
 pub mod separators;

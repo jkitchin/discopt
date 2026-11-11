@@ -22,13 +22,17 @@
 //! `CutpoolPropagation` (`cutAdded`, `cutDeleted`, `markPropagateCut`,
 //! `updateActivityLb/UbChange`, `recomputeCapacityThreshold`), with the domain's
 //! `markPropagateCut(reason)`, `getMinCutActivity` and the cut-pool section of
-//! `propagate`.
+//! `propagate`; and `ObjectivePropagation` (constructor, `updateActivityLb/UbChange`,
+//! `recomputeCapacityThreshold`, `shouldBePropagated`, `propagate`,
+//! `getPropagationConstraint`) with `checkChangeBound`.
 //!
-//! Not yet ported (later layers of the search port): objective propagation,
-//! conflict-pool propagation, conflict analysis, clique-table and implication
-//! fixings on binaries, redundant-row recording.
+//! Not yet ported (later layers of the search port): conflict-pool propagation,
+//! conflict analysis, clique-table and implication fixings on binaries,
+//! redundant-row recording.
 
 use super::cdouble::CDouble;
+use super::objective::ObjectiveFunction;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const INF: f64 = f64::INFINITY;
@@ -72,6 +76,8 @@ pub enum Reason {
     RedCost,
     /// `Reason::cut(cutpoolindex, cut)`: row `cut` of the domain's cut pool `pool`.
     Cut(usize, usize),
+    /// `kObjective`.
+    Objective,
 }
 
 /// The rows a domain propagates: `row_lower <= a x <= row_upper` over the columns,
@@ -285,6 +291,76 @@ impl CutpoolProp {
     }
 }
 
+/// A contribution-tree key, ordered like HiGHS's `std::pair<double, HighsInt>`
+/// (`-contribution`, `col`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ContribKey(f64, usize);
+impl Eq for ContribKey {}
+impl PartialOrd for ContribKey {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for ContribKey {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&o.0)
+            .expect("NaN objective contribution")
+            .then(self.1.cmp(&o.1))
+    }
+}
+
+/// `HighsDomain::ObjectivePropagation`: propagation of `cost . x <= upper_limit`
+/// with the objective's lower bound kept incrementally. Binaries in a clique
+/// partition contribute through `ObjectiveContributionTree`s (HiGHS's cached
+/// red-black trees keyed by `(-contribution, col)`; ordered maps here, with
+/// `first()` the smallest key and `last()` the largest).
+#[derive(Clone)]
+struct ObjProp {
+    obj: Arc<ObjectiveFunction>,
+    objective_lower: CDouble,
+    num_inf_obj_lower: i32,
+    capacity_threshold: f64,
+    is_propagated: bool,
+    /// `objectiveLowerContributions`: (contribution, col, partition) per position.
+    contributions: Vec<(f64, usize, usize)>,
+    /// One contribution tree per partition: key -> position.
+    trees: Vec<BTreeMap<ContribKey, usize>>,
+    propagation_cons_buffer: Vec<f64>,
+    /// `partitionCliqueData`: (multiplier, rhs).
+    partition_clique_data: Vec<(f64, i64)>,
+}
+
+impl ObjProp {
+    fn key(&self, pos: usize) -> ContribKey {
+        ContribKey(-self.contributions[pos].0, self.contributions[pos].1)
+    }
+    fn link(&mut self, pos: usize) {
+        let k = self.key(pos);
+        let part = self.contributions[pos].2;
+        self.trees[part].insert(k, pos);
+    }
+    fn unlink(&mut self, pos: usize) {
+        let k = self.key(pos);
+        let part = self.contributions[pos].2;
+        self.trees[part].remove(&k);
+    }
+    fn first(&self, part: usize) -> Option<usize> {
+        self.trees[part].values().next().copied()
+    }
+    fn last(&self, part: usize) -> Option<usize> {
+        self.trees[part].values().next_back().copied()
+    }
+    fn successor(&self, pos: usize) -> Option<usize> {
+        let part = self.contributions[pos].2;
+        let k = self.key(pos);
+        self.trees[part]
+            .range((std::ops::Bound::Excluded(k), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(_, &p)| p)
+    }
+}
+
 /// `HighsDomain`: model-row and cut-pool propagation.
 #[derive(Clone)]
 pub struct Domain {
@@ -324,6 +400,10 @@ pub struct Domain {
     /// `cutpool->resetAge(cut)` calls made during propagation, for the caller to
     /// apply to its pools (the domain does not own them): `(pool, cut)`.
     cut_age_resets: Vec<(usize, usize)>,
+    /// `objProp_` (inactive until [`Domain::setup_objective_propagation`]).
+    obj_prop: Option<Box<ObjProp>>,
+    /// `mipdata_->upper_limit`: the objective cutoff objective propagation uses.
+    upper_limit: f64,
 }
 
 impl Domain {
@@ -365,6 +445,8 @@ impl Domain {
             cutpools: Vec::new(),
             is_global: false,
             cut_age_resets: Vec::new(),
+            obj_prop: None,
+            upper_limit: INF,
         };
         d.compute_row_activities();
         d
@@ -470,6 +552,484 @@ impl Domain {
     /// `(pool, cut)`; the caller applies them to its pools in order.
     pub fn take_cut_age_resets(&mut self) -> Vec<(usize, usize)> {
         std::mem::take(&mut self.cut_age_resets)
+    }
+
+    /// Set `mipdata_->upper_limit`, the cutoff objective propagation works against.
+    pub fn set_upper_limit(&mut self, upper_limit: f64) {
+        self.upper_limit = upper_limit;
+    }
+
+    /// `setupObjectivePropagation()`: `ObjectivePropagation(domain)` over the
+    /// current bounds.
+    pub fn setup_objective_propagation(&mut self, obj: Arc<ObjectiveFunction>) {
+        let nz = obj.nonzeros().to_vec();
+        let starts = obj.partition_starts().to_vec();
+        let np = obj.num_partitions();
+        let cost = &obj.cost;
+        let mut op = ObjProp {
+            obj: Arc::clone(&obj),
+            objective_lower: CDouble::from(0.0),
+            num_inf_obj_lower: 0,
+            capacity_threshold: INF,
+            is_propagated: false,
+            contributions: vec![(0.0, 0, 0); starts[np]],
+            trees: vec![BTreeMap::new(); np],
+            propagation_cons_buffer: if np != 0 {
+                obj.values_packed().to_vec()
+            } else {
+                Vec::new()
+            },
+            partition_clique_data: if np != 0 {
+                vec![(0.0, 0); np]
+            } else {
+                Vec::new()
+            },
+        };
+        // Each clique partition's columns first contribute with their larger
+        // value, then the largest contribution of the partition is removed.
+        for i in 0..np {
+            op.partition_clique_data[i].1 = 1;
+            for (j, &col) in nz.iter().enumerate().take(starts[i + 1]).skip(starts[i]) {
+                if cost[col] > 0.0 {
+                    op.objective_lower += cost[col];
+                    op.contributions[j] = (cost[col], col, i);
+                    op.partition_clique_data[i].1 -= 1;
+                    if self.col_lower[col] == 0.0 {
+                        op.link(j);
+                    }
+                } else {
+                    op.contributions[j] = (-cost[col], col, i);
+                    if self.col_upper[col] == 1.0 {
+                        op.link(j);
+                    }
+                }
+            }
+            if let Some(w) = op.first(i) {
+                op.objective_lower -= op.contributions[w].0;
+            }
+        }
+        for &col in &nz[starts[np]..] {
+            if cost[col] > 0.0 {
+                if self.col_lower[col] == -INF {
+                    op.num_inf_obj_lower += 1;
+                } else {
+                    op.objective_lower += self.col_lower[col] * cost[col];
+                }
+            } else if self.col_upper[col] == INF {
+                op.num_inf_obj_lower += 1;
+            } else {
+                op.objective_lower += self.col_upper[col] * cost[col];
+            }
+        }
+        self.obj_prop = Some(Box::new(op));
+        self.obj_recompute_capacity_threshold();
+    }
+
+    /// The objective's lower bound over the current bounds, `(value, ninf)`
+    /// (`objectiveLower`, `numInfObjLower`); `None` without objective propagation.
+    pub fn objective_lower(&self) -> Option<(f64, i32)> {
+        self.obj_prop
+            .as_ref()
+            .map(|op| (op.objective_lower.to_f64(), op.num_inf_obj_lower))
+    }
+
+    /// `ObjectivePropagation::getPropagationConstraint(domchgStackSize, ...,
+    /// domchgCol)`: the objective cutoff row `vals . x[inds] <= rhs` as it stood
+    /// when the stack had `stack_size` changes.
+    pub fn objective_propagation_constraint(
+        &mut self,
+        stack_size: i64,
+        domchg_col: Option<usize>,
+    ) -> (Vec<usize>, Vec<f64>, f64) {
+        let op = self
+            .obj_prop
+            .as_ref()
+            .expect("objective propagation inactive");
+        let obj = Arc::clone(&op.obj);
+        let np = obj.num_partitions();
+        let inds = obj.nonzeros().to_vec();
+        if np == 0 {
+            return (inds, obj.values_packed().to_vec(), self.upper_limit);
+        }
+        let starts = obj.partition_starts();
+        let cost = &obj.cost;
+        let mut tmp_rhs = CDouble::from(self.upper_limit);
+        let mut largests = Vec::with_capacity(np);
+        for i in 0..np {
+            let mut largest = 0.0f64;
+            for &c in &inds[starts[i]..starts[i + 1]] {
+                if Some(c) == domchg_col {
+                    continue;
+                }
+                if cost[c] > 0.0 {
+                    if self.col_lower_pos(c, stack_size).0 < 1.0 {
+                        largest = largest.max(cost[c]);
+                    }
+                } else if self.col_upper_pos(c, stack_size).0 > 0.0 {
+                    largest = largest.max(-cost[c]);
+                }
+            }
+            largests.push(largest);
+        }
+        let op = self.obj_prop.as_mut().unwrap();
+        let packed = obj.values_packed();
+        for (i, &largest) in largests.iter().enumerate() {
+            tmp_rhs += largest * op.partition_clique_data[i].1 as f64;
+            if op.partition_clique_data[i].0 != largest {
+                op.partition_clique_data[i].0 = largest;
+                for j in starts[i]..starts[i + 1] {
+                    op.propagation_cons_buffer[j] = packed[j] - largest.copysign(packed[j]);
+                }
+            }
+        }
+        (inds, op.propagation_cons_buffer.clone(), tmp_rhs.to_f64())
+    }
+
+    /// `ObjectivePropagation::recomputeCapacityThreshold()`.
+    fn obj_recompute_capacity_threshold(&mut self) {
+        let mut op = self
+            .obj_prop
+            .take()
+            .expect("objective propagation inactive");
+        let obj = Arc::clone(&op.obj);
+        let np = obj.num_partitions();
+        let ft = self.feastol;
+        op.capacity_threshold = -ft;
+        for i in 0..np {
+            let Some(worst) = op.first(i) else { continue };
+            let wcol = op.contributions[worst].1;
+            if self.col_lower[wcol] == self.col_upper[wcol] {
+                continue;
+            }
+            let mut contribution = op.contributions[worst].0;
+            let best = op.last(i).unwrap();
+            if best != worst {
+                contribution -= op.contributions[best].0;
+            }
+            op.capacity_threshold = op.capacity_threshold.max(contribution * (1.0 - ft));
+        }
+        for &col in &obj.nonzeros()[obj.partition_starts()[np]..] {
+            op.capacity_threshold = op.capacity_threshold.max(
+                obj.cost[col].abs()
+                    * bound_range(
+                        self.col_upper[col],
+                        self.col_lower[col],
+                        ft,
+                        self.is_continuous(col),
+                    ),
+            );
+        }
+        self.obj_prop = Some(op);
+    }
+
+    /// `ObjectivePropagation::updateActivityLbChange` (`lower`) or
+    /// `updateActivityUbChange`.
+    fn obj_update(&mut self, col: usize, oldbound: f64, newbound: f64, lower: bool) {
+        let mut op = self
+            .obj_prop
+            .take()
+            .expect("objective propagation inactive");
+        let cost = op.obj.cost[col];
+        let ft = self.feastol;
+        let cont = self.is_continuous(col);
+        // The bound that moves the objective's lower bound: a lower bound for a
+        // positive cost, an upper bound for a negative one.
+        let moves_lower = if lower { cost > 0.0 } else { cost < 0.0 };
+        if !moves_lower {
+            let loosened = if lower {
+                newbound < oldbound
+            } else {
+                newbound > oldbound
+            };
+            if cost != 0.0 && loosened {
+                let range = if lower {
+                    bound_range(self.col_upper[col], newbound, ft, cont)
+                } else {
+                    bound_range(newbound, self.col_lower[col], ft, cont)
+                };
+                op.capacity_threshold = op.capacity_threshold.max(cost.abs() * range);
+                op.is_propagated = false;
+            }
+            self.obj_prop = Some(op);
+            return;
+        }
+        op.is_propagated = false;
+        let inf = if lower { -INF } else { INF };
+        let partition_pos = op.obj.col_partition_pos(col);
+        let mut infeasible = false;
+        if partition_pos == -1 {
+            if oldbound == inf {
+                op.num_inf_obj_lower -= 1;
+            } else {
+                op.objective_lower -= oldbound * cost;
+            }
+            if newbound == inf {
+                op.num_inf_obj_lower += 1;
+            } else {
+                op.objective_lower += newbound * cost;
+            }
+            let loosened = if lower {
+                newbound < oldbound
+            } else {
+                newbound > oldbound
+            };
+            if loosened {
+                op.capacity_threshold = op.capacity_threshold.max(
+                    cost.abs() * bound_range(self.col_upper[col], self.col_lower[col], ft, cont),
+                );
+            } else if op.num_inf_obj_lower == 0 && op.objective_lower > self.upper_limit {
+                infeasible = true;
+            }
+        } else {
+            let pos = partition_pos as usize;
+            let part = op.contributions[pos].2;
+            // Relaxing the binary back to the bound that contributes its larger value.
+            let relaxed = if lower {
+                newbound == 0.0
+            } else {
+                newbound == 1.0
+            };
+            if relaxed {
+                let curr_first = op.first(part);
+                op.link(pos);
+                let old_contribution = curr_first.map_or(0.0, |f| op.contributions[f].0);
+                if Some(pos) == op.first(part) && op.contributions[pos].0 != old_contribution {
+                    op.objective_lower += old_contribution;
+                    op.objective_lower -= op.contributions[pos].0;
+                    let best = op.last(part).unwrap();
+                    let mut delta = op.contributions[pos].0;
+                    if best != pos {
+                        delta -= op.contributions[best].0;
+                    }
+                    op.capacity_threshold = op.capacity_threshold.max(delta * (1.0 - ft));
+                } else {
+                    op.capacity_threshold = op
+                        .capacity_threshold
+                        .max((old_contribution - op.contributions[pos].0) * (1.0 - ft));
+                }
+            } else {
+                let was_first = op.first(part) == Some(pos);
+                if was_first {
+                    op.objective_lower += op.contributions[pos].0;
+                }
+                op.unlink(pos);
+                if was_first {
+                    if let Some(w) = op.first(part) {
+                        op.objective_lower -= op.contributions[w].0;
+                    }
+                }
+                if op.num_inf_obj_lower == 0 && op.objective_lower > self.upper_limit {
+                    infeasible = true;
+                }
+            }
+        }
+        self.obj_prop = Some(op);
+        if infeasible {
+            self.infeasible = true;
+            self.infeasible_pos = self.domchgstack.len();
+            self.infeasible_reason = Reason::Objective;
+            self.obj_update(col, newbound, oldbound, lower);
+        }
+    }
+
+    /// `ObjectivePropagation::shouldBePropagated()`.
+    fn obj_should_be_propagated(&self) -> bool {
+        let Some(op) = self.obj_prop.as_ref() else {
+            return false;
+        };
+        !(op.is_propagated
+            || op.num_inf_obj_lower > 1
+            || self.infeasible
+            || self.upper_limit == INF
+            || self.upper_limit - op.objective_lower.to_f64() > op.capacity_threshold)
+    }
+
+    /// `checkChangeBound(boundtype, col, boundval, reason)`.
+    fn check_change_bound(
+        &mut self,
+        boundtype: BoundType,
+        col: usize,
+        boundval: CDouble,
+        reason: Reason,
+    ) -> bool {
+        if (boundval.to_f64() * K_HIGHS_TINY).abs() > self.feastol {
+            return false;
+        }
+        let (bound, accept) = match boundtype {
+            BoundType::Lower => self.adjusted_lb(col, boundval),
+            BoundType::Upper => self.adjusted_ub(col, boundval),
+        };
+        if !accept {
+            return false;
+        }
+        self.change_bound(
+            DomainChange {
+                boundval: bound,
+                column: col,
+                boundtype,
+            },
+            reason,
+        );
+        true
+    }
+
+    /// `ObjectivePropagation::propagate()`.
+    fn obj_propagate(&mut self) {
+        if !self.obj_should_be_propagated() {
+            return;
+        }
+        let obj = Arc::clone(&self.obj_prop.as_ref().unwrap().obj);
+        let cost = &obj.cost;
+        let upper_limit = self.upper_limit;
+        let (ol, ninf) = {
+            let op = self.obj_prop.as_ref().unwrap();
+            (op.objective_lower, op.num_inf_obj_lower)
+        };
+        if ninf == 0 && ol > upper_limit {
+            self.infeasible = true;
+            self.infeasible_pos = self.domchgstack.len();
+            self.infeasible_reason = Reason::Objective;
+            return;
+        }
+        let nz = obj.nonzeros();
+        let mut capacity = upper_limit - ol;
+        if ninf == 1 {
+            // Only the one column contributing with an infinite bound can be bounded.
+            for &col in &nz[obj.num_binary()..] {
+                if (cost[col] > 0.0 && self.col_lower[col] != -INF)
+                    || (cost[col] < 0.0 && self.col_upper[col] != INF)
+                {
+                    continue;
+                }
+                let bt = if cost[col] > 0.0 {
+                    BoundType::Upper
+                } else {
+                    BoundType::Lower
+                };
+                self.check_change_bound(bt, col, capacity / cost[col], Reason::Objective);
+                break;
+            }
+        } else {
+            let np = obj.num_partitions();
+            loop {
+                let mut num_bound_changes = 0usize;
+                for i in 0..np {
+                    let op = self.obj_prop.as_ref().unwrap();
+                    let Some(worst) = op.first(i) else { continue };
+                    let mut contribution = op.contributions[worst].0;
+                    let second = op.successor(worst);
+                    if let Some(s2) = second {
+                        contribution -= op.contributions[s2].0;
+                    }
+                    // The upper limit already has a tolerance: a hard cutoff.
+                    if contribution > capacity {
+                        let col = op.contributions[worst].1;
+                        if cost[col] > 0.0 {
+                            if self.col_upper[col] > 0.0 {
+                                num_bound_changes += 1;
+                                self.change_bound(
+                                    DomainChange {
+                                        boundval: 0.0,
+                                        column: col,
+                                        boundtype: BoundType::Upper,
+                                    },
+                                    Reason::Objective,
+                                );
+                                if self.infeasible {
+                                    break;
+                                }
+                            }
+                        } else if self.col_lower[col] < 1.0 {
+                            num_bound_changes += 1;
+                            self.change_bound(
+                                DomainChange {
+                                    boundval: 1.0,
+                                    column: col,
+                                    boundtype: BoundType::Lower,
+                                },
+                                Reason::Objective,
+                            );
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    } else if second.is_some() {
+                        // The column with the smallest contribution may be fixed to
+                        // the bound that gives its larger objective value.
+                        loop {
+                            let op = self.obj_prop.as_ref().unwrap();
+                            let best = op.last(i).unwrap();
+                            let first = op.first(i).unwrap();
+                            if best == first {
+                                break;
+                            }
+                            if CDouble::from(op.contributions[first].0 - op.contributions[best].0)
+                                > capacity
+                            {
+                                let col = op.contributions[best].1;
+                                let chg = if cost[col] > 0.0 {
+                                    debug_assert!(self.col_lower[col] < 1.0);
+                                    DomainChange {
+                                        boundval: 1.0,
+                                        column: col,
+                                        boundtype: BoundType::Lower,
+                                    }
+                                } else {
+                                    debug_assert!(self.col_upper[col] > 0.0);
+                                    DomainChange {
+                                        boundval: 0.0,
+                                        column: col,
+                                        boundtype: BoundType::Upper,
+                                    }
+                                };
+                                num_bound_changes += 1;
+                                self.change_bound(chg, Reason::Objective);
+                                if self.infeasible {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        if self.infeasible {
+                            break;
+                        }
+                    }
+                }
+                if self.infeasible {
+                    break;
+                }
+                for &col in &nz[obj.partition_starts()[np]..] {
+                    let changed = if cost[col] > 0.0 {
+                        self.check_change_bound(
+                            BoundType::Upper,
+                            col,
+                            (capacity + self.col_lower[col] * cost[col]) / cost[col],
+                            Reason::Objective,
+                        )
+                    } else {
+                        self.check_change_bound(
+                            BoundType::Lower,
+                            col,
+                            (capacity + self.col_upper[col] * cost[col]) / cost[col],
+                            Reason::Objective,
+                        )
+                    };
+                    if changed {
+                        num_bound_changes += 1;
+                    }
+                    if self.infeasible {
+                        break;
+                    }
+                }
+                if self.infeasible || num_bound_changes == 0 {
+                    break;
+                }
+                capacity = upper_limit - self.obj_prop.as_ref().unwrap().objective_lower;
+            }
+        }
+        self.obj_recompute_capacity_threshold();
+        self.obj_prop.as_mut().unwrap().is_propagated = true;
     }
 
     /// `markPropagateCut(reason)`.
@@ -999,6 +1559,12 @@ impl Domain {
 
     /// `updateActivityLbChange` / `updateActivityUbChange` (`lower` selects which).
     fn update_activity(&mut self, col: usize, oldbound: f64, newbound: f64, lower: bool) {
+        if self.obj_prop.is_some() {
+            self.obj_update(col, oldbound, newbound, lower);
+            if self.infeasible {
+                return;
+            }
+        }
         let model = Arc::clone(&self.model);
         let (start, mut end) = (model.a_start[col], model.a_start[col + 1]);
         let ft = self.feastol;
@@ -1130,6 +1696,9 @@ impl Domain {
                     self.activitymaxinf[row] = ninf;
                     self.activitymax[row] += d;
                 }
+            }
+            if self.obj_prop.is_some() {
+                self.obj_update(col, newbound, oldbound, lower);
             }
         }
     }
@@ -1455,6 +2024,9 @@ impl Domain {
         let mut inds: Vec<usize> = Vec::new();
         let mut buf: Vec<(usize, Vec<DomainChange>, Vec<DomainChange>)> = Vec::new();
         while self.have_propagation_rows() {
+            if self.obj_prop.is_some() {
+                self.obj_propagate();
+            }
             std::mem::swap(&mut inds, &mut self.propagateinds);
             for &row in &inds {
                 self.propagateflags[row] = 0;
@@ -1558,9 +2130,11 @@ impl Domain {
         true
     }
 
-    /// `havePropagationRows()` (objective and conflict propagation not yet ported).
+    /// `havePropagationRows()` (conflict propagation not yet ported).
     fn have_propagation_rows(&self) -> bool {
-        !self.propagateinds.is_empty() || self.cutpools.iter().any(|cp| !cp.inds.is_empty())
+        !self.propagateinds.is_empty()
+            || self.obj_should_be_propagated()
+            || self.cutpools.iter().any(|cp| !cp.inds.is_empty())
     }
 
     /// Debug check (HiGHS's `#ifndef NDEBUG` asserts): the incremental activities
@@ -1587,6 +2161,7 @@ impl Domain {
 
 #[cfg(test)]
 mod tests {
+    use super::super::objective::ObjectiveFunction;
     use super::*;
 
     struct Lcg(u64);
@@ -1689,6 +2264,272 @@ mod tests {
             }
         }
         (worst, ok, n)
+    }
+
+    /// `debugCheckObjectiveLower`: |incremental - from scratch| and whether the
+    /// infinity counts agree.
+    fn check_objective_lower(d: &Domain) -> (f64, bool) {
+        let op = d.obj_prop.as_ref().unwrap();
+        let obj = &op.obj;
+        let cost = &obj.cost;
+        let nz = obj.nonzeros();
+        let starts = obj.partition_starts();
+        let np = obj.num_partitions();
+        let mut lower = CDouble::from(0.0);
+        let mut ninf = 0;
+        for i in 0..np {
+            let mut largest = 0.0f64;
+            for &c in &nz[starts[i]..starts[i + 1]] {
+                if cost[c] > 0.0 {
+                    lower += cost[c];
+                    if d.col_lower[c] < 1.0 {
+                        largest = largest.max(cost[c]);
+                    }
+                } else if d.col_upper[c] > 0.0 {
+                    largest = largest.max(-cost[c]);
+                }
+            }
+            lower -= largest;
+        }
+        for &c in &nz[starts[np]..] {
+            if cost[c] > 0.0 {
+                if d.col_lower[c] > -INF {
+                    lower += d.col_lower[c] * cost[c];
+                } else {
+                    ninf += 1;
+                }
+            } else if d.col_upper[c] < INF {
+                lower += d.col_upper[c] * cost[c];
+            } else {
+                ninf += 1;
+            }
+        }
+        (
+            (lower - op.objective_lower).to_f64().abs(),
+            ninf == op.num_inf_obj_lower,
+        )
+    }
+
+    /// Random binaries with one clique row over a subset `S` (at most one literal
+    /// `x_j = [cost_j < 0]` true), the clique partition `S` + singletons, and a
+    /// random second row. Returns the model, costs, the partition and the points.
+    #[allow(clippy::type_complexity)]
+    fn random_clique_ip(
+        r: &mut Lcg,
+    ) -> (DomainModel, Vec<f64>, Vec<usize>, Vec<usize>, Vec<Vec<i64>>) {
+        let n = r.int(3, 6) as usize;
+        let cost: Vec<f64> = (0..n)
+            .map(|_| {
+                let c = r.int(-4, 4);
+                (if c == 0 { 1 } else { c }) as f64
+            })
+            .collect();
+        let ns = r.int(2, 3.min(n as i64)) as usize;
+        let mut cols: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = r.int(0, i as i64) as usize;
+            cols.swap(i, j);
+        }
+        let set = cols[..ns].to_vec();
+        let (mut ri, mut rv) = (Vec::new(), Vec::new());
+        let mut npos = 0;
+        for &j in &set {
+            ri.push(j);
+            if cost[j] < 0.0 {
+                rv.push(1.0);
+            } else {
+                rv.push(-1.0);
+                npos += 1;
+            }
+        }
+        let mut rows = vec![(ri, rv)];
+        let (mut rl, mut ru) = (vec![-INF], vec![1.0 - npos as f64]);
+        let (mut r2i, mut r2v) = (Vec::new(), Vec::new());
+        for j in 0..n {
+            let v = r.int(-2, 2);
+            if v != 0 {
+                r2i.push(j);
+                r2v.push(v as f64);
+            }
+        }
+        if !r2i.is_empty() {
+            rows.push((r2i, r2v));
+            rl.push(-INF);
+            ru.push(r.int(0, 3) as f64);
+        }
+        let model = DomainModel::from_rows(n, &rows, rl.clone(), ru.clone(), vec![true; n]);
+        let mut clqvars = set.clone();
+        clqvars.extend(cols[ns..].iter().copied());
+        let mut starts = vec![0, ns];
+        for k in ns..n {
+            starts.push(k + 1);
+        }
+        let mut pts = Vec::new();
+        for mask in 0..(1u32 << n) {
+            let x: Vec<i64> = (0..n).map(|j| ((mask >> j) & 1) as i64).collect();
+            let ok = (0..rows.len()).all(|i| {
+                let a: f64 = rows[i]
+                    .0
+                    .iter()
+                    .zip(&rows[i].1)
+                    .map(|(&j, &v)| v * x[j] as f64)
+                    .sum();
+                a >= rl[i] - 1e-9 && a <= ru[i] + 1e-9
+            });
+            if ok {
+                pts.push(x);
+            }
+        }
+        (model, cost, clqvars, starts, pts)
+    }
+
+    #[test]
+    fn objective_propagation_never_removes_a_point_under_the_cutoff() {
+        let mut r = Lcg(23);
+        let (mut checked, mut obj_changes, mut obj_infeasible, mut with_partition) =
+            (0usize, 0usize, 0usize, 0usize);
+        for it in 0..3000 {
+            let clique = it % 2 == 1;
+            let (model, cost, lb, ub, pts, part) = if clique {
+                let (m, c, clq, st, pts) = random_clique_ip(&mut r);
+                let n = m.ncols;
+                (m, c, vec![0.0; n], vec![1.0; n], pts, Some((clq, st)))
+            } else {
+                let (m, lb, ub, pts) = random_ip(&mut r);
+                let c: Vec<f64> = (0..m.ncols).map(|_| r.int(-3, 3) as f64).collect();
+                (m, c, lb, ub, pts, None)
+            };
+            if pts.is_empty() {
+                continue;
+            }
+            let n = model.ncols;
+            let objv = |p: &Vec<i64>| (0..n).map(|j| cost[j] * p[j] as f64).sum::<f64>();
+            let best = pts.iter().map(objv).fold(INF, f64::min);
+            let upper_limit = best + r.int(0, 3) as f64 + 0.5;
+            let model = Arc::new(model);
+            let mut obj = ObjectiveFunction::new(&cost, &model.is_int, &lb, &ub);
+            if let Some((clq, st)) = &part {
+                obj.setup_clique_partition(clq, st);
+                if obj.num_partitions() > 0 {
+                    with_partition += 1;
+                }
+            }
+            let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+            d.set_upper_limit(upper_limit);
+            d.setup_objective_propagation(Arc::new(obj));
+            let (w, ok) = check_objective_lower(&d);
+            assert!(ok && w <= 1e-9, "initial objective lower wrong: {w}");
+            let base = d.objective_lower().unwrap();
+            let mut box_lb = lb.clone();
+            let mut box_ub = ub.clone();
+            for _ in 0..3 {
+                let col = r.int(0, n as i64 - 1) as usize;
+                if d.col_lower[col] >= d.col_upper[col] {
+                    continue;
+                }
+                let up = r.int(0, 1) == 1;
+                let val = r.int(d.col_lower[col] as i64, d.col_upper[col] as i64) as f64;
+                let boundtype = if up {
+                    box_lb[col] = box_lb[col].max(val);
+                    BoundType::Lower
+                } else {
+                    box_ub[col] = box_ub[col].min(val);
+                    BoundType::Upper
+                };
+                d.change_bound(
+                    DomainChange {
+                        boundval: val,
+                        column: col,
+                        boundtype,
+                    },
+                    Reason::Branching,
+                );
+                if r.int(0, 2) != 0 {
+                    d.propagate();
+                }
+                obj_changes += d
+                    .domchgreason
+                    .iter()
+                    .filter(|r| **r == Reason::Objective)
+                    .count();
+                let under: Vec<&Vec<i64>> = pts
+                    .iter()
+                    .filter(|p| {
+                        objv(p) <= upper_limit
+                            && (0..n).all(|j| p[j] as f64 >= box_lb[j] && p[j] as f64 <= box_ub[j])
+                    })
+                    .collect();
+                if d.infeasible() {
+                    if d.infeasible_reason() == Reason::Objective {
+                        obj_infeasible += 1;
+                    }
+                    assert!(
+                        under.is_empty(),
+                        "infeasible verdict with points under the cutoff"
+                    );
+                    break;
+                }
+                let (w, ok) = check_objective_lower(&d);
+                assert!(ok && w <= 1e-9, "objective lower drifted: {w}");
+                for p in &under {
+                    for j in 0..n {
+                        checked += 1;
+                        assert!(
+                            p[j] as f64 >= d.col_lower[j] - 1e-9
+                                && p[j] as f64 <= d.col_upper[j] + 1e-9,
+                            "point under the cutoff removed at column {j}"
+                        );
+                    }
+                }
+            }
+            d.backtrack_to_global();
+            assert_eq!(d.col_lower, lb);
+            assert_eq!(d.col_upper, ub);
+            let (w, ok) = check_objective_lower(&d);
+            assert!(ok && w <= 1e-9);
+            let now = d.objective_lower().unwrap();
+            assert!((now.0 - base.0).abs() <= 1e-9 && now.1 == base.1);
+        }
+        assert!(
+            checked > 2000 && obj_changes > 200 && obj_infeasible > 20 && with_partition > 500,
+            "probe fired too little: checked {checked} objective changes {obj_changes} \
+             objective infeasible {obj_infeasible} with partition {with_partition}"
+        );
+    }
+
+    #[test]
+    fn objective_propagation_bounds_the_one_infinite_column() {
+        // min x0 + x1, x0 in [0, 10], x1 in [-inf, 10]: cutoff 3 bounds nothing
+        // (one infinite contribution, it is the column itself) until x1 gets a lower
+        // bound; the cutoff then bounds both from above.
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![false; 2],
+        ));
+        let (lb, ub) = ([0.0, -INF], [10.0, 10.0]);
+        let obj = ObjectiveFunction::new(&[1.0, 1.0], &[false; 2], &lb, &ub);
+        let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+        d.set_upper_limit(3.0);
+        d.setup_objective_propagation(Arc::new(obj));
+        assert_eq!(d.objective_lower(), Some((0.0, 1)));
+        // One infinite contribution: x1 (the infinite one) is bounded by 3 - 0.
+        assert!(d.propagate());
+        assert_eq!(d.col_upper[1], 3.0);
+        d.change_bound(
+            DomainChange {
+                boundval: 1.0,
+                column: 1,
+                boundtype: BoundType::Lower,
+            },
+            Reason::Branching,
+        );
+        d.propagate();
+        assert_eq!(d.objective_lower(), Some((1.0, 0)));
+        assert_eq!(d.col_upper[0], 2.0);
+        assert_eq!(d.domchgreason.last(), Some(&Reason::Objective));
     }
 
     #[test]

@@ -54,7 +54,7 @@ not involved), and parity of the whole is checked statistically on the panel.
 | `HighsModkSeparator`, `HighsGFkSolve` | 872 | ported | `modk.rs` | GF(k) brute-force test; **no HiGHS replay** |
 | `HighsCutPool`, `HighsDynamicRowMatrix` | 1,235 | ported | `pool.rs` | pool replay |
 | `HighsSeparation` | 293 | partial | `bridge.rs` (root rounds) | root only; node path uses a fresh pool per round |
-| `HighsDomain` | 4,645 | partial | `domain.rs` (1,224) | row propagation; missing objective, cut-pool and conflict propagation, conflict analysis, clique/implication fixings |
+| `HighsDomain` | 4,645 | partial | `domain.rs`, `objective.rs` | row, cut-pool and objective propagation (with `HighsObjectiveFunction`); missing conflict-pool propagation, conflict analysis, clique/implication fixings |
 | `HighsImplications` | 1,118 | partial | `vbound.rs` | variable-bound discovery/storage; missing probing implications |
 | `HighsCliqueTable` | 2,582 | missing | - | - |
 | `HighsRedcostFixing` | 380 | missing (discopt's own root-only RC fixing) | `milp_driver.rs` `reduced_cost_fix` | - |
@@ -282,6 +282,7 @@ deleted.
 | piece | content | gate |
 |---|---|---|
 | 1d-1 | local domain for the control: `HighsDomain::setDomainChangeStack` and `getReducedDomainChangeStack` added to the domain translation (`highs_cutgen/domain.rs`) | install/reduce round trip on random IPs (**done**) |
+| 1d-1b | the rest of the domain's propagation that a node needs: `CutpoolPropagation` (cut activities, thresholds, `markPropagateCut`, the cut section of `propagate`, `getMinCutActivity`; the pool notifies its domains through `PoolObserver`) and `ObjectivePropagation` with `HighsObjectiveFunction` (objective lower bound, clique-partition contribution trees, the cutoff row for conflict analysis). The clique partition is taken as input until the clique table is ported (stage 7); conflict pools and conflict analysis follow with stage 7 | randomized dive tests: no feasible point (cuts) and no point under the cutoff (objective) removed, infeasibility only without such points, incremental activities and objective lower bound equal to recomputation through dives and backtracks; `std::partition` order checked against libstdc++ output (**done**) |
 | 1d-2 | node evaluation behind `SearchEnv::evaluate`: the LP solve on the local domain's box with the safety layer (safe bound, Farkas check, unresolved floor, incumbent verification) and the evaluation's propagation recursion | a driver-level test that the new evaluation and `solve_node` agree on bounds and verdicts on the in-repo MILPs |
 | 1d-3 | branching behind `SearchEnv::branch` (today's candidate scoring and strong branching, reporting commits as `BranchStep`s) and `plunge_scores` from today's pseudocosts | branching unit tests; replay-style check that steps apply as HiGHS's |
 | 1d-4 | separation, heuristics, limits, after-round bound/prune behind `SearchEnv`; the hooks re-hosted (lazy veto = re-evaluation, node hook = separation at the node, bound hook, debugger, node callback) | the hook tests (`test_1060_*`, `test_1141_*`, debugger tests) on the new loop |
