@@ -46,9 +46,7 @@ use crate::bnb::highs_search::search::{
     SearchEnv, NO_NODE_LIMIT,
 };
 use crate::bnb::node::{BranchRecord, NodeStatus};
-use crate::lp::highs_cutgen::bridge::{FEASTOL, POOL_AGE_LIMIT, POOL_SOFT_LIMIT};
 use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
-use crate::lp::highs_cutgen::pool::{CutPool, NoObserver};
 
 #[cfg(test)]
 thread_local! {
@@ -119,10 +117,6 @@ pub(super) struct Outcome {
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
     pub seeded_pool: usize,
-    /// H1 (`DISCOPT_HIGHS_SEARCH_POOL=highs`): cuts the ported pool selected at nodes,
-    /// and LP row removals reported back to it.
-    pub pool_selected: usize,
-    pub pool_lp_removed: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -292,27 +286,6 @@ pub(super) fn search_cut_lp_enabled() -> bool {
     }
 }
 
-/// `DISCOPT_HIGHS_SEARCH_POOL` (H1, under [`search_cut_lp_enabled`]): how node
-/// separation picks the pool cuts it offers the LP. `adhoc` (the default): the top
-/// [`NODE_GMI_POOL_PER_NODE`] violated cuts of a plain list by violation/norm. `highs`:
-/// the ported `HighsCutPool` -- the root's pool itself handed over with its ages and LP
-/// membership, selected each node with `separate` (efficacy, `minScoreFactor`,
-/// parallelism 0.1, ageing of non-violated cuts, soft limit), aged when a node does
-/// not separate, and told about every LP row removal (`lpCutRemoved`). Read per call,
-/// garbage refused.
-pub(super) fn search_pool_highs() -> bool {
-    match std::env::var("DISCOPT_HIGHS_SEARCH_POOL") {
-        Err(_) => false,
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "highs" => true,
-            "adhoc" | "" => false,
-            other => {
-                panic!("DISCOPT_HIGHS_SEARCH_POOL={other:?} is not recognized (expected highs or adhoc)")
-            }
-        },
-    }
-}
-
 /// Cut rows the search's LP may carry at once, beyond the root's: bounds the per-LP
 /// cost (the falsified 1d-5 fold doubled it with unmanaged rows).
 fn search_cut_cap(base_rows: usize) -> usize {
@@ -416,15 +389,6 @@ fn make_ctx<'x>(base: &NodeCtx<'x>, lp: &'x Option<SearchLp>) -> NodeCtx<'x> {
     }
 }
 
-/// A pool cut `vals·x[inds] <= rhs` as `coeffs·x >= -rhs` over `n` columns.
-fn pool_cut_ge(n: usize, inds: &[i32], vals: &[f64], rhs: f64) -> GomoryCut {
-    let mut coeffs = vec![0.0; n];
-    for (&j, &v) in inds.iter().zip(vals) {
-        coeffs[j as usize] = -v;
-    }
-    GomoryCut { coeffs, rhs: -rhs }
-}
-
 /// One node's box and id, as a debugger batch: `(lower, upper, ids)`.
 type DbgBatch<'x> = (&'x [Vec<f64>], &'x [Vec<f64>], &'x [NodeId]);
 
@@ -473,12 +437,6 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub cut_rows_deleted: usize,
     /// Root cuts the pool started with (step 2.1).
     pub seeded_pool: usize,
-    /// H1 (`DISCOPT_HIGHS_SEARCH_POOL=highs`): the ported pool in place of `pool`, and
-    /// the pool index of each cut row in the search's LP (by signature).
-    cpool: Option<CutPool>,
-    lp_pool_id: std::collections::HashMap<Vec<(u32, i64)>, i32>,
-    pub pool_selected: usize,
-    pub pool_lp_removed: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -523,30 +481,26 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     }
 
     /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
-    /// Returns, aligned with `cuts`, whether each became a row (a cut already in the LP
-    /// or past the row cap does not).
-    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) -> Vec<bool> {
-        let mut took = vec![false; cuts.len()];
+    fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
         if cuts.is_empty() {
-            return took;
+            return;
         }
         let base = self.ctx;
         let n0 = base.n_w;
         let lp = self.lp.get_or_insert_with(|| SearchLp::from_base(base));
         let room = search_cut_cap(base.m_w).saturating_sub(lp.rows.len());
         let mut add: Vec<GomoryCut> = Vec::new();
-        for (k, cut) in cuts.iter().enumerate() {
+        for cut in cuts {
             if add.len() >= room {
                 break;
             }
             let c = lp.to_base(cut, n0);
             if self.in_lp.insert(cut_signature(&c)) {
                 add.push(c);
-                took[k] = true;
             }
         }
         if add.is_empty() {
-            return took;
+            return;
         }
         let (m0, n0w) = (lp.m, lp.n);
         let (csc, m, n) = augment_csc_with_cuts(
@@ -583,7 +537,6 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             d.resize(n, 0.0);
         }
         self.clear_lp_caches();
-        took
     }
 
     fn clear_lp_caches(&mut self) {
@@ -627,12 +580,7 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             return;
         }
         for r in &gone {
-            let sig = cut_signature(&r.cut);
-            if let (Some(id), Some(cp)) = (self.lp_pool_id.remove(&sig), self.cpool.as_mut()) {
-                cp.lp_cut_removed(id);
-                self.pool_lp_removed += 1;
-            }
-            self.in_lp.remove(&sig);
+            self.in_lp.remove(&cut_signature(&r.cut));
         }
         let d = delete_cut_rows(&lp.csc, lp.m, lp.n, &lp.b, &mut gone, &mut kept);
         let col_map = d.col_map.clone();
@@ -682,105 +630,6 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
                 .collect()
         });
         self.clear_lp_caches();
-    }
-
-    /// H1 node separation (`DISCOPT_HIGHS_SEARCH_POOL=highs`), in HiGHS's
-    /// `separationRound` roles: the ported pool's `separate` picks the pool cuts for
-    /// this node (scoring, `minScoreFactor`, parallelism 0.1, ageing every cut it does
-    /// not find violated); the node-local rounds run on those rows and lift the node's
-    /// bound; their new cuts join the pool (`addCut`, which refuses duplicates); the
-    /// selected and new cuts become LP rows, each recorded with its pool index so the
-    /// pool hears of its later removal. A selected cut that does not become a row is
-    /// reported removed at once.
-    fn separate_highs_pool(
-        &mut self,
-        x: &[f64],
-        y: &[f64],
-        basis: &Basis,
-        fl: &[f64],
-        fu: &[f64],
-    ) -> bool {
-        let n0 = self.ctx.n_w;
-        let ctx = make_ctx(self.ctx, &self.lp);
-        let ctx = &ctx;
-        let Some(cp) = self.cpool.as_mut() else {
-            return false;
-        };
-        let mut cutset = Vec::new();
-        let sel = cp.separate(
-            &mut NoObserver,
-            &x[..n0],
-            &fl[..n0],
-            &fu[..n0],
-            FEASTOL,
-            &mut cutset,
-        );
-        self.pool_selected += sel.len();
-        let picked: Vec<(i32, GomoryCut)> = sel
-            .into_iter()
-            .map(|c| (c.index, pool_cut_ge(n0, &c.inds, &c.vals, c.rhs)))
-            .collect();
-        let rows: Vec<GomoryCut> = picked
-            .iter()
-            .map(|(_, c)| {
-                let mut coeffs = c.coeffs.clone();
-                coeffs.resize(ctx.n_w, 0.0);
-                GomoryCut { coeffs, rhs: c.rhs }
-            })
-            .collect();
-        self.sep_calls += 1;
-        let lg = node_local_gmi_bound(ctx, fl, fu, x, y, basis, &rows, NODE_GMI_ROUNDS, self.nodes);
-        self.eval.lp_iters += lg.pivots as i64;
-        if let Some(g) = lg.bound {
-            self.sep_lifts += 1;
-            self.eval.pending_lift = Some(g + ctx.obj_const);
-        }
-        let new_base: Vec<GomoryCut> = match self.lp.as_ref() {
-            Some(lp) => lg.new_cuts.iter().map(|c| lp.to_base(c, n0)).collect(),
-            None => lg.new_cuts,
-        };
-        // (pool index, selected by `separate`, cut over the base columns)
-        let mut add: Vec<(i32, bool, GomoryCut)> =
-            picked.into_iter().map(|(id, c)| (id, true, c)).collect();
-        let Some(cp) = self.cpool.as_mut() else {
-            return false;
-        };
-        for cut in new_base {
-            let (inds, vals): (Vec<i32>, Vec<f64>) = cut
-                .coeffs
-                .iter()
-                .enumerate()
-                .filter(|(_, &v)| v != 0.0)
-                .map(|(j, &v)| (j as i32, -v))
-                .unzip();
-            if inds.is_empty() {
-                continue;
-            }
-            let id = cp.add_cut(&mut NoObserver, &inds, &vals, -cut.rhs, false, false, false);
-            if id >= 0 {
-                add.push((id, false, cut));
-            }
-        }
-        let cuts: Vec<GomoryCut> = add
-            .iter()
-            .take(SEARCH_CUTS_PER_NODE)
-            .map(|a| a.2.clone())
-            .collect();
-        let took = self.append_cut_rows(&cuts);
-        let Some(cp) = self.cpool.as_mut() else {
-            return false;
-        };
-        for (k, (id, selected, cut)) in add.into_iter().enumerate() {
-            if took.get(k).copied().unwrap_or(false) {
-                if !selected {
-                    cp.lp_cut_added(id);
-                }
-                self.lp_pool_id.insert(cut_signature(&cut), id);
-            } else if selected {
-                cp.lp_cut_removed(id);
-            }
-        }
-        false
     }
 
     /// The external node bound (`MilpBoundHook`, `Model.solve(lagrangian_bound=True)`),
@@ -1227,14 +1076,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 .deadline
                 .is_some_and(|d| std::time::Instant::now() >= d)
         {
-            // HiGHS `HighsSeparation::separate`: no separation round, just ageing.
-            if let Some(cp) = self.cpool.as_mut() {
-                cp.perform_aging(&mut NoObserver);
-            }
             return false;
-        }
-        if self.cpool.is_some() {
-            return self.separate_highs_pool(&x, &y, &basis, &fl, &fu);
         }
         let mut pick: Vec<(f64, usize)> = Vec::new();
         for (k, cut) in self.pool.iter().enumerate() {
@@ -1406,7 +1248,6 @@ impl SearchEnv for HighsEnv<'_, '_> {
 /// `obj_const` (`-inf` for none). `None` when any LP of the search is unbounded or
 /// the rows are infeasible over the global box before any search (the driver's own
 /// handling then decides).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run<'a>(
     ctx: &'a NodeCtx<'_>,
     lim: &'a Limits,
@@ -1415,7 +1256,6 @@ pub(super) fn run<'a>(
     sub_mip: Option<SubMip<'a>>,
     dbg: Option<Debugger<'a>>,
     seed_pool: Vec<GomoryCut>,
-    root_pool: Option<CutPool>,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -1462,57 +1302,11 @@ pub(super) fn run<'a>(
         cut_rows_added: 0,
         cut_rows_deleted: 0,
         seeded_pool: 0,
-        cpool: None,
-        lp_pool_id: std::collections::HashMap::new(),
-        pool_selected: 0,
-        pool_lp_removed: 0,
     };
     // Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
     // cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
     // so does this one (the pool feeds the LP when a node violates a cut).
-    let seed = std::env::var("DISCOPT_XP_NO_SEED").is_err();
-    let highs_pool = env.cut_lp && search_pool_highs();
-    if highs_pool {
-        // H1: the root's pool itself, as HiGHS's search inherits it; discopt's own root
-        // pool cuts join it through `addCut`. Then `HighsMipSolver::run`'s five
-        // `performAging` calls after the root (`HighsMipSolver.cpp:229-235`).
-        let mut cp = match root_pool {
-            Some(p) if seed => p,
-            _ => {
-                let (rows, nnz) = ctx
-                    .highs_node
-                    .as_ref()
-                    .map_or((ctx.n_orig_rows, 0), |h| (h.model_rows, h.model_nnz));
-                CutPool::new(
-                    ctx.n_w,
-                    POOL_AGE_LIMIT,
-                    POOL_SOFT_LIMIT,
-                    nnz as i64,
-                    rows.max(1) as i64,
-                )
-            }
-        };
-        if seed {
-            for cut in ctx.gmi_pool.iter() {
-                let (inds, vals): (Vec<i32>, Vec<f64>) = cut
-                    .coeffs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &v)| v != 0.0)
-                    .map(|(j, &v)| (j as i32, -v))
-                    .unzip();
-                if !inds.is_empty() {
-                    cp.add_cut(&mut NoObserver, &inds, &vals, -cut.rhs, false, false, false);
-                }
-            }
-        }
-        for _ in 0..5 {
-            cp.perform_aging(&mut NoObserver);
-        }
-        env.seeded_pool = cp.num_cuts().max(0) as usize;
-        env.cpool = Some(cp);
-    }
-    if env.cut_lp && !highs_pool && seed {
+    if env.cut_lp {
         for cut in ctx.gmi_pool.iter().cloned().chain(seed_pool) {
             if env.pool_sigs.insert(cut_signature(&cut)) {
                 env.pool.push(cut);
@@ -1595,7 +1389,5 @@ pub(super) fn run<'a>(
         cut_rows_added: env.cut_rows_added,
         cut_rows_deleted: env.cut_rows_deleted,
         seeded_pool: env.seeded_pool,
-        pool_selected: env.pool_selected,
-        pool_lp_removed: env.pool_lp_removed,
     })
 }

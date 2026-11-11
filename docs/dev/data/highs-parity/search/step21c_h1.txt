@@ -1,0 +1,67 @@
+Step 2.1c / H1 (2026-11-11): ported HighsCutPool in the HiGHS search vs the ad-hoc pool pick.
+Fixed node budget 20000, DISCOPT_PANEL_DETERMINISTIC=1, RAYON_NUM_THREADS=1, DISCOPT_LP_MILP_BACKEND=rust (step21c_h1_ab.py).
+Arms (all but off/fixed: DISCOPT_HIGHS_SEARCH_CUT_LP=1 DISCOPT_HIGHS_SEPA_NODE=1): noseed = ad-hoc top-20 pick, empty pool (2.1b);
+seed = ad-hoc pick, pool seeded with the root's (2ef4b8d5); h1 = ported CutPool (root pool handed over, separate/ageing/lpCutRemoved);
+h1noseed = h1 with a fresh pool. off = flags unset; fixed = SEPA_NODE=1 only.
+Columns: name arm status dual-gap% nodes wall objective [bound termination] counters (max over profile blocks).
+Builds: entry rows from 2ef4b8d5 + a DISCOPT_XP_NO_SEED toggle; the rest from the H1 build (same toggle).
+
+## entry experiment (seed vs noseed)
+b-ball noseed feasible 0.9249 19999 6.7 -1.5 {"HighsSearchCutRowsAdded": 3422, "HighsSearchCutRowsDeleted": 3357, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 239} 
+b-ball seed feasible 1.5089 19999 8.3 -1.5 {"HighsSearchCutRowsAdded": 4730, "HighsSearchCutRowsDeleted": 4562, "HighsSearchPoolSeeded": 3960, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 250} 
+rows 2
+mik-250-20-75-1 noseed feasible 0.4701 19999 117.2 -49716.000000000015 {"HighsSearchCutRowsAdded": 13833, "HighsSearchCutRowsDeleted": 13451, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 1024} 
+mik-250-20-75-1 seed optimal 0.0 18975 133.0 -49716.0 {"HighsSearchCutRowsAdded": 31520, "HighsSearchCutRowsDeleted": 30904, "HighsSearchPoolSeeded": 14029, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 1258} 
+mik-250-20-75-2 noseed optimal 0.0 8097 78.5 -50768.0 {"HighsSearchCutRowsAdded": 10577, "HighsSearchCutRowsDeleted": 10421, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 501} 
+mik-250-20-75-2 seed optimal 0.0 6827 77.0 -50768.0 {"HighsSearchCutRowsAdded": 11755, "HighsSearchCutRowsDeleted": 11468, "HighsSearchPoolSeeded": 7933, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 399} 
+neos17 noseed optimal 0.0067 4122 122.9 0.15006921079864127 {"HighsSearchCutRowsAdded": 3822, "HighsSearchCutRowsDeleted": 3750, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 392} BOUND>OPT
+neos17 seed optimal 0.0 5172 234.5 0.15000257748496973 {"HighsSearchCutRowsAdded": 5848, "HighsSearchCutRowsDeleted": 5710, "HighsSearchPoolSeeded": 2970, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 507} 
+rows 6
+
+## b-ball repeats (deterministic) + H1
+b-ball noseed feasible 0.9249 19999 7.5 -1.5 {"HighsSearchCutRowsAdded": 3422, "HighsSearchCutRowsDeleted": 3357, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 239} 
+b-ball noseed feasible 0.9249 19999 7.1 -1.5 {"HighsSearchCutRowsAdded": 3422, "HighsSearchCutRowsDeleted": 3357, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 239} 
+b-ball seed feasible 1.5089 19999 8.7 -1.5 {"HighsSearchCutRowsAdded": 4730, "HighsSearchCutRowsDeleted": 4562, "HighsSearchPoolSeeded": 3960, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 250} 
+b-ball seed feasible 1.5089 19999 10.3 -1.5 {"HighsSearchCutRowsAdded": 4730, "HighsSearchCutRowsDeleted": 4562, "HighsSearchPoolSeeded": 3960, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 250} 
+b-ball h1 feasible 2.2261 19999 9.7 -1.5 {"HighsSearchCutRowsAdded": 807, "HighsSearchCutRowsDeleted": 752, "HighsSearchPoolSeeded": 4299, "HighsSearchPoolSelected": 246, "HighsSearchPoolLpRemoved": 752, "NodeGmiRaw": 592} 
+b-ball h1 feasible 2.2261 19999 8.9 -1.5 {"HighsSearchCutRowsAdded": 807, "HighsSearchCutRowsDeleted": 752, "HighsSearchPoolSeeded": 4299, "HighsSearchPoolSelected": 246, "HighsSearchPoolLpRemoved": 752, "NodeGmiRaw": 592} 
+b-ball h1noseed feasible 1.6888 19999 5.7 -1.5 {"HighsSearchCutRowsAdded": 697, "HighsSearchCutRowsDeleted": 658, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 245, "HighsSearchPoolLpRemoved": 658, "NodeGmiRaw": 527} 
+rows 7
+
+## mik H1
+mik-250-20-75-1 h1 feasible 0.4844 20000 86.5 -49716.0 bound=-49956.824566952586 node_limit {"HighsSearchCutRowsAdded": 14643, "HighsSearchCutRowsDeleted": 14163, "HighsSearchPoolSeeded": 13359, "HighsSearchPoolSelected": 14537, "HighsSearchPoolLpRemoved": 14163, "NodeGmiRaw": 1227} 
+mik-250-20-75-2 h1 optimal 0.0 10361 59.0 -50768.0 bound=-50768.0 gap {"HighsSearchCutRowsAdded": 13563, "HighsSearchCutRowsDeleted": 13292, "HighsSearchPoolSeeded": 9551, "HighsSearchPoolSelected": 14357, "HighsSearchPoolLpRemoved": 13292, "NodeGmiRaw": 616} 
+rows 2
+
+## neos17 (root and search NOT deterministic at a node budget: seeded pool 2970/2532/2470 across repeats)
+neos17 off optimal 0.0 18213 262.3 0.15000257742689832 {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 2073} 
+neos17 fixed optimal 0.0 15242 298.0 0.15000257742257792 {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 2975} 
+neos17 noseed optimal 0.0 1530 48.5 0.15000257742257792 {"HighsSearchCutRowsAdded": 808, "HighsSearchCutRowsDeleted": 763, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 191} 
+neos17 h1 optimal 0.0 2875 45.0 0.15000257742257792 {"HighsSearchCutRowsAdded": 1864, "HighsSearchCutRowsDeleted": 1781, "HighsSearchPoolSeeded": 1739, "HighsSearchPoolSelected": 1469, "HighsSearchPoolLpRemoved": 1781, "NodeGmiRaw": 426} 
+rows 4
+neos17 noseed optimal 0.0 6489 94.5 0.15000257742257778 bound=0.15000257742257778 gap {"HighsSearchCutRowsAdded": 9682, "HighsSearchCutRowsDeleted": 9548, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 791} 
+neos17 noseed optimal 0.0 3946 59.2 0.15000257742302794 bound=0.15000257726820856 gap {"HighsSearchCutRowsAdded": 2777, "HighsSearchCutRowsDeleted": 2700, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 379} 
+neos17 seed optimal 0.0 4867 139.7 0.15000257742616793 bound=0.1500025770413968 gap {"HighsSearchCutRowsAdded": 4858, "HighsSearchCutRowsDeleted": 4744, "HighsSearchPoolSeeded": 2532, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 481} 
+neos17 seed optimal 0.0 4527 93.4 0.150002577422582 bound=0.1500025774223062 gap {"HighsSearchCutRowsAdded": 6088, "HighsSearchCutRowsDeleted": 5957, "HighsSearchPoolSeeded": 2470, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 499} 
+rows 4
+neos17 noseed optimal 0.0 6580 96.7 0.15000257742263304 bound=0.15000257742250866 gap {"HighsSearchCutRowsAdded": 9916, "HighsSearchCutRowsDeleted": 9770, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 774} 
+neos17 noseed optimal 0.0 2988 39.5 0.15000257742257794 bound=0.1500025771843272 gap {"HighsSearchCutRowsAdded": 2489, "HighsSearchCutRowsDeleted": 2398, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 441} 
+neos17 noseed optimal 0.0 6489 111.5 0.15000257742257792 bound=0.15000257742257792 gap {"HighsSearchCutRowsAdded": 9633, "HighsSearchCutRowsDeleted": 9506, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 755} 
+neos17 noseed optimal 0.0 2846 51.8 0.15000257742257792 bound=0.15000257699601607 gap {"HighsSearchCutRowsAdded": 2172, "HighsSearchCutRowsDeleted": 2093, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 285} 
+rows 4
+
+## flag-off check
+# H1 build
+b-ball off feasible 4.4609 19999 12.8 -1.5000000000000047 bound=-1.5669140539544393 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 379} 
+mik-250-20-75-2 off feasible 0.6278 19999 70.7 -50768.0 bound=-51086.712698239884 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 4686} 
+rows 2
+mik-250-20-75-2 off feasible 0.6278 19999 106.3 -50768.0 bound=-51086.712698239884 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 4155} 
+mik-250-20-75-2 off feasible 0.6278 19999 106.0 -50768.0 bound=-51086.712698239884 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 4165} 
+rows 2
+# seed-toggle build
+b-ball off feasible 4.4609 19999 5.9 -1.5000000000000047 bound=-1.5669140539544393 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 379} 
+mik-250-20-75-2 off feasible 0.7454 19999 60.7 -50768.0 bound=-51146.40628832889 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 5674} 
+rows 2
+mik-250-20-75-2 off feasible 0.6278 19999 80.3 -50768.0 bound=-51086.712698239884 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 4344} 
+mik-250-20-75-2 off feasible 0.6278 19999 81.3 -50768.0 bound=-51086.712698239884 node_limit {"HighsSearchCutRowsAdded": 0, "HighsSearchCutRowsDeleted": 0, "HighsSearchPoolSeeded": 0, "HighsSearchPoolSelected": 0, "HighsSearchPoolLpRemoved": 0, "NodeGmiRaw": 4447} 
+rows 2

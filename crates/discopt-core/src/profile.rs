@@ -726,12 +726,6 @@ counters!(
     HighsSearchCutRowsAdded,
     HighsSearchCutRowsDeleted,
     HighsSearchPoolSeeded,
-    // H1 (`DISCOPT_HIGHS_SEARCH_POOL=highs`): cuts the ported pool's `separate` selected
-    // at nodes, LP row removals reported back to it, and root cleanups whose cut list
-    // did not map onto pool indices (the pool then over-counts LP cuts).
-    HighsSearchPoolSelected,
-    HighsSearchPoolLpRemoved,
-    HighsSearchPoolRootUnmapped,
     HighsMipSearchNodes,
     HighsMipSearchBranched,
     HighsMipSearchSbIters,
