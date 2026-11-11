@@ -2568,6 +2568,21 @@ impl Domain {
     pub fn reduced_domain_change_stack(&self) -> (Vec<DomainChange>, Vec<usize>) {
         let mut reduced = Vec::with_capacity(self.domchgstack.len());
         let mut positions = Vec::with_capacity(self.branch_pos.len());
+        // HiGHS walks each kept change's chain of earlier changes on its column
+        // (`prevboundval`) looking for a branching one: O(stack x chain), which a
+        // deep dive on a wide general-integer column makes quadratic. A change's
+        // previous position is always earlier on the stack, so whether its chain
+        // holds a branching change is known in one forward pass; the output is the
+        // same.
+        let mut branched: Vec<bool> = Vec::with_capacity(self.domchgstack.len());
+        for i in 0..self.domchgstack.len() {
+            let prev = self.prevboundval[i].1;
+            let earlier = prev != -1 && {
+                let p = prev as usize;
+                self.domchgreason[p] == Reason::Branching || branched[p]
+            };
+            branched.push(earlier);
+        }
         for (i, c) in self.domchgstack.iter().enumerate() {
             let last = match c.boundtype {
                 BoundType::Lower => self.col_lower_pos[c.column],
@@ -2576,17 +2591,8 @@ impl Domain {
             if last != i as i64 {
                 continue;
             }
-            if self.domchgreason[i] == Reason::Branching {
+            if self.domchgreason[i] == Reason::Branching || branched[i] {
                 positions.push(reduced.len());
-            } else {
-                let mut k = i;
-                while self.prevboundval[k].1 != -1 {
-                    k = self.prevboundval[k].1 as usize;
-                    if self.domchgreason[k] == Reason::Branching {
-                        positions.push(reduced.len());
-                        break;
-                    }
-                }
             }
             reduced.push(*c);
         }
@@ -4622,15 +4628,56 @@ mod tests {
             "probe fired too little: checked {checked} propagated {propagated} infeasible {infeasible_proofs}");
     }
 
+    /// HiGHS's `getReducedDomainChangeStack`, as translated first: for each kept
+    /// non-branching change, walk its column's chain of earlier changes for a
+    /// branching one. Also counts walks that needed two or more steps.
+    fn reduced_reference(d: &Domain) -> (Vec<DomainChange>, Vec<usize>, usize) {
+        let mut reduced = Vec::new();
+        let mut positions = Vec::new();
+        let mut long_walks = 0usize;
+        for (i, c) in d.domchgstack.iter().enumerate() {
+            let last = match c.boundtype {
+                BoundType::Lower => d.col_lower_pos[c.column],
+                BoundType::Upper => d.col_upper_pos[c.column],
+            };
+            if last != i as i64 {
+                continue;
+            }
+            if d.domchgreason[i] == Reason::Branching {
+                positions.push(reduced.len());
+            } else {
+                let mut k = i;
+                let mut steps = 0;
+                while d.prevboundval[k].1 != -1 {
+                    k = d.prevboundval[k].1 as usize;
+                    steps += 1;
+                    if d.domchgreason[k] == Reason::Branching {
+                        positions.push(reduced.len());
+                        if steps >= 2 {
+                            long_walks += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            reduced.push(*c);
+        }
+        (reduced, positions, long_walks)
+    }
+
     #[test]
     fn reduced_stack_reinstalls_to_the_same_bounds() {
         // Branch down a random path with propagation, take HiGHS's reduced stack, and
         // install it on a fresh domain at the global bounds: the same box, and no more
         // branching positions, on every node of the path.
         let mut r = Lcg(11);
-        let (mut checked, mut with_implied) = (0usize, 0usize);
+        let (mut checked, mut with_implied, mut chain_walks) = (0usize, 0usize, 0usize);
         for _ in 0..300 {
-            let (model, lb, ub, _) = random_ip(&mut r);
+            let (model, lb, mut ub, _) = random_ip(&mut r);
+            // Wider boxes, so a column takes many changes (long chains).
+            for v in ub.iter_mut() {
+                *v += 8.0;
+            }
             let model = Arc::new(model);
             let mut d = Domain::new(model.clone(), &lb, &ub, 1e-6, 1e-9);
             d.propagate();
@@ -4639,14 +4686,20 @@ mod tests {
             }
             d.commit_as_global();
             let (glb, gub) = (d.col_lower.clone(), d.col_upper.clone());
-            for _ in 0..4 {
+            let mut last_col: Option<usize> = None;
+            for _ in 0..12 {
                 let free: Vec<usize> = (0..lb.len())
                     .filter(|&j| d.col_upper[j] > d.col_lower[j])
                     .collect();
                 if free.is_empty() {
                     break;
                 }
-                let j = free[r.int(0, free.len() as i64 - 1) as usize];
+                // Mostly the same column again (a deep dive on one wide column).
+                let j = match last_col {
+                    Some(c) if free.contains(&c) && r.int(0, 3) != 0 => c,
+                    _ => free[r.int(0, free.len() as i64 - 1) as usize],
+                };
+                last_col = Some(j);
                 let up = r.int(0, 1) == 1;
                 let chg = if up {
                     DomainChange {
@@ -4667,6 +4720,11 @@ mod tests {
                     break;
                 }
                 let (stack, pos) = d.reduced_domain_change_stack();
+                // The one-pass chain test gives HiGHS's chain walk's output.
+                let (rs, rp, walked) = reduced_reference(&d);
+                assert_eq!(stack, rs, "reduced stack differs from HiGHS's walk");
+                assert_eq!(pos, rp, "branching positions differ from HiGHS's walk");
+                chain_walks += walked;
                 if stack.len() > pos.len() {
                     with_implied += 1;
                 }
@@ -4682,9 +4740,10 @@ mod tests {
             }
         }
         // §6: the check ran, also on stacks carrying propagated (non-branching) changes.
+        // Measured 46: chain walks of two or more steps that found a branching change.
         assert!(
-            checked > 200 && with_implied > 50,
-            "checked {checked}, with implied {with_implied}"
+            checked > 200 && with_implied > 50 && chain_walks > 20,
+            "checked {checked}, with implied {with_implied}, chain walks {chain_walks}"
         );
     }
 
