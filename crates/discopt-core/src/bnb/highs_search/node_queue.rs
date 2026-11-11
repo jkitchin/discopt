@@ -384,6 +384,14 @@ impl NodeQueue {
             Some(k) => k.0 .0.min(lb),
         }
     }
+    /// `getBestBoundDomchgStackSize` (`i32::MAX` for `kHighsIInf` when empty).
+    pub fn best_bound_domchg_stack_size(&self) -> i32 {
+        let a = self.lower.first().map_or(i32::MAX, |k| k.1);
+        match self.suboptimal.first() {
+            None => a,
+            Some(k) => (self.nodes[k.1 as usize].domchgstack.len() as i32).min(a),
+        }
+    }
     /// `numNodesUp(col)`: open nodes with a lower-bound change on `col`.
     pub fn num_nodes_up(&self, col: usize) -> i64 {
         self.col_lower[col].len() as i64

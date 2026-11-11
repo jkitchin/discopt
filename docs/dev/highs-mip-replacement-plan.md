@@ -241,3 +241,38 @@ distinct instances of the population at 20 s (`hs_dump_search_coverage.md`): 99,
 to the queue), 54,000 sibling decisions (11,480 pruned), 4,297 installs from the queue. Every
 decision kind and outcome is observed except a node pruned inside `openNodesToQueue`
 (`SQ O` with prune = 1: 0 of 8,926), which 1c covers with a unit test instead of a replay.
+
+**Stage 1c (2026-11-11), done.** `bnb/highs_search/search.rs` translates the control of
+`HighsSearch` (`installNode`, `evaluateNode`'s bookkeeping, `branch`'s child creation with
+`branchDownwards`/`branchUpwards`, `backtrack`, `backtrackPlunge`, `dive`,
+`currentNodeToQueue`, `openNodesToQueue`) and of `HighsMipSolver::run`'s node processing
+(`installNodes`, `processNodes`, `pruneNode`, `separateAndStoreBasis`, `runHeuristics`, the
+dive and plunge loop, the round's end). Every component call goes through `SearchEnv`,
+including the node queue.
+
+Replay (`replay_search.rs`): the control runs against a mock that answers each component
+call with HiGHS's recorded outcome and requires HiGHS's decision wherever the dump records
+one; the queue is the translated queue. Fixture `tests/data/highs_search_replay/` (six complete
+solves: bell5, bppc8-02, flugpl, gesa2, mik-250-20-75-1, p0201): **0 mismatches, no event
+left unconsumed**: 272 rounds, 1,580 evaluations, 902 branchings, 819 siblings tried, 495
+plunge-or-queue choices (125 to the queue), 623 strong-branching commitments, 1,043 queue
+states, plus the rarer paths (current-node hand-off, plunge limit, ancestor closed by
+propagation, search ended by `checkLimits`). A node pruned inside `openNodesToQueue` (never
+observed) is covered by `open_nodes_to_queue_prunes_without_queueing`.
+
+What the replay taught (each found as a mismatch, then fixed in the translation or the
+dump): HiGHS's root processing drives the search object before the main loop (the replay
+starts at the first install); heuristic dives run a second search object in heuristic mode
+(excluded from the dump); a recursive `evaluateNode` prints one identical record per level;
+the child's bound is the chosen side's strong-branching bound, not the parent's; strong
+branching commits to children inside selection (`branchDownwards`/`branchUpwards`, with
+`skipDepthCount` and `depthoffset -= 1`), so selection returns steps for the control to
+apply; and a round can end the search through `checkLimits` before its bound update.
+
+**Not translated in stage 1** (components or unused at one thread): LP basis storage and
+recovery, symmetry, conflict analysis, worker parallelism, restarts (`mip_allow_restart` was
+off in every recorded solve; HiGHS's default restarts are a later addition).
+
+**Next: stage 1d** (§6): the production `SearchEnv` over discopt's components with the
+safety layer, the driver's search loop switched to `MainLoop`, and the batched search
+deleted.

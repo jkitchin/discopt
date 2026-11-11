@@ -8,6 +8,9 @@
 //! HiGHS itself before the driver uses it.
 
 pub mod node_queue;
+pub mod search;
 
 #[cfg(test)]
 mod replay_queue;
+#[cfg(test)]
+mod replay_search;

@@ -154,7 +154,7 @@
  
    const HighsDomain& getLocalDomain() const { return localdom; }
 --- a/highs/mip/HighsSearch.cpp	2026-11-11 00:23:12.436626176 +0000
-+++ b/highs/mip/HighsSearch.cpp	2026-11-11 00:24:13.006757102 +0000
++++ b/highs/mip/HighsSearch.cpp	2026-11-11 01:31:31.597211340 +0000
 @@ -8,6 +8,13 @@
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  #include "mip/HighsSearch.h"
@@ -162,38 +162,96 @@
 +#include <cstdio>
 +// discopt dump: the shared search/queue dump file (HighsNodeQueue.cpp); top level only.
 +FILE* hsSearchDumpFile();
-+static FILE* hsSearchDump(const HighsMipSolver& mipsolver) {
-+  return mipsolver.submip ? nullptr : hsSearchDumpFile();
++static FILE* hsSearchDump(const HighsMipSolver& mipsolver, bool inheuristic) {
++  return (mipsolver.submip || inheuristic) ? nullptr : hsSearchDumpFile();
 +}
 +
  #include <numeric>
  
  #include "lp_data/HConst.h"
-@@ -728,6 +735,9 @@
+@@ -137,6 +144,8 @@
+ 
+ void HighsSearch::branchDownwards(HighsInt col, double newub,
+                                   double branchpoint) {
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++    std::fprintf(f, "SBD %d 1 %a %a\n", (int)col, newub, branchpoint);
+   NodeData& currnode = nodestack.back();
+ 
+   assert(currnode.opensubtrees == 2);
+@@ -160,6 +169,8 @@
+ 
+ void HighsSearch::branchUpwards(HighsInt col, double newlb,
+                                 double branchpoint) {
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++    std::fprintf(f, "SBD %d 0 %a %a\n", (int)col, newlb, branchpoint);
+   NodeData& currnode = nodestack.back();
+ 
+   assert(currnode.opensubtrees == 2);
+@@ -566,6 +577,9 @@
+         nodestack[nodestack.size() - 2].opensubtrees = 0;
+         nodestack[nodestack.size() - 2].skipDepthCount = 1;
+         depthoffset -= 1;
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SBS %d %a\n", (int)nodestack[nodestack.size() - 2].opensubtrees,
++                       nodestack[nodestack.size() - 2].other_child_lb);
+ 
+         return true;
+       }
+@@ -635,6 +649,9 @@
+             nodestack[nodestack.size() - 2].other_child_lb = solobj;
+             nodestack[nodestack.size() - 2].skipDepthCount = 1;
+             depthoffset -= 1;
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SBS %d %a\n", (int)nodestack[nodestack.size() - 2].opensubtrees,
++                       nodestack[nodestack.size() - 2].other_child_lb);
+ 
+             return true;
+           }
+@@ -654,6 +671,9 @@
+             nodestack[nodestack.size() - 2].opensubtrees = 0;
+             nodestack[nodestack.size() - 2].skipDepthCount = 1;
+             depthoffset -= 1;
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SBS %d %a\n", (int)nodestack[nodestack.size() - 2].opensubtrees,
++                       nodestack[nodestack.size() - 2].other_child_lb);
+ 
+             return true;
+           }
+@@ -673,6 +693,9 @@
+         nodestack[nodestack.size() - 2].opensubtrees = 0;
+         nodestack[nodestack.size() - 2].skipDepthCount = 1;
+         depthoffset -= 1;
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SBS %d %a\n", (int)nodestack[nodestack.size() - 2].opensubtrees,
++                       nodestack[nodestack.size() - 2].other_child_lb);
+ 
+         return true;
+       } else {
+@@ -728,6 +751,9 @@
        localdom.conflictAnalysis(getConflictPool(), mipworker.getGlobalDomain(),
                                  pseudocost);
    }
-+  if (FILE* f = hsSearchDump(mipsolver))
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic))
 +    std::fprintf(f, "SQ C %d %a %a %d\n", (int)getCurrentDepth(),
 +                 nodestack.back().lower_bound, nodestack.back().estimate, (int)prune);
    if (!prune) {
      std::vector<HighsInt> branchPositions;
      auto domchgStack = localdom.getReducedDomainChangeStack(branchPositions);
-@@ -769,6 +779,9 @@
+@@ -769,6 +795,9 @@
          localdom.conflictAnalysis(getConflictPool(),
                                    mipworker.getGlobalDomain(), pseudocost);
      }
-+    if (FILE* f = hsSearchDump(mipsolver))
++    if (FILE* f = hsSearchDump(mipsolver, inheuristic))
 +      std::fprintf(f, "SQ O %d %a %a %d\n", (int)getCurrentDepth(),
 +                   nodestack.back().lower_bound, nodestack.back().estimate, (int)prune);
      if (!prune) {
        std::vector<HighsInt> branchPositions;
        auto domchgStack = localdom.getReducedDomainChangeStack(branchPositions);
-@@ -870,9 +883,12 @@
+@@ -870,9 +899,12 @@
        globalSymmetriesValid ? mipsolver.mipdata_->globalOrbits : nullptr);
    subrootsol.clear();
    depthoffset = node.depth - 1;
-+  if (FILE* f = hsSearchDump(mipsolver))
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic))
 +    std::fprintf(f, "SI %d %a %a %d\n", (int)getCurrentDepth(), node.lower_bound,
 +                 node.estimate, (int)node.domchgstack.size());
  }
@@ -203,7 +261,7 @@
    assert(!nodestack.empty());
    NodeData& currnode = nodestack.back();
    const NodeData* parent = getParentNodeData();
-@@ -1106,7 +1122,7 @@
+@@ -1106,7 +1138,7 @@
    return result;
  }
  
@@ -212,7 +270,7 @@
    assert(localdom.getChangedCols().empty());
  
    assert(nodestack.back().opensubtrees == 2);
-@@ -1516,7 +1532,7 @@
+@@ -1516,7 +1548,7 @@
    return NodeResult::kBranched;
  }
  
@@ -221,11 +279,20 @@
    if (nodestack.empty()) return false;
    assert(!nodestack.empty());
    assert(nodestack.back().opensubtrees == 0);
-@@ -1613,6 +1629,12 @@
+@@ -1554,6 +1586,8 @@
+           else
+             getSymmetries().propagateOrbitopes(localdom);
+         }
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SKP %d %d\n", (int)getCurrentDepth(), (int)localdom.infeasible());
+         if (localdom.infeasible()) {
+           localdom.clearChangedCols(oldNumChangedCols);
+           if (countTreeWeight)
+@@ -1613,6 +1647,12 @@
        currnode.stabilizerOrbits->orbitalFixing(localdom);
        prune = localdom.infeasible();
      }
-+    if (FILE* f = hsSearchDump(mipsolver)) {
++    if (FILE* f = hsSearchDump(mipsolver, inheuristic)) {
 +      std::fprintf(f, "SKS %d %d %d %a %a %d\n", (int)getCurrentDepth(),
 +                   (int)currnode.branchingdecision.column,
 +                   currnode.branchingdecision.boundtype == HighsBoundType::kLower ? 0 : 1,
@@ -234,7 +301,7 @@
      if (prune) {
        localdom.backtrack();
        localdom.clearChangedCols(numChangedCols);
-@@ -1636,7 +1658,7 @@
+@@ -1636,7 +1676,7 @@
    return true;
  }
  
@@ -243,11 +310,20 @@
    const std::vector<HighsDomainChange>& domchgstack =
        localdom.getDomainChangeStack();
  
-@@ -1745,6 +1767,12 @@
+@@ -1679,6 +1719,8 @@
+           else
+             getSymmetries().propagateOrbitopes(localdom);
+         }
++        if (FILE* f = hsSearchDump(mipsolver, inheuristic))
++          std::fprintf(f, "SKP %d %d\n", (int)getCurrentDepth(), (int)localdom.infeasible());
+         if (localdom.infeasible()) {
+           localdom.clearChangedCols(oldNumChangedCols);
+           if (countTreeWeight)
+@@ -1745,6 +1787,12 @@
        currnode.stabilizerOrbits->orbitalFixing(localdom);
        prune = localdom.infeasible();
      }
-+    if (FILE* f = hsSearchDump(mipsolver)) {
++    if (FILE* f = hsSearchDump(mipsolver, inheuristic)) {
 +      std::fprintf(f, "SKS %d %d %d %a %a %d\n", (int)getCurrentDepth(),
 +                   (int)currnode.branchingdecision.column,
 +                   currnode.branchingdecision.boundtype == HighsBoundType::kLower ? 0 : 1,
@@ -256,21 +332,39 @@
      if (prune) {
        localdom.backtrack();
        localdom.clearChangedCols(numChangedCols);
-@@ -1789,6 +1817,13 @@
+@@ -1754,6 +1802,8 @@
+ 
+     nodelb = std::max(nodelb, localdom.getObjectiveLowerBound());
+     bool nodeToQueue = nodelb > getOptimalityLimit();
++    double hsAncInactive = -kHighsInf, hsAncActive = -kHighsInf;
++    int hsAnc = -1;
+     // we check if switching to the other branch of an ancestor yields a higher
+     // additive branch score than staying in this node and if so we postpone the
+     // node and put it to the queue to backtrack further.
+@@ -1783,12 +1833,22 @@
+         // if (!mipsolver.submip)
+         //   printf("nodeScore: %g, ancestorScore: %g\n", nodeScore,
+         //   ancestorScore);
++        hsAncInactive = ancestorScoreInactive;
++        hsAncActive = ancestorScoreActive;
++        hsAnc = i;
+         nodeToQueue = ancestorScoreInactive - ancestorScoreActive >
+                       nodeScore + getFeasTol();
+         break;
        }
      }
  
-+    if (FILE* f = hsSearchDump(mipsolver)) {
-+      std::fprintf(f, "SPQ %d %d %d %a %a %a %d\n", (int)getCurrentDepth(),
++    if (FILE* f = hsSearchDump(mipsolver, inheuristic)) {
++      std::fprintf(f, "SPQ %d %d %d %a %a %a %d %d %a %a %a\n", (int)getCurrentDepth(),
 +                   (int)currnode.branchingdecision.column,
 +                   currnode.branchingdecision.boundtype == HighsBoundType::kLower ? 0 : 1,
 +                   currnode.branchingdecision.boundval, nodelb, nodeScore,
-+                   (int)nodeToQueue);
++                   (int)nodeToQueue, hsAnc, hsAncInactive, hsAncActive, getFeasTol());
 +    }
      if (nodeToQueue) {
        // if (!mipsolver.submip) printf("node goes to queue\n");
        std::vector<HighsInt> branchPositions;
-@@ -1883,7 +1918,7 @@
+@@ -1883,7 +1943,7 @@
    return true;
  }
  
@@ -279,7 +373,7 @@
    reliableatnode.clear();
  
    do {
-@@ -2011,3 +2046,58 @@
+@@ -2011,3 +2071,68 @@
                                              print_display_line);
    }
  }
@@ -287,7 +381,7 @@
 +
 +// ---- discopt dump (HS_DUMP_SEARCH): wrappers recording each control call ----
 +void HighsSearch::hsDumpLine(const char* tag, int result, bool withNode) {
-+  FILE* f = hsSearchDump(mipsolver);
++  FILE* f = hsSearchDump(mipsolver, inheuristic);
 +  if (!f) return;
 +  if (withNode && !nodestack.empty()) {
 +    const NodeData& n = nodestack.back();
@@ -305,7 +399,7 @@
 +HighsSearch::NodeResult HighsSearch::evaluateNode() {
 +  NodeResult r = evaluateNodeImpl();
 +  hsDumpLine("SE", (int)r, true);
-+  if (FILE* f = hsSearchDump(mipsolver)) {
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic)) {
 +    std::fprintf(f, "SEF %d", (int)lp->getFractionalIntegers().size());
 +    for (const auto& fr : lp->getFractionalIntegers())
 +      std::fprintf(f, " %d %a", (int)fr.first, fr.second);
@@ -315,8 +409,18 @@
 +}
 +
 +HighsSearch::NodeResult HighsSearch::branch() {
++  double hsLb0 = nodestack.empty() ? -kHighsInf : nodestack.back().lower_bound;
 +  NodeResult r = branchImpl();
 +  hsDumpLine("SB", (int)r, true);
++  if (FILE* f = hsSearchDump(mipsolver, inheuristic)) {
++    if (r == NodeResult::kBranched && nodestack.size() >= 2) {
++      const NodeData& p = nodestack[nodestack.size() - 2];
++      std::fprintf(f, "SBP %d %d %a %a %a %a %a %d %a\n", (int)p.branchingdecision.column,
++                   p.branchingdecision.boundtype == HighsBoundType::kLower ? 0 : 1,
++                   p.branchingdecision.boundval, p.branching_point, p.other_child_lb,
++                   p.lower_bound, p.estimate, (int)p.opensubtrees, hsLb0);
++    }
++  }
 +  return r;
 +}
 +
@@ -339,7 +443,7 @@
 +  return r;
 +}
 --- a/highs/mip/HighsMipSolver.cpp	2026-11-11 00:23:12.438070933 +0000
-+++ b/highs/mip/HighsMipSolver.cpp	2026-11-11 00:25:28.601946387 +0000
++++ b/highs/mip/HighsMipSolver.cpp	2026-11-11 01:13:44.924196531 +0000
 @@ -6,6 +6,8 @@
  /*                                                                       */
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -376,7 +480,16 @@
        worker.sepa_ptr_->separate(worker.search_ptr_->getLocalDomain());
        if (!mipdata_->parallelLockActive())
          profiling_->stop(kMipClockNodeSearchSeparation);
-@@ -855,8 +863,11 @@
+@@ -745,6 +753,8 @@
+ 
+   auto runHeuristics = [&](HighsInt i) -> bool {
+     HighsMipWorker& worker = mipdata_->workers[i];
++    if (!submip)
++      if (FILE* f = hsSearchDumpFile()) std::fprintf(f, "MH\n");
+     if (!mipdata_->parallelLockActive())
+       profiling_->start(kMipClockDiveEvaluateNode);
+     const HighsSearch::NodeResult evaluate_node_result =
+@@ -855,8 +865,11 @@
            break;
          }
  
@@ -389,7 +502,7 @@
          if (!mipdata_->parallelLockActive()) {
            nodes_explored += worker.search_ptr_->getLocalNodes();
          }
-@@ -907,6 +918,8 @@
+@@ -907,6 +920,8 @@
      // Assign nodes to workers
      bool limit_reached = false;
      if (root_node) {
@@ -398,7 +511,7 @@
        master_worker.search_ptr_->installNode(
            mipdata_->nodequeue.popBestBoundNode());
      } else {
-@@ -993,6 +1006,10 @@
+@@ -993,6 +1008,10 @@
  
      mipdata_->updateLowerBound(std::min(
          mipdata_->upper_bound, mipdata_->nodequeue.getBestLowerBound()));
