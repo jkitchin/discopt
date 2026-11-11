@@ -1,0 +1,61 @@
+H2 (2026-11-11): attach the search's cut pool to its local domain for propagation
+(HiGHS's HighsDomain::CutpoolPropagation), DISCOPT_HIGHS_SEARCH_POOL_PROP.
+
+Hypothesis: on b-ball, HiGHS's pool is decisive (mip_pool_soft_limit=1/age 0 -> 8.3 % after
+187k nodes vs 102 nodes) partly through domain propagation over every pool cut; attaching the
+pool to the search's domain improves b-ball's bound at a fixed node budget by >= half the
+remaining gap (kill criterion), with no bound past the oracle (-1.5).
+
+Common env: DISCOPT_PANEL_DETERMINISTIC=1 RAYON_NUM_THREADS=1 DISCOPT_LP_MILP_BACKEND=rust
+DISCOPT_PROFILE=1 DISCOPT_HIGHS_SEARCH_CUT_LP=1 DISCOPT_HIGHS_SEPA_NODE=1;
+lp_milp_panel.py worker <inst>.mps.gz R 600 1e-4 <max_nodes>. (max_nodes=100000 is read as
+the solver's default, i.e. uncapped: use 99999.) Counters summed over profile blocks.
+
+Entry experiment (shadow probe, search unchanged): the pool (plus/minus HiGHS objective
+propagation) on a copy of the domain synchronised to each evaluated node's propagated box.
+b-ball, 20000 nodes; every arm's bound is bit-identical to the flag-off run (-1.522633110804383).
+
+  arm          probed  cuts processed  cut changes  infeasible  nodes tightened  int cols tightened
+  shadow        24420               0            0           0                0                   0
+  shadow-obj    24420               -            -           0             5819               34673
+  shadow+obj    24420        20181320        39420           0             5819               34673
+
+-> No pool cut ever passes the capacity test on b-ball's node boxes (0 processed). With the
+   objective cutoff propagated (x12 bounded by the incumbent) cuts fire 39k times, but tighten
+   no integer column beyond what objective propagation alone does (5819 / 34673 both ways).
+
+A/B on the search (same build; 0 = without propagation):
+
+  b-ball                     20000 nodes                 99999 nodes
+  arm                 bound       gap %   wall s   bound       gap %   wall s
+  0 (off)            -1.5226331   1.509    8.8    -1.5067243   0.448   69.7
+  1 (pool)           -1.5226331   1.509   12.0    -1.5067243   0.448   72.8   (bit-identical)
+  1+obj (pool+obj)   -1.5193797   1.292    8.0    -1.5042294   0.282   63.3
+  obj (obj only)     -1.5172168   1.148    6.7    -1.5039195   0.261   57.1
+  kill line (half the off gap)    0.754                      0.224
+
+  pool arm counters, 99999: 16434 cuts attached, 0 skipped, 0 global changes, 0 processed,
+  0 changes. 1+obj: 4.7M cuts processed, 107655 changes. No bound past -1.5 in any arm.
+
+Verdict: H2 FALSIFIED on b-ball. Pool propagation never fires there (0 of 16k cuts ever
+pass the capacity test); the pool arm is bit-identical to off. Objective propagation
+(HiGHS's ObjectivePropagation, ported but not wired into the search) is the only lever that
+moves: -24 % (20k) / -42 % (99999) of the gap, short of the kill line; adding the pool to it
+makes the bound worse than objective propagation alone.
+
+Checks (20000 nodes; both certify, so node counts compare):
+  mik-250-20-75-2  off 11514 nodes; pool 6463 (run 1), 11514 (run 2); base build 11514.
+                   Pool: 8789 attached, 1.86M processed, 0 changes -> neutral; run 1's 6463
+                   is not the flag (run 2 = off).
+  neos17           base build 5077, off 4527, pool 2468 nodes; pool: 2336 attached, 1870 changes.
+  Node counts here are NOT deterministic under DISCOPT_PANEL_DETERMINISTIC=1: the same build
+  and flags gave 11514 / 6463 (mik) and 5077 / 4527 (neos17), sub-MIP time caps being the
+  likely wall-clock dependence (unverified). neos17's 2468 is a single run inside that noise.
+  All arms certified the reference optimum (mik -50768, neos17 0.1500026).
+
+Soundness: cuts over working slacks are rewritten over the structurals with a rounding margin
+(PoolCutMap); regression test highs_search_pool_propagation_keeps_feasible_points (360 random
+MILPs, both pool and pool+obj): same certified optimum, every bound (also at 3/12-node limits)
+<= it, the shadow arm bit-identical to off, and 2378 checks that no node propagation drops the
+known optimum from a branching box holding it while it beats the cutoff -- 0 violations. With
+the rewritten rhs tightened by 0.5 (a deliberately invalid cut) the test fails (wrong optimum).
