@@ -727,6 +727,7 @@ counters!(
     HighsMipSearchHeuristicHits,
     HighsMipSearchSepCalls,
     HighsMipSearchSepLifts,
+    HighsMipSearchFolded,
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,

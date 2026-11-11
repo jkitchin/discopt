@@ -6448,6 +6448,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchHeuristicHits, o.heuristic_hits as u64);
                     incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
                     incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
+                    incr_by(Ctr::HighsMipSearchFolded, o.folded as u64);
                 }
             }
             outs
@@ -7579,6 +7580,7 @@ fn incumbent_misvalued(obj: f64, tree_inc: f64) -> bool {
 /// working LP (constant within a batch), the options, and a snapshot of the
 /// tree's read-only state. All fields are `Sync`, so `solve_node` runs under
 /// `rayon`'s `into_par_iter` over the batch.
+#[derive(Clone, Copy)]
 struct NodeCtx<'a> {
     b_w: &'a [f64],
     c_w: &'a [f64],
@@ -11948,6 +11950,7 @@ mod tests {
         };
         let (mut optimal, mut infeasible, mut limited) = (0usize, 0usize, 0usize);
         let runs0 = super::highs_env::RUNS.with(|r| r.get());
+        let folded0 = super::highs_env::FOLDED.with(|r| r.get());
         for it in 0..150 {
             let mixed = it % 2 == 1;
             let ns = rnd(8, 18) as usize;
@@ -12079,13 +12082,19 @@ mod tests {
             }
         }
         let runs = super::highs_env::RUNS.with(|r| r.get()) - runs0;
-        eprintln!("optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}");
+        let folded = super::highs_env::FOLDED.with(|r| r.get()) - folded0;
+        eprintln!("optimal {optimal} infeasible {infeasible} limited {limited} runs {runs} folded {folded}");
         assert!(
             // Measured: 128 optimal, 22 infeasible (21 reaching the search; one is
             // proved before it), 46 node-limited, 277 searches. Runs beyond the two per
             // optimal problem are infeasible problems the search itself refuted.
-            optimal > 100 && infeasible > 10 && limited > 20 && runs >= 2 * optimal + 10,
-            "probe fired too little: optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}"
+            optimal > 100
+                && infeasible > 10
+                && limited > 20
+                && runs >= 2 * optimal + 10
+                // Measured 17: cuts folded into the search's LP between rounds.
+                && folded >= 8,
+            "probe fired too little: optimal {optimal} infeasible {infeasible} limited {limited} runs {runs} folded {folded}"
         );
     }
 
