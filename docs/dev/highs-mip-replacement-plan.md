@@ -218,3 +218,26 @@ the local-domain half of stage 3 forward), and reads scores through a pseudocost
 | 1b | `HS_DUMP_SEARCH`: per node, the inputs and outcome of each control decision (install, evaluate result and bounds, branching decision, each backtrack step with prune outcome, `backtrackPlunge` scores and plunge/queue choice, dive steps, main-loop plunge/queue selection) | dump covers all decision kinds on mik and the queue fixture's instances |
 | 1c | `HighsSearch` node stack and control (`NodeData`, `installNode`, `evaluateNode` control, `branch` control, `backtrack`, `backtrackPlunge`, `backtrackUntilDepth`, `dive`, `currentNodeToQueue`, `openNodesToQueue`) with `NodeLp`, `Pseudocost` and `Domain` behind traits | replay with mocks fed from 1b: identical decisions |
 | 1d | `HighsMipSolver::run`'s node processing over 1c; the driver's search loop switched to it; the safety layer and hooks re-hosted; batches, reduce and plunge emulation deleted | Rust and Python suites green; soundness panel clean; certified count recorded against stage 0 |
+
+**Stage 1b (2026-11-11), done.** `HS_DUMP_SEARCH` (`data/highs-parity/search/hs_dump_search.patch`,
+on top of the queue patch; HiGHS 1.15.1) writes the queue events and the search's control
+events to one file, in order, top-level search only:
+
+| event | when | fields |
+|---|---|---|
+| `MI R\|B\|E` | main loop installs a node: root, best bound, best estimate | - |
+| `MS`, `ML` | separation at the installed node; plunge-limit break | - |
+| `MG` | after each main-loop round | global lower and upper bound, nodes |
+| `SI` | `installNode` | depth, lower bound, estimate, bound changes |
+| `SE` + `SEF` | each `evaluateNode` (recursive calls too) | result, depth, node lb/estimate/LP objective, open subtrees, branching decision, cutoff, optimality limit; fractional columns |
+| `SB`, `SD0`/`SD`, `SK`, `SP` | `branch`, `dive`, `backtrack`, `backtrackPlunge` | result plus the same node fields after the call |
+| `SKS` | each sibling tried while backtracking | depth, decision, node lb, pruned |
+| `SPQ` | `backtrackPlunge`'s plunge-or-queue choice | depth, decision, node lb, node score, sent to queue |
+| `SQ C\|O` | `currentNodeToQueue` / `openNodesToQueue` per node | depth, lb, estimate, pruned |
+
+The dump does not change the search (mik-250-20-75-1: 718 nodes with and without). Over the 58
+distinct instances of the population at 20 s (`hs_dump_search_coverage.md`): 99,279 open and
+32,618 pruned evaluations, 54,425 branchings, 29,981 dives, 27,646 plunges (5,912 siblings sent
+to the queue), 54,000 sibling decisions (11,480 pruned), 4,297 installs from the queue. Every
+decision kind and outcome is observed except a node pruned inside `openNodesToQueue`
+(`SQ O` with prune = 1: 0 of 8,926), which 1c covers with a unit test instead of a replay.
