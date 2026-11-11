@@ -141,35 +141,6 @@ impl HighsEval {
         })
     }
 
-    /// The working LP changed (rows appended): rebuild the domain over it at its
-    /// global bounds and extend the basis with the new slacks basic. Only between
-    /// rounds, when the search's node stack is empty. `false` when the rows are
-    /// infeasible over the global box.
-    pub fn relp(&mut self, ctx: &NodeCtx<'_>) -> bool {
-        let Some((dom, slacks)) = domain_from_lp(
-            ctx.csc_rc,
-            ctx.m_w,
-            ctx.n_w,
-            ctx.ns,
-            ctx.b_w,
-            ctx.l_w,
-            ctx.u_w,
-            ctx.is_int_full,
-        ) else {
-            return false;
-        };
-        self.dom = dom;
-        self.slacks = slacks;
-        self.basis = self.basis.take().map(|b| extend_basis(b, ctx.n_w));
-        self.point = None;
-        self.point_full = None;
-        self.last_dual = None;
-        self.last_dual_raw = None;
-        self.last_box = None;
-        self.redcost = None;
-        true
-    }
-
     /// Install a box on the local domain as branching changes from its global
     /// baseline (without propagating); whether the domain stayed feasible.
     pub fn install_box(&mut self, lb: &[f64], ub: &[f64]) -> bool {

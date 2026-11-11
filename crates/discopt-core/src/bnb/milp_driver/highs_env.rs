@@ -41,8 +41,6 @@ use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
 thread_local! {
     /// Searches run on this thread (tests prove the route fired).
     pub(super) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Cuts folded into the search's LP on this thread.
-    pub(super) static FOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Limits and tolerances for [`run`].
@@ -89,8 +87,6 @@ pub(super) struct Outcome {
     pub heuristic_hits: usize,
     pub sep_calls: usize,
     pub sep_lifts: usize,
-    /// Cuts folded into the search's LP.
-    pub folded: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -142,9 +138,10 @@ fn from_q(c: &QDomainChange) -> DomainChange {
     }
 }
 
-/// The search's state that persists across main-loop rounds (and across folds of
-/// cuts into its LP between rounds).
-pub(super) struct State {
+/// The production search environment.
+pub(super) struct HighsEnv<'a, 'b> {
+    ctx: &'a NodeCtx<'b>,
+    lim: &'a Limits,
     pub eval: HighsEval,
     pub pc: Pseudocost,
     pub q: NodeQueue,
@@ -157,70 +154,54 @@ pub(super) struct State {
     pub stop: Option<Stop>,
     gap_stop: bool,
     /// Node separation's cuts (globally valid Gomory cuts found at nodes), offered to
-    /// later nodes' separation and folded into the LP between rounds; with
-    /// signatures for deduplication, the best efficacy each reached at a node this
-    /// round, and whether it is in the LP.
+    /// later nodes' separation; with signatures for deduplication.
     pool: Vec<GomoryCut>,
     pool_sigs: std::collections::HashSet<Vec<(u32, i64)>>,
-    pool_score: std::collections::HashMap<usize, f64>,
-    pool_in_lp: Vec<bool>,
     pub sep_calls: usize,
     pub sep_lifts: usize,
-    pub folded: usize,
-}
-
-/// The production search environment for one round: the round's LP context, the
-/// limits, and the persistent state.
-pub(super) struct HighsEnv<'a, 'b> {
-    ctx: &'a NodeCtx<'b>,
-    lim: &'a Limits,
-    pub st: State,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
     /// Take up incumbents the components found, and set the cutoff to the best value.
     fn sync(&mut self) {
-        while self.st.nseen < self.st.eval.found.len() {
-            let (x, v) = self.st.eval.found[self.st.nseen].clone();
-            self.st.nseen += 1;
+        while self.nseen < self.eval.found.len() {
+            let (x, v) = self.eval.found[self.nseen].clone();
+            self.nseen += 1;
             self.accept(x, v);
         }
     }
 
     fn accept(&mut self, x: Vec<f64>, v: f64) {
-        if self.st.best.as_ref().is_none_or(|b| v < b.1) {
-            self.st.best = Some((x, v));
-            self.st.eval.cutoff = v;
+        if self.best.as_ref().is_none_or(|b| v < b.1) {
+            self.best = Some((x, v));
+            self.eval.cutoff = v;
         }
     }
 
     fn optlim(&self) -> f64 {
-        optimality_limit(
-            self.lim,
-            self.st.best.as_ref().map_or(f64::INFINITY, |b| b.1),
-        )
+        optimality_limit(self.lim, self.best.as_ref().map_or(f64::INFINITY, |b| b.1))
     }
 
     fn check_limits(&mut self) -> bool {
-        if self.st.stop.is_some() {
+        if self.stop.is_some() {
             return true;
         }
-        if self.st.nodes as usize >= self.lim.max_nodes {
-            self.st.stop = Some(Stop::Nodes);
+        if self.nodes as usize >= self.lim.max_nodes {
+            self.stop = Some(Stop::Nodes);
         } else if self
             .lim
             .max_open_nodes
-            .is_some_and(|k| self.st.q.num_nodes() as usize > k)
+            .is_some_and(|k| self.q.num_nodes() as usize > k)
         {
-            self.st.stop = Some(Stop::OpenNodes);
+            self.stop = Some(Stop::OpenNodes);
         } else if self
             .lim
             .deadline
             .is_some_and(|d| std::time::Instant::now() >= d)
         {
-            self.st.stop = Some(Stop::Time);
+            self.stop = Some(Stop::Time);
         }
-        self.st.stop.is_some()
+        self.stop.is_some()
     }
 }
 
@@ -233,25 +214,25 @@ impl SearchEnv for HighsEnv<'_, '_> {
         est: f64,
         depth: i32,
     ) -> f64 {
-        self.st.q.emplace_node(d, b, lb, est, depth).1
+        self.q.emplace_node(d, b, lb, est, depth).1
     }
     fn queue_pop_best(&mut self) -> OpenNode {
-        self.st.q.pop_best_node().1
+        self.q.pop_best_node().1
     }
     fn queue_pop_best_bound(&mut self) -> OpenNode {
-        self.st.q.pop_best_bound_node().1
+        self.q.pop_best_bound_node().1
     }
     fn queue_is_empty(&self) -> bool {
-        self.st.q.is_empty()
+        self.q.is_empty()
     }
     fn queue_best_lower_bound(&self) -> f64 {
-        self.st.q.best_lower_bound()
+        self.q.best_lower_bound()
     }
     fn queue_best_bound_stack_size(&self) -> i32 {
-        self.st.q.best_bound_domchg_stack_size()
+        self.q.best_bound_domchg_stack_size()
     }
     fn cutoff_bound(&self) -> f64 {
-        self.st.eval.cutoff
+        self.eval.cutoff
     }
     fn optimality_limit(&self) -> f64 {
         self.optlim()
@@ -266,51 +247,51 @@ impl SearchEnv for HighsEnv<'_, '_> {
         self.check_limits()
     }
     fn domain_install(&mut self, node: &OpenNode) {
-        self.st.eval.dom.backtrack_to_global();
+        self.eval.dom.backtrack_to_global();
         let stack: Vec<DomainChange> = node.domchgstack.iter().map(from_q).collect();
         let br: Vec<usize> = node.branchings.iter().map(|&p| p as usize).collect();
-        self.st.eval.dom.set_domain_change_stack(&stack, &br);
-        self.st.eval.subrootsol.clear();
+        self.eval.dom.set_domain_change_stack(&stack, &br);
+        self.eval.subrootsol.clear();
     }
     fn domain_stack_len(&self) -> i32 {
-        self.st.eval.dom.domain_change_stack().len() as i32
+        self.eval.dom.domain_change_stack().len() as i32
     }
     fn domain_backtrack(&mut self) {
-        self.st.eval.dom.backtrack();
+        self.eval.dom.backtrack();
     }
     fn domain_backtrack_to_global(&mut self) {
-        self.st.eval.dom.backtrack_to_global();
+        self.eval.dom.backtrack_to_global();
     }
     fn domain_propagate_after_backtrack(&mut self, _depth: i32) -> bool {
-        self.st.eval.dom.propagate();
-        self.st.eval.dom.infeasible()
+        self.eval.dom.propagate();
+        self.eval.dom.infeasible()
     }
     fn domain_try_sibling(&mut self, d: QDomainChange, skip_propagate: bool) -> bool {
-        self.st.eval.dom.change_bound(from_q(&d), Reason::Branching);
-        if !skip_propagate && !self.st.eval.dom.infeasible() {
-            self.st.eval.dom.propagate();
+        self.eval.dom.change_bound(from_q(&d), Reason::Branching);
+        if !skip_propagate && !self.eval.dom.infeasible() {
+            self.eval.dom.propagate();
         }
-        self.st.eval.dom.infeasible()
+        self.eval.dom.infeasible()
     }
     fn domain_undo_sibling(&mut self) {
-        self.st.eval.dom.backtrack();
-        self.st.eval.dom.clear_changed_cols();
+        self.eval.dom.backtrack();
+        self.eval.dom.clear_changed_cols();
     }
     fn domain_propagate_for_queue(&mut self) -> bool {
-        let n = self.st.eval.dom.changed_cols().len();
-        self.st.eval.dom.propagate();
-        self.st.eval.dom.clear_changed_cols_from(n);
-        self.st.eval.dom.infeasible()
+        let n = self.eval.dom.changed_cols().len();
+        self.eval.dom.propagate();
+        self.eval.dom.clear_changed_cols_from(n);
+        self.eval.dom.infeasible()
     }
     fn domain_reduced_stack(&mut self) -> (Vec<QDomainChange>, Vec<i32>) {
-        let (s, p) = self.st.eval.dom.reduced_domain_change_stack();
+        let (s, p) = self.eval.dom.reduced_domain_change_stack();
         (
             s.iter().map(to_q).collect(),
             p.iter().map(|&x| x as i32).collect(),
         )
     }
     fn domain_objective_lower_bound(&mut self) -> f64 {
-        match self.st.eval.dom.objective_lower() {
+        match self.eval.dom.objective_lower() {
             Some((v, 0)) => v + self.ctx.obj_const,
             _ => f64::NEG_INFINITY,
         }
@@ -325,26 +306,25 @@ impl SearchEnv for HighsEnv<'_, '_> {
         parent: Option<&NodeData>,
         _depth: i32,
     ) -> SearchResult {
-        self.st.nodes += 1;
+        self.nodes += 1;
         let limit = self.optlim();
         let r = self
-            .st
             .eval
-            .evaluate(self.ctx, node, parent, &mut self.st.pc, false, limit);
+            .evaluate(self.ctx, node, parent, &mut self.pc, false, limit);
         self.sync();
         r
     }
     fn branch(&mut self, top: &NodeData, parent: Option<&NodeData>, _depth: i32) -> BranchOutcome {
-        let q = &self.st.q;
+        let q = &self.q;
         let nodes = |c: usize| (q.num_nodes_up(c), q.num_nodes_down(c));
         let deadline = self.lim.deadline;
         let limits = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let bc = BranchCtx {
             optimality_limit: optimality_limit(
                 self.lim,
-                self.st.best.as_ref().map_or(f64::INFINITY, |b| b.1),
+                self.best.as_ref().map_or(f64::INFINITY, |b| b.1),
             ),
-            upper_limit: self.st.eval.cutoff,
+            upper_limit: self.eval.cutoff,
             feastol: 1e-6,
             epsilon: 1e-9,
             nodes_up_down: &nodes,
@@ -352,17 +332,14 @@ impl SearchEnv for HighsEnv<'_, '_> {
             child_rule: ChildSelectionRule::RootSol,
             inheuristic: false,
         };
-        let out = self
-            .st
-            .eval
-            .branch(self.ctx, &mut self.st.pc, top, parent, &bc);
-        self.st.commits += out
+        let out = self.eval.branch(self.ctx, &mut self.pc, top, parent, &bc);
+        self.commits += out
             .steps
             .iter()
             .filter(|s| matches!(s, BranchStep::Commit { .. }))
             .count();
         if out.branched.is_some() {
-            self.st.branched += 1;
+            self.branched += 1;
         }
         self.sync();
         out
@@ -374,14 +351,14 @@ impl SearchEnv for HighsEnv<'_, '_> {
     ) -> (f64, Option<(f64, f64)>) {
         let (c, p, up) = node;
         let s = if up {
-            self.st.pc.score_up(c as usize, p)
+            self.pc.score_up(c as usize, p)
         } else {
-            self.st.pc.score_down(c as usize, p)
+            self.pc.score_down(c as usize, p)
         };
         let a = ancestor.map(|(ac, ap, lower)| {
             let (d, u) = (
-                self.st.pc.score_down(ac as usize, ap),
-                self.st.pc.score_up(ac as usize, ap),
+                self.pc.score_down(ac as usize, ap),
+                self.pc.score_up(ac as usize, ap),
             );
             if lower {
                 (d, u)
@@ -402,10 +379,10 @@ impl SearchEnv for HighsEnv<'_, '_> {
             return false;
         }
         let (Some(x), Some(y), Some(basis), Some((fl, fu))) = (
-            self.st.eval.point_full.clone(),
-            self.st.eval.last_dual_raw.clone(),
-            self.st.eval.basis.clone(),
-            self.st.eval.last_box.clone(),
+            self.eval.point_full.clone(),
+            self.eval.last_dual_raw.clone(),
+            self.eval.basis.clone(),
+            self.eval.last_box.clone(),
         ) else {
             return false;
         };
@@ -419,10 +396,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             return false;
         }
         let mut pick: Vec<(f64, usize)> = Vec::new();
-        for (k, cut) in self.st.pool.iter().enumerate() {
-            if self.st.pool_in_lp[k] {
-                continue;
-            }
+        for (k, cut) in self.pool.iter().enumerate() {
             let (mut act, mut nrm) = (0.0, 0.0);
             for (j, &a) in cut.coeffs.iter().enumerate() {
                 if a != 0.0 {
@@ -437,22 +411,18 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         pick.truncate(NODE_GMI_POOL_PER_NODE);
-        for &(eff, k) in &pick {
-            let e = self.st.pool_score.entry(k).or_insert(eff);
-            *e = e.max(eff);
-        }
         let rows: Vec<GomoryCut> = pick
             .iter()
             .map(|&(_, k)| {
-                let mut coeffs = self.st.pool[k].coeffs.clone();
+                let mut coeffs = self.pool[k].coeffs.clone();
                 coeffs.resize(ctx.n_w, 0.0);
                 GomoryCut {
                     coeffs,
-                    rhs: self.st.pool[k].rhs,
+                    rhs: self.pool[k].rhs,
                 }
             })
             .collect();
-        self.st.sep_calls += 1;
+        self.sep_calls += 1;
         let lg = node_local_gmi_bound(
             ctx,
             &fl,
@@ -462,31 +432,16 @@ impl SearchEnv for HighsEnv<'_, '_> {
             &basis,
             &rows,
             NODE_GMI_ROUNDS,
-            self.st.nodes,
+            self.nodes,
         );
-        self.st.eval.lp_iters += lg.pivots as i64;
+        self.eval.lp_iters += lg.pivots as i64;
         if let Some(g) = lg.bound {
-            self.st.sep_lifts += 1;
-            self.st.eval.pending_lift = Some(g + ctx.obj_const);
+            self.sep_lifts += 1;
+            self.eval.pending_lift = Some(g + ctx.obj_const);
         }
         for cut in lg.new_cuts {
-            if self.st.pool_sigs.insert(cut_signature(&cut)) {
-                // Its efficacy at the node point that produced it.
-                let (mut act, mut nrm) = (0.0, 0.0);
-                for (j, &a) in cut.coeffs.iter().enumerate() {
-                    if a != 0.0 && j < x.len() {
-                        act += a * x[j];
-                        nrm += a * a;
-                    }
-                }
-                let k = self.st.pool.len();
-                if nrm > 0.0 && cut.rhs - act > 0.0 {
-                    self.st
-                        .pool_score
-                        .insert(k, (cut.rhs - act) / f64::sqrt(nrm));
-                }
-                self.st.pool.push(cut);
-                self.st.pool_in_lp.push(false);
+            if self.pool_sigs.insert(cut_signature(&cut)) {
+                self.pool.push(cut);
             }
         }
         false
@@ -497,7 +452,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
     fn run_heuristics(&mut self) {
         // discopt's rounding of the node LP point (HiGHS: randomized rounding, RENS,
         // RINS -- stage 6).
-        let Some(x) = self.st.eval.point_full.clone() else {
+        let Some(x) = self.eval.point_full.clone() else {
             return;
         };
         let ctx = self.ctx;
@@ -514,23 +469,23 @@ impl SearchEnv for HighsEnv<'_, '_> {
             ctx.n_w,
             ctx.obj_const,
         ) {
-            self.st.heuristic_hits += 1;
+            self.heuristic_hits += 1;
             self.accept(cand, v);
         }
     }
     fn after_round(&mut self) -> bool {
-        self.st.q.perform_bounding(self.st.eval.cutoff);
+        self.q.perform_bounding(self.eval.cutoff);
         let optlim = self.optlim();
-        self.st.q.set_optimality_limit(optlim);
-        let inc = self.st.best.as_ref().map_or(f64::INFINITY, |b| b.1);
-        let lb = if self.st.q.is_empty() {
+        self.q.set_optimality_limit(optlim);
+        let inc = self.best.as_ref().map_or(f64::INFINITY, |b| b.1);
+        let lb = if self.q.is_empty() {
             inc
         } else {
-            inc.min(self.st.q.best_lower_bound())
+            inc.min(self.q.best_lower_bound())
         }
-        .min(self.st.eval.unresolved_floor);
+        .min(self.eval.unresolved_floor);
         if gap_closed(self.lim, inc, lb) {
-            self.st.gap_stop = true;
+            self.gap_stop = true;
             return true;
         }
         self.check_limits()
@@ -553,7 +508,9 @@ pub(super) fn run(
     RUNS.with(|r| r.set(r.get() + 1));
     let mut eval = HighsEval::new(ctx)?;
     eval.tighten_cutoff = false;
-    let mut st = State {
+    let mut env = HighsEnv {
+        ctx,
+        lim,
         eval,
         pc: Pseudocost::new(ctx.ns, DEFAULT_MIN_RELIABLE),
         q: NodeQueue::new(ctx.ns),
@@ -567,221 +524,50 @@ pub(super) fn run(
         gap_stop: false,
         pool: Vec::new(),
         pool_sigs: std::collections::HashSet::new(),
-        pool_score: std::collections::HashMap::new(),
-        pool_in_lp: Vec::new(),
         sep_calls: 0,
         sep_lifts: 0,
-        folded: 0,
     };
-    st.q.emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
-    // The search's own copy of the working LP, grown by folding cuts between rounds
-    // (HiGHS adds separated cuts to its LP; the driver's LP stays as it was).
-    let mut own = OwnedLp::from_ctx(ctx);
-    let fold_cap = (ctx.n_orig_rows / 2).max(FOLD_CAP_MIN);
+    if let Some((x, v)) = initial {
+        env.accept(x, v);
+    }
+    env.q
+        .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
     let mut search = Search {
         count_tree_weight: true,
         ..Default::default()
     };
     let mut ml = MainLoop::default();
     let mut root = true;
-    let mut accepted_initial = initial;
-    loop {
-        let rctx = own.ctx(ctx);
-        let mut env = HighsEnv {
-            ctx: &rctx,
-            lim,
-            st,
-        };
-        if let Some((x, v)) = accepted_initial.take() {
-            env.accept(x, v);
+    while !env.queue_is_empty() {
+        let stop = ml.round(&mut env, &mut search, root, NO_NODE_LIMIT);
+        if root && env.eval.unbounded {
+            return None;
         }
-        let mut stop = false;
-        let mut rounds = 0usize;
-        // Rounds on this LP until there are cuts worth folding.
-        while !env.queue_is_empty() {
-            stop = ml.round(&mut env, &mut search, root, NO_NODE_LIMIT);
-            if root && env.st.eval.unbounded {
-                return None;
-            }
-            root = false;
-            rounds += 1;
-            if stop || (env.st.folded < fold_cap && fold_candidates(&env.st) >= FOLD_MIN) {
-                break;
-            }
-        }
-        let _ = rounds;
-        st = env.st;
-        if stop || st.q.is_empty() {
-            break;
-        }
-        // Fold the best-scoring pool cuts into the LP and rebuild what depends on it.
-        let mut cands: Vec<(f64, usize)> = st
-            .pool_score
-            .iter()
-            .filter(|(k, _)| !st.pool_in_lp[**k])
-            .map(|(&k, &sc)| (sc, k))
-            .collect();
-        cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        cands.truncate(FOLD_PER_ROUND.min(fold_cap - st.folded));
-        let cuts: Vec<GomoryCut> = cands.iter().map(|&(_, k)| st.pool[k].clone()).collect();
-        for &(_, k) in &cands {
-            st.pool_in_lp[k] = true;
-        }
-        st.pool_score.clear();
-        st.folded += cuts.len();
-        #[cfg(test)]
-        FOLDED.with(|f| f.set(f.get() + cuts.len()));
-        own.add_cuts(&cuts);
-        let rctx = own.ctx(ctx);
-        if !st.eval.relp(&rctx) {
-            // The rows (cuts included, all valid for every integer point of the
-            // box) are infeasible over the global box: no integer point is left.
-            st.q.clear();
+        root = false;
+        if stop {
             break;
         }
     }
-    let inc = st.best.as_ref().map_or(f64::INFINITY, |b| b.1);
-    let open = if st.q.is_empty() {
+    let inc = env.best.as_ref().map_or(f64::INFINITY, |b| b.1);
+    let open = if env.q.is_empty() {
         f64::INFINITY
     } else {
-        st.q.best_lower_bound()
+        env.q.best_lower_bound()
     };
-    let bound = inc.min(open).min(st.eval.unresolved_floor);
+    let bound = inc.min(open).min(env.eval.unresolved_floor);
     Some(Outcome {
-        best: st.best.clone(),
+        best: env.best.clone(),
         bound,
-        complete: st.stop.is_none() && (st.q.is_empty() || st.gap_stop),
-        unresolved: st.eval.unresolved_floor < inc,
-        stop: st.stop,
-        nodes: st.nodes,
-        lp_iters: st.eval.lp_iters,
-        sb_iters: st.eval.sb_iters,
-        commits: st.commits,
-        branched: st.branched,
-        heuristic_hits: st.heuristic_hits,
-        sep_calls: st.sep_calls,
-        sep_lifts: st.sep_lifts,
-        folded: st.folded,
+        complete: env.stop.is_none() && (env.q.is_empty() || env.gap_stop),
+        unresolved: env.eval.unresolved_floor < inc,
+        stop: env.stop,
+        nodes: env.nodes,
+        lp_iters: env.eval.lp_iters,
+        sb_iters: env.eval.sb_iters,
+        commits: env.commits,
+        branched: env.branched,
+        heuristic_hits: env.heuristic_hits,
+        sep_calls: env.sep_calls,
+        sep_lifts: env.sep_lifts,
     })
-}
-
-/// Fold once any scored cut is waiting (HiGHS adds separated cuts to its LP at once), at
-/// most this many per fold, and
-/// at most `max(FOLD_CAP_MIN, original rows / 2)` in all.
-const FOLD_MIN: usize = 1;
-const FOLD_PER_ROUND: usize = 20;
-const FOLD_CAP_MIN: usize = 50;
-
-/// Pool cuts scored since the last fold that are not in the LP yet.
-fn fold_candidates(st: &State) -> usize {
-    st.pool_score.keys().filter(|&&k| !st.pool_in_lp[k]).count()
-}
-
-/// The search's own working LP `A x = b` (the driver's at the root, then grown by
-/// folded cuts `a.x - s = rhs`, `s >= 0`) with the solve structures over it.
-pub(super) struct OwnedLp {
-    csc: SparseCols,
-    b: Vec<f64>,
-    c: Vec<f64>,
-    l: Vec<f64>,
-    u: Vec<f64>,
-    is_int_full: Vec<bool>,
-    slack_l: Vec<f64>,
-    slack_u: Vec<f64>,
-    problem: ScaledProblem,
-    m: usize,
-    n: usize,
-}
-
-impl OwnedLp {
-    fn from_ctx(ctx: &NodeCtx<'_>) -> Self {
-        let csc = ctx.csc_rc.clone();
-        let problem = ScaledProblem::new(csc.clone(), ctx.m_w, ctx.n_w, ctx.c_w, ctx.b_w);
-        OwnedLp {
-            csc,
-            b: ctx.b_w[..ctx.m_w].to_vec(),
-            c: ctx.c_w[..ctx.n_w].to_vec(),
-            l: ctx.l_w[..ctx.n_w].to_vec(),
-            u: ctx.u_w[..ctx.n_w].to_vec(),
-            is_int_full: ctx.is_int_full[..ctx.n_w].to_vec(),
-            slack_l: ctx.slack_l.to_vec(),
-            slack_u: ctx.slack_u.to_vec(),
-            problem,
-            m: ctx.m_w,
-            n: ctx.n_w,
-        }
-    }
-
-    /// The node context over this LP (everything else from the driver's).
-    fn ctx<'s>(&'s self, base: &NodeCtx<'s>) -> NodeCtx<'s> {
-        let p = &self.problem;
-        NodeCtx {
-            b_w: &self.b,
-            c_w: &self.c,
-            l_w: &self.l,
-            u_w: &self.u,
-            scaling: p.scaling(),
-            sc: p.solve_c(),
-            sb: p.solve_b(),
-            csc: p.solve_matrix(),
-            csc_rc: p.original_matrix(),
-            problem: p,
-            slack_l: &self.slack_l,
-            slack_u: &self.slack_u,
-            is_int_full: &self.is_int_full,
-            m_w: self.m,
-            n_w: self.n,
-            // The driver's root basis is over its LP's columns: valid until the
-            // first fold (the search keeps its own basis from the first solve on).
-            root_warm_basis: if self.n == base.n_w {
-                base.root_warm_basis
-            } else {
-                None
-            },
-            cut_lp_rows: &[],
-            gmi_pool: &[],
-            ..*base
-        }
-    }
-
-    /// Append each cut `a.x >= rhs` as the row `a.x - s = rhs` with a new surplus
-    /// slack `s` in `[0, inf)`.
-    fn add_cuts(&mut self, cuts: &[GomoryCut]) {
-        if cuts.is_empty() {
-            return;
-        }
-        let (cp, ri, rv) = self.csc.raw();
-        let mut cols: Vec<Vec<(usize, f64)>> = (0..self.n)
-            .map(|j| (cp[j]..cp[j + 1]).map(|k| (ri[k], rv[k])).collect())
-            .collect();
-        for cut in cuts {
-            let row = self.m;
-            for (j, &a) in cut.coeffs.iter().enumerate() {
-                if a != 0.0 && j < self.n {
-                    cols[j].push((row, a));
-                }
-            }
-            cols.push(vec![(row, -1.0)]);
-            self.b.push(cut.rhs);
-            self.c.push(0.0);
-            self.l.push(0.0);
-            self.u.push(INF);
-            self.is_int_full.push(false);
-            self.slack_l.push(0.0);
-            self.slack_u.push(INF);
-            self.m += 1;
-            self.n += 1;
-        }
-        let mut cpn = vec![0usize];
-        let (mut rin, mut rvn) = (Vec::new(), Vec::new());
-        for col in &cols {
-            for &(i, v) in col {
-                rin.push(i);
-                rvn.push(v);
-            }
-            cpn.push(rin.len());
-        }
-        self.csc = SparseCols::from_csc(cpn, rin, rvn);
-        self.problem = ScaledProblem::new(self.csc.clone(), self.m, self.n, &self.c, &self.b);
-    }
 }
