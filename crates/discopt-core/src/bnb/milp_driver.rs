@@ -12550,6 +12550,144 @@ mod tests {
         );
     }
 
+    /// The HiGHS-design search's dual bound counts the queue's suboptimal nodes.
+    ///
+    /// A node whose bound is above the optimality limit (the incumbent less the gap
+    /// allowance) but below the cutoff leaves the active queue for the suboptimal set:
+    /// it is not searched, but it still bounds the optimum from below. The search ends
+    /// when no active node is left, and its bound was `min(incumbent, best queued
+    /// bound)` only while an *active* node remained (`NodeQueue::is_empty` counts
+    /// active nodes only), so a search that ended with suboptimal nodes reported the
+    /// incumbent itself as the bound: above the optimum whenever the incumbent was not
+    /// optimal. Found on neos17 (`DISCOPT_HIGHS_SEARCH_CUT_LP=1
+    /// DISCOPT_HIGHS_SEPA_NODE=1`, MIPLIB optimum 0.1500025774): `optimal`,
+    /// objective 0.150069, bound 0.150069; reproduced deterministically from a seeded
+    /// incumbent at 0.15005, where the node holding the optimum was queued as
+    /// suboptimal at bound 0.149966 (optimality limit 0.14995) and the search reported
+    /// 0.15005. Here, a 1 % gap on random MILPs: every reported bound must stay at or
+    /// below the optimum the exact search certifies on the same problem.
+    #[test]
+    fn highs_search_bound_counts_suboptimal_nodes() {
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(true));
+
+        use super::highs_branch::e2e::{E2eResult, E2E};
+        let mut seed = 97u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut checked, mut above) = (0usize, 0usize);
+        for it in 0..80 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 18) as usize;
+            let m = rnd(6, 10) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+            let mut b = Vec::new();
+            for row in rows.iter_mut() {
+                for j in 0..ns {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            row.push((j, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            for (i, row) in rows.iter().enumerate() {
+                for &(j, v) in row {
+                    cols[j].push((i, v));
+                }
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            // The exact optimum (the batched search, gap 1e-9).
+            let exact = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &opts(ns, ints.clone()),
+                None,
+                None,
+                None,
+            );
+            if exact.status != MilpStatus::Optimal {
+                continue;
+            }
+            // The HiGHS-design search at a loose gap, from no incumbent, so its first
+            // incumbents are rarely optimal and nodes within the gap of them become
+            // suboptimal.
+            let mut o = opts(ns, ints);
+            o.heuristics = false;
+            E2E.with(|e| {
+                *e.borrow_mut() = Some(E2eResult {
+                    cfg_gap_tol: Some(0.01),
+                    cfg_no_initial: true,
+                    ..Default::default()
+                })
+            });
+            let _ = solve_milp_node_search(csc, m, n, &cf, &lf, &uf, &b, 0.0, &o, None, None, None);
+            let h = E2E.with(|e| e.borrow_mut().take().unwrap());
+            if !h.ran || h.stopped_by_limit || !h.complete {
+                continue;
+            }
+            let Some((_, inc)) = h.best.clone() else {
+                continue;
+            };
+            checked += 1;
+            let tol = 1e-6 * (1.0 + exact.obj.abs());
+            if inc > exact.obj + tol {
+                above += 1;
+            }
+            assert!(
+                h.bound <= exact.obj + tol,
+                "problem {it}: the search's bound {} is above the optimum {} (incumbent {inc})",
+                h.bound,
+                exact.obj
+            );
+        }
+        // The probe must have met searches that ended on a suboptimal incumbent, the
+        // only case where the bound and the incumbent differ. Measured (seed 97, gap
+        // 0.01): 80 searches checked, 6 ended on a suboptimal incumbent; before the
+        // fix problem 15 (optimum -231, incumbent -229) reported -229 as its bound.
+        eprintln!("checked {checked} incumbent above the optimum {above}");
+        assert!(
+            checked >= 60 && above >= 3,
+            "probe fired too little: {checked} {above}"
+        );
+    }
+
     /// Stage 1d-2 gate (`docs/dev/highs-mip-replacement-plan.md`): the HiGHS-search node
     /// evaluation (`highs_eval`) against `solve_node` on every node of real searches over
     /// random pure-integer and mixed MILPs. Same box: verdicts and bounds agree bit for

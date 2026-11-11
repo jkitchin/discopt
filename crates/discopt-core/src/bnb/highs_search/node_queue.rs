@@ -430,6 +430,17 @@ impl NodeQueue {
     pub fn node(&self, n: i64) -> &OpenNode {
         &self.nodes[n as usize]
     }
+    /// Whether slot `n` holds a queued node (open or suboptimal).
+    pub fn is_linked(&self, n: i64) -> bool {
+        if n < 0 || n as usize >= self.nodes.len() {
+            return false;
+        }
+        if self.nodes[n as usize].estimate == INF {
+            self.suboptimal.contains(&self.sub_key(n))
+        } else {
+            self.lower.contains(&self.lower_key(n))
+        }
+    }
 }
 
 /// Conflict analysis weighs resolution candidates by the open nodes on each column.

@@ -48,6 +48,8 @@ use crate::bnb::highs_search::search::{
 use crate::bnb::node::{BranchRecord, NodeStatus};
 use crate::lp::highs_cutgen::domain::{BoundType, DomainChange, Reason};
 
+mod refcheck;
+
 #[cfg(test)]
 thread_local! {
     /// Searches run on this thread (tests prove the route fired).
@@ -437,6 +439,8 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub cut_rows_deleted: usize,
     /// Root cuts the pool started with (step 2.1).
     pub seeded_pool: usize,
+    /// `DISCOPT_HIGHS_SEARCH_CHECK_POINT` (debug instrument, [`refcheck`]).
+    refp: Option<refcheck::RefCheck>,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -480,6 +484,76 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         }
     }
 
+    /// `DISCOPT_HIGHS_SEARCH_CHECK_POINT`: whether the local domain holds the point.
+    fn ref_in_domain(&self) -> Option<bool> {
+        let rc = self.refp.as_ref()?;
+        let ns = self.ctx.ns;
+        Some(
+            !self.eval.dom.infeasible()
+                && rc.contains(
+                    &self.eval.dom.col_lower[..ns],
+                    &self.eval.dom.col_upper[..ns],
+                ),
+        )
+    }
+
+    /// A popped queue slot: forget it if it held the point.
+    fn ref_popped(&mut self, how: &str, slot: i64) {
+        if let Some(rc) = self.refp.as_mut() {
+            if rc.slots.remove(&slot) {
+                eprintln!(
+                    "HIGHS_SEARCH_TRACE popped {how} slot={slot} n={}",
+                    self.nodes
+                );
+            }
+        }
+    }
+
+    /// Every tracked queue slot holding the point must still be queued.
+    fn ref_slots_kept(&mut self, kind: &str) {
+        let Some(rc) = self.refp.as_mut() else { return };
+        let gone: Vec<i64> = rc
+            .slots
+            .iter()
+            .copied()
+            .filter(|&s| !self.q.is_linked(s))
+            .collect();
+        for s in gone {
+            rc.slots.remove(&s);
+            let lb = self.q.node(s).lower_bound;
+            rc.bound(
+                kind,
+                self.nodes,
+                f64::INFINITY,
+                self.eval.cutoff,
+                &format!(
+                    "slot={s} lb={lb:.12} optlim={:.12}",
+                    self.q.optimality_limit()
+                ),
+            );
+        }
+    }
+
+    /// The domain held the point before a reduction (`was_in`): it must still.
+    fn ref_box_kept(&mut self, kind: &str, was_in: Option<bool>) {
+        if was_in != Some(true) {
+            return;
+        }
+        let still = self.ref_in_domain() == Some(true);
+        let (nodes, cutoff) = (self.nodes, self.eval.cutoff);
+        let infeasible = self.eval.dom.infeasible();
+        let Some(rc) = self.refp.as_mut() else { return };
+        if !still && rc.active(cutoff) {
+            rc.bound(
+                kind,
+                nodes,
+                f64::INFINITY,
+                cutoff,
+                &format!("infeasible={infeasible}"),
+            );
+        }
+    }
+
     /// Append `cuts` (over the current columns) to the search's LP as persistent rows.
     fn append_cut_rows(&mut self, cuts: &[GomoryCut]) {
         if cuts.is_empty() {
@@ -495,6 +569,9 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
                 break;
             }
             let c = lp.to_base(cut, n0);
+            if let Some(rc) = self.refp.as_mut() {
+                rc.cut("lp-row", self.nodes, &c, &rc.x.clone());
+            }
             if self.in_lp.insert(cut_signature(&c)) {
                 add.push(c);
             }
@@ -527,6 +604,9 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
             });
         }
         lp.rebuild(base.ns);
+        if let Some(rc) = self.refp.as_mut() {
+            rc.lp("append", self.nodes, lp);
+        }
         self.cut_rows_added += m - m0;
         // The basis takes the new slacks as basic (block-triangular, nonsingular);
         // reduced costs of basic columns are zero. The other caches describe the
@@ -616,6 +696,9 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         lp.n -= gone.len();
         lp.rows = kept;
         lp.rebuild(self.ctx.ns);
+        if let Some(rc) = self.refp.as_mut() {
+            rc.lp("delete", self.nodes, lp);
+        }
         self.cut_rows_deleted += gone.len();
         self.eval.basis = self
             .eval
@@ -738,6 +821,20 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         self.ctx.tm.round_bound_up(v)
     }
 
+    /// The search's dual bound: `min(incumbent, best queued bound, unresolved floor)`,
+    /// HiGHS's `min(upper_bound, nodequeue.getBestLowerBound())`. The queued bound
+    /// covers the suboptimal nodes too (bound above the optimality limit, below the
+    /// cutoff): they are not searched, but the optimum may lie in one of them, so the
+    /// bound must not exceed theirs. `NodeQueue::is_empty` counts active nodes only and
+    /// is no test for this: with only suboptimal nodes left it is true, and gating the
+    /// queued bound on it reported the incumbent itself as the bound (neos17 under
+    /// `DISCOPT_HIGHS_SEARCH_CUT_LP=1 DISCOPT_HIGHS_SEPA_NODE=1`: bound 0.150069 above
+    /// the optimum 0.1500026). `best_lower_bound` is `+inf` on an empty queue.
+    fn dual_bound(&self, inc: f64) -> f64 {
+        inc.min(self.lift(self.q.best_lower_bound()))
+            .min(self.lift(self.eval.unresolved_floor))
+    }
+
     fn optlim(&self) -> f64 {
         optimality_limit(self.lim, self.best.as_ref().map_or(f64::INFINITY, |b| b.1))
             .min(self.eval.cutoff)
@@ -775,7 +872,37 @@ impl SearchEnv for HighsEnv<'_, '_> {
         est: f64,
         depth: i32,
     ) -> f64 {
+        let ns = self.ctx.ns;
+        let mut ref_q = false;
+        if let Some(rc) = self.refp.as_mut() {
+            let (lo, hi) = refcheck::stack_box(&self.ctx.l_w[..ns], &self.ctx.u_w[..ns], &d);
+            rc.queue_checked += 1;
+            ref_q = rc.contains(&lo, &hi);
+            if ref_q {
+                rc.queue_containing += 1;
+                eprintln!(
+                    "HIGHS_SEARCH_TRACE queue n={} lb={lb:.12} est={est:.12} depth={depth} \
+                     domchg={}",
+                    self.nodes,
+                    d.len()
+                );
+                let cutoff = self.eval.cutoff;
+                if rc.active(cutoff) {
+                    rc.bound("queue", self.nodes, lb, cutoff, &format!("depth={depth}"));
+                }
+            }
+        }
         let (slot, w) = self.q.emplace_node(d, b, lb, est, depth);
+        if ref_q {
+            eprintln!(
+                "HIGHS_SEARCH_TRACE queued slot={slot} linked={} optlim={:.12}",
+                self.q.is_linked(slot),
+                self.q.optimality_limit()
+            );
+            if let Some(rc) = self.refp.as_mut() {
+                rc.slots.insert(slot);
+            }
+        }
         self.last_slot = slot;
         w
     }
@@ -878,10 +1005,14 @@ impl SearchEnv for HighsEnv<'_, '_> {
         self.dbg_processed(id);
     }
     fn queue_pop_best(&mut self) -> OpenNode {
-        self.q.pop_best_node().1
+        let (slot, n) = self.q.pop_best_node();
+        self.ref_popped("best", slot);
+        n
     }
     fn queue_pop_best_bound(&mut self) -> OpenNode {
-        self.q.pop_best_bound_node().1
+        let (slot, n) = self.q.pop_best_bound_node();
+        self.ref_popped("best-bound", slot);
+        n
     }
     fn queue_is_empty(&self) -> bool {
         self.q.is_empty()
@@ -913,6 +1044,47 @@ impl SearchEnv for HighsEnv<'_, '_> {
         let stack: Vec<DomainChange> = node.domchgstack.iter().map(from_q).collect();
         let br: Vec<usize> = node.branchings.iter().map(|&p| p as usize).collect();
         self.eval.dom.set_domain_change_stack(&stack, &br);
+        if let Some(rc) = self.refp.as_ref() {
+            let ns = self.ctx.ns;
+            let (lo, hi) =
+                refcheck::stack_box(&self.ctx.l_w[..ns], &self.ctx.u_w[..ns], &node.domchgstack);
+            let queued_in = rc.contains(&lo, &hi);
+            let dom_in = self.ref_in_domain() == Some(true);
+            if queued_in || dom_in {
+                eprintln!(
+                    "HIGHS_SEARCH_TRACE install n={} id={} lb={:.12} depth={} queued_in={queued_in} \
+                     dom_in={dom_in} infeasible={}",
+                    self.nodes,
+                    node.ident.id,
+                    node.lower_bound,
+                    node.depth,
+                    self.eval.dom.infeasible()
+                );
+                if queued_in && !dom_in {
+                    let bad: Vec<String> = (0..ns)
+                        .filter(|&j| {
+                            let v = rc.x[j];
+                            v < self.eval.dom.col_lower[j] - 1e-9
+                                || v > self.eval.dom.col_upper[j] + 1e-9
+                        })
+                        .take(8)
+                        .map(|j| {
+                            format!(
+                                "col {j} x={} dom=[{}, {}] queued=[{}, {}] global=[{}, {}]",
+                                rc.x[j],
+                                self.eval.dom.col_lower[j],
+                                self.eval.dom.col_upper[j],
+                                lo[j],
+                                hi[j],
+                                self.ctx.l_w[j],
+                                self.ctx.u_w[j]
+                            )
+                        })
+                        .collect();
+                    eprintln!("HIGHS_SEARCH_INVALID kind=install-box {bad:?}");
+                }
+            }
+        }
         self.eval.subrootsol.clear();
     }
     fn domain_stack_len(&self) -> i32 {
@@ -925,14 +1097,24 @@ impl SearchEnv for HighsEnv<'_, '_> {
         self.eval.dom.backtrack_to_global();
     }
     fn domain_propagate_after_backtrack(&mut self, _depth: i32) -> bool {
+        let was_in = self.ref_in_domain();
         self.eval.dom.propagate();
+        self.ref_box_kept("prop-backtrack", was_in);
         self.eval.dom.infeasible()
     }
     fn domain_try_sibling(&mut self, d: QDomainChange, skip_propagate: bool) -> bool {
         self.eval.dom.change_bound(from_q(&d), Reason::Branching);
+        let was_in = self.ref_in_domain();
+        if was_in == Some(true) {
+            eprintln!(
+                "HIGHS_SEARCH_TRACE sibling n={} {d:?} skip_propagate={skip_propagate}",
+                self.nodes
+            );
+        }
         if !skip_propagate && !self.eval.dom.infeasible() {
             self.eval.dom.propagate();
         }
+        self.ref_box_kept("prop-sibling", was_in);
         self.eval.dom.infeasible()
     }
     fn domain_undo_sibling(&mut self) {
@@ -941,7 +1123,9 @@ impl SearchEnv for HighsEnv<'_, '_> {
     }
     fn domain_propagate_for_queue(&mut self) -> bool {
         let n = self.eval.dom.changed_cols().len();
+        let was_in = self.ref_in_domain();
         self.eval.dom.propagate();
+        self.ref_box_kept("prop-queue", was_in);
         self.eval.dom.clear_changed_cols_from(n);
         self.eval.dom.infeasible()
     }
@@ -977,9 +1161,51 @@ impl SearchEnv for HighsEnv<'_, '_> {
             d.best = None;
         }
         let ctx = make_ctx(self.ctx, &self.lp);
+        let ns = self.ctx.ns;
+        let ref_in = self.refp.as_ref().map(|rc| {
+            rc.contains(
+                &self.eval.dom.col_lower[..ns],
+                &self.eval.dom.col_upper[..ns],
+            )
+        });
+        let lb_in = node.lower_bound;
         let r = self
             .eval
             .evaluate(&ctx, node, parent, &mut self.pc, false, limit);
+        if !matches!(
+            r,
+            SearchResult::DomainInfeasible | SearchResult::LpInfeasible
+        ) {
+            self.ref_box_kept("eval-box", ref_in);
+        }
+        if let (Some(rc), Some(inside)) = (self.refp.as_mut(), ref_in) {
+            rc.nodes_checked += 1;
+            if inside {
+                rc.nodes_containing += 1;
+                let cutoff = self.eval.cutoff;
+                eprintln!(
+                    "HIGHS_SEARCH_TRACE eval n={} id={} lb_in={lb_in:.12} r={r:?} lb={:.12} \
+                     cutoff={cutoff:.12} rows={}",
+                    self.nodes,
+                    node.ident.id,
+                    node.lower_bound,
+                    self.lp.as_ref().map_or(0, |l| l.rows.len())
+                );
+                if rc.active(cutoff) {
+                    let what = format!(
+                        "result={r:?} lb_in={lb_in:.12} rows={}",
+                        self.lp.as_ref().map_or(0, |l| l.rows.len())
+                    );
+                    let b = match r {
+                        SearchResult::DomainInfeasible | SearchResult::LpInfeasible => {
+                            f64::INFINITY
+                        }
+                        _ => node.lower_bound,
+                    };
+                    rc.bound("node", self.nodes, b, cutoff, &what);
+                }
+            }
+        }
         self.age_cut_rows();
         if let Some(d) = self.dbg.as_mut() {
             let id = node.ident.id;
@@ -1013,7 +1239,84 @@ impl SearchEnv for HighsEnv<'_, '_> {
             inheuristic: false,
         };
         let ctx = make_ctx(self.ctx, &self.lp);
+        let ns = self.ctx.ns;
+        let ref_box = self.refp.as_ref().map(|_| {
+            (
+                self.eval.dom.col_lower[..ns].to_vec(),
+                self.eval.dom.col_upper[..ns].to_vec(),
+            )
+        });
         let out = self.eval.branch(&ctx, &mut self.pc, top, parent, &bc);
+        if let (Some(rc), Some((mut lo, mut hi))) = (self.refp.as_mut(), ref_box) {
+            if rc.contains(&lo, &hi) && rc.active(self.eval.cutoff) {
+                let cutoff = self.eval.cutoff;
+                let side = |d: &QDomainChange, x: &[f64]| {
+                    let v = x[d.col as usize];
+                    if d.upper {
+                        v <= d.val + 1e-9
+                    } else {
+                        v >= d.val - 1e-9
+                    }
+                };
+                eprintln!(
+                    "HIGHS_SEARCH_TRACE branch n={} top={} r={:?} steps={:?} branched={:?} \
+                     closed={:?}",
+                    self.nodes, top.ident.id, out.result, out.steps, out.branched, out.closed
+                );
+                let mut inside = true;
+                for s in &out.steps {
+                    match s {
+                        BranchStep::Commit { decision, .. } => {
+                            if !side(decision, &rc.x) {
+                                rc.bound(
+                                    "sb-commit",
+                                    self.nodes,
+                                    f64::INFINITY,
+                                    cutoff,
+                                    &format!("{decision:?}"),
+                                );
+                                inside = false;
+                                break;
+                            }
+                            let j = decision.col as usize;
+                            if decision.upper {
+                                hi[j] = hi[j].min(decision.val);
+                            } else {
+                                lo[j] = lo[j].max(decision.val);
+                            }
+                        }
+                        BranchStep::Update { lower_bound, .. } => {
+                            rc.bound("sb-update", self.nodes, *lower_bound, cutoff, "");
+                        }
+                    }
+                }
+                if inside {
+                    if let Some((d, _, other_lb, lb, _, child_lb, _)) = out.branched.as_ref() {
+                        rc.bound("branch-node", self.nodes, *lb, cutoff, "");
+                        let (b, which) = if side(d, &rc.x) {
+                            (*child_lb, "branch-child")
+                        } else {
+                            (*other_lb, "branch-other")
+                        };
+                        rc.bound(which, self.nodes, b, cutoff, &format!("{d:?}"));
+                    } else if let Some((lb, ..)) = out.closed.as_ref() {
+                        let b = match out.result {
+                            SearchResult::DomainInfeasible | SearchResult::LpInfeasible => {
+                                f64::INFINITY
+                            }
+                            _ => *lb,
+                        };
+                        rc.bound(
+                            "branch-closed",
+                            self.nodes,
+                            b,
+                            cutoff,
+                            &format!("{:?}", out.result),
+                        );
+                    }
+                }
+            }
+        }
         self.commits += out
             .steps
             .iter()
@@ -1109,6 +1412,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
             })
             .collect();
         self.sep_calls += 1;
+        let ref_cur = self.refp.as_ref().map(|rc| rc.current(self.lp.as_ref()));
+        if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
+            for r in &rows {
+                rc.cut("pool-pick", self.nodes, r, xc);
+            }
+        }
         let lg = node_local_gmi_bound(
             ctx,
             &fl,
@@ -1122,6 +1431,22 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.best.as_ref().map(|b| b.1),
         );
         self.eval.lp_iters += lg.pivots as i64;
+        if let (Some(rc), Some(xc)) = (self.refp.as_mut(), ref_cur.as_ref()) {
+            for c in &lg.new_cuts {
+                rc.cut("node-new", self.nodes, c, xc);
+            }
+            if let Some(g) = lg.bound {
+                if rc.contains(&fl[..ctx.ns], &fu[..ctx.ns]) {
+                    rc.bound(
+                        "sep-lift",
+                        self.nodes,
+                        g + ctx.obj_const,
+                        self.eval.cutoff,
+                        &format!("pool_rows={} new_cuts={}", rows.len(), lg.new_cuts.len()),
+                    );
+                }
+            }
+        }
         if let Some(g) = lg.bound {
             self.sep_lifts += 1;
             self.eval.pending_lift = Some(g + ctx.obj_const);
@@ -1141,6 +1466,12 @@ impl SearchEnv for HighsEnv<'_, '_> {
             Some(lp) => lg.new_cuts.iter().map(|c| lp.to_base(c, n0)).collect(),
             None => lg.new_cuts,
         };
+        if let Some(rc) = self.refp.as_mut() {
+            let xb = rc.x.clone();
+            for c in &new_base {
+                rc.cut("node-new-base", self.nodes, c, &xb);
+            }
+        }
         let mut add: Vec<GomoryCut> = pick.iter().map(|&(_, k)| self.pool[k].clone()).collect();
         for cut in new_base {
             if self.pool_sigs.insert(cut_signature(&cut)) {
@@ -1222,16 +1553,13 @@ impl SearchEnv for HighsEnv<'_, '_> {
             }
         }
         self.delete_aged_cut_rows();
+        self.ref_slots_kept("queue-lost-before-bounding");
         self.q.perform_bounding(self.eval.cutoff);
+        self.ref_slots_kept("queue-bounding");
         let optlim = self.optlim();
         self.q.set_optimality_limit(optlim);
         let inc = self.best.as_ref().map_or(f64::INFINITY, |b| b.1);
-        let lb = if self.q.is_empty() {
-            inc
-        } else {
-            inc.min(self.lift(self.q.best_lower_bound()))
-        }
-        .min(self.lift(self.eval.unresolved_floor));
+        let lb = self.dual_bound(inc);
         if let Some(d) = self.dbg.as_mut() {
             d.bound = d.bound.max(lb);
         }
@@ -1303,7 +1631,18 @@ pub(super) fn run<'a>(
         cut_rows_added: 0,
         cut_rows_deleted: 0,
         seeded_pool: 0,
+        refp: refcheck::RefCheck::load(ctx),
     };
+    if let Some(rc) = env.refp.as_mut() {
+        let xb = rc.x.clone();
+        for cut in ctx.gmi_pool.iter() {
+            rc.cut("seed-gmi", 0, cut, &xb);
+        }
+        for cut in seed_pool.iter() {
+            rc.cut("seed-highs", 0, cut, &xb);
+        }
+        rc.bound("root", 0, root_bound, f64::INFINITY, "");
+    }
     // Step 2.1: HiGHS's search starts with the root's whole cut pool (every separated
     // cut, and the ones root cleanup dropped from the LP); with persistent cuts on,
     // so does this one (the pool feeds the LP when a node violates a cut).
@@ -1355,12 +1694,10 @@ pub(super) fn run<'a>(
         }
     }
     let inc = env.best.as_ref().map_or(f64::INFINITY, |b| b.1);
-    let open = if env.q.is_empty() {
-        f64::INFINITY
-    } else {
-        env.lift(env.q.best_lower_bound())
-    };
-    let bound = inc.min(open).min(env.lift(env.eval.unresolved_floor));
+    let bound = env.dual_bound(inc);
+    if let Some(rc) = env.refp.as_ref() {
+        rc.summary(bound);
+    }
     if let Some(d) = env.dbg.as_mut() {
         d.bound = d.bound.max(bound);
     }

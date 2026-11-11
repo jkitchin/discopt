@@ -1021,6 +1021,10 @@ pub(super) mod e2e {
         pub branched: usize,
         pub sb_iters: i64,
         pub stopped_by_limit: bool,
+        /// Inputs a test may set when arming: the search's relative gap tolerance
+        /// (default `1e-9`), and whether to start without the tree's incumbent.
+        pub cfg_gap_tol: Option<f64>,
+        pub cfg_no_initial: bool,
     }
 
     thread_local! {
@@ -1040,11 +1044,16 @@ pub(super) mod e2e {
         if !armed {
             return;
         }
+        let (cfg_gap_tol, cfg_no_initial) = E2E.with(|e| {
+            let e = e.borrow();
+            let r = e.as_ref().unwrap();
+            (r.cfg_gap_tol, r.cfg_no_initial)
+        });
         let lim = Limits {
             max_nodes: 200_000,
             max_open_nodes: None,
             deadline: None,
-            gap_tol: 1e-9,
+            gap_tol: cfg_gap_tol.unwrap_or(1e-9),
             rel_gap_max_abs: false,
             abs_gap_tol: None,
             heuristics: false,
@@ -1053,6 +1062,8 @@ pub(super) mod e2e {
         };
         let mut res = E2eResult {
             ran: true,
+            cfg_gap_tol,
+            cfg_no_initial,
             ..Default::default()
         };
         // Seeded with the tree's incumbent, as the production route is: the root may
@@ -1060,7 +1071,7 @@ pub(super) mod e2e {
         let initial = ctx
             .tm
             .incumbent()
-            .filter(|(_, v)| *v < INFEAS_SENTINEL - 1.0)
+            .filter(|(_, v)| !cfg_no_initial && *v < INFEAS_SENTINEL - 1.0)
             .map(|(x, v)| (x.to_vec(), v));
         match highs_env::run(
             ctx,
