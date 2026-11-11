@@ -18,6 +18,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod highs_eval;
+
 use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::node::{NodeId, NodeLineage};
 use crate::bnb::pool::SelectionStrategy;
@@ -856,6 +858,100 @@ fn domain_model_from_lp(
         ),
         slack_map,
     )
+}
+
+/// The working-LP box of a domain (gap plan §12.31): the structural columns take the
+/// domain's bounds (infinity to the `1e20` sentinel), and a row's singleton slack
+/// takes the range implied by the row's activity over the domain's box
+/// (`a x + sigma s = b`), relaxed by 1e-9 relative and intersected with the slack's
+/// own bounds. Boxed slacks let the warm dual simplex flip bounds instead of
+/// pivoting (without them a node LP took ~90 pivots, with them ~2). `b`, `l`, `u`
+/// are the working LP's (`l`/`u` over all `n_w` columns).
+fn domain_lp_box(
+    d: &crate::lp::highs_cutgen::domain::Domain,
+    slacks: &[Option<(usize, f64)>],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    ns: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let (m_w, n_w) = (b.len(), l.len());
+    let map = |v: f64, inf: f64| if v.is_infinite() { inf } else { v };
+    let mut fl: Vec<f64> = d.col_lower.iter().map(|&v| map(v, -INF)).collect();
+    let mut fu: Vec<f64> = d.col_upper.iter().map(|&v| map(v, INF)).collect();
+    fl.extend_from_slice(&l[ns..n_w]);
+    fu.extend_from_slice(&u[ns..n_w]);
+    for (row, sm) in slacks.iter().enumerate() {
+        let Some((sj, sigma)) = *sm else { continue };
+        if sj >= n_w || row >= m_w {
+            continue;
+        }
+        let (amin, nmin, amax, nmax) = d.row_activity(row);
+        let amin = if nmin > 0 { f64::NEG_INFINITY } else { amin };
+        let amax = if nmax > 0 { f64::INFINITY } else { amax };
+        let (e_hi, e_lo) = ((b[row] - amin) / sigma, (b[row] - amax) / sigma);
+        let (mut slo, mut shi) = if sigma > 0.0 {
+            (e_lo, e_hi)
+        } else {
+            (e_hi, e_lo)
+        };
+        if slo.is_nan() {
+            slo = f64::NEG_INFINITY;
+        }
+        if shi.is_nan() {
+            shi = f64::INFINITY;
+        }
+        slo -= 1e-9 * (1.0 + slo.abs());
+        shi += 1e-9 * (1.0 + shi.abs());
+        let (nl, nu) = (fl[sj].max(map(slo, -INF)), fu[sj].min(map(shi, INF)));
+        if nl <= nu {
+            fl[sj] = nl;
+            fu[sj] = nu;
+        }
+    }
+    (fl, fu)
+}
+
+/// Row -> the working LP's singleton slack `(column, coefficient)` of that row.
+type SlackMap = Vec<Option<(usize, f64)>>;
+
+/// A domain over the working LP's rows (`domain_model_from_lp`) at the working LP's
+/// structural bounds, propagated and committed as its global baseline, with the
+/// row-to-slack map; `None` when the rows alone are infeasible over the global box.
+#[allow(clippy::too_many_arguments)]
+fn domain_from_lp(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    ns: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    is_int: &[bool],
+) -> Option<(crate::lp::highs_cutgen::domain::Domain, SlackMap)> {
+    let (model, slack_map) = domain_model_from_lp(csc, m, n, ns, b, l, u, is_int);
+    let gl: Vec<f64> = l[..ns]
+        .iter()
+        .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
+        .collect();
+    let gu: Vec<f64> = u[..ns]
+        .iter()
+        .map(|&v| if v >= INF { f64::INFINITY } else { v })
+        .collect();
+    let mut d = crate::lp::highs_cutgen::domain::Domain::new(
+        std::sync::Arc::new(model),
+        &gl,
+        &gu,
+        1e-6,
+        1e-9,
+    );
+    d.propagate();
+    if d.infeasible() {
+        return None;
+    }
+    d.clear_changed_cols();
+    d.commit_as_global();
+    Some((d, slack_map))
 }
 
 /// A node's box after the sequential search's domain propagation: `None` inside when
@@ -6080,34 +6176,16 @@ fn solve_milp_node_search(
                 h = (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3);
             }
             if hs_domain.as_ref().is_none_or(|(k, _)| *k != h) {
-                let (model, slack_map) =
-                    domain_model_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
-                hs_slacks = slack_map;
-                let gl: Vec<f64> = l_w[..ns]
-                    .iter()
-                    .map(|&v| if v <= -INF { f64::NEG_INFINITY } else { v })
-                    .collect();
-                let gu: Vec<f64> = u_w[..ns]
-                    .iter()
-                    .map(|&v| if v >= INF { f64::INFINITY } else { v })
-                    .collect();
-                let mut d = crate::lp::highs_cutgen::domain::Domain::new(
-                    std::sync::Arc::new(model),
-                    &gl,
-                    &gu,
-                    1e-6,
-                    1e-9,
-                );
-                d.propagate();
+                let built = domain_from_lp(csc_rc, m_w, n_w, ns, &b_w, &l_w, &u_w, &is_int_full);
                 crate::profile::incr(crate::profile::Ctr::HsDomainRebuilds);
-                if d.infeasible() {
+                match built {
+                    Some((d, slack_map)) => {
+                        hs_slacks = slack_map;
+                        hs_domain = Some((h, d));
+                    }
                     // The global rows alone are infeasible over the global box: no
                     // domain to keep; the node falls back to its own FBBT.
-                    hs_domain = None;
-                } else {
-                    d.clear_changed_cols();
-                    d.commit_as_global();
-                    hs_domain = Some((h, d));
+                    None => hs_domain = None,
                 }
             }
             hs_domain.as_mut().map(|(_, d)| {
@@ -6160,43 +6238,8 @@ fn solve_milp_node_search(
                     crate::profile::incr(crate::profile::Ctr::HsDomainInfeasible);
                     (id, None)
                 } else {
-                    let map = |v: f64, inf: f64| if v.is_infinite() { inf } else { v };
-                    let mut fl: Vec<f64> = d.col_lower.iter().map(|&v| map(v, -INF)).collect();
-                    let mut fu: Vec<f64> = d.col_upper.iter().map(|&v| map(v, INF)).collect();
-                    fl.extend_from_slice(&l_w[ns..n_w]);
-                    fu.extend_from_slice(&u_w[ns..n_w]);
-                    // A row's slack takes the range implied by the row's activity over the
-                    // domain's box (`a x + sigma s = b`), relaxed by 1e-9 relative: boxed
-                    // slacks let the warm dual simplex flip bounds instead of pivoting
-                    // (gap plan §12.31: without them a node LP took ~90 pivots, with them ~2).
-                    for (row, sm) in hs_slacks.iter().enumerate() {
-                        let Some((sj, sigma)) = *sm else { continue };
-                        if sj >= n_w || row >= m_w {
-                            continue;
-                        }
-                        let (amin, nmin, amax, nmax) = d.row_activity(row);
-                        let amin = if nmin > 0 { f64::NEG_INFINITY } else { amin };
-                        let amax = if nmax > 0 { f64::INFINITY } else { amax };
-                        let (e_hi, e_lo) = ((b_w[row] - amin) / sigma, (b_w[row] - amax) / sigma);
-                        let (mut slo, mut shi) = if sigma > 0.0 {
-                            (e_lo, e_hi)
-                        } else {
-                            (e_hi, e_lo)
-                        };
-                        if slo.is_nan() {
-                            slo = f64::NEG_INFINITY;
-                        }
-                        if shi.is_nan() {
-                            shi = f64::INFINITY;
-                        }
-                        slo -= 1e-9 * (1.0 + slo.abs());
-                        shi += 1e-9 * (1.0 + shi.abs());
-                        let (nl, nu) = (fl[sj].max(map(slo, -INF)), fu[sj].min(map(shi, INF)));
-                        if nl <= nu {
-                            fl[sj] = nl;
-                            fu[sj] = nu;
-                        }
-                    }
+                    let (fl, fu) =
+                        domain_lp_box(d, &hs_slacks, &b_w[..m_w], &l_w[..n_w], &u_w[..n_w], ns);
                     (id, Some((fl, fu)))
                 }
             })
@@ -6262,30 +6305,48 @@ fn solve_milp_node_search(
                 highs_node,
                 domain_pre: domain_pre.as_ref(),
             };
-            #[cfg(feature = "parallel")]
-            {
-                use rayon::prelude::*;
-                // Small batches don't amortize task-spawn overhead; solve those
-                // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
-                const PAR_MIN_BATCH: usize = 4;
-                // And only where rayon can actually build its pool: that build
-                // panics rather than erroring on a threadless platform, which
-                // no caller can catch (see `crate::parallel`).
-                if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available() {
-                    (0..batch.node_ids.len())
-                        .into_par_iter()
-                        .map(|k| {
-                            solve_node(
-                                batch.node_ids[k],
-                                &batch.lb[k],
-                                &batch.ub[k],
-                                &ctx,
-                                dive_batch && k == 0,
-                                gmi_slots[k],
-                            )
-                        })
-                        .collect()
-                } else {
+            let outs: Vec<NodeOutput> = {
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    // Small batches don't amortize task-spawn overhead; solve those
+                    // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
+                    const PAR_MIN_BATCH: usize = 4;
+                    // And only where rayon can actually build its pool: that build
+                    // panics rather than erroring on a threadless platform, which
+                    // no caller can catch (see `crate::parallel`).
+                    if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available()
+                    {
+                        (0..batch.node_ids.len())
+                            .into_par_iter()
+                            .map(|k| {
+                                solve_node(
+                                    batch.node_ids[k],
+                                    &batch.lb[k],
+                                    &batch.ub[k],
+                                    &ctx,
+                                    dive_batch && k == 0,
+                                    gmi_slots[k],
+                                )
+                            })
+                            .collect()
+                    } else {
+                        (0..batch.node_ids.len())
+                            .map(|k| {
+                                solve_node(
+                                    batch.node_ids[k],
+                                    &batch.lb[k],
+                                    &batch.ub[k],
+                                    &ctx,
+                                    dive_batch && k == 0,
+                                    gmi_slots[k],
+                                )
+                            })
+                            .collect()
+                    }
+                }
+                #[cfg(not(feature = "parallel"))]
+                {
                     (0..batch.node_ids.len())
                         .map(|k| {
                             solve_node(
@@ -6299,22 +6360,11 @@ fn solve_milp_node_search(
                         })
                         .collect()
                 }
-            }
-            #[cfg(not(feature = "parallel"))]
-            {
-                (0..batch.node_ids.len())
-                    .map(|k| {
-                        solve_node(
-                            batch.node_ids[k],
-                            &batch.lb[k],
-                            &batch.ub[k],
-                            &ctx,
-                            dive_batch && k == 0,
-                            gmi_slots[k],
-                        )
-                    })
-                    .collect()
-            }
+            };
+            // Stage 1d-2 gate: the HiGHS-search evaluation on the same nodes (tests only).
+            #[cfg(test)]
+            highs_eval::diff::batch(&ctx, &batch.node_ids, &batch.lb, &batch.ub, &outs);
+            outs
         };
 
         // --- sequential reduce: apply tree mutations in batch order ---
@@ -7477,6 +7527,10 @@ type SbObservation = (usize, f64, f64, bool);
 /// *when* a node's LP is solved, never the order results fold into the tree.
 struct NodeOutput {
     result: NodeResult,
+    /// The node LP's safe bound (with `obj_const`) before any node-local lift (node
+    /// GMI); NaN when the LP gave no bound. Read by the stage 1d-2 gate.
+    #[cfg_attr(not(test), allow(dead_code))]
+    lp_bound: f64,
     /// Optimal basis to store on the node (for children to warm-start from).
     basis: Option<Basis>,
     /// Incumbent candidate from the rounding heuristic.
@@ -7644,6 +7698,7 @@ fn solve_node(
             cut_lp_active: Vec::new(),
             relaxed_used: Vec::new(),
             relaxed_scores: Vec::new(),
+            lp_bound: f64::NAN,
         };
     }
     let mut full_l = vec![0.0; ctx.n_w];
@@ -7723,6 +7778,7 @@ fn solve_node(
                 cut_lp_active: Vec::new(),
                 relaxed_used: Vec::new(),
                 relaxed_scores: Vec::new(),
+                lp_bound: f64::NAN,
             };
         }
         // Record tightened structural bounds for the children to inherit, only
@@ -7733,18 +7789,6 @@ fn solve_node(
         full_l = pr.l;
         full_u = pr.u;
     }
-    // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
-    // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
-    // once for the whole batch. The basis is scaling-invariant, so a warm start
-    // and the returned basis transfer across the original/scaled spaces; the
-    // objective is invariant too. We unscale the primal `x` back to the original
-    // space so everything downstream (separation, rounding, branching) is unchanged.
-    // Lazily extend a basis stored before later cuts grew the matrix: the
-    // appended cut slacks become basic (a valid, dual-repairable starting basis).
-    let (sl, su) = match ctx.scaling {
-        Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
-        None => (full_l.clone(), full_u.clone()),
-    };
     // The root is the only node solved cold (no inherited basis); the diving
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
@@ -7752,126 +7796,21 @@ fn solve_node(
     // when the parent's LP returned no basis (counted: `NodeNoBasisOffRoot` measured 0 in
     // every default arm; the retired DISCOPT_MILP_CUT_LP_DROP_RELAXED path, which
     // dropped stored bases, was the case that needed a depth-based test).
-    let no_basis = ctx.tm.node_basis(id).is_none();
+    let start = ctx.tm.node_basis(id);
+    let no_basis = start.is_none();
     if no_basis && ctx.tm.node_depth(id).is_some_and(|d| d > 0) {
         crate::profile::incr(crate::profile::Ctr::NodeNoBasisOffRoot);
     }
     let is_root = no_basis;
-    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
-    let mut sol = match ctx.tm.node_basis(id) {
-        Some(basis) => {
-            let basis = extend_basis(basis, ctx.n_w);
-            ctx.problem
-                .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
-        }
-        // The only node solved cold is the root. Prefer the root-cut loop's own
-        // optimal basis (extended over any cuts added after its last solve): the
-        // augmented LP is already solved there, so the root node just pivots in the
-        // few trailing cut rows instead of re-deriving it. Failing that, try the
-        // dual simplex from the slack basis (built from the unscaled working matrix
-        // — scaling-invariant, dual feasibility preserved) before the cold primal,
-        // the same covering-LP speedup the root-cut loop gets. The warm solve
-        // re-verifies the start basis and cold-solves on any difficulty, so the
-        // optimal objective — hence the node's bound — is identical either way; only
-        // which optimal vertex is reached (and thus branching) can differ, exactly
-        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
-        // is reused so this cold-root warm solve also skips the per-solve rebuild.
-        None => {
-            if let Some(rb) = ctx.root_warm_basis {
-                let basis = extend_basis(rb.clone(), ctx.n_w);
-                ctx.problem
-                    .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
-            } else {
-                match dual_slack_basis(
-                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
-                    // dual_slack_basis reads only singleton structure + `c`, both
-                    // scale-invariant, so this is bit-identical to the old dense arg.
-                    ctx.csc_rc,
-                    ctx.m_w,
-                    ctx.n_w,
-                    ctx.c_w,
-                    &full_l,
-                    &full_u,
-                    ctx.simplex.tol,
-                ) {
-                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
-                    // slack basis whose dual solve then stalls on an ill-conditioned
-                    // relaxation must fall back to the cold primal, not grind to the
-                    // deadline.
-                    Some(basis) => {
-                        let warm = ctx.problem.solve_warm(
-                            &full_l,
-                            &full_u,
-                            &basis,
-                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
-                        );
-                        match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => {
-                                ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex)
-                            }
-                            _ => warm,
-                        }
-                    }
-                    None => ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex),
-                }
-            }
-        }
+    let nl = node_lp(ctx, start, &full_l, &full_u);
+    let untrusted = |id| NodeResult {
+        node_id: id,
+        lower_bound: f64::NEG_INFINITY,
+        solution: midpoint(lb_k, ub_k),
+        is_feasible: false,
+        certified_infeasible: false,
+        sentinel_is_exclusion: false,
     };
-    // The box the node's NS bound is taken over: the node box, or (below) its full
-    // tolerance relaxation when the LP had to be re-solved there.
-    let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
-    // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
-    // no exact point yet may hold an acceptable one. Re-solve it over the rows
-    // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
-    // relaxation of the node over the accepted set, so whatever it returns (an
-    // optimum whose bound is valid there, or a ray tested below) replaces the exact
-    // verdict.
-    if tol_robust_enabled()
-        && sol.status == LpStatus::Infeasible
-        && !robust_infeasible(ctx, &sol.dual, &full_l, &full_u)
-    {
-        crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedSolves);
-        let solve = |l: &[f64], u: &[f64]| match ctx.tm.node_basis(id) {
-            Some(basis) => {
-                let basis = extend_basis(basis, ctx.n_w);
-                ctx.problem.solve_warm(l, u, &basis, ctx.simplex)
-            }
-            None => ctx.problem.solve_cold(l, u, ctx.simplex),
-        };
-        // The candidate LP (half the slack tolerance) first; if it is empty too, the
-        // full relaxation decides (its ray, if robust, fathoms; its optimum bounds
-        // the node). The node keeps its ORIGINAL box for everything else, the
-        // incumbent check above all; only the NS bound is taken over the full
-        // relaxation (`bound_box`), so it holds for every acceptable point.
-        if let Some((cl, cu)) = relax_row_slacks(ctx, &full_l, &full_u, false) {
-            let mut alt = solve(&cl, &cu);
-            let full_box = relax_row_slacks(ctx, &full_l, &full_u, true);
-            if alt.status == LpStatus::Infeasible {
-                if let Some((rl, ru)) = &full_box {
-                    alt = solve(rl, ru);
-                }
-            }
-            if alt.status == LpStatus::Optimal && full_box.is_some() {
-                crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedOptimal);
-                sol = alt;
-                bound_box = full_box;
-            } else if alt.status == LpStatus::Infeasible {
-                sol = alt;
-            }
-        }
-    }
-    if let Some(s) = ctx.scaling {
-        s.unscale_x(&mut sol.x);
-        // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
-        // `LpStatus::Infeasible` arm below verifies the Farkas ray against the scaled
-        // working CSC (`ctx.csc`, `ctx.sb`, `sl`/`su`) and unscaling it there would
-        // mix coordinate systems, fail every verification, and stop the driver from
-        // fathoming provably empty nodes. Reduced-cost fixing wants the unscaled
-        // duals instead, so it unscales its own copy at the call site.
-    }
-    drop(_t_node);
-    let sol = sol;
-
     let mut out = NodeOutput {
         result: NodeResult {
             node_id: id,
@@ -7888,7 +7827,7 @@ fn solve_node(
         sb_observations: Vec::new(),
         sb_probes: 0,
         tightened,
-        iters: sol.iters,
+        iters: nl.sol.iters,
         unbounded: false,
         point_value: f64::NAN,
         deferred: false,
@@ -7899,159 +7838,101 @@ fn solve_node(
         cut_lp_active: Vec::new(),
         relaxed_used: Vec::new(),
         relaxed_scores: Vec::new(),
+        lp_bound: f64::NAN,
     };
-
-    match sol.status {
-        LpStatus::Optimal => {
-            out.basis = Some(sol.basis.clone());
-            let xs = &sol.x[..ctx.ns];
-            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
-            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
-            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
-            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
-            // itself is left scaled for the Farkas arm (see the note after the
-            // node solve).
-            let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
-                Some(s) => {
-                    let mut d = sol.dual.clone();
-                    s.unscale_dual(&mut d);
-                    std::borrow::Cow::Owned(d)
-                }
-                None => std::borrow::Cow::Borrowed(&sol.dual),
-            };
-            // D2 W1: which folded cut rows are active at this optimum -- slack
-            // nonbasic AND |dual| above the dual tolerance, HiGHS's age-reset test
-            // (`HighsLpRelaxation.cpp:660-673`). A degenerate row (nonbasic at a zero
-            // dual) ages like a basic one.
-            if !ctx.cut_lp_rows.is_empty() {
-                out.cut_lp_active = ctx
-                    .cut_lp_rows
-                    .iter()
-                    .map(|&(r, c)| {
-                        sol.basis.col_status.get(c).is_some_and(|&st| st != BASIC)
-                            && rc_dual.get(r).is_some_and(|y| y.abs() > CUT_LP_DUAL_TOL)
-                    })
-                    .collect();
-            }
-            // #1953: the node's bound. With the gate on, the NS safe bound from the
-            // node's own dual over its box (capped at the vertex value); the vertex
-            // value alone is only as good as the simplex's optimality test, and a
-            // vertex the test passed early sits ABOVE the node's LP minimum.
-            // A relaxed re-solve's LP value is not a bound over the acceptable
-            // points, only its NS bound over `bound_box` is: require it.
-            let node_lp_bound = if ns_node_bound_enabled() || bound_box.is_some() {
-                match &bound_box {
-                    Some((bl, bu)) => node_ns_bound(ctx, &rc_dual, bl, bu),
-                    None => node_ns_bound(ctx, &rc_dual, &full_l, &full_u),
-                }
-                .map(|g| g.min(sol.obj))
-            } else {
-                Some(sol.obj)
-            };
-            let Some(node_lp_bound) = node_lp_bound else {
-                // No safe bound: hand the node back exactly as an `IterLimit` one
-                // (parent-floored -inf bound, untrusted midpoint; see that arm). A
-                // verified integral vertex is still a feasible point, so it is
-                // offered to the reduce as an incumbent candidate, which
-                // re-validates it -- it just does not fathom the node.
-                crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
-                out.basis = None;
-                if feasible_integral(ctx, xs) && incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
-                    out.incumbent = Some((xs.to_vec(), sol.obj + ctx.obj_const));
-                }
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
-                return out;
-            };
-            if ns_node_bound_enabled() {
-                crate::profile::incr(crate::profile::Ctr::NodeNsBound);
-            }
-            crate::profile::incr(crate::profile::Ctr::NodeLpOptimal);
-            crate::profile::incr_by(crate::profile::Ctr::NodeLpIters, sol.iters as u64);
-            if ctx
-                .inc_snapshot
-                .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
-            {
-                crate::profile::incr(crate::profile::Ctr::NodeLpOverInc);
-                crate::profile::incr_by(crate::profile::Ctr::NodeLpItersOverInc, sol.iters as u64);
-            }
-            let feasible = ctx
-                .is_int
+    if nl.sol.status == LpStatus::Optimal {
+        // D2 W1: which folded cut rows are active at this optimum -- slack
+        // nonbasic AND |dual| above the dual tolerance, HiGHS's age-reset test
+        // (`HighsLpRelaxation.cpp:660-673`). A degenerate row (nonbasic at a zero
+        // dual) ages like a basic one.
+        if !ctx.cut_lp_rows.is_empty() {
+            let rc_dual = nl.rc_dual();
+            out.cut_lp_active = ctx
+                .cut_lp_rows
                 .iter()
-                .enumerate()
-                .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
-            // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
-            // so its original rows AND bounds must hold verifiably. One that fails is
-            // handled like a failed LP: its bound and point are both untrusted.
-            if feasible && !point_verified(ctx, &full_l, &full_u, &sol.x) {
-                out.basis = None;
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
-                return out;
-            }
-            // #2163 (the driver side of #1414): the vertex verifies as computed,
-            // but the point it CLAIMS is its integral realisation, and that one
-            // may miss a row -- a binary at `1 - 5.3e-6` on a big-M row with
-            // `M ~ 30` buys ~3e-6 of slack. Fathoming here certified the slack:
-            // on a CMIR-augmented knapsack the driver reported `Optimal` at
-            // 36.929960309 against a true optimum of 36.929960372, and on a trained
-            // ReLU big-M MILP the adopted vertex was refused by `verify_point` and
-            // the solve came back `feasible`. Do what the Python tree does for the
-            // same class: offer the fixed-integer polish of the vertex as an
-            // incumbent (verified, exact integers), and hand the node back with a
-            // branch hint on the column whose rounding moved furthest. The node
-            // keeps its OWN LP bound: that bound is a valid bound over the box
-            // whether or not the vertex is integral (an untrusted `-inf` handback
-            // left the root with no dual bound at all -- #2165 review). The tree
-            // never fathoms a node whose hinted column is not exactly integral
-            // (`process_evaluated`, #2163), so it branches; the child that fixes
-            // the column settles it with its own LP. Branching is always a valid
-            // cover; the domain strictly shrinks, so the search terminates.
-            if feasible {
-                if let Some(zs) = snap_integral(ctx, &sol.x) {
-                    if !point_verified(ctx, &full_l, &full_u, &zs) {
-                        crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
-                        let mut col = None;
-                        let mut moved = 0.0f64;
-                        for (j, (&is_int, (&zj, &xj))) in
-                            ctx.is_int.iter().zip(zs.iter().zip(&sol.x)).enumerate()
-                        {
-                            let d = (zj - xj).abs();
-                            if is_int && d > moved {
-                                moved = d;
-                                col = Some(j);
-                            }
-                        }
-                        if let Some(j) = col {
-                            out.incumbent =
-                                polish_integral_vertex(ctx, &full_l, &full_u, &sol.x, &sol.basis)
-                                    .map(|(xp, vp)| (xp[..ctx.ns].to_vec(), vp));
-                            out.branch_hint = Some(j);
-                            out.result = NodeResult {
-                                node_id: id,
-                                lower_bound: node_lp_bound + ctx.obj_const,
-                                solution: xs.to_vec(),
-                                is_feasible: false,
-                                certified_infeasible: false,
-                                sentinel_is_exclusion: false,
-                            };
-                            return out;
-                        }
-                    }
-                }
-            }
+                .map(|&(r, c)| {
+                    nl.sol
+                        .basis
+                        .col_status
+                        .get(c)
+                        .is_some_and(|&st| st != BASIC)
+                        && rc_dual.get(r).is_some_and(|y| y.abs() > CUT_LP_DUAL_TOL)
+                })
+                .collect();
+        }
+    }
+    let (node_lp_bound, feasible) = match nl.verdict {
+        NodeLpVerdict::Bound { bound, integral } => (bound, integral),
+        NodeLpVerdict::Abstain { ref incumbent } => {
+            out.incumbent = incumbent.clone();
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::UnverifiedPoint => {
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::SnapRefused {
+            bound,
+            col,
+            ref incumbent,
+        } => {
+            out.basis = Some(nl.sol.basis.clone());
+            out.incumbent = incumbent.clone();
+            out.branch_hint = Some(col);
+            out.lp_bound = bound + ctx.obj_const;
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: bound + ctx.obj_const,
+                solution: nl.sol.x[..ctx.ns].to_vec(),
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: false,
+            };
+            return out;
+        }
+        NodeLpVerdict::InfeasibleProved => {
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: INFEAS_SENTINEL, // pruned
+                solution: vec![0.0; ctx.ns],
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: true,
+            };
+            return out;
+        }
+        // Cannot trust this LP's bound: never prune off it (could drop the
+        // optimum). Hand the node back with a raw -inf (non-pruning) bound
+        // and the box midpoint. This stays fully SOUND without decertifying
+        // the whole search (#598): `import_results` floors the -inf at the
+        // node's parent-inherited bound — a valid bound over this child box,
+        // proved at the ancestor's LP solve — and `process_evaluated` then
+        // only prunes it against the incumbent on that valid bound, branches
+        // it (children re-solve fresh LPs, so the subtree stays searched), or
+        // — when nothing is left to branch — folds the valid bound into the
+        // tree's permanent `unresolved_floor`. The untrusted midpoint can
+        // never fathom the node as integer-feasible or become the incumbent
+        // (`PendingResult::bound_trusted` gates both), so a closed gap
+        // remains a rigorous optimality certificate.
+        NodeLpVerdict::Untrusted => {
+            out.result = untrusted(id);
+            return out;
+        }
+        NodeLpVerdict::Unbounded => {
+            out.unbounded = true;
+            return out;
+        }
+    };
+    #[allow(unused_mut)]
+    let mut node_lp_bound = node_lp_bound;
+    out.basis = Some(nl.sol.basis.clone());
+    out.lp_bound = node_lp_bound + ctx.obj_const;
+    let rc_dual = nl.rc_dual().to_vec();
+    let sol = nl.sol;
+    let xs = &sol.x[..ctx.ns];
+    {
+        {
             // Past the deadline, skip every optional per-node effort below. The
             // LP bound (above) is already computed and valid; the heuristic,
             // cover separation, and strong branching only sharpen branching /
@@ -8338,6 +8219,265 @@ fn solve_node(
                 sentinel_is_exclusion: false,
             };
         }
+    }
+    out
+}
+
+/// A node LP's verdict through the safety layer (#1953 NS bound, #1287/#1945 point
+/// verification, #2163 snap check, C-14 Farkas verification). Shared by
+/// [`solve_node`] and the HiGHS-search node evaluation, so both trust exactly the
+/// same LP outcomes.
+enum NodeLpVerdict {
+    /// A safe bound over the box (solve space, without `obj_const`); `integral`: the
+    /// vertex is integral and verified on the original rows and bounds.
+    Bound { bound: f64, integral: bool },
+    /// Optimal, but no safe bound could be taken: a verified integral vertex is
+    /// offered as an incumbent candidate; the node is otherwise untrusted.
+    Abstain { incumbent: Option<(Vec<f64>, f64)> },
+    /// An integral vertex that fails verification: bound and point untrusted.
+    UnverifiedPoint,
+    /// An integral vertex whose integral realisation misses a row: the polished
+    /// incumbent candidate and the column to branch on; the node keeps `bound`.
+    SnapRefused {
+        bound: f64,
+        col: usize,
+        incumbent: Option<(Vec<f64>, f64)>,
+    },
+    /// The Farkas ray verified: the box is empty.
+    InfeasibleProved,
+    /// An infeasibility that does not verify, an iteration limit or numerical
+    /// trouble: no bound, never a fathom.
+    Untrusted,
+    /// The LP is unbounded.
+    Unbounded,
+}
+
+/// [`node_lp`]'s result: the solve (`x` unscaled, `dual` in the solve space), the
+/// unscaled row duals when the LP was optimal on a scaled matrix (else empty: use
+/// `sol.dual`), and the verdict.
+struct NodeLp {
+    sol: crate::lp::simplex::LpSolve,
+    rc_dual: Vec<f64>,
+    verdict: NodeLpVerdict,
+}
+
+impl NodeLp {
+    /// The unscaled row duals.
+    fn rc_dual(&self) -> &[f64] {
+        if self.rc_dual.is_empty() {
+            &self.sol.dual
+        } else {
+            &self.rc_dual
+        }
+    }
+}
+
+/// Solve a node's LP over the box `full_l..full_u` (all working columns), warm from
+/// `start` or, with no basis, as the root (root-cut basis, dual slack basis, cold),
+/// and pass the outcome through the safety layer.
+fn node_lp(ctx: &NodeCtx<'_>, start: Option<Basis>, full_l: &[f64], full_u: &[f64]) -> NodeLp {
+    let full_l = full_l.to_vec();
+    let full_u = full_u.to_vec();
+    // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
+    // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
+    // once for the whole batch. The basis is scaling-invariant, so a warm start
+    // and the returned basis transfer across the original/scaled spaces; the
+    // objective is invariant too. We unscale the primal `x` back to the original
+    // space so everything downstream (separation, rounding, branching) is unchanged.
+    // Lazily extend a basis stored before later cuts grew the matrix: the
+    // appended cut slacks become basic (a valid, dual-repairable starting basis).
+    let (sl, su) = match ctx.scaling {
+        Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
+        None => (full_l.clone(), full_u.clone()),
+    };
+    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
+    let mut sol = match &start {
+        Some(basis) => {
+            let basis = extend_basis(basis.clone(), ctx.n_w);
+            ctx.problem
+                .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
+        }
+        // The only node solved cold is the root. Prefer the root-cut loop's own
+        // optimal basis (extended over any cuts added after its last solve): the
+        // augmented LP is already solved there, so the root node just pivots in the
+        // few trailing cut rows instead of re-deriving it. Failing that, try the
+        // dual simplex from the slack basis (built from the unscaled working matrix
+        // — scaling-invariant, dual feasibility preserved) before the cold primal,
+        // the same covering-LP speedup the root-cut loop gets. The warm solve
+        // re-verifies the start basis and cold-solves on any difficulty, so the
+        // optimal objective — hence the node's bound — is identical either way; only
+        // which optimal vertex is reached (and thus branching) can differ, exactly
+        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
+        // is reused so this cold-root warm solve also skips the per-solve rebuild.
+        None => {
+            if let Some(rb) = ctx.root_warm_basis {
+                let basis = extend_basis(rb.clone(), ctx.n_w);
+                ctx.problem
+                    .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
+            } else {
+                match dual_slack_basis(
+                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
+                    // dual_slack_basis reads only singleton structure + `c`, both
+                    // scale-invariant, so this is bit-identical to the old dense arg.
+                    ctx.csc_rc,
+                    ctx.m_w,
+                    ctx.n_w,
+                    ctx.c_w,
+                    &full_l,
+                    &full_u,
+                    ctx.simplex.tol,
+                ) {
+                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
+                    // slack basis whose dual solve then stalls on an ill-conditioned
+                    // relaxation must fall back to the cold primal, not grind to the
+                    // deadline.
+                    Some(basis) => {
+                        let warm = ctx.problem.solve_warm(
+                            &full_l,
+                            &full_u,
+                            &basis,
+                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
+                        );
+                        match warm.status {
+                            LpStatus::IterLimit | LpStatus::Numerical => {
+                                ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex)
+                            }
+                            _ => warm,
+                        }
+                    }
+                    None => ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex),
+                }
+            }
+        }
+    };
+    // The box the node's NS bound is taken over: the node box, or (below) its full
+    // tolerance relaxation when the LP had to be re-solved there.
+    let mut bound_box: Option<(Vec<f64>, Vec<f64>)> = None;
+    // DISCOPT_MILP_TOL_ROBUST: an LP that is infeasible, but not robustly so, holds
+    // no exact point yet may hold an acceptable one. Re-solve it over the rows
+    // relaxed by their acceptance tolerance (each row's slack widened); that LP is a
+    // relaxation of the node over the accepted set, so whatever it returns (an
+    // optimum whose bound is valid there, or a ray tested below) replaces the exact
+    // verdict.
+    if tol_robust_enabled()
+        && sol.status == LpStatus::Infeasible
+        && !robust_infeasible(ctx, &sol.dual, &full_l, &full_u)
+    {
+        crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedSolves);
+        let solve = |l: &[f64], u: &[f64]| match &start {
+            Some(basis) => {
+                let basis = extend_basis(basis.clone(), ctx.n_w);
+                ctx.problem.solve_warm(l, u, &basis, ctx.simplex)
+            }
+            None => ctx.problem.solve_cold(l, u, ctx.simplex),
+        };
+        // The candidate LP (half the slack tolerance) first; if it is empty too, the
+        // full relaxation decides (its ray, if robust, fathoms; its optimum bounds
+        // the node). The node keeps its ORIGINAL box for everything else, the
+        // incumbent check above all; only the NS bound is taken over the full
+        // relaxation (`bound_box`), so it holds for every acceptable point.
+        if let Some((cl, cu)) = relax_row_slacks(ctx, &full_l, &full_u, false) {
+            let mut alt = solve(&cl, &cu);
+            let full_box = relax_row_slacks(ctx, &full_l, &full_u, true);
+            if alt.status == LpStatus::Infeasible {
+                if let Some((rl, ru)) = &full_box {
+                    alt = solve(rl, ru);
+                }
+            }
+            if alt.status == LpStatus::Optimal && full_box.is_some() {
+                crate::profile::incr(crate::profile::Ctr::TolRobustRelaxedOptimal);
+                sol = alt;
+                bound_box = full_box;
+            } else if alt.status == LpStatus::Infeasible {
+                sol = alt;
+            }
+        }
+    }
+    if let Some(s) = ctx.scaling {
+        s.unscale_x(&mut sol.x);
+        // NOTE (#1066): `sol.dual` deliberately stays in the SCALED space here. The
+        // `LpStatus::Infeasible` arm below verifies the Farkas ray against the scaled
+        // working CSC (`ctx.csc`, `ctx.sb`, `sl`/`su`) and unscaling it there would
+        // mix coordinate systems, fail every verification, and stop the driver from
+        // fathoming provably empty nodes. Reduced-cost fixing wants the unscaled
+        // duals instead, so it unscales its own copy at the call site.
+    }
+    drop(_t_node);
+    let sol = sol;
+    let mut rc_dual: Vec<f64> = Vec::new();
+    let full_l = &full_l[..];
+    let full_u = &full_u[..];
+    let verdict = match sol.status {
+        LpStatus::Optimal => {
+            let xs = &sol.x[..ctx.ns];
+            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
+            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
+            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
+            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
+            // itself is left scaled for the Farkas arm (see the note after the
+            // node solve).
+            if let Some(s) = ctx.scaling {
+                rc_dual = sol.dual.clone();
+                s.unscale_dual(&mut rc_dual);
+            }
+            let rc: &[f64] = if ctx.scaling.is_some() {
+                &rc_dual
+            } else {
+                &sol.dual
+            };
+            // #1953: the node's bound. With the gate on, the NS safe bound from the
+            // node's own dual over its box (capped at the vertex value); the vertex
+            // value alone is only as good as the simplex's optimality test, and a
+            // vertex the test passed early sits ABOVE the node's LP minimum.
+            // A relaxed re-solve's LP value is not a bound over the acceptable
+            // points, only its NS bound over `bound_box` is: require it.
+            let node_lp_bound = if ns_node_bound_enabled() || bound_box.is_some() {
+                match &bound_box {
+                    Some((bl, bu)) => node_ns_bound(ctx, rc, bl, bu),
+                    None => node_ns_bound(ctx, rc, full_l, full_u),
+                }
+                .map(|g| g.min(sol.obj))
+            } else {
+                Some(sol.obj)
+            };
+            match node_lp_bound {
+                None => {
+                    // No safe bound: the node goes back exactly as an `IterLimit` one
+                    // (parent-floored -inf bound, untrusted point). A verified
+                    // integral vertex is still a feasible point, so it is offered as
+                    // an incumbent candidate, which the tree re-validates -- it just
+                    // does not fathom the node.
+                    crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
+                    let incumbent = (feasible_integral(ctx, xs)
+                        && incumbent_verified(ctx, full_l, full_u, &sol.x))
+                    .then(|| (xs.to_vec(), sol.obj + ctx.obj_const));
+                    NodeLpVerdict::Abstain { incumbent }
+                }
+                Some(node_lp_bound) => {
+                    if ns_node_bound_enabled() {
+                        crate::profile::incr(crate::profile::Ctr::NodeNsBound);
+                    }
+                    crate::profile::incr(crate::profile::Ctr::NodeLpOptimal);
+                    crate::profile::incr_by(crate::profile::Ctr::NodeLpIters, sol.iters as u64);
+                    if ctx
+                        .inc_snapshot
+                        .is_some_and(|inc| node_lp_bound + ctx.obj_const >= inc)
+                    {
+                        crate::profile::incr(crate::profile::Ctr::NodeLpOverInc);
+                        crate::profile::incr_by(
+                            crate::profile::Ctr::NodeLpItersOverInc,
+                            sol.iters as u64,
+                        );
+                    }
+                    let integral = ctx
+                        .is_int
+                        .iter()
+                        .enumerate()
+                        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    node_lp_optimal_verdict(ctx, &sol, full_l, full_u, node_lp_bound, integral)
+                }
+            }
+        }
         LpStatus::Infeasible => {
             // C-14: the simplex reports `Infeasible` with a Farkas *dual ray
             // candidate* in `sol.dual` (contract: `lp/simplex/mod.rs`), sound only
@@ -8349,18 +8489,17 @@ fn solve_node(
             // before pruning. The safe-bound identity is invariant under
             // equilibration (`scaling.rs`), so the scaled-space verdict equals the
             // original-space one. On verification failure the box is NOT provably
-            // empty: never fathom — hand the node back with a raw -inf (non-pruning)
-            // bound and midpoint so it is branched/re-solved and the optimum can
+            // empty: never fathom -- the node goes back untrusted (a raw -inf,
+            // non-pruning bound) so it is branched/re-solved and the optimum can
             // never be silently cut (same sound handling as the IterLimit /
-            // Numerical arm below). A sound infeasible LP always exports a
-            // verifiable ray, so this costs one mat-vec and never changes a
-            // correct fathom.
+            // Numerical arm). A sound infeasible LP always exports a verifiable
+            // ray, so this costs one mat-vec and never changes a correct fathom.
             // T3b5: farkas check on the SCALED working CSC (`ctx.csc`; the dual/ray
             // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
             // DISCOPT_MILP_TOL_ROBUST: only a ray that survives every row's acceptance
             // tolerance fathoms (an exact-only one left the node above re-solved).
             let proved = if tol_robust_enabled() {
-                let r = robust_infeasible(ctx, &sol.dual, &full_l, &full_u);
+                let r = robust_infeasible(ctx, &sol.dual, full_l, full_u);
                 if !r {
                     crate::profile::incr(crate::profile::Ctr::TolRobustFarkasRefused);
                 }
@@ -8394,53 +8533,83 @@ fn solve_node(
                         crate::profile::incr(crate::profile::Ctr::ConflictSmall);
                     }
                 }
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: INFEAS_SENTINEL, // pruned
-                    solution: vec![0.0; ctx.ns],
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: true,
-                };
+                NodeLpVerdict::InfeasibleProved
             } else {
-                out.result = NodeResult {
-                    node_id: id,
-                    lower_bound: f64::NEG_INFINITY,
-                    solution: midpoint(lb_k, ub_k),
-                    is_feasible: false,
-                    certified_infeasible: false,
-                    sentinel_is_exclusion: false,
-                };
+                NodeLpVerdict::Untrusted
             }
         }
-        LpStatus::Unbounded => {
-            out.unbounded = true;
-        }
-        LpStatus::IterLimit | LpStatus::Numerical => {
-            // Cannot trust this LP's bound: never prune off it (could drop the
-            // optimum). Hand the node back with a raw -inf (non-pruning) bound
-            // and the box midpoint. This stays fully SOUND without decertifying
-            // the whole search (#598): `import_results` floors the -inf at the
-            // node's parent-inherited bound — a valid bound over this child box,
-            // proved at the ancestor's LP solve — and `process_evaluated` then
-            // only prunes it against the incumbent on that valid bound, branches
-            // it (children re-solve fresh LPs, so the subtree stays searched), or
-            // — when nothing is left to branch — folds the valid bound into the
-            // tree's permanent `unresolved_floor`. The untrusted midpoint can
-            // never fathom the node as integer-feasible or become the incumbent
-            // (`PendingResult::bound_trusted` gates both), so a closed gap
-            // remains a rigorous optimality certificate.
-            out.result = NodeResult {
-                node_id: id,
-                lower_bound: f64::NEG_INFINITY,
-                solution: midpoint(lb_k, ub_k),
-                is_feasible: false,
-                certified_infeasible: false,
-                sentinel_is_exclusion: false,
-            };
+        LpStatus::Unbounded => NodeLpVerdict::Unbounded,
+        // Cannot trust this LP's bound: never prune off it (could drop the optimum).
+        LpStatus::IterLimit | LpStatus::Numerical => NodeLpVerdict::Untrusted,
+    };
+    NodeLp {
+        sol,
+        rc_dual,
+        verdict,
+    }
+}
+
+/// The verdict on an optimal node LP with a safe bound: the integral-vertex checks.
+fn node_lp_optimal_verdict(
+    ctx: &NodeCtx<'_>,
+    sol: &crate::lp::simplex::LpSolve,
+    full_l: &[f64],
+    full_u: &[f64],
+    bound: f64,
+    integral: bool,
+) -> NodeLpVerdict {
+    // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
+    // so its original rows AND bounds must hold verifiably. One that fails is
+    // handled like a failed LP: its bound and point are both untrusted.
+    if integral && !point_verified(ctx, full_l, full_u, &sol.x) {
+        return NodeLpVerdict::UnverifiedPoint;
+    }
+    // #2163 (the driver side of #1414): the vertex verifies as computed,
+    // but the point it CLAIMS is its integral realisation, and that one
+    // may miss a row -- a binary at `1 - 5.3e-6` on a big-M row with
+    // `M ~ 30` buys ~3e-6 of slack. Fathoming here certified the slack:
+    // on a CMIR-augmented knapsack the driver reported `Optimal` at
+    // 36.929960309 against a true optimum of 36.929960372, and on a trained
+    // ReLU big-M MILP the adopted vertex was refused by `verify_point` and
+    // the solve came back `feasible`. Do what the Python tree does for the
+    // same class: offer the fixed-integer polish of the vertex as an
+    // incumbent (verified, exact integers), and hand the node back with a
+    // branch hint on the column whose rounding moved furthest. The node
+    // keeps its OWN LP bound: that bound is a valid bound over the box
+    // whether or not the vertex is integral (an untrusted `-inf` handback
+    // left the root with no dual bound at all -- #2165 review). The tree
+    // never fathoms a node whose hinted column is not exactly integral
+    // (`process_evaluated`, #2163), so it branches; the child that fixes
+    // the column settles it with its own LP. Branching is always a valid
+    // cover; the domain strictly shrinks, so the search terminates.
+    if integral {
+        if let Some(zs) = snap_integral(ctx, &sol.x) {
+            if !point_verified(ctx, full_l, full_u, &zs) {
+                crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
+                let mut col = None;
+                let mut moved = 0.0f64;
+                for (j, (&is_int, (&zj, &xj))) in
+                    ctx.is_int.iter().zip(zs.iter().zip(&sol.x)).enumerate()
+                {
+                    let d = (zj - xj).abs();
+                    if is_int && d > moved {
+                        moved = d;
+                        col = Some(j);
+                    }
+                }
+                if let Some(col) = col {
+                    let incumbent = polish_integral_vertex(ctx, full_l, full_u, &sol.x, &sol.basis)
+                        .map(|(xp, vp)| (xp[..ctx.ns].to_vec(), vp));
+                    return NodeLpVerdict::SnapRefused {
+                        bound,
+                        col,
+                        incumbent,
+                    };
+                }
+            }
         }
     }
-    out
+    NodeLpVerdict::Bound { bound, integral }
 }
 
 /// Verify a Farkas infeasibility certificate for the LP `{ A x = b, l ≤ x ≤ u }`.
@@ -11595,6 +11764,155 @@ mod tests {
             root_cut_prune: true,
             simplex: SimplexOptions::default(),
         }
+    }
+
+    /// Stage 1d-2 gate (`docs/dev/highs-mip-replacement-plan.md`): the HiGHS-search node
+    /// evaluation (`highs_eval`) against `solve_node` on every node of real searches over
+    /// random pure-integer and mixed MILPs. Same box: verdicts and bounds agree bit for
+    /// bit. Full evaluation (local-domain propagation, LP, reduced-cost fixing against a
+    /// cutoff just above the optimum, re-evaluation): never prunes a box holding the
+    /// reference optimum, never bounds above it, never removes it from the domain.
+    #[test]
+    fn highs_eval_agrees_with_solve_node_and_never_cuts_the_optimum() {
+        use super::highs_eval::diff::{EvalDiff, DIFF};
+        let mut seed = 7u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let mut total = super::highs_eval::diff::DiffStats::default();
+        let mut problems = 0usize;
+        for it in 0..160 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(10, 20) as usize;
+            let m = rnd(6, 12) as usize;
+            let is_int: Vec<bool> = (0..ns).map(|_| !mixed || rnd(0, 2) != 0).collect();
+            let l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            for i in 0..m {
+                for col in cols.iter_mut().take(ns) {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            col.push((i, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                uf.push(INF);
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let base = opts(ns, ints);
+            let r0 = solve_milp_node_search(
+                csc.clone(),
+                m,
+                n,
+                &cf,
+                &lf,
+                &uf,
+                &b,
+                0.0,
+                &base,
+                None,
+                None,
+                None,
+            );
+            if r0.status != MilpStatus::Optimal {
+                continue;
+            }
+            problems += 1;
+            // Same-box arm: no node propagation or fixing in `solve_node`, so its box is
+            // the node's; the full arm runs the default search.
+            for same in [true, false] {
+                let mut o = base.clone();
+                if same {
+                    o.node_propagation = false;
+                    o.reduced_cost_fixing = false;
+                }
+                DIFF.with(|d| {
+                    *d.borrow_mut() = Some(EvalDiff {
+                        reference: (!same).then(|| (r0.x.clone(), r0.obj)),
+                        stats: Default::default(),
+                    })
+                });
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    &o,
+                    None,
+                    None,
+                    None,
+                );
+                assert_eq!(r.status, MilpStatus::Optimal);
+                let st = DIFF.with(|d| d.borrow_mut().take().unwrap()).stats;
+                assert!(
+                    st.same_box_mismatch.is_empty(),
+                    "same-box mismatch: {:?}",
+                    st.same_box_mismatch
+                );
+                assert!(st.unsound.is_empty(), "unsound: {:?}", st.unsound);
+                total.nodes += st.nodes;
+                total.same_box += st.same_box;
+                total.full += st.full;
+                total.ref_in_box += st.ref_in_box;
+                total.stronger_prunes += st.stronger_prunes;
+                let (a, e) = (&mut total.eval, &st.eval);
+                a.evaluations += e.evaluations;
+                a.domain_infeasible += e.domain_infeasible;
+                a.lp_infeasible += e.lp_infeasible;
+                a.bound_exceeding += e.bound_exceeding;
+                a.integral += e.integral;
+                a.untrusted += e.untrusted;
+                a.open += e.open;
+                a.redcost_fixings += e.redcost_fixings;
+                a.reevaluations += e.reevaluations;
+            }
+        }
+        eprintln!("problems {problems} {total:?}");
+        let e = &total.eval;
+        assert!(
+            // Measured: 160 problems, 4197 same-box, 569 with x* in the box, 29 domain-
+            // and 153 LP-infeasible, 1409 bound-exceeding, 4515 fixings, 1222 re-runs.
+            problems > 100
+                && total.same_box > 2000
+                && total.ref_in_box > 280
+                && e.domain_infeasible > 14
+                && e.lp_infeasible > 75
+                && e.bound_exceeding > 700
+                && e.redcost_fixings > 2000
+                && e.reevaluations > 600,
+            "probe fired too little: problems {problems} {total:?}"
+        );
     }
 
     /// Gap plan §12.35: the MILP presolve path (`solve_presolved`) must reach the same
