@@ -63,6 +63,8 @@ pub(super) struct HighsEval {
     pub branch_hint: Option<usize>,
     /// The last trusted LP point (structurals), for branching.
     pub point: Option<Vec<f64>>,
+    /// The same point over all working columns (slacks included), for heuristics.
+    pub point_full: Option<Vec<f64>>,
     /// Whether the last LP was unbounded.
     pub unbounded: bool,
     /// Reduced costs of the structurals at the last trusted LP (`col_dual`).
@@ -113,6 +115,7 @@ impl HighsEval {
             found: Vec::new(),
             branch_hint: None,
             point: None,
+            point_full: None,
             unbounded: false,
             redcost: None,
             last_dual: None,
@@ -218,6 +221,7 @@ impl HighsEval {
             NodeLpVerdict::Unbounded => {
                 self.unbounded = true;
                 self.point = None;
+                self.point_full = None;
                 self.stats.open += 1;
                 Some(SearchResult::Open)
             }
@@ -226,12 +230,14 @@ impl HighsEval {
             // if any, is still offered.
             NodeLpVerdict::Untrusted | NodeLpVerdict::UnverifiedPoint => {
                 self.point = None;
+                self.point_full = None;
                 self.stats.untrusted += 1;
                 Some(SearchResult::Open)
             }
             NodeLpVerdict::Abstain { incumbent } => {
                 self.offer(incumbent);
                 self.point = None;
+                self.point_full = None;
                 self.stats.untrusted += 1;
                 Some(SearchResult::Open)
             }
@@ -249,6 +255,7 @@ impl HighsEval {
                 objective_observation(parent, node, pc);
                 node.lower_bound = node.lower_bound.max(bound + oc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
+                self.point_full = Some(nl.sol.x.clone());
                 self.branch_hint = Some(col);
                 self.stats.open += 1;
                 Some(SearchResult::Open)
@@ -261,6 +268,7 @@ impl HighsEval {
                 self.last_dual = Some(nl.rc_dual().to_vec());
                 objective_observation(parent, node, pc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
+                self.point_full = Some(nl.sol.x.clone());
                 if integral {
                     // `addIncumbent`; the LP is dual feasible, so the node is done.
                     self.offer(Some((nl.sol.x[..ctx.ns].to_vec(), nl.sol.obj + oc)));

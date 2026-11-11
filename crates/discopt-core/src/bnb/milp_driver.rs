@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod highs_branch;
+mod highs_env;
 mod highs_eval;
 
 use crate::bnb::branching::VarBranchInfo;
@@ -760,6 +761,36 @@ fn highs_search() -> bool {
 /// for the looser structural and slack boxes (bell5: ~90 pivots per node LP vs ~2,
 /// 2.6 ms vs 0.2 ms). Kept for the layers that need the domain (cut-pool and conflict
 /// propagation); turn on when those land and a panel shows it pays.
+#[cfg(test)]
+thread_local! {
+    /// Tests force the `DISCOPT_HIGHS_MIP_SEARCH` route without touching the process
+    /// environment (tests run in parallel).
+    static FORCE_HIGHS_MIP_SEARCH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn highs_mip_search() -> bool {
+    #[cfg(test)]
+    if let Some(v) = FORCE_HIGHS_MIP_SEARCH.with(|f| f.get()) {
+        return v;
+    }
+    // `DISCOPT_HIGHS_MIP_SEARCH` (stage 1d-5 of `docs/dev/highs-mip-replacement-plan.md`):
+    // run the HiGHS-design search (translated control, queue, local domain, node
+    // evaluation through `node_lp`'s safety layer, reliability strong branching with
+    // `HighsPseudocost`) from the root working LP instead of the batched search, for
+    // models with no lazy, node, bound or debug hook. Default OFF until the
+    // certification panel passes (flag-retirement audit row).
+    match std::env::var("DISCOPT_HIGHS_MIP_SEARCH") {
+        Err(_) => false,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_MIP_SEARCH={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 fn highs_search_domain() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEARCH_DOMAIN") {
         Err(_) => false,
@@ -5956,6 +5987,14 @@ fn solve_milp_node_search(
     let mut nonroot_dives: usize = 0;
     let mut frontier_capped = false;
 
+    // Stage 1d-5: the HiGHS-design search runs once, at the first batch, from the
+    // root working LP; its outcome replaces the batched search's.
+    let mut highs_route = highs_mip_search()
+        && hook.is_none()
+        && lazy.is_none()
+        && node.is_none()
+        && opts.bound_hook.is_none();
+    let mut highs_outcome: Option<highs_env::Outcome> = None;
     'search: loop {
         if fire_dbg!(MilpCheckpoint::IterStart) {
             gap_certified = false;
@@ -6367,9 +6406,55 @@ fn solve_milp_node_search(
             highs_eval::diff::batch(&ctx, &batch.node_ids, &batch.lb, &batch.ub, &outs);
             #[cfg(test)]
             highs_branch::e2e::maybe_run(&ctx);
+            if highs_route && batch.node_ids.len() == 1 {
+                highs_route = false;
+                let lim = highs_env::Limits {
+                    max_nodes: opts.max_nodes.saturating_sub(tm.stats().total_nodes),
+                    max_open_nodes: opts.max_open_nodes,
+                    deadline,
+                    gap_tol: opts.gap_tol,
+                    rel_gap_max_abs: opts.rel_gap_max_abs,
+                    abs_gap_tol: opts.abs_gap_tol,
+                    heuristics: opts.heuristics,
+                };
+                // The best verified point so far: the tree's, or the root
+                // evaluation's heuristic candidate.
+                let mut initial: Option<(Vec<f64>, f64)> = tm
+                    .incumbent()
+                    .filter(|(_, v)| *v < INFEAS_SENTINEL - 1.0)
+                    .map(|(x, v)| (x.to_vec(), v));
+                if let Some((x, v)) = &outs[0].incumbent {
+                    if initial.as_ref().is_none_or(|(_, w)| v < w) {
+                        initial = Some((x.clone(), *v));
+                    }
+                }
+                highs_outcome = highs_env::run(&ctx, &lim, initial);
+                if let Some(o) = &highs_outcome {
+                    use crate::profile::{incr, incr_by, Ctr};
+                    incr(Ctr::HighsMipSearchRuns);
+                    incr_by(Ctr::HighsMipSearchNodes, o.nodes as u64);
+                    incr_by(Ctr::HighsMipSearchBranched, o.branched as u64);
+                    incr_by(Ctr::HighsMipSearchSbIters, o.sb_iters as u64);
+                    incr_by(Ctr::HighsMipSearchCommits, o.commits as u64);
+                    incr_by(Ctr::HighsMipSearchHeuristicHits, o.heuristic_hits as u64);
+                }
+            }
             outs
         };
 
+        if let Some(o) = highs_outcome.take() {
+            return highs_search_result(
+                o,
+                c,
+                ns,
+                obj_const,
+                opts,
+                gap_certified,
+                search_incomplete,
+                lp_iters,
+                root_cut_rows,
+            );
+        }
         // --- sequential reduce: apply tree mutations in batch order ---
         let mut hit_unbounded = false;
         // D2 B1': global GMI cuts separated this batch, and pool cuts the batch used.
@@ -7388,6 +7473,74 @@ fn solve_milp_node_search(
     // its recorded value can sit below the tree's bound, and this guard is not
     // meant to reason about which direction it caught.
     if has_inc && incumbent_misvalued(res.obj, stats.incumbent_value) {
+        crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
+        withdraw_certificate(&mut res);
+    }
+    res
+}
+
+/// The driver's result from a finished HiGHS-design search (`DISCOPT_HIGHS_MIP_SEARCH`):
+/// the same status decision, objective recomputation (#1296) and misvaluation guard
+/// (#2136) as the batched search's tail.
+#[allow(clippy::too_many_arguments)]
+fn highs_search_result(
+    o: highs_env::Outcome,
+    c: &[f64],
+    ns: usize,
+    obj_const: f64,
+    opts: &MilpOptions,
+    gap_certified: bool,
+    search_incomplete: bool,
+    lp_iters: usize,
+    root_cut_rows: usize,
+) -> MilpResult {
+    let has_inc = o.best.is_some();
+    let (x, tree_v) = match &o.best {
+        Some((x, v)) => (x.clone(), *v),
+        None => (vec![0.0; ns], f64::INFINITY),
+    };
+    let obj = if has_inc && c[ns..].iter().all(|&v| v == 0.0) {
+        x.iter().zip(&c[..ns]).map(|(xj, cj)| xj * cj).sum::<f64>() + obj_const
+    } else {
+        tree_v
+    };
+    let gap_ok = has_inc && {
+        let raw = tree_v - o.bound;
+        let denom = if opts.rel_gap_max_abs {
+            tree_v.abs().max(o.bound.abs()).max(1e-10)
+        } else {
+            tree_v.abs().max(1.0)
+        };
+        (raw / denom).max(0.0) <= opts.gap_tol
+            || opts.abs_gap_tol.is_some_and(|t| raw.max(0.0) <= t)
+    };
+    let status = decide_status(
+        false,
+        has_inc,
+        o.complete,
+        search_incomplete || !o.complete,
+        o.unresolved,
+        gap_ok,
+        gap_certified && o.complete,
+        o.stop == Some(highs_env::Stop::Nodes) || o.stop == Some(highs_env::Stop::OpenNodes),
+    );
+    let mut res = MilpResult {
+        status,
+        x,
+        obj,
+        bound: o.bound,
+        nodes: o.nodes as usize,
+        lp_iters: lp_iters + o.lp_iters as usize,
+        lazy_calls: 0,
+        lazy_requeues: 0,
+        node_calls: 0,
+        node_cuts_added: 0,
+        root_cut_rows,
+        strong_probe_lps: 0,
+        bound_hook_calls: 0,
+        bound_hook_raised: 0,
+    };
+    if has_inc && incumbent_misvalued(res.obj, tree_v) {
         crate::profile::incr(crate::profile::Ctr::MilpIncumbentMisvaluedDecert);
         withdraw_certificate(&mut res);
     }
@@ -11769,6 +11922,162 @@ mod tests {
         }
     }
 
+    /// Stage 1d-5 gate: through the driver's entry point with `DISCOPT_HIGHS_MIP_SEARCH`
+    /// on, the HiGHS-design search returns the batched search's status and optimum
+    /// with a closed, valid gap; proves infeasible problems infeasible; and under a
+    /// node limit returns a bound no higher than the optimum.
+    #[test]
+    fn highs_mip_search_route_matches_the_batched_search() {
+        let mut seed = 77u64;
+        let mut rnd = |lo: i64, hi: i64| -> i64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + ((seed >> 33) % ((hi - lo + 1) as u64)) as i64
+        };
+        let (mut optimal, mut infeasible, mut limited) = (0usize, 0usize, 0usize);
+        let runs0 = super::highs_env::RUNS.with(|r| r.get());
+        for it in 0..150 {
+            let mixed = it % 2 == 1;
+            let ns = rnd(8, 18) as usize;
+            let m = rnd(5, 11) as usize;
+            let contradict = it % 7 == 3;
+            let is_int: Vec<bool> = (0..ns)
+                .map(|j| (contradict && j < 4) || !mixed || rnd(0, 2) != 0)
+                .collect();
+            let mut l: Vec<f64> = (0..ns).map(|_| rnd(-3, 0) as f64).collect();
+            let mut u: Vec<f64> = l.iter().map(|&v| v + rnd(1, 10) as f64).collect();
+            if contradict {
+                for j in 0..4 {
+                    l[j] = 0.0;
+                    u[j] = 1.0;
+                }
+            }
+            let c: Vec<f64> = (0..ns)
+                .map(|_| rnd(-9, 9) as f64 + 0.5 * rnd(0, 1) as f64)
+                .collect();
+            let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ns];
+            let mut b = Vec::new();
+            // Every 7th problem gets `3 x0 + 5 x1 + 7 x2 + 11 x3 = 13` over binaries:
+            // no subset sums to 13, nothing propagates, the LP is feasible -- only the
+            // search proves it infeasible.
+            for i in 0..m {
+                for col in cols.iter_mut() {
+                    if rnd(0, 2) != 0 {
+                        let v = rnd(-5, 7);
+                        if v != 0 {
+                            col.push((i, v as f64));
+                        }
+                    }
+                }
+                b.push(rnd(5, 30) as f64);
+            }
+            let mut m = m;
+            if contradict {
+                for (j, a) in [3.0, 5.0, 7.0, 11.0].into_iter().enumerate() {
+                    cols[j].push((m, a));
+                }
+                b.push(13.0);
+                m += 1;
+            }
+            let (mut cf, mut lf, mut uf) = (c.clone(), l.clone(), u.clone());
+            for i in 0..m {
+                cols.push(vec![(i, 1.0)]);
+                cf.push(0.0);
+                lf.push(0.0);
+                // The knapsack row is an equality (its slack fixed at 0).
+                uf.push(if contradict && i == m - 1 { 0.0 } else { INF });
+            }
+            let n = cols.len();
+            let mut cp = vec![0usize];
+            let (mut rix, mut rvx) = (Vec::new(), Vec::new());
+            for col in &cols {
+                for &(i, v) in col {
+                    rix.push(i);
+                    rvx.push(v);
+                }
+                cp.push(rix.len());
+            }
+            let csc = SparseCols::from_csc(cp, rix, rvx);
+            let ints: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let o = opts(ns, ints);
+            let solve = |o: &MilpOptions, on: bool| {
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(Some(on)));
+                let r = solve_milp_node_search(
+                    csc.clone(),
+                    m,
+                    n,
+                    &cf,
+                    &lf,
+                    &uf,
+                    &b,
+                    0.0,
+                    o,
+                    None,
+                    None,
+                    None,
+                );
+                FORCE_HIGHS_MIP_SEARCH.with(|f| f.set(None));
+                r
+            };
+            let base = solve(&o, false);
+            let h = solve(&o, true);
+            let tol = 1e-6 * (1.0 + base.obj.abs());
+            match base.status {
+                MilpStatus::Optimal => {
+                    optimal += 1;
+                    assert_eq!(h.status, MilpStatus::Optimal, "route lost the certificate");
+                    assert!(
+                        (h.obj - base.obj).abs() <= tol,
+                        "optimum {} vs {}",
+                        h.obj,
+                        base.obj
+                    );
+                    assert!(
+                        h.bound <= base.obj + tol,
+                        "bound {} above the optimum {}",
+                        h.bound,
+                        base.obj
+                    );
+                    // A node limit: still a valid bound, never a false certificate.
+                    let mut ol = o.clone();
+                    ol.max_nodes = 3;
+                    let hl = solve(&ol, true);
+                    assert!(
+                        hl.bound <= base.obj + tol,
+                        "limited bound {} above {}",
+                        hl.bound,
+                        base.obj
+                    );
+                    if hl.status != MilpStatus::Optimal {
+                        limited += 1;
+                    } else {
+                        assert!((hl.obj - base.obj).abs() <= tol);
+                    }
+                }
+                MilpStatus::Infeasible => {
+                    infeasible += 1;
+                    assert_eq!(
+                        h.status,
+                        MilpStatus::Infeasible,
+                        "route on an infeasible problem: {:?}",
+                        h.status
+                    );
+                }
+                other => panic!("batched search ended {other:?}"),
+            }
+        }
+        let runs = super::highs_env::RUNS.with(|r| r.get()) - runs0;
+        eprintln!("optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}");
+        assert!(
+            // Measured: 128 optimal, 22 infeasible (21 reaching the search; one is
+            // proved before it), 46 node-limited, 277 searches. Runs beyond the two per
+            // optimal problem are infeasible problems the search itself refuted.
+            optimal > 100 && infeasible > 10 && limited > 20 && runs >= 2 * optimal + 10,
+            "probe fired too little: optimal {optimal} infeasible {infeasible} limited {limited} runs {runs}"
+        );
+    }
+
     /// Stage 1d-3 gate: the HiGHS-design search (translated control, node queue, local
     /// domain, `highs_eval` evaluation, `highs_branch` reliability strong branching) run
     /// on the working LP the batched search has at its root reaches the batched
@@ -11875,14 +12184,9 @@ mod tests {
                 other => panic!("batched search ended {other:?}"),
             }
             tot.nodes += h.nodes;
-            tot.rounds += h.rounds;
             tot.commits += h.commits;
             tot.branched += h.branched;
             tot.sb_iters += h.sb_iters;
-            tot.eval.lp_infeasible += h.eval.lp_infeasible;
-            tot.eval.domain_infeasible += h.eval.domain_infeasible;
-            tot.eval.bound_exceeding += h.eval.bound_exceeding;
-            tot.eval.reevaluations += h.eval.reevaluations;
         }
         eprintln!("problems {problems} optimal {optimal} infeasible {infeasible} {tot:?}");
         assert!(
@@ -11893,8 +12197,7 @@ mod tests {
                 && optimal > 100
                 && tot.branched > 1000
                 && tot.commits > 40
-                && tot.sb_iters > 900
-                && tot.eval.reevaluations > 800,
+                && tot.sb_iters > 900,
             "probe fired too little: problems {problems} optimal {optimal} {tot:?}"
         );
     }

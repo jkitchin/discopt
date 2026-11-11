@@ -983,17 +983,13 @@ impl HighsEval {
     }
 }
 
-/// Stage 1d-3 gate: a whole HiGHS-design search -- the translated control
-/// (`MainLoop`, `Search`), node queue, the local domain, [`HighsEval::evaluate`] and
-/// [`HighsEval::branch`] -- run on the working LP the batched search has at its root,
-/// so its certified result can be compared with the batched search's. Separation and
-/// heuristics are not part of it (stage 1d-4).
+/// Stage 1d-3/1d-5 gate: the production HiGHS-design search ([`super::highs_env::run`])
+/// run on the working LP the batched search has at its root, so its certified result
+/// can be compared with the batched search's.
 #[cfg(test)]
 pub(super) mod e2e {
-    use super::super::highs_eval::EvalStats;
+    use super::super::highs_env::{self, Limits};
     use super::*;
-    use crate::bnb::highs_search::node_queue::{NodeQueue, OpenNode};
-    use crate::bnb::highs_search::search::{MainLoop, Search, SearchEnv, NO_NODE_LIMIT};
     use std::cell::RefCell;
 
     /// The search's outcome.
@@ -1004,13 +1000,12 @@ pub(super) mod e2e {
         pub best: Option<(Vec<f64>, f64)>,
         /// Certified lower bound at the end.
         pub bound: f64,
+        pub complete: bool,
         pub nodes: i64,
-        pub rounds: usize,
         pub commits: usize,
         pub branched: usize,
         pub sb_iters: i64,
         pub stopped_by_limit: bool,
-        pub eval: EvalStats,
     }
 
     thread_local! {
@@ -1019,305 +1014,38 @@ pub(super) mod e2e {
         pub static E2E: RefCell<Option<E2eResult>> = const { RefCell::new(None) };
     }
 
-    const NODE_LIMIT: i64 = 200_000;
-
-    struct Env<'a, 'b> {
-        ctx: &'a NodeCtx<'b>,
-        eval: HighsEval,
-        pc: crate::bnb::highs_search::pseudocost::Pseudocost,
-        q: NodeQueue,
-        best: Option<(Vec<f64>, f64)>,
-        nseen: usize,
-        nodes: i64,
-        commits: usize,
-        branched: usize,
-        stopped: bool,
-    }
-
-    fn to_q(c: &DomainChange) -> QDomainChange {
-        QDomainChange {
-            col: c.column as i32,
-            upper: c.boundtype == BoundType::Upper,
-            val: c.boundval,
-        }
-    }
-
-    fn from_q(c: &QDomainChange) -> DomainChange {
-        DomainChange {
-            boundval: c.val,
-            column: c.col as usize,
-            boundtype: if c.upper {
-                BoundType::Upper
-            } else {
-                BoundType::Lower
-            },
-        }
-    }
-
-    impl Env<'_, '_> {
-        /// Take up incumbents the components found; the cutoff is the best value less
-        /// a relative 1e-9 (the search looks for strictly better points).
-        fn sync(&mut self) {
-            while self.nseen < self.eval.found.len() {
-                let (x, v) = self.eval.found[self.nseen].clone();
-                self.nseen += 1;
-                if self.best.as_ref().is_none_or(|b| v < b.1) {
-                    self.best = Some((x, v));
-                }
-            }
-            if let Some((_, v)) = &self.best {
-                self.eval.cutoff = v - 1e-9 * (1.0 + v.abs());
-            }
-        }
-    }
-
-    impl SearchEnv for Env<'_, '_> {
-        fn queue_emplace(
-            &mut self,
-            d: Vec<QDomainChange>,
-            b: Vec<i32>,
-            lb: f64,
-            est: f64,
-            depth: i32,
-        ) -> f64 {
-            self.q.emplace_node(d, b, lb, est, depth).1
-        }
-        fn queue_pop_best(&mut self) -> OpenNode {
-            self.q.pop_best_node().1
-        }
-        fn queue_pop_best_bound(&mut self) -> OpenNode {
-            self.q.pop_best_bound_node().1
-        }
-        fn queue_is_empty(&self) -> bool {
-            self.q.is_empty()
-        }
-        fn queue_best_lower_bound(&self) -> f64 {
-            self.q.best_lower_bound()
-        }
-        fn queue_best_bound_stack_size(&self) -> i32 {
-            self.q.best_bound_domchg_stack_size()
-        }
-        fn cutoff_bound(&self) -> f64 {
-            self.eval.cutoff
-        }
-        fn optimality_limit(&self) -> f64 {
-            self.eval.cutoff
-        }
-        fn feastol(&self) -> f64 {
-            1e-6
-        }
-        fn search_check_limits(&mut self, nnodes: i64) -> bool {
-            if self.nodes + nnodes >= NODE_LIMIT {
-                self.stopped = true;
-            }
-            self.stopped
-        }
-        fn mip_check_limits(&mut self) -> bool {
-            self.stopped
-        }
-        fn domain_install(&mut self, node: &OpenNode) {
-            self.eval.dom.backtrack_to_global();
-            let stack: Vec<DomainChange> = node.domchgstack.iter().map(from_q).collect();
-            let br: Vec<usize> = node.branchings.iter().map(|&p| p as usize).collect();
-            self.eval.dom.set_domain_change_stack(&stack, &br);
-            self.eval.subrootsol.clear();
-        }
-        fn domain_stack_len(&self) -> i32 {
-            self.eval.dom.domain_change_stack().len() as i32
-        }
-        fn domain_backtrack(&mut self) {
-            self.eval.dom.backtrack();
-        }
-        fn domain_backtrack_to_global(&mut self) {
-            self.eval.dom.backtrack_to_global();
-        }
-        fn domain_propagate_after_backtrack(&mut self, _depth: i32) -> bool {
-            self.eval.dom.propagate();
-            self.eval.dom.infeasible()
-        }
-        fn domain_try_sibling(&mut self, d: QDomainChange, skip_propagate: bool) -> bool {
-            self.eval.dom.change_bound(from_q(&d), Reason::Branching);
-            if !skip_propagate && !self.eval.dom.infeasible() {
-                self.eval.dom.propagate();
-            }
-            self.eval.dom.infeasible()
-        }
-        fn domain_undo_sibling(&mut self) {
-            self.eval.dom.backtrack();
-            self.eval.dom.clear_changed_cols();
-        }
-        fn domain_propagate_for_queue(&mut self) -> bool {
-            let n = self.eval.dom.changed_cols().len();
-            self.eval.dom.propagate();
-            self.eval.dom.clear_changed_cols_from(n);
-            self.eval.dom.infeasible()
-        }
-        fn domain_reduced_stack(&mut self) -> (Vec<QDomainChange>, Vec<i32>) {
-            let (s, p) = self.eval.dom.reduced_domain_change_stack();
-            (
-                s.iter().map(to_q).collect(),
-                p.iter().map(|&x| x as i32).collect(),
-            )
-        }
-        fn domain_objective_lower_bound(&mut self) -> f64 {
-            match self.eval.dom.objective_lower() {
-                Some((v, 0)) => v + self.ctx.obj_const,
-                _ => f64::NEG_INFINITY,
-            }
-        }
-        fn global_propagate(&mut self) {}
-        fn global_infeasible(&self) -> bool {
-            false
-        }
-        fn evaluate(
-            &mut self,
-            node: &mut NodeData,
-            parent: Option<&NodeData>,
-            _depth: i32,
-        ) -> SearchResult {
-            self.nodes += 1;
-            let limit = self.eval.cutoff;
-            let r = self
-                .eval
-                .evaluate(self.ctx, node, parent, &mut self.pc, false, limit);
-            self.sync();
-            r
-        }
-        fn branch(
-            &mut self,
-            top: &NodeData,
-            parent: Option<&NodeData>,
-            _depth: i32,
-        ) -> BranchOutcome {
-            let q = &self.q;
-            let nodes = |c: usize| (q.num_nodes_up(c), q.num_nodes_down(c));
-            let limits = || false;
-            let bc = BranchCtx {
-                optimality_limit: self.eval.cutoff,
-                upper_limit: self.eval.cutoff,
-                feastol: 1e-6,
-                epsilon: 1e-9,
-                nodes_up_down: &nodes,
-                check_limits: &limits,
-                child_rule: ChildSelectionRule::RootSol,
-                inheuristic: false,
-            };
-            let out = self.eval.branch(self.ctx, &mut self.pc, top, parent, &bc);
-            self.commits += out
-                .steps
-                .iter()
-                .filter(|s| matches!(s, BranchStep::Commit { .. }))
-                .count();
-            if out.branched.is_some() {
-                self.branched += 1;
-            }
-            self.sync();
-            out
-        }
-        fn plunge_scores(
-            &mut self,
-            node: (i32, f64, bool),
-            ancestor: Option<(i32, f64, bool)>,
-        ) -> (f64, Option<(f64, f64)>) {
-            let (c, p, up) = node;
-            let s = if up {
-                self.pc.score_up(c as usize, p)
-            } else {
-                self.pc.score_down(c as usize, p)
-            };
-            let a = ancestor.map(|(ac, ap, lower)| {
-                let (d, u) = (
-                    self.pc.score_down(ac as usize, ap),
-                    self.pc.score_up(ac as usize, ap),
-                );
-                if lower {
-                    (d, u)
-                } else {
-                    (u, d)
-                }
-            });
-            (s, a)
-        }
-        fn separate(&mut self) -> bool {
-            false
-        }
-        fn heuristics_allowed(&mut self) -> bool {
-            false
-        }
-        fn run_heuristics(&mut self) {}
-        fn after_round(&mut self) -> bool {
-            self.q.perform_bounding(self.eval.cutoff);
-            self.q.set_optimality_limit(self.eval.cutoff);
-            self.stopped
-        }
-    }
-
     /// Run the search once if a test armed [`E2E`].
     pub fn maybe_run(ctx: &NodeCtx<'_>) {
         let armed = E2E.with(|e| e.borrow().as_ref().is_some_and(|r| !r.ran));
         if !armed {
             return;
         }
+        let lim = Limits {
+            max_nodes: 200_000,
+            max_open_nodes: None,
+            deadline: None,
+            gap_tol: 1e-9,
+            rel_gap_max_abs: false,
+            abs_gap_tol: None,
+            heuristics: false,
+        };
         let mut res = E2eResult {
             ran: true,
             ..Default::default()
         };
-        let Some(mut eval) = HighsEval::new(ctx) else {
-            // The rows alone are infeasible over the global box.
-            res.bound = f64::INFINITY;
-            E2E.with(|e| *e.borrow_mut() = Some(res));
-            return;
-        };
-        eval.tighten_cutoff = false;
-        let mut env = Env {
-            ctx,
-            eval,
-            pc: crate::bnb::highs_search::pseudocost::Pseudocost::new(
-                ctx.ns,
-                crate::bnb::highs_search::pseudocost::DEFAULT_MIN_RELIABLE,
-            ),
-            q: NodeQueue::new(ctx.ns),
-            best: None,
-            nseen: 0,
-            nodes: 0,
-            commits: 0,
-            branched: 0,
-            stopped: false,
-        };
-        env.q.emplace_node(
-            Vec::new(),
-            Vec::new(),
-            f64::NEG_INFINITY,
-            f64::NEG_INFINITY,
-            1,
-        );
-        let mut search = Search {
-            count_tree_weight: true,
-            ..Default::default()
-        };
-        let mut ml = MainLoop::default();
-        let mut root = true;
-        while !env.queue_is_empty() {
-            res.rounds += 1;
-            if ml.round(&mut env, &mut search, root, NO_NODE_LIMIT) {
-                break;
+        match highs_env::run(ctx, &lim, None) {
+            Some(o) => {
+                res.best = o.best;
+                res.bound = o.bound;
+                res.complete = o.complete;
+                res.nodes = o.nodes;
+                res.commits = o.commits;
+                res.branched = o.branched;
+                res.sb_iters = o.sb_iters;
+                res.stopped_by_limit = o.stop.is_some();
             }
-            root = false;
+            None => res.bound = f64::INFINITY,
         }
-        let open = if env.q.is_empty() {
-            f64::INFINITY
-        } else {
-            env.q.best_lower_bound()
-        };
-        let best_v = env.best.as_ref().map_or(f64::INFINITY, |b| b.1);
-        res.bound = open.min(best_v).min(env.eval.unresolved_floor);
-        res.best = env.best.clone();
-        res.nodes = env.nodes;
-        res.commits = env.commits;
-        res.branched = env.branched;
-        res.sb_iters = env.eval.sb_iters;
-        res.stopped_by_limit = env.stopped;
-        res.eval = env.eval.stats.clone();
         E2E.with(|e| *e.borrow_mut() = Some(res));
     }
 }

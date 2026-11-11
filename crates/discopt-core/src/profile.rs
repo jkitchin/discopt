@@ -717,6 +717,14 @@ counters!(
     // point's recomputed objective disagreed with the tree's incumbent value
     // (the value every gap test and cutoff used) beyond LP noise.
     MilpIncumbentMisvaluedDecert,
+    // Stage 1d-5: MILP solves whose tree was searched by the HiGHS-design search
+    // (`DISCOPT_HIGHS_MIP_SEARCH`).
+    HighsMipSearchRuns,
+    HighsMipSearchNodes,
+    HighsMipSearchBranched,
+    HighsMipSearchSbIters,
+    HighsMipSearchCommits,
+    HighsMipSearchHeuristicHits,
     // #2107: noise-floor entries relaxed into their row's slack instead of
     // withdrawing the certificate.
     MilpNoiseEntriesRelaxed,
