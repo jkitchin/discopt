@@ -18,11 +18,15 @@
 //! `updateActivityLb/UbChange`, `updateThresholdLb/UbChange`,
 //! `recomputeCapacityThreshold`, `markPropagate`, `computeRowActivities`,
 //! `doChangeBound`, `changeBound`, `backtrack`, `backtrackToGlobal`, `propagate`,
-//! `getColLower/UpperPos`.
+//! `getColLower/UpperPos`, `set/getReducedDomainChangeStack`; and
+//! `CutpoolPropagation` (`cutAdded`, `cutDeleted`, `markPropagateCut`,
+//! `updateActivityLb/UbChange`, `recomputeCapacityThreshold`), with the domain's
+//! `markPropagateCut(reason)`, `getMinCutActivity` and the cut-pool section of
+//! `propagate`.
 //!
 //! Not yet ported (later layers of the search port): objective propagation,
-//! cut-pool and conflict-pool propagation, conflict analysis, clique-table and
-//! implication fixings on binaries, redundant-row recording.
+//! conflict-pool propagation, conflict analysis, clique-table and implication
+//! fixings on binaries, redundant-row recording.
 
 use super::cdouble::CDouble;
 use std::sync::Arc;
@@ -66,6 +70,8 @@ pub enum Reason {
     ConflictingBounds(usize),
     /// Reduced-cost fixing (HiGHS passes `unspecified()`; kept distinct for counts).
     RedCost,
+    /// `Reason::cut(cutpoolindex, cut)`: row `cut` of the domain's cut pool `pool`.
+    Cut(usize, usize),
 }
 
 /// The rows a domain propagates: `row_lower <= a x <= row_upper` over the columns,
@@ -200,7 +206,87 @@ fn bound_range(upper: f64, lower: f64, tolerance: f64, continuous: bool) -> f64 
         }
 }
 
-/// `HighsDomain` (model-row propagation).
+/// `HighsDomain::CutpoolPropagation`: one cut pool's rows as a domain tracks them.
+///
+/// HiGHS reads the rows through a pointer to the pool's `HighsDynamicRowMatrix`;
+/// here the pool hands each row to the domain when it is added
+/// ([`Domain::cut_added`]) and the domain keeps a copy, with per-column lists that
+/// mirror the pool matrix's column links. HiGHS inserts a linked row at the head of
+/// each column's list, so its traversals visit the newest row first; the lists here
+/// are pushed in insertion order and walked in reverse, which is the same order.
+#[derive(Clone, Default)]
+struct CutpoolProp {
+    /// Mirror of the pool matrix: row columns and values per cut slot.
+    rows: Vec<(Vec<usize>, Vec<f64>)>,
+    /// `cutpool->getRhs()`.
+    rhs: Vec<f64>,
+    /// `columnsLinked(cut)`.
+    linked: Vec<bool>,
+    /// Column links of the positive (`AheadPos_`) and negative (`AheadNeg_`) entries.
+    col_pos: Vec<Vec<(usize, f64)>>,
+    col_neg: Vec<Vec<(usize, f64)>>,
+    /// `activitycuts_`, `activitycutsinf_`, `propagatecutflags_`,
+    /// `propagatecutinds_`, `capacityThreshold_`.
+    activity: Vec<CDouble>,
+    activity_inf: Vec<i32>,
+    flags: Vec<u8>,
+    inds: Vec<usize>,
+    threshold: Vec<f64>,
+}
+
+impl CutpoolProp {
+    fn new(ncols: usize) -> Self {
+        CutpoolProp {
+            col_pos: vec![Vec::new(); ncols],
+            col_neg: vec![Vec::new(); ncols],
+            ..Default::default()
+        }
+    }
+
+    /// `HighsDynamicRowMatrix::unlinkColumns` on the mirror.
+    fn unlink(&mut self, cut: usize) {
+        if !self.linked[cut] {
+            return;
+        }
+        self.linked[cut] = false;
+        let (inds, vals) = &self.rows[cut];
+        for (&c, &v) in inds.iter().zip(vals) {
+            let list = if v > 0.0 {
+                &mut self.col_pos[c]
+            } else {
+                &mut self.col_neg[c]
+            };
+            let p = list
+                .iter()
+                .position(|&(r, _)| r == cut)
+                .expect("linked cut missing from its column list");
+            list.remove(p);
+        }
+    }
+
+    /// `markPropagateCut(cut)`.
+    fn mark_propagate_cut(&mut self, cut: usize) {
+        if self.flags[cut] == 0
+            && (self.activity_inf[cut] == 1
+                || self.rhs[cut] - self.activity[cut].to_f64() <= self.threshold[cut])
+        {
+            self.inds.push(cut);
+            self.flags[cut] |= 1;
+        }
+    }
+
+    fn ensure_tracked(&mut self, cut: usize) {
+        if self.activity.len() <= cut {
+            self.activity.resize(cut + 1, CDouble::from(0.0));
+            self.activity_inf.resize(cut + 1, 0);
+            self.flags.resize(cut + 1, 2);
+            self.threshold.resize(cut + 1, 0.0);
+        }
+    }
+}
+
+/// `HighsDomain`: model-row and cut-pool propagation.
+#[derive(Clone)]
 pub struct Domain {
     model: Arc<DomainModel>,
     feastol: f64,
@@ -230,6 +316,14 @@ pub struct Domain {
     infeasible: bool,
     infeasible_pos: usize,
     infeasible_reason: Reason,
+    /// `cutpoolpropagation`.
+    cutpools: Vec<CutpoolProp>,
+    /// Whether this is the global domain (`domain == &mipdata_->getDomain()`), which
+    /// also tracks cuts added without propagation and ignores unlinking.
+    is_global: bool,
+    /// `cutpool->resetAge(cut)` calls made during propagation, for the caller to
+    /// apply to its pools (the domain does not own them): `(pool, cut)`.
+    cut_age_resets: Vec<(usize, usize)>,
 }
 
 impl Domain {
@@ -268,6 +362,9 @@ impl Domain {
             infeasible: false,
             infeasible_pos: 0,
             infeasible_reason: Reason::Unspecified,
+            cutpools: Vec::new(),
+            is_global: false,
+            cut_age_resets: Vec::new(),
         };
         d.compute_row_activities();
         d
@@ -276,6 +373,110 @@ impl Domain {
     /// Set the minimum relative improvement for continuous bound changes (HiGHS: 0.3).
     pub fn set_continuous_accept(&mut self, v: f64) {
         self.cont_accept = v;
+    }
+
+    /// Mark this as the global domain (HiGHS compares against
+    /// `mipdata_->getDomain()`): it tracks the activity of cuts added without
+    /// propagation and keeps tracking a cut its pool unlinks for propagation.
+    pub fn set_global(&mut self, global: bool) {
+        self.is_global = global;
+    }
+
+    /// `addCutpool(cutpool)`: register a cut pool; returns its index in reasons.
+    pub fn add_cutpool(&mut self) -> usize {
+        self.cutpools.push(CutpoolProp::new(self.model.ncols));
+        self.cutpools.len() - 1
+    }
+
+    /// `CutpoolPropagation::cutAdded(cut, propagate)`, with the row handed over
+    /// (HiGHS reads it from the pool). Row `inds`/`vals` are the cut `vals . x <= rhs`.
+    pub fn cut_added(
+        &mut self,
+        pool: usize,
+        cut: usize,
+        inds: &[usize],
+        vals: &[f64],
+        rhs: f64,
+        propagate: bool,
+    ) {
+        {
+            let cp = &mut self.cutpools[pool];
+            if cp.rows.len() <= cut {
+                cp.rows.resize(cut + 1, (Vec::new(), Vec::new()));
+                cp.rhs.resize(cut + 1, INF);
+                cp.linked.resize(cut + 1, false);
+            }
+            debug_assert!(!cp.linked[cut], "cut slot reused while still linked");
+            cp.rows[cut] = (inds.to_vec(), vals.to_vec());
+            cp.rhs[cut] = rhs;
+            cp.linked[cut] = propagate;
+            if propagate {
+                for (&c, &v) in inds.iter().zip(vals) {
+                    if v > 0.0 {
+                        cp.col_pos[c].push((cut, v));
+                    } else {
+                        cp.col_neg[c].push((cut, v));
+                    }
+                }
+            }
+        }
+        if !propagate && !self.is_global {
+            return;
+        }
+        self.cutpools[pool].ensure_tracked(cut);
+        self.cutpools[pool].flags[cut] &= !2u8;
+        let (ninf, act) = self.compute_min_activity_of(inds, vals);
+        let cp = &mut self.cutpools[pool];
+        cp.activity_inf[cut] = ninf;
+        cp.activity[cut] = act;
+        if propagate {
+            self.recompute_cut_capacity_threshold(pool, cut);
+            self.cutpools[pool].mark_propagate_cut(cut);
+        }
+    }
+
+    /// `CutpoolPropagation::cutDeleted(cut, deletedOnlyForPropagation)`. The mirror
+    /// of the pool matrix unlinks the row in every domain, as the pool's matrix does;
+    /// only a local domain marks an unlinked cut deleted.
+    pub fn cut_deleted(&mut self, pool: usize, cut: usize, deleted_only_for_propagation: bool) {
+        let is_global = self.is_global;
+        let cp = &mut self.cutpools[pool];
+        if cut < cp.linked.len() {
+            cp.unlink(cut);
+            if !deleted_only_for_propagation {
+                cp.rows[cut] = (Vec::new(), Vec::new());
+                cp.rhs[cut] = INF;
+            }
+        }
+        if deleted_only_for_propagation && is_global {
+            return;
+        }
+        if cut < cp.flags.len() {
+            cp.flags[cut] |= 2;
+        }
+    }
+
+    /// `getMinCutActivity(cutpool, cut)`.
+    pub fn min_cut_activity(&self, pool: usize, cut: usize) -> f64 {
+        let cp = &self.cutpools[pool];
+        if cut < cp.flags.len() && cp.flags[cut] & 2 == 0 && cp.activity_inf[cut] == 0 {
+            cp.activity[cut].to_f64()
+        } else {
+            -INF
+        }
+    }
+
+    /// The `cutpool->resetAge(cut)` calls propagation made since the last call, as
+    /// `(pool, cut)`; the caller applies them to its pools in order.
+    pub fn take_cut_age_resets(&mut self) -> Vec<(usize, usize)> {
+        std::mem::take(&mut self.cut_age_resets)
+    }
+
+    /// `markPropagateCut(reason)`.
+    fn mark_propagate_cut_reason(&mut self, reason: Reason) {
+        if let Reason::Cut(pool, cut) = reason {
+            self.cutpools[pool].mark_propagate_cut(cut);
+        }
     }
 
     /// Whether the domain is infeasible.
@@ -374,6 +575,23 @@ impl Domain {
         (ninf, act)
     }
 
+    /// `computeMinActivity(start, end, ARindex, ARvalue, ...)` over a given row.
+    fn compute_min_activity_of(&self, inds: &[usize], vals: &[f64]) -> (i32, CDouble) {
+        let mut act = CDouble::from(0.0);
+        let mut ninf = 0;
+        for (&col, &val) in inds.iter().zip(vals) {
+            let (lb, ub) = self.bounds_for_activity(col);
+            let c = activity_contribution_min(val, lb, ub);
+            if c == -INF {
+                ninf += 1;
+            } else {
+                act += c;
+            }
+        }
+        act.renormalize();
+        (ninf, act)
+    }
+
     /// `computeMaxActivity` over row `row`.
     pub fn compute_max_activity(&self, row: usize) -> (i32, CDouble) {
         let mut act = CDouble::from(0.0);
@@ -455,15 +673,31 @@ impl Domain {
     }
 
     fn propagate_row_upper(&self, row: usize, out: &mut Vec<DomainChange>) {
-        let ninfmin = self.activitymininf[row];
+        let (s, e) = (self.model.ar_start[row], self.model.ar_start[row + 1]);
+        self.propagate_row_upper_of(
+            &self.model.ar_index[s..e],
+            &self.model.ar_value[s..e],
+            self.model.row_upper[row],
+            self.activitymin[row],
+            self.activitymininf[row],
+            out,
+        );
+    }
+
+    /// `propagateRowUpper(Rindex, Rvalue, Rlen, Rupper, minactivity, ninfmin, ...)`.
+    fn propagate_row_upper_of(
+        &self,
+        inds: &[usize],
+        vals: &[f64],
+        rupper: f64,
+        minactivity: CDouble,
+        ninfmin: i32,
+        out: &mut Vec<DomainChange>,
+    ) {
         if ninfmin > 1 {
             return;
         }
-        let minactivity = self.activitymin[row];
-        let rupper = self.model.row_upper[row];
-        for k in self.model.ar_start[row]..self.model.ar_start[row + 1] {
-            let col = self.model.ar_index[k];
-            let val = self.model.ar_value[k];
+        for (&col, &val) in inds.iter().zip(vals) {
             let contrib = activity_contribution_min(val, self.col_lower[col], self.col_upper[col]);
             let minresact = if ninfmin == 1 {
                 if contrib != -INF {
@@ -605,6 +839,127 @@ impl Domain {
         self.capacity_threshold[row] = t;
     }
 
+    /// `CutpoolPropagation::recomputeCapacityThreshold(cut)`.
+    fn recompute_cut_capacity_threshold(&mut self, pool: usize, cut: usize) {
+        let mut t = -self.feastol;
+        let (inds, vals) = &self.cutpools[pool].rows[cut];
+        for (&col, &val) in inds.iter().zip(vals) {
+            if self.col_upper[col] == self.col_lower[col] {
+                continue;
+            }
+            let th = val.abs()
+                * bound_range(
+                    self.col_upper[col],
+                    self.col_lower[col],
+                    self.feastol,
+                    self.is_continuous(col),
+                );
+            t = t.max(th).max(self.feastol);
+        }
+        self.cutpools[pool].threshold[cut] = t;
+    }
+
+    /// `CutpoolPropagation::updateActivityLbChange` (`lower`) or
+    /// `updateActivityUbChange`, with HiGHS's `threshold`, `activity` and
+    /// `infeasdomain` arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn update_cut_activity(
+        &mut self,
+        pool: usize,
+        col: usize,
+        oldbound: f64,
+        newbound: f64,
+        lower: bool,
+        threshold: bool,
+        activity: bool,
+        infeasdomain: bool,
+    ) {
+        // A loosened bound widens the capacity of the cuts it bounds from the other
+        // side: negative entries for a lower bound, positive for an upper bound.
+        let loosened = if lower {
+            newbound < oldbound
+        } else {
+            newbound > oldbound
+        };
+        if loosened && threshold {
+            let n = if lower {
+                self.cutpools[pool].col_neg[col].len()
+            } else {
+                self.cutpools[pool].col_pos[col].len()
+            };
+            for j in (0..n).rev() {
+                let (row, val) = if lower {
+                    self.cutpools[pool].col_neg[col][j]
+                } else {
+                    self.cutpools[pool].col_pos[col][j]
+                };
+                let t = self.cutpools[pool].threshold[row];
+                self.cutpools[pool].threshold[row] = if lower {
+                    self.update_threshold_lb_change(col, newbound, val, t)
+                } else {
+                    self.update_threshold_ub_change(col, newbound, val, t)
+                };
+            }
+        }
+        if !activity {
+            return;
+        }
+        // The entries whose minimum activity the bound moves: positive for a lower
+        // bound, negative for an upper bound.
+        let n = if lower {
+            self.cutpools[pool].col_pos[col].len()
+        } else {
+            self.cutpools[pool].col_neg[col].len()
+        };
+        let entry = |cp: &CutpoolProp, j: usize| {
+            if lower {
+                cp.col_pos[col][j]
+            } else {
+                cp.col_neg[col][j]
+            }
+        };
+        let inf = if lower { -INF } else { INF };
+        if !infeasdomain {
+            for j in (0..n).rev() {
+                let (row, val) = entry(&self.cutpools[pool], j);
+                let cp = &mut self.cutpools[pool];
+                let delta = compute_delta(val, oldbound, newbound, inf, &mut cp.activity_inf[row]);
+                cp.activity[row] += delta;
+                if delta <= 0.0 {
+                    let t = self.cutpools[pool].threshold[row];
+                    self.cutpools[pool].threshold[row] = if lower {
+                        self.update_threshold_lb_change(col, newbound, val, t)
+                    } else {
+                        self.update_threshold_ub_change(col, newbound, val, t)
+                    };
+                    continue;
+                }
+                let cp = &mut self.cutpools[pool];
+                if cp.activity_inf[row] == 0
+                    && (cp.activity[row] - cp.rhs[row]).to_f64() > self.feastol
+                {
+                    self.infeasible = true;
+                    self.infeasible_pos = self.domchgstack.len();
+                    self.infeasible_reason = Reason::Cut(pool, row);
+                    break;
+                }
+                cp.mark_propagate_cut(row);
+            }
+        }
+        if self.infeasible {
+            // Reverse this pool's changes, up to and including the culprit cut.
+            for j in (0..n).rev() {
+                let (row, val) = entry(&self.cutpools[pool], j);
+                let cp = &mut self.cutpools[pool];
+                let d = compute_delta(val, newbound, oldbound, inf, &mut cp.activity_inf[row]);
+                cp.activity[row] += d;
+                if self.infeasible_reason == Reason::Cut(pool, row) {
+                    break;
+                }
+            }
+        }
+    }
+
     fn mark_propagate(&mut self, row: usize) {
         if self.propagateflags[row] != 0 {
             return;
@@ -738,6 +1093,26 @@ impl Domain {
             }
             i += 1;
         }
+        if !self.infeasible {
+            // If cut pool i finds the domain infeasible, pools after it still update
+            // their thresholds, and pools before it reverse their activity changes.
+            let mut infeas_pool: Option<usize> = None;
+            for p in 0..self.cutpools.len() {
+                if !self.infeasible {
+                    self.update_cut_activity(p, col, oldbound, newbound, lower, true, true, false);
+                    if self.infeasible {
+                        infeas_pool = Some(p);
+                    }
+                } else {
+                    self.update_cut_activity(p, col, oldbound, newbound, lower, true, false, true);
+                }
+            }
+            if let Some(ip) = infeas_pool {
+                for p in 0..ip {
+                    self.update_cut_activity(p, col, oldbound, newbound, lower, false, true, true);
+                }
+            }
+        }
         if self.infeasible {
             // Reverse the activity changes made before the infeasibility was found.
             for i in start..end {
@@ -845,6 +1220,7 @@ impl Domain {
     pub fn backtrack(&mut self) -> Option<DomainChange> {
         let mut k = self.domchgstack.len() as i64 - 1;
         let old_infeasible = self.infeasible;
+        let old_reason = self.infeasible_reason;
         if self.infeasible && self.infeasible_pos == self.domchgstack.len() {
             self.infeasible = false;
             self.infeasible_reason = Reason::Unspecified;
@@ -873,8 +1249,12 @@ impl Domain {
             k -= 1;
         }
         if old_infeasible {
+            self.mark_propagate_cut_reason(old_reason);
             self.infeasible_reason = Reason::Unspecified;
             self.infeasible = false;
+        }
+        for i in (k + 1) as usize..self.domchgreason.len() {
+            self.mark_propagate_cut_reason(self.domchgreason[i]);
         }
         if k < 0 {
             self.domchgstack.clear();
@@ -1006,6 +1386,7 @@ impl Domain {
     pub fn backtrack_to_global(&mut self) {
         let mut k = self.domchgstack.len() as i64 - 1;
         let old_infeasible = self.infeasible;
+        let old_reason = self.infeasible_reason;
         if self.infeasible && self.infeasible_pos == self.domchgstack.len() {
             self.infeasible = false;
             self.infeasible_reason = Reason::Unspecified;
@@ -1032,8 +1413,12 @@ impl Domain {
             k -= 1;
         }
         if old_infeasible {
+            self.mark_propagate_cut_reason(old_reason);
             self.infeasible_reason = Reason::Unspecified;
             self.infeasible = false;
+        }
+        for i in 0..self.domchgreason.len() {
+            self.mark_propagate_cut_reason(self.domchgreason[i]);
         }
         self.domchgstack.clear();
         self.prevboundval.clear();
@@ -1062,14 +1447,14 @@ impl Domain {
 
     /// `propagate()`: true when there was anything to propagate.
     pub fn propagate(&mut self) -> bool {
-        if self.propagateinds.is_empty() {
+        if !self.have_propagation_rows() {
             return false;
         }
         let model = Arc::clone(&self.model);
         let ft = self.feastol;
         let mut inds: Vec<usize> = Vec::new();
         let mut buf: Vec<(usize, Vec<DomainChange>, Vec<DomainChange>)> = Vec::new();
-        while !self.propagateinds.is_empty() {
+        while self.have_propagation_rows() {
             std::mem::swap(&mut inds, &mut self.propagateinds);
             for &row in &inds {
                 self.propagateflags[row] = 0;
@@ -1123,8 +1508,59 @@ impl Domain {
                 }
             }
             inds.clear();
+            for pool in 0..self.cutpools.len() {
+                if self.cutpools[pool].inds.is_empty() {
+                    continue;
+                }
+                std::mem::swap(&mut inds, &mut self.cutpools[pool].inds);
+                for &cut in &inds {
+                    self.cutpools[pool].flags[cut] &= 2;
+                }
+                if !self.infeasible {
+                    let mut changes: Vec<(usize, Vec<DomainChange>)> = Vec::new();
+                    for &cut in &inds {
+                        let mut up = Vec::new();
+                        // A cut marked deleted is skipped.
+                        if self.cutpools[pool].flags[cut] & 2 == 0 {
+                            self.cutpools[pool].activity[cut].renormalize();
+                            let cp = &self.cutpools[pool];
+                            let (ri, rv) = &cp.rows[cut];
+                            self.propagate_row_upper_of(
+                                ri,
+                                rv,
+                                cp.rhs[cut],
+                                cp.activity[cut],
+                                cp.activity_inf[cut],
+                                &mut up,
+                            );
+                            self.recompute_cut_capacity_threshold(pool, cut);
+                        }
+                        changes.push((cut, up));
+                    }
+                    for (cut, up) in changes {
+                        if !up.is_empty() {
+                            self.cut_age_resets.push((pool, cut));
+                            for c in up {
+                                if self.infeasible {
+                                    break;
+                                }
+                                self.change_bound(c, Reason::Cut(pool, cut));
+                            }
+                        }
+                        if self.infeasible {
+                            break;
+                        }
+                    }
+                }
+                inds.clear();
+            }
         }
         true
+    }
+
+    /// `havePropagationRows()` (objective and conflict propagation not yet ported).
+    fn have_propagation_rows(&self) -> bool {
+        !self.propagateinds.is_empty() || self.cutpools.iter().any(|cp| !cp.inds.is_empty())
     }
 
     /// Debug check (HiGHS's `#ifndef NDEBUG` asserts): the incremental activities
@@ -1232,6 +1668,270 @@ mod tests {
             }
         }
         (model, lb, ub, pts)
+    }
+
+    /// Worst disagreement between each tracked, linked, live cut's incremental
+    /// minimum activity and its recomputation, and whether the infinity counts match.
+    fn check_cut_activities(d: &Domain) -> (f64, bool, usize) {
+        let (mut worst, mut ok, mut n) = (0.0f64, true, 0usize);
+        for cp in &d.cutpools {
+            for cut in 0..cp.flags.len() {
+                if cp.flags[cut] & 2 != 0 || !cp.linked[cut] {
+                    continue;
+                }
+                let (ri, rv) = &cp.rows[cut];
+                let (ni, a) = d.compute_min_activity_of(ri, rv);
+                n += 1;
+                ok &= ni == cp.activity_inf[cut];
+                if ni == 0 {
+                    worst = worst.max((a - cp.activity[cut]).to_f64().abs());
+                }
+            }
+        }
+        (worst, ok, n)
+    }
+
+    #[test]
+    fn cut_propagation_fixes_and_proves_infeasible_with_cut_reasons() {
+        // No model rows: only the cut x0 + x1 <= 1 over binaries links them.
+        let model = Arc::new(DomainModel::from_rows(
+            2,
+            &[],
+            vec![],
+            vec![],
+            vec![true; 2],
+        ));
+        let mut d = Domain::new(Arc::clone(&model), &[0.0, 0.0], &[1.0, 1.0], 1e-6, 1e-9);
+        let pool = d.add_cutpool();
+        d.cut_added(pool, 0, &[0, 1], &[1.0, 1.0], 1.0, true);
+        assert_eq!(d.min_cut_activity(pool, 0), 0.0);
+        let one = |col| DomainChange {
+            boundval: 1.0,
+            column: col,
+            boundtype: BoundType::Lower,
+        };
+        d.change_bound(one(0), Reason::Branching);
+        assert!(d.propagate());
+        assert_eq!(d.col_upper[1], 0.0);
+        assert_eq!(d.domchgreason.last(), Some(&Reason::Cut(pool, 0)));
+        assert_eq!(d.take_cut_age_resets(), vec![(pool, 0)]);
+        assert_eq!(d.min_cut_activity(pool, 0), 1.0);
+        d.backtrack_to_global();
+        assert_eq!(d.col_upper, vec![1.0, 1.0]);
+        assert_eq!(d.min_cut_activity(pool, 0), 0.0);
+        // Both at one: the cut proves the node infeasible, and the activity change
+        // that found it is rolled back.
+        d.change_bound(one(0), Reason::Branching);
+        d.change_bound(one(1), Reason::Branching);
+        assert!(d.infeasible());
+        assert_eq!(d.infeasible_reason(), Reason::Cut(pool, 0));
+        assert_eq!(check_cut_activities(&d).1, true);
+        d.backtrack_to_global();
+        assert!(!d.infeasible());
+        let (w, ok, n) = check_cut_activities(&d);
+        assert!(ok && w == 0.0 && n == 1);
+        // A deleted cut no longer propagates or reports an activity.
+        d.cut_deleted(pool, 0, false);
+        assert_eq!(d.min_cut_activity(pool, 0), -INF);
+        d.change_bound(one(0), Reason::Branching);
+        d.propagate();
+        assert_eq!(d.col_upper[1], 1.0);
+    }
+
+    #[test]
+    fn pool_notifies_its_propagation_domains() {
+        use super::super::pool::{CutPool, DomainObservers, PoolObserver};
+        let model = Arc::new(DomainModel::from_rows(
+            3,
+            &[],
+            vec![],
+            vec![],
+            vec![true; 3],
+        ));
+        let mut global = Domain::new(Arc::clone(&model), &[0.0; 3], &[1.0; 3], 1e-6, 1e-9);
+        global.set_global(true);
+        let gp = global.add_cutpool();
+        let mut local = global.clone();
+        local.set_global(false);
+        let mut pool = CutPool::new(3, 10, 100, 10, 5);
+        let c0 = {
+            let mut obs = DomainObservers(vec![(&mut global, gp), (&mut local, gp)]);
+            pool.add_cut(&mut obs, &[2, 0], &[1.0, 1.0], 1.0, true, true, false)
+        };
+        assert!(c0 >= 0);
+        let c0 = c0 as usize;
+        // Both domains track it; the pool sorted the row.
+        assert_eq!(global.min_cut_activity(gp, c0), 0.0);
+        assert_eq!(local.min_cut_activity(gp, c0), 0.0);
+        assert_eq!(local.cutpools[gp].rows[c0].0, vec![0, 2]);
+        local.change_bound(
+            DomainChange {
+                boundval: 1.0,
+                column: 2,
+                boundtype: BoundType::Lower,
+            },
+            Reason::Branching,
+        );
+        local.propagate();
+        assert_eq!(local.col_upper[0], 0.0);
+        for (p, c) in local.take_cut_age_resets() {
+            assert_eq!(p, gp);
+            pool.reset_age(c as i32);
+        }
+        // Unlinking for propagation: the local domain drops the cut, the global
+        // domain keeps its activity.
+        {
+            let mut obs = DomainObservers(vec![(&mut global, gp), (&mut local, gp)]);
+            obs.cut_deleted(c0 as i32, true);
+        }
+        assert_eq!(local.min_cut_activity(gp, c0), -INF);
+        assert_eq!(global.min_cut_activity(gp, c0), 0.0);
+    }
+
+    #[test]
+    fn cut_propagation_never_removes_a_feasible_point_and_activities_stay_exact() {
+        let mut r = Lcg(11);
+        let (mut checked, mut cut_fixings, mut cut_infeasible, mut dives) = (0usize, 0, 0, 0);
+        for _ in 0..4000 {
+            let (model, lb, ub, pts) = random_ip(&mut r);
+            if pts.is_empty() {
+                continue;
+            }
+            let n = model.ncols;
+            // Half the time the model rows are dropped, so the cuts alone carry the
+            // structure (the points stay feasible for every valid cut).
+            let model = if r.int(0, 1) == 0 {
+                Arc::new(DomainModel::from_rows(
+                    n,
+                    &[],
+                    vec![],
+                    vec![],
+                    vec![true; n],
+                ))
+            } else {
+                Arc::new(model)
+            };
+            let mut d = Domain::new(Arc::clone(&model), &lb, &ub, 1e-6, 1e-9);
+            d.set_global(r.int(0, 1) == 1);
+            let pool = d.add_cutpool();
+            // Valid cuts: random integer rows with the rhs at the feasible maximum.
+            let ncuts = r.int(1, 4) as usize;
+            for cut in 0..ncuts {
+                let (mut ri, mut rv) = (Vec::new(), Vec::new());
+                for j in 0..n {
+                    let v = r.int(-3, 3);
+                    if v != 0 {
+                        ri.push(j);
+                        rv.push(v as f64);
+                    }
+                }
+                if ri.is_empty() {
+                    ri.push(0);
+                    rv.push(1.0);
+                }
+                let rhs = pts
+                    .iter()
+                    .map(|p| {
+                        ri.iter()
+                            .zip(&rv)
+                            .map(|(&j, &v)| v * p[j] as f64)
+                            .sum::<f64>()
+                    })
+                    .fold(-INF, f64::max);
+                let propagate = r.int(0, 3) != 0;
+                d.cut_added(pool, cut, &ri, &rv, rhs, propagate);
+            }
+            if r.int(0, 3) == 0 {
+                let c = r.int(0, ncuts as i64 - 1) as usize;
+                let only_prop = r.int(0, 1) == 1;
+                d.cut_deleted(pool, c, only_prop);
+            }
+            d.propagate();
+            assert!(
+                !d.infeasible(),
+                "valid cuts proved a feasible box infeasible"
+            );
+            d.commit_as_global();
+            let (glb, gub) = (d.col_lower.clone(), d.col_upper.clone());
+            dives += 1;
+            // A dive of up to three branchings, propagating after each.
+            let mut box_lb = glb.clone();
+            let mut box_ub = gub.clone();
+            for _ in 0..3 {
+                let col = r.int(0, n as i64 - 1) as usize;
+                if d.col_lower[col] >= d.col_upper[col] {
+                    continue;
+                }
+                let up = r.int(0, 1) == 1;
+                let val = r.int(d.col_lower[col] as i64, d.col_upper[col] as i64) as f64;
+                let boundtype = if up {
+                    box_lb[col] = box_lb[col].max(val);
+                    BoundType::Lower
+                } else {
+                    box_ub[col] = box_ub[col].min(val);
+                    BoundType::Upper
+                };
+                d.change_bound(
+                    DomainChange {
+                        boundval: val,
+                        column: col,
+                        boundtype,
+                    },
+                    Reason::Branching,
+                );
+                // Sometimes branch twice before propagating, so a bound change can
+                // drive a cut's activity past its rhs directly.
+                if r.int(0, 1) == 0 {
+                    d.propagate();
+                }
+                cut_fixings += d
+                    .domchgreason
+                    .iter()
+                    .filter(|r| matches!(r, Reason::Cut(..)))
+                    .count();
+                let in_box: Vec<&Vec<i64>> = pts
+                    .iter()
+                    .filter(|p| {
+                        (0..n).all(|j| p[j] as f64 >= box_lb[j] && p[j] as f64 <= box_ub[j])
+                    })
+                    .collect();
+                if d.infeasible() {
+                    if matches!(d.infeasible_reason(), Reason::Cut(..)) {
+                        cut_infeasible += 1;
+                    }
+                    assert!(in_box.is_empty(), "infeasible verdict with feasible points");
+                    break;
+                }
+                let (w, ok, _) = check_cut_activities(&d);
+                assert!(ok && w <= 1e-6, "cut activities drifted: {w} counts {ok}");
+                for p in &in_box {
+                    for j in 0..n {
+                        checked += 1;
+                        assert!(
+                            p[j] as f64 >= d.col_lower[j] - 1e-9
+                                && p[j] as f64 <= d.col_upper[j] + 1e-9,
+                            "feasible point cut off at column {j}"
+                        );
+                    }
+                }
+            }
+            // One-level backtrack, then to the global box: activities stay exact.
+            d.backtrack();
+            let (w, ok, _) = check_cut_activities(&d);
+            assert!(ok && w <= 1e-6);
+            d.backtrack_to_global();
+            assert_eq!(d.col_lower, glb);
+            assert_eq!(d.col_upper, gub);
+            let (w, ok, _) = check_cut_activities(&d);
+            assert!(ok && w <= 1e-9);
+            d.propagate();
+            assert!(!d.infeasible());
+        }
+        assert!(
+            dives > 2000 && checked > 1000 && cut_fixings > 200 && cut_infeasible > 15,
+            "probe fired too little: dives {dives} checked {checked} cut fixings \
+             {cut_fixings} cut infeasible {cut_infeasible}"
+        );
     }
 
     #[test]

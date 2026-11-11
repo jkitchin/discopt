@@ -266,8 +266,10 @@ impl DynamicRowMatrix {
 
 /// Told about pool changes (HiGHS's `CutpoolPropagation::cutAdded/cutDeleted`).
 pub trait PoolObserver {
-    /// A cut was added; `propagate` says whether it is linked for propagation.
-    fn cut_added(&mut self, _row: i32, _propagate: bool) {}
+    /// A cut `vals . x <= rhs` over `inds` was added at slot `row`; `propagate` says
+    /// whether it is linked for propagation. (HiGHS's observers read the row from
+    /// the pool; it is handed over here because the pool is borrowed during the call.)
+    fn cut_added(&mut self, _row: i32, _inds: &[i32], _vals: &[f64], _rhs: f64, _propagate: bool) {}
     /// A cut was deleted (`deleted_only_for_propagation`: unlinked, still in pool).
     fn cut_deleted(&mut self, _row: i32, _deleted_only_for_propagation: bool) {}
 }
@@ -275,6 +277,24 @@ pub trait PoolObserver {
 /// A no-op observer.
 pub struct NoObserver;
 impl PoolObserver for NoObserver {}
+
+/// The domains propagating one pool (`HighsCutPool::propagationDomains`), each with
+/// the index this pool has among its cut pools; notified in order.
+pub struct DomainObservers<'a>(pub Vec<(&'a mut super::domain::Domain, usize)>);
+
+impl PoolObserver for DomainObservers<'_> {
+    fn cut_added(&mut self, row: i32, inds: &[i32], vals: &[f64], rhs: f64, propagate: bool) {
+        let inds: Vec<usize> = inds.iter().map(|&c| c as usize).collect();
+        for (d, pool) in self.0.iter_mut() {
+            d.cut_added(*pool, row as usize, &inds, vals, rhs, propagate);
+        }
+    }
+    fn cut_deleted(&mut self, row: i32, deleted_only_for_propagation: bool) {
+        for (d, pool) in self.0.iter_mut() {
+            d.cut_deleted(*pool, row as usize, deleted_only_for_propagation);
+        }
+    }
+}
 
 /// `HighsCutPool` (one global pool, single-threaded).
 pub struct CutPool {
@@ -510,7 +530,7 @@ impl CutPool {
         }
         self.rownormalization[r] = normalization;
         self.maxabscoef[r] = maxabscoef;
-        obs.cut_added(rowindex, propagate);
+        obs.cut_added(rowindex, &sinds, &svals, rhs, propagate);
         rowindex
     }
 
