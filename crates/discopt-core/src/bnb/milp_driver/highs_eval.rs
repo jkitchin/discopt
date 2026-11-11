@@ -71,6 +71,13 @@ pub(super) struct HighsEval {
     pub redcost: Option<Vec<f64>>,
     /// Unscaled row duals of the last trusted LP (`row_dual`).
     pub last_dual: Option<Vec<f64>>,
+    /// The last trusted LP's duals as the solve returned them (solve space), and its
+    /// working-LP box: what node separation re-solves from.
+    pub last_dual_raw: Option<Vec<f64>>,
+    pub last_box: Option<(Vec<f64>, Vec<f64>)>,
+    /// A bound from node separation for the node evaluated next (the same node: the
+    /// dive's first evaluation after `separateAndStoreBasis`), with `obj_const`.
+    pub pending_lift: Option<f64>,
     /// LP iterations: all node and strong-branching solves, and the strong-branching
     /// share (`lpiterations`, `sblpiterations`); heuristics' share (`heurlpiterations`).
     pub lp_iters: i64,
@@ -119,6 +126,9 @@ impl HighsEval {
             unbounded: false,
             redcost: None,
             last_dual: None,
+            last_dual_raw: None,
+            last_box: None,
+            pending_lift: None,
             lp_iters: 0,
             sb_iters: 0,
             heur_iters: 0,
@@ -252,6 +262,8 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.last_dual_raw = Some(nl.sol.dual.clone());
+                self.last_box = Some((full_l.to_vec(), full_u.to_vec()));
                 objective_observation(parent, node, pc);
                 node.lower_bound = node.lower_bound.max(bound + oc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
@@ -266,6 +278,8 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.last_dual_raw = Some(nl.sol.dual.clone());
+                self.last_box = Some((full_l.to_vec(), full_u.to_vec()));
                 objective_observation(parent, node, pc);
                 self.point = Some(nl.sol.x[..ctx.ns].to_vec());
                 self.point_full = Some(nl.sol.x.clone());
@@ -364,6 +378,9 @@ impl HighsEval {
         optimality_limit: f64,
     ) -> SearchResult {
         let oc = ctx.obj_const;
+        if let Some(lift) = self.pending_lift.take() {
+            node.lower_bound = node.lower_bound.max(lift);
+        }
         let mut first = true;
         loop {
             if !first && !inheuristic && node.lower_bound > optimality_limit {

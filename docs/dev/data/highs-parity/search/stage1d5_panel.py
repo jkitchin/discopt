@@ -21,7 +21,10 @@ BUNDLE = dict(DISCOPT_HIGHS_ROOT_RENS="1", DISCOPT_HIGHS_DIVE="1", DISCOPT_HIGHS
 ROOT = dict(H, DISCOPT_HIGHS_ROOT_RENS="1", DISCOPT_HIGHS_ROOT_POOL="1", DISCOPT_MILP_PRESOLVE="1")
 ARMS = {"default": ("R", dict()),
         "hmip": ("R", dict(DISCOPT_HIGHS_MIP_SEARCH="1")),
-        "hmip_root": ("R", dict(ROOT, DISCOPT_HIGHS_MIP_SEARCH="1"))}
+        "hmip_root": ("R", dict(ROOT, DISCOPT_HIGHS_MIP_SEARCH="1")),
+        "root_batched": ("R", dict(ROOT))}
+if os.environ.get("PANEL_ARMS"):
+    ARMS = {a: ARMS[a] for a in os.environ["PANEL_ARMS"].split(",")}
 names = list(ARMS)
 STRIP = ("DISCOPT_HIGHS_MIP_SEARCH", "DISCOPT_MILP_PRESOLVE", "DISCOPT_HIGHS_SEARCH", "DISCOPT_HIGHS_DIVE_BATCH", "DISCOPT_HIGHS_DIVE", "DISCOPT_HIGHS_ROOT_POOL", "DISCOPT_HIGHS_SB_TREE", "DISCOPT_HIGHS_ROOT_RENS", "DISCOPT_HIGHS_SEPA_MODK", "DISCOPT_HIGHS_SEPA_NODE", "DISCOPT_HIGHS_SEPA_PROPAGATE", "DISCOPT_HIGHS_SEPA_VBOUNDS", "DISCOPT_MILP_ROOT_CMIR", "DISCOPT_MILP_RAND_ROUND", "DISCOPT_MILP_RUN1_CONTINUE", "DISCOPT_LP_MILP_BACKEND")
 def run(job):
@@ -44,10 +47,12 @@ with ThreadPoolExecutor(2) as ex:
         res[(k, arm)] = r; opt = pop[k]["oracle_objective"]
         out.write(json.dumps({"name": pop[k]["name"], "arm": arm, "opt": opt, **{x: r.get(x) for x in ("status", "objective", "bound", "gap_certified", "nodes", "wall")}}) + "\n"); out.flush()
         tol = 1e-6 + 1e-4 * abs(opt) if opt is not None else None
+        sg = -1 if pop[k].get("maximize") else 1
         if opt is not None and r.get("status") not in ("ERR", None):
             if r.get("status") == "optimal" and r.get("gap_certified") and (r.get("objective") is None or abs(r["objective"] - opt) > tol):
                 viol.append((pop[k]["name"], arm, "certified objective", r.get("objective"), opt))
-            if r.get("bound") is not None and r["bound"] > opt + tol:
+            # Sense-aware: a maximisation's dual bound is an upper bound (score_ab.py).
+            if r.get("bound") is not None and sg * (r["bound"] - opt) > tol:
                 viol.append((pop[k]["name"], arm, "bound above oracle", r["bound"], opt))
             if r.get("status") == "infeasible":
                 viol.append((pop[k]["name"], arm, "infeasible verdict", None, opt))

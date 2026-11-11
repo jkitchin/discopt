@@ -6428,7 +6428,16 @@ fn solve_milp_node_search(
                         initial = Some((x.clone(), *v));
                     }
                 }
-                highs_outcome = highs_env::run(&ctx, &lim, initial);
+                // The root evaluation's bound (node-local cuts included), when
+                // trusted; HiGHS does not separate the root node again either.
+                let r0 = &outs[0].result;
+                let root_bound =
+                    if r0.lower_bound.is_finite() && r0.lower_bound < INFEAS_SENTINEL - 1.0 {
+                        r0.lower_bound
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                highs_outcome = highs_env::run(&ctx, &lim, initial, root_bound);
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
                     incr(Ctr::HighsMipSearchRuns);
@@ -6437,6 +6446,8 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSbIters, o.sb_iters as u64);
                     incr_by(Ctr::HighsMipSearchCommits, o.commits as u64);
                     incr_by(Ctr::HighsMipSearchHeuristicHits, o.heuristic_hits as u64);
+                    incr_by(Ctr::HighsMipSearchSepCalls, o.sep_calls as u64);
+                    incr_by(Ctr::HighsMipSearchSepLifts, o.sep_lifts as u64);
                 }
             }
             outs

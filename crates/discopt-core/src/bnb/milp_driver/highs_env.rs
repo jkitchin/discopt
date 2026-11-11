@@ -85,6 +85,8 @@ pub(super) struct Outcome {
     pub commits: usize,
     pub branched: usize,
     pub heuristic_hits: usize,
+    pub sep_calls: usize,
+    pub sep_lifts: usize,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -151,6 +153,12 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub heuristic_hits: usize,
     pub stop: Option<Stop>,
     gap_stop: bool,
+    /// Node separation's cuts (globally valid Gomory cuts found at nodes), offered to
+    /// later nodes' separation; with signatures for deduplication.
+    pool: Vec<GomoryCut>,
+    pool_sigs: std::collections::HashSet<Vec<(u32, i64)>>,
+    pub sep_calls: usize,
+    pub sep_lifts: usize,
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -361,6 +369,81 @@ impl SearchEnv for HighsEnv<'_, '_> {
         (s, a)
     }
     fn separate(&mut self) -> bool {
+        // `separateAndStoreBasis` with discopt's node separation: node-local Gomory
+        // rounds plus the pool cuts this node violates, on a copy of the node LP; the
+        // bound they prove holds on the node's box and lifts the node when the dive
+        // re-evaluates it. (HiGHS adds its cuts to the shared LP; the working LP is
+        // fixed during this search, so the cuts stay node-local and in the pool.)
+        let ctx = self.ctx;
+        if !ctx.node_gmi {
+            return false;
+        }
+        let (Some(x), Some(y), Some(basis), Some((fl, fu))) = (
+            self.eval.point_full.clone(),
+            self.eval.last_dual_raw.clone(),
+            self.eval.basis.clone(),
+            self.eval.last_box.clone(),
+        ) else {
+            return false;
+        };
+        let integral = (0..ctx.ns).all(|j| !ctx.is_int[j] || frac(x[j]) <= INT_TOL);
+        if integral
+            || self
+                .lim
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+        {
+            return false;
+        }
+        let mut pick: Vec<(f64, usize)> = Vec::new();
+        for (k, cut) in self.pool.iter().enumerate() {
+            let (mut act, mut nrm) = (0.0, 0.0);
+            for (j, &a) in cut.coeffs.iter().enumerate() {
+                if a != 0.0 {
+                    act += a * x[j];
+                    nrm += a * a;
+                }
+            }
+            let viol = cut.rhs - act;
+            if nrm > 0.0 && viol > 0.0 && viol / f64::sqrt(nrm) >= CUT_MIN_EFFICACY {
+                pick.push((viol / f64::sqrt(nrm), k));
+            }
+        }
+        pick.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        pick.truncate(NODE_GMI_POOL_PER_NODE);
+        let rows: Vec<GomoryCut> = pick
+            .iter()
+            .map(|&(_, k)| {
+                let mut coeffs = self.pool[k].coeffs.clone();
+                coeffs.resize(ctx.n_w, 0.0);
+                GomoryCut {
+                    coeffs,
+                    rhs: self.pool[k].rhs,
+                }
+            })
+            .collect();
+        self.sep_calls += 1;
+        let lg = node_local_gmi_bound(
+            ctx,
+            &fl,
+            &fu,
+            &x,
+            &y,
+            &basis,
+            &rows,
+            NODE_GMI_ROUNDS,
+            self.nodes,
+        );
+        self.eval.lp_iters += lg.pivots as i64;
+        if let Some(g) = lg.bound {
+            self.sep_lifts += 1;
+            self.eval.pending_lift = Some(g + ctx.obj_const);
+        }
+        for cut in lg.new_cuts {
+            if self.pool_sigs.insert(cut_signature(&cut)) {
+                self.pool.push(cut);
+            }
+        }
         false
     }
     fn heuristics_allowed(&mut self) -> bool {
@@ -410,13 +493,16 @@ impl SearchEnv for HighsEnv<'_, '_> {
 }
 
 /// Search the whole tree from the driver's root working LP. `initial` is the best
-/// verified point the driver already holds. `None` when the root LP is unbounded or
+/// verified point the driver already holds; `root_bound` a valid bound on the root box
+/// the driver already proved (its root evaluation, node-local cuts included), with
+/// `obj_const` (`-inf` for none). `None` when the root LP is unbounded or
 /// the rows are infeasible over the global box before any search (the driver's own
 /// handling then decides).
 pub(super) fn run(
     ctx: &NodeCtx<'_>,
     lim: &Limits,
     initial: Option<(Vec<f64>, f64)>,
+    root_bound: f64,
 ) -> Option<Outcome> {
     #[cfg(test)]
     RUNS.with(|r| r.set(r.get() + 1));
@@ -436,17 +522,16 @@ pub(super) fn run(
         heuristic_hits: 0,
         stop: None,
         gap_stop: false,
+        pool: Vec::new(),
+        pool_sigs: std::collections::HashSet::new(),
+        sep_calls: 0,
+        sep_lifts: 0,
     };
     if let Some((x, v)) = initial {
         env.accept(x, v);
     }
-    env.q.emplace_node(
-        Vec::new(),
-        Vec::new(),
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-        1,
-    );
+    env.q
+        .emplace_node(Vec::new(), Vec::new(), root_bound, root_bound, 1);
     let mut search = Search {
         count_tree_weight: true,
         ..Default::default()
@@ -482,5 +567,7 @@ pub(super) fn run(
         commits: env.commits,
         branched: env.branched,
         heuristic_hits: env.heuristic_hits,
+        sep_calls: env.sep_calls,
+        sep_lifts: env.sep_lifts,
     })
 }
