@@ -606,6 +606,13 @@ impl RootSeparation {
             .collect()
     }
 
+    /// The root's global pool itself (cuts over the structural columns, `a·x <= b`,
+    /// with their ages and LP membership), for a later search that selects from it as
+    /// HiGHS's search does from the same pool.
+    pub fn clone_pool(&self) -> CutPool {
+        self.pool.clone()
+    }
+
     /// Variable bounds held (0 when off).
     pub fn num_vbounds(&self) -> i64 {
         self.vbounds.as_ref().map_or(0, |v| v.len())

@@ -5768,6 +5768,23 @@ fn solve_milp_node_search(
             all_root_cuts.len() as u64,
         );
         crate::profile::incr_by(crate::profile::Ctr::RootCutsKept, n_keep as u64);
+        // Step 2.1 (H1, under `DISCOPT_HIGHS_SEARCH_POOL=highs`): the search takes over
+        // the root's pool, so the pool must know which of its cuts this cleanup drops
+        // from the LP (HiGHS reports every LP row removal with `lpCutRemoved`). Only the
+        // pool's ages/LP membership change; nothing else reads them before the search.
+        if let Some(hs) = highs_sep.as_mut() {
+            if highs_env::search_pool_highs() {
+                if pool_ids.len() == all_root_cuts.len() {
+                    for (c, &k) in keep.iter().enumerate() {
+                        if !k {
+                            hs.lp_cut_removed(pool_ids[c]);
+                        }
+                    }
+                } else {
+                    crate::profile::incr(crate::profile::Ctr::HighsSearchPoolRootUnmapped);
+                }
+            }
+        }
         if n_keep < all_root_cuts.len() {
             let mut newidx = vec![usize::MAX; all_root_cuts.len()];
             let mut next = 0usize;
@@ -6622,6 +6639,12 @@ fn solve_milp_node_search(
                 } else {
                     Vec::new()
                 };
+                let root_pool =
+                    if highs_env::search_cut_lp_enabled() && highs_env::search_pool_highs() {
+                        highs_sep.as_ref().map(|h| h.clone_pool())
+                    } else {
+                        None
+                    };
                 highs_outcome = highs_env::run(
                     &ctx,
                     &lim,
@@ -6630,6 +6653,7 @@ fn solve_milp_node_search(
                     Some(&mut sub_mip),
                     dbg,
                     seed_pool,
+                    root_pool,
                 );
                 if let Some(o) = &highs_outcome {
                     use crate::profile::{incr, incr_by, Ctr};
@@ -6645,6 +6669,8 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
                     incr_by(Ctr::HighsSearchPoolSeeded, o.seeded_pool as u64);
+                    incr_by(Ctr::HighsSearchPoolSelected, o.pool_selected as u64);
+                    incr_by(Ctr::HighsSearchPoolLpRemoved, o.pool_lp_removed as u64);
                 }
             }
             outs

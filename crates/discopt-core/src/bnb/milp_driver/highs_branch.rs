@@ -1070,6 +1070,7 @@ pub(super) mod e2e {
             None,
             None,
             Vec::new(),
+            None,
         ) {
             Some(o) => {
                 res.best = o.best;

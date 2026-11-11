@@ -297,6 +297,7 @@ impl PoolObserver for DomainObservers<'_> {
 }
 
 /// `HighsCutPool` (one global pool, single-threaded).
+#[derive(Clone)]
 pub struct CutPool {
     matrix: DynamicRowMatrix,
     rhs: Vec<f64>,
@@ -548,6 +549,28 @@ impl CutPool {
         }
     }
 
+    /// Record that cut `cut`, not in any LP (age `>= 0`), entered the LP without
+    /// passing through [`CutPool::separate`]: the bookkeeping `separate` does for a
+    /// cut it selects (HiGHS adds a cut to its LP only through that selection; the
+    /// HiGHS search's node separation adds the cuts its separators just found and
+    /// used for the node's bound, so it records them here). Report the LP dropping
+    /// the row with [`CutPool::lp_cut_removed`] as usual.
+    pub fn lp_cut_added(&mut self, cut: i32) {
+        let c = cut as usize;
+        assert!(
+            self.ages[c] >= 0 && self.rhs[c] != INF,
+            "lp_cut_added on a cut already in an LP or deleted"
+        );
+        self.num_lps[c] += 1;
+        self.age_distribution[self.ages[c] as usize] -= 1;
+        self.num_lp_cuts += 1;
+        if self.matrix.columns_linked(cut) {
+            self.prop_rows.remove(&(self.ages[c], cut));
+            self.prop_rows.insert((-1, cut));
+        }
+        self.ages[c] = -1;
+    }
+
     /// `lpCutRemoved(cut)`.
     pub fn lp_cut_removed(&mut self, cut: i32) {
         let c = cut as usize;
@@ -791,6 +814,30 @@ mod tests {
         assert_eq!(m.row(0).0, &[5, 6]);
         assert_eq!(m.num_rows(), 2);
         assert_eq!(m.num_del_rows(), 0);
+    }
+
+    /// `lp_cut_added` books a cut into the LP as `separate`'s selection does: it is
+    /// no longer available, `separate` skips it, and `lp_cut_removed` gives it back.
+    #[test]
+    fn lp_cut_added_matches_selection_bookkeeping() {
+        let mut p = CutPool::new(4, 30, 10000, 8, 2);
+        // x0 + x1 <= 1, violated at (1, 1).
+        let c = p.add_cut(&mut NoObserver, &[0, 1], &[1.0, 1.0], 1.0, true, false, false);
+        assert_eq!(c, 0);
+        assert_eq!(p.num_available_cuts(), 1);
+        p.lp_cut_added(c);
+        assert_eq!(p.num_available_cuts(), 0);
+        let (sol, lo, up) = ([1.0, 1.0, 0.0, 0.0], [0.0; 4], [1.0; 4]);
+        let mut cs = Vec::new();
+        assert!(p.separate(&mut NoObserver, &sol, &lo, &up, 1e-6, &mut cs).is_empty());
+        p.lp_cut_removed(c);
+        assert_eq!(p.num_available_cuts(), 1);
+        let sel = p.separate(&mut NoObserver, &sol, &lo, &up, 1e-6, &mut cs);
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].index, c);
+        // Selected: in the LP again, so the same call books it exactly like
+        // `lp_cut_added` did.
+        assert_eq!(p.num_available_cuts(), 0);
     }
 }
 
