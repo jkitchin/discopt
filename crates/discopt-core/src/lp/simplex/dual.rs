@@ -1235,6 +1235,31 @@ fn cost_perturbed_warm_solve(
         Some(p) => p.reoptimize(l, u, b, &attempt),
         None => return reject(),
     };
+    if dual_trace_enabled() {
+        eprintln!(
+            "DUALPERTURB pert status={:?} iters={}",
+            pert.status, pert.iters
+        );
+    }
+    if pert.status == LpStatus::Infeasible {
+        // Feasibility does not depend on the cost vector: the perturbed and the true
+        // LP share `A`, `b`, `l`, `u`, so a Farkas ray that certifies on them proves
+        // the true LP empty. Re-verified here on the true data rather than trusted
+        // from the status (and the B&B caller verifies it again before fathoming).
+        // Discarding it sent every degenerate infeasible node LP down the
+        // unperturbed loop to the warm stall cap and then a cold solve, to reach the
+        // same verdict: bppc8-02 with its load column integer spent 77 % of its dual
+        // pivots there (7,680 zero-length pivots per such LP, 15 LPs in 1,500 nodes).
+        if pert.dual.len() == m
+            && super::primal::farkas_ray_certifies_cols(&pert.dual, sp, n, m, b, l, u)
+        {
+            crate::profile::incr(crate::profile::Ctr::DualCostPerturbInfeasible);
+            let mut sol = pert;
+            sol.obj = c.iter().zip(&sol.x).map(|(cj, xj)| cj * xj).sum();
+            return Some(sol);
+        }
+        return reject();
+    }
     if pert.status != LpStatus::Optimal {
         return reject();
     }
@@ -1249,6 +1274,12 @@ fn cost_perturbed_warm_solve(
             super::primal::solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, &pert.basis, &attempt)
         }
     };
+    if dual_trace_enabled() {
+        eprintln!(
+            "DUALPERTURB clean status={:?} iters={}",
+            clean.status, clean.iters
+        );
+    }
     if clean.status != LpStatus::Optimal {
         return reject();
     }
@@ -2248,7 +2279,7 @@ impl<'a> PreparedDual<'a> {
                 eprintln!(
                     "DUALTRACE it={pivots} piv={:.6e} t={:.6e} dstep={:.6e} degen={} \
                      run={stall} ncand={trace_ncand} stop={trace_stop} flips={} \
-                     bland={} delta={:.6e}",
+                     bland={} delta={:.6e} q={q} qinf={} leave={leaving} r={r} lowr={}",
                     piv.abs(),
                     t.abs(),
                     theta_d.abs(),
@@ -2256,6 +2287,8 @@ impl<'a> PreparedDual<'a> {
                     flips.len(),
                     bland as u8,
                     delta.abs(),
+                    (u[q] >= INF || l[q] <= -INF) as u8,
+                    to_lower as u8,
                 );
             }
         }
@@ -3620,10 +3653,16 @@ mod tests {
             basic_vars,
         };
         let _guard = crate::profile::test_guard();
+        // The audit is exercised with the warm cost perturbation off: with it on,
+        // the perturbed warm solve proves this LP infeasible by a certified Farkas
+        // ray before any scaled `Optimal` forms (asserted after the loop), so the
+        // audit would never be reached on the warm arm.
+        let mut no_perturb = opts();
+        no_perturb.dual_cost_perturb = 0.0;
         for warm in [None, Some(&start)] {
             crate::profile::reset_totals();
             crate::profile::set_enabled(true);
-            let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, warm, &opts());
+            let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, warm, &no_perturb);
             let refused = crate::profile::counter_snapshot()
                 .into_iter()
                 .find(|(k, _)| *k == "ScaledOptimalOriginalAuditFail")
@@ -3649,8 +3688,26 @@ mod tests {
             }
             checked += 1;
         }
+        // The default warm path: the perturbed solve's ray settles it `Infeasible`.
+        crate::profile::reset_totals();
+        crate::profile::set_enabled(true);
+        let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &opts());
+        let settled = crate::profile::counter_snapshot()
+            .into_iter()
+            .find(|(k, _)| *k == "DualCostPerturbInfeasible")
+            .map_or(0, |(_, v)| v);
+        crate::profile::set_enabled(false);
+        assert_eq!(sol.status, LpStatus::Infeasible);
+        assert!(
+            settled >= 1,
+            "the perturbed infeasible verdict did not fire"
+        );
+        assert!(super::super::primal::farkas_ray_certifies_cols(
+            &sol.dual, &sp, n, m, &b, &l, &u
+        ));
+        checked += 3;
         assert_eq!(
-            checked, 8,
+            checked, 11,
             "false-Optimal probe did not run every assertion"
         );
     }

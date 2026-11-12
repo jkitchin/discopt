@@ -778,7 +778,14 @@ mod tests {
     #[test]
     fn scaled_problem_refuses_the_false_optimal_the_old_driver_recipe_returned() {
         let (lp, basis) = fixture();
-        let opts = SimplexOptions::default();
+        // Warm cost perturbation off: with it on, the perturbed warm solve proves
+        // this LP infeasible by a certified Farkas ray before the false `Optimal`
+        // forms (asserted at the end), so neither the old recipe's defect nor the
+        // choke point's audit would be reached on the warm arm.
+        let opts = SimplexOptions {
+            dual_cost_perturb: 0.0,
+            ..SimplexOptions::default()
+        };
         let mut checked = 0usize;
 
         // The old recipe, cold and warm, on the driver's scaled data.
@@ -846,7 +853,12 @@ mod tests {
             }
             checked += 1;
         }
-        assert_eq!(checked, 8, "probe did not run every assertion");
+        // The default options: the warm solve through the choke point is settled
+        // `Infeasible` by the perturbed solve's certified ray.
+        let sol = problem.solve_warm(&lp.l, &lp.u, &basis, &SimplexOptions::default());
+        assert_eq!(sol.status, LpStatus::Infeasible);
+        checked += 1;
+        assert_eq!(checked, 9, "probe did not run every assertion");
     }
 
     /// Deterministic generator (no `rand` dependency): xorshift64*.
