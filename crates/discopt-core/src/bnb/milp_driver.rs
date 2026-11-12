@@ -3785,6 +3785,20 @@ fn milp_implied_int_enabled() -> bool {
     }
 }
 
+/// `DISCOPT_MILP_SPARSIFY`: add HiGHS's sparsify (`milp_presolve::Work::sparsify`,
+/// multiples of equality rows added to other rows to cancel nonzeros) to the MILP
+/// presolve. Default OFF; `1` turns it on. Garbage is refused.
+fn milp_sparsify_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_SPARSIFY") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!("DISCOPT_MILP_SPARSIFY={other:?} is not recognized (expected 1 or 0)"),
+        },
+    }
+}
+
 /// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
 /// singleton slack per inequality row after them), solve the reduced problem, map the
 /// answer back and re-verify it on the original rows. `None` means "solve the original
@@ -3871,7 +3885,13 @@ fn solve_presolved(
         u: u[..ns].iter().map(|&v| fin(v)).collect(),
         is_int,
     };
-    let p = presolve_opts(&rf, 1e-9, 20, milp_implied_int_enabled());
+    let p = presolve_opts(
+        &rf,
+        1e-9,
+        20,
+        milp_implied_int_enabled(),
+        milp_sparsify_enabled(),
+    );
     crate::profile::incr_by(
         crate::profile::Ctr::PresolveImpliedInt,
         (p.stats.implied_int_primal + p.stats.implied_int_dual) as u64,

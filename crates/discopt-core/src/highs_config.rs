@@ -9,7 +9,8 @@
 //!
 //! Members: `DISCOPT_HIGHS_SEARCH_CUT_LP`, `DISCOPT_HIGHS_SEPA_NODE` (as `1`, replace),
 //! `DISCOPT_HIGHS_SEPA_CUTOFF_BOX`, `DISCOPT_LP_DUAL_NOISE_ROWS`,
-//! `DISCOPT_MILP_IMPLIED_INT`, `DISCOPT_LP_DUAL_PERTURB_FIRST`, `DISCOPT_LP_SUBTOL_LADDER` (HiGHS
+//! `DISCOPT_MILP_IMPLIED_INT`, `DISCOPT_MILP_SPARSIFY`, `DISCOPT_LP_DUAL_PERTURB_FIRST`,
+//! `DISCOPT_LP_SUBTOL_LADDER` (HiGHS
 //! has no primal repair of sub-tolerance reduced costs: it treats them as optimal at its
 //! dual tolerance; the ladder is the rigorous counterpart -- skip the repair when the
 //! node-bound ladder certifies the vertex).

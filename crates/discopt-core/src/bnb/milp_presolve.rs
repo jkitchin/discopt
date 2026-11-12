@@ -39,6 +39,10 @@
 //!
 //! - parallel columns with proportional costs merged (`PostOp::Split` undoes it).
 //!
+//! - sparsify (HiGHS `sparsify`, opt-in via `presolve_opts(.., implied_int, sparsify = true)`):
+//!   multiples of equality rows added to other rows to cancel nonzeros; see
+//!   `Work::sparsify`.
+//!
 //! Postsolve replays a stack of fixings and substitutions in reverse.
 //!
 //! Every step is exact up to `feastol` on the row activity, and the caller re-verifies
@@ -115,6 +119,14 @@ pub struct PresolveStats {
     /// Continuous columns marked integral because some optimum has them integral
     /// (HiGHS `isImpliedInteger`, dual detection).
     pub implied_int_dual: usize,
+    /// Sparsify (`DISCOPT_MILP_SPARSIFY`): row additions `row += lambda * eq` made.
+    pub sparsified_rows: usize,
+    /// Sparsify: net nonzeros removed by those additions (cancelled minus fill-in;
+    /// the singleton / doubleton clean-up after them is counted under its own rule).
+    pub sparsify_nz_removed: usize,
+    /// Sparsify: additions HiGHS would make that were refused because they leave a
+    /// round-off entry that cannot be removed soundly (see `Work::sparsify`).
+    pub sparsify_refused_roundoff: usize,
     /// Passes over the rule set.
     pub passes: usize,
 }
@@ -299,6 +311,36 @@ struct Work {
 }
 
 impl Work {
+    fn new(f: &RowForm, feastol: f64) -> Work {
+        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); f.n];
+        for (r, (ri, _)) in f.rows.iter().enumerate() {
+            for &j in ri {
+                col_rows[j].push(r);
+            }
+        }
+        Work {
+            n: f.n,
+            rows: f.rows.clone(),
+            lo: f.lo.clone(),
+            up: f.up.clone(),
+            shift: vec![0.0; f.rows.len()],
+            row_alive: vec![true; f.rows.len()],
+            c: f.c.clone(),
+            l: f.l.clone(),
+            u: f.u.clone(),
+            is_int: f.is_int.clone(),
+            col_alive: vec![true; f.n],
+            impl_l: vec![(-INF, usize::MAX); f.n],
+            impl_u: vec![(INF, usize::MAX); f.n],
+            col_rows,
+            ops: Vec::new(),
+            offset: 0.0,
+            infeasible: false,
+            feastol,
+            stats: PresolveStats::default(),
+        }
+    }
+
     fn activity(&self, r: usize) -> (f64, usize, f64, usize) {
         let (ri, rv) = &self.rows[r];
         let (mut mn, mut nmn, mut mx, mut nmx) = (0.0, 0usize, 0.0, 0usize);
@@ -1621,6 +1663,285 @@ impl Work {
         changed
     }
 
+    /// Alive nonzeros per column (HiGHS `colsize`).
+    fn col_sizes(&self) -> Vec<usize> {
+        let mut cs = vec![0usize; self.n];
+        for (r, (ri, _)) in self.rows.iter().enumerate() {
+            if self.row_alive[r] {
+                for &j in ri {
+                    cs[j] += 1;
+                }
+            }
+        }
+        cs
+    }
+
+    /// Alive rows holding column `j`, each once (`col_rows` may list dead rows, rows
+    /// the column has left, and repeats).
+    fn rows_of(&self, j: usize) -> Vec<usize> {
+        let mut out: Vec<usize> = self.col_rows[j]
+            .iter()
+            .copied()
+            .filter(|&q| self.row_alive[q] && self.rows[q].0.contains(&j))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Sparsify: a port of HiGHS's `HPresolve::sparsify`
+    /// (`highs/presolve/HPresolve.cpp`, HiGHS 1.15.1, MIT License, Copyright (c)
+    /// HiGHS; license text in `THIRD_PARTY_NOTICES.md` at the repository root).
+    ///
+    /// For each equality row `eq` (`a_eq x = r`, in HiGHS's order: by row length, then
+    /// index, as of the start of the rule), every other row `q` holding `eq`'s sparsest
+    /// column is a candidate for `q += lambda * eq` (sides `+= lambda r`). The
+    /// multipliers on offer are `lambda = -a_qj / a_eqj` over `eq`'s columns `j` (those
+    /// with `|lambda| > 1e3` skipped); a multiplier's count is the entries it cancels,
+    /// a near-identical one (within `sqrt(feastol) / |a_eqj|`) adding to it only when
+    /// its residual is at most `small_matrix_value` and otherwise marking it unusable.
+    /// The row is changed when the best count (ties: smaller `|lambda|`) exceeds the
+    /// fill-in `misses` (columns of `eq` absent from `q`), at most one fill-in, none
+    /// when `eq` has no integer column and `q` has one, and never a fill-in of a general
+    /// integer (an integer column whose box is wider than 1.5). After each equality's
+    /// additions the touched rows that became singletons or doubleton equations are
+    /// removed, as HiGHS does (`removeRowSingletons`, `removeDoubletonEquations`).
+    ///
+    /// Why it is exact for a MILP: on every point with `a_eq x = r`, `q + lambda eq`
+    /// takes the value `a_q x + lambda r`, so the feasible set (integrality included)
+    /// is unchanged and the primal postsolve is the identity; nothing in HiGHS's rule
+    /// restricts `lambda` by integrality, and none is needed. The row's constant moves
+    /// with it (`shift -= lambda r`), so the driver's rebuild `b - row_shift` with the
+    /// row's own slack keeps the slack's value `(b - a_q x) / sigma`.
+    ///
+    /// Departures from HiGHS, each only ever less aggressive:
+    /// - HiGHS drops a combined entry with `|v| <= small_matrix_value` outright. Here
+    ///   every touched entry goes through `cancel_entry` (an exact zero is removed, a
+    ///   leftover `|v| <= 1e-12` only from an inequality that is relaxed by its reach),
+    ///   the soundness rule of this module, and an addition that would leave a nonzero
+    ///   `|v| <= small_matrix_value` that `cancel_entry` cannot remove is not made
+    ///   (`stats.sparsify_refused_roundoff`). With exact data and multipliers (integer
+    ///   rows, `lambda = +-1, +-2`) every cancellation is an exact zero and nothing
+    ///   differs from HiGHS.
+    /// - HiGHS's second scan (rows holding the second-sparsest column but not the
+    ///   sparsest) is not ported: in 1.15.1 it sets `skip` for every stored-row column
+    ///   missing from the candidate except the second-sparsest one, and the sparsest
+    ///   column is missing from every row it scans by construction, so it never adds a
+    ///   row. Porting it would be dead code.
+    /// - The singleton / doubleton clean-up looks at the touched rows only; the next
+    ///   pass handles anything else.
+    ///
+    /// Returns whether any row was changed.
+    fn sparsify(&mut self) -> bool {
+        // HiGHS defaults: `small_matrix_value` and `primal_feasibility_tolerance` (whose
+        // square root is the scale-clustering width `minNonzeroVal`).
+        const SMALL_MATRIX_VALUE: f64 = 1e-9;
+        const PRIMAL_FEASTOL: f64 = 1e-7;
+        const MAX_SCALE: f64 = 1e3;
+        let min_nonzero_val = PRIMAL_FEASTOL.sqrt();
+        // Entries the additions removed and created (net = the nonzeros saved).
+        let (mut nz_removed, mut nz_filled) = (0usize, 0usize);
+        let mut eqs: Vec<usize> = (0..self.rows.len())
+            .filter(|&r| self.row_alive[r] && self.lo[r] == self.up[r] && self.lo[r].is_finite())
+            .collect();
+        eqs.sort_by_key(|&r| (self.rows[r].0.len(), r));
+        let mut colsize = self.col_sizes();
+        // Position of each column in the stored equality row (usize::MAX: absent).
+        let mut eqpos = vec![usize::MAX; self.n];
+        let mut changed = false;
+        let n_int = |w: &Work, q: usize| w.rows[q].0.iter().filter(|&&k| w.is_int[k]).count();
+        for eq in eqs {
+            if self.infeasible {
+                return changed;
+            }
+            if !self.row_alive[eq] || self.lo[eq] != self.up[eq] || self.rows[eq].0.len() < 2 {
+                continue;
+            }
+            // HiGHS `storeRow`: the row in column order.
+            let mut stored: Vec<(usize, f64)> = self.rows[eq]
+                .0
+                .iter()
+                .copied()
+                .zip(self.rows[eq].1.iter().copied())
+                .collect();
+            stored.sort_by_key(|e| e.0);
+            let mut sparsest = usize::MAX;
+            let mut sparsest_len = usize::MAX;
+            for &(j, _) in &stored {
+                if colsize[j] < sparsest_len {
+                    sparsest = j;
+                    sparsest_len = colsize[j];
+                }
+            }
+            for (p, &(j, _)) in stored.iter().enumerate() {
+                eqpos[j] = p;
+            }
+            let eq_int = n_int(self, eq);
+            let mut adds: Vec<(usize, f64)> = Vec::new();
+            // Candidate's value per stored-row position.
+            let mut cand_val: Vec<Option<f64>> = vec![None; stored.len()];
+            // (scale, count); count -1 marks a numerically bad scale.
+            let mut scales: Vec<(f64, i64)> = Vec::new();
+            for q in self.rows_of(sparsest) {
+                if q == eq {
+                    continue;
+                }
+                cand_val.iter_mut().for_each(|v| *v = None);
+                for (&k, &v) in self.rows[q].0.iter().zip(&self.rows[q].1) {
+                    if eqpos[k] != usize::MAX {
+                        cand_val[eqpos[k]] = Some(v);
+                    }
+                }
+                scales.clear();
+                let mut misses: i64 = 0;
+                // No fill-in when a continuous equality cancels in a row with integers
+                // (HiGHS: "a huge deterioration of cut performance").
+                let mut max_misses: i64 = 1;
+                if eq_int == 0 && n_int(self, q) != 0 {
+                    max_misses -= 1;
+                }
+                for (p, &(j, a_eq)) in stored.iter().enumerate() {
+                    let Some(cv) = cand_val[p] else {
+                        if self.is_int[j] && self.u[j] - self.l[j] > 1.5 {
+                            // No fill-in of general integers.
+                            misses = 2;
+                            break;
+                        }
+                        misses += 1;
+                        if misses > max_misses {
+                            break;
+                        }
+                        continue;
+                    };
+                    let scale = -cv / a_eq;
+                    if scale.abs() > MAX_SCALE {
+                        continue;
+                    }
+                    let tol = min_nonzero_val / a_eq.abs();
+                    // `std::map::lower_bound(scale - tol)`.
+                    let it = scales.partition_point(|e| e.0 < scale - tol);
+                    if it < scales.len() && (scales[it].0 - scale).abs() <= tol {
+                        if scales[it].1 == -1 {
+                            continue;
+                        }
+                        if (scales[it].0 * a_eq + cv).abs() <= SMALL_MATRIX_VALUE {
+                            scales[it].1 += 1;
+                        } else {
+                            scales[it].1 = -1;
+                        }
+                    } else {
+                        let at = scales.partition_point(|e| e.0 < scale);
+                        scales.insert(at, (scale, 1));
+                    }
+                }
+                if misses > max_misses || scales.is_empty() {
+                    continue;
+                }
+                let (mut num_cancel, mut scale) = (0i64, 0.0f64);
+                for &(s, cnt) in &scales {
+                    if cnt <= misses {
+                        continue;
+                    }
+                    if cnt > num_cancel || (cnt == num_cancel && s.abs() < scale.abs()) {
+                        scale = s;
+                        num_cancel = cnt;
+                    }
+                }
+                if num_cancel > misses {
+                    adds.push((q, scale));
+                }
+            }
+            for &(j, _) in &stored {
+                eqpos[j] = usize::MAX;
+            }
+            if adds.is_empty() {
+                continue;
+            }
+            let rhs = self.lo[eq];
+            // HiGHS drops a combined entry with `|v| <= small_matrix_value` without
+            // compensating the row. Here such a round-off leftover must be removable by
+            // `cancel_entry` (an inequality, `|v| <= 1e-12`, a finite reach); otherwise the
+            // row is not changed at all. Keeping it is not an option either: measured on a
+            // random integer program, multipliers -1/6 and -4/3 left `1.1e-16 x2` in an
+            // equality, which the doubleton rule then divided by (coefficients of 1.5e16)
+            // and turned a feasible problem infeasible.
+            let leftover_ok = |w: &Work, q: usize, scale: f64| -> bool {
+                stored.iter().all(|&(j, a_eq)| {
+                    let Some(p) = w.rows[q].0.iter().position(|&k| k == j) else {
+                        return true;
+                    };
+                    let v = w.rows[q].1[p] + scale * a_eq;
+                    if v == 0.0 || v.abs() > SMALL_MATRIX_VALUE {
+                        return true;
+                    }
+                    let reach = w.l[j].abs().max(w.u[j].abs());
+                    w.lo[q] != w.up[q] && v.abs() <= 1e-12 && reach.is_finite()
+                })
+            };
+            let n_adds = adds.len();
+            adds.retain(|&(q, scale)| leftover_ok(self, q, scale));
+            self.stats.sparsify_refused_roundoff += n_adds - adds.len();
+            for &(q, scale) in &adds {
+                if self.lo[q].is_finite() {
+                    self.lo[q] += scale * rhs;
+                }
+                if self.up[q].is_finite() {
+                    self.up[q] += scale * rhs;
+                }
+                // The constant moved out of the row's activity changes by the opposite
+                // amount (see `Presolved::row_shift`).
+                self.shift[q] -= scale * rhs;
+                for &(j, a_eq) in &stored {
+                    let add = scale * a_eq;
+                    if let Some(p) = self.rows[q].0.iter().position(|&k| k == j) {
+                        self.rows[q].1[p] += add;
+                        let before = self.rows[q].0.len();
+                        self.cancel_entry(q, p);
+                        if self.rows[q].0.len() < before {
+                            colsize[j] -= 1;
+                            nz_removed += 1;
+                        }
+                    } else if add != 0.0 {
+                        self.rows[q].0.push(j);
+                        self.rows[q].1.push(add);
+                        if !self.col_rows[j].contains(&q) {
+                            self.col_rows[j].push(q);
+                        }
+                        colsize[j] += 1;
+                        nz_filled += 1;
+                    }
+                }
+                self.stats.sparsified_rows += 1;
+                changed = true;
+            }
+            // HiGHS `removeRowSingletons` / `removeDoubletonEquations` on what changed.
+            let mut cleaned = false;
+            for &(q, _) in &adds {
+                if !self.row_alive[q] || self.infeasible {
+                    continue;
+                }
+                match self.rows[q].0.len() {
+                    1 => {
+                        let (j, a) = (self.rows[q].0[0], self.rows[q].1[0]);
+                        let (lo, up) = (self.lo[q] / a, self.up[q] / a);
+                        let (blo, bup) = if a > 0.0 { (lo, up) } else { (up, lo) };
+                        self.tighten(j, blo, bup);
+                        self.row_alive[q] = false;
+                        self.stats.singleton_rows += 1;
+                        cleaned = true;
+                    }
+                    2 if self.lo[q] == self.up[q] && self.doubleton_eq(q) => cleaned = true,
+                    _ => {}
+                }
+            }
+            if cleaned {
+                colsize = self.col_sizes();
+            }
+        }
+        self.stats.sparsify_nz_removed += nz_removed.saturating_sub(nz_filled);
+        changed
+    }
+
     fn pass(&mut self) -> bool {
         let mut changed = false;
         // Fixed columns.
@@ -1894,48 +2215,59 @@ impl Work {
 /// Presolve `f` with feasibility tolerance `feastol`, running the rule set to a
 /// fixpoint (at most `max_passes` passes).
 pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
-    presolve_opts(f, feastol, max_passes, false)
+    presolve_opts(f, feastol, max_passes, false, false)
 }
 
-/// [`presolve`], and with `implied_int` HiGHS's implied-integer detection after the
-/// last pass ([`Work::detect_implied_integers`]).
-pub fn presolve_opts(f: &RowForm, feastol: f64, max_passes: usize, implied_int: bool) -> Presolved {
-    let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); f.n];
-    for (r, (ri, _)) in f.rows.iter().enumerate() {
-        for &j in ri {
-            col_rows[j].push(r);
-        }
-    }
-    let mut w = Work {
-        n: f.n,
-        rows: f.rows.clone(),
-        lo: f.lo.clone(),
-        up: f.up.clone(),
-        shift: vec![0.0; f.rows.len()],
-        row_alive: vec![true; f.rows.len()],
-        c: f.c.clone(),
-        l: f.l.clone(),
-        u: f.u.clone(),
-        is_int: f.is_int.clone(),
-        col_alive: vec![true; f.n],
-        impl_l: vec![(-INF, usize::MAX); f.n],
-        impl_u: vec![(INF, usize::MAX); f.n],
-        col_rows,
-        ops: Vec::new(),
-        offset: 0.0,
-        infeasible: false,
-        feastol,
-        stats: PresolveStats::default(),
-    };
+/// `presolve` with the opt-in rules: `implied_int` runs HiGHS's implied-integer
+/// detection after the last pass ([`Work::detect_implied_integers`]); `sparsify` runs
+/// HiGHS's sparsify (`Work::sparsify`) once, at the first pass that removes at most
+/// 0.05 % of the rows and of the columns (HiGHS runs it when its reduction since the last
+/// size checkpoint is at most 0.05 %), and the passes continue after it when it changed a
+/// row.
+pub fn presolve_opts(
+    f: &RowForm,
+    feastol: f64,
+    max_passes: usize,
+    implied_int: bool,
+    sparsify: bool,
+) -> Presolved {
+    let mut w = Work::new(f, feastol);
     // Integer bounds rounded inward first.
     for j in 0..f.n {
         if w.is_int[j] {
             w.tighten(j, w.l[j], w.u[j]);
         }
     }
+    let alive = |w: &Work| {
+        (
+            w.row_alive.iter().filter(|&&a| a).count(),
+            w.col_alive.iter().filter(|&&a| a).count(),
+        )
+    };
+    let mut try_sparsify = sparsify;
     while !w.infeasible && w.stats.passes < max_passes {
         w.stats.passes += 1;
-        if !w.pass() {
+        let (r0, c0) = alive(&w);
+        let mut changed = w.pass();
+        if try_sparsify && !w.infeasible {
+            // HiGHS `problemSizeReduction`: the larger of the row and column reductions,
+            // in percent.
+            let (r1, c1) = alive(&w);
+            let pct = |a: usize, b: usize| {
+                if a == 0 {
+                    0.0
+                } else {
+                    100.0 * (a - b) as f64 / a as f64
+                }
+            };
+            if pct(r0, r1).max(pct(c0, c1)) <= 0.05 {
+                try_sparsify = false;
+                if w.sparsify() {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
             break;
         }
     }
@@ -2447,7 +2779,7 @@ mod tests {
         best
     }
 
-    /// HiGHS's implied-integer rule (`presolve_opts(.., true)`) never changes the
+    /// HiGHS's implied-integer rule (`presolve_opts(.., true, false)`) never changes the
     /// optimum: on random problems with one continuous column `h` (integer, half-
     /// integral and fractional data mixed so the rule both fires and refuses), whenever
     /// presolve marks `h` integral the all-integer reduced problem has the exact
@@ -2525,7 +2857,7 @@ mod tests {
                 is_int,
             };
             let want = exact_min_one_continuous(&f);
-            let p = presolve_opts(&f, 1e-9, 20, true);
+            let p = presolve_opts(&f, 1e-9, 20, true, false);
             cases += 1;
             primal += p.stats.implied_int_primal;
             dual += p.stats.implied_int_dual;
@@ -2741,5 +3073,400 @@ mod tests {
             bad, 0,
             "presolve produced an unsafe reduction on {bad} cases"
         );
+    }
+    /// Random integer programs with the structure sparsify cancels: one or two equality
+    /// rows, rows holding a multiple of one of them (sometimes with one of its columns
+    /// missing) plus other terms, and unrelated rows. Sides are drawn around the activity
+    /// of a reference point in the box, sometimes past it, so most cases are feasible
+    /// and some are not.
+    fn random_ip_sparsify(r: &mut Lcg) -> RowForm {
+        let n = r.int(4, 6) as usize;
+        let l: Vec<f64> = (0..n).map(|_| r.int(-1, 0) as f64).collect();
+        let u: Vec<f64> = l.iter().map(|&v| v + r.int(1, 2) as f64).collect();
+        let c: Vec<f64> = (0..n).map(|_| r.int(-4, 4) as f64).collect();
+        let xr: Vec<f64> = (0..n)
+            .map(|j| r.int(l[j] as i64, u[j] as i64) as f64)
+            .collect();
+        let mut f = RowForm {
+            n,
+            rows: Vec::new(),
+            lo: Vec::new(),
+            up: Vec::new(),
+            c,
+            l,
+            u,
+            is_int: vec![true; n],
+        };
+        // Dyadic coefficients and multipliers only (see the test below for why).
+        let coef = |r: &mut Lcg| [1.0, -1.0, 2.0, 1.0, -2.0][r.int(0, 4) as usize];
+        let push_row = |f: &mut RowForm, r: &mut Lcg, ri: Vec<usize>, rv: Vec<f64>, eq| {
+            let act: f64 = ri.iter().zip(&rv).map(|(&j, &a)| a * xr[j]).sum();
+            let off = r.int(-1, 2) as f64;
+            let (lo, up) = match (eq, r.int(0, 2)) {
+                (true, _) | (_, 2) => (act, act),
+                (_, 0) => (-INF, act + off),
+                _ => (act - off, INF),
+            };
+            f.rows.push((ri, rv));
+            f.lo.push(lo);
+            f.up.push(up);
+        };
+        let shuffled = |r: &mut Lcg| {
+            let mut cols: Vec<usize> = (0..n).collect();
+            for i in 0..n {
+                let s = r.int(i as i64, n as i64 - 1) as usize;
+                cols.swap(i, s);
+            }
+            cols
+        };
+        for _ in 0..r.int(1, 2) {
+            let cols = shuffled(r);
+            let k = r.int(3, (n as i64 - 1).min(4)) as usize;
+            let eqc: Vec<usize> = cols[..k].to_vec();
+            let eqv: Vec<f64> = eqc.iter().map(|_| coef(r)).collect();
+            push_row(&mut f, r, eqc.clone(), eqv.clone(), true);
+            for _ in 0..r.int(1, 3) {
+                let lam = [1.0, -1.0, 2.0, -2.0, 0.5, 4.0][r.int(0, 5) as usize];
+                let drop = if r.int(0, 2) == 0 {
+                    Some(r.int(0, k as i64 - 1) as usize)
+                } else {
+                    None
+                };
+                let (mut ri, mut rv) = (Vec::new(), Vec::new());
+                for (p, (&j, &a)) in eqc.iter().zip(&eqv).enumerate() {
+                    if Some(p) != drop {
+                        ri.push(j);
+                        rv.push(lam * a);
+                    }
+                }
+                // At least one other column (else the row is parallel to the equality
+                // and merged before sparsify's turn).
+                let first = r.int(k as i64, n as i64 - 1) as usize;
+                for (p, &j) in cols.iter().enumerate().skip(k) {
+                    if p == first || r.int(0, 1) == 0 {
+                        ri.push(j);
+                        rv.push(coef(r));
+                    }
+                }
+                push_row(&mut f, r, ri, rv, false);
+            }
+        }
+        for _ in 0..r.int(0, 2) {
+            let cols = shuffled(r);
+            let k = r.int(2, n as i64) as usize;
+            let ri: Vec<usize> = cols[..k].to_vec();
+            let rv: Vec<f64> = ri.iter().map(|_| coef(r)).collect();
+            push_row(&mut f, r, ri, rv, false);
+        }
+        f
+    }
+
+    /// The live problem of `w` (alive rows and columns) and its objective constant.
+    fn snapshot(w: &Work) -> (RowForm, f64) {
+        let keep: Vec<usize> = (0..w.n).filter(|&j| w.col_alive[j]).collect();
+        let mut idx = vec![usize::MAX; w.n];
+        for (k, &j) in keep.iter().enumerate() {
+            idx[j] = k;
+        }
+        let pick = |v: &Vec<f64>| keep.iter().map(|&j| v[j]).collect::<Vec<f64>>();
+        let mut f = RowForm {
+            n: keep.len(),
+            rows: Vec::new(),
+            lo: Vec::new(),
+            up: Vec::new(),
+            c: pick(&w.c),
+            l: pick(&w.l),
+            u: pick(&w.u),
+            is_int: keep.iter().map(|&j| w.is_int[j]).collect(),
+        };
+        for r in 0..w.rows.len() {
+            if w.row_alive[r] {
+                f.rows.push((
+                    w.rows[r].0.iter().map(|&j| idx[j]).collect(),
+                    w.rows[r].1.clone(),
+                ));
+                f.lo.push(w.lo[r]);
+                f.up.push(w.up[r]);
+            }
+        }
+        (f, w.offset)
+    }
+
+    /// The sparsify step alone is exact: on random integer programs, run the other
+    /// rules to a fixpoint, then compare the live problem's optimum (plus the objective
+    /// constant) before and after `Work::sparsify`, by enumeration. Counts prove the
+    /// rule fired (CLAUDE.md section 6).
+    #[test]
+    fn sparsify_step_keeps_the_live_problem_exact() {
+        let mut r = Lcg(std::env::var("XSEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7));
+        let (mut fired, mut compared, mut both_infeasible) = (0usize, 0usize, 0usize);
+        let mut sparsified = 0usize;
+        for _ in 0..3000 {
+            let f = random_ip_sparsify(&mut r);
+            let mut w = Work::new(&f, 1e-9);
+            for j in 0..f.n {
+                if w.is_int[j] {
+                    w.tighten(j, w.l[j], w.u[j]);
+                }
+            }
+            for _ in 0..20 {
+                if w.infeasible || !w.pass() {
+                    break;
+                }
+            }
+            if w.infeasible {
+                continue;
+            }
+            let (g0, o0) = snapshot(&w);
+            let before = brute_min(&g0);
+            let rows_before = w.stats.sparsified_rows;
+            if !w.sparsify() {
+                continue;
+            }
+            fired += 1;
+            sparsified += w.stats.sparsified_rows - rows_before;
+            if w.infeasible {
+                assert!(before.is_none(), "sparsify declared infeasible: {g0:?}");
+                continue;
+            }
+            let (g1, o1) = snapshot(&w);
+            let after = brute_min(&g1);
+            match (&before, &after) {
+                (None, None) => both_infeasible += 1,
+                (Some((v0, _)), Some((v1, _))) => {
+                    compared += 1;
+                    assert!(
+                        ((v0 + o0) - (v1 + o1)).abs() <= 1e-9,
+                        "sparsify changed the optimum: {} -> {} on {g0:?} -> {g1:?}",
+                        v0 + o0,
+                        v1 + o1
+                    );
+                }
+                _ => panic!(
+                    "sparsify changed feasibility: {before:?} -> {after:?} on {g0:?} -> {g1:?}"
+                ),
+            }
+        }
+        eprintln!(
+            "sparsify step probe: fired in {fired} cases ({sparsified} rows), optimum compared \
+             {compared}, both infeasible {both_infeasible}"
+        );
+        assert!(
+            fired > 400 && sparsified > 1000 && compared > 300,
+            "probe fired too little: fired {fired} rows {sparsified} compared {compared}"
+        );
+    }
+
+    /// `solve_presolved`'s contract on one presolve result: presolve never calls a
+    /// feasible problem infeasible; the reduced optimum (plus offset) is never above the
+    /// true optimum; at the true optimum the postsolved point is feasible with that
+    /// value; below it (a relaxation) the postsolved point fails the check on the
+    /// original rows, so the driver solves the original instead. Returns whether the
+    /// result was exact (`false`: a relaxation the check catches).
+    fn driver_contract(f: &RowForm, p: &Presolved, want: &Option<(f64, Vec<f64>)>) -> bool {
+        if p.infeasible {
+            assert!(
+                want.is_none(),
+                "presolve declared a feasible problem infeasible: {f:?}"
+            );
+            return true;
+        }
+        let got = brute_min(&p.form);
+        match (want, &got) {
+            (_, None) => {
+                assert!(
+                    want.is_none(),
+                    "reduced problem infeasible, original {want:?}: {f:?}"
+                );
+                true
+            }
+            (None, Some((_, gx))) => {
+                // A relaxation of an infeasible problem: the check must reject it.
+                let x = p.postsolve(gx, f.n);
+                assert!(!row_form_feasible(f, &x, 1e-9), "{x:?} feasible for {f:?}");
+                false
+            }
+            (Some((wv, _)), Some((gv, gx))) => {
+                let red = gv + p.offset;
+                assert!(
+                    red <= wv + 1e-9,
+                    "reduced optimum {red} above {wv} for {f:?}"
+                );
+                let x = p.postsolve(gx, f.n);
+                if (red - wv).abs() <= 1e-9 {
+                    assert!(
+                        row_form_feasible(f, &x, 1e-9),
+                        "postsolved point infeasible: {x:?} for {f:?}"
+                    );
+                    let v: f64 = f.c.iter().zip(&x).map(|(c, x)| c * x).sum();
+                    assert!((v - wv).abs() <= 1e-9);
+                    true
+                } else {
+                    assert!(
+                        !row_form_feasible(f, &x, 1e-9),
+                        "relaxed optimum {red} < {wv} with a feasible postsolved point \
+                         {x:?} for {f:?}"
+                    );
+                    false
+                }
+            }
+        }
+    }
+
+    /// The whole presolve with sparsify on random integer programs, held to the
+    /// contract `solve_presolved` relies on (`driver_contract`). The probe counts rows
+    /// actually sparsified (CLAUDE.md section 6).
+    ///
+    /// The defect this test first exposed (a cancellation leaving a ~4e-16 entry on an
+    /// equality row that `doubleton_eq` / the singleton rule then divided by: 12
+    /// contract violations in 180,000 cases over seeds 200-259 with sparsify, 3
+    /// without) was in presolve itself, not in sparsify, and is fixed by
+    /// `Work::is_noise` (`presolve_never_divides_by_a_noise_coefficient`); the same
+    /// 60-seed census is now clean (`XSEED` reruns any seed).
+    #[test]
+    fn sparsify_presolve_keeps_the_driver_contract() {
+        let mut r = Lcg(std::env::var("XSEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7));
+        let (mut cases, mut feasible, mut infeasible) = (0usize, 0usize, 0usize);
+        let (mut sparsified, mut fired_cases, mut nz_removed) = (0usize, 0usize, 0usize);
+        let (mut fired_exact, mut relaxed, mut relaxed_off) = (0usize, 0usize, 0usize);
+        for _ in 0..3000 {
+            let f = random_ip_sparsify(&mut r);
+            let want = brute_min(&f);
+            cases += 1;
+            if want.is_some() {
+                feasible += 1;
+            } else {
+                infeasible += 1;
+            }
+            let p = presolve_opts(&f, 1e-9, 20, false, true);
+            sparsified += p.stats.sparsified_rows;
+            nz_removed += p.stats.sparsify_nz_removed;
+            let fired = p.stats.sparsified_rows > 0;
+            fired_cases += usize::from(fired);
+            if !driver_contract(&f, &p, &want) {
+                relaxed += 1;
+            } else if fired && want.is_some() {
+                fired_exact += 1;
+            }
+            if !driver_contract(&f, &presolve_opts(&f, 1e-9, 20, false, false), &want) {
+                relaxed_off += 1;
+            }
+        }
+        eprintln!(
+            "sparsify probe: cases {cases} feasible {feasible} infeasible {infeasible} \
+             sparsified rows {sparsified} in {fired_cases} cases, net nonzeros removed \
+             {nz_removed}; exact with sparsify on feasible cases {fired_exact}; relaxed \
+             (caught by the postsolve check) {relaxed} on vs {relaxed_off} off"
+        );
+        assert!(
+            cases == 3000
+                && feasible > 1000
+                && infeasible > 100
+                && sparsified > 1000
+                && fired_cases > 400
+                && fired_exact > 250
+                && nz_removed > 2000,
+            "probe fired too little: cases {cases} feasible {feasible} sparsified {sparsified} \
+             fired cases {fired_cases} exact {fired_exact} nz removed {nz_removed}"
+        );
+    }
+
+    /// Sparsify by hand, on the rule alone (no other presolve pass first).
+    /// `x0 + x1 + x2 = 1` (binaries) cancels all three of its entries in
+    /// `x0 + x1 + x2 + x3 <= 2` (`x3` integer in [0, 3]; the row becomes the singleton
+    /// `x3 <= 1`, a bound), and two in `2 x0 + 2 x2 + x4 >= 1` at the price of one
+    /// fill-in (`-2 x1 + x4 >= -1`). A continuous equality may not fill in a row with
+    /// integers, and no row may receive a general-integer fill-in.
+    #[test]
+    fn sparsify_cancels_entries_by_hand() {
+        let f = RowForm {
+            n: 6,
+            rows: vec![
+                (vec![0, 1, 2], vec![1.0, 1.0, 1.0]),
+                (vec![0, 1, 2, 3], vec![1.0, 1.0, 1.0, 1.0]),
+                (vec![0, 2, 4], vec![2.0, 2.0, 1.0]),
+                (vec![1, 5], vec![1.0, -1.0]),
+            ],
+            lo: vec![1.0, -INF, 1.0, -1.0],
+            up: vec![1.0, 2.0, INF, INF],
+            c: vec![1.0, 2.0, 3.0, -1.0, 1.0, 1.0],
+            l: vec![0.0; 6],
+            u: vec![1.0, 1.0, 1.0, 3.0, 4.0, 1.0],
+            is_int: vec![true; 6],
+        };
+        let mut w = Work::new(&f, 1e-9);
+        assert!(w.sparsify());
+        assert_eq!(w.stats.sparsified_rows, 2, "{:?}", w.stats);
+        // Row 1: three cancelled, no fill-in; row 2: two cancelled, one fill-in.
+        assert_eq!(w.stats.sparsify_nz_removed, 4, "{:?}", w.stats);
+        // Row 1 became `x3 <= 1` and was turned into a bound.
+        assert!(!w.row_alive[1]);
+        assert_eq!(w.u[3], 1.0);
+        assert_eq!(w.stats.singleton_rows, 1);
+        // Row 2: -2 x1 + x4 >= -1; its constant moved by +2 (`shift -= lambda r`).
+        let mut e: Vec<(usize, f64)> = w.rows[2]
+            .0
+            .iter()
+            .copied()
+            .zip(w.rows[2].1.iter().copied())
+            .collect();
+        e.sort_by_key(|t| t.0);
+        assert_eq!(e, vec![(1, -2.0), (4, 1.0)]);
+        assert_eq!((w.lo[2], w.up[2], w.shift[2]), (-1.0, INF, 2.0));
+        // The equality and the unrelated row are untouched.
+        assert_eq!(w.rows[0], f.rows[0]);
+        assert_eq!(w.rows[3], f.rows[3]);
+        // The whole presolve with sparsify keeps the optimum.
+        let (want, _) = brute_min(&f).expect("feasible");
+        // (Measured: here the other rules solve the problem before sparsify's turn; the
+        // randomized test above is the end-to-end probe.)
+        let p = presolve_opts(&f, 1e-9, 20, false, true);
+        assert!(!p.infeasible);
+        let (gv, gx) = brute_min(&p.form).expect("reduced feasible");
+        assert!((want - (gv + p.offset)).abs() <= 1e-9);
+        assert!(row_form_feasible(&f, &p.postsolve(&gx, f.n), 1e-9));
+
+        // A continuous equality may not fill in a row with an integer column. (Row 2
+        // only gives z2 a second entry, so that z0 -- not z2 -- is the sparsest column:
+        // candidates must hold the sparsest column.)
+        let g = RowForm {
+            n: 4,
+            rows: vec![
+                (vec![0, 1, 2], vec![1.0, 1.0, 1.0]),
+                (vec![0, 1, 3], vec![1.0, 1.0, 1.0]),
+                (vec![2, 3], vec![1.0, -1.0]),
+            ],
+            lo: vec![1.0, 0.0, -INF],
+            up: vec![1.0, INF, 1.0],
+            c: vec![0.0; 4],
+            l: vec![0.0; 4],
+            u: vec![1.0; 4],
+            is_int: vec![false, false, false, true],
+        };
+        let mut w = Work::new(&g, 1e-9);
+        assert!(!w.sparsify(), "{:?}", w.rows);
+        // ... but it may when the row has no integer column: z0 + z1 + z3 -> -z2 + z3.
+        let mut g2 = g.clone();
+        g2.is_int[3] = false;
+        let mut w = Work::new(&g2, 1e-9);
+        assert!(w.sparsify());
+        assert_eq!(w.stats.sparsified_rows, 1);
+        assert_eq!((w.lo[1], w.shift[1]), (-1.0, 1.0));
+        // No fill-in of a general integer: z2 integer in [0, 5] is missing from row 1.
+        let mut g3 = g.clone();
+        g3.is_int = vec![true; 4];
+        g3.u[2] = 5.0;
+        let mut w = Work::new(&g3, 1e-9);
+        assert!(!w.sparsify(), "{:?}", w.rows);
+        // A binary z2 may be filled in.
+        g3.u[2] = 1.0;
+        let mut w = Work::new(&g3, 1e-9);
+        assert!(w.sparsify());
     }
 }
