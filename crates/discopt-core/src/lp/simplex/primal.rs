@@ -995,7 +995,6 @@ fn subtol_noise_global_enabled() -> bool {
 /// can improve the objective by more than `floor`, and the vertex is optimal at
 /// that tolerance whatever the suspects' true signs. Only a failed certificate
 /// pays for the dual refinement that settles them (#1953).
-#[allow(clippy::too_many_arguments)]
 ///
 /// With `ladder` (`SimplexOptions::subtol_ladder`), two more rigorous bounds are
 /// tried before declaring the vertex uncertified, the cheap rungs of the B&B
