@@ -1,0 +1,123 @@
+--- MILP phase profile (count, total ms) ---
+  RootCutLoop           10 calls    8628.83 ms
+  RootSolve            102 calls    2538.59 ms
+  SepCmir              100 calls     742.24 ms
+  SepGomory             10 calls     259.94 ms
+  DiveRepair            10 calls     794.06 ms
+  SubMip                 9 calls    9855.24 ms
+  RandRound             46 calls     108.57 ms
+  NodeGmiScan           10 calls       0.34 ms
+  NodeGmiAugment        36 calls       3.62 ms
+  NodeGmiLp             36 calls     751.69 ms
+  NodeGmiNs             35 calls       0.91 ms
+  NodeGmiSep            14 calls      82.56 ms
+  NodeLpSolve         4033 calls   26399.14 ms
+  StrongBranch           1 calls      72.07 ms
+  SearchLoop            10 calls   35333.98 ms
+  Fbbt                  10 calls       7.39 ms
+  NodeReduce            10 calls       8.55 ms
+  PriceBtran         62452 calls     219.24 ms
+  PriceSweep         62452 calls     997.58 ms
+  AlphaFtran         62168 calls     290.14 ms
+  FtUpdate           43393 calls     285.83 ms
+  Refactorize          760 calls     327.36 ms
+  DualPrepare         6589 calls    2601.28 ms
+  DualRecompute       6600 calls     230.59 ms
+  DualPivotLoop       6600 calls   24271.34 ms
+  RedCostFix            81 calls      41.38 ms
+  LuSymbolic         13900 calls      14.40 ms
+  LuNumeric          13900 calls    4952.50 ms
+--- simplex pivot categorization ---
+  DiveRuns                   10
+  DiveCapped                  3
+  RootHighsPropagated          3
+  DiveSteps                 180
+  DiveHitIntegral             3
+  DiveAbandonedInfeasible          4
+  NodeNsBound              4025
+  Phase1Pivots             5183
+  FarkasExactAttempt         51
+  Phase2Pivots            56985
+  DegeneratePivots        51457
+  BoundFlips              18775
+  Refactorizations          760
+  DualDegeneratePivots     165779
+  ExpandMinSteps           9353
+  RcFixDualReuse           2570
+  NodeLpOptimal            4025
+  NodeLpIters            270312
+  NodeLpOverInc             322
+  NodeLpItersOverInc      16530
+  NodeGmiNodes               10
+  NodeGmiRaw                905
+  NodeGmiCuts               280
+  NodeGmiLpFail               1
+  NodeGmiNsAbstain           35
+  NodeGmiInheritSolves         22
+  P1ExpelPasses             176
+  SubMipRensRun               9
+  SubMipSubNodes            481
+  SubMipImproved              5
+  RandRoundRuns              46
+  RandRoundPropInfeas         45
+  RandRoundFound              1
+  RootPoolSeeded            173
+  RootRensRuns                4
+  RootRensImproved            3
+  RcFixCalls                 10
+  RcFixNodesHit               1
+  RcFixCols                   7
+  DualWarmSolves           6600
+  DualColdFallbacks          33
+  DualDegenerateRunArms       1605
+  DualDegenerateRunMax         64
+  DualDegenerateStallBails       1041
+  DualCostPerturbAttempts       1055
+  DualCostPerturbAccepted       1051
+  DualCostPerturbRejected          4
+  DualNoiseRowTolerated         20
+  SubtolLadderTried        2808
+  SubtolLadderCertified       2362
+  RefacFtFail                 7
+  RefacCap                  753
+  LpDenseRetries             27
+  LpVerdictOptimal          273
+  LpVerdictIterLimit         54
+  FarkasRejectOpen           50
+  FarkasRejectMargin        102
+  SubtolStepTests          1042
+  WarmSubtolRepair          248
+  WarmSubtolRepairFailed          4
+  SubtolSuspectConfirmed       1042
+  DualExitDeadline           30
+  DualExitFarkasUncertified         31
+  Phase1EndBoxOk             11
+  HighsMipSearchRuns         10
+  HighsMipSearchNodes       2480
+  HighsMipSearchBranched       1617
+  HighsMipSearchSbIters      42382
+  HighsMipSearchCommits        174
+  HighsMipSearchSepCalls         26
+  HighsMipSearchBasisFits     292721
+  HighsMipSearchSubMipHits          1
+  SepCmirCuts              7128
+  EntryCols                  34
+  EntryColsWarm             266
+  RootCutRounds             102
+  RootCutWarmReopt           92
+  RootCutsGenerated         499
+  RootCutsKept              326
+  RootCutsSubstDropped        562
+  DualPrepRejectDualInf         18
+  DualPrepAccept           6571
+  LogicalBasisDualAttempts          3
+  LuSparseFactorizations      13900
+  LuBasisNnz           15380070
+  LuFactorNnz          17725833
+  DualRefactorizations       6110
+  DualRefacCap             6109
+  DualRefacFtFail             1
+  SepGomoryCalls             14
+  SepGomoryRejectDynamism         67
+  SepGomoryCutsEmitted        905
+  SepGomoryCutNnz        580298
