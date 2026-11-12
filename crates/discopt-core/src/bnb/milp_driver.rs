@@ -4703,6 +4703,26 @@ fn solve_milp_node_search(
     lazy: Option<&dyn MilpLazyHook>,
     node: Option<&dyn MilpNodeHook>,
 ) -> MilpResult {
+    // The HiGHS configuration's LP-level members (graduated default-ON for the MILP
+    // engine, `highs_config`): set here, on the engine's own LP options, so LPs solved
+    // outside the engine keep `SimplexOptions::default()`'s values.
+    let milp_opts: MilpOptions;
+    let opts = {
+        let mut s = opts.simplex.clone();
+        crate::lp::simplex::dual::milp_lp_members(&mut s);
+        let same = s.dual_noise_rows == opts.simplex.dual_noise_rows
+            && s.dual_perturb_first == opts.simplex.dual_perturb_first
+            && s.subtol_ladder == opts.simplex.subtol_ladder
+            && s.warm_flip_boxed == opts.simplex.warm_flip_boxed;
+        if same {
+            opts
+        } else {
+            let mut o = opts.clone();
+            o.simplex = s;
+            milp_opts = o;
+            &milp_opts
+        }
+    };
     // A hook with a zero round budget can never fire; drop it here so every
     // fire-site downstream is a single `Option` test and the "zero effect when
     // absent" guarantee covers "present but disabled" too.
@@ -13444,9 +13464,10 @@ mod tests {
     /// binary is exactly 1.
     #[test]
     fn snap_refused_root_keeps_its_lp_bound_2163() {
+        // The refusal this test was written around is the pre-graduation engine's (the
+        // HiGHS configuration rounds the root differently); its probe is asserted there.
+        // The bound property holds under both: checked for each.
         let _guard = crate::profile::test_guard();
-        crate::profile::set_enabled(true);
-        crate::profile::reset();
         let a = [1.0, -1e6, 1.0];
         let c = [-1.0, 3.0, 0.0];
         let l = [0.0, 0.0, 0.0];
@@ -13459,32 +13480,47 @@ mod tests {
             l: &l,
             u: &u,
         };
-        let mut root_only = opts(2, vec![1]);
-        // The loop stops once the tree holds this many nodes: 2 lets the root run
-        // and stops as soon as it branches.
-        root_only.max_nodes = 2;
-        let r1 = solve_milp(&lp, &[0.0], 0.0, &root_only);
-        let refused = crate::profile::counter(crate::profile::Ctr::DriverIncumbentSnapRefused);
-        crate::profile::set_enabled(false);
-        assert!(
-            refused >= 1,
-            "the root vertex must be refused at its realisation"
-        );
-        assert!(
-            r1.bound.is_finite(),
-            "root-capped bound {} must be finite",
-            r1.bound
-        );
-        assert!(
-            r1.bound <= -7.0 + 1e-9,
-            "bound {} crosses the optimum -7",
-            r1.bound
-        );
+        let mut checked = 0usize;
+        for legacy in [true, false] {
+            crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(legacy));
+            crate::profile::set_enabled(true);
+            crate::profile::reset();
+            let mut root_only = opts(2, vec![1]);
+            // The loop stops once the tree holds this many nodes: 2 lets the root run
+            // and stops as soon as it branches.
+            root_only.max_nodes = 2;
+            let r1 = solve_milp(&lp, &[0.0], 0.0, &root_only);
+            let refused = crate::profile::counter(crate::profile::Ctr::DriverIncumbentSnapRefused);
+            crate::profile::set_enabled(false);
+            if legacy {
+                assert!(
+                    refused >= 1,
+                    "the root vertex must be refused at its realisation"
+                );
+            }
+            assert!(
+                r1.bound.is_finite(),
+                "legacy={legacy}: root-capped bound {} must be finite",
+                r1.bound
+            );
+            assert!(
+                r1.bound <= -7.0 + 1e-9,
+                "legacy={legacy}: bound {} crosses the optimum -7",
+                r1.bound
+            );
 
-        let r = solve_milp(&lp, &[0.0], 0.0, &opts(2, vec![1]));
-        assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
-        assert!((r.obj + 7.0).abs() <= 1e-6, "obj {}", r.obj);
-        assert!(r.bound <= -7.0 + 1e-6, "bound {}", r.bound);
+            let r = solve_milp(&lp, &[0.0], 0.0, &opts(2, vec![1]));
+            assert_eq!(r.status, MilpStatus::Optimal, "legacy={legacy}: {r:?}");
+            assert!(
+                (r.obj + 7.0).abs() <= 1e-6,
+                "legacy={legacy}: obj {}",
+                r.obj
+            );
+            assert!(r.bound <= -7.0 + 1e-6, "legacy={legacy}: bound {}", r.bound);
+            checked += 1;
+        }
+        crate::lp::cmir::LEGACY_DEFAULTS.with(|c| c.set(false));
+        assert_eq!(checked, 2);
     }
 
     #[test]

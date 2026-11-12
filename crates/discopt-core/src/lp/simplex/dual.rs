@@ -358,33 +358,13 @@ const NOISE_ROW_TOL: f64 = 1e-7;
 /// Default for [`SimplexOptions::dual_perturb_first`] from
 /// `DISCOPT_LP_DUAL_PERTURB_FIRST` (default OFF). Garbage is refused.
 pub(super) fn perturb_first_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_PERTURB_FIRST") {
-        Err(_) => crate::highs_config::enabled(),
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => panic!(
-                "DISCOPT_LP_DUAL_PERTURB_FIRST={other:?} is not recognized (expected 1 or 0)"
-            ),
-        },
-    })
+    member_env("DISCOPT_LP_DUAL_PERTURB_FIRST").unwrap_or_else(crate::highs_config::lp_default)
 }
 
 /// Default for [`SimplexOptions::subtol_ladder`] from `DISCOPT_LP_SUBTOL_LADDER`
 /// (default OFF): see `primal::subtol_suspects_matter`. Garbage is refused.
 pub(super) fn subtol_ladder_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_SUBTOL_LADDER") {
-        Err(_) => crate::highs_config::enabled(),
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => {
-                panic!("DISCOPT_LP_SUBTOL_LADDER={other:?} is not recognized (expected 1 or 0)")
-            }
-        },
-    })
+    member_env("DISCOPT_LP_SUBTOL_LADDER").unwrap_or_else(crate::highs_config::lp_default)
 }
 
 /// Default for [`SimplexOptions::warm_flip_boxed`] from `DISCOPT_LP_WARM_FLIP_BOXED`
@@ -394,32 +374,41 @@ pub(super) fn subtol_ladder_default() -> bool {
 /// HiGHS configuration, all 162 rejected warm starts in 100 nodes had their dual
 /// infeasibilities on boxed columns only (median |d_j| ~ 600), each one a primal
 /// phase 1 (56 to the iteration limit). Garbage is refused.
-pub(super) fn warm_flip_boxed_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_WARM_FLIP_BOXED") {
-        Err(_) => crate::highs_config::enabled(),
+/// A HiGHS-configuration member's own switch as set (`None` when unset), read once per
+/// variable; garbage refused.
+fn member_env(var: &'static str) -> Option<bool> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<bool>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut c = cache.lock().expect("member_env cache");
+    *c.entry(var).or_insert_with(|| match std::env::var(var) {
+        Err(_) => None,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => {
-                panic!("DISCOPT_LP_WARM_FLIP_BOXED={other:?} is not recognized (expected 1 or 0)")
-            }
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" | "" => Some(false),
+            other => panic!("{var}={other:?} is not recognized (expected 1 or 0)"),
         },
     })
 }
 
+/// The MILP engine's LP options: the HiGHS configuration's LP-level members follow
+/// their own switch, else `DISCOPT_HIGHS_CONFIG` as the MILP engine reads it
+/// (graduated default-ON), whatever `SimplexOptions::default()` gave the caller.
+pub fn milp_lp_members(s: &mut SimplexOptions) {
+    let on = crate::highs_config::enabled();
+    s.dual_noise_rows = member_env("DISCOPT_LP_DUAL_NOISE_ROWS").unwrap_or(on);
+    s.dual_perturb_first = member_env("DISCOPT_LP_DUAL_PERTURB_FIRST").unwrap_or(on);
+    s.subtol_ladder = member_env("DISCOPT_LP_SUBTOL_LADDER").unwrap_or(on);
+    s.warm_flip_boxed = member_env("DISCOPT_LP_WARM_FLIP_BOXED").unwrap_or(on);
+}
+
+pub(super) fn warm_flip_boxed_default() -> bool {
+    member_env("DISCOPT_LP_WARM_FLIP_BOXED").unwrap_or_else(crate::highs_config::lp_default)
+}
+
 pub(super) fn noise_rows_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
-        Err(_) => crate::highs_config::enabled(),
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" | "" => false,
-            other => {
-                panic!("DISCOPT_LP_DUAL_NOISE_ROWS={other:?} is not recognized (expected 1 or 0)")
-            }
-        },
-    })
+    member_env("DISCOPT_LP_DUAL_NOISE_ROWS").unwrap_or_else(crate::highs_config::lp_default)
 }
 
 fn dual_trace_enabled() -> bool {
@@ -3187,6 +3176,32 @@ mod tests {
         SimplexOptions::default()
     }
 
+    /// The LP-level members of the HiGHS configuration (`DISCOPT_HIGHS_CONFIG`) on,
+    /// whatever the environment says: tests that pin the configuration's (graduated)
+    /// warm path, or the legacy one via [`legacy_lp_opts`], name the options instead of
+    /// inheriting the env-dependent defaults, so they hold under `DISCOPT_HIGHS_CONFIG`
+    /// set either way.
+    fn config_lp_opts() -> SimplexOptions {
+        SimplexOptions {
+            warm_flip_boxed: true,
+            dual_noise_rows: true,
+            dual_perturb_first: true,
+            subtol_ladder: true,
+            ..SimplexOptions::default()
+        }
+    }
+
+    /// See [`config_lp_opts`]: the same four members off.
+    fn legacy_lp_opts() -> SimplexOptions {
+        SimplexOptions {
+            warm_flip_boxed: false,
+            dual_noise_rows: false,
+            dual_perturb_first: false,
+            subtol_ladder: false,
+            ..SimplexOptions::default()
+        }
+    }
+
     /// #1935 `warm_flip_boxed`: a warm start whose only dual infeasibilities sit on
     /// BOXED nonbasic columns is repaired by moving them to their other bound, and
     /// reaches the cold optimum; with the option off the same start is refused, as
@@ -3211,7 +3226,10 @@ mod tests {
         crate::profile::reset();
         crate::profile::set_enabled(true);
 
-        let off = opts();
+        let off = SimplexOptions {
+            warm_flip_boxed: false,
+            ..opts()
+        };
         assert!(PreparedDual::prepare_cols(&sp, 1, 3, &c, &l, &u, &start, &off).is_none());
         assert_eq!(
             crate::profile::counter(crate::profile::Ctr::DualPrepRejectDualInf),
@@ -3813,10 +3831,20 @@ mod tests {
         // `ENABLED` false and the assertion below would read 0 for the wrong reason.
         crate::profile::set_enabled(true);
         crate::profile::reset();
-        let warm = solve_lp_warm(&lp, &b, &bad, &opts());
+        // The refusal path is the legacy one: with `warm_flip_boxed` (graduated) a
+        // boxed-only dual infeasibility is repaired instead, checked below.
+        let warm = solve_lp_warm(&lp, &b, &bad, &legacy_lp_opts());
         let rejects = crate::profile::counter(crate::profile::Ctr::DualPrepRejectDualInf);
         crate::profile::set_enabled(false);
         let cold = solve_lp(&lp, &b, &opts());
+        let graduated = solve_lp_warm(&lp, &b, &bad, &config_lp_opts());
+        assert_eq!(graduated.status, LpStatus::Optimal);
+        assert!(
+            (graduated.obj - cold.obj).abs() < 1e-7,
+            "graduated warm {} vs cold {}",
+            graduated.obj,
+            cold.obj
+        );
         assert_eq!(cold.status, LpStatus::Optimal);
         assert_eq!(warm.status, LpStatus::Optimal);
         // Correct optimum, not the origin the dual-infeasible basis sits at.
@@ -4368,12 +4396,16 @@ mod tests {
         let _guard = crate::profile::test_guard();
         crate::profile::set_enabled(true);
         crate::profile::reset();
+        // The captured defect is the legacy warm path's (before the HiGHS
+        // configuration graduated); the graduated defaults are checked per fixture
+        // below to reach the same answers, directly or through the rescue.
         let o = SimplexOptions {
             warm_flip_boxed: true,
-            ..opts()
+            ..legacy_lp_opts()
         };
         let mut checked = 0usize;
-        for (json, want) in [
+        let mut graduated_checked = 0usize;
+        let fixtures = [
             (
                 include_str!("../../bnb/testdata/nous1_inherited_basis_numerical_lp.json"),
                 Some(1.2060754564327338),
@@ -4392,7 +4424,8 @@ mod tests {
                 include_str!("testdata/relu_anderson_cuts_false_optimal_lp.json"),
                 Some(22.36816528521379),
             ),
-        ] {
+        ];
+        for &(json, want) in fixtures.iter() {
             let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
                 parse_stall_fixture(json);
             let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
@@ -4428,6 +4461,36 @@ mod tests {
             "the stage decided them"
         );
         crate::profile::set_enabled(false);
+        // The graduated defaults reach the same answers, directly or via the rescue.
+        for &(json, want) in fixtures.iter() {
+            let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+                parse_stall_fixture(json);
+            let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+            let start = Basis {
+                col_status,
+                basic_vars,
+            };
+            let g_opts = config_lp_opts();
+            let g = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &g_opts);
+            let g = if g.status == LpStatus::Numerical {
+                logical_dual_rescue(g, &sp, m, n, &c, &l, &u, &b, &g_opts)
+            } else {
+                g
+            };
+            match want {
+                Some(h) => {
+                    assert_eq!(g.status, LpStatus::Optimal, "graduated defaults");
+                    assert!(
+                        (g.obj - h).abs() <= 1e-6 * (1.0 + h.abs()),
+                        "graduated obj {} vs HiGHS {h}",
+                        g.obj
+                    );
+                }
+                None => assert_eq!(g.status, LpStatus::Infeasible, "graduated defaults"),
+            }
+            graduated_checked += 1;
+        }
+        assert_eq!(graduated_checked, 4);
     }
 
     /// #2212 entry experiment (ignored; run with `--ignored --nocapture`): on every
@@ -4580,21 +4643,33 @@ mod tests {
             col_status,
             basic_vars,
         };
+        // The legacy warm path (before the HiGHS configuration graduated) leaves it
+        // undecided, never infeasible.
         let o = SimplexOptions {
             warm_flip_boxed: true,
-            ..opts()
+            ..legacy_lp_opts()
         };
-        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &o);
+        let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, Some(&start), &o);
         assert_ne!(
             sol.status,
             LpStatus::Optimal,
-            "#2142: this captured LP is now decided; check its objective against the \
-             fixture's highs_obj and update this pin"
+            "#2142: the legacy path now decides this LP; check its objective against \
+             the fixture's highs_obj and update this pin"
         );
         assert_ne!(
             sol.status,
             LpStatus::Infeasible,
             "HiGHS solves it: never infeasible"
+        );
+        // The graduated HiGHS configuration decides it, at HiGHS's optimum
+        // (0.2397017272 vs 0.2397017202, measured 2026-11-12).
+        let highs_obj = 0.239_701_720_151_352_33;
+        let g = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &config_lp_opts());
+        assert_eq!(g.status, LpStatus::Optimal);
+        assert!(
+            (g.obj - highs_obj).abs() <= 1e-6 * (1.0 + highs_obj.abs()),
+            "obj {} vs HiGHS {highs_obj}",
+            g.obj
         );
     }
 

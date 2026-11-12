@@ -83,6 +83,14 @@ _RTOL = 1e-4  # conftest's declared rel tolerance
 # handed to the gate failed `verify_point` at any budget 1-13 (measured), so the gate
 # would have nothing to repair. Without it, the masters' tolerance-exploiting points
 # still reach the gate: the exit point is rejected at budgets 4, 5, 8 and 9.
+#
+# Re-measured at the HiGHS-configuration graduation (2026-11-12, `DISCOPT_HIGHS_CONFIG`
+# default-ON in the MILP engine): with it on, no point handed to the gate fails
+# `verify_point` at any budget 1-13 even without presolve -- its masters return points
+# the verifier accepts -- while `DISCOPT_HIGHS_CONFIG=0` reproduces 4, 5, 8 and 9 exactly
+# (row 5 violated by 2.7e-6 / 1.8e-6). The control therefore also runs the previous
+# engine. That switch is read once per process, so the control's arms run in a child
+# process with both variables set (`_control`), never by `monkeypatch.setenv`.
 _BUDGET = 6
 _CONTROL_BUDGETS = (4, 5)
 _TL = 300.0  # deliberately non-binding; see above
@@ -143,7 +151,70 @@ def test_the_certificate_survives_the_gate(oa_run):
         assert r.status == "optimal"
 
 
-def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
+_CONTROL_SCRIPT = r"""
+import json, sys
+import numpy as np
+import discopt.solvers.oa as oa
+from discopt.modeling.core import from_nl
+from discopt.validation.feasibility import verify_point
+
+nl, budget, tl = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+real = oa._exit_verified_incumbent
+handed = []
+
+def _identity(model, x_flat, obj, obj_sign, *, warn=True):
+    handed.append(np.asarray(x_flat, dtype=np.float64).copy())
+    return np.asarray(x_flat, dtype=np.float64), obj, None
+
+def _flat(model, x_dict):
+    return np.concatenate(
+        [np.asarray(x_dict[v.name], dtype=np.float64).ravel() for v in model._variables]
+    )
+
+oa._exit_verified_incumbent = _identity
+m_u = from_nl(nl)
+u = m_u.solve(time_limit=tl, max_nodes=budget, solver="mip-nlp", mip_nlp_method="oa")
+oa._exit_verified_incumbent = real
+m_g = from_nl(nl)
+g = m_g.solve(time_limit=tl, max_nodes=budget, solver="mip-nlp", mip_nlp_method="oa")
+before = verify_point(m_u, handed[-1]) if handed else None
+after = verify_point(m_g, _flat(m_g, g.x)) if g.x is not None else None
+print("CONTROL " + json.dumps({
+    "handed": bool(handed),
+    "before_ok": None if before is None else bool(before.ok),
+    "before_reason": None if before is None else before.reason,
+    "after_ok": None if after is None else bool(after.ok),
+    "after_reason": None if after is None else after.reason,
+    "u": [u.objective, u.bound, u.status, bool(u.gap_certified)],
+    "g": [g.objective, g.bound, g.status, bool(g.gap_certified)],
+}))
+"""
+
+
+def _control(budget):
+    """Both arms of one control budget in a child process running the previous MILP
+    engine without presolve (see `_CONTROL_BUDGETS`)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, DISCOPT_MILP_PRESOLVE="0", DISCOPT_HIGHS_CONFIG="0")
+    p = subprocess.run(
+        [sys.executable, "-c", _CONTROL_SCRIPT, _NL, str(budget), str(_TL)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=900,
+    )
+    lines = [ln for ln in p.stdout.splitlines() if ln.startswith("CONTROL ")]
+    assert p.returncode == 0 and lines, (
+        f"control child failed (rc={p.returncode}): {p.stderr[-2000:]}"
+    )
+    return json.loads(lines[-1][len("CONTROL ") :])
+
+
+def test_the_gate_repairs_without_moving_the_answer():
     """Regime (a) as a DIFFERENTIAL, over deterministic iteration budgets.
 
     "The repair moves the point, never the answer" is a claim about the gate, so
@@ -158,52 +229,33 @@ def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
     proving nothing, so the test additionally requires that at least one budget
     produced a point the shipped verifier REJECTS before the gate ran.
     """
-    import discopt.solvers.oa as oa
-
-    real = oa._exit_verified_incumbent
-
-    handed: list[np.ndarray] = []
-
-    def _identity(model, x_flat, obj, obj_sign, *, warn=True):
-        handed.append(np.asarray(x_flat, dtype=np.float64).copy())
-        return np.asarray(x_flat, dtype=np.float64), obj, None
-
-    # See `_CONTROL_BUDGETS`: the control needs the unpresolved masters.
-    monkeypatch.setenv("DISCOPT_MILP_PRESOLVE", "0")
     reproduced = []
     for budget in _CONTROL_BUDGETS:
-        handed.clear()
-        monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
-        m_u, ungated = _solve(budget)
-
-        monkeypatch.setattr(oa, "_exit_verified_incumbent", real)
-        m_g, gated = _solve(budget)
-
-        assert ungated.objective is not None and gated.objective is not None
+        r = _control(budget)
+        ungated, gated = r["u"], r["g"]
+        assert ungated[0] is not None and gated[0] is not None
 
         # The positive control judges the point OA handed to the gate, not the
         # ungated result: the model-level certificate repair (#1537 E) now projects
         # a point with a small row excess after the solve, so the ungated RESULT
         # verifies even when the gate had work to do (measured on every budget 1-9).
-        assert handed, f"max_nodes={budget}: the gate was never called"
-        before = verify_point(m_u, handed[-1])
-        after = verify_point(m_g, _flat(m_g, gated.x))
-        if not before.ok:
-            reproduced.append((budget, before.reason))
-            assert after.ok, (
+        assert r["handed"], f"max_nodes={budget}: the gate was never called"
+        if not r["before_ok"]:
+            reproduced.append((budget, r["before_reason"]))
+            assert r["after_ok"], (
                 f"max_nodes={budget}: the gate failed to repair a point the "
-                f"verifier rejects: {after.reason}"
+                f"verifier rejects: {r['after_reason']}"
             )
 
         # EXACTLY unchanged -- any drift, in either direction, means the gate is
-        # doing something other than clearing round-off.
-        assert gated.objective == ungated.objective, (
-            f"max_nodes={budget}: gate moved the objective: "
-            f"{ungated.objective!r} -> {gated.objective!r}"
+        # doing something other than clearing round-off. (JSON round-trips a float
+        # exactly: `repr` is shortest-round-trip.)
+        assert gated[0] == ungated[0], (
+            f"max_nodes={budget}: gate moved the objective: {ungated[0]!r} -> {gated[0]!r}"
         )
-        assert gated.bound == ungated.bound
-        assert gated.status == ungated.status
-        assert gated.gap_certified == ungated.gap_certified
+        assert gated[1] == ungated[1]
+        assert gated[2] == ungated[2]
+        assert gated[3] == ungated[3]
 
     assert reproduced, (
         "no budget in "
