@@ -1,0 +1,396 @@
+diff --git a/crates/discopt-core/src/bnb/milp_driver.rs b/crates/discopt-core/src/bnb/milp_driver.rs
+index d035c24c..115fe765 100644
+--- a/crates/discopt-core/src/bnb/milp_driver.rs
++++ b/crates/discopt-core/src/bnb/milp_driver.rs
+@@ -3766,6 +3766,25 @@ fn milp_presolve_enabled() -> bool {
+     }
+ }
+ 
++/// `DISCOPT_MILP_IMPLIED_INT` (default OFF): MILP presolve marks continuous columns
++/// integral by HiGHS's implied-integer rule (`milp_presolve::presolve_opts`). Entry
++/// evidence (`highs-mip-replacement-plan.md`, root strength): on bppc8-02 the one
++/// implied-integer column takes discopt's root bound from 486.5 (the LP bound) to 504
++/// (optimum 507), because the root separators may then round on it; HiGHS's own root
++/// with presolve gets 495. Garbage is refused.
++fn milp_implied_int_enabled() -> bool {
++    match std::env::var("DISCOPT_MILP_IMPLIED_INT") {
++        Err(_) => false,
++        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
++            "1" | "true" | "yes" | "on" => true,
++            "0" | "false" | "no" | "off" | "" => false,
++            other => {
++                panic!("DISCOPT_MILP_IMPLIED_INT={other:?} is not recognized (expected 1 or 0)")
++            }
++        },
++    }
++}
++
+ /// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
+ /// singleton slack per inequality row after them), solve the reduced problem, map the
+ /// answer back and re-verify it on the original rows. `None` means "solve the original
+@@ -3784,7 +3803,7 @@ fn solve_presolved(
+     obj_const: f64,
+     opts: &MilpOptions,
+ ) -> Option<MilpResult> {
+-    use crate::bnb::milp_presolve::{presolve, row_form_feasible, RowForm};
++    use crate::bnb::milp_presolve::{presolve_opts, row_form_feasible, RowForm};
+     let ns = opts.n_struct.min(n);
+     let fin = |v: f64| {
+         if v <= -INF {
+@@ -3852,7 +3871,11 @@ fn solve_presolved(
+         u: u[..ns].iter().map(|&v| fin(v)).collect(),
+         is_int,
+     };
+-    let p = presolve(&rf, 1e-9, 20);
++    let p = presolve_opts(&rf, 1e-9, 20, milp_implied_int_enabled());
++    crate::profile::incr_by(
++        crate::profile::Ctr::PresolveImpliedInt,
++        (p.stats.implied_int_primal + p.stats.implied_int_dual) as u64,
++    );
+     // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
+     // show what is left to remove (gap plan §12.36).
+     if let Ok(path) = std::env::var("DISCOPT_MILP_PRESOLVE_DUMP") {
+@@ -3876,7 +3899,8 @@ fn solve_presolved(
+         // Never trusted as a certificate: the original is solved instead.
+         return None;
+     }
+-    if p.keep_cols.len() == ns && p.form.rows.len() == m {
++    let implied = p.stats.implied_int_primal + p.stats.implied_int_dual;
++    if p.keep_cols.len() == ns && p.form.rows.len() == m && implied == 0 {
+         return None;
+     }
+     // Rebuild in the ORIGINAL layout: each kept row keeps its own slack column (same
+diff --git a/crates/discopt-core/src/bnb/milp_presolve.rs b/crates/discopt-core/src/bnb/milp_presolve.rs
+index ff155e7c..85e5d76a 100644
+--- a/crates/discopt-core/src/bnb/milp_presolve.rs
++++ b/crates/discopt-core/src/bnb/milp_presolve.rs
+@@ -104,6 +104,12 @@ pub struct PresolveStats {
+     pub dominated_pairs: usize,
+     /// Parallel columns merged.
+     pub parallel_cols: usize,
++    /// Continuous columns marked integral because an equality row implies it
++    /// (HiGHS `isImpliedInteger`, primal detection).
++    pub implied_int_primal: usize,
++    /// Continuous columns marked integral because some optimum has them integral
++    /// (HiGHS `isImpliedInteger`, dual detection).
++    pub implied_int_dual: usize,
+     /// Passes over the rule set.
+     pub passes: usize,
+ }
+@@ -701,6 +707,94 @@ impl Work {
+         false
+     }
+ 
++    /// HiGHS `detectImpliedIntegers` (`HPresolve.cpp:7261-7265`, with `isImpliedInteger`
++    /// `:358-418`): mark continuous columns integral when integrality costs nothing.
++    ///
++    /// * Primal: an alive equality row has every other column integer with `a_k / a_s`
++    ///   and `rhs / a_s` integral ([`Self::implied_integral`]), so `x_s` is integral at
++    ///   every point where the integer columns are. Repeated to a fixpoint, as each
++    ///   marked column can complete another's row.
++    /// * Dual: every alive row of `x_s` has at least one other column, all of them
++    ///   integer, with `a_k / a_s` and each finite side `/ a_s` integral, and `x_s`'s
++    ///   bounds are integral. With the integer columns fixed, `x_s` then ranges over an
++    ///   interval with integral ends and touches no other row, so an optimal value of
++    ///   `x_s` is integral: some optimal solution has `x_s` integral.
++    ///
++    /// Two departures from HiGHS, both for soundness by construction. The dual test
++    /// counts as integer only original and primal-detected columns, never another
++    /// dual-detected one (HiGHS counts all), so no two dual-detected columns share a
++    /// row and each interval argument stands alone. And integrality is tested at
++    /// `1e-12` relative, not HiGHS's feasibility tolerance. It runs after the last
++    /// pass, so no later rule rewrites the rows a dual detection relied on.
++    fn detect_implied_integers(&mut self) {
++        let integral = |v: f64| (v - v.round()).abs() <= 1e-12 * v.abs().max(1.0);
++        loop {
++            let mut changed = false;
++            for s in 0..self.n {
++                if !self.col_alive[s] || self.is_int[s] || !self.implied_integral(s) {
++                    continue;
++                }
++                // Integral at every feasible point: the bounds round inward.
++                let lo = if self.l[s].is_finite() {
++                    (self.l[s] - 1e-9).ceil()
++                } else {
++                    self.l[s]
++                };
++                let up = if self.u[s].is_finite() {
++                    (self.u[s] + 1e-9).floor()
++                } else {
++                    self.u[s]
++                };
++                if lo > up {
++                    // A real infeasibility; left to the solve rather than claimed here.
++                    continue;
++                }
++                self.l[s] = lo;
++                self.u[s] = up;
++                self.is_int[s] = true;
++                self.stats.implied_int_primal += 1;
++                changed = true;
++            }
++            if !changed {
++                break;
++            }
++        }
++        let base = self.is_int.clone();
++        for s in 0..self.n {
++            if !self.col_alive[s] || base[s] {
++                continue;
++            }
++            let bound_ok = |v: f64| !v.is_finite() || integral(v);
++            if !bound_ok(self.l[s]) || !bound_ok(self.u[s]) {
++                continue;
++            }
++            let ok = self.col_rows[s].iter().all(|&q| {
++                if !self.row_alive[q] {
++                    return true;
++                }
++                let (qi, qv) = &self.rows[q];
++                let Some(pq) = qi.iter().position(|&k| k == s) else {
++                    return true;
++                };
++                let a = qv[pq];
++                qi.len() >= 2
++                    && a != 0.0
++                    && (!self.lo[q].is_finite() || integral(self.lo[q] / a))
++                    && (!self.up[q].is_finite() || integral(self.up[q] / a))
++                    && qi
++                        .iter()
++                        .zip(qv)
++                        .all(|(&k, &v)| k == s || (base[k] && integral(v / a)))
++            });
++            if ok {
++                self.l[s] = self.l[s].round();
++                self.u[s] = self.u[s].round();
++                self.is_int[s] = true;
++                self.stats.implied_int_dual += 1;
++            }
++        }
++    }
++
+     /// HiGHS `isImpliedIntegral`: some alive equality row of `x_s` has every other
+     /// column integer with `a_k / a_s` and `rhs / a_s` integral, so `x_s` is integral
+     /// whenever that row holds. Substituting `x_s` out through any row then drops a
+@@ -1751,6 +1845,12 @@ impl Work {
+ /// Presolve `f` with feasibility tolerance `feastol`, running the rule set to a
+ /// fixpoint (at most `max_passes` passes).
+ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
++    presolve_opts(f, feastol, max_passes, false)
++}
++
++/// [`presolve`], and with `implied_int` HiGHS's implied-integer detection after the
++/// last pass ([`Work::detect_implied_integers`]).
++pub fn presolve_opts(f: &RowForm, feastol: f64, max_passes: usize, implied_int: bool) -> Presolved {
+     let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); f.n];
+     for (r, (ri, _)) in f.rows.iter().enumerate() {
+         for &j in ri {
+@@ -1790,6 +1890,9 @@ pub fn presolve(f: &RowForm, feastol: f64, max_passes: usize) -> Presolved {
+             break;
+         }
+     }
++    if implied_int && !w.infeasible {
++        w.detect_implied_integers();
++    }
+     let keep_cols: Vec<usize> = (0..f.n).filter(|&j| w.col_alive[j]).collect();
+     let mut newidx = vec![usize::MAX; f.n];
+     for (k, &j) in keep_cols.iter().enumerate() {
+@@ -2238,4 +2341,185 @@ mod tests {
+             "probe fired too little: reduced {reduced} infeasible {infeasible} feasible {feasible} doubletons {doubletons} aggregated {aggregated} propagated {propagated} dominated pairs {pairs} parallel cols {par_cols}"
+         );
+     }
++
++    /// Exact optimum of a problem whose last column (`h`) is continuous and all others
++    /// integer with finite bounds: per integer point, `h` ranges over an interval.
++    fn exact_min_one_continuous(f: &RowForm) -> Option<f64> {
++        let h = f.n - 1;
++        let mut x: Vec<f64> = f.l[..h].to_vec();
++        let mut best: Option<f64> = None;
++        loop {
++            let (mut lo_h, mut up_h) = (f.l[h], f.u[h]);
++            let mut ok = true;
++            for (r, (ri, rv)) in f.rows.iter().enumerate() {
++                let (mut s, mut a_h) = (0.0, 0.0);
++                for (&j, &v) in ri.iter().zip(rv) {
++                    if j == h {
++                        a_h += v;
++                    } else {
++                        s += v * x[j];
++                    }
++                }
++                if a_h == 0.0 {
++                    ok &= s >= f.lo[r] - 1e-9 && s <= f.up[r] + 1e-9;
++                } else {
++                    let (p, q) = ((f.lo[r] - s) / a_h, (f.up[r] - s) / a_h);
++                    lo_h = lo_h.max(p.min(q));
++                    up_h = up_h.min(p.max(q));
++                }
++            }
++            if ok && lo_h <= up_h + 1e-9 {
++                let ch = f.c[h];
++                let vh = if ch > 0.0 {
++                    ch * lo_h
++                } else if ch < 0.0 {
++                    ch * up_h
++                } else {
++                    0.0
++                };
++                let v: f64 = f.c[..h].iter().zip(&x).map(|(c, x)| c * x).sum::<f64>() + vh;
++                if best.is_none_or(|b| v < b - 1e-9) {
++                    best = Some(v);
++                }
++            }
++            let mut j = 0;
++            while j < h {
++                x[j] += 1.0;
++                if x[j] <= f.u[j] {
++                    break;
++                }
++                x[j] = f.l[j];
++                j += 1;
++            }
++            if j == h {
++                break;
++            }
++        }
++        best
++    }
++
++    /// HiGHS's implied-integer rule (`presolve_opts(.., true)`) never changes the
++    /// optimum: on random problems with one continuous column `h` (integer, half-
++    /// integral and fractional data mixed so the rule both fires and refuses), whenever
++    /// presolve marks `h` integral the all-integer reduced problem has the exact
++    /// optimum of the original (computed with `h` continuous), and its postsolved
++    /// optimum is feasible for the original.
++    #[test]
++    fn implied_integer_marking_preserves_the_optimum() {
++        let mut r = Lcg(77);
++        let pick = |r: &mut Lcg| -> f64 {
++            match r.int(0, 9) {
++                0 => 0.5,
++                1 => -1.5,
++                _ => r.int(-3, 3) as f64,
++            }
++        };
++        let (mut cases, mut primal, mut dual, mut refused, mut checked) = (0, 0, 0, 0, 0);
++        for _ in 0..20000 {
++            let ni = r.int(1, 3) as usize;
++            let n = ni + 1;
++            let mut l: Vec<f64> = (0..ni).map(|_| r.int(-2, 1) as f64).collect();
++            let mut u: Vec<f64> = l.iter().map(|&v| v + r.int(0, 3) as f64).collect();
++            let lh = r.int(-4, 0) as f64;
++            let uh = lh + r.int(0, 6) as f64 + if r.int(0, 4) == 0 { 0.5 } else { 0.0 };
++            l.push(lh);
++            u.push(uh);
++            let c: Vec<f64> = (0..n).map(|_| r.int(-4, 4) as f64).collect();
++            let m = r.int(1, 3) as usize;
++            let (mut rows, mut lo, mut up) = (Vec::new(), Vec::new(), Vec::new());
++            for _ in 0..m {
++                let mut ri = Vec::new();
++                let mut rv = Vec::new();
++                for j in 0..n {
++                    if j == ni || r.int(0, 2) > 0 {
++                        let v = if j == ni {
++                            [1.0, -1.0, 2.0, 0.5][r.int(0, 3) as usize]
++                        } else {
++                            pick(&mut r)
++                        };
++                        if v != 0.0 {
++                            ri.push(j);
++                            rv.push(v);
++                        }
++                    }
++                }
++                if ri.is_empty() {
++                    continue;
++                }
++                let base = r.int(-4, 4) as f64 + if r.int(0, 5) == 0 { 0.5 } else { 0.0 };
++                match r.int(0, 2) {
++                    0 => {
++                        lo.push(base);
++                        up.push(base);
++                    }
++                    1 => {
++                        lo.push(-INF);
++                        up.push(base);
++                    }
++                    _ => {
++                        lo.push(base);
++                        up.push(INF);
++                    }
++                }
++                rows.push((ri, rv));
++            }
++            let mut is_int = vec![true; n];
++            is_int[ni] = false;
++            let f = RowForm {
++                n,
++                rows,
++                lo,
++                up,
++                c,
++                l,
++                u,
++                is_int,
++            };
++            let want = exact_min_one_continuous(&f);
++            let p = presolve_opts(&f, 1e-9, 20, true);
++            cases += 1;
++            primal += p.stats.implied_int_primal;
++            dual += p.stats.implied_int_dual;
++            if p.infeasible {
++                assert!(
++                    want.is_none(),
++                    "presolve declared a feasible problem infeasible: {f:?}"
++                );
++                continue;
++            }
++            if p.form.is_int.iter().any(|&b| !b) {
++                refused += 1;
++                continue;
++            }
++            if p.stats.implied_int_primal + p.stats.implied_int_dual == 0 {
++                continue; // h was removed by another rule, not marked
++            }
++            checked += 1;
++            let got = brute_min(&p.form);
++            match (want, &got) {
++                (None, None) => {}
++                (Some(wv), Some((gv, gx))) => {
++                    assert!(
++                        (wv - (gv + p.offset)).abs() <= 1e-9,
++                        "optimum changed: {wv} vs {} for {f:?} (stats {:?})",
++                        gv + p.offset,
++                        p.stats
++                    );
++                    let x = p.postsolve(gx, f.n);
++                    assert!(
++                        row_form_feasible(&f, &x, 1e-9),
++                        "postsolved point infeasible: {x:?} for {f:?}"
++                    );
++                }
++                _ => panic!("feasibility changed: original {want:?} reduced {got:?} for {f:?}"),
++            }
++        }
++        eprintln!(
++            "implied-int: cases {cases} primal {primal} dual {dual} refused {refused} checked {checked}"
++        );
++        assert!(
++            cases == 20000 && primal > 100 && dual > 100 && refused > 300 && checked > 250,
++            "probe fired too little: primal {primal} dual {dual} refused {refused} checked {checked}"
++        );
++    }
+ }
+diff --git a/crates/discopt-core/src/profile.rs b/crates/discopt-core/src/profile.rs
+index 6ca648ad..91f69764 100644
+--- a/crates/discopt-core/src/profile.rs
++++ b/crates/discopt-core/src/profile.rs
+@@ -733,6 +733,8 @@ counters!(
+     HighsSearchCutRowsDeleted,
+     // `performAging(true)` epochs on the search's LP.
+     HighsSearchCutEpochs,
++    // Continuous columns MILP presolve marked implied integer.
++    PresolveImpliedInt,
+     HighsSearchPoolSeeded,
+     HighsMipSearchNodes,
+     HighsMipSearchBranched,
