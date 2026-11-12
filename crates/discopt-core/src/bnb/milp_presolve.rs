@@ -48,6 +48,11 @@ use std::collections::HashMap;
 
 const INF: f64 = f64::INFINITY;
 
+/// A coefficient at most this fraction of its row's largest is noise to the presolve
+/// rules ([`Work::is_noise`]); and a singleton row's lone coefficient at most this in
+/// absolute value is left alone.
+const NOISE_REL: f64 = 1e-9;
+
 /// A MILP in row form.
 #[derive(Clone, Debug)]
 pub struct RowForm {
@@ -388,6 +393,25 @@ impl Work {
         }
     }
 
+    /// Whether coefficient `a` of row `r` is noise no rule may divide by, pivot on or
+    /// derive a bound through: at most `NOISE_REL` of the row's largest coefficient.
+    ///
+    /// discopt certifies under tolerance semantics (a point satisfying the rows within
+    /// the feasibility tolerance is feasible, as for the oracle solvers), but a rule
+    /// dividing by such a coefficient reasons in exact arithmetic: a substitution
+    /// `x_s = (rhs - b x_t) / 4.4e-16` or a bound derived through it amplifies the
+    /// tolerance (and every rounding in the other terms) by `1 / |a|`, and cut off
+    /// tolerance-feasible points. Measured (`presolve_never_divides_by_a_noise_coefficient`):
+    /// with one 1e-16-scale entry on an equality row, the reduced optimum came out 0
+    /// against a true -1 -- a bound above the optimum -- and feasible problems were
+    /// declared infeasible. Cancellation leaves exactly such entries on equality rows,
+    /// where `cancel_entry` must keep them (an equality has no slack to relax), so the
+    /// rules themselves refuse them. Refusing a reduction is always sound.
+    fn is_noise(&self, r: usize, a: f64) -> bool {
+        let mx = self.rows[r].1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        a.abs() <= NOISE_REL * mx
+    }
+
     /// Entry `pos` of row `q` has just been updated by a substitution and may have
     /// cancelled to round-off. An exact zero is removed. A nonzero `|v| <= 1e-12` is
     /// removed only from an inequality, whose sides are then relaxed by the term's reach
@@ -428,6 +452,9 @@ impl Work {
         let (ri, rv) = self.rows[r].clone();
         let rhs0 = self.up[r];
         let ((j1, a1), (j2, a2)) = ((ri[0], rv[0]), (ri[1], rv[1]));
+        if self.is_noise(r, a1) || self.is_noise(r, a2) {
+            return false;
+        }
         // Which column to substitute out: continuous first; among two continuous the
         // larger |coefficient| (better conditioned); two integers: the smaller |coef|.
         let (i1, i2) = (self.is_int[j1], self.is_int[j2]);
@@ -537,6 +564,9 @@ impl Work {
         cand.sort_by_key(|&p| (self.is_int[ri[p]], self.col_rows[ri[p]].len()));
         for p in cand {
             let (s, a) = (ri[p], rv[p]);
+            if self.is_noise(r, a) {
+                continue;
+            }
             // Pivot: large enough against the row's or the column's largest entry.
             if a.abs() < PIVOT_THRESHOLD * row_max {
                 let col_max = self.col_rows[s]
@@ -571,6 +601,11 @@ impl Work {
                     continue;
                 };
                 let aq = self.rows[q].1[pq];
+                if self.is_noise(q, aq) {
+                    // Row q cannot bound x_s through a noise coefficient: it implies
+                    // nothing here, so x_s is not shown implied free by it.
+                    continue;
+                }
                 let (mut rmin, mut rmax) = (0.0f64, 0.0f64);
                 let (mut nmin, mut nmax) = (0usize, 0usize);
                 for (&k, &v) in self.rows[q].0.iter().zip(&self.rows[q].1) {
@@ -841,7 +876,7 @@ impl Work {
             let (lo, up) = (self.lo[r], self.up[r]);
             let (ri, rv) = self.rows[r].clone();
             for (&j, &a) in ri.iter().zip(&rv) {
-                if a.abs() < 1e-9 || !self.col_alive[j] {
+                if a.abs() < 1e-9 || self.is_noise(r, a) || !self.col_alive[j] {
                     continue;
                 }
                 let (lj, uj) = (self.l[j], self.u[j]);
@@ -983,6 +1018,10 @@ impl Work {
                 continue;
             };
             let a = self.rows[r].1[p];
+            if self.is_noise(r, a) {
+                // No bound through a noise coefficient (`is_noise`).
+                continue;
+            }
             let (rmin, rmax) = self.residual(r, col, fixed);
             // a x <= up - (rmin | rmax), a x >= lo - (rmax | rmin).
             let (ru, rl) = if worst { (rmax, rmin) } else { (rmin, rmax) };
@@ -1619,6 +1658,11 @@ impl Work {
             }
             if len == 1 {
                 let (j, a) = (self.rows[r].0[0], self.rows[r].1[0]);
+                if a.abs() <= NOISE_REL {
+                    // A lone noise coefficient bounds nothing it can be trusted for
+                    // (`is_noise`): the row stays as it is.
+                    continue;
+                }
                 let (lo, up) = (self.lo[r] / a, self.up[r] / a);
                 let (blo, bup) = if a > 0.0 { (lo, up) } else { (up, lo) };
                 self.tighten(j, blo, bup);
@@ -1667,6 +1711,11 @@ impl Work {
             if force_max || force_min {
                 let (ri, rv) = self.rows[r].clone();
                 for (&j, &a) in ri.iter().zip(&rv) {
+                    if self.is_noise(r, a) {
+                        // A noise column is not forced (`is_noise`): it stays free, so
+                        // removing the row relaxes rather than cuts.
+                        continue;
+                    }
                     let at_upper = (a > 0.0) == force_max;
                     let v = if at_upper { self.u[j] } else { self.l[j] };
                     self.l[j] = v;
@@ -2520,6 +2569,177 @@ mod tests {
         assert!(
             cases == 20000 && primal > 100 && dual > 100 && refused > 300 && checked > 250,
             "probe fired too little: primal {primal} dual {dual} refused {refused} checked {checked}"
+        );
+    }
+
+    /// Presolve on integer programs with FRACTIONAL row coefficients (thirds): the
+    /// optimum must be preserved and the postsolved optimum feasible, as for integer
+    /// data. Cancellation in such rows leaves round-off entries (~4e-16) that the
+    /// doubleton/singleton rules must never divide by (found by the sparsify port's
+    /// census; reproduced here with sparsify absent). `XSEED` reruns other seeds.
+    #[test]
+    fn presolve_with_fractional_coefficients_preserves_the_optimum() {
+        let base: u64 = std::env::var("XSEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4242);
+        let mut r = Lcg(base);
+        let fr = [
+            -5.0 / 3.0,
+            -4.0 / 3.0,
+            -2.0 / 3.0,
+            -1.0 / 3.0,
+            1.0 / 3.0,
+            2.0 / 3.0,
+            4.0 / 3.0,
+            5.0 / 3.0,
+            -3.0,
+            -2.0,
+            -1.0,
+            1.0,
+            2.0,
+            3.0,
+        ];
+        let (mut cases, mut feasible, mut reduced) = (0usize, 0usize, 0usize);
+        for _ in 0..3000 {
+            let mut f = random_ip(&mut r);
+            for (_, rv) in f.rows.iter_mut() {
+                for v in rv.iter_mut() {
+                    *v = fr[r.int(0, fr.len() as i64 - 1) as usize];
+                }
+            }
+            let want = brute_min(&f);
+            let p = presolve(&f, 1e-9, 20);
+            cases += 1;
+            if p.keep_cols.len() < f.n || p.form.rows.len() < f.rows.len() {
+                reduced += 1;
+            }
+            if p.infeasible {
+                assert!(
+                    want.is_none(),
+                    "presolve declared a feasible problem infeasible: {f:?}"
+                );
+                continue;
+            }
+            let got = brute_min(&p.form);
+            match (&want, &got) {
+                (None, None) => {}
+                (Some((wv, _)), Some((gv, gx))) => {
+                    feasible += 1;
+                    assert!(
+                        (wv - (gv + p.offset)).abs() <= 1e-6,
+                        "optimum changed: {wv} vs {} for {f:?}",
+                        gv + p.offset
+                    );
+                    let x = p.postsolve(gx, f.n);
+                    assert!(
+                        row_form_feasible(&f, &x, 1e-6),
+                        "postsolved point infeasible: {x:?} for {f:?}"
+                    );
+                }
+                _ => panic!("feasibility changed: original {want:?} reduced {got:?} for {f:?}"),
+            }
+        }
+        assert!(
+            cases == 3000 && feasible > 300 && reduced > 1000,
+            "probe fired too little: feasible {feasible} reduced {reduced}"
+        );
+    }
+
+    /// Presolve never divides by a noise coefficient (`Work::is_noise`). Random
+    /// integer programs get one 1e-16-scale entry (the round-off cancellation leaves)
+    /// on an equality row; the reduced problem must keep the optimum (brute force over
+    /// both, at the feasibility tolerance the solver certifies under) and the
+    /// postsolved optimum must be feasible, and presolve may not call a feasible
+    /// problem infeasible. Before the fix: reduced optima above the true one (0 vs -1),
+    /// wrong optima, and false infeasibility, on the default presolve.
+    #[test]
+    fn presolve_never_divides_by_a_noise_coefficient() {
+        let nz = |st: &PresolveStats| {
+            format!("{st:?}")
+                .split(", ")
+                .filter(|t| !t.ends_with(": 0") && !t.contains("passes"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut r = Lcg(5);
+        let (mut bad, mut cases, mut exact, mut tolerated) = (0, 0, 0, 0);
+        for _ in 0..20000 {
+            let mut f = random_ip(&mut r);
+            if f.rows.is_empty() {
+                continue;
+            }
+            // Put a round-off coefficient on one entry of an equality row.
+            let k = r.int(0, f.rows.len() as i64 - 1) as usize;
+            if f.rows[k].0.len() < 2 {
+                continue;
+            }
+            f.lo[k] = f.up[k].min(f.lo[k].max(-4.0));
+            f.up[k] = f.lo[k];
+            if !f.lo[k].is_finite() {
+                continue;
+            }
+            let e = r.int(0, f.rows[k].1.len() as i64 - 1) as usize;
+            f.rows[k].1[e] = [4.4e-16, -4.4e-16, 1e-13, -2.2e-16][r.int(0, 3) as usize];
+            cases += 1;
+            let want = brute_min(&f);
+            let p = presolve(&f, 1e-9, 20);
+            // The driver's contract (`solve_presolved`): an infeasibility verdict is never
+            // trusted, a reduced problem that is infeasible or whose postsolved point
+            // fails the original rows (at 1e-6) sends the solve back to the original.
+            // What nothing downstream catches -- and is therefore unsafe -- is a reduced
+            // optimum above the true one (a false bound), or a postsolved point that
+            // passes the check while its objective is not the reduced one.
+            if p.infeasible {
+                // Right on an infeasible problem; untrusted (so tolerated) on a feasible one.
+                if want.is_some() {
+                    tolerated += 1;
+                } else {
+                    exact += 1;
+                }
+                continue;
+            }
+            let got = brute_min(&p.form);
+            match (&want, &got) {
+                (Some((wv, _)), Some((gv, gx))) => {
+                    let rv = gv + p.offset;
+                    let x = p.postsolve(gx, f.n);
+                    let passes = row_form_feasible(&f, &x, 1e-6);
+                    let xv: f64 = f.c.iter().zip(&x).map(|(c, x)| c * x).sum();
+                    if rv > wv + 1e-6 {
+                        bad += 1;
+                        eprintln!("FALSE BOUND want {wv} reduced {rv} {}", nz(&p.stats));
+                    } else if passes && (xv - rv).abs() > 1e-6 {
+                        bad += 1;
+                        eprintln!("MISREPORT x worth {xv} reported {rv} {}", nz(&p.stats));
+                    } else if (rv - wv).abs() <= 1e-6 && passes {
+                        exact += 1;
+                    } else {
+                        tolerated += 1;
+                    }
+                }
+                (None, Some((_, gx))) => {
+                    if row_form_feasible(&f, &p.postsolve(gx, f.n), 1e-6) {
+                        bad += 1;
+                        eprintln!("INFEASIBLE MADE FEASIBLE {}", nz(&p.stats));
+                    } else {
+                        tolerated += 1;
+                    }
+                }
+                (Some(_), None) => tolerated += 1,
+                (None, None) => exact += 1,
+            }
+        }
+        eprintln!(
+            "noise-coefficient probe: cases {cases} exact {exact} tolerated {tolerated} unsafe {bad}"
+        );
+        assert!(
+            cases > 10_000 && exact > 10_000,
+            "probe fired too little: {cases} cases, {exact} exact"
+        );
+        assert_eq!(
+            bad, 0,
+            "presolve produced an unsafe reduction on {bad} cases"
         );
     }
 }

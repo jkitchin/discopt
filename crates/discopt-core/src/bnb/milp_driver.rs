@@ -4079,6 +4079,22 @@ fn solve_presolved(
             crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
             return None;
         }
+        // The reported objective is the reduced problem's; it must be the postsolved
+        // point's on the ORIGINAL costs, or the solve would report one value for a
+        // point worth another. Presolve keeps them equal by construction; a reduction
+        // that does not (a noise-coefficient pivot did, `presolve_never_divides_by_a_
+        // noise_coefficient`) sends the solve back to the original.
+        let xv: f64 = (0..ns).map(|j| c[j] * x[j]).sum::<f64>() + obj_const;
+        if !(xv - res.obj).abs().le(&(1e-6 * (1.0 + res.obj.abs()))) {
+            if std::env::var("DISCOPT_MILP_PRESOLVE_LOG").is_ok() {
+                eprintln!(
+                    "MILP presolve: postsolved objective {xv} != reduced {}; solving the original",
+                    res.obj
+                );
+            }
+            crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
+            return None;
+        }
         res.x = x;
     } else {
         res.x = vec![0.0; ns];
