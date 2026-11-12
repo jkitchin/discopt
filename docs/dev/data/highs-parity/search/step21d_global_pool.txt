@@ -1,0 +1,54 @@
+Step 2.1d: DISCOPT_HIGHS_SEARCH_GLOBAL_POOL (one ported CutPool for the HiGHS search;
+node separators add to it, CutPool::separate over it selects each node round's cuts).
+Build: worktree claude/sleepy-gates-8ronyd, uncommitted; python/discopt/_rust.abi3.so holds
+the marker "DISCOPT_HIGHS_SEARCH_GLOBAL_POOL" (strings: 2 hits). 4 cores, 1-min load
+0.6-1.2 throughout, one solve at a time.
+
+1. mik-250-20-75-5 seeded with HiGHS's optimum (highs --solution_file, MPS order;
+   "DISCOPT_MILP_SEED_POINT accepted, objective -5.1532e4"), DISCOPT_MILP_PRESOLVE=0
+   DISCOPT_MILP_SUBMIP=0 DISCOPT_PANEL_DETERMINISTIC=1, TL 60, max_nodes 100000:
+     flag off: optimal, bound -51536.906, 3,267 nodes, 35.1 s (reproduces the diagnosis)
+     flag on : feasible (time limit), bound -51807.135, 16,935 nodes, 60.6 s
+     flag on, DISCOPT_HIGHS_SEPA_CUTOFF_BOX=0 : feasible, bound -51774.341, 17,705 nodes
+     flag off, DISCOPT_HIGHS_SEPA_CUTOFF_BOX=0: optimal, 4,604 nodes, 39.1 s
+     HiGHS (patched build, --read_solution_file, --presolve off): 590 nodes
+   Counters, flag on (DISCOPT_PROFILE=1): HighsSearchGpoolRounds 918, Generated 38,207
+   (41.6 per round), Selected 1,224 (1.33 per round, max 5), NotInLp 0, LpRemoved 1,193,
+   Aged 0 (no node took HiGHS's no-separation branch), PoolSeeded 6,565.
+   HiGHS (HS_DUMP_POOL, main pool only): 289 separate calls, 2,558 selected (8.85 per call).
+
+2. Reference-point checker, flag on, same seeded run with
+   DISCOPT_HIGHS_SEPA_CHECK_POINT and DISCOPT_HIGHS_SEARCH_CHECK_POINT = HiGHS's optimum:
+     HIGHS_SEARCH_CHECK base: ns=270 n_w=544 m_w=274 row_resid=4.3e-19 box_viol=0 int_viol=0
+     HIGHS_SEARCH_CHECK summary: cuts=15644 cuts_bad=0 lp_checks=1072 lp_bad=0 nodes=16754
+       nodes_containing=79 queued=2673 queued_containing=9 bounds_bad=0
+     HIGHS_SEPA_NODE_CHECK: 898 node separator calls, 194,493 cuts checked, 0 violated
+     HIGHS_SEPA_CHECK (root): 357 separator calls, 72,489 cuts checked, 0 violated
+     HIGHS_SEARCH_INVALID lines: 0; HIGHS_SEPA_INVALID lines: 0
+
+3. Panel, TL 20, max_nodes 1e8, DISCOPT_PANEL_DETERMINISTIC=1, off/on interleaved
+   (order alternates per row): step21d_global_pool_panel.jsonl (step21d_global_pool_panel.sh).
+     row              off: status bound nodes            on: status bound nodes
+     mik-1 (-49716)   feasible -50294.517 3493           feasible -50241.204 4004
+     mik-2 (-50768)   feasible -51067.553 2879           feasible -50965.403 3123
+     mik-3 (-52242)   feasible -52979.256 3143           feasible -52899.681 3716
+     mik-5 (-51532)   feasible -52128.091 3768           feasible -52126.108 3302
+     neos17 (0.15000) feasible 0.1453459 2143            feasible 0.1432443 2486
+     neos-911970 (54.76) feasible 53.48714 1008          feasible 53.62900 824
+     b-ball           optimal at the root (0 nodes) in both arms
+     enlight_hard (37) time_limit 35 3188                time_limit 35 3790
+     gsvm2rl3         optimal 268 nodes 12.0 s          optimal 300 nodes 10.3 s
+   Every bound at or below the MIPLIB optimum. No certificate gained or lost. Single samples.
+
+4. Why selection stays at ~1 per round: the first root round's pool (same LP point, 0 of 270
+   columns differ; same 150 cuts accepted; same best score 0.0338728619) is far more
+   mutually parallel in discopt than in HiGHS (step21d_root_pool_parallelism.py):
+     HiGHS seeded:   8,325 of 11,175 pairs <= 0.1 parallel, median 5.8e-05
+     HiGHS unseeded: 1,148 of 11,175, median 0.218
+     discopt seeded:     3 of 11,175, median 0.385
+   and HiGHS's separate admits a cut only at <= 0.1 against every cut already selected. The
+   separation box differs on 120 of 270 upper bounds (step21d_root_pool_box.py; e.g. column 0:
+   HiGHS 239.8, discopt 3.0). Not explained by DISCOPT_HIGHS_SEPA_CUTOFF_BOX (=0: 1.33 per
+   round, unchanged). Open: which input of the separators makes the cuts parallel.
+   HiGHS seeded root, selections in its first rounds (HS_DUMP_POOL): 29 49 53 40 49 41 18 10 8 6 20 8;
+   discopt seeded root (temporary trace, its 118 rounds): 117 rounds selected 1 cut, 1 round 2.
