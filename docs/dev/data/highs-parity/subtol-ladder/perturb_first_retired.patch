@@ -1,0 +1,136 @@
+diff --git a/crates/discopt-core/src/bin/e0_warm_bench.rs b/crates/discopt-core/src/bin/e0_warm_bench.rs
+index abac464a..9ab3f42a 100644
+--- a/crates/discopt-core/src/bin/e0_warm_bench.rs
++++ b/crates/discopt-core/src/bin/e0_warm_bench.rs
+@@ -165,6 +165,7 @@ fn main() -> ExitCode {
+         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+         cold_dual_start: false,
+         warm_flip_boxed: false,
+     };
+diff --git a/crates/discopt-core/src/bin/nl_milp.rs b/crates/discopt-core/src/bin/nl_milp.rs
+index f7eb4dc5..059513df 100644
+--- a/crates/discopt-core/src/bin/nl_milp.rs
++++ b/crates/discopt-core/src/bin/nl_milp.rs
+@@ -372,6 +372,7 @@ fn run() -> Result<(), String> {
+             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+             dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++            dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+             cold_dual_start: false,
+             warm_flip_boxed: false,
+         },
+diff --git a/crates/discopt-core/src/lp/simplex/dual.rs b/crates/discopt-core/src/lp/simplex/dual.rs
+index ac374478..fb8dd29f 100644
+--- a/crates/discopt-core/src/lp/simplex/dual.rs
++++ b/crates/discopt-core/src/lp/simplex/dual.rs
+@@ -355,6 +355,22 @@ const NOISE_ROW_TOL: f64 = 1e-7;
+ /// Default for [`SimplexOptions::dual_noise_rows`] from `DISCOPT_LP_DUAL_NOISE_ROWS`
+ /// (default OFF): see the empty-ratio-test arm of the warm dual loop. Garbage is
+ /// refused.
++/// Default for [`SimplexOptions::dual_perturb_first`] from
++/// `DISCOPT_LP_DUAL_PERTURB_FIRST` (default OFF). Garbage is refused.
++pub(super) fn perturb_first_default() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_PERTURB_FIRST") {
++        Err(_) => false,
++        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
++            "1" | "true" | "yes" | "on" => true,
++            "0" | "false" | "no" | "off" | "" => false,
++            other => panic!(
++                "DISCOPT_LP_DUAL_PERTURB_FIRST={other:?} is not recognized (expected 1 or 0)"
++            ),
++        },
++    })
++}
++
+ pub(super) fn noise_rows_default() -> bool {
+     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
+@@ -1245,6 +1261,17 @@ fn warm_dual_armed_inner(
+     basis: &Basis,
+     opts: &SimplexOptions,
+ ) -> LpSolve {
++    if opts.dual_cost_perturb > 0.0 && opts.dual_perturb_first {
++        // HiGHS perturbs the costs of every dual solve up front rather than after a
++        // degenerate run is seen (`HEkkDual` cost perturbation); the clean-up on the
++        // true costs keeps the verdict exactly the unperturbed one's
++        // (`cost_perturbed_warm_solve`).
++        crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
++        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
++            return sol;
++        }
++        return p.reoptimize(l, u, b, opts);
++    }
+     if opts.dual_cost_perturb > 0.0 {
+         let mut probe = opts.clone();
+         probe.dual_stall_patience = match opts.dual_stall_patience {
+diff --git a/crates/discopt-core/src/lp/simplex/mod.rs b/crates/discopt-core/src/lp/simplex/mod.rs
+index 64e13441..72b84159 100644
+--- a/crates/discopt-core/src/lp/simplex/mod.rs
++++ b/crates/discopt-core/src/lp/simplex/mod.rs
+@@ -240,6 +240,10 @@ pub struct SimplexOptions {
+     /// does not certify, instead of sending the LP cold. Default from
+     /// `DISCOPT_LP_DUAL_NOISE_ROWS` (OFF).
+     pub dual_noise_rows: bool,
++    /// Apply the #1013 cost perturbation from the first pivot of every warm dual
++    /// solve, as HiGHS does, instead of after a degenerate run of `PERTURB_ARM_RUN`
++    /// pivots. Default from `DISCOPT_LP_DUAL_PERTURB_FIRST` (OFF).
++    pub dual_perturb_first: bool,
+     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
+     /// slack basis instead of the cold two-phase primal.
+     ///
+@@ -332,6 +336,7 @@ impl Default for SimplexOptions {
+             dual_stall_patience: dual::stall_patience_default(),
+             dual_cost_perturb: dual::cost_perturb_default(),
+             dual_noise_rows: dual::noise_rows_default(),
++            dual_perturb_first: dual::perturb_first_default(),
+             cold_dual_start: false,
+             warm_flip_boxed: false,
+         }
+diff --git a/crates/discopt-python/src/lp_bindings.rs b/crates/discopt-python/src/lp_bindings.rs
+index 80b01bb4..febaed62 100644
+--- a/crates/discopt-python/src/lp_bindings.rs
++++ b/crates/discopt-python/src/lp_bindings.rs
+@@ -355,6 +355,7 @@ pub fn solve_lp_py<'py>(
+         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+         cold_dual_start: false,
+         warm_flip_boxed: false,
+     };
+@@ -497,6 +498,7 @@ pub fn solve_lp_warm_py<'py>(
+         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+         cold_dual_start: false,
+         warm_flip_boxed: false,
+     };
+@@ -622,6 +624,7 @@ pub fn solve_lp_warm_csc_py<'py>(
+         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+         cold_dual_start: false,
+         // #1935: see `SimplexOptions::warm_flip_boxed` (default off).
+         warm_flip_boxed,
+@@ -763,6 +766,7 @@ pub fn solve_lp_batch_py<'py>(
+         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+         dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++        dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+         cold_dual_start: false,
+         warm_flip_boxed: false,
+     };
+@@ -2173,6 +2177,7 @@ pub(crate) fn milp_options(
+             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
+             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
+             dual_noise_rows: SimplexOptions::default().dual_noise_rows,
++            dual_perturb_first: SimplexOptions::default().dual_perturb_first,
+             cold_dual_start: false,
+             warm_flip_boxed: false,
+         },
