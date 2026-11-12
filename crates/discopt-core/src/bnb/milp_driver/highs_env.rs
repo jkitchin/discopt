@@ -119,6 +119,8 @@ pub(super) struct Outcome {
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
     pub seeded_pool: usize,
+    /// `performAging(true)` epochs on the search's LP.
+    pub cut_epochs: u32,
 }
 
 /// The relative and absolute gap test the driver uses (`gap_closed`).
@@ -316,6 +318,16 @@ pub(super) struct SearchLp {
     slack_l: Vec<f64>,
     slack_u: Vec<f64>,
     rows: Vec<CutLpRow>,
+    /// HiGHS `HighsLpRelaxation::epochs`: `performAging(true)` calls so far.
+    epochs: u32,
+    /// HiGHS `lastAgeCall`: the LP iteration count at the last ageing.
+    last_age_iters: i64,
+    /// Separation appended rows; the next dual-feasible solve is the resolve after
+    /// which HiGHS's `separationRound` calls `performAging(true)`.
+    epoch_due: bool,
+    /// An epoch fell due for deletion (`min(epochs, agelimit)`); `after_round`
+    /// deletes the rows above it whose slack is still basic.
+    delete_limit: Option<u32>,
 }
 
 impl SearchLp {
@@ -335,6 +347,10 @@ impl SearchLp {
             slack_l: base.slack_l.to_vec(),
             slack_u: base.slack_u.to_vec(),
             rows: Vec::new(),
+            epochs: 0,
+            last_age_iters: -1,
+            epoch_due: false,
+            delete_limit: None,
         }
     }
 
@@ -434,6 +450,8 @@ pub(super) struct HighsEnv<'a, 'b> {
     /// cut rows, and the signatures of the cuts currently in it.
     cut_lp: bool,
     lp: Option<SearchLp>,
+    /// The last evaluation stored duals of the current LP (`last_dual`).
+    dual_fresh: bool,
     in_lp: std::collections::HashSet<Vec<(u32, i64)>>,
     pub cut_rows_added: usize,
     pub cut_rows_deleted: usize,
@@ -622,38 +640,75 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
     fn clear_lp_caches(&mut self) {
         self.eval.point_full = None;
         self.eval.last_dual = None;
+        self.dual_fresh = false;
         self.eval.last_dual_raw = None;
         self.eval.last_box = None;
     }
 
-    /// Age the cut rows on the last LP's row duals (HiGHS: a row ages while its dual
-    /// is zero, `HighsLpRelaxation.cpp:660-673`).
-    fn age_cut_rows(&mut self) {
-        let (Some(lp), Some(y)) = (self.lp.as_mut(), self.eval.last_dual.as_ref()) else {
+    /// HiGHS `HighsLpRelaxation::performAging(deleteRows)` (`HighsLpRelaxation.cpp:
+    /// 629-677`) on the last solve: only with valid duals (`dual_fresh`); a row whose
+    /// slack is basic ages (without `delete_rows`, only once it has started to), a
+    /// nonbasic row with a nonzero dual is reset. With `delete_rows` an epoch passes,
+    /// and every `max(agelimit/2, 2)`-th epoch the rows older than
+    /// `min(epochs, agelimit)` are due for deletion. Without `delete_rows` the call is
+    /// skipped when no LP iteration happened since the last one (`lastAgeCall`).
+    fn age_cut_rows(&mut self, delete_rows: bool) {
+        if !self.dual_fresh {
+            return;
+        }
+        let iters = self.eval.lp_iters;
+        let (Some(lp), Some(y), Some(basis)) = (
+            self.lp.as_mut(),
+            self.eval.last_dual.as_ref(),
+            self.eval.basis.as_ref(),
+        ) else {
             return;
         };
         if y.len() != lp.m {
             return;
         }
-        for r in lp.rows.iter_mut() {
-            if y[r.row].abs() > CUT_LP_DUAL_TOL {
-                r.age = 0;
-            } else {
-                r.age = r.age.saturating_add(1);
+        let mut agelimit = u32::MAX;
+        if delete_rows {
+            lp.epochs += 1;
+            if lp.epochs % (CUT_LP_AGE_LIMIT >> 1).max(2) == 0 {
+                agelimit = CUT_LP_AGE_LIMIT.min(lp.epochs);
             }
+        } else if lp.last_age_iters == iters {
+            return;
+        }
+        lp.last_age_iters = iters;
+        for r in lp.rows.iter_mut() {
+            let basic = basis.col_status.get(r.col).is_some_and(|&st| st == BASIC);
+            if basic {
+                if delete_rows || r.age != 0 {
+                    r.age = r.age.saturating_add(1);
+                }
+            } else if y[r.row].abs() > CUT_LP_DUAL_TOL {
+                r.age = 0;
+            }
+        }
+        if agelimit != u32::MAX {
+            lp.delete_limit = Some(lp.delete_limit.map_or(agelimit, |d| d.min(agelimit)));
         }
     }
 
-    /// Delete cut rows aged past `CUT_LP_AGE_LIMIT` whose slack is basic in the LP's
-    /// basis (dropping a basic slack with its row keeps the basis a basis). Their cuts
-    /// stay in the pool and are re-added when violated again.
+    /// Delete the cut rows an ageing epoch found due (`delete_limit`): older than the
+    /// limit and with the slack basic in the LP's basis (dropping a basic slack with
+    /// its row keeps the basis a basis). HiGHS deletes inside `performAging`; here it
+    /// waits for the round's end, because the node's point and duals are still in use
+    /// after its evaluation, and the conditions are re-checked on the current basis.
+    /// The cuts stay in the pool and are re-added when violated again.
     fn delete_aged_cut_rows(&mut self) {
         let Some(lp) = self.lp.as_mut() else { return };
-        let basis = self.eval.basis.as_ref();
+        let Some(limit) = lp.delete_limit.take() else {
+            return;
+        };
+        let Some(basis) = self.eval.basis.as_ref() else {
+            return;
+        };
         let (mut gone, mut kept): (Vec<CutLpRow>, Vec<CutLpRow>) =
             lp.rows.drain(..).partition(|r| {
-                r.age > CUT_LP_AGE_LIMIT
-                    && basis.is_none_or(|b| b.col_status.get(r.col).is_none_or(|&s| s == BASIC))
+                r.age > limit && basis.col_status.get(r.col).is_some_and(|&s| s == BASIC)
             });
         if gone.is_empty() {
             lp.rows = kept;
@@ -1169,9 +1224,11 @@ impl SearchEnv for HighsEnv<'_, '_> {
             )
         });
         let lb_in = node.lower_bound;
+        let dual_epoch0 = self.eval.dual_epoch;
         let r = self
             .eval
             .evaluate(&ctx, node, parent, &mut self.pc, false, limit);
+        self.dual_fresh = self.eval.dual_epoch != dual_epoch0;
         if !matches!(
             r,
             SearchResult::DomainInfeasible | SearchResult::LpInfeasible
@@ -1206,7 +1263,15 @@ impl SearchEnv for HighsEnv<'_, '_> {
                 }
             }
         }
-        self.age_cut_rows();
+        // HiGHS ages after every node LP (`HighsSearch.cpp:955-958`); the first solve
+        // after a separation round is that round's resolve, which ages with deletion
+        // (`HighsSeparation.cpp:122-124`). A solve without valid duals ends the round
+        // without an epoch, as `performAging` returns early there.
+        let epoch = self
+            .lp
+            .as_mut()
+            .is_some_and(|lp| std::mem::take(&mut lp.epoch_due));
+        self.age_cut_rows(epoch);
         if let Some(d) = self.dbg.as_mut() {
             let id = node.ident.id;
             if self.eval.found.len() > found0 {
@@ -1370,14 +1435,21 @@ impl SearchEnv for HighsEnv<'_, '_> {
             self.eval.basis.clone(),
             self.eval.last_box.clone(),
         ) else {
+            // HiGHS `separate`'s else branch: no optimal LP, just ageing (a no-op
+            // without valid duals).
+            self.age_cut_rows(true);
             return false;
         };
         let integral = (0..ctx.ns).all(|j| !ctx.is_int[j] || frac(x[j]) <= INT_TOL);
-        if integral
-            || self
-                .lim
-                .deadline
-                .is_some_and(|d| std::time::Instant::now() >= d)
+        if integral {
+            // The else branch again: no fractional integers, just ageing.
+            self.age_cut_rows(true);
+            return false;
+        }
+        if self
+            .lim
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d)
         {
             return false;
         }
@@ -1480,7 +1552,15 @@ impl SearchEnv for HighsEnv<'_, '_> {
             add.push(cut);
         }
         add.truncate(SEARCH_CUTS_PER_NODE);
+        let rows0 = self.cut_rows_added;
         self.append_cut_rows(&add);
+        if self.cut_rows_added > rows0 {
+            // `separationRound`: cuts went into the LP, so its resolve ages with
+            // deletion (`HighsSeparation.cpp:122-124`).
+            if let Some(lp) = self.lp.as_mut() {
+                lp.epoch_due = true;
+            }
+        }
         false
     }
     fn heuristics_allowed(&mut self) -> bool {
@@ -1626,6 +1706,7 @@ pub(super) fn run<'a>(
         bound_hook_calls: 0,
         bound_hook_raised: 0,
         cut_lp: search_cut_lp_enabled(),
+        dual_fresh: false,
         lp: None,
         in_lp: std::collections::HashSet::new(),
         cut_rows_added: 0,
@@ -1726,6 +1807,7 @@ pub(super) fn run<'a>(
         bound_hook_raised: env.bound_hook_raised,
         cut_rows_added: env.cut_rows_added,
         cut_rows_deleted: env.cut_rows_deleted,
+        cut_epochs: env.lp.as_ref().map_or(0, |l| l.epochs),
         seeded_pool: env.seeded_pool,
     })
 }

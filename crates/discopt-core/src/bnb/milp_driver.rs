@@ -6786,6 +6786,7 @@ fn solve_milp_node_search(
                     incr_by(Ctr::HighsMipSearchSubMipHits, o.sub_mip_hits as u64);
                     incr_by(Ctr::HighsSearchCutRowsAdded, o.cut_rows_added as u64);
                     incr_by(Ctr::HighsSearchCutRowsDeleted, o.cut_rows_deleted as u64);
+                    incr_by(Ctr::HighsSearchCutEpochs, o.cut_epochs as u64);
                     incr_by(Ctr::HighsSearchPoolSeeded, o.seeded_pool as u64);
                 }
             }

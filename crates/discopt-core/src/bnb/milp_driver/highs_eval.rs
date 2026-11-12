@@ -74,6 +74,10 @@ pub(super) struct HighsEval {
     pub redcost: Option<Vec<f64>>,
     /// Unscaled row duals of the last trusted LP (`row_dual`).
     pub last_dual: Option<Vec<f64>>,
+    /// Bumped each time an evaluation stores fresh duals (`last_dual`): the search
+    /// LP's cut-row ageing runs only on a dual-feasible solve, as HiGHS's
+    /// `performAging` returns early without valid duals.
+    pub dual_epoch: u64,
     /// Reduced costs of all working columns at [`Self::basis`] (for refitting it to
     /// another node's box).
     pub basis_d: Option<Vec<f64>>,
@@ -133,6 +137,7 @@ impl HighsEval {
             unbounded_seen: false,
             redcost: None,
             last_dual: None,
+            dual_epoch: 0,
             basis_d: None,
             last_dual_raw: None,
             last_box: None,
@@ -271,6 +276,7 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.dual_epoch += 1;
                 self.basis_d = Some(full_redcost(ctx, &nl));
                 self.last_dual_raw = Some(nl.sol.dual.clone());
                 self.last_box = Some((full_l.to_vec(), full_u.to_vec()));
@@ -288,6 +294,7 @@ impl HighsEval {
                 node.estimate = node.lp_objective;
                 self.redcost = Some(structural_redcost(ctx, &nl));
                 self.last_dual = Some(nl.rc_dual().to_vec());
+                self.dual_epoch += 1;
                 self.basis_d = Some(full_redcost(ctx, &nl));
                 self.last_dual_raw = Some(nl.sol.dual.clone());
                 self.last_box = Some((full_l.to_vec(), full_u.to_vec()));

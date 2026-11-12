@@ -731,6 +731,8 @@ counters!(
     // Step 2.1: cut rows added to / deleted from the HiGHS search's own LP.
     HighsSearchCutRowsAdded,
     HighsSearchCutRowsDeleted,
+    // `performAging(true)` epochs on the search's LP.
+    HighsSearchCutEpochs,
     HighsSearchPoolSeeded,
     HighsMipSearchNodes,
     HighsMipSearchBranched,
