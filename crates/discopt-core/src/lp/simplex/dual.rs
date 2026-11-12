@@ -1314,7 +1314,7 @@ fn warm_dual_armed_inner(
         // true costs keeps the verdict exactly the unperturbed one's
         // (`cost_perturbed_warm_solve`).
         crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
-        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
+        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts, Some(p)) {
             return sol;
         }
         return p.reoptimize(l, u, b, opts);
@@ -1335,7 +1335,7 @@ fn warm_dual_armed_inner(
         if let Some(sol) = p.run_dual(l, u, b, &probe, &mut banked) {
             return sol;
         }
-        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
+        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts, None) {
             return sol;
         }
     }
@@ -1373,6 +1373,7 @@ fn cost_perturbed_warm_solve(
     b: &[f64],
     basis: &Basis,
     opts: &SimplexOptions,
+    prepared: Option<&PreparedDual<'_>>,
 ) -> Option<LpSolve> {
     let eps = opts.dual_cost_perturb;
     // `is_nan` first: a NaN eps must disable the mechanism, not slip through a
@@ -1396,9 +1397,32 @@ fn cost_perturbed_warm_solve(
         None
     };
 
-    let cp = perturbed_costs(c, l, u, basis, eps);
-    let pert = match PreparedDual::prepare_cols(sp, m, n, &cp, l, u, basis, &attempt) {
-        Some(p) => p.reoptimize(l, u, b, &attempt),
+    // With the start already prepared on the true costs (perturb-first), perturb
+    // relative to the prepared statuses (after any boxed flips) and re-price that
+    // factorization instead of building a second LU of the same basis.
+    let prepared_basis = prepared.map(|p| p.prepared_basis());
+    let cp = perturbed_costs(c, l, u, prepared_basis.as_ref().unwrap_or(basis), eps);
+    // Perturb-first (HiGHS configuration) re-prices the perturbed optimum on the
+    // true costs with the loop's own factor instead of a second prepare + solve.
+    let in_loop_clean = opts.dual_perturb_first;
+    let cleaned_in_loop;
+    let start_pert = match prepared {
+        Some(p0) => p0
+            .repriced(&cp, l, u, &attempt)
+            .or_else(|| PreparedDual::prepare_cols(sp, m, n, &cp, l, u, basis, &attempt)),
+        None => PreparedDual::prepare_cols(sp, m, n, &cp, l, u, basis, &attempt),
+    };
+    let pert = match start_pert {
+        Some(p) => {
+            let p = if in_loop_clean {
+                p.with_clean_costs(c)
+            } else {
+                p
+            };
+            let sol = p.reoptimize(l, u, b, &attempt);
+            cleaned_in_loop = p.cleaned();
+            sol
+        }
         None => return reject(),
     };
     if dual_trace_enabled() {
@@ -1428,6 +1452,12 @@ fn cost_perturbed_warm_solve(
     }
     if pert.status != LpStatus::Optimal {
         return reject();
+    }
+    if cleaned_in_loop && pert.status == LpStatus::Optimal {
+        // Already optimal for the true costs (objective, duals and basis all
+        // priced on `c`); the pivots reported are the perturbed solve's.
+        crate::profile::incr(crate::profile::Ctr::DualCostPerturbAccepted);
+        return Some(pert);
     }
 
     // Clean-up on the true costs. The perturbed optimum is primal feasible for the
@@ -1603,6 +1633,69 @@ pub(crate) fn nonbasic_at_infinite_bound(
     })
 }
 
+/// The dual-feasibility precondition [`PreparedDual::prepare`] verifies on a
+/// factorized start basis: with `y = B⁻ᵀc_B`, every nonbasic reduced cost has the
+/// sign its bound requires (boxed columns flipped to the other bound when
+/// `opts.warm_flip_boxed`). `false` = refuse the start (counter incremented).
+#[allow(clippy::too_many_arguments)]
+fn verify_dual_start(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    basis: &[usize],
+    stat: &mut [i8],
+    n: usize,
+    opts: &SimplexOptions,
+) -> bool {
+    let tol = opts.tol;
+
+    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+    if lu.btran(&mut y).is_err() {
+        crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
+        return false;
+    }
+    let mut flips = 0u64;
+    for j in 0..n {
+        if stat[j] == BASIC || u[j] - l[j] <= tol {
+            continue; // basic or fixed: dual feasibility is unconstrained
+        }
+        let dj = c[j] - sp.dot(j, &y);
+        let free = l[j] <= -INF && u[j] >= INF;
+        let ok = if free {
+            dj.abs() <= tol
+        } else if stat[j] == AT_UPPER {
+            dj <= tol
+        } else {
+            dj >= -tol
+        };
+        if !ok {
+            // #1935: a boxed column's wrong-signed `d_j` is right-signed at
+            // its other bound (`!ok` means `|d_j| > tol` in the direction
+            // the move fixes). Only the nonbasic VALUE changes, so the
+            // factorization above still describes the basis.
+            if opts.warm_flip_boxed && l[j] > -INF && u[j] < INF {
+                stat[j] = if stat[j] == AT_UPPER {
+                    AT_LOWER
+                } else {
+                    AT_UPPER
+                };
+                flips += 1;
+                continue;
+            }
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectDualInf);
+            return false; // dual-infeasible warm start → cold fallback
+        }
+    }
+    if flips > 0 {
+        crate::profile::incr_by(crate::profile::Ctr::DualPrepFlipColumns, flips);
+        crate::profile::incr(crate::profile::Ctr::DualPrepFlipAccepts);
+    }
+
+    true
+}
+
 /// A basis factorization prepared once for repeated dual re-optimizations that
 /// differ only in their bounds and right-hand side.
 ///
@@ -1628,9 +1721,95 @@ pub struct PreparedDual<'a> {
     basis: Vec<usize>,
     slot_of: Vec<i64>,
     stat: Vec<i8>,
+    /// The true costs when this LP carries a perturbed `c` (HiGHS `correctDual`
+    /// clean-up, see [`Self::with_clean_costs`]); `None` otherwise.
+    clean_c: Option<&'a [f64]>,
+    /// Set by `run_dual` when it returned the optimum already re-priced on
+    /// `clean_c` (so the caller's separate clean-up solve is not needed).
+    cleaned: std::cell::Cell<bool>,
 }
 
 impl<'a> PreparedDual<'a> {
+    /// Re-price the perturbed optimum on the true costs `c` inside the dual loop,
+    /// with the loop's own factorization. `x_B` does not depend on the costs, so a
+    /// final basis that is primal feasible (already verified on an exact recompute)
+    /// and dual feasible for `c` on exact reduced costs is optimal for the true LP
+    /// -- the verdict a second prepare + re-solve of that basis reaches at 0 pivots,
+    /// minus its fresh LU. HiGHS removes its cost perturbation the same way
+    /// (`HEkk::cleanup` re-computes the duals on the existing factor). When the
+    /// re-priced basis is not dual feasible nothing changes: the perturbed optimum
+    /// is returned and [`Self::cleaned`] stays false.
+    pub(super) fn with_clean_costs(mut self, c: &'a [f64]) -> Self {
+        self.clean_c = Some(c);
+        self
+    }
+
+    /// This prepared basis re-priced on costs `c` at bounds `l`/`u`, reusing its
+    /// factorization: every precondition [`Self::prepare`] checks on a start (no
+    /// nonbasic column at an infinite bound, dual feasibility for `c`, boxed flips)
+    /// is re-checked exactly as `prepare` checks it; only the LU is not rebuilt (it
+    /// depends on the basic columns alone). `None` when a check refuses.
+    pub(super) fn repriced<'b>(
+        &self,
+        c: &'b [f64],
+        l: &[f64],
+        u: &[f64],
+        opts: &SimplexOptions,
+    ) -> Option<PreparedDual<'b>>
+    where
+        'a: 'b,
+    {
+        if c.len() != self.n || l.len() != self.n || u.len() != self.n {
+            return None;
+        }
+        let _t_prep = crate::profile::Timer::new(crate::profile::Phase::DualPrepare);
+        let mut lu = self.lu.clone();
+        let mut stat = self.stat.clone();
+        if nonbasic_at_infinite_bound(&stat, l, u, opts.tol).is_some() {
+            crate::profile::incr(crate::profile::Ctr::DualPrepRejectInfBound);
+            return None;
+        }
+        if !verify_dual_start(
+            &mut lu,
+            self.sp,
+            c,
+            l,
+            u,
+            &self.basis,
+            &mut stat,
+            self.n,
+            opts,
+        ) {
+            return None;
+        }
+        crate::profile::incr(crate::profile::Ctr::DualPrepRepriced);
+        Some(PreparedDual {
+            m: self.m,
+            n: self.n,
+            c,
+            sp: self.sp,
+            lu,
+            basis: self.basis.clone(),
+            slot_of: self.slot_of.clone(),
+            stat,
+            clean_c: None,
+            cleaned: std::cell::Cell::new(false),
+        })
+    }
+
+    /// The prepared basis (basic columns and nonbasic statuses, after any flips).
+    pub(super) fn prepared_basis(&self) -> Basis {
+        Basis {
+            basic_vars: self.basis.clone(),
+            col_status: self.stat.clone(),
+        }
+    }
+
+    /// Whether the last `run_dual` returned an optimum re-priced on the clean costs.
+    pub(super) fn cleaned(&self) -> bool {
+        self.cleaned.get()
+    }
+
     /// Factorize `start` for the LP `lp` and verify dual feasibility, or `None`
     /// if the basis is unusable (wrong size, a nonbasic column at an infinite
     /// bound, singular, or dual-infeasible) and the caller should cold-solve
@@ -1710,48 +1889,8 @@ impl<'a> PreparedDual<'a> {
         // d_j ≥ −tol, a nonbasic-at-upper needs d_j ≤ tol, and a nonbasic *free*
         // variable (both bounds infinite) needs |d_j| ≤ tol. A dual-infeasible
         // start would silently converge to a wrong Optimal/Infeasible.
-        {
-            let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-            if lu.btran(&mut y).is_err() {
-                crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
-                return None;
-            }
-            let mut flips = 0u64;
-            for j in 0..n {
-                if stat[j] == BASIC || u[j] - l[j] <= tol {
-                    continue; // basic or fixed: dual feasibility is unconstrained
-                }
-                let dj = c[j] - sp.dot(j, &y);
-                let free = l[j] <= -INF && u[j] >= INF;
-                let ok = if free {
-                    dj.abs() <= tol
-                } else if stat[j] == AT_UPPER {
-                    dj <= tol
-                } else {
-                    dj >= -tol
-                };
-                if !ok {
-                    // #1935: a boxed column's wrong-signed `d_j` is right-signed at
-                    // its other bound (`!ok` means `|d_j| > tol` in the direction
-                    // the move fixes). Only the nonbasic VALUE changes, so the
-                    // factorization above still describes the basis.
-                    if opts.warm_flip_boxed && l[j] > -INF && u[j] < INF {
-                        stat[j] = if stat[j] == AT_UPPER {
-                            AT_LOWER
-                        } else {
-                            AT_UPPER
-                        };
-                        flips += 1;
-                        continue;
-                    }
-                    crate::profile::incr(crate::profile::Ctr::DualPrepRejectDualInf);
-                    return None; // dual-infeasible warm start → cold fallback
-                }
-            }
-            if flips > 0 {
-                crate::profile::incr_by(crate::profile::Ctr::DualPrepFlipColumns, flips);
-                crate::profile::incr(crate::profile::Ctr::DualPrepFlipAccepts);
-            }
+        if !verify_dual_start(&mut lu, sp, c, l, u, &basis, &mut stat, n, opts) {
+            return None;
         }
 
         crate::profile::incr(crate::profile::Ctr::DualPrepAccept);
@@ -1764,6 +1903,8 @@ impl<'a> PreparedDual<'a> {
             basis,
             slot_of,
             stat,
+            clean_c: None,
+            cleaned: std::cell::Cell::new(false),
         })
     }
 
@@ -2104,6 +2245,33 @@ impl<'a> PreparedDual<'a> {
                                     None
                                 };
                                 let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
+                                if let Some(cc) = self.clean_c {
+                                    if let Some((d_clean, y_clean)) =
+                                        recompute_reduced_costs(&mut lu, sp, cc, n, &basis)
+                                    {
+                                        if dual_feasible(n, &stat, l, u, &d_clean, tol) {
+                                            crate::profile::incr(
+                                                crate::profile::Ctr::DualCostPerturbCleanInLoop,
+                                            );
+                                            self.cleaned.set(true);
+                                            return Some(assemble(
+                                                n,
+                                                m,
+                                                &basis,
+                                                &slot_of,
+                                                &stat,
+                                                xb_final,
+                                                cc,
+                                                l,
+                                                u,
+                                                LpStatus::Optimal,
+                                                pivots,
+                                                y_clean,
+                                                Vec::new(),
+                                            ));
+                                        }
+                                    }
+                                }
                                 // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
                                 // empty (caller falls back) if the btran fails.
                                 let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
@@ -5194,6 +5362,128 @@ mod tests {
     /// This is the bound-neutrality claim the mechanism rests on (CLAUDE.md §5,
     /// bound-neutral regime): the perturbed solve only chooses a starting basis,
     /// and the answer is produced by an ordinary solve on the true costs.
+    /// Perturb-first's in-loop clean-up (`PreparedDual::with_clean_costs`) must
+    /// return exactly what the two-factorization clean-up returned: the perturbed
+    /// solve's final basis, re-priced on the true costs, optimal for the true LP
+    /// (same objective as a cold solve), with a second prepare + re-solve of that
+    /// basis taking zero pivots. Counts the LPs where the in-loop path actually
+    /// fired (CLAUDE.md §6).
+    #[test]
+    fn in_loop_clean_up_matches_the_two_factor_clean_up() {
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let (mut fired, mut declined, mut repriced) = (0usize, 0usize, 0usize);
+        for _ in 0..200 {
+            let (m, n) = (3, 7);
+            let a: Vec<f64> = (0..m * n).map(|_| (next() * 6.0 - 3.0).round()).collect();
+            let x0: Vec<f64> = (0..n).map(|_| 0.5 + 4.0 * next()).collect();
+            let b: Vec<f64> = (0..m)
+                .map(|i| (0..n).map(|j| a[i * n + j] * x0[j]).sum())
+                .collect();
+            let c: Vec<f64> = (0..n).map(|_| (next() * 10.0 - 5.0).round()).collect();
+            let l = vec![0.0; n];
+            let u = vec![5.0; n];
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let cold = solve_lp(&lp, &b, &opts());
+            if cold.status != LpStatus::Optimal {
+                continue;
+            }
+            let k = (next() * n as f64) as usize % n;
+            let mut u2 = u.clone();
+            u2[k] = (cold.x[k] - 1.0).max(0.0);
+            let lp2 = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u2,
+            };
+            let cold2 = solve_lp(&lp2, &b, &opts());
+            let mut col_ptr = vec![0usize];
+            let (mut ri, mut vs) = (Vec::new(), Vec::new());
+            for j in 0..n {
+                for i in 0..m {
+                    if a[i * n + j] != 0.0 {
+                        ri.push(i);
+                        vs.push(a[i * n + j]);
+                    }
+                }
+                col_ptr.push(ri.len());
+            }
+            let sp = SparseCols::from_csc(col_ptr, ri, vs);
+            let cp = perturbed_costs(&c, &l, &u2, &cold.basis, COST_PERTURB_EPS);
+            let Some(p) = PreparedDual::prepare_cols(&sp, m, n, &cp, &l, &u2, &cold.basis, &opts())
+            else {
+                continue;
+            };
+            // Re-pricing a factor prepared on the true costs must be the same
+            // start as preparing the perturbed costs from scratch.
+            if let Some(p_true) =
+                PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u2, &cold.basis, &opts())
+            {
+                let r = p_true
+                    .repriced(&cp, &l, &u2, &opts())
+                    .expect("perturbed costs keep the prepared start dual feasible");
+                assert_eq!(r.prepared_basis().col_status, p.prepared_basis().col_status);
+                let (sa, sb) = (
+                    r.reoptimize(&l, &u2, &b, &opts()),
+                    p.reoptimize(&l, &u2, &b, &opts()),
+                );
+                assert_eq!(sa.status, sb.status);
+                assert_eq!(sa.basis.basic_vars, sb.basis.basic_vars);
+                assert!((sa.obj - sb.obj).abs() <= 1e-9 * (1.0 + sb.obj.abs()));
+                repriced += 1;
+            }
+            let p = p.with_clean_costs(&c);
+            let sol = p.reoptimize(&l, &u2, &b, &opts());
+            if !p.cleaned() {
+                declined += 1;
+                continue;
+            }
+            fired += 1;
+            assert_eq!(sol.status, LpStatus::Optimal);
+            assert_eq!(cold2.status, LpStatus::Optimal);
+            assert!(
+                (sol.obj - cold2.obj).abs() <= 1e-7 * (1.0 + cold2.obj.abs()),
+                "in-loop clean obj {} vs cold {}",
+                sol.obj,
+                cold2.obj
+            );
+            let priced: f64 = c.iter().zip(&sol.x).map(|(cj, xj)| cj * xj).sum();
+            assert!((priced - sol.obj).abs() <= 1e-9 * (1.0 + priced.abs()));
+            // The reference clean-up: a fresh factor of the final basis, true costs.
+            let q = PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u2, &sol.basis, &opts())
+                .expect("the in-loop clean basis is dual feasible for the true costs");
+            let refsol = q.reoptimize(&l, &u2, &b, &opts());
+            assert_eq!(refsol.status, LpStatus::Optimal);
+            assert_eq!(
+                refsol.iters, 0,
+                "the reference clean-up must need no pivots"
+            );
+            assert!((refsol.obj - sol.obj).abs() <= 1e-9 * (1.0 + sol.obj.abs()));
+            assert_eq!(refsol.basis.basic_vars, sol.basis.basic_vars);
+            for (ya, yb) in refsol.dual.iter().zip(&sol.dual) {
+                assert!((ya - yb).abs() <= 1e-8 * (1.0 + ya.abs()));
+            }
+        }
+        eprintln!("in-loop clean-up: fired {fired}, declined {declined}, repriced {repriced}");
+        assert!(fired >= 20, "the in-loop clean-up fired only {fired} times");
+        assert!(repriced >= 20, "re-pricing compared only {repriced} times");
+    }
+
     #[test]
     fn cost_perturbation_is_verdict_neutral_on_every_captured_lp() {
         let mut compared = 0usize;

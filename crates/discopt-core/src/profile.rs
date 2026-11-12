@@ -500,6 +500,11 @@ counters!(
     DualCostPerturbRejected,
     // Perturbed attempts whose certified Farkas ray settled the true LP infeasible.
     DualCostPerturbInfeasible,
+    //   `DualCostPerturbCleanInLoop` — perturb-first attempts whose optimum was
+    //   re-priced on the true costs with the dual loop's own factor (no second LU).
+    DualCostPerturbCleanInLoop,
+    // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
+    DualPrepRepriced,
     // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
     DualNoiseRowTolerated,
     // Objective lattices that needed the interval (inequality) rule.
