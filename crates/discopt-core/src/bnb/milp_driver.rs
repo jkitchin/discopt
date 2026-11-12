@@ -12519,6 +12519,16 @@ mod tests {
                     optimal += 1;
                     let tol = 1e-6 * (1.0 + r.obj.abs());
                     let (x, v) = h.best.clone().expect("HiGHS-design search found no point");
+                    assert!((v - r.obj).abs() <= tol, "optimum {v} vs batched {}", r.obj);
+                    assert!(
+                        h.bound >= r.obj - tol && h.bound <= v + tol,
+                        "gap not closed: bound {} obj {v}",
+                        h.bound
+                    );
+                    for (i, row) in rows.iter().enumerate() {
+                        let a: f64 = row.iter().map(|&(j, w)| w * x[j]).sum();
+                        assert!(a <= b[i] + 1e-6 * (1.0 + b[i].abs()), "row {i} violated");
+                    }
                     for j in 0..ns {
                         assert!(x[j] >= l[j] - 1e-6 && x[j] <= u[j] + 1e-6, "bound violated");
                         if is_int[j] {

@@ -296,6 +296,37 @@ fn search_cut_cap(base_rows: usize) -> usize {
     base_rows.max(100)
 }
 
+/// The row update of HiGHS `performAging(deleteRows)` (`HighsLpRelaxation.cpp:
+/// 629-677`): a row whose slack is basic ages (without `delete_rows` only once it
+/// has started to), a nonbasic row with a nonzero dual is reset. With `delete_rows`
+/// an epoch passes; every `max(agelimit/2, 2)`-th epoch the limit `min(epochs,
+/// agelimit)` is returned, and the basic rows older than it are due for deletion.
+fn highs_age_rows(
+    rows: &mut [CutLpRow],
+    basic: impl Fn(usize) -> bool,
+    y: &[f64],
+    delete_rows: bool,
+    epochs: &mut u32,
+) -> Option<u32> {
+    let mut due = None;
+    if delete_rows {
+        *epochs += 1;
+        if *epochs % (CUT_LP_AGE_LIMIT >> 1).max(2) == 0 {
+            due = Some(CUT_LP_AGE_LIMIT.min(*epochs));
+        }
+    }
+    for r in rows.iter_mut() {
+        if basic(r.col) {
+            if delete_rows || r.age != 0 {
+                r.age = r.age.saturating_add(1);
+            }
+        } else if y[r.row].abs() > CUT_LP_DUAL_TOL {
+            r.age = 0;
+        }
+    }
+    due
+}
+
 /// New cut rows one node's separation may add.
 const SEARCH_CUTS_PER_NODE: usize = 20;
 
@@ -667,28 +698,19 @@ impl<'a, 'b> HighsEnv<'a, 'b> {
         if y.len() != lp.m {
             return;
         }
-        let mut agelimit = u32::MAX;
-        if delete_rows {
-            lp.epochs += 1;
-            if lp.epochs % (CUT_LP_AGE_LIMIT >> 1).max(2) == 0 {
-                agelimit = CUT_LP_AGE_LIMIT.min(lp.epochs);
-            }
-        } else if lp.last_age_iters == iters {
+        if !delete_rows && lp.last_age_iters == iters {
             return;
         }
         lp.last_age_iters = iters;
-        for r in lp.rows.iter_mut() {
-            let basic = basis.col_status.get(r.col).is_some_and(|&st| st == BASIC);
-            if basic {
-                if delete_rows || r.age != 0 {
-                    r.age = r.age.saturating_add(1);
-                }
-            } else if y[r.row].abs() > CUT_LP_DUAL_TOL {
-                r.age = 0;
-            }
-        }
-        if agelimit != u32::MAX {
-            lp.delete_limit = Some(lp.delete_limit.map_or(agelimit, |d| d.min(agelimit)));
+        let due = highs_age_rows(
+            &mut lp.rows,
+            |col| basis.col_status.get(col).is_some_and(|&st| st == BASIC),
+            y,
+            delete_rows,
+            &mut lp.epochs,
+        );
+        if let Some(limit) = due {
+            lp.delete_limit = Some(lp.delete_limit.map_or(limit, |d| d.min(limit)));
         }
     }
 
@@ -1810,4 +1832,55 @@ pub(super) fn run<'a>(
         cut_epochs: env.lp.as_ref().map_or(0, |l| l.epochs),
         seeded_pool: env.seeded_pool,
     })
+}
+
+#[cfg(test)]
+mod ageing_tests {
+    use super::*;
+
+    fn row(i: usize, age: u32) -> CutLpRow {
+        CutLpRow {
+            row: i,
+            col: 10 + i,
+            age,
+            cut: GomoryCut {
+                coeffs: vec![1.0],
+                rhs: 0.0,
+            },
+            relaxed: false,
+        }
+    }
+
+    /// HiGHS `performAging`: per-node ageing advances only rows already ageing whose
+    /// slack is basic; a nonbasic row with a nonzero dual is reset, one with a zero
+    /// dual keeps its age; separation epochs age every basic row and make deletion
+    /// due every 5th epoch at `min(epochs, 10)`.
+    #[test]
+    fn search_lp_rows_age_as_highs_performaging() {
+        // rows: 0 basic fresh, 1 basic ageing, 2 nonbasic binding, 3 nonbasic dual 0.
+        let mut rows = vec![row(0, 0), row(1, 3), row(2, 7), row(3, 4)];
+        let basic = |c: usize| c == 10 || c == 11;
+        let y = [0.0, 0.0, -2.0, 0.0];
+        let mut epochs = 0u32;
+
+        assert_eq!(
+            highs_age_rows(&mut rows, basic, &y, false, &mut epochs),
+            None
+        );
+        let ages: Vec<u32> = rows.iter().map(|r| r.age).collect();
+        assert_eq!(ages, vec![0, 4, 0, 4]);
+        assert_eq!(epochs, 0);
+
+        let mut due = Vec::new();
+        for _ in 0..10 {
+            due.push(highs_age_rows(&mut rows, basic, &y, true, &mut epochs));
+        }
+        assert_eq!(epochs, 10);
+        let expect: Vec<Option<u32>> = (1..=10u32)
+            .map(|e| (e % 5 == 0).then_some(e.min(CUT_LP_AGE_LIMIT)))
+            .collect();
+        assert_eq!(due, expect);
+        let ages: Vec<u32> = rows.iter().map(|r| r.age).collect();
+        assert_eq!(ages, vec![10, 14, 0, 4]);
+    }
 }
