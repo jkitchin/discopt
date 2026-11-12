@@ -4586,7 +4586,7 @@ fn solve_milp_node_search(
             // never cuts a feasible point, so a column it fixed is fixed at every
             // point the tree can still reach -- which is all the lattice claim is
             // quantified over, and it resolves strictly more objectives.
-            let subst = crate::bnb::obj_integral::objective_lattice(
+            let subst = crate::bnb::obj_integral::objective_lattice_opts(
                 c,
                 &is_int,
                 &base_l,
@@ -4597,6 +4597,7 @@ fn solve_milp_node_search(
                     m,
                     n,
                 },
+                obj_lattice_interval_enabled().then_some((l, u)),
             );
             // Counted for the top-level solve only: a nested sub-MIP (root RENS) on the
             // same rows resolves the lattice again and reported 2 for one solve.
@@ -4615,6 +4616,10 @@ fn solve_milp_node_search(
         obj_const + lattice.map_or(0.0, |l| l.shift),
         lattice.map_or(0.0, |l| l.drift),
     );
+    tm.set_objective_lattice_optimum_only(lattice.is_some_and(|l| l.optimum_only));
+    if lattice.is_some_and(|l| l.optimum_only) && milp_depth == 0 {
+        crate::profile::incr(crate::profile::Ctr::ObjLatticeInterval);
+    }
     tm.initialize();
 
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
@@ -9493,6 +9498,27 @@ fn obj_integrality_enabled() -> bool {
 /// An unrecognized value is a hard **refusal**, for the same reason: a panel that
 /// exports `DISCOPT_OBJ_LATTICE_SUBST=on` and is quietly handed the OFF arm
 /// measures nothing and reads as a result.
+/// `DISCOPT_MILP_OBJ_LATTICE_INTERVAL` (default ON since its 2026-11-12 panel;
+/// `=0` opts out): the objective lattice may resolve a costed continuous column
+/// bounded by inequalities against lattice columns (`obj_integral::interval_lattice`;
+/// b-ball, and 7 of the 240 MIPLIB 2017 benchmark instances by a static census).
+/// Such a lattice holds at some optimum only, and the fathoming cutoff accounts for
+/// an off-lattice incumbent (`TreeManager::cutoff_for`). Panel (62 rows, 20 s): 51 ->
+/// 52 certified (+b-ball, 20.1 -> 0.3 s), 0 violations. Garbage is refused.
+fn obj_lattice_interval_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_OBJ_LATTICE_INTERVAL") {
+        Err(_) => true,
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            "" => true,
+            other => panic!(
+                "DISCOPT_MILP_OBJ_LATTICE_INTERVAL={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    }
+}
+
 fn obj_lattice_subst_enabled() -> bool {
     match std::env::var("DISCOPT_OBJ_LATTICE_SUBST") {
         Err(_) => true,

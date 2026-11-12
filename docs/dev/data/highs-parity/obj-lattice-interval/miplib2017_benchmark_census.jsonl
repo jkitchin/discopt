@@ -1,0 +1,240 @@
+{"name": "50v-10", "no_cont_cost": true}
+{"name": "air05", "no_cont_cost": true}
+{"name": "30n20b8", "no_cont_cost": true}
+{"name": "academictimetablesmall", "no_cont_cost": true}
+{"name": "assign1-5-8", "contcost": 26, "prim": 0, "dual": 26, "lattice": true, "primal_only": false, "step": "1"}
+{"name": "app1-1", "no_cont_cost": true}
+{"name": "b1c1s1", "contcost": 1280, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "app1-2", "no_cont_cost": true}
+{"name": "atlanta-ip", "no_cont_cost": true}
+{"name": "binkar10_1", "contcost": 1572, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "beasleyC3", "no_cont_cost": true}
+{"name": "blp-ic98", "contcost": 1, "prim": 89, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "blp-ar98", "contcost": 1, "prim": 214, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "bab6", "no_cont_cost": true}
+{"name": "bnatt400", "no_cont_cost": true}
+{"name": "bab2", "no_cont_cost": true}
+{"name": "bppc4-08", "contcost": 2, "prim": 0, "dual": 1, "lattice": false, "primal_only": false, "step": null}
+{"name": "bnatt500", "no_cont_cost": true}
+{"name": "brazil3", "no_cont_cost": true}
+{"name": "cbs-cta", "contcost": 968, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "chromaticindex512-7", "no_cont_cost": true}
+{"name": "chromaticindex1024-7", "no_cont_cost": true}
+{"name": "cmflsp50-24-8-8", "contcost": 13676, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "buildingenergy", "contcost": 68733, "prim": 0, "dual": 1, "lattice": false, "primal_only": false, "step": null}
+{"name": "CMS750_4", "contcost": 1, "prim": 0, "dual": 1, "lattice": true, "primal_only": false, "step": "1"}
+{"name": "cod105", "no_cont_cost": true}
+{"name": "comp07-2idx", "no_cont_cost": true}
+{"name": "comp21-2idx", "no_cont_cost": true}
+{"name": "cost266-UUE", "contcost": 3990, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "csched007", "contcost": 50, "prim": 50, "dual": 50, "lattice": true, "primal_only": false, "step": "1"}
+{"name": "csched008", "contcost": 1, "prim": 50, "dual": 1, "lattice": true, "primal_only": false, "step": "1"}
+{"name": "cryptanalysiskb128n5obj14", "no_cont_cost": true}
+{"name": "co-100", "no_cont_cost": true}
+{"name": "cryptanalysiskb128n5obj16", "no_cont_cost": true}
+{"name": "cvs16r128-89", "no_cont_cost": true}
+{"name": "dano3_3", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "dano3_5", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "decomp2", "no_cont_cost": true}
+{"name": "drayage-100-23", "no_cont_cost": true}
+{"name": "drayage-25-23", "no_cont_cost": true}
+{"name": "eil33-2", "no_cont_cost": true}
+{"name": "dws008-01", "contcost": 84, "prim": 28, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "enlight_hard", "no_cont_cost": true}
+{"name": "exp-1-500-5-5", "contcost": 740, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "eilA101-2", "no_cont_cost": true}
+{"name": "ex9", "no_cont_cost": true}
+{"name": "fastxgemm-n2r6s0t2", "contcost": 208, "prim": 144, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "fast0507", "no_cont_cost": true}
+{"name": "fhnw-binpack4-4", "no_cont_cost": true}
+{"name": "ex10", "no_cont_cost": true}
+{"name": "fhnw-binpack4-48", "no_cont_cost": true}
+{"name": "gen-ip002", "no_cont_cost": true}
+{"name": "gen-ip054", "no_cont_cost": true}
+{"name": "fiball", "contcost": 1, "prim": 1, "dual": 0, "lattice": true, "primal_only": true, "step": "1"}
+{"name": "glass4", "contcost": 19, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "glass-sc", "no_cont_cost": true}
+{"name": "germanrr", "contcost": 1, "prim": 238, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "gmu-35-40", "no_cont_cost": true}
+{"name": "gmu-35-50", "no_cont_cost": true}
+{"name": "graphdraw-domain", "contcost": 54, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "graph20-20-1rand", "no_cont_cost": true}
+{"name": "h80x6320d", "contcost": 6320, "prim": 0, "dual": 79, "lattice": false, "primal_only": false, "step": null}
+{"name": "ic97_potential", "contcost": 86, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "hypothyroid-k1", "no_cont_cost": true}
+{"name": "icir97_tension", "contcost": 408, "prim": 0, "dual": 2, "lattice": false, "primal_only": false, "step": null}
+{"name": "gfd-schedulen180f7d50m30k18", "no_cont_cost": true}
+{"name": "irp", "no_cont_cost": true}
+{"name": "istanbul-no-cutoff", "contcost": 77, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "irish-electricity", "contcost": 15552, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "highschool1-aigio", "no_cont_cost": true}
+{"name": "lectsched-5-obj", "no_cont_cost": true}
+{"name": "leo1", "contcost": 1, "prim": 1, "dual": 0, "lattice": true, "primal_only": true, "step": "4/25"}
+{"name": "lotsize", "contcost": 1790, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "mad", "contcost": 20, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "leo2", "contcost": 1, "prim": 1, "dual": 0, "lattice": true, "primal_only": true, "step": "1/50"}
+{"name": "k1mushroom", "no_cont_cost": true}
+{"name": "markshare_4_0", "contcost": 4, "prim": 4, "dual": 0, "lattice": true, "primal_only": true, "step": "1"}
+{"name": "markshare2", "contcost": 14, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "mas74", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "mas76", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "mc11", "no_cont_cost": true}
+{"name": "mcsched", "contcost": 1, "prim": 2, "dual": 0, "lattice": true, "primal_only": true, "step": "1"}
+{"name": "mik-250-20-75-4", "contcost": 20, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "milo-v12-6-r2-40-1", "contcost": 210, "prim": 210, "dual": 0, "lattice": false, "primal_only": true, "step": null}
+{"name": "map10", "contcost": 1676, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "map16715-04", "contcost": 1676, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "momentum1", "contcost": 2545, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "mushroom-best", "contcost": 113, "prim": 0, "dual": 113, "lattice": false, "primal_only": false, "step": null}
+{"name": "mzzv11", "no_cont_cost": true}
+{"name": "mzzv42z", "no_cont_cost": true}
+{"name": "n5-3", "contcost": 2350, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "n2seq36q", "no_cont_cost": true}
+{"name": "n3div36", "no_cont_cost": true}
+{"name": "neos-1171448", "contcost": 2457, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-1122047", "no_cont_cost": true}
+{"name": "neos-1171737", "contcost": 1170, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-1354092", "no_cont_cost": true}
+{"name": "neos-1445765", "no_cont_cost": true}
+{"name": "neos-1582420", "no_cont_cost": true}
+{"name": "neos-1456979", "no_cont_cost": true}
+{"name": "neos-2657525-crna", "no_cont_cost": true}
+{"name": "neos-2978193-inde", "contcost": 20736, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-2746589-doon", "no_cont_cost": true}
+{"name": "neos-3004026-krka", "no_cont_cost": true}
+{"name": "neos-3024952-loue", "no_cont_cost": true}
+{"name": "neos-2987310-joes", "contcost": 24786, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3046615-murg", "contcost": 2, "prim": 0, "dual": 1, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3083819-nubu", "no_cont_cost": true}
+{"name": "neos-3381206-awhea", "no_cont_cost": true}
+{"name": "neos-3216931-puriri", "contcost": 191, "prim": 159, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3555904-turama", "no_cont_cost": true}
+{"name": "neos-3627168-kasai", "contcost": 3, "prim": 2, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3656078-kumeu", "contcost": 2, "prim": 659, "dual": 0, "lattice": true, "primal_only": true, "step": "1/10"}
+{"name": "neos-3754480-nidda", "contcost": 203, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3402294-bobin", "contcost": 24, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-3988577-wolgan", "no_cont_cost": true}
+{"name": "neos-4300652-rahue", "no_cont_cost": true}
+{"name": "neos-4338804-snowy", "contcost": 21, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-4387871-tavua", "no_cont_cost": true}
+{"name": "neos-2075418-temuka", "no_cont_cost": true}
+{"name": "neos-4413714-turia", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-4532248-waihi", "contcost": 1, "prim": 0, "dual": 1, "lattice": true, "primal_only": false, "step": "1/10"}
+{"name": "neos-4738912-atrato", "no_cont_cost": true}
+{"name": "neos-4722843-widden", "contcost": 4228, "prim": 0, "dual": 8, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-4954672-berkel", "contcost": 126, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-4763324-toguru", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-4647030-tutaki", "contcost": 1400, "prim": 1400, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5093327-huahum", "contcost": 7808, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5049753-cuanza", "contcost": 228096, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5107597-kakapo", "contcost": 24, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5052403-cygnet", "no_cont_cost": true}
+{"name": "neos-5188808-nattai", "contcost": 2376, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5195221-niemur", "contcost": 2, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-5104907-jarama", "contcost": 326144, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-631710", "no_cont_cost": true}
+{"name": "neos-662469", "no_cont_cost": true}
+{"name": "neos-3402454-bohle", "contcost": 24, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-787933", "no_cont_cost": true}
+{"name": "neos-827175", "contcost": 10980, "prim": 10416, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-860300", "contcost": 1, "prim": 1, "dual": 0, "lattice": true, "primal_only": true, "step": "1"}
+{"name": "neos-911970", "contcost": 48, "prim": 0, "dual": 48, "lattice": true, "primal_only": false, "step": "1/100"}
+{"name": "neos-873061", "no_cont_cost": true}
+{"name": "neos-950242", "no_cont_cost": true}
+{"name": "neos-933966", "contcost": 3780, "prim": 0, "dual": 3243, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos-960392", "no_cont_cost": true}
+{"name": "neos-957323", "no_cont_cost": true}
+{"name": "neos5", "contcost": 10, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos17", "contcost": 185, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "neos859080", "no_cont_cost": true}
+{"name": "neos8", "no_cont_cost": true}
+{"name": "net12", "no_cont_cost": true}
+{"name": "nexp-150-20-8-5", "no_cont_cost": true}
+{"name": "neos-5114902-kasavu", "contcost": 677768, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "netdiversion", "no_cont_cost": true}
+{"name": "ns1208400", "contcost": 3, "prim": 3, "dual": 0, "lattice": true, "primal_only": true, "step": "1"}
+{"name": "ns1116954", "no_cont_cost": true}
+{"name": "ns1830653", "contcost": 171, "prim": 0, "dual": 171, "lattice": true, "primal_only": false, "step": "1"}
+{"name": "ns1952667", "no_cont_cost": true}
+{"name": "ns1644855", "contcost": 10000, "prim": 100, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "nu25-pr12", "no_cont_cost": true}
+{"name": "neos-848589", "contcost": 548865, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "nursesched-sprint02", "no_cont_cost": true}
+{"name": "ns1760995", "contcost": 2, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "nw04", "no_cont_cost": true}
+{"name": "p200x1188c", "no_cont_cost": true}
+{"name": "nursesched-medium-hint03", "no_cont_cost": true}
+{"name": "opm2-z10-s4", "no_cont_cost": true}
+{"name": "pg", "contcost": 2500, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "peg-solitaire-a3", "no_cont_cost": true}
+{"name": "pg5_34", "contcost": 2500, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "piperout-27", "no_cont_cost": true}
+{"name": "piperout-08", "no_cont_cost": true}
+{"name": "pk1", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "proteindesign121hz512p9", "no_cont_cost": true}
+{"name": "proteindesign122trx11p8", "no_cont_cost": true}
+{"name": "physiciansched3-3", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "physiciansched6-2", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "qap10", "no_cont_cost": true}
+{"name": "radiationm18-12-05", "no_cont_cost": true}
+{"name": "radiationm40-10-02", "no_cont_cost": true}
+{"name": "rail01", "no_cont_cost": true}
+{"name": "rail507", "contcost": 10, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "ran14x18-disj-8", "contcost": 252, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "reblock115", "no_cont_cost": true}
+{"name": "rail02", "no_cont_cost": true}
+{"name": "rmatr100-p10", "contcost": 7259, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "rd-rplusc-21", "contcost": 2, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "rocI-4-11", "no_cont_cost": true}
+{"name": "rmatr200-p5", "contcost": 37616, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "rococoB10-011000", "no_cont_cost": true}
+{"name": "rocII-5-11", "contcost": 111, "prim": 0, "dual": 1, "lattice": false, "primal_only": false, "step": null}
+{"name": "rococoC10-001000", "no_cont_cost": true}
+{"name": "roll3000", "contcost": 1, "prim": 1, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "roi2alpha3n4", "contcost": 174, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "satellites2-40", "no_cont_cost": true}
+{"name": "roi5alpha10n8", "contcost": 200, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "satellites2-60-fs", "no_cont_cost": true}
+{"name": "s250r10", "contcost": 3, "prim": 0, "dual": 3, "lattice": false, "primal_only": false, "step": null}
+{"name": "s100", "no_cont_cost": true}
+{"name": "sct2", "contcost": 5, "prim": 1, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "seymour", "no_cont_cost": true}
+{"name": "seymour1", "contcost": 921, "prim": 0, "dual": 38, "lattice": false, "primal_only": false, "step": null}
+{"name": "sing326", "contcost": 15146, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "sing44", "contcost": 16184, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "sp150x300d", "no_cont_cost": true}
+{"name": "sorrell3", "no_cont_cost": true}
+{"name": "sp97ar", "no_cont_cost": true}
+{"name": "snp-02-004-104", "contcost": 215529, "prim": 36, "dual": 153, "lattice": false, "primal_only": false, "step": null}
+{"name": "sp98ar", "no_cont_cost": true}
+{"name": "square47", "skip": "download"}
+{"name": "splice1k1", "no_cont_cost": true}
+{"name": "savsched1", "contcost": 75844, "prim": 0, "dual": 2637, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase18", "no_cont_cost": true}
+{"name": "supportcase10", "no_cont_cost": true}
+{"name": "supportcase22", "no_cont_cost": true}
+{"name": "supportcase26", "contcost": 40, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase33", "no_cont_cost": true}
+{"name": "supportcase12", "contcost": 70461, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase40", "contcost": 13480, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase42", "contcost": 18439, "prim": 0, "dual": 2053, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase6", "no_cont_cost": true}
+{"name": "swath1", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "swath3", "contcost": 1, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase19", "no_cont_cost": true}
+{"name": "tbfp-network", "no_cont_cost": true}
+{"name": "timtab1", "contcost": 128, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "supportcase7", "contcost": 147, "prim": 7, "dual": 61, "lattice": false, "primal_only": false, "step": null}
+{"name": "tr12-30", "contcost": 360, "prim": 0, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "thor50dday", "no_cont_cost": true}
+{"name": "traininstance6", "no_cont_cost": true}
+{"name": "traininstance2", "no_cont_cost": true}
+{"name": "trento1", "contcost": 1272, "prim": 1248, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "triptim1", "contcost": 1, "prim": 1, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "uccase12", "contcost": 22332, "prim": 9072, "dual": 9072, "lattice": false, "primal_only": false, "step": null}
+{"name": "uct-subprob", "contcost": 976, "prim": 881, "dual": 956, "lattice": false, "primal_only": false, "step": null}
+{"name": "uccase9", "contcost": 13975, "prim": 4872, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "wachplan", "no_cont_cost": true}
+{"name": "unitcal_7", "contcost": 7560, "prim": 17, "dual": 0, "lattice": false, "primal_only": false, "step": null}
+{"name": "square41", "no_cont_cost": true}
+{"name": "var-smallemery-m6j6", "contcost": 2, "prim": 0, "dual": 1, "lattice": false, "primal_only": false, "step": null}

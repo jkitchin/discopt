@@ -502,6 +502,8 @@ counters!(
     DualCostPerturbInfeasible,
     // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
     DualNoiseRowTolerated,
+    // Objective lattices that needed the interval (inequality) rule.
+    ObjLatticeInterval,
     // THRU-5: split the primal refactorization trigger into its three causes so the
     // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
     // (product-form) update returned Err (numerical bump breakdown → forced

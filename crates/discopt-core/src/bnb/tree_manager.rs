@@ -261,6 +261,9 @@ struct ObjLattice {
     spacing: f64,
     offset: f64,
     drift: f64,
+    /// The lattice holds at some optimum only (`obj_integral::ObjLattice::optimum_only`):
+    /// an incumbent may sit off it.
+    optimum_only: bool,
 }
 
 /// Orchestrates the Branch-and-Bound search.
@@ -1991,10 +1994,39 @@ impl TreeManager {
                     spacing: g,
                     offset,
                     drift,
+                    optimum_only: false,
                 })
             }
             _ => None,
         };
+    }
+
+    /// Mark the installed lattice as holding at some optimal solution only
+    /// ([`crate::bnb::obj_integral::ObjLattice::optimum_only`]); a no-op without one.
+    /// [`Self::cutoff_for`] then fathoms below the largest lattice point under an
+    /// off-lattice incumbent instead of at `incumbent - spacing`.
+    pub fn set_objective_lattice_optimum_only(&mut self, on: bool) {
+        if let Some(l) = self.obj_lattice.as_mut() {
+            l.optimum_only = on;
+        }
+    }
+
+    /// Test helper: an empty manager carrying only this one's objective lattice.
+    #[cfg(test)]
+    pub(crate) fn clone_lattice_probe(&self) -> TreeManager {
+        let mut t = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![crate::bnb::branching::VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        t.obj_lattice = self.obj_lattice;
+        t
     }
 
     /// How far below the incumbent a lattice-fathomed node may still reach:
@@ -2035,8 +2067,30 @@ impl TreeManager {
     /// HiGHS-design search keeps its own incumbent; it prunes on the same lattice).
     pub fn cutoff_for(&self, inc: f64) -> f64 {
         match self.obj_lattice {
-            Some(ObjLattice { spacing, drift, .. }) if inc.is_finite() => {
-                let c = inc - spacing + 2.0 * drift;
+            Some(ObjLattice {
+                spacing,
+                drift,
+                offset,
+                optimum_only,
+            }) if inc.is_finite() => {
+                let mut c = inc - spacing + 2.0 * drift;
+                if optimum_only {
+                    // The incumbent may sit off the lattice (its continuous column
+                    // need not be at an interval end). A strictly better optimum is
+                    // a lattice point below `inc`; when `inc` is not within the
+                    // drift window of one, the largest such point is `floor`, not
+                    // `inc - spacing`, and every optimal value below `inc` is at
+                    // most that point plus the drift.
+                    let k = (inc - offset) / spacing;
+                    if !k.is_finite() {
+                        return inc;
+                    }
+                    let near = (k - k.round()).abs() * spacing
+                        <= 2.0 * drift + LATTICE_EPS * inc.abs().max(1.0);
+                    if !near {
+                        c = c.max(k.floor() * spacing + offset + drift);
+                    }
+                }
                 c + LATTICE_EPS * c.abs().max(1.0)
             }
             _ => inc,
@@ -2065,6 +2119,7 @@ impl TreeManager {
             spacing,
             offset,
             drift,
+            ..
         }) = self.obj_lattice
         else {
             return v;
