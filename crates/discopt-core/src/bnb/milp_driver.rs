@@ -2631,6 +2631,7 @@ fn try_sub_mip(
     });
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        let _nest = SubMipNest::enter();
         solve_milp_node_hooked(
             base.csc.clone(),
             base.m,
@@ -2646,6 +2647,12 @@ fn try_sub_mip(
             None,
         )
     };
+    charge_sub_mip(
+        res.lp_iters,
+        fixed as f64 / n_int.max(1) as f64,
+        n_int,
+        ns - n_int,
+    );
     *spent += res.nodes;
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
     if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) {
@@ -2739,6 +2746,7 @@ fn try_stall_redive(
     crate::profile::incr(crate::profile::Ctr::StallRediveRun);
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        let _nest = SubMipNest::enter();
         solve_milp_node_hooked(
             base.csc.clone(),
             base.m,
@@ -2754,6 +2762,7 @@ fn try_stall_redive(
             None,
         )
     };
+    charge_sub_mip(res.lp_iters, 0.0, 1, 0);
     *spent += res.nodes;
     if !matches!(
         res.status,
@@ -3316,8 +3325,10 @@ fn try_rens_highs(
     sub.cut_rounds = sub.cut_rounds.min(5);
     sub.root_cut_time_s = Some(budget * 0.3);
     sub.strong_branch = false;
+    let n_int_heur = is_int.iter().take(ns).filter(|&&b| b).count();
     let res = {
         let _t = crate::profile::Timer::new(crate::profile::Phase::SubMip);
+        let _nest = SubMipNest::enter();
         solve_milp_node_hooked(
             cut.csc.clone(),
             cut.m,
@@ -3333,6 +3344,7 @@ fn try_rens_highs(
             None,
         )
     };
+    charge_sub_mip(res.lp_iters, fixing, n_int_heur, ns - n_int_heur);
     crate::profile::incr_by(crate::profile::Ctr::SubMipSubNodes, res.nodes as u64);
     if !matches!(res.status, MilpStatus::Optimal | MilpStatus::Feasible) || res.x.len() < ns {
         return None;
@@ -3370,6 +3382,69 @@ thread_local! {
     /// wipe the parent's measurement mid-run and read as "this path never
     /// executed", the CLAUDE.md §6 failure mode.
     static MILP_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Heuristic sub-MIP solves enclosing this point (`mipsolver.submip`).
+    static SUB_MIP_NEST: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// HiGHS's `heuristic_lp_iterations` per driver depth: the sub-MIP iterations a
+    /// solve at that depth has spent on heuristics ([`charge_sub_mip`]).
+    static HEUR_LP_ITERS: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII marker for [`SUB_MIP_NEST`] around a heuristic sub-MIP solve.
+struct SubMipNest;
+
+impl SubMipNest {
+    fn enter() -> Self {
+        SUB_MIP_NEST.with(|c| c.set(c.get() + 1));
+        SubMipNest
+    }
+}
+
+impl Drop for SubMipNest {
+    fn drop(&mut self) {
+        SUB_MIP_NEST.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// Whether this solve is itself a heuristic sub-MIP.
+fn in_sub_mip() -> bool {
+    SUB_MIP_NEST.with(|c| c.get()) > 0
+}
+
+/// Charge a finished sub-MIP to the calling solve's heuristic LP iterations, as
+/// HiGHS's `solveSubMip` does (scaled by the share of columns left free).
+fn charge_sub_mip(sub_iters: usize, fixing_rate: f64, n_integral: usize, n_cont: usize) {
+    let c = crate::bnb::highs_search::heur_effort::sub_mip_charge(
+        sub_iters as i64,
+        fixing_rate,
+        n_integral,
+        n_cont,
+    );
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, 0);
+        }
+        v[d] += c;
+    });
+}
+
+/// The heuristic LP iterations charged at this driver depth.
+fn heur_lp_iters_here() -> i64 {
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| v.borrow().get(d).copied().unwrap_or(0))
+}
+
+/// Start this depth's heuristic count from zero (a new solve at this depth).
+fn reset_heur_lp_iters_here() {
+    let d = MILP_DEPTH.with(|x| x.get()) as usize;
+    HEUR_LP_ITERS.with(|v| {
+        let mut v = v.borrow_mut();
+        if v.len() <= d {
+            v.resize(d + 1, 0);
+        }
+        v[d] = 0;
+    });
 }
 
 /// RAII depth counter for [`MILP_DEPTH`]. The driver has many early returns; a
@@ -4644,6 +4719,7 @@ fn solve_milp_node_search(
     if milp_depth == 0 {
         crate::profile::begin_solve();
     }
+    reset_heur_lp_iters_here();
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -6805,6 +6881,9 @@ fn solve_milp_node_search(
                     stall_at: opts
                         .stall_time_s
                         .map(|st| t_start + std::time::Duration::from_secs_f64(st)),
+                    heur_effort: highs_env::heur_effort_enabled(),
+                    submip: in_sub_mip(),
+                    iters_before: lp_iters as i64,
                 };
                 // The best verified point so far: the tree's, or the root
                 // evaluation's heuristic candidate.

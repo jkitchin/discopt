@@ -505,6 +505,9 @@ counters!(
     DualCostPerturbCleanInLoop,
     // Prepared warm starts re-priced on new costs without a new LU (perturb-first).
     DualPrepRepriced,
+    // Node-heuristic slots the HiGHS effort budget (DISCOPT_HIGHS_HEUR_EFFORT) allowed / refused.
+    HeurEffortAllowed,
+    HeurEffortRefused,
     // Leaving rows tolerated at the noise level (DISCOPT_LP_DUAL_NOISE_ROWS).
     DualNoiseRowTolerated,
     // Objective lattices that needed the interval (inequality) rule.

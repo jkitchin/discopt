@@ -283,6 +283,10 @@ pub trait SearchEnv {
     fn separate(&mut self) -> bool;
     /// `worker.getAllowHeuristics() && mipdata_->moreHeuristicsAllowed()`.
     fn heuristics_allowed(&mut self) -> bool;
+    /// The search's progress before `heuristics_allowed` is asked: the tree weight
+    /// it has closed, its leaves, and the nodes processed (`moreHeuristicsAllowed`
+    /// reads `pruned_treeweight`, `num_leaves`, `num_nodes`).
+    fn note_search_progress(&mut self, _treeweight: f64, _nleaves: i64, _nnodes: i64) {}
     /// `runHeuristics` after its node evaluation: randomized rounding, RENS/RINS.
     fn run_heuristics(&mut self);
 
@@ -955,6 +959,11 @@ impl MainLoop {
             }
         }
         let mut consider_heuristics = true;
+        env.note_search_progress(
+            search.treeweight,
+            search.nleaves,
+            self.num_nodes + search.nnodes,
+        );
         loop {
             if consider_heuristics
                 && (skip_separation || node_lim == NO_NODE_LIMIT)

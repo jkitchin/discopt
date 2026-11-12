@@ -75,6 +75,34 @@ pub(super) struct Limits {
     /// `MilpOptions::stall_time_s` as an instant: there, a search with no incumbent
     /// stops (uncertified), and one with an incumbent runs the stall re-solve once.
     pub stall_at: Option<std::time::Instant>,
+    /// HiGHS's heuristic effort budget (`moreHeuristicsAllowed`,
+    /// [`heur_effort_enabled`]) gates the node heuristics.
+    pub heur_effort: bool,
+    /// This solve is a heuristic sub-MIP (`mipsolver.submip`).
+    pub submip: bool,
+    /// LP iterations the driver spent before the search (root LP and cut loop).
+    pub iters_before: i64,
+}
+
+/// `DISCOPT_HIGHS_HEUR_EFFORT`: gate the search's node heuristics (rounding, RENS,
+/// RINS) by HiGHS's `moreHeuristicsAllowed` -- heuristic LP iterations held to
+/// `mip_heuristic_effort` (5 %) of the search's, a sub-MIP charged by the share of
+/// columns its fixings left free (`highs_search::heur_effort`). Member of
+/// `DISCOPT_HIGHS_CONFIG`; garbage refused. Entry evidence: on 23588 under the
+/// configuration six sub-MIPs took ~5 of ~17 s (each runs its own root cut loop),
+/// and with sub-MIPs off the configuration certifies in 12.6 s (deterministic, 1,258
+/// nodes twice) against 17-22 s.
+pub(super) fn heur_effort_enabled() -> bool {
+    match std::env::var("DISCOPT_HIGHS_HEUR_EFFORT") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_HIGHS_HEUR_EFFORT={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
 }
 
 /// Why the search stopped early.
@@ -490,6 +518,11 @@ pub(super) struct HighsEnv<'a, 'b> {
     pub seeded_pool: usize,
     /// `DISCOPT_HIGHS_SEARCH_CHECK_POINT` (debug instrument, [`refcheck`]).
     refp: Option<refcheck::RefCheck>,
+    /// Tree weight the queue pruned (`emplaceNode`, `performBounding`): with the
+    /// search's own `treeweight`, HiGHS's `pruned_treeweight`.
+    queue_pruned: f64,
+    /// The search's `(treeweight, nleaves, nodes)` at the last node processed.
+    progress: (f64, i64, i64),
 }
 
 impl<'a, 'b> HighsEnv<'a, 'b> {
@@ -970,6 +1003,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
             }
         }
         let (slot, w) = self.q.emplace_node(d, b, lb, est, depth);
+        self.queue_pruned += w;
         if ref_q {
             eprintln!(
                 "HIGHS_SEARCH_TRACE queued slot={slot} linked={} optlim={:.12}",
@@ -1586,7 +1620,38 @@ impl SearchEnv for HighsEnv<'_, '_> {
         false
     }
     fn heuristics_allowed(&mut self) -> bool {
-        self.lim.heuristics
+        if !self.lim.heuristics {
+            return false;
+        }
+        if !self.lim.heur_effort {
+            return true;
+        }
+        let heur = super::heur_lp_iters_here();
+        let st = crate::bnb::highs_search::heur_effort::EffortState {
+            submip: self.lim.submip,
+            heuristic_lp_iterations: heur,
+            total_lp_iterations: self.lim.iters_before
+                + self.eval.lp_iters
+                + self.eval.sb_iters
+                + heur,
+            sb_lp_iterations: self.eval.sb_iters,
+            pruned_treeweight: self.progress.0 + self.queue_pruned,
+            num_leaves: self.progress.1,
+            num_nodes: self.progress.2,
+        };
+        let ok = crate::bnb::highs_search::heur_effort::more_heuristics_allowed(
+            &st,
+            crate::bnb::highs_search::heur_effort::HEURISTIC_EFFORT,
+        );
+        crate::profile::incr(if ok {
+            crate::profile::Ctr::HeurEffortAllowed
+        } else {
+            crate::profile::Ctr::HeurEffortRefused
+        });
+        ok
+    }
+    fn note_search_progress(&mut self, treeweight: f64, nleaves: i64, nnodes: i64) {
+        self.progress = (treeweight, nleaves, nnodes);
     }
     fn run_heuristics(&mut self) {
         // discopt's rounding of the node LP point (HiGHS: randomized rounding, RENS,
@@ -1656,7 +1721,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         }
         self.delete_aged_cut_rows();
         self.ref_slots_kept("queue-lost-before-bounding");
-        self.q.perform_bounding(self.eval.cutoff);
+        self.queue_pruned += self.q.perform_bounding(self.eval.cutoff);
         self.ref_slots_kept("queue-bounding");
         let optlim = self.optlim();
         self.q.set_optimality_limit(optlim);
@@ -1735,6 +1800,8 @@ pub(super) fn run<'a>(
         cut_rows_deleted: 0,
         seeded_pool: 0,
         refp: refcheck::RefCheck::load(ctx),
+        queue_pruned: 0.0,
+        progress: (0.0, 0, 0),
     };
     if let Some(rc) = env.refp.as_mut() {
         let xb = rc.x.clone();

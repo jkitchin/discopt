@@ -1059,6 +1059,9 @@ pub(super) mod e2e {
             heuristics: false,
             strong_branch: true,
             stall_at: None,
+            heur_effort: false,
+            submip: false,
+            iters_before: 0,
         };
         let mut res = E2eResult {
             ran: true,

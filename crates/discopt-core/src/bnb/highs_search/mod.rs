@@ -7,6 +7,7 @@
 //! HiGHS's design in Rust rather than linking it. Each layer is checked against dumps of
 //! HiGHS itself before the driver uses it.
 
+pub mod heur_effort;
 pub mod node_queue;
 pub mod pseudocost;
 pub mod search;
