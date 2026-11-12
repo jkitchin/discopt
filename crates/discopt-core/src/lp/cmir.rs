@@ -1784,6 +1784,7 @@ mod tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: ints,
+            implied_int_cols: Vec::new(),
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,

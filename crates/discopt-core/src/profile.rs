@@ -749,6 +749,10 @@ counters!(
     HighsSearchCutEpochs,
     // Continuous columns MILP presolve marked implied integer.
     PresolveImpliedInt,
+    // Presolved MILP results accepted (after the original-problem verification) with
+    // at least one implied-integer column off integral: the heuristics' `integer_cols`
+    // view (`MilpOptions::implied_int_cols`) at work.
+    PresolveImpliedFracResult,
     HighsSearchPoolSeeded,
     HighsMipSearchNodes,
     HighsMipSearchBranched,

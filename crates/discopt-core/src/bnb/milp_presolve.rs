@@ -241,6 +241,14 @@ pub struct Presolved {
     pub infeasible: bool,
     /// Counts.
     pub stats: PresolveStats,
+    /// Reduced-column indices of the columns that were continuous in the input and that
+    /// [`Work::detect_implied_integers`] marked integral (primal and dual rules), in
+    /// increasing order. They are integer in `form.is_int` (branching, cuts, propagation
+    /// may use their integrality) but not integer in the original problem, so a point
+    /// with one of them fractional is still feasible for it: HiGHS keeps these columns
+    /// out of `integer_cols` (the heuristics' set) and in `integral_cols`
+    /// (`HighsMipSolverData.cpp:1013-1050`).
+    pub implied_int_cols: Vec<usize>,
 }
 
 impl Presolved {
@@ -294,6 +302,8 @@ struct Work {
     l: Vec<f64>,
     u: Vec<f64>,
     is_int: Vec<bool>,
+    /// Original-index columns marked integral by `detect_implied_integers`.
+    implied_int: Vec<usize>,
     col_alive: Vec<bool>,
     /// Implied lower/upper bounds of continuous columns with the row implying them
     /// (HiGHS `implColLower/Upper` + source). Never written into `l/u`: they only feed
@@ -329,6 +339,7 @@ impl Work {
             l: f.l.clone(),
             u: f.u.clone(),
             is_int: f.is_int.clone(),
+            implied_int: Vec::new(),
             col_alive: vec![true; f.n],
             impl_l: vec![(-INF, usize::MAX); f.n],
             impl_u: vec![(INF, usize::MAX); f.n],
@@ -829,6 +840,7 @@ impl Work {
                 self.l[s] = lo;
                 self.u[s] = up;
                 self.is_int[s] = true;
+                self.implied_int.push(s);
                 self.stats.implied_int_primal += 1;
                 changed = true;
             }
@@ -867,6 +879,7 @@ impl Work {
                 self.l[s] = self.l[s].round();
                 self.u[s] = self.u[s].round();
                 self.is_int[s] = true;
+                self.implied_int.push(s);
                 self.stats.implied_int_dual += 1;
             }
         }
@@ -2294,6 +2307,10 @@ pub fn presolve_opts(
         up.push(w.up[r]);
     }
     let pick = |v: &Vec<f64>| keep_cols.iter().map(|&j| v[j]).collect::<Vec<f64>>();
+    // Detection runs after the last pass, so every marked column is still alive.
+    let mut implied_int_cols: Vec<usize> = w.implied_int.iter().map(|&j| newidx[j]).collect();
+    assert!(implied_int_cols.iter().all(|&k| k != usize::MAX));
+    implied_int_cols.sort_unstable();
     Presolved {
         form: RowForm {
             n: keep_cols.len(),
@@ -2312,6 +2329,7 @@ pub fn presolve_opts(
         offset: w.offset,
         infeasible: w.infeasible,
         stats: w.stats,
+        implied_int_cols,
     }
 }
 
@@ -2796,6 +2814,7 @@ mod tests {
             }
         };
         let (mut cases, mut primal, mut dual, mut refused, mut checked) = (0, 0, 0, 0, 0);
+        let mut listed = 0usize;
         for _ in 0..20000 {
             let ni = r.int(1, 3) as usize;
             let n = ni + 1;
@@ -2861,6 +2880,19 @@ mod tests {
             cases += 1;
             primal += p.stats.implied_int_primal;
             dual += p.stats.implied_int_dual;
+            // `implied_int_cols` is exactly the marked columns: integer in the reduced
+            // problem, continuous in the input, one per counted marking.
+            if !p.infeasible {
+                assert_eq!(
+                    p.implied_int_cols.len(),
+                    p.stats.implied_int_primal + p.stats.implied_int_dual,
+                    "implied_int_cols out of step with the stats for {f:?}"
+                );
+                for &q in &p.implied_int_cols {
+                    assert!(p.form.is_int[q] && !f.is_int[p.keep_cols[q]]);
+                    listed += 1;
+                }
+            }
             if p.infeasible {
                 assert!(
                     want.is_none(),
@@ -2896,10 +2928,16 @@ mod tests {
             }
         }
         eprintln!(
-            "implied-int: cases {cases} primal {primal} dual {dual} refused {refused} checked {checked}"
+            "implied-int: cases {cases} primal {primal} dual {dual} refused {refused} checked {checked} \
+             listed {listed}"
         );
         assert!(
-            cases == 20000 && primal > 100 && dual > 100 && refused > 300 && checked > 250,
+            cases == 20000
+                && primal > 100
+                && dual > 100
+                && refused > 300
+                && checked > 250
+                && listed > 200,
             "probe fired too little: primal {primal} dual {dual} refused {refused} checked {checked}"
         );
     }

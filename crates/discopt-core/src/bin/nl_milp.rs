@@ -326,6 +326,7 @@ fn run() -> Result<(), String> {
     let opts = MilpOptions {
         n_struct,
         integer_cols: integer_cols.clone(),
+        implied_int_cols: Vec::new(),
         max_nodes: args.max_nodes,
         max_open_nodes: None,
         time_limit_s: Some(args.time_limit),

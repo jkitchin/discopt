@@ -2211,6 +2211,17 @@ pub struct MilpOptions {
     pub n_struct: usize,
     /// Structural column indices that are integer-constrained.
     pub integer_cols: Vec<usize>,
+    /// The subset of `integer_cols` that is integer only because presolve proved it
+    /// (`Presolved::implied_int_cols`): continuous in the caller's problem. HiGHS's
+    /// `integer_cols` / `integral_cols` split (`HighsMipSolverData.cpp:1013-1050`):
+    /// branching, node integer feasibility, cuts, propagation, reduced-cost fixing and
+    /// the objective lattice use all of `integer_cols`; the primal heuristics (rounding,
+    /// RENS/RINS fixings, diving, snapping) and the integrality check of a heuristic's
+    /// point use `integer_cols` minus these (`HighsPrimalHeuristics.cpp:44`), since a
+    /// point with one of them fractional is feasible for the caller's problem. Empty
+    /// (every integer column is a true integer) at every entry point but the presolved
+    /// solve.
+    pub implied_int_cols: Vec<usize>,
     /// Node-creation cap.
     pub max_nodes: usize,
     /// Open-frontier cap (#1874). `Some(k)`: the search stops, uncertified, once
@@ -3799,6 +3810,27 @@ fn milp_sparsify_enabled() -> bool {
     }
 }
 
+/// `MilpOptions::implied_int_cols` must name structural columns of `integer_cols`; a
+/// caller that marks a column implied without making it integer has mislabelled its
+/// problem, which is refused rather than silently repaired.
+fn assert_implied_subset(opts: &MilpOptions) {
+    if opts.implied_int_cols.is_empty() {
+        return;
+    }
+    let mut int = vec![false; opts.n_struct];
+    for &j in &opts.integer_cols {
+        if j < opts.n_struct {
+            int[j] = true;
+        }
+    }
+    for &j in &opts.implied_int_cols {
+        assert!(
+            j < opts.n_struct && int[j],
+            "implied_int_cols must be a subset of integer_cols (column {j})"
+        );
+    }
+}
+
 /// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
 /// singleton slack per inequality row after them), solve the reduced problem, map the
 /// answer back and re-verify it on the original rows. `None` means "solve the original
@@ -3818,6 +3850,7 @@ fn solve_presolved(
     opts: &MilpOptions,
 ) -> Option<MilpResult> {
     use crate::bnb::milp_presolve::{presolve_opts, row_form_feasible, RowForm};
+    assert_implied_subset(opts);
     let ns = opts.n_struct.min(n);
     let fin = |v: f64| {
         if v <= -INF {
@@ -3891,10 +3924,6 @@ fn solve_presolved(
         20,
         milp_implied_int_enabled(),
         milp_sparsify_enabled(),
-    );
-    crate::profile::incr_by(
-        crate::profile::Ctr::PresolveImpliedInt,
-        (p.stats.implied_int_primal + p.stats.implied_int_dual) as u64,
     );
     // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
     // show what is left to remove (gap plan §12.36).
@@ -4037,6 +4066,31 @@ fn solve_presolved(
     let mut o2 = opts.clone();
     o2.n_struct = k;
     o2.integer_cols = (0..k).filter(|&q| f.is_int[q]).collect();
+    // HiGHS's `integer_cols` / `integral_cols` split: the presolve-proved columns stay
+    // integral for branching, cuts and propagation, but the heuristics leave them
+    // continuous (they are continuous in `rf`, whose verification below is what
+    // accepts a point). The caller's own marks (none at today's entry points, which
+    // all pass an empty list) are carried through for the columns presolve kept
+    // integer.
+    assert!(
+        p.implied_int_cols.len() == implied
+            && p.implied_int_cols
+                .iter()
+                .all(|&q| f.is_int[q] && !rf.is_int[p.keep_cols[q]]),
+        "MILP presolve: implied-integer columns out of step with the stats"
+    );
+    let mut caller_implied = vec![false; ns];
+    for &j in &opts.implied_int_cols {
+        if j < ns {
+            caller_implied[j] = true;
+        }
+    }
+    o2.implied_int_cols = (0..k)
+        .filter(|&q| {
+            p.implied_int_cols.binary_search(&q).is_ok()
+                || (f.is_int[q] && caller_implied[p.keep_cols[q]])
+        })
+        .collect();
     o2.initial_incumbent = opts
         .initial_incumbent
         .as_ref()
@@ -4057,6 +4111,7 @@ fn solve_presolved(
     );
     // After the search: its `begin_solve` resets the counters.
     crate::profile::incr(crate::profile::Ctr::MilpPresolveRuns);
+    crate::profile::incr_by(crate::profile::Ctr::PresolveImpliedInt, implied as u64);
     crate::profile::incr_by(
         crate::profile::Ctr::MilpPresolveColsRemoved,
         (ns - p.keep_cols.len()) as u64,
@@ -4114,6 +4169,15 @@ fn solve_presolved(
             }
             crate::profile::incr(crate::profile::Ctr::MilpPresolveVerifyFallback);
             return None;
+        }
+        // Verified on `rf`, where the implied columns are continuous: a point with one
+        // of them off integral is a feasible point of the caller's problem.
+        if o2
+            .implied_int_cols
+            .iter()
+            .any(|&q| (res.x[q] - res.x[q].round()).abs() > 1e-9)
+        {
+            crate::profile::incr(crate::profile::Ctr::PresolveImpliedFracResult);
         }
         res.x = x;
     } else {
@@ -4601,6 +4665,19 @@ fn solve_milp_node_search(
 
     let mut is_int_full = vec![false; n];
     is_int_full[..ns].copy_from_slice(&is_int);
+    // HiGHS's `integer_cols` beside `integral_cols` (`HighsMipSolverData.cpp:1013-1050`):
+    // the columns a primal heuristic rounds, fixes or checks for integrality are the
+    // true integers only; the presolve-implied ones (`opts.implied_int_cols`) are left
+    // continuous there (`HighsPrimalHeuristics.cpp:44`). Branching, node integer
+    // feasibility, cuts, propagation, reduced-cost fixing and the lattice keep `is_int`.
+    let heur_is_int = {
+        let mut v = is_int.clone();
+        assert_implied_subset(opts);
+        for &j in &opts.implied_int_cols {
+            v[j] = false;
+        }
+        v
+    };
 
     // #1287 integer rounding, then root presolve: one helper, shared with
     // `milp_presolve_verdict` (highs-parity P3.1) so a handle's `presolve_only()`
@@ -4676,6 +4753,19 @@ fn solve_milp_node_search(
         obj_const + lattice.map_or(0.0, |l| l.shift),
         lattice.map_or(0.0, |l| l.drift),
     );
+    // A lattice built over presolve-implied integer columns (`opts.implied_int_cols`)
+    // holds at the integral points the tree branches to, not at every feasible point:
+    // the heuristics leave those columns continuous (HiGHS's `integer_cols`), so an
+    // incumbent may sit off the lattice. A dual-detected column is integral at some
+    // optimum only, and a primal-detected one is integral at a heuristic's point only
+    // up to its feasibility tolerance. Either way the lattice is an `optimum_only` one:
+    // the optimal value is still a lattice point (some optimum has every implied column
+    // integral), so the bound lift stays sound, and `cutoff_for` cuts below the largest
+    // lattice point under an off-lattice incumbent.
+    let lattice = lattice.map(|mut l| {
+        l.optimum_only |= !opts.implied_int_cols.is_empty();
+        l
+    });
     tm.set_objective_lattice_optimum_only(lattice.is_some_and(|l| l.optimum_only));
     if lattice.is_some_and(|l| l.optimum_only) && milp_depth == 0 {
         crate::profile::incr(crate::profile::Ctr::ObjLatticeInterval);
@@ -4788,9 +4878,18 @@ fn solve_milp_node_search(
         None
     };
     if let Some(seed) = opts.initial_incumbent.as_ref().or(seed_file.as_ref()) {
-        if let Some((sx, sobj)) =
-            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
-        {
+        if let Some((sx, sobj)) = validate_seed_incumbent(
+            seed,
+            ns,
+            &heur_is_int,
+            &csc_w,
+            &b_w,
+            &c_w,
+            &l_w,
+            &u_w,
+            m_w,
+            n_w,
+        ) {
             // A seed is an integer-feasible point like any other, so it goes to
             // the separator first: seeding an incumbent the caller's lazy
             // constraints exclude would prune the tree against a point that is
@@ -5094,7 +5193,7 @@ fn solve_milp_node_search(
                     is_int_full: is_int_full.clone(),
                 };
                 let (up, dn) = rounding_locks(base, ns);
-                let mut order: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+                let mut order: Vec<usize> = (0..ns).filter(|&j| heur_is_int[j]).collect();
                 let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
                 order.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
                 let start: Option<Basis> = root_basis.as_ref().map(|(b, bn)| {
@@ -5114,7 +5213,7 @@ fn solve_milp_node_search(
                     &order,
                     obj_const,
                     ns,
-                    &is_int,
+                    &heur_is_int,
                     &rx[..ns],
                     Some(&rx[..ns]),
                     None,
@@ -5375,7 +5474,7 @@ fn solve_milp_node_search(
                             locks,
                             obj_const,
                             ns,
-                            &is_int,
+                            &heur_is_int,
                             &root.x,
                             0x5EED_0000 + _round as u64,
                             opts,
@@ -6123,7 +6222,7 @@ fn solve_milp_node_search(
     let rens_order: Vec<usize> = match (p3_rens, sub_mip_base.as_ref()) {
         (true, Some(b)) => {
             let (up, dn) = rounding_locks(b, ns);
-            let mut o: Vec<usize> = (0..ns).filter(|&j| is_int[j]).collect();
+            let mut o: Vec<usize> = (0..ns).filter(|&j| heur_is_int[j]).collect();
             let score = |j: usize| (1e-6 + up[j] as f64) * (1e-6 + dn[j] as f64);
             o.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
             o
@@ -6587,6 +6686,7 @@ fn solve_milp_node_search(
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
+                heur_is_int: &heur_is_int,
                 is_int_full: &is_int_full,
                 ns,
                 m_w,
@@ -6741,7 +6841,7 @@ fn solve_milp_node_search(
                                 base,
                                 obj_const,
                                 ns,
-                                &is_int,
+                                &heur_is_int,
                                 ix,
                                 iv,
                                 opts,
@@ -6774,7 +6874,7 @@ fn solve_milp_node_search(
                             &rens_order,
                             obj_const,
                             ns,
-                            &is_int,
+                            &heur_is_int,
                             x,
                             rens_root_x.as_deref(),
                             if rens_now { None } else { inc },
@@ -6790,7 +6890,7 @@ fn solve_milp_node_search(
                             base,
                             obj_const,
                             ns,
-                            &is_int,
+                            &heur_is_int,
                             x,
                             inc,
                             opts,
@@ -7461,7 +7561,7 @@ fn solve_milp_node_search(
                         locks,
                         obj_const,
                         ns,
-                        &is_int,
+                        &heur_is_int,
                         &r.solution,
                         batch_index as u64,
                         opts,
@@ -7486,7 +7586,7 @@ fn solve_milp_node_search(
                         base,
                         obj_const,
                         ns,
-                        &is_int,
+                        &heur_is_int,
                         &ix,
                         iv,
                         opts,
@@ -7539,7 +7639,7 @@ fn solve_milp_node_search(
                             &rens_order,
                             obj_const,
                             ns,
-                            &is_int,
+                            &heur_is_int,
                             &r.solution,
                             rens_root_x.as_deref(),
                             if rens_now {
@@ -7559,7 +7659,7 @@ fn solve_milp_node_search(
                             base,
                             obj_const,
                             ns,
-                            &is_int,
+                            &heur_is_int,
                             &r.solution,
                             inc.as_ref().map(|(x, v)| (x.as_slice(), *v)),
                             opts,
@@ -8020,7 +8120,13 @@ struct NodeCtx<'a> {
     n_orig_cols: usize,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
+    /// Integer structural columns, presolve-implied ones included (branching, node
+    /// integer feasibility, cuts, propagation, reduced-cost fixing).
     is_int: &'a [bool],
+    /// The true integer structurals only (`MilpOptions::implied_int_cols` excluded):
+    /// the columns a primal heuristic rounds or fixes and a heuristic point's
+    /// realisation snaps (HiGHS `integer_cols`).
+    heur_is_int: &'a [bool],
     is_int_full: &'a [bool],
     ns: usize,
     m_w: usize,
@@ -8560,7 +8666,7 @@ fn solve_node(
                 out.incumbent = try_rounding_csc(
                     &sol.x,
                     ctx.ns,
-                    ctx.is_int,
+                    ctx.heur_is_int,
                     ctx.csc_rc, // T3b5: unscaled working CSC (was ctx.a_w)
                     ctx.b_w,
                     ctx.c_w,
@@ -9162,8 +9268,11 @@ fn node_lp_optimal_verdict(
                 crate::profile::incr(crate::profile::Ctr::DriverIncumbentSnapRefused);
                 let mut col = None;
                 let mut moved = 0.0f64;
-                for (j, (&is_int, (&zj, &xj))) in
-                    ctx.is_int.iter().zip(zs.iter().zip(&sol.x)).enumerate()
+                for (j, (&is_int, (&zj, &xj))) in ctx
+                    .heur_is_int
+                    .iter()
+                    .zip(zs.iter().zip(&sol.x))
+                    .enumerate()
                 {
                     let d = (zj - xj).abs();
                     if is_int && d > moved {
@@ -10666,7 +10775,7 @@ fn try_dive_repair(
     // incumbent; `inject_incumbent` still enforces strict improvement and the
     // Python feasibility gate re-checks the point.
     let mut cur_basis = start_basis.clone();
-    let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
+    let max_steps = ctx.heur_is_int.iter().filter(|&&it| it).count() + 1;
     crate::profile::incr(crate::profile::Ctr::DiveRuns);
     // Gap plan P3: the dive's own LP solves stop at the dive cap too; a cold
     // fallback from a refused warm start otherwise ran 9.7 s against a 2 s cap.
@@ -10700,7 +10809,7 @@ fn try_dive_repair(
         let mut pick: Option<usize> = None;
         let mut best = INT_TOL;
         for j in 0..ns {
-            if ctx.is_int[j] && l[j] != u[j] {
+            if ctx.heur_is_int[j] && l[j] != u[j] {
                 let f = frac(x[j]);
                 if f > best {
                     best = f;
@@ -10725,7 +10834,7 @@ fn try_dive_repair(
                 }
                 let mut xc = x[..ns].to_vec();
                 for (k, xk) in xc.iter_mut().enumerate() {
-                    if ctx.is_int[k] {
+                    if ctx.heur_is_int[k] {
                         *xk = xk.round();
                     }
                 }
@@ -10953,15 +11062,18 @@ fn incumbent_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> boo
     }
 }
 
-/// `z` with every structural integer column rounded to its nearest integer, or
-/// `None` when that moves nothing (the point is already its own realisation).
+/// `z` with every true-integer structural column (`NodeCtx::heur_is_int`) rounded to
+/// its nearest integer, or `None` when that moves nothing (the point is already its own
+/// realisation). A presolve-implied column keeps its value: it is continuous in the
+/// caller's problem, so the realisation needs no integrality there, and rounding it
+/// would only perturb the rows (HiGHS's `checkSolution` tests `integer_cols` alone).
 fn snap_integral(ctx: &NodeCtx<'_>, z: &[f64]) -> Option<Vec<f64>> {
-    let k = ctx.is_int.len().min(z.len());
-    if (0..k).all(|j| !ctx.is_int[j] || z[j] == z[j].round()) {
+    let k = ctx.heur_is_int.len().min(z.len());
+    if (0..k).all(|j| !ctx.heur_is_int[j] || z[j] == z[j].round()) {
         return None;
     }
     let mut zs = z.to_vec();
-    for (zj, &is_int) in zs.iter_mut().zip(ctx.is_int) {
+    for (zj, &is_int) in zs.iter_mut().zip(ctx.heur_is_int) {
         if is_int {
             *zj = zj.round();
         }
@@ -11005,7 +11117,7 @@ fn polish_integral_vertex(
     let mut fl = full_l.to_vec();
     let mut fu = full_u.to_vec();
     for j in 0..ctx.ns {
-        if ctx.is_int[j] {
+        if ctx.heur_is_int[j] {
             let r = x[j].round();
             if r < full_l[j] || r > full_u[j] {
                 return None;
@@ -11023,7 +11135,7 @@ fn polish_integral_vertex(
     }
     // Exact integers: the solve's own value for a fixed column is its bound, but
     // write it explicitly so no rounding of the unscale can leave a residue.
-    for ((xj, &fj), &is_int) in sol.x.iter_mut().zip(&fl).zip(ctx.is_int) {
+    for ((xj, &fj), &is_int) in sol.x.iter_mut().zip(&fl).zip(ctx.heur_is_int) {
         if is_int {
             *xj = fj;
         }
@@ -11423,6 +11535,7 @@ mod tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
+            implied_int_cols: Vec::new(),
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -11516,6 +11629,108 @@ mod tests {
             "dual bound {} exceeds the true optimum -- false certificate",
             res.bound
         );
+    }
+
+    /// HiGHS's `integer_cols` / `integral_cols` split (`MilpOptions::implied_int_cols`).
+    ///
+    /// `min 2 x0 + x1 + 2 x2` s.t. `2 x0 + 2 x2 >= 3`, `x0 + x1 + x2 >= 2`; `x0, x2` in
+    /// `[0, 5]` integer, `x1` in `[0, 10]` continuous in the caller's problem but
+    /// integral at some optimum (HiGHS's dual implied-integer rule: its one row has
+    /// every other column integer with unit ratio and an integral side, and its bounds
+    /// are integral), so it is passed as `integer_cols` and marked implied. The LP
+    /// optimum is 3.5 (`x0 + x2 = 1.5`, `x1 = 0.5`), the integer optimum 4
+    /// (`x0 + x2 = 2`, `x1 = 0`), and the lattice over `integer_cols` has spacing 1.
+    ///
+    /// 1. A heuristic point with `x1` fractional (the seed `(2, 0.5, 0)`, objective 4.5)
+    ///    is accepted when `x1` is implied, and refused when it is a true integer.
+    /// 2. The lattice cutoff stays sound with that off-lattice incumbent: `4.5 - 1`
+    ///    would fathom the root (bound 3.5, lifted to 4) and certify 4.5; the
+    ///    `optimum_only` cutoff (largest lattice point below 4.5, i.e. 4) keeps it.
+    #[test]
+    fn implied_integer_columns_are_continuous_for_heuristics_only() {
+        let (ns, m) = (3usize, 2usize);
+        let n = ns + m;
+        #[rustfmt::skip]
+        let dense = vec![
+            2.0, 0.0, 2.0, -1.0, 0.0,
+            1.0, 1.0, 1.0, 0.0, -1.0,
+        ];
+        let sp = SparseCols::from_dense(&dense, m, n);
+        let c = vec![2.0, 1.0, 2.0, 0.0, 0.0];
+        let b = vec![3.0, 2.0];
+        let l = vec![0.0; n];
+        let u = vec![5.0, 10.0, 5.0, INF, INF];
+        let seed = vec![2.0, 0.5, 0.0];
+        let mut checks = 0usize;
+        let run = |implied: Vec<usize>, max_nodes: usize| {
+            let mut o = cover_opts(ns);
+            o.implied_int_cols = implied;
+            o.max_nodes = max_nodes;
+            o.heuristics = false;
+            o.strong_branch = false;
+            o.initial_incumbent = Some(seed.clone());
+            solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &o)
+        };
+        // Anti-vacuity: the relaxation is fractional and the lattice fires, or the
+        // cutoff arm below proves nothing.
+        let lp = crate::lp::simplex::solve_lp_cols(
+            sp.clone(),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            &SimplexOptions::default(),
+        );
+        assert_eq!(lp.status, LpStatus::Optimal);
+        assert!((lp.obj - 3.5).abs() < 1e-9, "LP bound {}", lp.obj);
+        checks += 1;
+        // 1. The seed alone (no node solved): accepted only with `x1` implied.
+        let with = run(vec![1], 0);
+        assert!(
+            (with.obj - 4.5).abs() < 1e-9 && (with.x[1] - 0.5).abs() < 1e-12,
+            "seed with a fractional implied column must be the incumbent: obj {} x {:?}",
+            with.obj,
+            with.x
+        );
+        checks += 1;
+        let without = run(Vec::new(), 0);
+        assert!(
+            !without.obj.is_finite(),
+            "the same seed must be refused when x1 is a true integer: obj {}",
+            without.obj
+        );
+        checks += 1;
+        // 2. The full solve from the off-lattice incumbent certifies the optimum.
+        let full = run(vec![1], 100_000);
+        assert_eq!(full.status, MilpStatus::Optimal, "must certify");
+        assert!(
+            (full.obj - 4.0).abs() < 1e-6,
+            "optimum is 4, got {} -- 4.5 means the lattice cutoff fathomed the optimum \
+             from an off-lattice incumbent (CLAUDE.md §1)",
+            full.obj
+        );
+        assert!(
+            full.bound <= 4.0 + 1e-6,
+            "bound {} above the optimum",
+            full.bound
+        );
+        checks += 1;
+        // An implied column outside `integer_cols` is refused loudly.
+        let bad = std::panic::catch_unwind(|| {
+            let mut o = cover_opts(ns);
+            o.integer_cols = vec![0, 2];
+            o.implied_int_cols = vec![1];
+            solve_milp_csc(&sp, m, n, &c, &l, &u, &b, 0.0, &o)
+        });
+        assert!(
+            bad.is_err(),
+            "implied_int_cols outside integer_cols must panic"
+        );
+        checks += 1;
+        eprintln!("implied-int heuristic mask: {checks} checks");
+        assert_eq!(checks, 5);
     }
 
     /// Same cover, but one unit of continuous cost. The objective can now take any
@@ -12328,6 +12543,7 @@ mod tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -14362,6 +14578,7 @@ mod tests {
         let o = MilpOptions {
             n_struct: 3,
             integer_cols: vec![0, 1, 2],
+            implied_int_cols: Vec::new(),
             max_nodes: 5_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -14504,6 +14721,7 @@ pub(crate) mod sparse_milp_diff {
             MilpOptions {
                 n_struct: self.ns,
                 integer_cols: self.int_cols.clone(),
+                implied_int_cols: Vec::new(),
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -14819,6 +15037,7 @@ pub(crate) mod sparse_milp_diff {
         let o = MilpOptions {
             n_struct: 6,
             integer_cols: vec![0, 1, 2, 3, 4, 5],
+            implied_int_cols: Vec::new(),
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -15134,6 +15353,7 @@ mod lazy_separation {
             MilpOptions {
                 n_struct: 4,
                 integer_cols: vec![0, 1, 2, 3],
+                implied_int_cols: Vec::new(),
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -15439,6 +15659,7 @@ mod node_separation {
             MilpOptions {
                 n_struct: 3,
                 integer_cols: vec![0, 1, 2],
+                implied_int_cols: Vec::new(),
                 max_nodes: 100_000,
                 max_open_nodes: None,
                 time_limit_s: None,
@@ -15727,6 +15948,7 @@ mod lazy_infeasible_node {
         MilpOptions {
             n_struct: 2,
             integer_cols: vec![0, 1],
+            implied_int_cols: Vec::new(),
             max_nodes: 100_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -15871,6 +16093,7 @@ mod root_cut_budget_tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
+            implied_int_cols: Vec::new(),
             max_nodes: 200_000,
             max_open_nodes: None,
             time_limit_s: None,
@@ -16659,6 +16882,7 @@ mod tiny_entry_tests {
         MilpOptions {
             n_struct: ns,
             integer_cols: int_cols,
+            implied_int_cols: Vec::new(),
             max_nodes: 10_000,
             max_open_nodes: None,
             time_limit_s: None,

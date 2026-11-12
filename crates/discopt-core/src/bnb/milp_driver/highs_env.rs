@@ -1601,7 +1601,7 @@ impl SearchEnv for HighsEnv<'_, '_> {
         if let Some((cand, v)) = try_rounding_csc(
             x,
             ctx.ns,
-            ctx.is_int,
+            ctx.heur_is_int,
             ctx.csc_rc,
             ctx.b_w,
             ctx.c_w,

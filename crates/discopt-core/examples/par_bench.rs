@@ -107,6 +107,7 @@ fn opts(inst: &Instance) -> MilpOptions {
     MilpOptions {
         n_struct: inst.n_struct,
         integer_cols: inst.integer_cols.clone(),
+        implied_int_cols: Vec::new(),
         max_nodes: 2_000_000,
         max_open_nodes: None,
         time_limit_s: None,
