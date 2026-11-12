@@ -279,7 +279,7 @@ impl<'a> Debugger<'a> {
 /// search with a fixed LP sits (`data/highs-parity/search/step2_entry.txt`).
 pub(super) fn search_cut_lp_enabled() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEARCH_CUT_LP") {
-        Err(_) => false,
+        Err(_) => crate::highs_config::enabled(),
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,

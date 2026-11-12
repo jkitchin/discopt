@@ -355,10 +355,26 @@ const NOISE_ROW_TOL: f64 = 1e-7;
 /// Default for [`SimplexOptions::dual_noise_rows`] from `DISCOPT_LP_DUAL_NOISE_ROWS`
 /// (default OFF): see the empty-ratio-test arm of the warm dual loop. Garbage is
 /// refused.
+/// Default for [`SimplexOptions::dual_perturb_first`] from
+/// `DISCOPT_LP_DUAL_PERTURB_FIRST` (default OFF). Garbage is refused.
+pub(super) fn perturb_first_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_PERTURB_FIRST") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => panic!(
+                "DISCOPT_LP_DUAL_PERTURB_FIRST={other:?} is not recognized (expected 1 or 0)"
+            ),
+        },
+    })
+}
+
 pub(super) fn noise_rows_default() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("DISCOPT_LP_DUAL_NOISE_ROWS") {
-        Err(_) => false,
+        Err(_) => crate::highs_config::enabled(),
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
@@ -1245,6 +1261,17 @@ fn warm_dual_armed_inner(
     basis: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    if opts.dual_cost_perturb > 0.0 && opts.dual_perturb_first {
+        // HiGHS perturbs the costs of every dual solve up front rather than after a
+        // degenerate run is seen (`HEkkDual` cost perturbation); the clean-up on the
+        // true costs keeps the verdict exactly the unperturbed one's
+        // (`cost_perturbed_warm_solve`).
+        crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
+        if let Some(sol) = cost_perturbed_warm_solve(sp, m, n, c, l, u, b, basis, opts) {
+            return sol;
+        }
+        return p.reoptimize(l, u, b, opts);
+    }
     if opts.dual_cost_perturb > 0.0 {
         let mut probe = opts.clone();
         probe.dual_stall_patience = match opts.dual_stall_patience {

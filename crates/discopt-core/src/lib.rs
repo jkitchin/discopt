@@ -9,6 +9,7 @@ pub mod bnb;
 pub mod decomp;
 pub mod expand;
 pub mod expr;
+pub mod highs_config;
 pub mod lp;
 pub mod lp_file;
 pub mod mps;

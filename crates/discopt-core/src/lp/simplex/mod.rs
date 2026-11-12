@@ -240,6 +240,10 @@ pub struct SimplexOptions {
     /// does not certify, instead of sending the LP cold. Default from
     /// `DISCOPT_LP_DUAL_NOISE_ROWS` (OFF).
     pub dual_noise_rows: bool,
+    /// Apply the #1013 cost perturbation from the first pivot of every warm dual
+    /// solve, as HiGHS does, instead of after a degenerate run of `PERTURB_ARM_RUN`
+    /// pivots. Default from `DISCOPT_LP_DUAL_PERTURB_FIRST` (OFF).
+    pub dual_perturb_first: bool,
     /// Start a COLD spatial-kernel node LP from the sign-matched dual-feasible
     /// slack basis instead of the cold two-phase primal.
     ///
@@ -332,6 +336,7 @@ impl Default for SimplexOptions {
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
             dual_noise_rows: dual::noise_rows_default(),
+            dual_perturb_first: dual::perturb_first_default(),
             cold_dual_start: false,
             warm_flip_boxed: false,
         }

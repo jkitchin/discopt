@@ -372,6 +372,7 @@ fn run() -> Result<(), String> {
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
             dual_noise_rows: SimplexOptions::default().dual_noise_rows,
+            dual_perturb_first: SimplexOptions::default().dual_perturb_first,
             cold_dual_start: false,
             warm_flip_boxed: false,
         },

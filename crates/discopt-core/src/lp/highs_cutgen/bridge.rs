@@ -843,6 +843,7 @@ pub enum NodeSepaMode {
 /// refusing garbage.
 pub fn node_sepa_mode() -> NodeSepaMode {
     match std::env::var("DISCOPT_HIGHS_SEPA_NODE") {
+        Err(_) if crate::highs_config::enabled() => NodeSepaMode::Replace,
         Err(_) => NodeSepaMode::Off,
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" | "replace" => NodeSepaMode::Replace,

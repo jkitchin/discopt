@@ -739,6 +739,8 @@ counters!(
     HighsSearchCutRowsDeleted,
     // `performAging(true)` epochs on the search's LP.
     HighsSearchCutEpochs,
+    // Continuous columns MILP presolve marked implied integer.
+    PresolveImpliedInt,
     HighsSearchPoolSeeded,
     HighsMipSearchNodes,
     HighsMipSearchBranched,

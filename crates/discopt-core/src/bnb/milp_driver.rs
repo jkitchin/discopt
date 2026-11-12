@@ -692,7 +692,7 @@ fn highs_sepa_propagate() -> bool {
 /// audit row. Read per call, refusing garbage.
 fn highs_sepa_cutoff_box() -> bool {
     match std::env::var("DISCOPT_HIGHS_SEPA_CUTOFF_BOX") {
-        Err(_) => false,
+        Err(_) => crate::highs_config::enabled(),
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" | "" => false,
@@ -3766,6 +3766,25 @@ fn milp_presolve_enabled() -> bool {
     }
 }
 
+/// `DISCOPT_MILP_IMPLIED_INT` (default OFF): MILP presolve marks continuous columns
+/// integral by HiGHS's implied-integer rule (`milp_presolve::presolve_opts`). Entry
+/// evidence (`highs-mip-replacement-plan.md`, root strength): on bppc8-02 the one
+/// implied-integer column takes discopt's root bound from 486.5 (the LP bound) to 504
+/// (optimum 507), because the root separators may then round on it; HiGHS's own root
+/// with presolve gets 495. Garbage is refused.
+fn milp_implied_int_enabled() -> bool {
+    match std::env::var("DISCOPT_MILP_IMPLIED_INT") {
+        Err(_) => crate::highs_config::enabled(),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" | "" => false,
+            other => {
+                panic!("DISCOPT_MILP_IMPLIED_INT={other:?} is not recognized (expected 1 or 0)")
+            }
+        },
+    }
+}
+
 /// Presolve the standard-form MILP (`A x = b`, structural columns `0..n_struct`, one
 /// singleton slack per inequality row after them), solve the reduced problem, map the
 /// answer back and re-verify it on the original rows. `None` means "solve the original
@@ -3784,7 +3803,7 @@ fn solve_presolved(
     obj_const: f64,
     opts: &MilpOptions,
 ) -> Option<MilpResult> {
-    use crate::bnb::milp_presolve::{presolve, row_form_feasible, RowForm};
+    use crate::bnb::milp_presolve::{presolve_opts, row_form_feasible, RowForm};
     let ns = opts.n_struct.min(n);
     let fin = |v: f64| {
         if v <= -INF {
@@ -3852,7 +3871,11 @@ fn solve_presolved(
         u: u[..ns].iter().map(|&v| fin(v)).collect(),
         is_int,
     };
-    let p = presolve(&rf, 1e-9, 20);
+    let p = presolve_opts(&rf, 1e-9, 20, milp_implied_int_enabled());
+    crate::profile::incr_by(
+        crate::profile::Ctr::PresolveImpliedInt,
+        (p.stats.implied_int_primal + p.stats.implied_int_dual) as u64,
+    );
     // Diagnostic: write the reduced problem as free MPS, so another solver's presolve can
     // show what is left to remove (gap plan §12.36).
     if let Ok(path) = std::env::var("DISCOPT_MILP_PRESOLVE_DUMP") {
@@ -3876,7 +3899,8 @@ fn solve_presolved(
         // Never trusted as a certificate: the original is solved instead.
         return None;
     }
-    if p.keep_cols.len() == ns && p.form.rows.len() == m {
+    let implied = p.stats.implied_int_primal + p.stats.implied_int_dual;
+    if p.keep_cols.len() == ns && p.form.rows.len() == m && implied == 0 {
         return None;
     }
     // Rebuild in the ORIGINAL layout: each kept row keeps its own slack column (same
